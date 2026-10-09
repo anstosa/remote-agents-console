@@ -6282,7 +6282,15 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
       toggleExpand: expansion.toggle,
       renamePanel: (panelKey: string) => { const open = terminalRenamers.get(panelKey); open?.(); return open !== undefined; },
       closePanel,
-      openTerminal
+      openTerminal,
+      ...(place.worktreeId === undefined ? {} : {
+        toggleCode: () => {
+          if (code.open) return code.close();
+          // focus the panel once it reaches the carousel
+          pendingWorkspaceJumps.set(key, 'code');
+          code.openChanges('working');
+        }
+      })
     };
     workspaceViews.set(key, view);
     const requested = pendingWorkspaceJumps.get(key);
@@ -8761,11 +8769,11 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   // only the loading screen's render returns before them, and it has no Workspace to act on
   const activeEntry = () => data === undefined ? undefined : items[visibleActive];
   // run `act` on the mounted Workspace in view, with its panels and the current one
-  const onPanels = (act: (view: WorkspaceView, panels: string[], current: string | undefined) => void) => () => {
+  const onPanels = (act: (view: WorkspaceView, panels: string[], current: string | undefined) => boolean | void) => () => {
     const entry = activeEntry();
     const view = entry === undefined ? undefined : workspaceViews.get(entry.key);
     if (view === undefined) return false;
-    act(view, view.splits.map(split => split.key), view.currentPanel());
+    return act(view, view.splits.map(split => split.key), view.currentPanel());
   };
   const stepPanel = (step: -1 | 1, wrap: boolean) => onPanels((view, panels, current) => {
     const index = panels.indexOf(current ?? '');
@@ -8784,6 +8792,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     'select-panel-left': stepPanel(-1, false),
     'last-panel': onPanels(view => { const last = view.lastPanel(); if (last !== undefined) view.jump(last, true); }),
     'toggle-expand': onPanels((view, _panels, current) => { if (current !== undefined) view.toggleExpand(current); }),
+    'toggle-code': onPanels(view => { if (view.toggleCode === undefined) return false; view.toggleCode(); }),
     'rename-panel': onPanels((view, _panels, current) => { if (current !== undefined) view.renamePanel(current); }),
     'close-panel': onPanels((view, _panels, current) => {
       const split = view.splits.find(candidate => candidate.key === current);

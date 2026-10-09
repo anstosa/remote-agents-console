@@ -324,6 +324,22 @@ test('a terminal binding names the binding, never the command', async ({ page })
   await expect.poll(() => shells).toEqual([{ binding: { table: 'prefix', key: 'g' } }]);
 });
 
+test('the palette opens the Code panel and a bound key closes it', async ({ page }) => {
+  await openWithTerminal(page, { keys: { prefix: { k: 'toggle-code' } } });
+  const code = page.locator('.code-pane');
+
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press(':');
+  await page.keyboard.type('code panel');
+  await page.keyboard.press('Enter');
+  await expect(code).toBeVisible();
+  await expect(code).toBeFocused();
+
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('k');
+  await expect(code).toHaveCount(0);
+});
+
 test('closing a panel asks first, and only y closes it', async ({ page }) => {
   const deleted: string[] = [];
   await openWithTerminal(page, { deleted });

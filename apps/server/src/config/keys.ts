@@ -31,6 +31,7 @@ export const keyActions: Record<string, { description: string; repeat?: true }> 
   'select-panel-left': { description: 'Panel to the left', repeat: true },
   'select-panel-right': { description: 'Panel to the right', repeat: true },
   'toggle-expand': { description: 'Expand or restore the current panel' },
+  'toggle-code': { description: 'Open or close the Code panel' },
   'rename-panel': { description: 'Rename the current panel' },
   'close-panel': { description: 'Close the current panel' },
   'choose-tree': { description: 'Pick a Workspace or panel' },
