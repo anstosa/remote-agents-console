@@ -24,12 +24,13 @@ async function fulfillAgentSupport(route: Route, pathname: string): Promise<bool
 }
 
 // serve one authenticated review console
-async function fulfillReviewConsole(route: Route, pathname: string, editor = false): Promise<boolean> {
+// with `second`, a second Worktree (Delta) whose tab the review can be switched away to
+async function fulfillReviewConsole(route: Route, pathname: string, editor = false, second = false): Promise<boolean> {
   // serve the authenticated browser
   if (pathname === '/api/auth/session') { await route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } }); return true; }
-  // expose one reviewable agent
+  // expose one reviewable agent, listed first
   if (pathname === '/api/dashboard') {
-    await route.fulfill({ json: { generation: 1, reviewTour: { available: true }, ...(editor ? { editor: true } : {}), agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/owen', worktreeId: 'owen', worktreeLabel: 'Owen', branch: 'feature/review-tour', title: 'Ready', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0, changes: [{ code: ' M', path: 'src/route.ts', additions: 2, deletions: 1, category: 'implementation' }] }, gitPrStatus: { base: 'origin/main', files: 1, changes: [{ code: 'M ', path: 'src/route.ts', additions: 2, deletions: 1, category: 'implementation' }] } }], projects: [] } });
+    await route.fulfill({ json: { generation: 1, reviewTour: { available: true }, ...(editor ? { editor: true } : {}), agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/owen', worktreeId: 'owen', worktreeLabel: 'Owen', worktreeOrder: 0, branch: 'feature/review-tour', title: 'Ready', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0, changes: [{ code: ' M', path: 'src/route.ts', additions: 2, deletions: 1, category: 'implementation' }] }, gitPrStatus: { base: 'origin/main', files: 1, changes: [{ code: 'M ', path: 'src/route.ts', additions: 2, deletions: 1, category: 'implementation' }] } }, ...(second ? [{ id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/delta', worktreeId: 'delta', worktreeLabel: 'Delta', title: 'Ready' }] : [])], projects: [] } });
     return true;
   }
   return await fulfillAgentSupport(route, pathname);
@@ -367,7 +368,7 @@ test('renders a placeholder for a binary or unparseable change', async ({ page }
 });
 
 // open a ready two-step tour whose first step is a small parseable patch, for the inline-comment tests
-async function openCommentTour(page: Page, { editor = false, explanation = 'The route renames its constants.', tour: custom, files = {} }: { editor?: boolean; explanation?: string; tour?: object; files?: Record<string, string> } = {}): Promise<{ dialog: ReturnType<Page['getByRole']>; prompts: string[]; shells: unknown[] }> {
+async function openCommentTour(page: Page, { editor = false, second = false, explanation = 'The route renames its constants.', tour: custom, files = {} }: { editor?: boolean; second?: boolean; explanation?: string; tour?: object; files?: Record<string, string> } = {}): Promise<{ dialog: ReturnType<Page['getByRole']>; prompts: string[]; shells: unknown[] }> {
   const routePatch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -10,4 +10,5 @@\n const a = 1;\n-const b = 2;\n+const b = 3;\n+const c = 4;\n const d = 5;\n export {};\n';
   const servicePatch = 'diff --git a/src/service.ts b/src/service.ts\nindex 3333333..4444444 100644\n--- a/src/service.ts\n+++ b/src/service.ts\n@@ -4 +4 @@\n-old service\n+new service\n';
   const tour = custom ?? { title: 'Comment tour', overview: 'Review the route constants.', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'comment-fingerprint-123456', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: routePatch }, { id: 'chg_service01', file: 'src/service.ts', category: 'implementation', kind: 'hunk', patch: servicePatch }], steps: [{ id: 'route', title: 'Accept the request', explanation, changeIds: ['chg_route0001'] }, { id: 'service', title: 'Apply the operation', explanation: 'The service performs the transition.', changeIds: ['chg_service01'] }] };
@@ -381,7 +382,7 @@ async function openCommentTour(page: Page, { editor = false, explanation = 'The 
     if (editor && url.pathname === '/api/worktrees/owen/shells' && request.method() === 'POST') { shells.push(request.postDataJSON()); return route.fulfill({ status: 201, json: { paneId: '%9' } }); }
     if (editor && url.pathname === '/api/worktrees/owen/panes') return route.fulfill({ json: { panes: [{ paneId: '%9', role: 'shell', agent: false, name: 'nvim' }] } });
     // serve the review console fixture
-    if (await fulfillReviewConsole(route, url.pathname, editor)) return;
+    if (await fulfillReviewConsole(route, url.pathname, editor, second)) return;
     // serve the working tree's text of a file whose unchanged lines are expanded
     if (url.pathname === '/api/worktrees/owen/comparison/file' && request.method() === 'POST') {
       const { path } = request.postDataJSON() as { path: string };
@@ -600,6 +601,61 @@ test('folds the step notes into a drawer while the panel is narrow', async ({ pa
   await dialog.getByRole('button', { name: 'Expand guided review' }).click();
   await expect(dialog.getByRole('button', { name: 'Show step notes' })).toHaveCount(0);
   await expect(dialog.getByLabel('Feedback for this change')).toBeVisible();
+});
+
+// verify switching Workspaces and minimizing each return the step to where it was being read, while
+// moving to another step still starts that step at the top
+test('keeps the step scroll across a Workspace switch and a minimize', async ({ page }) => {
+  // both steps are tall enough to scroll, so a step left scrolled cannot pass for one at the top
+  const longPatch = (file: string) => `diff --git a/${file} b/${file}\nindex 1111111..2222222 100644\n--- a/${file}\n+++ b/${file}\n@@ -0,0 +1,150 @@\n${Array.from({ length: 150 }, (_, index) => `+const line${index} = ${index};`).join('\n')}\n`;
+  const longExplanation = (opening: string) => [opening, ...Array.from({ length: 40 }, (_, index) => `Paragraph ${index} of the walkthrough.`)].join('\n\n');
+  const tour = { title: 'Scroll tour', overview: 'Review the long route.', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'scroll-fingerprint-1234567', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: longPatch('src/route.ts') }, { id: 'chg_service01', file: 'src/service.ts', category: 'implementation', kind: 'hunk', patch: longPatch('src/service.ts') }], steps: [{ id: 'route', title: 'Accept the request', explanation: longExplanation('The route accepts the request.'), changeIds: ['chg_route0001'] }, { id: 'service', title: 'Apply the operation', explanation: longExplanation('The service performs the transition.'), changeIds: ['chg_service01'] }] };
+  const { dialog } = await openCommentTour(page, { tour, second: true });
+  const narration = dialog.locator('.review-tour-narration');
+  const diffs = dialog.locator('.review-tour-diff-scroll');
+  await expect(diffs.getByText('const line0 = 0;')).toBeVisible();
+  const scrollTops = async () => [await narration.evaluate(element => element.scrollTop), await diffs.evaluate(element => element.scrollTop)];
+  await narration.evaluate(element => { element.scrollTop = 300; });
+  await diffs.evaluate(element => { element.scrollTop = 900; });
+  await expect.poll(scrollTops).toEqual([300, 900]);
+  await expect(diffs.getByText('const line0 = 0;')).not.toBeInViewport();
+  const readLine = diffs.getByText('const line50 = 50;');
+  await expect(readLine).toBeInViewport();
+
+  // switching to another Workspace and back
+  await page.getByRole('tab', { name: /^Delta/u }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('tab', { name: /^Owen/u }).click();
+  await expect(dialog).toBeVisible();
+  await expect.poll(scrollTops).toEqual([300, 900]);
+  await expect(readLine).toBeInViewport();
+
+  // minimizing and reopening
+  await dialog.getByRole('button', { name: 'Minimize guided review' }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  await expect(dialog).toBeVisible();
+  await expect.poll(scrollTops).toEqual([300, 900]);
+  await expect(readLine).toBeInViewport();
+
+  // another step starts at the top, and stays there across a switch
+  await dialog.getByRole('button', { name: 'Next' }).click();
+  await expect(dialog.getByText('The service performs the transition.')).toBeVisible();
+  await expect.poll(scrollTops).toEqual([0, 0]);
+  await page.getByRole('tab', { name: /^Delta/u }).click();
+  await page.getByRole('tab', { name: /^Owen/u }).click();
+  await expect(dialog.getByText('The service performs the transition.')).toBeVisible();
+  await expect.poll(scrollTops).toEqual([0, 0]);
+
+  // leaving the step for the summary forgets its place
+  await narration.evaluate(element => { element.scrollTop = 300; });
+  await diffs.evaluate(element => { element.scrollTop = 900; });
+  await expect.poll(scrollTops).toEqual([300, 900]);
+  await dialog.getByRole('button', { name: 'Review summary' }).click();
+  await dialog.getByRole('button', { name: 'Back to tour' }).click();
+  await expect(dialog.getByText('The service performs the transition.')).toBeVisible();
+  await expect.poll(scrollTops).toEqual([0, 0]);
 });
 
 // verify a write-up taller than the phone drawer pushes the feedback box below it instead of under it

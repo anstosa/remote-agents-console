@@ -7,10 +7,11 @@
 // the caller hands in the step's Changes, its inline comments and the AI review's suggested comments,
 // and this renders them, reporting comment edits and suggestion triage back — including which comments
 // are open, which the caller holds so Escape can close them from anywhere in the dialog. The only state it owns is visual: the Unified / Split choice,
-// which (rendered at the same spot for every step) carries across steps.
-import { type CSSProperties, useCallback, useMemo, useState } from 'react';
+// which (rendered at the same spot for every step) carries across steps. The caller also keeps the scroll
+// position, handed back on mount so a remounted step returns to where it was read.
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CodeViewLineSelection, DiffLineAnnotation, FileDiffLoadedChangedFiles, FileDiffMetadata, SelectedLineRange } from '@pierre/diffs';
-import { CodeView, type CodeViewItem, type CodeViewReactOptions } from '@pierre/diffs/react';
+import { CodeView, type CodeViewHandle, type CodeViewItem, type CodeViewReactOptions } from '@pierre/diffs/react';
 import { useColorTheme } from '../color-theme.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
@@ -67,6 +68,10 @@ type ReviewDiffsProps = {
   loadFile?: (path: string) => Promise<string | undefined>;
   // a file's unchanged lines could not expand, and why
   onExpandError?: (file: string, detail: string) => void;
+  // where the diffs were scrolled to when this step was last on screen, returned to on mount; `onScroll`
+  // reports each move
+  scrollTop?: number;
+  onScroll?: (scrollTop: number) => void;
 };
 
 // One hunk of a file view: its Change, its range on each side of the base diff, and where its old
@@ -210,8 +215,10 @@ function SuggestedComment({ suggestion, onKeep, onDismiss, onRestore }: { sugges
 }
 
 // render one tour step with current display settings
-export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, onOpenInEditor, loadFile, onExpandError }: ReviewDiffsProps) {
+export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll }: ReviewDiffsProps) {
   const theme = useColorTheme();
+  const codeView = useRef<CodeViewHandle<CommentAnchor, undefined>>(null);
+  const initialScrollTop = useRef(scrollTop);
   const terminalFontSize = useTerminalFontSize();
   // The step's hunk Changes of one file become one diff item, keyed by their Change ids; any other
   // Change is an item of its own. One whose patch is not a diff the parser can recover (a binary
@@ -247,6 +254,17 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
   }), [baseItems, anchorKey]); // anchorKey stands in for `comments` and `suggestions`: it covers every field read here
   const viewByDiff = useMemo(() => new Map([...baseItems.values()].map(({ item, view }) => [item.fileDiff, view])), [baseItems]);
   const patchByChangeId = useMemo(() => new Map(changes.map(change => [change.id, change.patch])), [changes]);
+
+  // Return to where the step was last read, once on mount. The library holds the target until layout
+  // can reach it. It is an offset from the first item's top because a `position` target lands short by
+  // the sticky file header.
+  useEffect(() => {
+    const first = items[0];
+    const top = first === undefined ? undefined : codeView.current?.getInstance()?.getTopForItem(first.id);
+    const restore = initialScrollTop.current ?? 0;
+    if (restore > 0 && first !== undefined && top !== undefined) codeView.current?.scrollTo({ type: 'item', id: first.id, align: 'start', offset: top - restore });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // The selected line range, held here so starting a comment can clear it: while a range is selected
   // the library pins the "+" to it, so a stale selection would steal the next comment's placement.
@@ -331,7 +349,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
           ))}
         </ul>
       )}
-      {items.length > 0 && <CodeView className="review-tour-diff-scroll" options={options} items={items} renderAnnotation={renderAnnotation} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} selectedLines={selection} onSelectedLinesChange={setSelection} disableWorkerPool />}
+      {items.length > 0 && <CodeView ref={codeView} className="review-tour-diff-scroll" options={options} items={items} renderAnnotation={renderAnnotation} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} selectedLines={selection} onSelectedLinesChange={setSelection} {...(onScroll === undefined ? {} : { onScroll })} disableWorkerPool />}
     </div>
   );
 }
