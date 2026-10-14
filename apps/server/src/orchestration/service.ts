@@ -409,7 +409,7 @@ export class OrchestrationService {
       const agent = (await this.dependencies.loadDashboard()).agents.find(candidate => candidate.id === agentId);
       // require an enriched current agent
       if (agent === undefined) return failure('not_found', 'Agent not found.');
-      const switching = await this.dependencies.pullRequests.available(agentId);
+      const switching = agent.worktreeId === undefined ? undefined : await this.dependencies.pullRequests.available(agent.worktreeId);
       const actionsUrl = await this.dependencies.pullRequests.actionsUrl(agentId).catch(() => undefined);
       // require at least one observable pull request surface
       if (switching === undefined && agent.pullRequest === undefined && agent.gitPrStatus === undefined && actionsUrl === undefined) return failure('unavailable', 'Pull request status is unavailable.');
@@ -650,7 +650,9 @@ export class OrchestrationService {
     // enforce positive GitHub pull request numbers
     if (!validIdentifier(input.agentId) || !Number.isSafeInteger(input.number) || input.number < 1) return failure('invalid_request', 'Invalid pull request switch.');
     return await this.operation(async () => {
-      const result = await this.dependencies.pullRequests.switch(input.agentId, input.number);
+      const worktreeId = (await this.dependencies.loadDashboard()).agents.find(candidate => candidate.id === input.agentId)?.worktreeId;
+      if (worktreeId === undefined) return failure('not_found', 'Agent worktree not found.');
+      const result = await this.dependencies.pullRequests.switch(worktreeId, input.number);
       if (result === 'switched') return success({ switched: true as const });
       return failure('conflict', result === 'busy' ? 'The agent is busy; wait for it to finish before switching.' : result.error);
     });

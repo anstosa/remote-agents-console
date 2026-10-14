@@ -21,11 +21,11 @@ test('prefetches shared repository choices and refreshes them when reopened', as
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') {
+    if (url.pathname === '/api/worktrees/cora/switch-prs') {
       pullRequestRequests += 1;
       await (pullRequestRequests === 1 ? pullRequestsFinished : pullRequestRefreshFinished);
       return route.fulfill({ json: { enabled: true, pullRequests: [
@@ -135,7 +135,7 @@ test('queues the configured push prompt and falls back to the default action', a
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
     if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') {
       const body = request.postDataJSON() as { prompt: string; attachments: unknown[] };
       expect(body.attachments).toEqual([]);
@@ -215,7 +215,7 @@ test('shows every pull request target while keeping checkout and worktree action
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname) && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({
       json: {
         enabled: false,
         pullRequests: [
@@ -303,7 +303,7 @@ test('checks out an available pull request from its dedicated action', async ({ 
     // authenticate the test client
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // expose one active worktree
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     // disable unrelated setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // connect the visible agent
@@ -311,9 +311,9 @@ test('checks out an available pull request from its dedicated action', async ({ 
     // provide an empty saved-prompt list
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     // expose one available checkout
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [{ number: 300, title: 'Available checkout', branch: 'feature/available', draft: false, url: 'https://github.example.com/pull/300', checkedOut: false }], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [{ number: 300, title: 'Available checkout', branch: 'feature/available', draft: false, url: 'https://github.example.com/pull/300', checkedOut: false }], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
     // record the checkout action
-    if (url.pathname === '/api/agents/agent-1/switch-pr' && request.method() === 'POST') { checkedOut = request.postDataJSON(); return route.fulfill({ status: 202 }); }
+    if (url.pathname === '/api/worktrees/cora/switch-pr' && request.method() === 'POST') { checkedOut = request.postDataJSON(); return route.fulfill({ status: 202 }); }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -342,7 +342,7 @@ test('disables checkout for the pull request already open in the current worktre
     // provide an empty saved-prompt list
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     // expose the branch as checked out here
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [{ number: 300, title: 'Current checkout', branch: 'feature/current', draft: false, url: 'https://github.example.com/pull/300', checkedOut: true, openIn: { agentId: 'agent-1', worktreeId: 'cora', worktreeName: 'Cora' } }], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [{ number: 300, title: 'Current checkout', branch: 'feature/current', draft: false, url: 'https://github.example.com/pull/300', checkedOut: true, openIn: { agentId: 'agent-1', worktreeId: 'cora', worktreeName: 'Cora' } }], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -373,9 +373,9 @@ test('shows the server reason when pull request checkout fails', async ({ page }
     // provide an empty saved-prompt list
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     // expose one available checkout
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [{ number: 300, title: 'Rejected checkout', branch: 'feature/rejected', draft: false, url: 'https://github.example.com/pull/300', checkedOut: false }], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [{ number: 300, title: 'Rejected checkout', branch: 'feature/rejected', draft: false, url: 'https://github.example.com/pull/300', checkedOut: false }], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
     // reject the checkout with an actionable reason
-    if (url.pathname === '/api/agents/agent-1/switch-pr' && request.method() === 'POST') return route.fulfill({ status: 409, json: { error: 'The branch changed before checkout.' } });
+    if (url.pathname === '/api/worktrees/cora/switch-pr' && request.method() === 'POST') return route.fulfill({ status: 409, json: { error: 'The branch changed before checkout.' } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -404,10 +404,10 @@ test('moves an occupied pull request into the current worktree', async ({ page }
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname) && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [
       { number: 301, title: 'Already in Delta', branch: 'feature/delta-target', draft: false, url: 'https://github.example.com/pull/301', checkedOut: true, openIn: { agentId: 'agent-2', worktreeId: 'delta', worktreeName: 'Delta' } }
     ], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
-    if (url.pathname === '/api/agents/agent-1/move-pr' && request.method() === 'POST') {
+    if (url.pathname === '/api/worktrees/cora/move-pr' && request.method() === 'POST') {
       moved = request.postDataJSON();
       await moveFinished;
       return route.fulfill({ status: 202 });
@@ -450,8 +450,8 @@ test('shows the workspace pull request cache while refreshing after a tab remoun
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-2/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') {
+    if (url.pathname === '/api/worktrees/delta/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') {
       pullRequestRequests += 1;
       // hold the remount refresh
       if (pullRequestRequests > 1) await refreshFinished;
@@ -504,8 +504,8 @@ test('disables stale pull request switching when a refresh fails', async ({ page
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-2/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') {
+    if (url.pathname === '/api/worktrees/delta/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') {
       pullRequestRequests += 1;
       // fail the remounted refresh
       if (pullRequestRequests > 1) return route.fulfill({ status: 502, json: { error: 'GitHub could not load pull requests (503).' } });
@@ -538,11 +538,11 @@ test('shows the empty pull request state in the PRs tab', async ({ page }) => {
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -568,7 +568,7 @@ test('shows the GitHub error instead of an empty pull request state', async ({ p
     // authenticate the browser
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // expose one active agent
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     // disable push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // provide agent bootstrap data
@@ -576,7 +576,7 @@ test('shows the GitHub error instead of an empty pull request state', async ({ p
     // provide saved prompts
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     // fail the shared repository lookup
-    if (url.pathname === '/api/agents/agent-1/switch-prs') {
+    if (url.pathname === '/api/worktrees/cora/switch-prs') {
       await failureFinished;
       return route.fulfill({ status: 502, json: { error: 'GitHub could not load pull requests (503): temporary outage.' } });
     }
@@ -614,7 +614,7 @@ test('shows the repository error instead of an empty branch state', async ({ pag
     // authenticate the browser
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // expose one active agent
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     // disable push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // provide agent bootstrap data
@@ -622,7 +622,7 @@ test('shows the repository error instead of an empty branch state', async ({ pag
     // provide saved prompts
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     // fail the repository lookup
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ status: 502, json: { error: 'Repository choices are temporarily unavailable.' } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ status: 502, json: { error: 'Repository choices are temporarily unavailable.' } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -639,7 +639,7 @@ test('shows invalid repository data instead of legacy branch defaults', async ({
     // authenticate the browser
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // expose one active agent
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     // disable push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // provide agent bootstrap data
@@ -647,7 +647,7 @@ test('shows invalid repository data instead of legacy branch defaults', async ({
     // provide saved prompts
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     // omit required branch capability fields
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [] } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -676,7 +676,7 @@ test('keeps repository loading across inner tabs and ignores a dismissed respons
     // authenticate the browser
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // expose one active agent
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     // disable push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // provide agent bootstrap data
@@ -684,7 +684,7 @@ test('keeps repository loading across inner tabs and ignores a dismissed respons
     // provide saved prompts
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     // hold repository choices across tab and flyout changes
-    if (url.pathname === '/api/agents/agent-1/switch-prs') {
+    if (url.pathname === '/api/worktrees/cora/switch-prs') {
       repositoryRequests += 1;
       const requestNumber = repositoryRequests;
       await (requestNumber === 1 ? dismissedRequestFinished : currentRequestFinished);
@@ -737,17 +737,17 @@ test('checks out a local branch from the Branches section', async ({ page }) => 
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     // one switchable branch and one checked out in an unresolved worktree
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
       { branch: 'feature/solo', checkedOut: false },
       { branch: 'feature/detached', checkedOut: true }
     ] } });
     // record the branch checkout
-    if (url.pathname === '/api/agents/agent-1/switch-branch' && request.method() === 'POST') { checkedOut = request.postDataJSON(); return route.fulfill({ status: 202 }); }
+    if (url.pathname === '/api/worktrees/cora/switch-branch' && request.method() === 'POST') { checkedOut = request.postDataJSON(); return route.fulfill({ status: 202 }); }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -780,10 +780,10 @@ test('moves a branch open in another worktree into the current worktree', async 
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname) && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
       { branch: 'feature/delta', checkedOut: true, openIn: { agentId: 'agent-2', worktreeId: 'delta', worktreeName: 'Delta' } }
     ] } });
-    if (url.pathname === '/api/agents/agent-1/move-branch' && request.method() === 'POST') { moved = request.postDataJSON(); await moveFinished; return route.fulfill({ status: 202 }); }
+    if (url.pathname === '/api/worktrees/cora/move-branch' && request.method() === 'POST') { moved = request.postDataJSON(); await moveFinished; return route.fulfill({ status: 202 }); }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -814,7 +814,7 @@ test('gates branch checkout on a clean, pushed destination', async ({ page }) =>
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     // a dirty working copy disables every checkout
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: false, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: false, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
       { branch: 'feature/clean', checkedOut: false }
     ] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -834,12 +834,12 @@ test('shows the empty branch state and pull requests unavailable without a GitHu
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
     // a git checkout without a GitHub origin: no branches, no pull request support
-    if (url.pathname === '/api/agents/agent-1/switch-prs') {
+    if (url.pathname === '/api/worktrees/cora/switch-prs') {
       repositoryRequests += 1;
       return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: false, branches: [] } });
     }
@@ -864,9 +864,9 @@ test('shows the server reason when branch checkout fails', async ({ page }) => {
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [{ branch: 'feature/rejected', checkedOut: false }] } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [{ branch: 'feature/rejected', checkedOut: false }] } });
     // reject the checkout with an actionable reason
-    if (url.pathname === '/api/agents/agent-1/switch-branch' && request.method() === 'POST') return route.fulfill({ status: 409, json: { error: 'The branch changed before checkout.' } });
+    if (url.pathname === '/api/worktrees/cora/switch-branch' && request.method() === 'POST') return route.fulfill({ status: 409, json: { error: 'The branch changed before checkout.' } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -891,11 +891,11 @@ test('shows the server reason and no success when a branch move fails', async ({
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname) && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
       { branch: 'feature/delta', checkedOut: true, openIn: { agentId: 'agent-2', worktreeId: 'delta', worktreeName: 'Delta' } }
     ] } });
     // the move needs manual recovery
-    if (url.pathname === '/api/agents/agent-1/move-branch' && request.method() === 'POST') return route.fulfill({ status: 409, json: { error: 'The branch move needs manual recovery.', recoveryRequired: true } });
+    if (url.pathname === '/api/worktrees/cora/move-branch' && request.method() === 'POST') return route.fulfill({ status: 409, json: { error: 'The branch move needs manual recovery.', recoveryRequired: true } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -923,7 +923,7 @@ test('switches to the worktree that already holds a branch', async ({ page }) =>
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname) && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
       { branch: 'feature/delta', checkedOut: true, openIn: { agentId: 'agent-2', worktreeId: 'delta', worktreeName: 'Delta' } }
     ] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -937,4 +937,27 @@ test('switches to the worktree that already holds a branch', async ({ page }) =>
 
   await expect(deltaTab).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('.git-status-panel')).toBeHidden();
+});
+
+// a worktree with no agent still lists and checks out branches
+test('lists and checks out branches in a worktree with no agent', async ({ page }) => {
+  let checkedOut: unknown;
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [], projects: [{ id: 'console', label: 'Console', available: true, worktrees: [{ id: 'idle', projectId: 'console', label: 'Idle', path: '/worktrees/idle', main: false, detached: false, locked: false, branch: 'feature/idle', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, available: true, pinned: true, order: 1 }] }] } });
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: false } });
+    if (url.pathname === '/api/worktrees/idle/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [{ number: 300, title: 'Open work', branch: 'feature/open', checkoutBranch: 'feature/open', headSha: 'a'.repeat(40), headOnOrigin: true, draft: false, url: 'https://github.com/octo/repo/pull/300', checkedOut: false }], otherPullRequests: [], pullRequestsSupported: true, branches: [{ branch: 'feature/solo', checkedOut: false }] } });
+    if (url.pathname === '/api/worktrees/idle/switch-branch' && request.method() === 'POST') { checkedOut = request.postDataJSON(); return route.fulfill({ status: 202, body: '' }); }
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  const prs = await openBranchTab(page, 'PRs');
+  await expect(prs.getByRole('link', { name: /#300/u })).toBeVisible();
+  await prs.getByRole('tab', { name: 'Branches', exact: true }).click();
+  await prs.getByRole('group', { name: 'feature/solo' }).getByRole('button', { name: 'Checkout' }).click();
+  await expect.poll(() => checkedOut).toEqual({ branch: 'feature/solo' });
 });

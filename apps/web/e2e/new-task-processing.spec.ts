@@ -39,7 +39,7 @@ test('keeps a new-task processing indicator visible until the replacement agent 
       await newTaskFinished;
       return route.fulfill({ status: 202 });
     }
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [] } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -92,7 +92,7 @@ test('shows the new-task banner only on its worktree', async ({ page }) => {
       await newTaskFinished;
       return route.fulfill({ status: 202 });
     }
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [] } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 

@@ -5966,14 +5966,13 @@ function GitCommitSections({ log, error, uncommitted, collapsed, onToggle, messa
   </>;
 }
 // render working changes, current pr controls, and repository switchers
-function GitStatus({ id, worktreeId, branch, summary, prSummary, pullRequest, onFixup, expanded = false, onToggle, onOpenFile, onViewChanges, onViewCommit, onReview, review, reviewUnavailable, pushAction = defaultPushAction, pushPending = false, onPush, onSelectTarget, onOperationFeedback }: { id?: string; worktreeId?: string; branch?: string; summary?: GitStatusSummary; prSummary?: GitComparisonSummary; pullRequest?: PullRequestSummary; onFixup?: () => Promise<boolean>; expanded?: boolean; onToggle?: () => void; onOpenFile: (path: string, mode: CodePanelMode) => void; onViewChanges?: (mode: CodePanelMode) => void; onViewCommit?: (commit: CodePanelCommit) => void; onReview?: (scope: ReviewScope) => void; review?: ReviewTourIndicator; reviewUnavailable?: string; pushAction?: PromptAction; pushPending?: boolean; onPush?: () => Promise<boolean>; onSelectTarget?: (target: DashboardTarget) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onFixup, expanded = false, onToggle, onOpenFile, onViewChanges, onViewCommit, onReview, review, reviewUnavailable, pushAction = defaultPushAction, pushPending = false, onPush, onSelectTarget, onOperationFeedback }: { worktreeId?: string; branch?: string; summary?: GitStatusSummary; prSummary?: GitComparisonSummary; pullRequest?: PullRequestSummary; onFixup?: () => Promise<boolean>; expanded?: boolean; onToggle?: () => void; onOpenFile: (path: string, mode: CodePanelMode) => void; onViewChanges?: (mode: CodePanelMode) => void; onViewCommit?: (commit: CodePanelCommit) => void; onReview?: (scope: ReviewScope) => void; review?: ReviewTourIndicator; reviewUnavailable?: string; pushAction?: PromptAction; pushPending?: boolean; onPush?: () => Promise<boolean>; onSelectTarget?: (target: DashboardTarget) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
   const wrapRef = useRef<HTMLSpanElement | null>(null);
   const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
   const [tab, setTab] = useState<'working' | 'prs' | 'branches'>('working');
   const [mode, setMode] = useState<'working' | 'pr'>(prSummary === undefined ? 'working' : 'pr');
   const [removingBranch, setRemovingBranch] = useState<SwitchableBranch>();
-  const prSwitchCacheKey = worktreeId ?? id;
-  const cachedPrSwitch = prSwitchCacheKey === undefined ? undefined : pullRequestSwitchCache.get(prSwitchCacheKey);
+  const cachedPrSwitch = worktreeId === undefined ? undefined : pullRequestSwitchCache.get(worktreeId);
   const [prSwitch, setPrSwitch] = useState<PullRequestSwitchAvailability | undefined>(cachedPrSwitch);
   const [prSwitchLoaded, setPrSwitchLoaded] = useState(cachedPrSwitch !== undefined);
   const [prSwitchError, setPrSwitchError] = useState<string>();
@@ -6034,11 +6033,11 @@ function GitStatus({ id, worktreeId, branch, summary, prSummary, pullRequest, on
   // preload both repository lists whenever the flyout opens
   useEffect(() => {
     // defer remote choices until the flyout is open
-    if (!expanded || id === undefined) return;
+    if (!expanded || worktreeId === undefined) return;
     let cancelled = false;
     const controller = new AbortController();
     setLoadingPrSwitch(true);
-    void request(`/api/agents/${encodeURIComponent(id)}/switch-prs`, { signal: controller.signal }).then(async response => ({ ok: response.ok, status: response.status, payload: await response.json().catch(() => undefined) })).then(({ ok, status, payload }) => {
+    void request(`/api/worktrees/${encodeURIComponent(worktreeId)}/switch-prs`, { signal: controller.signal }).then(async response => ({ ok: response.ok, status: response.status, payload: await response.json().catch(() => undefined) })).then(({ ok, status, payload }) => {
       // ignore a closed flyout
       if (cancelled) return;
       // expose the server failure
@@ -6060,7 +6059,7 @@ function GitStatus({ id, worktreeId, branch, summary, prSummary, pullRequest, on
           pullRequestsSupported: availability.pullRequestsSupported
         };
         // cache one workspace list
-        if (prSwitchCacheKey !== undefined) pullRequestSwitchCache.set(prSwitchCacheKey, next);
+        if (worktreeId !== undefined) pullRequestSwitchCache.set(worktreeId, next);
         setPrSwitch(next);
         setPrSwitchError(undefined);
       } else {
@@ -6082,7 +6081,7 @@ function GitStatus({ id, worktreeId, branch, summary, prSummary, pullRequest, on
       controller.abort();
       setLoadingPrSwitch(false);
     };
-  }, [id, prSwitchCacheKey, expanded]);
+  }, [worktreeId, expanded]);
   // fit the popup above the toolbar
   useLayoutEffect(() => {
     const wrap = wrapRef.current;
@@ -6174,17 +6173,17 @@ function GitStatus({ id, worktreeId, branch, summary, prSummary, pullRequest, on
   // check out one pull request branch
   const switchPullRequest = async (number: number) => {
     // prevent duplicate checkout transactions
-    if (id === undefined || mutationInFlight) return;
+    if (worktreeId === undefined || mutationInFlight) return;
     setSwitchingPr(number);
     try {
-      const response = await request(`/api/agents/${encodeURIComponent(id)}/switch-pr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ number }) });
+      const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/switch-pr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ number }) });
       // surface a rejected server transaction
       if (!response.ok) {
         onOperationFeedback?.({ tone: 'error', message: 'Pull request could not be checked out', detail: await launchError(response), worktreeId });
         return;
       }
       // discard stale checkout ownership after success
-      if (prSwitchCacheKey !== undefined) pullRequestSwitchCache.delete(prSwitchCacheKey);
+      if (worktreeId !== undefined) pullRequestSwitchCache.delete(worktreeId);
       onToggle?.();
     } catch {
       onOperationFeedback?.({ tone: 'error', message: 'Pull request could not be checked out', detail: 'The console could not be reached. Check the worktree before trying again.', worktreeId });
@@ -6195,17 +6194,17 @@ function GitStatus({ id, worktreeId, branch, summary, prSummary, pullRequest, on
   // move one occupied pull request into this worktree
   const movePullRequest = async (number: number) => {
     // prevent duplicate move transactions
-    if (id === undefined || mutationInFlight) return;
+    if (worktreeId === undefined || mutationInFlight) return;
     setMovingPr(number);
     try {
-      const response = await request(`/api/agents/${encodeURIComponent(id)}/move-pr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ number }) });
+      const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/move-pr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ number }) });
       // surface a rejected server transaction
       if (!response.ok) {
         onOperationFeedback?.({ tone: 'error', message: 'Pull request could not be moved', detail: await launchError(response), worktreeId });
         return;
       }
       // discard stale checkout ownership after success
-      if (prSwitchCacheKey !== undefined) pullRequestSwitchCache.delete(prSwitchCacheKey);
+      if (worktreeId !== undefined) pullRequestSwitchCache.delete(worktreeId);
       onToggle?.();
       onOperationFeedback?.({ tone: 'success', message: 'Pull request moved here', detail: 'The source worktree was detached and its uncommitted changes were restored here.', worktreeId });
     } catch {
@@ -6217,17 +6216,17 @@ function GitStatus({ id, worktreeId, branch, summary, prSummary, pullRequest, on
   // check out one local branch
   const switchBranch = async (nextBranch: string) => {
     // prevent duplicate checkout transactions
-    if (id === undefined || mutationInFlight) return;
+    if (worktreeId === undefined || mutationInFlight) return;
     setSwitchingBranch(nextBranch);
     try {
-      const response = await request(`/api/agents/${encodeURIComponent(id)}/switch-branch`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ branch: nextBranch }) });
+      const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/switch-branch`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ branch: nextBranch }) });
       // surface a rejected server transaction
       if (!response.ok) {
         onOperationFeedback?.({ tone: 'error', message: 'Branch could not be checked out', detail: await launchError(response), worktreeId });
         return;
       }
       // discard stale checkout ownership after success
-      if (prSwitchCacheKey !== undefined) pullRequestSwitchCache.delete(prSwitchCacheKey);
+      if (worktreeId !== undefined) pullRequestSwitchCache.delete(worktreeId);
       onToggle?.();
     } catch {
       onOperationFeedback?.({ tone: 'error', message: 'Branch could not be checked out', detail: 'The console could not be reached. Check the worktree before trying again.', worktreeId });
@@ -6238,17 +6237,17 @@ function GitStatus({ id, worktreeId, branch, summary, prSummary, pullRequest, on
   // move one occupied branch into this worktree
   const moveBranch = async (nextBranch: string) => {
     // prevent duplicate move transactions
-    if (id === undefined || mutationInFlight) return;
+    if (worktreeId === undefined || mutationInFlight) return;
     setMovingBranch(nextBranch);
     try {
-      const response = await request(`/api/agents/${encodeURIComponent(id)}/move-branch`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ branch: nextBranch }) });
+      const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/move-branch`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ branch: nextBranch }) });
       // surface a rejected server transaction
       if (!response.ok) {
         onOperationFeedback?.({ tone: 'error', message: 'Branch could not be moved', detail: await launchError(response), worktreeId });
         return;
       }
       // discard stale checkout ownership after success
-      if (prSwitchCacheKey !== undefined) pullRequestSwitchCache.delete(prSwitchCacheKey);
+      if (worktreeId !== undefined) pullRequestSwitchCache.delete(worktreeId);
       onToggle?.();
       onOperationFeedback?.({ tone: 'success', message: 'Branch moved here', detail: 'The source worktree was detached and its uncommitted changes were restored here.', worktreeId });
     } catch {
@@ -6267,7 +6266,7 @@ function GitStatus({ id, worktreeId, branch, summary, prSummary, pullRequest, on
     // require the active deletion target
     if (removingBranch === undefined) return;
     // discard stale repository choices
-    if (prSwitchCacheKey !== undefined) pullRequestSwitchCache.delete(prSwitchCacheKey);
+    if (worktreeId !== undefined) pullRequestSwitchCache.delete(worktreeId);
     setPrSwitch(current => current === undefined ? current : { ...current, branches: current.branches.filter(candidate => candidate.branch !== removingBranch.branch) });
     setRemovingBranch(undefined);
     onOperationFeedback?.({ tone: 'success', message: 'Branch deleted', detail: `${removingBranch.branch} was deleted.`, worktreeId });
@@ -6281,7 +6280,7 @@ function GitStatus({ id, worktreeId, branch, summary, prSummary, pullRequest, on
   if (tab === 'prs') activePanel = pullRequestPanel;
   // show local branch choices
   if (tab === 'branches') activePanel = branchPanel;
-  return <span ref={wrapRef} className={`git-status-wrap${expanded ? ' expanded' : ''}`}><button className={`git-status-summary ${state}${pullRequest === undefined ? '' : ` has-pull-request status-${pullRequest.status}`}${review !== undefined ? ' review-ready' : ''}${review?.generating ? ' review-generating' : ''}${review?.stale ? ' review-stale' : ''}`} type="button" aria-label={label} aria-busy={review?.generating || undefined} data-context-flyout aria-expanded={expanded} title={label} onClick={onToggle}><span className="flyout-caret" aria-hidden="true" />{/* a spinner in the icon's place still shows generation when reduced motion stops the glow */}{review?.generating ? <span className="spinner git-review-spinner" aria-hidden="true" /> : <svg className="git-branch-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.5" /><circle cx="6" cy="19" r="2.5" /><circle cx="18" cy="7" r="2.5" /><path d="M6 7.5v9M18 9.5v1a6 6 0 0 1-6 6H6" /></svg>}<span className="git-status-dot" aria-hidden="true" /><span className="git-branch">{branch}</span><span className="git-status-separator" aria-hidden="true">·</span><span className="git-worktree-state">{stateLabel}</span>{/* retain compact pr indicators beside the prompt */}{pullRequest !== undefined && <PullRequestIndicators checks={pullRequest.checks} issues={pullRequest.issues} />}</button>{expanded && <FlyoutPortal onDismiss={() => onToggle?.()}><div className="git-status-panel" role="region" aria-label="Changed files" aria-busy={repositoryTabVisible && loadingPrSwitch} style={panelStyle}>{activePanel}<span className="git-status-tabs" role="tablist" aria-label="Branch views"><button type="button" role="tab" aria-selected={tab === 'working'} onClick={() => setTab('working')}>Working</button><button type="button" role="tab" aria-selected={tab === 'prs'} aria-busy={loadingPrSwitch} disabled={id === undefined} title={id === undefined ? 'Launch agent to load pull requests' : undefined} onClick={() => { /* keep preloading while changing views */ setTab('prs'); }}>PRs{loadingPrSwitch && <span className="spinner" aria-hidden="true" />}</button><button type="button" role="tab" aria-selected={tab === 'branches'} aria-busy={loadingPrSwitch} disabled={id === undefined} title={id === undefined ? 'Launch agent to load branches' : undefined} onClick={() => { /* keep preloading while changing views */ setTab('branches'); }}>Branches{loadingPrSwitch && <span className="spinner" aria-hidden="true" />}</button></span></div></FlyoutPortal>}{removingBranch !== undefined && worktreeId !== undefined && <RemoveBranchDialog worktreeId={worktreeId} branch={removingBranch} onClose={() => setRemovingBranch(undefined)} onDeleted={branchRemoved} />}</span>;
+  return <span ref={wrapRef} className={`git-status-wrap${expanded ? ' expanded' : ''}`}><button className={`git-status-summary ${state}${pullRequest === undefined ? '' : ` has-pull-request status-${pullRequest.status}`}${review !== undefined ? ' review-ready' : ''}${review?.generating ? ' review-generating' : ''}${review?.stale ? ' review-stale' : ''}`} type="button" aria-label={label} aria-busy={review?.generating || undefined} data-context-flyout aria-expanded={expanded} title={label} onClick={onToggle}><span className="flyout-caret" aria-hidden="true" />{/* a spinner in the icon's place still shows generation when reduced motion stops the glow */}{review?.generating ? <span className="spinner git-review-spinner" aria-hidden="true" /> : <svg className="git-branch-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.5" /><circle cx="6" cy="19" r="2.5" /><circle cx="18" cy="7" r="2.5" /><path d="M6 7.5v9M18 9.5v1a6 6 0 0 1-6 6H6" /></svg>}<span className="git-status-dot" aria-hidden="true" /><span className="git-branch">{branch}</span><span className="git-status-separator" aria-hidden="true">·</span><span className="git-worktree-state">{stateLabel}</span>{/* retain compact pr indicators beside the prompt */}{pullRequest !== undefined && <PullRequestIndicators checks={pullRequest.checks} issues={pullRequest.issues} />}</button>{expanded && <FlyoutPortal onDismiss={() => onToggle?.()}><div className="git-status-panel" role="region" aria-label="Changed files" aria-busy={repositoryTabVisible && loadingPrSwitch} style={panelStyle}>{activePanel}<span className="git-status-tabs" role="tablist" aria-label="Branch views"><button type="button" role="tab" aria-selected={tab === 'working'} onClick={() => setTab('working')}>Working</button><button type="button" role="tab" aria-selected={tab === 'prs'} aria-busy={loadingPrSwitch} disabled={worktreeId === undefined} title={worktreeId === undefined ? 'Pull requests are listed for worktrees only' : undefined} onClick={() => { /* keep preloading while changing views */ setTab('prs'); }}>PRs{loadingPrSwitch && <span className="spinner" aria-hidden="true" />}</button><button type="button" role="tab" aria-selected={tab === 'branches'} aria-busy={loadingPrSwitch} disabled={worktreeId === undefined} title={worktreeId === undefined ? 'Branches are listed for worktrees only' : undefined} onClick={() => { /* keep preloading while changing views */ setTab('branches'); }}>Branches{loadingPrSwitch && <span className="spinner" aria-hidden="true" />}</button></span></div></FlyoutPortal>}{removingBranch !== undefined && worktreeId !== undefined && <RemoveBranchDialog worktreeId={worktreeId} branch={removingBranch} onClose={() => setRemovingBranch(undefined)} onDeleted={branchRemoved} />}</span>;
 }
 
 // The Place a Workspace shows: the fields it reads from a Worktree, a directory-Project or Scratch
@@ -6428,7 +6427,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
 }
 type WorkspaceState = ReturnType<typeof useWorkspace>;
 // The git actions only an Agent offers (push, fixup, guided review); an agentless Workspace passes
-// just the reason review is unavailable.
+// the reason review is unavailable plus the navigation and feedback branch checkout reports through.
 type WorkspaceGitActions = Omit<Parameters<typeof GitStatus>[0], 'branch' | 'summary' | 'prSummary' | 'pullRequest' | 'expanded' | 'onToggle' | 'onOpenFile' | 'onViewChanges'>;
 
 // The Place's git status control. Opening a changed file or the changes collapses it and shows them
@@ -7171,7 +7170,7 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
     }
   };
   // the Agent's push, fixup and guided-review actions on the git status
-  const gitActions: WorkspaceGitActions = { id: agent.id, worktreeId: agent.worktreeId, onFixup: queueFixup, onReview: agent.worktreeId === undefined || reviewAgent === undefined ? undefined : review === undefined ? scope => onReview({ agentId: reviewAgent.id, worktreeId: agent.worktreeId!, scope }) : () => { pendingWorkspaceJumps.set(workspace.viewKey, 'review'); review.onOpen(); }, review, reviewUnavailable: review === undefined || reviewAgent === undefined ? reviewUnavailable : undefined, pushAction, pushPending, onPush: queuePush, onSelectTarget, onOperationFeedback };
+  const gitActions: WorkspaceGitActions = { worktreeId: agent.worktreeId, onFixup: queueFixup, onReview: agent.worktreeId === undefined || reviewAgent === undefined ? undefined : review === undefined ? scope => onReview({ agentId: reviewAgent.id, worktreeId: agent.worktreeId!, scope }) : () => { pendingWorkspaceJumps.set(workspace.viewKey, 'review'); review.onOpen(); }, review, reviewUnavailable: review === undefined || reviewAgent === undefined ? reviewUnavailable : undefined, pushAction, pushPending, onPush: queuePush, onSelectTarget, onOperationFeedback };
   // selected output and Terminal text append to the current Agent's draft without queueing it
   const addToPrompt = (text: string) => setPromptDraft(agent.id, current => appendTextBlock(current, text));
   // the panel is keyed by Agent, so a switch swaps its output, draft, queue and pending actions
@@ -7667,7 +7666,7 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
     }
   };
   // guided review needs an Agent
-  const gitActions: WorkspaceGitActions = { reviewUnavailable: 'Launch agent to review' };
+  const gitActions: WorkspaceGitActions = { reviewUnavailable: 'Launch agent to review', onSelectTarget: target => onNavigateWorktree(target.worktreeId), onOperationFeedback };
   // a starting Agent (or a draft typed before launch) gets the agent panel; with none, the
   // Workspace shows only its other panels
   const starting = launching || restarting || startingNewTask;

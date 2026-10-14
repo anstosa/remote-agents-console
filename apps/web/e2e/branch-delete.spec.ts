@@ -17,7 +17,7 @@ test('guards deletion of an unpushed and unmerged branch', async ({ page }) => {
     // provide saved prompts
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     // provide one deletable local branch
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [{ branch: 'feature/risky', checkedOut: false }] } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [{ branch: 'feature/risky', checkedOut: false }] } });
     // expose fresh risky branch facts
     if (url.pathname === '/api/worktrees/cora/branch-removal') return route.fulfill({ json: { branch: url.searchParams.get('branch'), checkedOut: false, dirtyCount: 0, pushed: false, merged: false, defaultBranch: false } });
     // record the guarded deletion
@@ -76,7 +76,7 @@ test('blocks deletion of a checked-out branch with uncommitted changes', async (
     // provide saved prompts
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     // provide one occupied local branch
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [{ branch: 'feature/occupied', checkedOut: true }] } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [{ branch: 'feature/occupied', checkedOut: true }] } });
     // expose fresh dirty checkout facts
     if (url.pathname === '/api/worktrees/cora/branch-removal') return route.fulfill({ json: { branch: url.searchParams.get('branch'), checkedOut: true, dirtyCount: 2, pushed: false, merged: false, defaultBranch: false } });
     // detect an unsafe delete attempt

@@ -26,7 +26,7 @@ export type PullRequestMoveResult = 'moved' | 'unavailable' | 'recovery-required
 // control gone, cannot be interrupted for the checkout; `error` explains any other refusal
 export type BranchSwitchResult = 'switched' | 'busy' | { error: string };
 const mutationInProgress = 'Another branch checkout or move is already running. Try again when it finishes.';
-const switchingUnavailable = 'Branch switching is unavailable for this agent\'s worktree.';
+const switchingUnavailable = 'Branch switching is unavailable for this worktree.';
 const uncommittedChanges = 'The worktree has uncommitted changes. Commit or stash them, then try again.';
 const alreadyCheckedOut = (branch: string, openIn: PullRequestWorktree | undefined): string => `${branch} is already checked out in ${openIn?.worktreeName ?? 'another worktree'}.`;
 // the first line of a failed git command's stderr, which names the cause; the full output goes to the server log
@@ -46,12 +46,9 @@ export class PullRequestSwitchService {
   // adapter: it is structurally unable to type into an agent's terminal.
   constructor(private readonly config: ValidatedConfig, private readonly discovery: DiscoveryService, private readonly pullRequests = new PullRequestService(), private readonly command: GitCommand = runGit) {}
 
-  // list one agent's switchable pull requests and local branches
-  async available(agentId: string): Promise<PullRequestSwitchAvailability | undefined> {
-    const target = await this.discovery.target(agentId);
-    // require one current target
-    if (target === undefined) return undefined;
-    const worktree = this.worktree(target.agent.home);
+  // list one worktree's switchable pull requests and local branches, whether or not an agent runs there
+  async available(worktreeId: string): Promise<PullRequestSwitchAvailability | undefined> {
+    const worktree = worktreeById(this.discovery.worktreesNow(), worktreeId);
     if (worktree === undefined) return undefined;
     // require one canonical repository identity, not merely a GitHub origin
     const repository = await this.repositoryIdentity(worktree.identity);
@@ -61,11 +58,12 @@ export class PullRequestSwitchService {
     const head = await this.command('/usr/bin/git', ['-C', worktree.identity, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
     const currentBranch = head.code === 0 ? head.stdout.trim() : '';
     // prefer the live destination branch over cached dashboard metadata
-    if (currentBranch) checkedOut.set(currentBranch, { agentId: target.agent.id, worktreeId: worktree.id, worktreeName: worktree.label });
+    if (currentBranch) checkedOut.set(currentBranch, { worktreeId: worktree.id, worktreeName: worktree.label });
     const agents = await Promise.all((dashboard?.agents ?? []).map(async agent => {
-      // skip the freshly resolved target and branchless agents
-      if (agent.id === target.agent.id || agent.branch === undefined) return undefined;
-      const candidate = this.worktree(agent.home)?.identity ?? agent.home;
+      const agentWorktree = this.worktree(agent.home);
+      // skip agents in this worktree, whose live branch is read above, and branchless agents
+      if (agentWorktree?.id === worktree.id || agent.branch === undefined) return undefined;
+      const candidate = agentWorktree?.identity ?? agent.home;
       return await this.repositoryIdentity(candidate) === repository ? agent : undefined;
     }));
     // prioritize active agents in this repository
@@ -136,18 +134,18 @@ export class PullRequestSwitchService {
     return await this.pullRequests.actionsUrl(checkout);
   }
 
-  async switch(agentId: string, number: number): Promise<BranchSwitchResult> {
+  async switch(worktreeId: string, number: number): Promise<BranchSwitchResult> {
     if (!Number.isInteger(number) || number < 1) return { error: 'That is not a valid pull request number.' };
     if (this.branchMutationInProgress) return { error: mutationInProgress };
     this.branchMutationInProgress = true;
     try {
-      const available = await this.available(agentId);
+      const available = await this.available(worktreeId);
       if (available === undefined) return { error: switchingUnavailable };
       const pullRequest = available.pullRequests.find(candidate => candidate.number === number) ?? available.otherPullRequests.find(candidate => candidate.number === number);
       if (pullRequest === undefined) return { error: `Pull request #${number} is no longer open.` };
       if (pullRequest.checkedOut) return { error: alreadyCheckedOut(pullRequest.checkoutBranch, pullRequest.openIn) };
       if (!available.enabled) return { error: uncommittedChanges };
-      return await this.runSwitch(agentId, pullRequest.checkoutBranch, workspace =>
+      return await this.runSwitch(worktreeId, pullRequest.checkoutBranch, workspace =>
         pullRequest.headOnOrigin ? this.switchBranchRef(workspace, pullRequest) : this.switchPullRequestRef(workspace, pullRequest));
     } finally {
       this.branchMutationInProgress = false;
@@ -155,31 +153,30 @@ export class PullRequestSwitchService {
   }
 
   // switch to one available local branch open in no other worktree
-  async switchBranch(agentId: string, branch: string): Promise<BranchSwitchResult> {
+  async switchBranch(worktreeId: string, branch: string): Promise<BranchSwitchResult> {
     if (typeof branch !== 'string' || branch === '') return { error: 'No branch was named.' };
     if (this.branchMutationInProgress) return { error: mutationInProgress };
     this.branchMutationInProgress = true;
     try {
-      const available = await this.available(agentId);
+      const available = await this.available(worktreeId);
       if (available === undefined) return { error: switchingUnavailable };
       // require the branch on the availability list, held by no other worktree
       const switchable = available.branches.find(candidate => candidate.branch === branch);
       if (switchable === undefined) return { error: `${branch} is not a local branch that can be checked out here.` };
       if (switchable.checkedOut) return { error: alreadyCheckedOut(branch, switchable.openIn) };
       if (!available.enabled) return { error: uncommittedChanges };
-      return await this.runSwitch(agentId, branch, workspace => this.switchLocalBranch(workspace, branch));
+      return await this.runSwitch(worktreeId, branch, workspace => this.switchLocalBranch(workspace, branch));
     } finally {
       this.branchMutationInProgress = false;
     }
   }
 
-  // run one branch-changing git transaction in-process, gated on an idle agent; perform returns an error message or undefined
-  private async runSwitch(agentId: string, checkoutBranch: string, perform: (workspace: string) => Promise<string | undefined>): Promise<BranchSwitchResult> {
-    const target = await this.discovery.target(agentId);
-    const targetWorktree = target === undefined ? undefined : this.worktree(target.agent.home);
-    if (target === undefined || targetWorktree === undefined) return { error: switchingUnavailable };
+  // run one branch-changing git transaction in-process, gated on idle agents; perform returns an error message or undefined
+  private async runSwitch(worktreeId: string, checkoutBranch: string, perform: (workspace: string) => Promise<string | undefined>): Promise<BranchSwitchResult> {
+    const targetWorktree = worktreeById(this.discovery.worktreesNow(), worktreeId);
+    if (targetWorktree === undefined) return { error: switchingUnavailable };
     // without job control a working agent cannot be interrupted for a checkout
-    if (agentAttentionState(target.agent) === 'working') return 'busy';
+    if (await this.busy(targetWorktree)) return 'busy';
     const currentBranch = await this.command('/usr/bin/git', ['-C', targetWorktree.identity, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
     if (currentBranch.code === 0 && currentBranch.stdout.trim() === checkoutBranch) return { error: `${checkoutBranch} is already checked out here.` };
     // a failed fetch or switch leaves the current branch untouched, so nothing to roll back
@@ -191,30 +188,30 @@ export class PullRequestSwitchService {
   }
 
   // move one occupied pull request into the requested worktree
-  async move(agentId: string, number: number): Promise<PullRequestMoveResult> {
+  async move(worktreeId: string, number: number): Promise<PullRequestMoveResult> {
     // reject invalid or concurrent move requests
     if (!Number.isInteger(number) || number < 1 || this.branchMutationInProgress) return 'unavailable';
     this.branchMutationInProgress = true;
     try {
-      const available = await this.available(agentId);
+      const available = await this.available(worktreeId);
       const pullRequest = [...(available?.pullRequests ?? []), ...(available?.otherPullRequests ?? [])].find(candidate => candidate.number === number);
       if (available === undefined || pullRequest === undefined) return 'unavailable';
-      return await this.moveCheckedOutBranch(agentId, available.enabled, { branch: pullRequest.checkoutBranch, checkedOut: pullRequest.checkedOut, openIn: pullRequest.openIn });
+      return await this.moveCheckedOutBranch(worktreeId, available.enabled, { branch: pullRequest.checkoutBranch, checkedOut: pullRequest.checkedOut, openIn: pullRequest.openIn });
     } finally {
       this.branchMutationInProgress = false;
     }
   }
 
   // move one occupied local branch into the requested worktree
-  async moveBranch(agentId: string, branch: string): Promise<PullRequestMoveResult> {
+  async moveBranch(worktreeId: string, branch: string): Promise<PullRequestMoveResult> {
     // reject an empty or concurrent move request
     if (typeof branch !== 'string' || branch === '' || this.branchMutationInProgress) return 'unavailable';
     this.branchMutationInProgress = true;
     try {
-      const available = await this.available(agentId);
+      const available = await this.available(worktreeId);
       const switchable = available?.branches.find(candidate => candidate.branch === branch);
       if (available === undefined || switchable === undefined) return 'unavailable';
-      return await this.moveCheckedOutBranch(agentId, available.enabled, switchable);
+      return await this.moveCheckedOutBranch(worktreeId, available.enabled, switchable);
     } finally {
       this.branchMutationInProgress = false;
     }
@@ -222,6 +219,11 @@ export class PullRequestSwitchService {
 
   private worktree(workspace: string): Worktree | undefined {
     return this.discovery.worktreesNow().find(worktree => worktreeMatchesWorkspace(worktree, workspace));
+  }
+
+  // whether any agent in the worktree is working; a worktree with no agent is never busy
+  private async busy(worktree: Worktree): Promise<boolean> {
+    return (await this.discovery.refresh()).some(agent => this.worktree(agent.home)?.id === worktree.id && agentAttentionState(agent) === 'working');
   }
 
   // switch/move readiness: a clean working tree, whether or not the branch is pushed
@@ -245,18 +247,14 @@ export class PullRequestSwitchService {
   }
 
   // transfer one checked-out branch and its working state, in-process, gated on idle agents
-  private async moveCheckedOutBranch(agentId: string, enabled: boolean, movable: SwitchableBranch): Promise<PullRequestMoveResult> {
+  private async moveCheckedOutBranch(worktreeId: string, enabled: boolean, movable: SwitchableBranch): Promise<PullRequestMoveResult> {
     const { branch: checkoutBranch, checkedOut, openIn } = movable;
-    const target = await this.discovery.target(agentId);
-    const targetWorktree = target === undefined ? undefined : this.worktree(target.agent.home);
+    const targetWorktree = worktreeById(this.discovery.worktreesNow(), worktreeId);
     const sourceWorktree = openIn === undefined ? undefined : worktreeById(this.discovery.worktreesNow(), openIn.worktreeId);
     // require one ready destination and one resolvable source
-    if (!enabled || !checkedOut || target === undefined || targetWorktree === undefined || openIn === undefined || sourceWorktree === undefined || sourceWorktree.id === targetWorktree.id) return 'unavailable';
-    const sourceTarget = openIn.agentId === undefined ? undefined : await this.discovery.target(openIn.agentId);
-    // fail closed when the active source changed identity
-    if (openIn.agentId !== undefined && (sourceTarget === undefined || sourceTarget.agent.id === target.agent.id || this.worktree(sourceTarget.agent.home)?.id !== sourceWorktree.id)) return 'unavailable';
-    // without job control neither the destination nor an active source can be interrupted for a move
-    if (agentAttentionState(target.agent) === 'working' || (sourceTarget !== undefined && agentAttentionState(sourceTarget.agent) === 'working')) return 'busy';
+    if (!enabled || !checkedOut || targetWorktree === undefined || sourceWorktree === undefined || sourceWorktree.id === targetWorktree.id) return 'unavailable';
+    // without job control no agent in either worktree can be interrupted for a move
+    if (await this.busy(targetWorktree) || await this.busy(sourceWorktree)) return 'busy';
     const sourceBranch = await this.command('/usr/bin/git', ['-C', sourceWorktree.identity, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
     // revalidate the occupied branch immediately before mutation
     if (sourceBranch.code !== 0 || sourceBranch.stdout.trim() !== checkoutBranch) return 'unavailable';

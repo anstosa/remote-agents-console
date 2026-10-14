@@ -28,7 +28,7 @@ test('keeps the active tab, output, and prompt controls inside a narrow viewport
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[1-5]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[1-5]\/saved-prompts$/u.test(url.pathname) && request.method() === 'GET') return route.fulfill({ json: { prompts: [{ id: 'saved-1', text: 'Saved prompt' }] } });
-    if (url.pathname === '/api/agents/agent-5/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [] } });
+    if (url.pathname === '/api/worktrees/remote-agents/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -247,7 +247,7 @@ test('desktop flyout triggers show edge carets and remain clickable', async ({ p
     // make prompt-history controls available
     if (/^\/api\/agents\/agent-1\/(saved-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [{ id: 'saved-1', text: 'Saved prompt' }] } });
     // keep git detail loading bounded
-    if (url.pathname === '/api/agents/agent-1/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [] } });
+    if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
   await page.goto('/');

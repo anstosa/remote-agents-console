@@ -207,7 +207,7 @@ try {
       if (url.pathname === '/api/agents/agent-atlas/prompt-history') return route.fulfill({ json: { prompts: history } });
       if (url.pathname === '/api/agents/agent-atlas/skills') return route.fulfill({ json: { skills: [] } });
       if (url.pathname === '/api/worktrees/atlas/notes') return route.fulfill({ json: { notes } });
-      if (url.pathname === '/api/agents/agent-atlas/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [] } });
+      if (url.pathname === '/api/worktrees/atlas/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [] } });
       if (url.pathname === '/api/agents/agent-atlas/github-actions') return route.fulfill({ json: { url: 'https://github.com/example/atlas/actions' } });
       return route.fulfill({ status: 404, json: { error: 'not mocked for README capture' } });
     });

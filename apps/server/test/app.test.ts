@@ -595,7 +595,7 @@ describe('pull request switch API', () => {
     try {
       const boot = await pullRequestApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await pullRequestApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
-      const response = await pullRequestApp.inject({ method: 'GET', url: '/api/agents/agent-1/switch-prs', headers: { host: 'agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0] } });
+      const response = await pullRequestApp.inject({ method: 'GET', url: '/api/worktrees/cora/switch-prs', headers: { host: 'agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0] } });
 
       expect(response.statusCode).toBe(502);
       expect(response.json()).toEqual({ error: 'GitHub could not load pull requests (503).' });
@@ -610,11 +610,11 @@ describe('pull request switch API', () => {
     try {
       const boot = await pullRequestApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await pullRequestApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
-      const response = await pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/move-pr', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken }, payload: { number: 301 } });
-      const recovery = await pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/move-pr', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken }, payload: { number: 302 } });
+      const response = await pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/move-pr', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken }, payload: { number: 301 } });
+      const recovery = await pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/move-pr', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken }, payload: { number: 302 } });
 
       expect(response.statusCode).toBe(202);
-      expect(move).toHaveBeenCalledWith('agent-1', 301);
+      expect(move).toHaveBeenCalledWith('cora', 301);
       expect(recovery.statusCode).toBe(409);
       expect(recovery.json()).toMatchObject({ recoveryRequired: true, error: expect.any(String) });
     } finally {
@@ -632,19 +632,19 @@ describe('pull request switch API', () => {
       const boot = await pullRequestApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await pullRequestApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
       const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken };
-      const switched = await pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/switch-branch', headers, payload: { branch: 'feature/solo' } });
-      const rejectedSwitch = await pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/switch-branch', headers, payload: { branch: 'feature/solo' } });
-      const moved = await pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/move-branch', headers, payload: { branch: 'feature/solo' } });
-      const recovery = await pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/move-branch', headers, payload: { branch: 'feature/solo' } });
+      const switched = await pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/switch-branch', headers, payload: { branch: 'feature/solo' } });
+      const rejectedSwitch = await pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/switch-branch', headers, payload: { branch: 'feature/solo' } });
+      const moved = await pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/move-branch', headers, payload: { branch: 'feature/solo' } });
+      const recovery = await pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/move-branch', headers, payload: { branch: 'feature/solo' } });
       // a non-string branch is rejected before the service is consulted
-      const invalidSwitch = await pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/switch-branch', headers, payload: { branch: 42 } });
-      const invalidMove = await pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/move-branch', headers, payload: {} });
+      const invalidSwitch = await pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/switch-branch', headers, payload: { branch: 42 } });
+      const invalidMove = await pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/move-branch', headers, payload: {} });
 
       expect(switched.statusCode).toBe(202);
-      expect(switchBranch).toHaveBeenCalledWith('agent-1', 'feature/solo');
+      expect(switchBranch).toHaveBeenCalledWith('cora', 'feature/solo');
       expect(rejectedSwitch.statusCode).toBe(409);
       expect(moved.statusCode).toBe(202);
-      expect(moveBranch).toHaveBeenCalledWith('agent-1', 'feature/solo');
+      expect(moveBranch).toHaveBeenCalledWith('cora', 'feature/solo');
       expect(recovery.statusCode).toBe(409);
       expect(recovery.json()).toMatchObject({ recoveryRequired: true, error: expect.any(String) });
       expect(invalidSwitch.statusCode).toBe(409);
@@ -667,10 +667,10 @@ describe('pull request switch API', () => {
       const login = await pullRequestApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
       const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken };
       const responses = await Promise.all([
-        pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/switch-pr', headers, payload: { number: 301 } }),
-        pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/switch-branch', headers, payload: { branch: 'feature/solo' } }),
-        pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/move-pr', headers, payload: { number: 301 } }),
-        pullRequestApp.inject({ method: 'POST', url: '/api/agents/agent-1/move-branch', headers, payload: { branch: 'feature/solo' } })
+        pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/switch-pr', headers, payload: { number: 301 } }),
+        pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/switch-branch', headers, payload: { branch: 'feature/solo' } }),
+        pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/move-pr', headers, payload: { number: 301 } }),
+        pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/move-branch', headers, payload: { branch: 'feature/solo' } })
       ]);
 
       for (const response of responses) {
