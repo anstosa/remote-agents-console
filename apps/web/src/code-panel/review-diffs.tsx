@@ -65,6 +65,8 @@ type ReviewDiffsProps = {
   onOpenInEditor?: (target: EditorTarget) => void;
   // the working tree's text of a file, which lets the unchanged lines between hunks expand
   loadFile?: (path: string) => Promise<string | undefined>;
+  // a file's unchanged lines could not expand, and why
+  onExpandError?: (file: string, detail: string) => void;
 };
 
 // One hunk of a file view: its Change, its range on each side of the base diff, and where its old
@@ -124,8 +126,8 @@ const viewLine = (view: FileView, changeId: string, side: ReviewDiffSide, line: 
 
 // The view's two files from the working tree's text: the old one undoes each hunk, after checking
 // the text still holds the hunk's new lines, so a file changed since the tour was made stays
-// collapsed rather than showing the wrong lines.
-const viewFiles = (view: FileView, fileDiff: FileDiffMetadata, working: string): FileDiffLoadedChangedFiles => {
+// collapsed (undefined) rather than showing the wrong lines.
+const viewFiles = (view: FileView, fileDiff: FileDiffMetadata, working: string): FileDiffLoadedChangedFiles | undefined => {
   const lines = working.split('\n');
   const newline = lines.at(-1) === '';
   if (newline) lines.pop();
@@ -135,7 +137,7 @@ const viewFiles = (view: FileView, fileDiff: FileDiffMetadata, working: string):
   for (const hunk of [...view.hunks].reverse()) {
     const at = sideIndex(hunk.newStart, hunk.newLines);
     const newSide = hunk.body.filter(text => text.startsWith(' ') || text.startsWith('+')).map(text => text.slice(1));
-    if (newSide.length !== hunk.newLines || newSide.some((text, index) => lines[at + index] !== text)) throw new Error(`${view.file} changed since the tour was made`);
+    if (newSide.length !== hunk.newLines || newSide.some((text, index) => lines[at + index] !== text)) return undefined;
     lines.splice(at, hunk.newLines, ...hunk.body.filter(text => text.startsWith(' ') || text.startsWith('-')).map(text => text.slice(1)));
   }
   const old = lines.length > 0 && oldNewline ? `${lines.join('\n')}\n` : lines.join('\n');
@@ -208,7 +210,7 @@ function SuggestedComment({ suggestion, onKeep, onDismiss, onRestore }: { sugges
 }
 
 // render one tour step with current display settings
-export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, onOpenInEditor, loadFile }: ReviewDiffsProps) {
+export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, onOpenInEditor, loadFile, onExpandError }: ReviewDiffsProps) {
   const theme = useColorTheme();
   const terminalFontSize = useTerminalFontSize();
   // The step's hunk Changes of one file become one diff item, keyed by their Change ids; any other
@@ -257,13 +259,17 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
   const splitFits = viewWidth >= SPLIT_MIN_WIDTH;
   const effectiveSplit = split && splitFits;
 
-  // Expanding a gap fetches the file once and swaps in the view's two files.
+  // Expanding a gap fetches the file once and swaps in the view's two files. A failure is reported,
+  // then thrown so the library leaves the gap collapsed.
   const loadDiffFiles = useCallback(async (fileDiff: FileDiffMetadata) => {
     const view = viewByDiff.get(fileDiff);
     const working = view === undefined ? undefined : await loadFile?.(fileDiff.name);
-    if (view === undefined || working === undefined) throw new Error(`${fileDiff.name} is unavailable`);
-    return viewFiles(view, fileDiff, working);
-  }, [viewByDiff, loadFile]);
+    const files = view === undefined || working === undefined ? undefined : viewFiles(view, fileDiff, working);
+    if (files !== undefined) return files;
+    const detail = working === undefined ? 'The file could not be loaded. It may be binary or over 2 MB.' : 'The file changed since the tour was made. Regenerate the tour to see its current lines.';
+    onExpandError?.(fileDiff.name, detail);
+    throw new Error(`${fileDiff.name}: ${detail}`);
+  }, [viewByDiff, loadFile, onExpandError]);
 
   // The Code panel's shared render options (the tour has no full-context toggle), plus the gutter "+"
   // that starts a comment. On a mouse it shows on hover; on touch, tapping a line number reveals it.

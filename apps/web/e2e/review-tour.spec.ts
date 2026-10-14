@@ -528,9 +528,9 @@ test('hides the editor jump when no editor is configured', async ({ page }) => {
   await expect(diffPane.getByRole('button', { name: /in the editor$/u })).toHaveCount(0);
 });
 
-// verify a step's hunks of one file share one diff whose gaps expand to the current file, showing
-// another step's change there as plain lines that take no comment
-test('merges a step\'s hunks of one file into one expandable diff', async ({ page }) => {
+// a two-step tour of one file: the first step changes lines 5 and 35, the second inserts two lines
+// between them; `working` is the file those hunks were taken from
+function mergedTourFixture(): { tour: object; working: string[] } {
   const base = Array.from({ length: 40 }, (_, index) => `const v${index + 1} = ${index + 1};`);
   const working = [...base];
   working[4] = 'const v5 = 50;';
@@ -542,6 +542,13 @@ test('merges a step\'s hunks of one file into one expandable diff', async ({ pag
   const inserted = `${header}@@ -18,6 +18,8 @@\n${context(18, 20)}\n+const extra1 = 1;\n+const extra2 = 2;\n${context(21, 23)}\n`;
   const last = `${header}@@ -32,7 +34,7 @@\n${context(32, 34)}\n-${base[34]}\n+const v35 = 350;\n${context(36, 38)}\n`;
   const tour = { title: 'Merged tour', overview: 'Review the route values.', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'merged-fingerprint-123456', changes: [{ id: 'chg_first0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: first }, { id: 'chg_extra0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: inserted }, { id: 'chg_last00001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: last }], steps: [{ id: 'values', title: 'Change the values', explanation: 'Two values change.', changeIds: ['chg_first0001', 'chg_last00001'] }, { id: 'extras', title: 'Add the extras', explanation: 'Two constants are added.', changeIds: ['chg_extra0001'] }] };
+  return { tour, working };
+}
+
+// verify a step's hunks of one file share one diff whose gaps expand to the current file, showing
+// another step's change there as plain lines that take no comment
+test('merges a step\'s hunks of one file into one expandable diff', async ({ page }) => {
+  const { tour, working } = mergedTourFixture();
   const { dialog } = await openCommentTour(page, { tour, files: { 'src/route.ts': `${working.join('\n')}\n` } });
   const diffPane = dialog.getByLabel('Relevant changes');
   // both hunks sit in one diff of the file
@@ -569,6 +576,19 @@ test('merges a step\'s hunks of one file into one expandable diff', async ({ pag
   await expect(diffPane.locator('[data-utility-button]')).toBeHidden();
   await diffPane.getByText('const v5 = 50;').hover();
   await expect(diffPane.locator('[data-utility-button]')).toBeVisible();
+});
+
+// verify a gap that cannot expand says why in a toast instead of only on the console
+test('explains in a toast when a merged diff cannot expand', async ({ page }) => {
+  const { tour, working } = mergedTourFixture();
+  const changed = [...working];
+  changed[5] = 'const v6 = 60;';
+  const { dialog } = await openCommentTour(page, { tour, files: { 'src/route.ts': `${changed.join('\n')}\n` } });
+  const diffPane = dialog.getByLabel('Relevant changes');
+  await diffPane.locator('[data-separator]', { hasText: '25 unmodified lines' }).locator('[data-expand-button]').first().click();
+  const toast = page.getByRole('alert').filter({ hasText: 'Could not expand src/route.ts' });
+  await expect(toast).toContainText('The file changed since the tour was made.');
+  await expect(diffPane.getByText('const extra1 = 1;')).toHaveCount(0);
 });
 
 // verify a narrow desktop panel folds the step's notes into the drawer, and expanding unfolds them
