@@ -3,10 +3,32 @@
 // or a squeezed desktop column — the choice is hidden and the diff renders unified. The width is the
 // renderer's own (not the viewport's), measured with useObservedWidth. Library-free, so it adds
 // nothing to either lazy chunk beyond these few lines.
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 
 // Below this width a diff is always unified (the Code panel also folds its file rail into a drawer here).
 export const SPLIT_MIN_WIDTH = 640;
+
+// The last Unified / Split pick, shared by every diff on this browser and remembered across reloads.
+// It is only the preference: a diff too narrow for split still renders unified without changing it.
+const diffSplitKey = 'rac.diff-split';
+const splitListeners = new Set<() => void>();
+const readDiffSplit = (): boolean => {
+  try { return localStorage.getItem(diffSplitKey) === 'split'; }
+  catch { return false; }
+};
+const subscribeDiffSplit = (listener: () => void): (() => void) => {
+  splitListeners.add(listener);
+  return () => { splitListeners.delete(listener); };
+};
+const setDiffSplit = (split: boolean): void => {
+  try {
+    if (split) localStorage.setItem(diffSplitKey, 'split');
+    else localStorage.removeItem(diffSplitKey);
+  } catch { /* private-mode storage is non-fatal */ }
+  splitListeners.forEach(listener => listener());
+};
+export const useDiffSplit = (): [boolean, (split: boolean) => void] =>
+  [useSyncExternalStore(subscribeDiffSplit, readDiffSplit, readDiffSplit), setDiffSplit];
 
 // Track an element's own content width through a callback ref, so the observer re-attaches whenever
 // the element remounts. Reports +Infinity until the first measurement.

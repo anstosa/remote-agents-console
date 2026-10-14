@@ -280,6 +280,22 @@ test('on a desktop the top-level view controls drop from the header as a card', 
   expect(flyoutBox!.x + flyoutBox!.width).toBeLessThanOrEqual(regionBox!.x + regionBox!.width);
 });
 
+test('remembers the last Unified / Split pick across reloads, but a narrow panel stays unified', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const patch = patchOf([trackedFile('src/app.ts')]);
+  await mountPanel(page, patch);
+  const region = panel(page);
+  await expect(region.locator('[data-diff-type="single"]')).toHaveCount(1);
+  await (await openCodeViewMenu(region)).getByRole('group', { name: 'Diff layout' }).getByRole('button', { name: 'Split' }).click();
+  await expect(region.locator('[data-diff-type="split"]')).toHaveCount(1);
+  await mountPanel(page, patch);
+  await expect(region.locator('[data-diff-type="split"]')).toHaveCount(1);
+  await expect((await openCodeViewMenu(region)).getByRole('group', { name: 'Diff layout' }).getByRole('button', { name: 'Split' })).toHaveAttribute('aria-pressed', 'true');
+  await mountPanel(page, patch, {}, false, 560);
+  await expect(region.locator('[data-diff-type="single"]')).toHaveCount(1);
+  await expect((await openCodeViewMenu(region)).getByRole('group', { name: 'Diff layout' })).toHaveCount(0);
+});
+
 test('covers a size-capped file with a Load anyway placeholder instead of a diff', async ({ page }) => {
   await mountPanel(page, patchOf([trackedFile('src/app.ts'), cappedFile('src/generated.ts')]));
 

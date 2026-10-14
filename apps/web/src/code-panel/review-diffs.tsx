@@ -13,7 +13,7 @@ import type { CodeViewLineSelection, DiffLineAnnotation, FileDiffLoadedChangedFi
 import { CodeView, type CodeViewItem, type CodeViewReactOptions } from '@pierre/diffs/react';
 import { useColorTheme } from '../color-theme.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
-import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useObservedWidth } from './diff-layout.js';
+import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, type EditorTarget } from './editor-jump.js';
 import { codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch } from './items.js';
 import { patchRowIndex, patchRows } from './patch-rows.js';
@@ -254,7 +254,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
 
   // Split follows the Code panel's rule: offered only when the diff pane itself is wide enough, so a
   // phone or a narrow dialog always reads unified.
-  const [split, setSplit] = useState(false);
+  const [split, setSplit] = useDiffSplit();
   const [viewRef, viewWidth] = useObservedWidth();
   const splitFits = viewWidth >= SPLIT_MIN_WIDTH;
   const effectiveSplit = split && splitFits;

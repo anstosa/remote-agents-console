@@ -15,7 +15,7 @@ import { useColorTheme } from '../color-theme.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand } from '../panel-header.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
 import { groupComparisonFiles, type CodePanelCommit, type CodePanelMode, type CodePanelState, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView } from './comparison.js';
-import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useObservedWidth } from './diff-layout.js';
+import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, isPlaceRelativePath, type EditorTarget } from './editor-jump.js';
 import { codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, loadedFilesFromContents } from './items.js';
 
@@ -171,7 +171,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   // the Workspace's expansion, which promotes this panel over its siblings
   const expanded = usePanelExpand('code')?.expanded === true;
   const [viewMode, setViewMode] = useState<ViewMode>('hunks');
-  const [split, setSplit] = useState(false);
+  const [split, setSplit] = useDiffSplit();
   // wrapping is opt-in so wide lines keep their horizontal scroll by default
   const [wrapLines, setWrapLines] = useState(false);
   // keep file collapse separate from cached diff content and version each toggle for CodeView
