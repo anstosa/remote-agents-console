@@ -85,6 +85,23 @@ test("a used process's Start and output go to its own Worktree, and Open switche
   await expect(stackPanel(page)).toHaveCount(0);
 });
 
+test('keeps the selected process across a Workspace switch', async ({ page }) => {
+  await mockConsole(page, []);
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Stack controls/u }).click();
+  await page.getByRole('button', { name: 'Open Stack panel', exact: true }).click();
+  const selected = stackPanel(page).locator('.stack-pane-item[aria-current="true"]');
+  await expect(selected).toContainText('api');
+  await stackPanel(page).locator('.stack-pane-item', { hasText: 'static' }).click();
+  // leave Cora for Static, and come back
+  await stackPanel(page).getByRole('button', { name: 'Open Static Site / Main', exact: true }).click();
+  await expect(page.getByRole('tab', { selected: true })).toHaveAccessibleName(/^Static/u);
+  await page.keyboard.press('Escape');
+  await page.getByRole('tab', { name: /cora/u }).click();
+  await expect(selected).toContainText('static');
+  await expect(stackPanel(page).getByRole('group', { name: 'static in Static Site / Main' }).getByLabel('Process output')).toHaveText('static output from site:/worktrees/static');
+});
+
 test("an inactive tab's menu lists its open Stack panel, and Close all splits closes it", async ({ page }) => {
   await mockConsole(page, []);
   await page.goto('/');

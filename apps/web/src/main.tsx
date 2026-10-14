@@ -4679,27 +4679,36 @@ const saveBrowserSplit = (worktreeId: string | undefined, open: boolean) => {
   try { localStorage.setItem(browserSplitKey(worktreeId), open ? 'open' : 'closed'); }
   catch { /* browser storage is optional */ }
 };
-// Whether a Worktree's Stack panel is open, remembered per Worktree like the browser split, and
-// what it shows, which is not
+// Whether a Worktree's Stack panel is open, remembered per Worktree like the browser split. What it
+// shows is kept in memory only, so a Workspace switch returns to it, a reload starts on the first
+// process, and closing the panel forgets it.
 const stackPanelKey = (worktreeId: string) => `rac.stack-panel:${worktreeId}`;
+const stackSelections = new Map<string, StackSelection>();
 const savedStackPanel = (worktreeId: string) => {
   try { return localStorage.getItem(stackPanelKey(worktreeId)) === 'open'; }
   catch { return false; }
 };
 const saveStackPanel = (worktreeId: string, open: boolean) => {
+  if (!open) stackSelections.delete(worktreeId);
   try { localStorage.setItem(stackPanelKey(worktreeId), open ? 'open' : 'closed'); }
   catch { /* browser storage is optional */ }
 };
 function useStackPanel(worktreeId: string | undefined) {
   const [open, setOpen] = useState(() => worktreeId !== undefined && savedStackPanel(worktreeId));
-  const [selection, setSelection] = useState<StackSelection>();
+  const [selection, setSelection] = useState(() => worktreeId === undefined ? undefined : stackSelections.get(worktreeId));
   const save = (value: boolean) => {
     setOpen(value);
     if (worktreeId !== undefined) saveStackPanel(worktreeId, value);
   };
+  const select = (next: StackSelection | undefined) => {
+    setSelection(next);
+    if (worktreeId === undefined) return;
+    if (next === undefined) stackSelections.delete(worktreeId);
+    else stackSelections.set(worktreeId, next);
+  };
   // open the panel on `next`, or on its first process when nothing is named
-  const openOn = (next?: StackSelection) => { setSelection(next); save(true); };
-  return { open: open && worktreeId !== undefined, selection, select: setSelection, openOn, close: () => save(false) };
+  const openOn = (next?: StackSelection) => { select(next); save(true); };
+  return { open: open && worktreeId !== undefined, selection, select, openOn, close: () => save(false) };
 }
 // retain browser state for one worktree
 function useProjectBrowser(homeUrl?: string, worktreeId?: string, projectProxied?: boolean) {
