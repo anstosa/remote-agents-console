@@ -110,9 +110,24 @@ describe('note all-workspace visibility API', () => {
       const beforeDeleteRevision = refresh.mock.calls.length;
       const deleted = await server.inject({ method: 'DELETE', url: `/api/agents/${betaAgent.id}/notes/${noteId}`, headers: mutateHeaders });
       expect(deleted.statusCode).toBe(200);
-      expect(deleted.json()).toMatchObject({ id: noteId, allWorkspaces: true });
+      expect(deleted.json()).toMatchObject({ id: noteId, allWorkspaces: true, undoToken: expect.any(String) });
       await vi.waitFor(() => { expect(refresh.mock.calls.length).toBeGreaterThan(beforeDeleteRevision); });
       expect((await server.inject({ method: 'GET', url: '/api/worktrees/alpha/notes', headers: readHeaders })).json()).toEqual({ notes: [] });
+
+      const undoUrl = `/api/notes/deletions/${deleted.json().undoToken as string}/undo`;
+      const unauthorizedUndo = await server.inject({ method: 'POST', url: undoUrl, headers: { host, origin: `https://${host}`, 'x-csrf-token': 'csrf' } });
+      const noCsrfUndo = await server.inject({ method: 'POST', url: undoUrl, headers: { ...readHeaders, origin: `https://${host}` } });
+      expect(unauthorizedUndo.statusCode).toBe(401);
+      expect(noCsrfUndo.statusCode).toBe(403);
+
+      const beforeUndoRevision = refresh.mock.calls.length;
+      const restored = await server.inject({ method: 'POST', url: undoUrl, headers: mutateHeaders });
+      expect(restored.statusCode).toBe(200);
+      expect(restored.json()).toMatchObject({ id: noteId, text: 'Edited from beta', allWorkspaces: true, attachments: [{ name: 'context.txt', size: 7 }, { name: 'extra.txt', size: 5 }] });
+      await vi.waitFor(() => { expect(refresh.mock.calls.length).toBeGreaterThan(beforeUndoRevision); });
+      expect((await server.inject({ method: 'GET', url: '/api/worktrees/alpha/notes', headers: readHeaders })).json().notes).toHaveLength(1);
+      expect((await server.inject({ method: 'GET', url: '/api/worktrees/beta/notes', headers: readHeaders })).json().notes).toHaveLength(1);
+      expect((await server.inject({ method: 'POST', url: undoUrl, headers: mutateHeaders })).statusCode).toBe(404);
     } finally {
       await server.close();
     }

@@ -2,7 +2,14 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { WorktreeNoteService } from '../src/notes/service.js';
+import { WorktreeNoteService, type WorktreeNote, type WorktreeNoteDeletion } from '../src/notes/service.js';
+
+// narrow successful deletions for restoration fixtures
+function requireDeletion(deletion: WorktreeNoteDeletion | 'locked' | undefined): WorktreeNoteDeletion {
+  // fail before reading a token from a refused deletion
+  if (deletion === undefined || deletion === 'locked') throw new Error('expected note deletion');
+  return deletion;
+}
 
 describe('worktree notes', () => {
   // preserve attachment bytes across ordinary note mutations and reloads
@@ -23,7 +30,7 @@ describe('worktree notes', () => {
       await expect(service.removeAttachment('cora', note!.id, ' context.txt ')).resolves.toMatchObject({ text: 'Review both files', schedule: daily, attachments: [second] });
       await service.removeSchedule('cora', note!.id);
       await expect(service.attachments('cora', note!.id)).resolves.toEqual([second]);
-      await expect(service.delete('cora', note!.id)).resolves.toMatchObject({ attachments: [second] });
+      await expect(service.deleteWithUndo('cora', note!.id)).resolves.toMatchObject({ note: { attachments: [second] } });
       await expect(service.attachments('cora', note!.id)).resolves.toBeUndefined();
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -107,7 +114,7 @@ describe('worktree notes', () => {
 
       const [locked, refused] = await Promise.all([
         service.setLocked('cora', note!.id, true),
-        service.delete('cora', note!.id)
+        service.deleteWithUndo('cora', note!.id)
       ]);
       expect(locked).toMatchObject({ ...note, schedule: daily, locked: true });
       expect(refused).toBe('locked');
@@ -120,11 +127,11 @@ describe('worktree notes', () => {
 
       const [unlocked, deleted] = await Promise.all([
         restarted.setLocked('cora', note!.id, false),
-        restarted.delete('cora', note!.id)
+        restarted.deleteWithUndo('cora', note!.id)
       ]);
       expect(unlocked).toMatchObject({ text: 'Edited while locked', title: 'Renamed while locked', attachments: [attachment] });
       expect(unlocked).not.toHaveProperty('locked');
-      expect(deleted).toEqual(unlocked);
+      expect(deleted).toMatchObject({ note: unlocked });
       await expect(new WorktreeNoteService(file).list('cora')).resolves.toEqual([]);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -172,7 +179,7 @@ describe('worktree notes', () => {
 
       await expect(service.list('cora')).resolves.toEqual([second, { ...first, text: 'Latest draft', title: 'Deployment checklist' }]);
       await expect(new WorktreeNoteService(file).list('owen')).resolves.toMatchObject([{ text: '' }]);
-      await expect(service.delete('cora', second!.id)).resolves.toEqual(second);
+      await expect(service.deleteWithUndo('cora', second!.id)).resolves.toMatchObject({ note: second });
       await expect(service.list('cora')).resolves.toEqual([{ ...first, text: 'Latest draft', title: 'Deployment checklist' }]);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -215,7 +222,7 @@ describe('worktree notes', () => {
       await expect(service.removeSchedule('cora', note!.id)).resolves.toEqual({ id: note!.id, text: '', title: 'Morning triage' });
       // re-create a Schedule, then confirm deleting the note removes it
       await service.setSchedule('cora', note!.id, daily);
-      await service.delete('cora', note!.id);
+      await service.deleteWithUndo('cora', note!.id);
       await expect(service.list('cora')).resolves.toEqual([]);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
@@ -315,7 +322,7 @@ describe('worktree notes', () => {
       await expect(service.attachments('owen', note!.id)).resolves.toEqual([attachment]);
       await expect(service.setSchedule('owen', note!.id, daily)).resolves.toMatchObject({ schedule: daily, allWorkspaces: true });
       await expect(service.setLocked('owen', note!.id, true)).resolves.toMatchObject({ locked: true, allWorkspaces: true });
-      await expect(service.delete('owen', note!.id)).resolves.toBe('locked');
+      await expect(service.deleteWithUndo('owen', note!.id)).resolves.toBe('locked');
       await service.setLocked('owen', note!.id, false);
 
       await expect(service.resolve('owen', note!.id)).resolves.toMatchObject({ key: 'cora', note: { id: note!.id } });
@@ -328,9 +335,139 @@ describe('worktree notes', () => {
       await service.setVisibility('cora', note!.id, true);
       await expect(service.removeAttachment('owen', note!.id, 'context.txt')).resolves.toMatchObject({ allWorkspaces: true });
       await expect(service.removeSchedule('owen', note!.id)).resolves.toMatchObject({ allWorkspaces: true });
-      await expect(service.delete('owen', note!.id)).resolves.toMatchObject({ id: note!.id, allWorkspaces: true });
+      await expect(service.deleteWithUndo('owen', note!.id)).resolves.toMatchObject({ note: { id: note!.id, allWorkspaces: true } });
       await expect(service.list('cora')).resolves.toEqual([]);
       await expect(service.list('owen')).resolves.toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // restore every note field at its canonical key and original list position
+  it('undoes a shared deletion without losing metadata, attachments or ordering', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-note-deletion-undo-'));
+    const file = join(directory, 'notes.json');
+    const attachment = { name: 'context.txt', data: Buffer.from('context').toString('base64') };
+    const daily = { cron: '0 9 * * *', kind: 'claude', target: { worktreeId: 'wt-main' }, enabled: true, updatedAt: '2026-09-06T09:00:00-07:00' } as const;
+    try {
+      const service = new WorktreeNoteService(file);
+      const older = await service.create('cora', 'Older');
+      const target = await service.createWithText('cora', 'Queued plan', 'Preserve everything', 'queued-prompt', [attachment]);
+      const newer = await service.create('cora', 'Newer');
+      await service.setSchedule('cora', target!.id, daily);
+      await service.setVisibility('cora', target!.id, true);
+
+      const deletion = requireDeletion(await service.deleteWithUndo('owen', target!.id));
+      expect(deletion).toMatchObject({ note: { ...target, schedule: daily, allWorkspaces: true }, undoToken: expect.any(String) });
+      const latest = await service.create('cora', 'Latest');
+      await expect(service.list('cora')).resolves.toEqual([latest, newer, older]);
+
+      const restored = await service.undoDeletion(deletion.undoToken);
+      expect(restored).toEqual({ ...target, schedule: daily, allWorkspaces: true });
+      await expect(service.list('cora')).resolves.toEqual([latest, newer, restored, older]);
+      await expect(service.resolve('owen', target!.id)).resolves.toMatchObject({ key: 'cora', note: restored });
+      await expect(service.attachments('owen', target!.id)).resolves.toEqual([attachment]);
+      await expect(service.undoDeletion(deletion.undoToken)).resolves.toBe('gone');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // preserve original order when adjacent deletions are undone in either order
+  it('restores multiple pending deletions in stable list order', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-note-deletion-order-'));
+    try {
+      const cases = [
+        { labels: ['Alpha', 'Beta'], undo: ['Alpha', 'Beta'] },
+        { labels: ['Alpha', 'Beta'], undo: ['Beta', 'Alpha'] },
+        { labels: ['Alpha', 'Beta', 'Gamma'], undo: ['Alpha', 'Beta'] },
+        { labels: ['Alpha', 'Beta', 'Gamma'], undo: ['Beta', 'Alpha'] }
+      ];
+      // exercise two- and three-note lists in both undo orders
+      for (const [caseIndex, fixture] of cases.entries()) {
+        const service = new WorktreeNoteService(join(directory, `notes-${caseIndex}.json`));
+        const notesByTitle = new Map<string, WorktreeNote>();
+        // reverse creation because new notes are prepended
+        for (const label of [...fixture.labels].reverse()) {
+          notesByTitle.set(label, (await service.create('cora', label))!);
+        }
+        const tokens = new Map<string, string>();
+        // delete the same adjacent pair each time
+        for (const label of ['Alpha', 'Beta']) {
+          const deletion = requireDeletion(await service.deleteWithUndo('cora', notesByTitle.get(label)!.id));
+          tokens.set(label, deletion.undoToken);
+        }
+        // restore through the requested ordering
+        for (const label of fixture.undo) await service.undoDeletion(tokens.get(label)!);
+        expect((await service.list('cora'))?.map(note => note.title)).toEqual(fixture.labels);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // expire tokens in memory and lose them across service restarts
+  it('refuses invalid, expired and restart-lost deletion tokens', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-note-deletion-expiry-'));
+    const file = join(directory, 'notes.json');
+    let now = Date.parse('2026-10-12T12:00:00.000Z');
+    try {
+      const service = new WorktreeNoteService(file, 100 * 1024 * 1024, 100 * 1024 * 1024, () => now);
+      const expiring = await service.create('cora', 'Expiring');
+      const deletion = requireDeletion(await service.deleteWithUndo('cora', expiring!.id));
+      await expect(service.undoDeletion('not-a-deletion-token')).resolves.toBe('gone');
+      await expect(new WorktreeNoteService(file).undoDeletion(deletion.undoToken)).resolves.toBe('gone');
+      now += 60_001;
+      await expect(service.undoDeletion(deletion.undoToken)).resolves.toBe('gone');
+      await expect(service.list('cora')).resolves.toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // bound retained deletion content independently of the live note store
+  it('evicts oldest undo snapshots above the serialized content budget', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-note-deletion-memory-'));
+    const file = join(directory, 'notes.json');
+    try {
+      const service = new WorktreeNoteService(file, 100 * 1024 * 1024, 100);
+      const tokens: string[] = [];
+      // retain enough deleted text to exceed the aggregate snapshot cap
+      for (let index = 0; index < 11; index += 1) {
+        const note = await service.createWithText('cora', `Note ${index}`, 'x'.repeat(30_000));
+        const deletion = requireDeletion(await service.deleteWithUndo('cora', note!.id));
+        tokens.push(deletion.undoToken);
+      }
+      await expect(service.undoDeletion(tokens[0]!)).resolves.toBe('gone');
+      await expect(service.undoDeletion(tokens.at(-1)!)).resolves.toMatchObject({ title: 'Note 10' });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // retain retryable tokens when a conflict or storage budget blocks restoration
+  it('refuses conflicting and over-budget undo without consuming the token', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-note-deletion-limits-'));
+    const conflictFile = join(directory, 'conflict.json');
+    const budgetFile = join(directory, 'budget.json');
+    try {
+      const conflictService = new WorktreeNoteService(conflictFile);
+      const original = await conflictService.createWithText('cora', 'Original', 'Keep me');
+      const conflictDeletion = requireDeletion(await conflictService.deleteWithUndo('cora', original!.id));
+      await writeFile(conflictFile, JSON.stringify({ owen: [conflictDeletion.note] }));
+      await expect(conflictService.undoDeletion(conflictDeletion.undoToken)).resolves.toBe('conflict');
+      await writeFile(conflictFile, '{}');
+      await expect(conflictService.undoDeletion(conflictDeletion.undoToken)).resolves.toEqual(original);
+
+      const budgetService = new WorktreeNoteService(budgetFile, 10);
+      const firstAttachment = { name: 'first.txt', data: Buffer.from('123456').toString('base64') };
+      const secondAttachment = { name: 'second.txt', data: Buffer.from('abcdef').toString('base64') };
+      const bounded = await budgetService.createWithText('cora', 'Bounded', '', undefined, [firstAttachment]);
+      const budgetDeletion = requireDeletion(await budgetService.deleteWithUndo('cora', bounded!.id));
+      const filler = await budgetService.createWithText('owen', 'Filler', '', undefined, [secondAttachment]);
+      await expect(budgetService.undoDeletion(budgetDeletion.undoToken)).resolves.toBe('limit');
+      await budgetService.deleteWithUndo('owen', filler!.id);
+      await expect(budgetService.undoDeletion(budgetDeletion.undoToken)).resolves.toEqual(bounded);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

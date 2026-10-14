@@ -6,7 +6,10 @@ import { type Schedule, type ScheduleLastRun, validSchedule } from '../schedule/
 
 export type WorktreeNote = { id: string; text: string; title?: string; source?: 'queued-prompt'; schedule?: Schedule; attachments?: PromptAttachment[]; locked?: boolean; allWorkspaces?: boolean };
 export type WorktreeNoteLocation = { key: string; note: WorktreeNote };
+export type WorktreeNoteDeletion = { note: WorktreeNote; undoToken: string };
+export type WorktreeNoteUndo = WorktreeNote | 'gone' | 'conflict' | 'limit';
 type StoredNotes = Record<string, WorktreeNote[]>;
+type NoteDeletionSnapshot = { key: string; note: WorktreeNote; expiresAt: number };
 
 const maxNotesPerWorktree = 50;
 const maxWorktrees = 100;
@@ -15,6 +18,8 @@ const defaultAttachmentStorageLimit = 100 * 1024 * 1024;
 // the note-title cap; exported so the saved-prompts boot migration truncates to the same limit
 export const maxNoteTitleLength = 120;
 const maxTotalNoteLength = 300_000;
+const maxUndoSnapshots = 100;
+const undoRetentionMs = 60_000;
 const validWorktreeId = (value: string) => /^[A-Za-z0-9_-]{1,80}$/u.test(value);
 const validNoteId = (value: string) => /^[A-Za-z0-9_-]{12,64}$/u.test(value);
 const validText = (value: string) => value.length <= maxNoteLength && !value.includes('\0');
@@ -44,12 +49,16 @@ const totalNoteLength = (stored: StoredNotes) => Object.values(stored).flat().re
 const totalAttachmentBytes = (stored: StoredNotes) => Object.values(stored).flat().reduce((total, note) => total + (note.attachments ?? []).reduce((sum, attachment) => sum + (promptAttachmentBytes(attachment) ?? 0), 0), 0);
 // total serialized attachment json bytes
 const totalAttachmentFootprint = (stored: StoredNotes) => Object.values(stored).flat().reduce((total, note) => total + promptAttachmentsStorageFootprint(note.attachments ?? []), 0);
+// approximate one retained snapshot's serialized content footprint
+const noteStorageFootprint = (note: WorktreeNote) => Buffer.byteLength(note.text) + Buffer.byteLength(note.title ?? '') + promptAttachmentsStorageFootprint(note.attachments ?? []);
 
 export class WorktreeNoteService {
   private mutation = Promise.resolve();
+  private readonly deletions = new Map<string, NoteDeletionSnapshot>();
+  private readonly deletionOrders = new Map<string, string[]>();
 
   // bind note storage and its decoded and serialized attachment budgets
-  constructor(private readonly file = process.env.RAC_NOTES_FILE ?? '.data/notes.json', private readonly attachmentStorageLimit = defaultAttachmentStorageLimit, private readonly attachmentFootprintLimit = maxStoredAttachmentFootprintBytes) {}
+  constructor(private readonly file = process.env.RAC_NOTES_FILE ?? '.data/notes.json', private readonly attachmentStorageLimit = defaultAttachmentStorageLimit, private readonly attachmentFootprintLimit = maxStoredAttachmentFootprintBytes, private readonly now = () => Date.now()) {}
 
   // list owned notes first, followed by notes shared from other keys
   async list(worktreeId: string): Promise<WorktreeNote[] | undefined> {
@@ -213,10 +222,13 @@ export class WorktreeNoteService {
     });
   }
 
-  // delete only an unlocked note in the serialized mutation boundary
-  async delete(worktreeId: string, noteId: string): Promise<WorktreeNote | 'locked' | undefined> {
+  // delete one note and retain an exact, short-lived restoration snapshot
+  async deleteWithUndo(worktreeId: string, noteId: string): Promise<WorktreeNoteDeletion | 'locked' | undefined> {
+    // reject malformed identifiers before entering the mutation queue
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId)) return undefined;
-    return await this.mutate(stored => {
+    return await this.serialize(async () => {
+      this.trimDeletions();
+      const stored = await this.read();
       const resolved = this.visibleNote(stored, worktreeId, noteId);
       // hide notes outside the requesting scope
       if (resolved === undefined) return undefined;
@@ -225,9 +237,46 @@ export class WorktreeNoteService {
       if (index < 0) return undefined;
       // refuse locks before changing the stored collection
       if (notes[index]!.locked === true) return 'locked';
+      const existingOrder = this.deletionOrders.get(resolved.key);
+      const newIds = existingOrder === undefined ? [] : notes.map(note => note.id).filter(id => !existingOrder.includes(id));
+      const deletionOrder = existingOrder === undefined ? notes.map(note => note.id) : [...newIds, ...existingOrder];
       const [note] = notes.splice(index, 1);
       if (notes.length === 0) delete stored[resolved.key];
-      return note;
+      const undoToken = this.undoToken();
+      await this.write(stored);
+      // expose a token only after the deletion is durable
+      this.deletionOrders.set(resolved.key, deletionOrder);
+      this.deletions.set(undoToken, { key: resolved.key, note: structuredClone(note!), expiresAt: this.now() + undoRetentionMs });
+      this.trimDeletions();
+      return { note: structuredClone(note!), undoToken };
+    });
+  }
+
+  // restore one deletion at its canonical key and original list position
+  async undoDeletion(token: string): Promise<WorktreeNoteUndo> {
+    return await this.serialize(async () => {
+      this.trimDeletions();
+      const snapshot = this.deletions.get(token);
+      // fail closed for invalid, expired, consumed or restart-lost tokens
+      if (snapshot === undefined) return 'gone';
+      const stored = await this.read();
+      // never overwrite a note whose identifier has since appeared
+      if (Object.values(stored).some(notes => notes.some(note => note.id === snapshot.note.id))) return 'conflict';
+      const notes = stored[snapshot.key] ?? [];
+      // enforce collection and key-count budgets
+      if (notes.length >= maxNotesPerWorktree || stored[snapshot.key] === undefined && Object.keys(stored).length >= maxWorktrees) return 'limit';
+      // enforce aggregate text and attachment budgets
+      if (totalNoteLength(stored) + snapshot.note.text.length + (snapshot.note.title?.length ?? 0) > maxTotalNoteLength) return 'limit';
+      if (totalAttachmentBytes(stored) + (snapshot.note.attachments ?? []).reduce((sum, attachment) => sum + promptAttachmentBytes(attachment)!, 0) > this.attachmentStorageLimit) return 'limit';
+      if (totalAttachmentFootprint(stored) + promptAttachmentsStorageFootprint(snapshot.note.attachments ?? []) > this.attachmentFootprintLimit) return 'limit';
+      const restored = structuredClone(snapshot.note);
+      notes.splice(this.restorationIndex(snapshot, notes), 0, restored);
+      stored[snapshot.key] = notes;
+      await this.write(stored);
+      // consume only after the restoration is durable
+      this.deletions.delete(token);
+      this.releaseDeletionOrder(snapshot.key);
+      return structuredClone(restored);
     });
   }
 
@@ -298,14 +347,72 @@ export class WorktreeNoteService {
   }
 
   private async mutate<T>(change: (stored: StoredNotes) => T | Promise<T>): Promise<T> {
-    const operation = this.mutation.then(async () => {
+    return await this.serialize(async () => {
       const stored = await this.read();
       const result = await change(stored);
       await this.write(stored);
       return result;
     });
+  }
+
+  // serialize reads and durable writes across every note mutation
+  private async serialize<T>(change: () => Promise<T>): Promise<T> {
+    const operation = this.mutation.then(change);
     this.mutation = operation.then(() => undefined, () => undefined);
     return await operation;
+  }
+
+  // mint a token without replacing any live deletion snapshot
+  private undoToken(): string {
+    let token: string;
+    do token = randomBytes(24).toString('base64url');
+    while (this.deletions.has(token));
+    return token;
+  }
+
+  // resolve one note against the retained logical order
+  private restorationIndex(snapshot: NoteDeletionSnapshot, notes: WorktreeNote[]): number {
+    const order = this.deletionOrders.get(snapshot.key) ?? [];
+    const target = order.indexOf(snapshot.note.id);
+    // insert before the first surviving original successor
+    for (const [index, note] of notes.entries()) {
+      const position = order.indexOf(note.id);
+      if (position > target) return index;
+    }
+    return notes.length;
+  }
+
+  // discard one tombstone and close its gap for later snapshots
+  private discardDeletion(token: string): NoteDeletionSnapshot | undefined {
+    const removed = this.deletions.get(token);
+    if (removed === undefined) return undefined;
+    this.deletions.delete(token);
+    const order = this.deletionOrders.get(removed.key);
+    if (order !== undefined) this.deletionOrders.set(removed.key, order.filter(id => id !== removed.note.id));
+    this.releaseDeletionOrder(removed.key);
+    return removed;
+  }
+
+  // release ordering data once its last tombstone is gone
+  private releaseDeletionOrder(key: string): void {
+    if (![...this.deletions.values()].some(snapshot => snapshot.key === key)) this.deletionOrders.delete(key);
+  }
+
+  // expire old snapshots and bound retained deletion data
+  private trimDeletions(): void {
+    const now = this.now();
+    // discard every expired snapshot
+    for (const [token, snapshot] of this.deletions) {
+      if (snapshot.expiresAt <= now) this.discardDeletion(token);
+    }
+    // discard oldest snapshots above the count or storage cap
+    let footprint = [...this.deletions.values()].reduce((total, snapshot) => total + noteStorageFootprint(snapshot.note), 0);
+    while (this.deletions.size > maxUndoSnapshots || footprint > this.attachmentFootprintLimit + maxTotalNoteLength) {
+      const oldest = this.deletions.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      const removed = this.discardDeletion(oldest)!;
+      footprint -= noteStorageFootprint(removed.note);
+    }
   }
 
   private async read(): Promise<StoredNotes> {

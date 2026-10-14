@@ -1,6 +1,10 @@
 import { expect, test } from '@playwright/test';
 
+// tolerate the shared host's first Vite transform
+test.setTimeout(90_000);
+
 const sendPath = 'M22 2 11 13M22 2l-7 20-4-9-9-4Z';
+const checkPath = 'm5 12 4 4L19 6';
 const pencilPath = 'm4 20 4-1 11-11-3-3L5 16l-1 4ZM14 7l3 3';
 const trashPath = 'M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v6M14 11v6';
 
@@ -16,6 +20,8 @@ test('copies a note and sends its current contents as a prompt', async ({ page }
     });
     Object.defineProperty(window, '__copiedNote', { configurable: true, writable: true, value: '' });
   });
+  // control the two-second queued confirmation precisely
+  await page.clock.install();
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -38,6 +44,8 @@ test('copies a note and sends its current contents as a prompt', async ({ page }
   });
 
   await page.goto('/');
+  // freeze wall time before exercising transient feedback
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
   await page.getByRole('button', { name: 'Notes (0)' }).click();
   await page.getByRole('button', { name: '+ New note' }).click();
   const dialog = page.getByRole('dialog', { name: 'Note' });
@@ -54,7 +62,8 @@ test('copies a note and sends its current contents as a prompt', async ({ page }
   await expect(dialog.getByText('Copied', { exact: true })).toHaveCount(0);
   copied = await page.evaluate(() => (window as unknown as { __copiedNote: string }).__copiedNote);
   expect(copied).toBe('Use this exact note as the next prompt.');
-  await expect(dialog.getByRole('button', { name: 'Copy note' })).toBeVisible({ timeout: 3_000 });
+  await page.clock.fastForward(1_600);
+  await expect(dialog.getByRole('button', { name: 'Copy note' })).toBeVisible();
 
   const send = dialog.getByRole('button', { name: 'Send note as prompt' });
   await expect(send).toHaveAttribute('title', 'Send note as prompt');
@@ -64,7 +73,14 @@ test('copies a note and sends its current contents as a prompt', async ({ page }
   await expect(send).toHaveCSS('background-image', /linear-gradient/);
   await send.click();
   await expect.poll(() => queuedPrompt).toEqual({ prompt: 'Use this exact note as the next prompt.', attachments: [] });
-  await expect(dialog.getByText('Queued', { exact: true })).toBeVisible();
+  const queued = dialog.getByRole('button', { name: 'Note queued', exact: true });
+  await expect(queued).toBeVisible();
+  await expect(queued.locator('path')).toHaveAttribute('d', checkPath);
+  await expect(dialog.getByText('Queued', { exact: true })).toHaveCount(0);
+  await page.clock.fastForward(1_999);
+  await expect(queued).toBeVisible();
+  await page.clock.fastForward(1);
+  await expect(dialog.getByRole('button', { name: 'Send note as prompt', exact: true })).toBeVisible();
 
   const paneEdit = dialog.getByRole('button', { name: 'Rename note', exact: true });
   const paneDelete = dialog.getByRole('button', { name: 'Delete note', exact: true });

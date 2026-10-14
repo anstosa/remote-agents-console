@@ -534,7 +534,9 @@ test('pending launch blocks workspace middle-click shutdown until the launch fin
   expect(harness.agentAttempts.get('cora-1')).toBeUndefined();
 
   finishLaunch(500);
-  await expect(page.getByRole('alert').filter({ hasText: /could not start another agent/u })).toBeVisible();
+  const operationError = page.getByRole('alert').filter({ hasText: /could not start another agent/u });
+  await expect(operationError).toBeVisible();
+  await expect(operationError.locator('.toast-timer-bar')).toHaveCount(0);
   await tab.click({ button: 'middle' });
   await expect.poll(() => harness.paneAttempts.get('%5')).toBe(1);
   await expect.poll(() => harness.agentAttempts.get('cora-1')).toBe(1);

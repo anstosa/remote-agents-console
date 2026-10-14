@@ -810,6 +810,24 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // the anchor for a Schedule's displayed next-run and its firing: a restart never replays a missed
   // instant. Injectable so tests can place boot before a due instant they mean to fire.
   const scheduleBootAt = deps.scheduleBootAt ?? new Date();
+  // serialize schedule execution and deletion around each canonical note
+  const scheduleRunsInFlight = new Set<string>();
+  const noteDeletionsInFlight = new Set<string>();
+  const deleteNoteWithUndo = async (saveKey: string, noteId: string) => {
+    const resolved = await notes.resolve(saveKey, noteId);
+    // hide notes outside the requesting scope
+    if (resolved === undefined) return undefined;
+    const flightKey = `${resolved.key}:${noteId}`;
+    // let the operation that claimed this canonical note finish first
+    if (scheduleRunsInFlight.has(flightKey)) return 'schedule-running' as const;
+    if (noteDeletionsInFlight.has(flightKey)) return 'deleting' as const;
+    noteDeletionsInFlight.add(flightKey);
+    try {
+      return await notes.deleteWithUndo(saveKey, noteId);
+    } finally {
+      noteDeletionsInFlight.delete(flightKey);
+    }
+  };
   // summarize attachment bytes and add the server-computed next run
   const decorateNote = (note: WorktreeNote) => {
     const { attachments, ...safe } = note;
@@ -1042,13 +1060,28 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const saveKey = await placeSaveKey(id);
     // require one current Place
     if (saveKey === undefined) return reply.code(404).send({ error: 'place unavailable' });
-    const note = await notes.delete(saveKey, noteId);
+    const deletion = await deleteNoteWithUndo(saveKey, noteId);
+    // preserve the run outcome while external schedule work is active
+    if (deletion === 'schedule-running') return reply.code(409).send({ error: 'note schedule run is in progress' });
+    if (deletion === 'deleting') return reply.code(409).send({ error: 'note deletion is in progress' });
     // distinguish durable locks from missing notes
-    if (note === 'locked') return reply.code(409).send({ error: 'note is locked' });
+    if (deletion === 'locked') return reply.code(409).send({ error: 'note is locked' });
     // hide unknown notes
-    if (note === undefined) return reply.code(404).send({ error: 'note unavailable' });
+    if (deletion === undefined) return reply.code(404).send({ error: 'note unavailable' });
     publishNotesRevision();
-    return decorateNote(note);
+    return { ...decorateNote(deletion.note), undoToken: deletion.undoToken };
+  });
+  // restore one recently deleted note without accepting client-owned note data
+  app.post('/api/notes/deletions/:token/undo', async (request, reply) => {
+    controlled(request, true);
+    const token = (request.params as { token: string }).token;
+    const restored = await notes.undoDeletion(token);
+    // distinguish retryable storage conflicts from unavailable tokens
+    if (restored === 'gone') return reply.code(404).send({ error: 'note deletion unavailable' });
+    if (restored === 'conflict') return reply.code(409).send({ error: 'note already exists' });
+    if (restored === 'limit') return reply.code(409).send({ error: 'note limit reached' });
+    publishNotesRevision();
+    return decorateNote(restored);
   });
   // read full attachment payloads for one worktree note
   app.get('/api/worktrees/:id/notes/:noteId/attachments', async (request, reply) => {
@@ -1235,13 +1268,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const persistence = await agentPersistence(id);
     // require one current persistence group
     if (persistence === undefined) return reply.code(404).send({ error: 'agent unavailable' });
-    const note = await notes.delete(persistence.saveKey, noteId);
+    const deletion = await deleteNoteWithUndo(persistence.saveKey, noteId);
+    // preserve the run outcome while external schedule work is active
+    if (deletion === 'schedule-running') return reply.code(409).send({ error: 'note schedule run is in progress' });
+    if (deletion === 'deleting') return reply.code(409).send({ error: 'note deletion is in progress' });
     // distinguish durable locks from missing notes
-    if (note === 'locked') return reply.code(409).send({ error: 'note is locked' });
+    if (deletion === 'locked') return reply.code(409).send({ error: 'note is locked' });
     // hide unknown notes
-    if (note === undefined) return reply.code(404).send({ error: 'note unavailable' });
+    if (deletion === undefined) return reply.code(404).send({ error: 'note unavailable' });
     publishNotesRevision();
-    return decorateNote(note);
+    return { ...decorateNote(deletion.note), undoToken: deletion.undoToken };
   });
   // read full attachment payloads for one live agent note
   app.get('/api/agents/:id/notes/:noteId/attachments', async (request, reply) => {
@@ -2129,18 +2165,20 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // reconciler later closes its pane; an attended Run now records the immediate outcome and leaves its
   // pane open. An unexpected error still records a `failed` run, so "every run is recorded" holds even
   // for infrastructure failures. Returns the updated Note, or why nothing ran (Scheduled prompts).
-  const scheduleRunsInFlight = new Set<string>();
   const recordedScheduleRun = async (saveKey: string, noteId: string, at: string, unattended: boolean): Promise<{ note: WorktreeNote } | 'in-flight' | 'gone'> => {
     const resolved = await notes.resolve(saveKey, noteId);
     // gone: an unknown Note or a Note without a Schedule to run
     if (resolved === undefined || resolved.note.schedule === undefined) return 'gone';
-    const note = resolved.note;
-    const schedule = resolved.note.schedule;
     const canonicalSaveKey = resolved.key;
     const flightKey = `${canonicalSaveKey}:${noteId}`;
-    if (scheduleRunsInFlight.has(flightKey)) return 'in-flight';
+    if (scheduleRunsInFlight.has(flightKey) || noteDeletionsInFlight.has(flightKey)) return 'in-flight';
     scheduleRunsInFlight.add(flightKey);
     try {
+      const current = await notes.resolve(canonicalSaveKey, noteId);
+      // re-read after claiming the note so deletion cannot leave a stale run
+      if (current === undefined || current.note.schedule === undefined) return 'gone';
+      const note = current.note;
+      const schedule = current.note.schedule;
       let lastRun: ScheduleLastRun;
       try {
         const outcome = await performRun({
@@ -2186,10 +2224,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (resolved === undefined) return;
     const canonicalSaveKey = resolved.key;
     const flightKey = `${canonicalSaveKey}:${noteId}`;
-    if (scheduleRunsInFlight.has(flightKey)) return;
+    if (scheduleRunsInFlight.has(flightKey) || noteDeletionsInFlight.has(flightKey)) return;
     scheduleRunsInFlight.add(flightKey);
     try {
-      const note = resolved.note;
+      const current = await notes.resolve(canonicalSaveKey, noteId);
+      // re-read after claiming the note so deletion cannot leave stale state
+      if (current === undefined) return;
+      const note = current.note;
       const schedule = note?.schedule;
       const lastRun = schedule?.lastRun;
       if (note === undefined || schedule === undefined || lastRun?.status !== 'running') return;

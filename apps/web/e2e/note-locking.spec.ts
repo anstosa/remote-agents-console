@@ -94,7 +94,7 @@ const mockNoteLocking = async (page: Page, fixture: NoteLockFixture, context: 'w
       fixture.deletes.push(id);
       const index = fixture.notes.findIndex(candidate => candidate.id === id);
       const [note] = index < 0 ? [] : fixture.notes.splice(index, 1);
-      return note === undefined ? route.fulfill({ status: 404, json: { error: 'missing' } }) : route.fulfill({ json: note });
+      return note === undefined ? route.fulfill({ status: 404, json: { error: 'missing' } }) : route.fulfill({ json: { ...note, undoToken: 'undo-deleted-note' } });
     }
     // capture locked-note prompt dispatches
     if (url.pathname === `/api/agents/${context === 'worktree' ? 'agent-1' : 'scratch-1'}/prompt` && request.method() === 'POST') {
@@ -171,7 +171,15 @@ test('locks notes without losing drafts, persists the guard, then unlocks before
   // capture the protected toolbar at phone and desktop widths
   for (const viewport of [{ label: 'phone', width: 320, height: 640 }, { label: 'desktop', width: 1440, height: 900 }]) {
     await page.setViewportSize(viewport);
-    await expect(dialog.getByRole('button', { name: 'Unlock note' })).toBeVisible();
+    // phones fold secondary actions into More
+    if (viewport.label === 'phone') {
+      const more = dialog.getByRole('button', { name: 'More note actions', exact: true });
+      await more.click();
+      const actions = page.getByRole('group', { name: 'More note actions' });
+      await expect(actions.getByRole('button', { name: 'Unlock note', exact: true })).toBeVisible();
+      await more.press('Escape');
+      await expect(actions).toHaveCount(0);
+    } else await expect(dialog.getByRole('button', { name: 'Unlock note' })).toBeVisible();
     await expect(dialog.getByRole('button', { name: 'Close note' })).toBeVisible();
     await dialog.screenshot({ path: test.info().outputPath(`locked-note-${viewport.label}.png`) });
   }

@@ -168,8 +168,14 @@ describe('Notes at an idle directory-Project or Scratch Place', () => {
       expect((await app.inject({ method: 'PUT', url: url(directoryPlace.id, `/notes/${noteId}`), headers: mutate, payload: { text: 'Revised' } })).statusCode).toBe(200);
       expect((await app.inject({ method: 'DELETE', url: url(directoryPlace.id, `/notes/${noteId}`), headers: mutate })).statusCode).toBe(200);
       // a Scratch Place keeps its own notes
-      await app.inject({ method: 'POST', url: url(scratchPlace.id, '/notes'), headers: mutate, payload: { title: 'Idea', text: 'Scratch idea' } });
-      expect((await notes.list(folderNoteKey('/home/me/scratch')))?.length).toBe(1);
+      const scratchCreated = await app.inject({ method: 'POST', url: url(scratchPlace.id, '/notes'), headers: mutate, payload: { title: 'Idea', text: 'Scratch idea' } });
+      const scratchId = scratchCreated.json().id as string;
+      const scratchDeleted = await app.inject({ method: 'DELETE', url: url(scratchPlace.id, `/notes/${scratchId}`), headers: mutate });
+      expect(scratchDeleted.json()).toMatchObject({ id: scratchId, undoToken: expect.any(String) });
+      expect(await notes.list(folderNoteKey('/home/me/scratch'))).toEqual([]);
+      const scratchRestored = await app.inject({ method: 'POST', url: `/api/notes/deletions/${scratchDeleted.json().undoToken as string}/undo`, headers: mutate });
+      expect(scratchRestored.json()).toMatchObject({ id: scratchId, title: 'Idea', text: 'Scratch idea' });
+      expect((await notes.list(folderNoteKey('/home/me/scratch')))?.map(note => note.id)).toEqual([scratchId]);
     } finally { await app.close(); }
   });
 

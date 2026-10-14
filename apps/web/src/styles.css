@@ -580,7 +580,6 @@ html.software-keyboard-open .tabs { display: none; }
 .note-menu-rename-form svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
 .note-menu-error { margin: 0; padding: .35rem .5rem; color: var(--red); font: 650 .64rem/1.35 var(--font-mono); }
 .note-menu-hint { margin: 0; padding: .35rem .5rem; color: var(--subtext-0); font: 600 .64rem/1.4 var(--font-mono); }
-.note-menu-status { margin: 0; padding: .35rem .5rem; color: var(--green); font: 700 .64rem/1.35 var(--font-mono); }
 .notes-menu .new-note { border-color: color-mix(in srgb, var(--yellow) 65%, var(--surface-1)); color: var(--yellow); }
 .notes-menu .save-latest-response { border-color: color-mix(in srgb, var(--blue) 72%, var(--surface-1)); color: var(--blue); }
 /* conversations control: a fly-out with an "All conversations" entry that opens a full-screen searchable dialog */
@@ -1653,7 +1652,20 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* toasts sit below the panels' floating header pills, so they never cover a panel's actions */
 /* scroll crowded notices while leaving most of the settings surface available */
 .toast-region { position: fixed; top: calc(var(--panel-header-clearance) + .6rem + env(safe-area-inset-top, 0px)); right: calc(.6rem + env(safe-area-inset-right, 0px)); z-index: calc(var(--layer-dialog) + 1); display: flex; flex-direction: column; gap: .5rem; width: min(24rem, calc(100vw - 1.2rem)); max-height: min(calc(var(--app-height, 100dvh) * .4), max(0px, calc(var(--app-height, 100dvh) - var(--panel-header-clearance) - 1.2rem - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)))); overflow-y: auto; pointer-events: none; }
-.toast { flex-shrink: 0; pointer-events: auto; animation: toast-in .18s ease-out; }
+.toast { position: relative; flex-shrink: 0; pointer-events: auto; animation: toast-in .18s ease-out; }
+/* reserve a thin countdown beneath timed notices without shifting their controls */
+.toast:has(.toast-timer-bar) { padding-bottom: .8rem; }
+.toast-timer-bar { position: absolute; right: .7rem; bottom: .2rem; left: .7rem; background: var(--toast-timer-color, var(--green)); pointer-events: none; }
+.note-deletion-toast, .toast-error { --toast-timer-color: var(--red); }
+/* wrap note names while keeping undo reachable on narrow screens */
+.note-deletion-toast { display: flex; align-items: center; gap: .65rem; min-width: 0; padding: .55rem .7rem; border: 1px solid color-mix(in srgb, var(--red) 65%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 90%, var(--red)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent); }
+.note-deletion-toast > div { display: grid; flex: 1; min-width: 0; gap: .2rem; overflow-wrap: anywhere; }
+.note-deletion-toast strong { color: var(--text); font: 700 .72rem/1.4 var(--font-mono); }
+.note-deletion-toast [role="alert"] { color: var(--red); font: 500 .66rem/1.35 var(--font-mono); }
+.note-deletion-toast > button { display: flex; flex: none; align-items: center; gap: .35rem; min-height: 2rem; padding: .25rem .55rem; border-color: var(--red); background: transparent; color: var(--red); box-shadow: none; font: 700 .7rem var(--font-mono); }
+.note-deletion-toast > button:hover { background: color-mix(in srgb, var(--red) 12%, transparent); }
+/* acknowledge queued notes without adding header or flyout status text */
+.note-send.note-queued, .note-menu-run.note-queued { color: var(--green); }
 /* retain the reload action without dismissal controls or a timeout */
 .client-update-notification { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: .65rem; min-width: 0; padding: .55rem .7rem; border: 1px solid color-mix(in srgb, var(--blue) 58%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 94%, var(--blue)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent); }
 .client-update-copy { display: grid; flex: 1; min-width: 0; gap: .2rem; overflow-wrap: anywhere; }
@@ -2468,11 +2480,13 @@ svg.action-icon-glyph { fill: none; stroke: currentColor; stroke-linecap: round;
 .key-indicator-label, .key-indicator-context { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
 .key-indicator .shortcut-keys kbd { color: inherit; border-color: currentColor; font: inherit; }
 .key-indicator-context kbd { color: inherit; font: inherit; }
-.key-indicator-bar { display: block; height: 2px; border-radius: 1px; background: currentColor; transform-origin: left; animation: key-indicator-drain linear forwards; }
+/* share the same shrinking bar across keyboard overlays and timed notifications */
+.key-indicator-bar, .toast-timer-bar { display: block; height: 2px; border-radius: 1px; transform-origin: left; animation: key-indicator-drain linear forwards; }
+.key-indicator-bar { background: currentColor; }
 @keyframes key-indicator-drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
-/* keep frequent keypress feedback still for either reduced-motion preference */
-@media (prefers-reduced-motion: reduce) { .key-indicator-bar, .key-indicator.completed { animation: none; } }
-:root[data-motion="reduced"] .key-indicator-bar, :root[data-motion="reduced"] .key-indicator.completed { animation: none; }
+/* keep countdown and keypress feedback still for either reduced-motion preference */
+@media (prefers-reduced-motion: reduce) { .key-indicator-bar, .toast-timer-bar, .key-indicator.completed { animation: none; } }
+:root[data-motion="reduced"] .key-indicator-bar, :root[data-motion="reduced"] .toast-timer-bar, :root[data-motion="reduced"] .key-indicator.completed { animation: none; }
 .key-bindings-dialog > div { width: min(50rem, 100%); padding: 0; }
 .key-bindings-dialog header { position: sticky; top: 0; z-index: 1; background: var(--base); display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem 1rem; border-bottom: 1px solid var(--surface-1); }
 .key-bindings-dialog header h2 { margin: 0; font-size: 1.05rem; }

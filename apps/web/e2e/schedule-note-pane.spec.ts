@@ -49,7 +49,7 @@ test('sets and removes a note Schedule from the pane against a stateful notes st
     if (noteMatch && request.method() === 'DELETE') {
       const index = notes.findIndex(candidate => candidate.id === noteMatch[1]);
       if (index < 0) return route.fulfill({ status: 404, json: { error: 'missing' } });
-      return route.fulfill({ json: notes.splice(index, 1)[0] });
+      return route.fulfill({ json: { ...notes.splice(index, 1)[0], undoToken: 'undo-deleted-note' } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });

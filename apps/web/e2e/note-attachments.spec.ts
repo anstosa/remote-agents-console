@@ -63,7 +63,7 @@ const mockNoteApi = async (page: Page, fixture: NoteFixture) => {
     }
     if (url.pathname === `/api/worktrees/cora/notes/${fixture.note.id}` && request.method() === 'DELETE') {
       fixture.noteDeletes += 1;
-      return route.fulfill({ json: fixture.note });
+      return route.fulfill({ json: { ...fixture.note, undoToken: 'undo-deleted-note' } });
     }
     const attachmentBase = `/api/worktrees/cora/notes/${fixture.note.id}/attachments`;
     // preview one persisted attachment through the shared bounded contract

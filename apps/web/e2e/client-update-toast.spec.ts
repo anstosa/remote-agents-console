@@ -79,10 +79,12 @@ test('keeps a stale UI reload toast visible in the shared upper-right stack', as
   const reload = notification.getByRole('button', { name: 'Reload UI' });
   await expect(reload).toBeVisible();
   await expect(notification.getByRole('button')).toHaveCount(1);
+  await expect(notification.locator('.toast-timer-bar')).toHaveCount(0);
 
   // one fixed stack holds both persistent notices
   const upstreamNotification = page.getByRole('status', { name: 'origin/feature/idle has 1 new commit' });
   await expect(upstreamNotification).toBeVisible();
+  await expect(upstreamNotification.locator('.toast-timer-bar')).toHaveCount(0);
   const toastRegion = notification.locator('..');
   await expect(toastRegion).toHaveCount(1);
   await expect(toastRegion.getByRole('status', { name: 'origin/feature/idle has 1 new commit' })).toHaveCount(1);

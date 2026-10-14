@@ -97,7 +97,8 @@ const comparisonChangeSignal = (status?: GitStatusSummary, pr?: GitComparisonSum
     pr?.files ?? 0, changes(pr?.changes)]);
 };
 type NewTaskAvailability = { enabled: boolean; reason?: string };
-type OperationFeedback = { id: number; tone: 'pending'|'success'|'error'; message: string; detail: string; worktreeId?: string };
+type OperationFeedback = { id: number; tone: 'pending'|'success'|'error'; message: string; detail: string; worktreeId?: string; expires?: number };
+const toastDurationMs = 5_000;
 type CleanupTarget = { id: string; kind: 'orphan-worker'|'stale-agent'|'hud-pane'|'hud-process'|'merged-branch'|'closed-pr-branch'; label: string; detail: string };
 type BranchRemovalFacts = { branch: string; checkedOut: boolean; dirtyCount: number; pushed: boolean; merged: boolean; defaultBranch: boolean };
 type AttentionState = 'working' | 'finished' | 'question';
@@ -251,6 +252,8 @@ const isQueuedPrompt = (value: unknown): value is QueuedPrompt => value !== null
   && ((value as QueuedPrompt).attachments === undefined || Array.isArray((value as QueuedPrompt).attachments) && (value as QueuedPrompt).attachments!.every(attachment => attachment !== null && typeof attachment === 'object' && typeof attachment.name === 'string' && Number.isInteger(attachment.size) && attachment.size >= 0));
 type NoteAttachment = { name: string; size: number };
 type WorktreeNote = { id: string; text: string; title?: string; locked?: boolean; allWorkspaces?: boolean; attachments?: NoteAttachment[]; source?: 'queued-prompt'; schedule?: Schedule; nextRun?: string };
+// keep deletion recovery available after changing workspaces
+const NoteFeedbackContext = createContext<{ deleted: (label: string, undoToken: string) => void; toasts: ReactNode[] } | undefined>(undefined);
 // the Adapter and target a new Schedule pre-fills with, plus the launcher rows the note pane's
 // Adapter and target pickers offer, all resolved from the dashboard for the active tab's context
 type SchedulePrefill = { kind: AgentKind; target: ScheduleTarget; runsOnText: string; adapters: ScheduleAdapterOption[]; targets: ScheduleTargetOption[]; liveAgentIds: string[] };
@@ -684,6 +687,8 @@ const request = async (url: string, init: RequestInit = {}, observeReachability 
     });
   }
 };
+// preserve explicit json framing for otherwise bodyless mutations
+const emptyJsonMutation = (method: 'POST' | 'DELETE'): RequestInit => ({ method, headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
 // load the newest retained stack output
 const stackLog = async (worktreeId: string): Promise<StackOperationLog | undefined> => {
   const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/commands/log`);
@@ -2261,7 +2266,8 @@ function useNewTaskPowerOption(task: NewTaskPower | undefined, open: boolean, cl
     closeMenu();
     task.onOperationFeedback({ tone: 'pending', message: 'Starting a new task…', detail: 'Closing the current session and preparing a fresh agent. You can keep using other tabs.', worktreeId });
     try {
-      const response = await request(`/api/agents/${encodeURIComponent(task.agentId)}/new-task`, { method: 'POST' });
+      // give chunked transports an explicit json media type and body
+      const response = await request(`/api/agents/${encodeURIComponent(task.agentId)}/new-task`, emptyJsonMutation('POST'));
       // surface a rejected replacement
       if (!response.ok) {
         clearTask();
@@ -3424,6 +3430,7 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
 // `expansion` is the Workspace's: the note pane expands through it, and a retained note view
 // restores its expansion into it.
 function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpansion, agentId?: string, agentWorking = false, latestAssistantMessage?: string, latestAssistantMessageOverflows = false, onPromptHistoryChanged?: () => void | Promise<void>, promptHistory: PromptHistoryEntry[] = [], schedulePrefill?: SchedulePrefill, onLaunchAndRun?: (noteId: string) => Promise<boolean>, launchRunLabel?: string) {
+  const noteFeedback = useContext(NoteFeedbackContext);
   // use the shared mobile text-editing breakpoint
   const phone = usePhoneLayout();
   const [notes, setNotes] = useState<WorktreeNote[]>();
@@ -3451,10 +3458,14 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const [menuRenamingId, setMenuRenamingId] = useState<string>();
   const [menuDeletingId, setMenuDeletingId] = useState<string>();
   const [menuRunningId, setMenuRunningId] = useState<string>();
-  const [menuStatus, setMenuStatus] = useState('');
+  // share mutation guards between handlers and controls
+  const deleteBusy = deleting || menuDeletingId !== undefined;
+  const renameBusy = renamePending || menuRenamingId !== undefined;
   const [menuError, setMenuError] = useState('');
   const [copyState, setCopyState] = useState<'idle'|'copied'|'error'>('idle');
-  const [sendState, setSendState] = useState<'idle'|'sending'|'queued'|'error'>('idle');
+  const [sendState, setSendState] = useState<'idle'|'sending'|'error'>('idle');
+  // acknowledge each note independently in its pane and flyout
+  const [queuedNoteFeedback, setQueuedNoteFeedback] = useState<Record<string, number>>({});
   const [dirtyCount, setDirtyCount] = useState(0);
   const [saveStatus, setSaveStatus] = useState<'saved'|'saving'|'error'>('saved');
   const [scheduleBusy, setScheduleBusy] = useState(false);
@@ -3515,14 +3526,31 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded]);
 
+  // expire clipboard feedback without interrupting prompt feedback
   const clearActionStatusLater = () => {
+    // replace only the previous clipboard timer
     if (actionStatusTimer.current !== undefined) window.clearTimeout(actionStatusTimer.current);
     actionStatusTimer.current = window.setTimeout(() => {
       actionStatusTimer.current = undefined;
       setCopyState('idle');
-      setSendState('idle');
     }, 1_600);
   };
+  // retain each successful queue acknowledgement for two seconds
+  const markNoteQueued = (noteId: string) => {
+    // ignore a completed send from a replaced workspace
+    if (noteContext.current !== resourceBase) return;
+    setQueuedNoteFeedback(current => ({ ...current, [noteId]: Date.now() + 2_000 }));
+  };
+  // expire only acknowledgements whose own deadlines have passed
+  useEffect(() => {
+    const deadlines = Object.values(queuedNoteFeedback);
+    // leave no timer behind when all acknowledgements have expired
+    if (deadlines.length === 0) return;
+    const timer = window.setTimeout(() => {
+      setQueuedNoteFeedback(current => Object.fromEntries(Object.entries(current).filter(([, expires]) => expires > Date.now())));
+    }, Math.max(0, Math.min(...deadlines) - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [queuedNoteFeedback]);
 
   const persist = useCallback((noteId: string, text: string, immediate = false) => {
     // skip unavailable or duplicate saves
@@ -3623,6 +3651,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     saveVersions.current.clear();
     setCopyState('idle');
     setSendState('idle');
+    setQueuedNoteFeedback({});
     setDirtyCount(0);
   }, [noteViewId]);
   // load and restore the current view without allowing older reads to overwrite newer ones
@@ -3785,8 +3814,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   };
   // preserve the saved snapshot while visibility may revoke this workspace's access
   const updateDraft = (note: WorktreeNote, text: string) => {
-    // block editor and selection-driven changes during visibility writes
-    if (noteMetadataMutation.current?.option === 'allWorkspaces') return;
+    // preserve the snapshot during visibility writes and deletion
+    if (noteMetadataMutation.current?.option === 'allWorkspaces' || deleting || menuDeletingId === note.id) return;
     draftRef.current = text;
     activeNoteRef.current = { ...note, text };
     setDraft(text);
@@ -3817,17 +3846,34 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     if (resourceBase === undefined) return undefined;
     // reuse the current snapshot unless explicitly refreshing
     if (!force && notes !== undefined) return notes;
+    // capture note writes that can race this server snapshot
+    const saveVersionsAtLoad = new Map(saveVersions.current);
+    const dirtyAtLoad = new Set(dirtyTexts.current.keys());
+    const queuedAtLoad = new Set(queuedTexts.current.keys());
     const sequence = ++noteLoadSequence.current;
     setLoading(true);
     try {
       const loaded = await fetchWorktreeNotes(resourceBase);
       // stale reads must not change text acknowledgements or visible notes
       if (sequence !== noteLoadSequence.current) return undefined;
-      for (const note of loaded) acknowledgedTexts.current.set(note.id, note.text);
-      setNotes(loaded);
+      // retain local text while accepting refreshed metadata and restored notes
+      const merged = loaded.map(note => {
+        const dirtyText = dirtyTexts.current.get(note.id);
+        const queuedText = queuedTexts.current.get(note.id);
+        const writeRacedLoad = (saveVersions.current.get(note.id) ?? 0) !== (saveVersionsAtLoad.get(note.id) ?? 0);
+        const touched = dirtyAtLoad.has(note.id) || queuedAtLoad.has(note.id) || dirtyText !== undefined || queuedText !== undefined || writeRacedLoad;
+        // acknowledge only notes untouched throughout this read
+        if (!touched) {
+          acknowledgedTexts.current.set(note.id, note.text);
+          return note;
+        }
+        // prefer the newest local save boundary over stale server text
+        return { ...note, text: dirtyText ?? queuedText ?? acknowledgedTexts.current.get(note.id) ?? note.text };
+      });
+      setNotes(merged);
       // a manual retry can complete an earlier failed initial read
       setInitialNotesLoaded(true);
-      return loaded;
+      return merged;
     } catch {
       // ignore failures from replaced requests
       if (sequence === noteLoadSequence.current) setSaveStatus('error');
@@ -3863,7 +3909,6 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     await onPromptHistoryChanged?.();
     const loaded = await load();
     if (loaded === undefined) return;
-    setMenuStatus('');
     setMenuError('');
     setMenuOpen(true);
   };
@@ -4011,16 +4056,21 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     flush();
     setSendState('sending');
     setCopyState('idle');
+    // a retry must not display an earlier success after it fails
+    setQueuedNoteFeedback(current => Object.fromEntries(Object.entries(current).filter(([id]) => id !== note.id)));
     try {
       const attachments = await fetchNoteAttachments(resourceBase, note);
       const response = await request(`/api/agents/${encodeURIComponent(agentId)}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, attachments }) });
       // report dispatch failures without clearing saved note content
       if (!response.ok) throw new Error();
-      setSendState('queued');
-      await onPromptHistoryChanged?.();
-      clearActionStatusLater();
+      markNoteQueued(note.id);
+      // keep completed sends from changing another note's pending state
+      if (noteContext.current === resourceBase && activeNoteRef.current?.id === note.id) setSendState('idle');
+      // history refresh failures do not turn accepted prompts into failed sends
+      void Promise.resolve().then(onPromptHistoryChanged).catch(() => undefined);
     } catch {
-      setSendState('error');
+      // keep failed sends attached to their originating note
+      if (noteContext.current === resourceBase && activeNoteRef.current?.id === note.id) setSendState('error');
     } finally {
       setPendingOperation(promptPendingKey, false);
     }
@@ -4040,7 +4090,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     if (promptOperation && !beginPendingOperation(promptPendingKey, agentItemKey({ id: agentId, worktreeId }))) return;
     setMenuRunningId(note.id);
     setMenuError('');
-    setMenuStatus('');
+    // clear only this note's previous acknowledgement before retrying
+    setQueuedNoteFeedback(current => Object.fromEntries(Object.entries(current).filter(([id]) => id !== note.id)));
     try {
       // wait for text persistence before launching from the stored note
       if (launchAndRunMode) {
@@ -4055,11 +4106,11 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
         const response = await request(`/api/agents/${encodeURIComponent(agentId)}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: note.text, attachments }) });
         // preserve the saved note after a failed dispatch
         if (!response.ok) throw new Error();
-        setMenuStatus('Queued');
-        await onPromptHistoryChanged?.();
+        markNoteQueued(note.id);
+        // refresh history independently from the accepted prompt
+        void Promise.resolve().then(onPromptHistoryChanged).catch(() => undefined);
       }
     } catch {
-      setMenuStatus('Queue failed');
       setMenuError('Unable to run note');
     } finally {
       // release only the live-agent dispatch claimed here
@@ -4069,8 +4120,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   };
   // persist one note title while retaining local text
   const renameNote = async (note: WorktreeNote, title: string) => {
-    // require one persistence context
-    if (resourceBase === undefined) throw new Error('note rename unavailable');
+    // require one idle persistence context
+    if (resourceBase === undefined || deleteBusy) throw new Error('note rename unavailable');
     const response = await request(`${resourceBase}/notes/${encodeURIComponent(note.id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title }) });
     // require a complete renamed note
     if (!response.ok) throw new Error('note rename unavailable');
@@ -4093,7 +4144,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     const note = activeNoteRef.current;
     const title = titleDraft.trim();
     // require one valid pane rename
-    if (resourceBase === undefined || note === undefined || renamePending || !title) return;
+    if (resourceBase === undefined || note === undefined || renamePending || deleteBusy || !title) return;
     // close unchanged names without writing
     if (title === note.title) {
       setRenaming(false);
@@ -4111,7 +4162,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     const title = menuRenameDraft?.title.trim();
     const note = notes?.find(candidate => candidate.id === menuRenameDraft?.id);
     // require one valid menu rename
-    if (note === undefined || menuRenameDraft === undefined || menuRenamingId !== undefined || !title) return;
+    if (note === undefined || menuRenameDraft === undefined || menuRenamingId !== undefined || deleteBusy || !title) return;
     // close unchanged names without writing
     if (title === note.title) {
       setMenuRenameDraft(undefined);
@@ -4132,7 +4183,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const toggleNoteOption = async (option: 'locked' | 'allWorkspaces') => {
     const note = activeNoteRef.current;
     // serialize options with deletes, renames, schedules and attachment writes
-    if (resourceBase === undefined || note === undefined || noteMetadataMutation.current !== undefined || deleting || menuDeletingId !== undefined || renamePending || menuRenamingId !== undefined || scheduleBusy || scheduleRunning || attachmentMutation.current) return;
+    if (resourceBase === undefined || note === undefined || noteMetadataMutation.current !== undefined || deleteBusy || renameBusy || scheduleBusy || scheduleRunning || attachmentMutation.current) return;
     const mutation = { noteId: note.id, resourceBase, option };
     const enabled = !note[option];
     noteMetadataMutation.current = mutation;
@@ -4213,25 +4264,42 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   // delete one note after pending saves settle
   const deleteNote = async (note: WorktreeNote, restoreFocusAfterClose: boolean) => {
     // keep every local deletion path behind the confirmed protection state
-    if (note.locked || noteMetadataMutation.current !== undefined) throw new Error('note is locked');
-    // discard a pending autosave for this note
+    if (note.locked || noteMetadataMutation.current !== undefined || renameBusy || scheduleBusy || scheduleRunning) throw new Error('note is busy or locked');
+    // stop the debounce before preserving the exact draft for undo
     if (activeNoteRef.current?.id === note.id && saveTimer.current !== undefined) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = undefined;
     }
+    const text = dirtyTexts.current.get(note.id);
+    // preserve unsaved edits in the server's deletion snapshot
+    if (text !== undefined) persist(note.id, text);
     await saveQueue.current;
+    // do not delete a draft the server could not preserve
+    if (dirtyTexts.current.has(note.id)) throw new Error('note save failed');
     // require one persistence context
     if (resourceBase === undefined) throw new Error('note delete unavailable');
-    const response = await request(`${resourceBase}/notes/${encodeURIComponent(note.id)}`, { method: 'DELETE' });
+    // keep deletion compatible with proxies that forward chunked mutation bodies
+    const response = await request(`${resourceBase}/notes/${encodeURIComponent(note.id)}`, emptyJsonMutation('DELETE'));
     // retain the note after a failed delete
     if (!response.ok) throw new Error('note delete unavailable');
-    forgetNote(note, restoreFocusAfterClose);
+    const deleted: unknown = await response.json().catch(() => undefined);
+    const undoToken = (deleted as { undoToken?: unknown } | undefined)?.undoToken;
+    // never announce a recoverable deletion without its matching server snapshot
+    if (!isWorktreeNote(deleted) || deleted.id !== note.id || typeof undoToken !== 'string' || !undoToken.trim()) throw new Error('invalid note deletion response');
+    noteFeedback?.deleted(noteName(deleted), undoToken);
+    // leave a replacement workspace's note state and focus alone
+    if (noteContext.current === resourceBase) {
+      // prevent a pre-delete list response from resurrecting the note locally
+      noteLoadSequence.current += 1;
+      setLoading(false);
+      forgetNote(note, restoreFocusAfterClose);
+    }
   };
   // remove an unlocked note from its header or blank-note cleanup
   const remove = () => {
     const note = activeNoteRef.current;
     // serialize pane deletes
-    if (resourceBase === undefined || note === undefined || note.locked || noteMetadataMutation.current !== undefined || deleting || attachmentMutation.current) return;
+    if (resourceBase === undefined || note === undefined || note.locked || noteMetadataMutation.current !== undefined || deleting || renameBusy || attachmentMutation.current) return;
     setDeleting(true);
     void deleteNote(note, true).catch(() => {
       // preserve dirty state after a failed pane delete
@@ -4243,7 +4311,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   // delete one note from the flyout
   const removeFromMenu = async (note: WorktreeNote) => {
     // serialize menu deletes
-    if (note.locked || noteMetadataMutation.current !== undefined || menuDeletingId !== undefined || menuRenamingId !== undefined) return;
+    if (note.locked || noteMetadataMutation.current !== undefined || menuDeletingId !== undefined || renameBusy) return;
     setMenuDeletingId(note.id);
     setMenuError('');
     try {
@@ -4288,7 +4356,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const applySchedule = async (payload: ScheduleSetBody) => {
     const note = activeNoteRef.current;
     // serialize schedule writes for the open note
-    if (resourceBase === undefined || note === undefined || scheduleBusy || attachmentMutation.current) return;
+    if (resourceBase === undefined || note === undefined || scheduleBusy || deleteBusy || attachmentMutation.current) return;
     setScheduleBusy(true);
     try {
       const response = await request(`${resourceBase}/notes/${encodeURIComponent(note.id)}/schedule`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
@@ -4303,7 +4371,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   // remove the open note's Schedule, keeping the note
   const removeSchedule = async () => {
     const note = activeNoteRef.current;
-    if (resourceBase === undefined || note === undefined || scheduleBusy) return;
+    // preserve metadata while deletion captures its undo snapshot
+    if (resourceBase === undefined || note === undefined || scheduleBusy || deleteBusy) return;
     setScheduleBusy(true);
     try {
       const response = await request(`${resourceBase}/notes/${encodeURIComponent(note.id)}/schedule`, { method: 'DELETE' });
@@ -4319,8 +4388,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   // or any failure surfaces through the pane's save-status alert.
   const runScheduleNow = async () => {
     const note = activeNoteRef.current;
-    // let attachment writes finish before reading the stored run snapshot
-    if (resourceBase === undefined || note === undefined || scheduleBusy || scheduleRunning || attachmentMutation.current) return;
+    // let note mutations finish before reading the stored run snapshot
+    if (resourceBase === undefined || note === undefined || scheduleBusy || scheduleRunning || deleteBusy || attachmentMutation.current) return;
     setScheduleRunning(true);
     try {
       const response = await request(`${resourceBase}/notes/${encodeURIComponent(note.id)}/schedule/run`, { method: 'POST' });
@@ -4347,7 +4416,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const latestResponseAvailable = notes !== undefined && substantialResponse !== undefined && !notes.some(note => note.text === substantialResponse);
   const highlightLatestResponse = latestResponseAvailable && substantialResponse === latestAssistantMessage && latestAssistantMessageOverflows;
   const notesLabel = dirtyCount === 0 ? `Notes (${noteCount})` : `Notes (${noteCount}; ${dirtyCount} unsaved)`;
-  const noteMenuBusy = attachmentPending || noteMetadataPending || menuRenamingId !== undefined || menuDeletingId !== undefined || menuRunningId !== undefined;
+  const noteMenuBusy = attachmentPending || noteMetadataPending || deleteBusy || renameBusy || menuRunningId !== undefined;
   // pulse recovered prompts until the notes list acknowledges them
   const control = <div className="notes-control" ref={anchorRef}>
     <button ref={triggerRef} className={`log-control page-arrow notes-toggle toolbar-button${unreadQueuedNotes ? ' unread-queued-prompts' : ''}${menuOpen || activeNote !== undefined ? ' active' : ''}${activeNote !== undefined ? ' panel-open' : ''}${dirtyCount > 0 ? ' unsaved' : ''}${highlightLatestResponse ? ' latest-response-available' : ''}`} aria-label={notesLabel} title={`${notesLabel}${unreadQueuedNotes ? ' — unread queued prompts' : ''}`} data-context-flyout aria-expanded={menuOpen} disabled={loading} onPointerDown={event => event.preventDefault()} onClick={() => void toggle()}><span className="flyout-caret" aria-hidden="true" />{loading ? <span className="spinner" /> : <svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="notes-icon-sheet" d="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M15 21v-6h6" /></svg>}<span className="toolbar-label">Notes</span>{noteCount > 0 && <span className={`saved-prompts-count notes-count${unreadQueuedNotes ? ' unread' : ''}`} aria-hidden="true">{noteCount}</span>}</button>
@@ -4357,16 +4426,28 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
         if (substantialResponse !== undefined) void create(substantialResponse, assistantNoteTitle(substantialResponse));
       }}>Save latest response</button>
       {launchAndRunMode && launchRunLabel !== undefined && <p className="note-menu-hint">No agent on this tab: Run becomes Launch and run ({launchRunLabel}).</p>}
-      {menuStatus && <p className="note-menu-status" role="status">{menuStatus}</p>}
       {menuError && <p className="note-menu-error" role="alert">{menuError}</p>}
       {notes?.map(note => {
         // render one sticky note row
         const label = noteName(note);
         const editingTitle = menuRenameDraft?.id === note.id;
+        const noteQueued = queuedNoteFeedback[note.id] !== undefined;
+        // resolve queued and launch feedback before rendering the action
+        let actionTitle = noteActionLabel;
+        let actionIcon = <svg viewBox="0 0 24 24" aria-hidden="true"><path d={noteActionIcon} /></svg>;
+        if (noteQueued) {
+          actionTitle = 'Note queued';
+          actionIcon = <PanelIcon path={panelIcons.check} />;
+        } else if (launchAndRunMode) {
+          actionTitle = 'Launch and run note';
+          actionIcon = <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v11l9-5.5L7 4Z" /><path d="M4 20h16" /></svg>;
+        }
+        // pending requests take visual precedence over settled feedback
+        if (menuRunningId === note.id) actionIcon = <span className="spinner" />;
         // require unlocking in the note header before exposing deletion
         const deletionControl = note.locked
           ? <button className="log-control note-menu-lock" type="button" disabled aria-label={`Locked note: ${label}`} title="Open note to unlock before deleting"><svg viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.lock} /></svg></button>
-          : <button className="log-control note-menu-delete" type="button" disabled={noteMenuBusy || menuRenameDraft !== undefined} aria-label={`Delete note: ${label}`} title="Delete note" onClick={() => void removeFromMenu(note)}>{menuDeletingId === note.id ? <span className="spinner" /> : <svg className="action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg>}</button>;
+          : <button className="log-control note-menu-delete" type="button" disabled={noteMenuBusy || menuRenameDraft !== undefined || scheduleBusy || scheduleRunning} aria-label={`Delete note: ${label}`} title="Delete note" onClick={() => void removeFromMenu(note)}>{menuDeletingId === note.id ? <span className="spinner" /> : <svg className="action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg>}</button>;
         return <div className="note-row" key={note.id}>{editingTitle ? <form className="note-menu-rename-form" onSubmit={event => { event.preventDefault(); void saveMenuTitle(); }} onKeyDown={event => {
           // save or cancel from the keyboard
           if (event.key === 'Escape') { event.preventDefault(); setMenuRenameDraft(undefined); }
@@ -4378,12 +4459,12 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
           const failed = !dim && lastRunNeedsAttention(note.schedule.lastRun);
           const badgeLabel = invalid ? 'Schedule invalid' : !note.schedule.enabled ? 'Schedule paused' : failed ? 'Last run needs attention' : 'Scheduled';
           return <span className={`note-schedule-badge${dim ? ' paused' : failed ? ' bad' : ''}`} aria-label={badgeLabel} title={badgeLabel}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg></span>;
-        })()}<span className="note-menu-name">{label}</span></button><span className="note-menu-actions"><button className={`log-control note-menu-run${launchAndRunMode ? ' note-menu-launch-run' : ''}`} type="button" disabled={noteMenuBusy || menuRenameDraft !== undefined || !noteHasContent(note) || (!launchAndRunMode && agentId === undefined)} aria-label={launchAndRunMode ? `Launch and run note: ${label}` : `${noteActionLabel}: ${label}`} title={launchAndRunMode ? 'Launch and run note' : noteActionLabel} onClick={() => void runNote(note)}>{menuRunningId === note.id ? <span className="spinner" /> : launchAndRunMode ? <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v11l9-5.5L7 4Z" /><path d="M4 20h16" /></svg> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d={noteActionIcon} /></svg>}</button><button className="log-control note-menu-rename" type="button" disabled={noteMenuBusy || menuRenameDraft !== undefined} aria-label={`Rename note: ${label}`} title="Rename note" onClick={() => setMenuRenameDraft({ id: note.id, title: Array.from(note.title ?? label).slice(0, 120).join('') })}><svg className="action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.pencil} /></svg></button>{deletionControl}</span></>}</div>;
+        })()}<span className="note-menu-name">{label}</span></button><span className="note-menu-actions"><button className={`log-control note-menu-run${launchAndRunMode ? ' note-menu-launch-run' : ''}${noteQueued ? ' note-queued' : ''}`} type="button" disabled={noteMenuBusy || menuRenameDraft !== undefined || !noteHasContent(note) || (!launchAndRunMode && agentId === undefined)} aria-label={`${actionTitle}: ${label}`} title={actionTitle} onClick={() => void runNote(note)}>{actionIcon}</button><button className="log-control note-menu-rename" type="button" disabled={noteMenuBusy || menuRenameDraft !== undefined} aria-label={`Rename note: ${label}`} title="Rename note" onClick={() => setMenuRenameDraft({ id: note.id, title: Array.from(note.title ?? label).slice(0, 120).join('') })}><svg className="action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.pencil} /></svg></button>{deletionControl}</span></>}</div>;
       })}
       <button className="log-control new-note" disabled={noteMenuBusy || menuRenameDraft !== undefined} onClick={() => void create()}>+ New note</button>
     </div></FlyoutPortal>}
   </div>;
-  const actionStatus = copyState === 'error' ? 'Copy failed' : sendState === 'queued' ? 'Queued' : sendState === 'error' ? 'Queue failed' : '';
+  const actionStatus = copyState === 'error' ? 'Copy failed' : sendState === 'error' ? 'Queue failed' : '';
   // open note modes and clipboard actions without moving the editor caret
   const openNoteContextMenu = (event: React.MouseEvent<HTMLElement>) => {
     // preserve native mobile editing while retaining preview actions
@@ -4467,9 +4548,9 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const lastRunAgentId = activeNote?.schedule?.lastRun?.agentId;
   const openAgentId = lastRunAgentId !== undefined && schedulePrefill?.liveAgentIds.includes(lastRunAgentId) ? lastRunAgentId : undefined;
   // show the schedule sentence only after this note has a schedule
-  const scheduleArea = schedulePrefill === undefined || activeNote?.schedule === undefined ? null : <div className="schedule-area"><ScheduleEditor key={activeNote?.id} schedule={activeNote.schedule} nextRun={activeNote.nextRun} prefill={{ kind: schedulePrefill.kind, target: schedulePrefill.target }} runsOnText={schedulePrefill.runsOnText} adapterOptions={schedulePrefill.adapters} targetOptions={schedulePrefill.targets} onSet={payload => void applySchedule(payload)} onRemove={() => void removeSchedule()} onRunNow={() => void runScheduleNow()} running={scheduleRunning} {...(openAgentId === undefined ? {} : { openAgentId })} preview={previewSchedule} busy={scheduleBusy || attachmentPending || noteMetadataPending} /></div>;
+  const scheduleArea = schedulePrefill === undefined || activeNote?.schedule === undefined ? null : <div className="schedule-area"><ScheduleEditor key={activeNote?.id} schedule={activeNote.schedule} nextRun={activeNote.nextRun} prefill={{ kind: schedulePrefill.kind, target: schedulePrefill.target }} runsOnText={schedulePrefill.runsOnText} adapterOptions={schedulePrefill.adapters} targetOptions={schedulePrefill.targets} onSet={payload => void applySchedule(payload)} onRemove={() => void removeSchedule()} onRunNow={() => void runScheduleNow()} running={scheduleRunning} {...(openAgentId === undefined ? {} : { openAgentId })} preview={previewSchedule} busy={scheduleBusy || attachmentPending || noteMetadataPending || deleteBusy} /></div>;
   // keep note visibility and scheduling in the existing actions menu
-  const noteOptionsMenu = () => <><button className="panel-header-action panel-header-row" type="button" aria-pressed={Boolean(activeNote?.allWorkspaces)} disabled={noteFilesDisabled || renamePending || menuRenamingId !== undefined || scheduleBusy || scheduleRunning} onClick={() => { /* persist the shared visibility option */ void toggleNoteOption('allWorkspaces'); }}><PanelIcon path={activeNote?.allWorkspaces ? 'M3 3h18v18H3zM7 12l3 3 7-7' : 'M3 3h18v18H3z'} /><span>Show in all workspaces</span></button>{schedulePrefill !== undefined && activeNote?.schedule === undefined && <button className="panel-header-action panel-header-row" type="button" disabled={scheduleBusy || attachmentPending || noteMetadataPending} onClick={() => { /* start with the editor's daily default */ void applySchedule({ cron: defaultScheduleCron, kind: schedulePrefill.kind, target: schedulePrefill.target, enabled: true }); }}><svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg><span>Schedule note</span></button>}</>;
+  const noteOptionsMenu = () => <><button className="panel-header-action panel-header-row" type="button" aria-pressed={Boolean(activeNote?.allWorkspaces)} disabled={noteFilesDisabled || renameBusy || scheduleBusy || scheduleRunning} onClick={() => { /* persist the shared visibility option */ void toggleNoteOption('allWorkspaces'); }}><PanelIcon path={activeNote?.allWorkspaces ? 'M3 3h18v18H3zM7 12l3 3 7-7' : 'M3 3h18v18H3z'} /><span>Show in all workspaces</span></button>{schedulePrefill !== undefined && activeNote?.schedule === undefined && <button className="panel-header-action panel-header-row" type="button" disabled={scheduleBusy || attachmentPending || noteMetadataPending || deleteBusy} onClick={() => { /* start with the editor's daily default */ void applySchedule({ cron: defaultScheduleCron, kind: schedulePrefill.kind, target: schedulePrefill.target, enabled: true }); }}><svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg><span>Schedule note</span></button>}</>;
   // keep the picker mounted even when the attachments area is empty
   const noteAttachmentPicker = <input ref={noteAttachmentInput} className="attachment-input" type="file" multiple aria-label="Note attachment files" disabled={noteFilesDisabled} onChange={event => { /* allow selecting the same file again after removal */ chooseNoteFiles(event.target.files); event.target.value = ''; }} />;
   const visibleNoteAttachments = activeNote?.attachments ?? [];
@@ -4492,25 +4573,45 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     {notes?.map(note => <button key={note.id} type="button" className="note-picker-choice" aria-current={note.id === activeNote.id ? 'true' : undefined} onClick={() => { setPickerOpen(false); if (note.id !== activeNote.id) open(note, undefined, true); }}>{note.schedule !== undefined && <svg className="note-picker-scheduled" viewBox="0 0 24 24" aria-label="Scheduled"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>}<span>{noteName(note)}</span></button>)}
     <button type="button" className="note-picker-new" disabled={noteMenuBusy} onClick={() => { setPickerOpen(false); void create(); }}>+ New note</button>
   </div></FlyoutPortal>;
-  // send to the current Agent, or launch one and run the note where no Agent runs here
-  const noteSendAction = activeNote === undefined ? null : launchAndRunMode
-    ? <button className="panel-header-action note-send note-launch-run" type="button" disabled={noteFilesDisabled || !noteHasContent({ ...activeNote, text: draft })} aria-label="Launch and run note" title={launchRunLabel === undefined ? 'Launch an agent and run this note' : `Launch and run (${launchRunLabel})`} onClick={() => { const note = activeNoteRef.current; if (note !== undefined) void runNote(note); }}>{menuRunningId !== undefined ? <span className="spinner" /> : 'Launch and run'}</button>
-    : <button className="panel-header-action note-send" type="button" disabled={agentId === undefined || noteFilesDisabled || promptPending || !noteHasContent({ ...activeNote, text: draft })} aria-label={`${noteActionLabel} as prompt`} title={agentId === undefined ? 'Launch an agent to send this note' : `${noteActionLabel} as prompt`} onClick={() => void send()}>{sendState === 'sending' ? <span className="spinner" /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d={noteActionIcon} /></svg>}</button>;
+  const activeNoteQueued = activeNote !== undefined && queuedNoteFeedback[activeNote.id] !== undefined;
+  // keep the pane's label, tooltip and icon aligned with queue feedback
+  let noteSendLabel = `${noteActionLabel} as prompt`;
+  let noteSendTitle = noteSendLabel;
+  let noteSendIcon = <svg viewBox="0 0 24 24" aria-hidden="true"><path d={noteActionIcon} /></svg>;
+  if (activeNoteQueued) {
+    noteSendLabel = 'Note queued';
+    noteSendTitle = noteSendLabel;
+    noteSendIcon = <PanelIcon path={panelIcons.check} />;
+  } else if (agentId === undefined) {
+    noteSendTitle = 'Launch an agent to send this note';
+  }
+  // pending sends take visual precedence over settled feedback
+  if (sendState === 'sending') noteSendIcon = <span className="spinner" />;
+  // send to the current agent or launch one where no agent runs here
+  let noteSendAction: ReactNode = null;
+  if (activeNote !== undefined) {
+    // retain the separate launch-and-run control for idle workspaces
+    if (launchAndRunMode) {
+      noteSendAction = <button className="panel-header-action note-send note-launch-run" type="button" disabled={noteFilesDisabled || !noteHasContent({ ...activeNote, text: draft })} aria-label="Launch and run note" title={launchRunLabel === undefined ? 'Launch an agent and run this note' : `Launch and run (${launchRunLabel})`} onClick={() => { const note = activeNoteRef.current; if (note !== undefined) void runNote(note); }}>{menuRunningId !== undefined ? <span className="spinner" /> : 'Launch and run'}</button>;
+    } else {
+      noteSendAction = <button className={`panel-header-action note-send${activeNoteQueued ? ' note-queued' : ''}`} type="button" disabled={agentId === undefined || noteFilesDisabled || promptPending || !noteHasContent({ ...activeNote, text: draft })} aria-label={noteSendLabel} title={noteSendTitle} onClick={() => void send()}>{noteSendIcon}</button>;
+    }
+  }
   // attach sits beside Send, and lock right before the delete it guards
   const noteSecondary: PanelAction[] = activeNote === undefined ? [] : [
     // open the note-specific file picker
     { key: 'attach', label: 'Attach files to note', title: 'Attach files', className: 'note-attach', disabled: noteFilesDisabled, icon: <MoreMenuIcon name="attachment" />, onSelect: () => noteAttachmentInput.current?.click() },
     { key: 'copy', label: copyState === 'copied' ? 'Note copied' : 'Copy note', title: copyState === 'copied' ? 'Copied' : 'Copy note', className: `note-copy${copyState === 'copied' ? ' copied' : ''}`, disabled: deleting, icon: <PanelIcon path={copyState === 'copied' ? panelIcons.check : panelIcons.copy} />, onSelect: () => void copy() },
-    { key: 'rename', label: 'Rename note', className: 'note-rename', disabled: noteFilesDisabled || renamePending, icon: <PanelIcon path={actionIconPaths.pencil} />, onSelect: () => { setTitleDraft(activeNote.title ?? ''); setRenaming(true); } },
+    { key: 'rename', label: 'Rename note', className: 'note-rename', disabled: noteFilesDisabled || renamePending || menuDeletingId !== undefined, icon: <PanelIcon path={actionIconPaths.pencil} />, onSelect: () => { setTitleDraft(activeNote.title ?? ''); setRenaming(true); } },
     { key: 'lock', label: activeNote.locked ? 'Unlock note' : 'Lock note', className: 'note-lock', pressed: Boolean(activeNote.locked), disabled: noteFilesDisabled || menuDeletingId !== undefined, icon: noteMetadataPending && noteMetadataMutation.current?.option === 'locked' ? <span className="spinner" /> : <PanelIcon path={activeNote.locked ? actionIconPaths.lock : actionIconPaths.unlock} />, onSelect: () => void toggleNoteOption('locked') },
     // a locked note must be unlocked before it can be removed
-    ...(activeNote.locked ? [] : [{ key: 'delete', label: 'Delete note', className: 'note-delete', disabled: noteFilesDisabled, icon: deleting ? <span className="spinner" /> : <PanelIcon path={actionIconPaths.trash} />, onSelect: remove }])
+    ...(activeNote.locked ? [] : [{ key: 'delete', label: 'Delete note', className: 'note-delete', disabled: noteFilesDisabled || renameBusy || scheduleBusy || scheduleRunning, icon: deleting ? <span className="spinner" /> : <PanelIcon path={actionIconPaths.trash} />, onSelect: remove }])
   ];
   // a phone's full screen expands whichever panel is in view; the note keeps only a desktop
   // expansion with its view
   const paneExpanded = expanded || expansion.immersive;
   // Esc closes the note, unless it is expanded: then the Workspace restores its siblings first
-  const pane = activeNote === undefined ? null : <><section className={`note-pane${paneExpanded ? ' expanded' : ''}${editing ? ' editing' : ' selecting'}`} role="dialog" aria-label="Note" onAuxClickCapture={event => closeOnMiddleClick(event, () => { /* preserve pending note mutations */ if (!noteFilesDisabled) close(); })} onPointerDownCapture={phone && editing ? undefined : preserveContextMenuPress} onMouseDownCapture={phone && editing ? undefined : preserveContextMenuPress} onContextMenu={openNoteContextMenu} onDragEnter={dragNoteFiles} onDragOver={dragNoteFiles} onDragLeave={leaveNoteFiles} onDrop={dropNoteFiles} onPaste={pasteNoteFiles} onKeyDown={event => { if (event.key === 'Escape' && !paneExpanded && !deleting && sendState !== 'sending') { event.preventDefault(); close(); } }}><PanelHeader panelKey="note" label="note" title={noteTitlePill} actions={noteSendAction} secondary={noteSecondary} menuContent={noteOptionsMenu} expandDisabled={noteFilesDisabled} close={{ key: 'close', label: 'Close note', className: 'note-close', disabled: noteFilesDisabled, icon: <PanelIcon path={panelIcons.close} />, onSelect: close }} /><div className="note-pane-head">{noteMetadataError && <p className="note-lock-error" role="alert">{noteMetadataError}</p>}{scheduleArea}{noteAttachmentPicker}{noteAttachmentControls}</div>{draggingNoteFiles && <div className="prompt-drop-overlay" role="status">Drop files to attach to this note</div>}{editing ? <textarea ref={editorRef} aria-label="Note content" value={draft} maxLength={30_000} disabled={deleting || noteVisibilityPending} onChange={event => changeDraft(event.target.value)} onBlur={event => { flush(); /* native mobile popups must retain the editor */ if (phone && event.relatedTarget === null) return; /* menu focus must not unmount the source editor */ if (!contextMenuOwnsFocus(event.currentTarget)) setEditing(false); }} /> : <div className="note-preview-interaction" onPointerDown={() => { selectionAtPointerDown.current = Boolean(window.getSelection()?.toString()); }} onClick={event => inferEditing(event.target)}><NoteMarkdown text={draft} containerRef={previewRef} /></div>}</section>{selectionActions}{noteFilePreview.dialog}{notePicker}</>;
+  const pane = activeNote === undefined ? null : <><section className={`note-pane${paneExpanded ? ' expanded' : ''}${editing ? ' editing' : ' selecting'}`} role="dialog" aria-label="Note" onAuxClickCapture={event => closeOnMiddleClick(event, () => { /* preserve pending note mutations */ if (!noteFilesDisabled) close(); })} onPointerDownCapture={phone && editing ? undefined : preserveContextMenuPress} onMouseDownCapture={phone && editing ? undefined : preserveContextMenuPress} onContextMenu={openNoteContextMenu} onDragEnter={dragNoteFiles} onDragOver={dragNoteFiles} onDragLeave={leaveNoteFiles} onDrop={dropNoteFiles} onPaste={pasteNoteFiles} onKeyDown={event => { if (event.key === 'Escape' && !paneExpanded && !deleting && sendState !== 'sending') { event.preventDefault(); close(); } }}><PanelHeader panelKey="note" label="note" title={noteTitlePill} actions={noteSendAction} secondary={noteSecondary} menuContent={noteOptionsMenu} expandDisabled={noteFilesDisabled} close={{ key: 'close', label: 'Close note', className: 'note-close', disabled: noteFilesDisabled, icon: <PanelIcon path={panelIcons.close} />, onSelect: close }} /><div className="note-pane-head">{noteMetadataError && <p className="note-lock-error" role="alert">{noteMetadataError}</p>}{scheduleArea}{noteAttachmentPicker}{noteAttachmentControls}</div>{draggingNoteFiles && <div className="prompt-drop-overlay" role="status">Drop files to attach to this note</div>}{editing ? <textarea ref={editorRef} aria-label="Note content" value={draft} maxLength={30_000} disabled={deleting || menuDeletingId === activeNote.id || noteVisibilityPending} onChange={event => changeDraft(event.target.value)} onBlur={event => { flush(); /* native mobile popups must retain the editor */ if (phone && event.relatedTarget === null) return; /* menu focus must not unmount the source editor */ if (!contextMenuOwnsFocus(event.currentTarget)) setEditing(false); }} /> : <div className="note-preview-interaction" onPointerDown={() => { selectionAtPointerDown.current = Boolean(window.getSelection()?.toString()); }} onClick={event => inferEditing(event.target)}><NoteMarkdown text={draft} containerRef={previewRef} /></div>}</section>{selectionActions}{noteFilePreview.dialog}{notePicker}</>;
   return { active: activeNote !== undefined, appendToActive, canAppendToActive, canCreate: !loading && !noteMetadataPending, canClose: activeNote !== undefined && !noteFilesDisabled, close, initialNotesLoaded, control, createWithText: create, pane, toggleMenu: toggle };
 }
 type WorktreeNotes = ReturnType<typeof useWorktreeNotes>;
@@ -7100,7 +7201,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     onOperationFeedback({ tone: 'pending', message: `Turning off ${label}…`, detail: 'The session is being stopped and removed from the console.' });
     try {
       // keep shutdown parseable when the tunnel uses chunked framing
-      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
+      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}`, emptyJsonMutation('DELETE'));
       // surface failed closure
       if (!response.ok) return onOperationFeedback({ tone: 'error', message: `${label} could not be turned off`, detail: await launchError(response) });
       await onDeleted();
@@ -7117,7 +7218,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     onOperationFeedback({ tone: 'pending', message: `Turning off ${label}…`, detail: 'Stopping the agent while keeping the worktree available to start again.', worktreeId: agent.worktreeId });
     try {
       // keep shutdown parseable when the tunnel uses chunked framing
-      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}/deactivate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
+      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}/deactivate`, emptyJsonMutation('POST'));
       // surface failed deactivation
       if (!response.ok) return onOperationFeedback({ tone: 'error', message: `${label} could not be turned off`, detail: await launchError(response), worktreeId: agent.worktreeId });
       await onDeleted();
@@ -7807,19 +7908,74 @@ function NotificationControl() {
   return <button className="notification-control" type="button" onClick={() => void enable()}>Enable alerts</button>;
 }
 
-// present persistent failures with a dedicated optional accessible label
+// resume the visual countdown from the same deadline used to dismiss the toast
+function ToastTimerBar({ expires }: { expires: number }) {
+  // keep the initial offset stable through rerenders and recalculate after remounts
+  const delay = useMemo(() => Math.min(0, expires - Date.now() - toastDurationMs), [expires]);
+  return <span key={expires} className="toast-timer-bar" aria-hidden="true" style={{ animationDuration: `${toastDurationMs}ms`, animationDelay: `${delay}ms` }} />;
+}
+
+// present timed successes and persistent failures with an optional accessible label
 function OperationFeedbackToast({ feedback, onDismiss, ariaLabel }: { feedback: OperationFeedback; onDismiss: () => void; ariaLabel?: string }) {
   const role = feedback.tone === 'error' ? 'alert' : 'status';
   return <div className={`toast operation-feedback ${feedback.tone}`} role={role} aria-label={ariaLabel} aria-live={feedback.tone === 'error' ? 'assertive' : 'polite'}>
     <span className="operation-feedback-icon" aria-hidden="true">{feedback.tone === 'pending' ? <span className="spinner" /> : feedback.tone === 'success' ? '✓' : '!'}</span>
     <span className="operation-feedback-copy"><strong>{feedback.message}</strong><span>{feedback.detail}</span></span>
     {feedback.tone !== 'pending' && <button type="button" aria-label="Dismiss operation status" title="Dismiss" onClick={onDismiss}><PanelIcon path={panelIcons.close} /></button>}
+    {feedback.tone === 'success' && feedback.expires !== undefined && <ToastTimerBar expires={feedback.expires} />}
   </div>;
 }
 
+type DeletedNoteFeedback = { id: number; label: string; undoToken: string; expires: number; undoing?: boolean; error?: string };
+// retain independent undo windows above workspace-specific note views
+function NoteFeedbackProvider({ children }: { children: ReactNode }) {
+  const [deletions, setDeletions] = useState<DeletedNoteFeedback[]>([]);
+  const nextId = useRef(0);
+  const restoring = useRef(new Set<number>());
+  // start the five-second window only after the server confirms deletion
+  const deleted = useCallback((label: string, undoToken: string) => {
+    const entry = { id: ++nextId.current, label, undoToken, expires: Date.now() + toastDurationMs };
+    setDeletions(current => [...current, entry]);
+  }, []);
+  // expire toasts by their original deadlines even when the workspace changes
+  useEffect(() => {
+    const expiring = deletions.filter(entry => !entry.undoing);
+    // retain feedback while an undo request is in flight
+    if (expiring.length === 0) return;
+    const timer = window.setTimeout(() => {
+      setDeletions(current => current.filter(entry => entry.undoing || entry.expires > Date.now()));
+    }, Math.max(0, Math.min(...expiring.map(entry => entry.expires)) - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [deletions]);
+  // restore the server-held snapshot without recreating a partial note
+  const undo = async (entry: DeletedNoteFeedback) => {
+    // ignore repeated clicks while the original undo is pending
+    if (restoring.current.has(entry.id)) return;
+    restoring.current.add(entry.id);
+    setDeletions(current => current.map(candidate => candidate.id === entry.id ? { ...candidate, undoing: true, error: undefined } : candidate));
+    try {
+      // keep undo compatible with the same explicit json transport as deletion
+      const response = await request(`/api/notes/deletions/${encodeURIComponent(entry.undoToken)}/undo`, emptyJsonMutation('POST'));
+      // show failure rather than claiming a missing snapshot was restored
+      if (!response.ok || !isWorktreeNote(await response.json())) throw new Error('note restore failed');
+      // shared notes may be visible in several mounted note views
+      for (const reload of noteReloadRequests.values()) reload();
+      setDeletions(current => current.filter(candidate => candidate.id !== entry.id));
+    } catch {
+      setDeletions(current => current.map(candidate => candidate.id === entry.id ? { ...candidate, undoing: false, error: 'Unable to restore note. Try again.', expires: Date.now() + toastDurationMs } : candidate));
+    } finally {
+      restoring.current.delete(entry.id);
+    }
+  };
+  // share the existing toast stack instead of overlaying a second region
+  const toasts = deletions.map(entry => <section key={entry.id} className="toast note-deletion-toast" role="status" aria-label="Note deleted"><div><strong>Note “{entry.label}” was deleted</strong>{entry.error && <span role="alert">{entry.error}</span>}</div><button type="button" disabled={entry.undoing} onClick={() => { /* restore only this deletion */ void undo(entry); }}>{entry.undoing ? <><span className="spinner" />Restoring…</> : 'Undo'}</button>{!entry.undoing && <ToastTimerBar expires={entry.expires} />}</section>);
+  return <NoteFeedbackContext.Provider value={{ deleted, toasts }}>{children}</NoteFeedbackContext.Provider>;
+}
+
 // stack transient feedback and persistent notices in one corner region
-function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDismissUpdateError, launchErrorMessage }: { children?: ReactNode; feedback?: OperationFeedback; onDismissFeedback: () => void; updateError?: string; onDismissUpdateError: () => void; launchErrorMessage?: string }) {
+function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDismissUpdateError, launchErrorMessage, launchErrorExpires }: { children?: ReactNode; feedback?: OperationFeedback; onDismissFeedback: () => void; updateError?: string; onDismissUpdateError: () => void; launchErrorMessage?: string; launchErrorExpires?: number }) {
   const clientSettings = useContext(ClientSettingsContext);
+  const noteFeedback = useContext(NoteFeedbackContext);
   // keep stale-client guidance visible until the browser reloads
   const showClientUpdate = clientSettings?.clientUpdateAvailable === true;
   // the launch error is redundant while an error-tone operation toast already says the same thing
@@ -7839,13 +7995,14 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
     return () => { observer.disconnect(); window.removeEventListener('resize', measure); root.style.removeProperty('--toast-region-clearance'); };
   }, []);
   // omit an empty stack when there is no persistent notice
-  if (children == null && feedback === undefined && !updateError && !showLaunchError && !showClientUpdate) return null;
+  if (children == null && feedback === undefined && !updateError && !showLaunchError && !showClientUpdate && !noteFeedback?.toasts.length) return null;
   return createPortal(<div className="toast-region" ref={reserveToastSpace}>
+    {noteFeedback?.toasts}
     {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>Reload to use the latest version.</span></div><button type="button" onClick={clientSettings.reloadClient}>Reload UI</button></section>}
     {feedback && <OperationFeedbackToast key={feedback.id} feedback={feedback} onDismiss={onDismissFeedback} />}
     {/* keep update failures independent from other operation feedback */}
     {updateError && <OperationFeedbackToast ariaLabel="Agent update failed" feedback={{ id: 0, tone: 'error', message: 'Agent update failed', detail: updateError }} onDismiss={onDismissUpdateError} />}
-    {showLaunchError && <p className="toast toast-error" role="alert">{launchErrorMessage}</p>}
+    {showLaunchError && <p className="toast toast-error" role="alert">{launchErrorMessage}{launchErrorExpires !== undefined && <ToastTimerBar expires={launchErrorExpires} />}</p>}
     {children}
   </div>, document.body);
 }
@@ -8173,6 +8330,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const plusRef = useRef<HTMLButtonElement | null>(null);
   const [plusAlone, setPlusAlone] = useState(false);
   const [launchErrorMessage, setLaunchErrorMessage] = useState('');
+  // preserve the fallback notice's deadline when its region remounts
+  const launchErrorExpires = useMemo(() => launchErrorMessage ? Date.now() + toastDurationMs : undefined, [launchErrorMessage]);
   const [operationFeedback, setOperationFeedback] = useState<OperationFeedback>();
   const operationFeedbackId = useRef(0);
   const [activateAgentId, setActivateAgentId] = useState<string>();
@@ -8208,9 +8367,10 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   // retain the last viewed completion across buffered dashboard publications
   const viewedCompletions = useRef(new Map<string, string>());
   const dashboardMounted = useRef(true);
+  // assign one shared deadline to each transient success and its countdown
   const showOperationFeedback = useCallback((feedback: Omit<OperationFeedback, 'id'>) => {
     operationFeedbackId.current += 1;
-    setOperationFeedback({ ...feedback, id: operationFeedbackId.current });
+    setOperationFeedback({ ...feedback, id: operationFeedbackId.current, expires: feedback.tone === 'success' ? Date.now() + toastDurationMs : undefined });
   }, []);
   // remember the completion before clearing its optimistic highlight
   const viewAgent = useCallback((agent: Pick<Agent, 'id' | 'worktreeId' | 'completionId'>) => {
@@ -8226,15 +8386,19 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     });
     dismissAgentNotifications(agent);
   }, []);
+  // dismiss fallback launch notices when their countdown reaches zero
   useEffect(() => {
-    if (!launchErrorMessage) return;
-    const timer = window.setTimeout(() => setLaunchErrorMessage(''), 5_000);
+    // leave empty or persistent notices without a timer
+    if (launchErrorExpires === undefined) return;
+    const timer = window.setTimeout(() => setLaunchErrorMessage(''), Math.max(0, launchErrorExpires - Date.now()));
     return () => window.clearTimeout(timer);
-  }, [launchErrorMessage]);
+  }, [launchErrorExpires]);
+  // expire only the success whose countdown was scheduled
   useEffect(() => {
-    if (operationFeedback?.tone !== 'success') return;
+    // pending operations and failures remain until explicitly resolved
+    if (operationFeedback?.tone !== 'success' || operationFeedback.expires === undefined) return;
     const id = operationFeedback.id;
-    const timer = window.setTimeout(() => setOperationFeedback(current => current?.id === id ? undefined : current), 5_000);
+    const timer = window.setTimeout(() => setOperationFeedback(current => current?.id === id ? undefined : current), Math.max(0, operationFeedback.expires - Date.now()));
     return () => window.clearTimeout(timer);
   }, [operationFeedback]);
   const agentStates = useRef(new Map<string, AgentState>());
@@ -9415,7 +9579,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   // offer one Scratch launch even before any Workspace has been opened
   const globalLaunch: ToolbarLaunch = { label: 'Scratch', resolution: data.scratchLaunch, pending: creatingAgent, start: choice => createAgent(choice) };
   // share one toast stack while the active agent supplies its rebase action
-  const renderNotifications = (content: ReactNode = null) => <ToastRegion feedback={visibleOperationFeedback} onDismissFeedback={() => setOperationFeedback(undefined)} updateError={updateError} onDismissUpdateError={onDismissUpdateError} launchErrorMessage={launchErrorMessage}>{content}</ToastRegion>;
+  const renderNotifications = (content: ReactNode = null) => <ToastRegion feedback={visibleOperationFeedback} onDismissFeedback={() => setOperationFeedback(undefined)} updateError={updateError} onDismissUpdateError={onDismissUpdateError} launchErrorMessage={launchErrorMessage} launchErrorExpires={launchErrorExpires}>{content}</ToastRegion>;
   // read an inactive workspace's retained splits without activating it
   const retainedSplits = (entry: DashboardItem): WorkspaceSplit[] => {
     const live = workspaceViews.get(entry.key);
@@ -9499,7 +9663,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       // turn off every agent rather than only the selected split
       for (const target of agents) {
         const configured = target.worktreeId !== undefined;
-        const response = await request(`/api/agents/${encodeURIComponent(target.id)}${configured ? '/deactivate' : ''}`, { method: configured ? 'POST' : 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
+        const response = await request(`/api/agents/${encodeURIComponent(target.id)}${configured ? '/deactivate' : ''}`, emptyJsonMutation(configured ? 'POST' : 'DELETE'));
         // report partial shutdown rather than hiding surviving sessions
         if (!response.ok) throw new Error(await launchError(response));
       }
@@ -10065,7 +10229,7 @@ function App() {
   const screen = state === 'checking'
       ? <LoadingScreen />
       : state === 'ready'
-        ? <DashboardView onUnauthorized={handleUnauthorized} onInactive={handleInactive} updateError={agentUpdateError} onDismissUpdateError={() => { /* dismiss only the agent update failure */ setAgentUpdateError(''); }} />
+        ? <NoteFeedbackProvider><DashboardView onUnauthorized={handleUnauthorized} onInactive={handleInactive} updateError={agentUpdateError} onDismissUpdateError={() => { /* dismiss only the agent update failure */ setAgentUpdateError(''); }} /></NoteFeedbackProvider>
         : (state === 'inactive' || state === 'naming') && sessionInfo !== undefined
           ? <ControlScreen session={sessionInfo} claimed={applySession} />
           : <Login initialError={error} done={applySession} />;

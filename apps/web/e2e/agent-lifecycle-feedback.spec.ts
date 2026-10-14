@@ -50,6 +50,7 @@ test('keeps agent on/off progress visible across lifecycle transitions', async (
 
   const pendingOff = page.getByRole('status').filter({ hasText: 'Turning off Cora' });
   await expect(pendingOff).toContainText('Stopping the agent while keeping the worktree available');
+  await expect(pendingOff.locator('.toast-timer-bar')).toHaveCount(0);
   await expect(page.getByRole('tab', { name: 'Cora — Turning off' })).toHaveAttribute('aria-busy', 'true');
   await expect(page.getByRole('button', { name: 'Agent power options' })).toBeDisabled();
   await page.getByRole('tab', { name: 'Delta — Agent closed' }).click();
@@ -60,6 +61,7 @@ test('keeps agent on/off progress visible across lifecycle transitions', async (
   finishDeactivate();
   const offSuccess = page.getByRole('status').filter({ hasText: 'Cora is off' });
   await expect(offSuccess).toContainText('Launch agent whenever you want to turn it back on');
+  await expect(offSuccess.locator('.toast-timer-bar')).toHaveCount(1);
   await expect(page.getByRole('tab', { name: 'Cora — Agent closed' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Empty workspace' })).toBeVisible();
   // the agentless Worktree view has no floating server switcher; the tab row leads with it
@@ -70,6 +72,7 @@ test('keeps agent on/off progress visible across lifecycle transitions', async (
   await page.getByRole('menu', { name: 'Choose agent' }).getByRole('menuitem', { name: /^OMX/u }).click();
   const pendingLaunch = page.getByRole('status').filter({ hasText: 'Starting Cora' });
   await expect(pendingLaunch).toContainText('waiting for the agent session to become ready');
+  await expect(pendingLaunch.locator('.toast-timer-bar')).toHaveCount(0);
   await expect(page.getByRole('tab', { name: 'Cora — Starting agent' })).toHaveAttribute('aria-busy', 'true');
   await expect(page.getByText('Starting OMX at Cora…', { exact: true })).toBeVisible();
   await page.getByRole('tab', { name: 'Delta — Agent closed' }).click();
@@ -78,8 +81,48 @@ test('keeps agent on/off progress visible across lifecycle transitions', async (
   await expect(pendingLaunch).toBeVisible();
 
   finishLaunch();
-  await expect(page.getByRole('status').filter({ hasText: 'Cora is starting' })).toContainText('output is connecting');
+  const launchSuccess = page.getByRole('status').filter({ hasText: 'Cora is starting' });
+  await expect(launchSuccess).toContainText('output is connecting');
+  await expect(launchSuccess.locator('.toast-timer-bar')).toHaveCount(1);
   await expect(page.getByRole('tab', { name: 'Cora — Prompt done' })).toBeVisible();
+});
+
+// keep fallback launch failures timed after their scoped operation toast leaves view
+test('shows a timed fallback launch error after leaving its workspace', async ({ page }) => {
+  const adapters = {
+    codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
+    omx: { launchable: true, program: '/bin/omx', stateSource: 'title', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false }
+  };
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    // provide authenticated application state
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // expose one active and one launchable workspace
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', kind: 'codex', launch: { kind: 'codex', origin: 'worktree' } }], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [{ id: 'delta', label: 'Delta', path: '/worktrees/delta', available: true, pinned: true, order: 1, launch: { kind: 'codex', origin: 'worktree' } }] }] } });
+    // disable optional integrations
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (/^\/api\/agents\/agent-1\/(?:saved-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
+    if (/^\/api\/worktrees\/delta\/(?:notes|panes)$/u.test(url.pathname)) return route.fulfill({ json: url.pathname.endsWith('/notes') ? { notes: [] } : { panes: [] } });
+    // reject the selected empty-workspace launch
+    if (url.pathname === '/api/worktrees/delta/launch' && request.method() === 'POST') return route.fulfill({ status: 500, json: { error: 'launch failed' } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  await page.getByRole('tablist', { name: 'Agents and worktrees' }).getByRole('button', { name: 'Launch agent', exact: true }).click();
+  await page.getByRole('group', { name: 'Agent launcher' }).getByRole('button', { name: 'Launch Delta' }).click();
+  const scopedError = page.getByRole('alert').filter({ hasText: 'Delta could not start' });
+  await expect(scopedError).toBeVisible();
+  await expect(scopedError.locator('.toast-timer-bar')).toHaveCount(0);
+
+  // replace the hidden scoped error with its timed fallback
+  await page.getByRole('tab', { name: /^Cora/u }).click();
+  const fallback = page.locator('.toast-error').filter({ hasText: 'launch failed' });
+  await expect(fallback).toBeVisible();
+  await expect(fallback.locator('.toast-timer-bar')).toHaveCSS('animation-name', 'key-indicator-drain');
+  await expect(fallback.locator('.toast-timer-bar')).toHaveCSS('animation-duration', '5s');
 });
 
 // verify non-destructive power actions

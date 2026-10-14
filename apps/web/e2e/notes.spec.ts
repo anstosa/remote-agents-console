@@ -54,7 +54,7 @@ test('creates, previews, edits, autosaves, and deletes per-worktree notes', asyn
       }
       const index = notes.findIndex(candidate => candidate.id === noteMatch[1]);
       if (index < 0) return route.fulfill({ status: 404, json: { error: 'missing' } });
-      return route.fulfill({ json: notes.splice(index, 1)[0] });
+      return route.fulfill({ json: { ...notes.splice(index, 1)[0], undoToken: 'undo-deleted-note' } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -206,7 +206,7 @@ test('opens note flyouts above the toolbar’s Notes button and shifts long menu
       const index = visibleNotes.findIndex(candidate => candidate.id === noteId);
       // require the fixture note
       if (index < 0) return route.fulfill({ status: 404, json: { error: 'note unavailable' } });
-      return route.fulfill({ json: visibleNotes.splice(index, 1)[0] });
+      return route.fulfill({ json: { ...visibleNotes.splice(index, 1)[0], undoToken: 'undo-deleted-note' } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });

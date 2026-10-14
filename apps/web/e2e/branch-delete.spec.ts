@@ -53,7 +53,10 @@ test('guards deletion of an unpushed and unmerged branch', async ({ page }) => {
 
   await expect.poll(() => deletion).toEqual({ branch: 'feature/risky', discardUnpushed: true });
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByText('Branch deleted', { exact: true })).toBeVisible();
+  const success = page.locator('.operation-feedback.success').filter({ hasText: 'Branch deleted' });
+  await expect(success).toBeVisible();
+  await expect(success.locator('.toast-timer-bar')).toHaveCSS('animation-name', 'key-indicator-drain');
+  await expect(success.locator('.toast-timer-bar')).toHaveCSS('animation-duration', '5s');
 });
 
 // block deletion while a branch owns dirty work

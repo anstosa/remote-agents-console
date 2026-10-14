@@ -1,9 +1,14 @@
 import { expect, test } from '@playwright/test';
 
+// allow the shared host's first dashboard transform before exercising task transport
+test.setTimeout(90_000);
+
+// preserve task handoff after the browser sends an explicit empty json mutation
 test('keeps a new-task processing indicator visible until the replacement agent appears', async ({ page }) => {
   let oldAgentGone = false;
   let replacementReady = false;
   let dashboardRequests = 0;
+  let transport: { contentType: string | undefined; body: string | null; csrf: string | undefined } | undefined;
   let finishNewTask!: () => void;
   const newTaskFinished = new Promise<void>(resolve => { finishNewTask = resolve; });
 
@@ -27,6 +32,10 @@ test('keeps a new-task processing indicator visible until the replacement agent 
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/agents/agent-1/new-task' && request.method() === 'GET') return route.fulfill({ json: { enabled: true } });
     if (url.pathname === '/api/agents/agent-1/new-task' && request.method() === 'POST') {
+      // capture the real browser request before accepting a task reset
+      transport = { contentType: request.headers()['content-type'], body: request.postData(), csrf: request.headers()['x-csrf-token'] };
+      // model the tunnel parser rejecting untyped chunked mutations
+      if (transport.contentType !== 'application/json' || transport.body !== '{}') return route.fulfill({ status: 415, json: { error: 'Unsupported Media Type' } });
       await newTaskFinished;
       return route.fulfill({ status: 202 });
     }
@@ -38,6 +47,7 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   await page.getByRole('button', { name: 'Agent power options' }).click();
   await page.getByRole('menu', { name: 'Agent power options' }).getByRole('menuitem', { name: 'New Task', exact: true }).click();
 
+  await expect.poll(() => transport).toEqual({ contentType: 'application/json', body: '{}', csrf: 'csrf-token' });
   const processing = page.locator('.log-loading[role="status"]');
   await expect(processing).toBeVisible();
   await expect(processing).toContainText('preparing a fresh agent');
@@ -58,6 +68,7 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   await expect(page.getByRole('status').filter({ hasText: 'New task is ready' })).toContainText('ready for a fresh prompt');
 });
 
+// keep accepted task feedback scoped to the source worktree
 test('shows the new-task banner only on its worktree', async ({ page }) => {
   let finishNewTask!: () => void;
   const newTaskFinished = new Promise<void>(resolve => { finishNewTask = resolve; });
@@ -76,6 +87,8 @@ test('shows the new-task banner only on its worktree', async ({ page }) => {
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/agents/agent-1/new-task' && request.method() === 'GET') return route.fulfill({ json: { enabled: true } });
     if (url.pathname === '/api/agents/agent-1/new-task' && request.method() === 'POST') {
+      // require the same explicit json transport while switching workspaces
+      if (request.headers()['content-type'] !== 'application/json' || request.postData() !== '{}') return route.fulfill({ status: 415, json: { error: 'Unsupported Media Type' } });
       await newTaskFinished;
       return route.fulfill({ status: 202 });
     }

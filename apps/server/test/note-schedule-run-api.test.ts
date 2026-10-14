@@ -285,6 +285,42 @@ describe('POST /api/worktrees/:id/notes/:noteId/schedule/run', () => {
     } finally { await server.close(); }
   }, 15_000);
 
+  // stop a run whose initial lookup raced behind a completed deletion
+  it('re-reads the note after claiming its schedule run lock', async () => {
+    let reached!: () => void;
+    const reachedGate = new Promise<void>(resolve => { reached = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const discovery = appearingDiscovery({ worktree, agent: { ...codexPane, attention: 'finished' }, socket: testSocket });
+    const { notes, queued, noteId } = await scheduledNote({ target: { worktreeId: 'wt-main' } });
+    const resolveNote = notes.resolve.bind(notes);
+    let resolves = 0;
+    notes.resolve = async (key: string, candidateId: string) => {
+      const result = await resolveNote(key, candidateId);
+      resolves += 1;
+      // hold only the run's first lookup with its stale result
+      if (resolves === 1) {
+        reached();
+        await gate;
+      }
+      return result;
+    };
+    const launch = launchFake();
+    const server = await runApp({ notes, queued, tmux: recordingTmux(), launch, discovery });
+    try {
+      const run = server.inject(runNow(noteId));
+      await reachedGate;
+      const deleted = await server.inject({ method: 'DELETE', url: `/api/worktrees/wt-main/notes/${noteId}`, headers: mutate });
+      expect(deleted.statusCode).toBe(200);
+      release();
+      expect((await run).statusCode).toBe(404);
+      expect(launch.calls).toEqual([]);
+    } finally {
+      release();
+      await server.close();
+    }
+  }, 15_000);
+
   // canonicalize shared aliases before applying the per-note flight guard
   it('refuses a concurrent Run through another workspace alias of the same shared Schedule', async () => {
     let reached!: () => void;
@@ -318,6 +354,10 @@ describe('POST /api/worktrees/:id/notes/:noteId/schedule/run', () => {
       await reachedGate;
       const aliasRun = await server.inject(runNow(noteId, 'wt-alias'));
       expect(aliasRun.statusCode).toBe(409);
+      const aliasDelete = await server.inject({ method: 'DELETE', url: `/api/worktrees/wt-alias/notes/${noteId}`, headers: mutate });
+      expect(aliasDelete.statusCode).toBe(409);
+      // retain the scheduled note while its canonical run holds the mutation guard
+      await expect(notes.list('proj')).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: noteId })]));
       release();
       expect((await first).statusCode).toBe(200);
       expect(base.kinds).toEqual(['codex']);

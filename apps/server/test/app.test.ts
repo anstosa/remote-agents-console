@@ -2021,7 +2021,9 @@ describe('worktree notes API', () => {
       create: async (key: string, title?: string) => { keys.push(`create:${key}:${title ?? ''}`); const note = { id: 'note-identifier-002', text: '', ...(title === undefined ? {} : { title }) }; stored.unshift(note); return note; },
       update: async (key: string, noteId: string, text: string) => { keys.push(`update:${key}:${noteId}`); const note = stored.find(candidate => candidate.id === noteId); if (note === undefined) return undefined; note.text = text; return { ...note }; },
       rename: async (key: string, noteId: string, title: string) => { keys.push(`rename:${key}:${noteId}`); const note = stored.find(candidate => candidate.id === noteId); if (note === undefined) return undefined; note.title = title; return { ...note }; },
-      delete: async (key: string, noteId: string) => { keys.push(`delete:${key}:${noteId}`); const index = stored.findIndex(candidate => candidate.id === noteId); return index < 0 ? undefined : stored.splice(index, 1)[0]; }
+      resolve: async (key: string, noteId: string) => { const note = stored.find(candidate => candidate.id === noteId); return note === undefined ? undefined : { key, note }; },
+      deleteWithUndo: async (key: string, noteId: string) => { keys.push(`delete:${key}:${noteId}`); const index = stored.findIndex(candidate => candidate.id === noteId); return index < 0 ? undefined : { note: stored.splice(index, 1)[0], undoToken: 'worktree-delete-token' }; },
+      undoDeletion: async (token: string) => { keys.push(`undo:${token}`); const note = { id: 'note-identifier-001', text: 'Existing note' }; stored.push(note); return note; }
     };
     const discovery = { worktreesNow: () => [worktree], place: async () => undefined, dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [] }) };
     const notesApp = await buildApp({ ...config }, { auth: new AuthService(hash, Buffer.alloc(32, 10).toString('base64url')), discovery: discovery as never, notes: notes as never });
@@ -2034,7 +2036,10 @@ describe('worktree notes API', () => {
       const created = await notesApp.inject({ method: 'POST', url: '/api/worktrees/cora/notes', headers, payload: { title: 'Assistant response' } });
       const updated = await notesApp.inject({ method: 'PUT', url: '/api/worktrees/cora/notes/note-identifier-002', headers, payload: { text: 'Autosaved note' } });
       const renamed = await notesApp.inject({ method: 'PATCH', url: '/api/worktrees/cora/notes/note-identifier-002', headers, payload: { title: 'Release checklist' } });
-      const deleted = await notesApp.inject({ method: 'DELETE', url: '/api/worktrees/cora/notes/note-identifier-001', headers });
+      // accept the explicit json bodies forwarded by chunked browser transports
+      const jsonHeaders = { ...headers, 'content-type': 'application/json', 'transfer-encoding': 'chunked' };
+      const deleted = await notesApp.inject({ method: 'DELETE', url: '/api/worktrees/cora/notes/note-identifier-001', headers: jsonHeaders, payload: '{}' });
+      const restored = await notesApp.inject({ method: 'POST', url: '/api/notes/deletions/worktree-delete-token/undo', headers: jsonHeaders, payload: '{}' });
       const missing = await notesApp.inject({ method: 'GET', url: '/api/worktrees/missing/notes', headers: { host: headers.host, cookie: headers.cookie } });
 
       expect(listed.json()).toEqual({ notes: [{ id: 'note-identifier-001', text: 'Existing note' }] });
@@ -2042,9 +2047,10 @@ describe('worktree notes API', () => {
       expect(created.json()).toEqual({ id: 'note-identifier-002', text: '', title: 'Assistant response' });
       expect(updated.json()).toEqual({ id: 'note-identifier-002', text: 'Autosaved note', title: 'Assistant response' });
       expect(renamed.json()).toEqual({ id: 'note-identifier-002', text: 'Autosaved note', title: 'Release checklist' });
-      expect(deleted.json()).toEqual({ id: 'note-identifier-001', text: 'Existing note' });
+      expect(deleted.json()).toEqual({ id: 'note-identifier-001', text: 'Existing note', undoToken: 'worktree-delete-token' });
+      expect(restored.json()).toEqual({ id: 'note-identifier-001', text: 'Existing note' });
       expect(missing.statusCode).toBe(404);
-      expect(keys).toEqual(['list:potato', 'create:potato:Assistant response', 'update:potato:note-identifier-002', 'rename:potato:note-identifier-002', 'delete:potato:note-identifier-001']);
+      expect(keys).toEqual(['list:potato', 'create:potato:Assistant response', 'update:potato:note-identifier-002', 'rename:potato:note-identifier-002', 'delete:potato:note-identifier-001', 'undo:worktree-delete-token']);
     } finally { await notesApp.close(); }
   }, 15_000);
 
@@ -2073,7 +2079,8 @@ describe('worktree notes API', () => {
         note.title = title;
         return { ...note };
       },
-      delete: async (key: string, noteId: string) => { keys.push(key); const index = stored.findIndex(candidate => candidate.id === noteId); return index < 0 ? undefined : stored.splice(index, 1)[0]; }
+      resolve: async (key: string, noteId: string) => { const note = stored.find(candidate => candidate.id === noteId); return note === undefined ? undefined : { key, note }; },
+      deleteWithUndo: async (key: string, noteId: string) => { keys.push(key); const index = stored.findIndex(candidate => candidate.id === noteId); return index < 0 ? undefined : { note: stored.splice(index, 1)[0], undoToken: 'scratch-delete-token' }; }
     };
     const discovery = { worktreesNow: () => [worktree],
       // resolve the live scratch agent
@@ -2098,7 +2105,7 @@ describe('worktree notes API', () => {
       expect(created.statusCode).toBe(201);
       expect(updated.json()).toEqual({ id: 'note-identifier-002', text: 'Keep this in scratch', title: 'Scratch checklist' });
       expect(renamed.json()).toEqual({ id: 'note-identifier-002', text: 'Keep this in scratch', title: 'Scratch plan' });
-      expect(deleted.json()).toEqual({ id: 'note-identifier-001', text: 'Scratch note' });
+      expect(deleted.json()).toEqual({ id: 'note-identifier-001', text: 'Scratch note', undoToken: 'scratch-delete-token' });
       expect(missing.statusCode).toBe(404);
       expect(new Set(keys).size).toBe(1);
       expect(keys[0]).toMatch(/^scratch_[A-Za-z0-9_-]{40}$/u);

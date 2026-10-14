@@ -30,7 +30,7 @@ test('deletes empty and whitespace-only notes when they are closed', async ({ pa
       deleted.push(match[1]!);
       const index = notes.findIndex(candidate => candidate.id === match[1]);
       const [note] = index < 0 ? [] : notes.splice(index, 1);
-      return note === undefined ? route.fulfill({ status: 404, json: { error: 'missing' } }) : route.fulfill({ json: note });
+      return note === undefined ? route.fulfill({ status: 404, json: { error: 'missing' } }) : route.fulfill({ json: { ...note, undoToken: 'undo-deleted-note' } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });

@@ -119,7 +119,7 @@ const mockWorktreeVisibility = async (page: Page, fixture: NoteVisibilityFixture
     if (note !== null && request.method() === 'DELETE') {
       fixture.deletes.push(note[2] ?? '');
       fixture.removed = true;
-      return route.fulfill({ json: fixture.note });
+      return route.fulfill({ json: { ...fixture.note, undoToken: 'undo-deleted-note' } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });

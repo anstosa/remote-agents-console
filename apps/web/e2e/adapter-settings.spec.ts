@@ -522,6 +522,7 @@ test('shows a dismissible toast after a queued agent update fails with its menu 
   const toast = page.getByRole('alert', { name: 'Agent update failed' });
   await page.clock.runFor(1_001);
   await expect(toast).toContainText('Agent update failed after starting.');
+  await expect(toast.locator('.toast-timer-bar')).toHaveCount(0);
   // error notices must not expire before dismissal
   await page.clock.fastForward(60_000);
   await expect(toast).toBeVisible();
@@ -566,6 +567,7 @@ test('shows a dismissible toast when an agent update cannot start', async ({ pag
   await update.click();
   const toast = page.getByRole('alert', { name: 'Agent update failed' });
   await expect(toast).toContainText('Another agent update is already running.');
+  await expect(toast.locator('.toast-timer-bar')).toHaveCount(0);
   await expect(menu.getByRole('alert')).toHaveCount(0);
   await expect(update).toBeEnabled();
   await toast.getByRole('button', { name: 'Dismiss operation status' }).click();
