@@ -39,6 +39,12 @@ describe('managed run fresh launch', () => {
     await expect(launchFresh(steps({ deliver: async () => false }))).resolves.toEqual({ status: 'failed', reason: 'delivery-failed', agentId: 'agent-2' });
   });
 
+  it('never delivers after a prepare that left unconfirmed input in the pane', async () => {
+    const deliver = vi.fn(async () => true);
+    await expect(launchFresh(steps({ prepare: async () => false, deliver }))).resolves.toEqual({ status: 'failed', reason: 'delivery-failed', detail: 'the agent did not accept input', agentId: 'agent-2' });
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
   it('never lets a failed prepare block delivery', async () => {
     const deliver = vi.fn(async () => true);
     await expect(launchFresh(steps({ prepare: async () => { throw new Error('rename failed'); }, deliver }))).resolves.toMatchObject({ status: 'launched' });

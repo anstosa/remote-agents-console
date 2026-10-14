@@ -20,6 +20,7 @@ export type InteractiveReviewHost = {
   launch(worktreeId: string, kind: ReviewAgentKind, launch: ReviewRunLaunch): Promise<boolean>;
   waitForAgent(before: Set<string>, runId: string): Promise<Agent | undefined>;
   waitForReadiness(agent: Agent): Promise<ReadinessOutcome>;
+  // resolves `false` when the rename may be left unsent in the composer, so no prompt is pasted after it
   name(agentId: string, name: string): Promise<unknown>;
   beginTurn(agent: Agent, maxBytes: number): Promise<() => Promise<string | undefined>>;
   submit(agentId: string, text: string): Promise<boolean>;
@@ -143,7 +144,7 @@ export class InteractiveReviewRunner implements ReviewRunner {
         waitForReadiness: candidate => this.host.waitForReadiness(candidate),
         close: id => this.host.close(id),
         // report the Agent, then name its conversation with the run (best-effort)
-        prepare: async candidate => { agent = candidate; request.onStarted?.({ agentId: candidate.id }); await this.host.name(candidate.id, request.label); },
+        prepare: async candidate => { agent = candidate; request.onStarted?.({ agentId: candidate.id }); return await this.host.name(candidate.id, request.label); },
         deliver: async candidate => { agent = candidate; read = await this.host.beginTurn(candidate, maxBytes); return await this.host.submit(candidate.id, text); }
       });
       if (launched.status === 'failed') {

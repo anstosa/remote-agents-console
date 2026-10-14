@@ -51,7 +51,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/run', () => {
     const note = await notes.createWithText('proj', 'Files only', '', undefined, [attachment]);
     const queued = new QueuedPromptService(join(root, 'queue.json'));
     const tmux = recordingTmux();
-    const discovery = appearingDiscovery({ worktree: localWorktree, agent: localAgent, socket: testSocket });
+    const discovery = appearingDiscovery({ worktree: localWorktree, agent: localAgent, socket: testSocket, working: () => tmux.submits > 0 });
     const server = await runApp({ notes, queued, tmux, launch: launchFake(), discovery });
     try {
       const response = await server.inject(run(note!.id));
@@ -66,7 +66,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/run', () => {
     const { notes, queued, noteId } = await stores();
     const tmux = recordingTmux();
     const launch = launchFake();
-    const discovery = appearingDiscovery({ worktree, agent: codexAgent(), socket: testSocket });
+    const discovery = appearingDiscovery({ worktree, agent: codexAgent(), socket: testSocket, working: () => tmux.submits > 0 });
     const server = await runApp({ notes, queued, tmux, launch, discovery });
     try {
       const response = await server.inject(run(noteId));
@@ -83,7 +83,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/run', () => {
     const { notes, queued, noteId } = await stores();
     const tmux = recordingTmux();
     const launch = launchFake();
-    const discovery = appearingDiscovery({ worktree, agent: codexAgent(), socket: testSocket });
+    const discovery = appearingDiscovery({ worktree, agent: codexAgent(), socket: testSocket, working: () => tmux.submits > 0 });
     const server = await runApp({ notes, queued, tmux, launch, discovery });
     try {
       // the shipping client posts no body, so the launch handoff receives an undefined kind
@@ -100,7 +100,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/run', () => {
     const tmux = recordingTmux({ capture: () => 'Ready to help.' });
     const launch = launchFake();
     const agent: Agent = { ...claudeAgent(), conversationId: 'conv-123' };
-    const discovery = appearingDiscovery({ worktree, agent, socket: testSocket });
+    const discovery = appearingDiscovery({ worktree, agent, socket: testSocket, working: () => tmux.submits > 0 });
     const server = await runApp({ notes, queued, tmux, launch, discovery });
     try {
       const response = await server.inject(run(noteId, 'wt-main', 'claude'));

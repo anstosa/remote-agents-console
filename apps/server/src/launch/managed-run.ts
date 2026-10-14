@@ -14,7 +14,8 @@ export type FreshLaunchFailure = 'launch-refused' | 'no-agent' | 'not-ready-bloc
 export type FreshLaunchOutcome = { status: 'launched'; agentId: string } | { status: 'failed'; reason: FreshLaunchFailure; detail?: string; agentId?: string };
 // The caller's steps for one fresh launch: snapshot the Agent ids, launch, wait for the new
 // Agent and its readiness, then `prepare` it (best-effort: name the conversation) and deliver
-// the prompt. `close` removes a pane that never became ready.
+// the prompt. `close` removes a pane that never became ready. A `prepare` that resolves `false`
+// left input in the pane it could not confirm, so the prompt is not pasted after it.
 export type FreshLaunchSteps = {
   agentIds(): Promise<Set<string>>;
   launch(): Promise<boolean>;
@@ -39,8 +40,9 @@ export async function launchFresh(steps: FreshLaunchSteps): Promise<FreshLaunchO
     await steps.close(agent.id).catch(() => undefined);
     return readiness.state === 'blocked' ? { status: 'failed', reason: 'not-ready-blocked', detail: readiness.reason } : { status: 'failed', reason: 'not-ready-timeout' };
   }
-  // naming never blocks delivery
-  await steps.prepare?.(agent).catch(() => undefined);
+  // a failed naming never blocks delivery, but a rename left unsent in the composer would be
+  // submitted as one command with the prompt pasted after it
+  if (await steps.prepare?.(agent).catch(() => undefined) === false) return { status: 'failed', reason: 'delivery-failed', detail: 'the agent did not accept input', agentId: agent.id };
   if (!await steps.deliver(agent)) return { status: 'failed', reason: 'delivery-failed', agentId: agent.id };
   return { status: 'launched', agentId: agent.id };
 }

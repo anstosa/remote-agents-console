@@ -78,7 +78,7 @@ const runNow = (noteId: string) => ({ method: 'POST' as const, url: `/api/worktr
 describe('scheduler tick fires Schedules unattended', () => {
   it('launches fresh at the due instant, records running, pushes nothing, and does not re-fire', async () => {
     const idle: Agent = { ...codexPane, attention: 'finished' };
-    const discovery = appearingDiscovery({ worktree, agent: idle, socket: testSocket });
+    const discovery = appearingDiscovery({ worktree, agent: idle, socket: testSocket, working: () => submissions.length > 0 });
     const { messages, push } = pushRecorder();
     const { notes, queued, noteId } = await seed({ target: { worktreeId: 'wt-main' } });
     const attachment = { name: 'scheduled.txt', data: Buffer.from('scheduled').toString('base64') };
@@ -103,6 +103,64 @@ describe('scheduler tick fires Schedules unattended', () => {
       expect(launch.kinds).toEqual(['codex']);
       expect(await lastRunOf(notes, noteId)).toMatchObject({ status: 'running' });
     } finally { await server.close(); }
+  }, 15_000);
+
+  // Claude's first launch of a morning took both pastes (`/rename`, then the note) but dropped the
+  // Enter after each, so the run sat unsent until the reconciler recorded it `completed`
+  it('presses Enter again and fails the Run, keeping the pane, when the fresh agent never starts the note', async () => {
+    const discovery = appearingDiscovery({ worktree, agent: { ...codexPane, attention: 'finished' }, socket: testSocket });
+    const { messages, push } = pushRecorder();
+    const { notes, queued, noteId } = await seed({ target: { worktreeId: 'wt-main' } });
+    const tmux = recordingTmux();
+    const prompts = { submit: async () => true, beginAgentMutation: () => () => {} };
+    const server = await tickApp({ notes, queued, tmux, launch: launchFake(), discovery, push, prompts });
+    try {
+      await server.scheduler.tick(tickNow);
+      expect(await lastRunOf(notes, noteId)).toMatchObject({ at: dueInstant, status: 'failed' });
+      expect(tmux.submits).toBeGreaterThan(1);
+      // the unsent note stays visible in its pane, and the operator is told
+      expect(tmux.closed).toEqual([]);
+      expect(messages).toHaveLength(1);
+    } finally { await server.close(); }
+  }, 15_000);
+
+  it('records running once a re-pressed Enter starts the note', async () => {
+    const tmux = recordingTmux();
+    const discovery = appearingDiscovery({ worktree, agent: { ...codexPane, attention: 'finished' }, socket: testSocket, working: () => tmux.submits > 0 });
+    const { notes, queued, noteId } = await seed({ target: { worktreeId: 'wt-main' } });
+    const prompts = { submit: async () => true, beginAgentMutation: () => () => {} };
+    const server = await tickApp({ notes, queued, tmux, launch: launchFake(), discovery, prompts });
+    try {
+      await server.scheduler.tick(tickNow);
+      expect(await lastRunOf(notes, noteId)).toMatchObject({ status: 'running', agentId: 'agent-1' });
+      expect(tmux.submits).toBe(1);
+    } finally { await server.close(); }
+  }, 15_000);
+
+  it('never pastes the note after a rename the fresh agent did not take', async () => {
+    const configDir = await mkdtemp(join(tmpdir(), 'rac-schedule-rename-')); dirs.push(configDir);
+    const savedConfigDir = process.env.RAC_CLAUDE_CONFIG_DIR;
+    // no transcript is ever written, so the rename never reads back
+    process.env.RAC_CLAUDE_CONFIG_DIR = configDir;
+    const claude: Agent = { ...codexPane, kind: 'claude', conversationId: '11111111-2222-4333-8444-555555555555', attention: 'finished' };
+    const discovery = { ...appearingDiscovery({ worktree, agent: claude, socket: testSocket }), conversationId: async () => claude.conversationId, paneDirectory: () => '/repo' };
+    const { messages, push } = pushRecorder();
+    const { notes, queued, noteId } = await seed({ kind: 'claude', target: { worktreeId: 'wt-main' } });
+    const tmux = recordingTmux();
+    const submitted: string[] = [];
+    const prompts = { submit: async (_agentId: string, text: string) => { submitted.push(text); return true; }, beginAgentMutation: () => () => {} };
+    const server = await tickApp({ notes, queued, tmux, launch: launchFake(), discovery, push, prompts, conversationNamePollDelay: async () => {} });
+    try {
+      await server.scheduler.tick(tickNow);
+      expect(await lastRunOf(notes, noteId)).toMatchObject({ status: 'failed', detail: 'the agent did not accept input' });
+      expect(tmux.pasted).toEqual([expect.stringMatching(/^\/rename ⏰ Weekly report — /u)]);
+      expect(tmux.submits).toBe(3);
+      expect(submitted).toEqual([]);
+      expect(messages).toHaveLength(1);
+    } finally {
+      await server.close();
+      if (savedConfigDir === undefined) delete process.env.RAC_CLAUDE_CONFIG_DIR; else process.env.RAC_CLAUDE_CONFIG_DIR = savedConfigDir;
+    }
   }, 15_000);
 
   it('closes the pane and records completed once a managed Run has finished', async () => {
@@ -248,13 +306,14 @@ describe('scheduler tick fires Schedules unattended', () => {
 
   it('skips a tick for a Schedule whose Run now is still in flight, via the shared flight guard', async () => {
     const { notes, queued, noteId } = await seed({ target: { worktreeId: 'wt-main' } });
-    const discovery = appearingDiscovery({ worktree, agent: { ...codexPane, attention: 'finished' }, socket: testSocket });
+    const tmux = recordingTmux();
+    const discovery = appearingDiscovery({ worktree, agent: { ...codexPane, attention: 'finished' }, socket: testSocket, working: () => tmux.submits > 0 });
     // gate the fresh launch so Run now stays in flight (holding the shared flight key) while we tick
     let releaseLaunch!: () => void;
     const launchGate = new Promise<void>(resolve => { releaseLaunch = resolve; });
     const launched: string[] = [];
     const launch = { launch: async (_id: string, kind?: string) => { launched.push(kind ?? 'codex'); await launchGate; return true; }, launchProjectDirectory: async () => true, launchHome: async () => true, isLaunchableKind: () => true };
-    const server = await tickApp({ notes, queued, tmux: recordingTmux(), launch, discovery });
+    const server = await tickApp({ notes, queued, tmux, launch, discovery });
     try {
       const runNowResponse = server.inject(runNow(noteId));
       // wait until Run now has entered the (gated) launch, so its flight key is held

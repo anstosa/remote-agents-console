@@ -1897,40 +1897,72 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // read-back and record of the console rename route below: paste the Adapter's rename text under the
   // lifecycle mutation lock, poll the agent's own store until it reports the name, then record it as
   // console-named so the closed managed Run stays discoverable in the Named list. Best-effort — a kind
-  // that cannot rename, a busy pane, or an unconfirmed read-back returns false and the Run proceeds
-  // unnamed rather than failing. The route keeps its own HTTP guards (question check, returned row).
-  const nameAgentConversation = async (agentId: string, name: string): Promise<boolean> => {
+  // that cannot rename or a busy pane is `skipped` and the Run proceeds unnamed. A freshly started
+  // agent can take the paste but drop its Enter, so the keys are pressed again while the read-back
+  // has not confirmed; a rename still unconfirmed is `stuck`, its text possibly left in the composer.
+  // The route keeps its own HTTP guards (question check, returned row).
+  const conversationNamePresses = 3;
+  const nameAgentConversation = async (agentId: string, name: string): Promise<'named' | 'skipped' | 'stuck'> => {
     const clean = name.trim().replace(/\s+/gu, ' ').slice(0, 120);
-    if (clean.length === 0 || renamesInFlight.has(agentId)) return false;
+    if (clean.length === 0 || renamesInFlight.has(agentId)) return 'skipped';
     const persistence = await agentPersistence(agentId);
-    if (persistence === undefined) return false;
+    if (persistence === undefined) return 'skipped';
     const conversations = adapterFor(persistence.agent.kind)?.conversations;
-    if (conversations?.rename === undefined || conversations.readName === undefined) return false;
+    if (conversations?.rename === undefined || conversations.readName === undefined) return 'skipped';
     renamesInFlight.add(agentId);
     try {
       const conversationId = await discovery.conversationId(agentId);
       const target = await discovery.target(agentId);
-      if (conversationId === undefined || target === undefined) return false;
-      const releaseMutation = prompts.beginAgentMutation(agentId);
-      if (releaseMutation === undefined) return false;
+      if (conversationId === undefined || target === undefined) return 'skipped';
       const rename = conversations.rename(clean);
       const buffer = `rac-${randomBytes(18).toString('base64url')}`;
-      try {
-        if (!await tmux.pastePrompt(target.socket, target.agent.paneId, buffer, rename.text)
-          || !await tmux.sendKeys(target.socket, target.agent.paneId, rename.keys)) return false;
-      } finally { releaseMutation(); }
       const cwd = discovery.paneDirectory(agentId);
-      for (let attempt = 0; attempt < conversationNamePollAttempts; attempt += 1) {
-        await conversationNamePollDelay();
-        if (await conversations.readName(conversationId, cwd).catch(() => undefined) === clean) {
-          await consoleNamed.record(persistence.saveKey, { kind: persistence.agent.kind, id: conversationId }).catch(() => undefined);
-          return true;
+      for (let press = 0; press < conversationNamePresses; press += 1) {
+        const releaseMutation = prompts.beginAgentMutation(agentId);
+        if (releaseMutation === undefined) return press === 0 ? 'skipped' : 'stuck';
+        try {
+          if (press === 0 && !await tmux.pastePrompt(target.socket, target.agent.paneId, buffer, rename.text)) return 'skipped';
+          if (!await tmux.sendKeys(target.socket, target.agent.paneId, rename.keys)) return 'stuck';
+        } finally { releaseMutation(); }
+        for (let attempt = 0; attempt < conversationNamePollAttempts; attempt += 1) {
+          await conversationNamePollDelay();
+          if (await conversations.readName(conversationId, cwd).catch(() => undefined) === clean) {
+            await consoleNamed.record(persistence.saveKey, { kind: persistence.agent.kind, id: conversationId }).catch(() => undefined);
+            return 'named';
+          }
         }
       }
-      return false;
+      return 'stuck';
     } finally {
       renamesInFlight.delete(agentId);
     }
+  };
+  // Submit a server-sent prompt to a freshly launched agent and confirm the agent started it
+  // (reported itself busy). Claude's first launch of a morning took the paste but dropped the Enter,
+  // so the submit keys are pressed again a couple of times before the delivery counts as failed. A
+  // prompt that completes without work, or a shell-mode one, reports nothing to confirm.
+  const promptStartAttempts = 40;
+  const promptStartPressEvery = 8;
+  const submitConfirmed = async (agentId: string, text: string, attachments: PromptAttachment[] = []): Promise<boolean> => {
+    if (!await prompts.submit(agentId, text, attachments)) return false;
+    const first = await discovery.target(agentId);
+    if (first === undefined) return false;
+    const submission = adapterFor(first.agent.kind)?.submission;
+    const shellMode = attachments.length === 0 && text.startsWith('!');
+    if (submission === undefined || shellMode || (attachments.length === 0 && submission.completesWithoutWork?.(text) === true)) return true;
+    const composed = submission.prepare(text, 'prompt');
+    for (let attempt = 1; attempt <= promptStartAttempts; attempt += 1) {
+      await launchPollDelay();
+      const target = await discovery.target(agentId, true);
+      if (target === undefined) return false;
+      if (agentAttentionState(target.agent) !== 'finished') return true;
+      if (attempt % promptStartPressEvery !== 0 || attempt === promptStartAttempts) continue;
+      const releaseMutation = prompts.beginAgentMutation(agentId);
+      if (releaseMutation === undefined) continue;
+      try { await tmux.sendKeys(target.socket, target.agent.paneId, composed.idleKeys ?? composed.keys).catch(() => false); }
+      finally { releaseMutation(); }
+    }
+    return false;
   };
   // wait for slow agent startup, shared with the Run primitive (launch/wait.ts)
   const waitForAgent = createAgentWaiter(discovery, launchPollDelay);
@@ -1987,9 +2019,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       },
       waitForAgent: (before, runId) => waitForAgent(before, reviewRunAgent(runId)),
       waitForReadiness: agent => waitForReadiness(agent),
-      name: (agentId, name) => nameAgentConversation(agentId, name),
+      name: async (agentId, name) => await nameAgentConversation(agentId, name) !== 'stuck',
       beginTurn: (agent, maxBytes) => beginReplyTurn(discovery, agent, maxBytes),
-      submit: (agentId, text) => prompts.submit(agentId, text),
+      submit: (agentId, text) => submitConfirmed(agentId, text),
       // the cached discovery snapshot (rescanned once over 2 s old, which the dashboard poll keeps it
       // under); an Agent missing from it is confirmed gone by a forced scan inside `target`
       attention: async agentId => { await discovery.refresh(); const target = await discovery.target(agentId); return target === undefined ? undefined : agentAttentionState(target.agent); },
@@ -2084,8 +2116,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       close: agentId => prompts.close(agentId),
       // an unattended (managed) Run names its fresh conversation before delivering, so the pane the
       // reconciler later closes is still findable by name in the Named list
-      ...(name === undefined ? {} : { prepare: (agent: Agent) => nameAgentConversation(agent.id, name) }),
-      deliver: agent => prompts.submit(agent.id, text, attachments)
+      ...(name === undefined ? {} : { prepare: async (agent: Agent) => await nameAgentConversation(agent.id, name) !== 'stuck' }),
+      deliver: agent => submitConfirmed(agent.id, text, attachments)
     });
     if (outcome.status === 'launched') return outcome;
     return { status: 'failed', reason: outcome.reason, detail: outcome.detail ?? freshFailureDetail[outcome.reason], ...(outcome.agentId === undefined ? {} : { agentId: outcome.agentId }) };

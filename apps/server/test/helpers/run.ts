@@ -110,9 +110,10 @@ export function reuseWorld(params: { worktree: Worktree; socket: SocketRef; agen
  * A discovery stub over one Worktree and one agent: the agent is absent from the
  * dashboard until after `appearAfter` snapshots (so `waitForAgent` finds it on a later
  * poll, or never when `appearAfter` is `Infinity`), while `target` always resolves it so
- * the readiness poll can read its pane.
+ * the readiness poll can read its pane. `working` reports the agent busy while it holds, the
+ * way the agent's own hook does once its prompt is submitted (pass `() => tmux.submits > 0`).
  */
-export function appearingDiscovery(params: { worktree: Worktree; agent: Agent; socket: SocketRef; appearAfter?: number }): {
+export function appearingDiscovery(params: { worktree: Worktree; agent: Agent; socket: SocketRef; appearAfter?: number; working?: () => boolean }): {
   invalidateWorktrees: () => void;
   worktreesNow: () => Worktree[];
   worktrees: () => Promise<Worktree[]>;
@@ -129,7 +130,7 @@ export function appearingDiscovery(params: { worktree: Worktree; agent: Agent; s
     worktrees: async () => [worktree],
     place: async () => undefined,
     dashboard: async () => ({ generation: ++dashboards, places: [], adapters: {}, agents: dashboards > appearAfter ? [agent] : [], projects: [] }),
-    target: async (id: string) => (id === agent.id ? { agent, socket } : undefined),
+    target: async (id: string) => (id === agent.id ? { agent: params.working?.() === true ? { ...agent, attention: 'working' as const } : agent, socket } : undefined),
   };
 }
 
@@ -148,18 +149,21 @@ export function recordingTmux(options: { capture?: () => string } = {}): {
   label: () => Promise<boolean>;
   pasted: string[];
   closed: string[];
+  readonly submits: number;
 } {
   const pasted: string[] = [];
   const closed: string[] = [];
   let draft = '';
+  let submits = 0;
   return {
     capture: async () => (options.capture ? options.capture() : `› ${draft}`),
     pastePrompt: async (_socket, _pane, _buffer, text) => { draft = text; pasted.push(text); return true; },
     // Enter clears the composer, so the submission reads as accepted
-    sendKeys: async () => { draft = ''; return true; },
+    sendKeys: async () => { draft = ''; submits += 1; return true; },
     close: async (_socket, pane) => { closed.push(pane); return true; },
     label: async () => true,
     pasted,
     closed,
+    get submits() { return submits; },
   };
 }

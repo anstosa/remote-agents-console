@@ -222,7 +222,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/schedule/run', () => {
     const tmux = recordingTmux();
     const launch = launchFake();
     // the remembered id resolves to nothing; a fresh Codex appears
-    const discovery = appearingDiscovery({ worktree: runtimeWorktree, agent: fresh, socket: testSocket });
+    const discovery = appearingDiscovery({ worktree: runtimeWorktree, agent: fresh, socket: testSocket, working: () => tmux.submits > 0 });
     const { notes, queued, noteId } = await scheduledNote({ target: { worktreeId: 'wt-main' } }, 'ghost-agent-id');
     const attachment = { name: 'fresh.txt', data: Buffer.from('fresh').toString('base64') };
     await notes.appendAttachments('proj', noteId, [attachment]);
@@ -253,7 +253,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/schedule/run', () => {
       worktreesNow: () => [worktree],
       worktrees: async () => [worktree],
       dashboard: async (): Promise<Dashboard> => ({ generation: ++dashboards, places: [], adapters: {}, agents: dashboards > 1 ? [stale, fresh] : [stale], projects: [] }),
-      target: async (id: string) => (id === stale.id ? { agent: stale, socket: testSocket } : id === fresh.id ? { agent: fresh, socket: testSocket } : undefined),
+      target: async (id: string) => (id === stale.id ? { agent: stale, socket: testSocket } : id === fresh.id ? { agent: tmux.submits > 0 ? { ...fresh, attention: 'working' as const } : fresh, socket: testSocket } : undefined),
     };
     const tmux = recordingTmux();
     const launch = launchFake();
@@ -370,7 +370,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/schedule/run', () => {
   it('launches fresh for a Scratch target through launchHome', async () => {
     const tmux = recordingTmux();
     const launch = launchFake();
-    const discovery = appearingDiscovery({ worktree, agent: { ...codexPane, home: '/scratch', placeId: 'scratch:/scratch', attention: 'finished' }, socket: testSocket });
+    const discovery = appearingDiscovery({ worktree, agent: { ...codexPane, home: '/scratch', placeId: 'scratch:/scratch', attention: 'finished' }, socket: testSocket, working: () => tmux.submits > 0 });
     const { notes, queued, noteId } = await scheduledNote({ target: { scratch: true } });
     const server = await runApp({ notes, queued, tmux, launch, discovery });
     try {
@@ -386,7 +386,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/schedule/run', () => {
     const tmux = recordingTmux();
     const launch = launchFake();
     const fresh: Agent = { ...codexPane, id: 'agent-1', home: '/dir', placeId: 'dir-proj:/dir-proj', attention: 'finished' };
-    const discovery = appearingDiscovery({ worktree, agent: fresh, socket: testSocket });
+    const discovery = appearingDiscovery({ worktree, agent: fresh, socket: testSocket, working: () => tmux.submits > 0 });
     const projects = [testProject({ id: 'proj' }), testProject({ id: 'dir-proj', label: 'Dir Proj', mode: 'directory', path: '/dir', identity: '/dir', available: true })];
     const { notes, queued, noteId } = await scheduledNote({ target: { projectId: 'dir-proj' } });
     const server = await runApp({ notes, queued, tmux, launch, discovery, projects });
@@ -453,7 +453,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/schedule/run', () => {
       worktreesNow: () => [worktree],
       worktrees: async () => [worktree],
       dashboard: async (): Promise<Dashboard> => ({ generation: ++dashboards, places: [], adapters: {}, agents: dashboards > 1 ? [stale, fresh] : [stale], projects: [] }),
-      target: async (id: string) => (id === stale.id ? { agent: stale, socket: testSocket } : id === fresh.id ? { agent: fresh, socket: testSocket } : undefined),
+      target: async (id: string) => (id === stale.id ? { agent: stale, socket: testSocket } : id === fresh.id ? { agent: tmux.submits > 0 ? { ...fresh, attention: 'working' as const } : fresh, socket: testSocket } : undefined),
     };
     const tmux = recordingTmux();
     const launch = launchFake();
@@ -493,7 +493,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/schedule/run', () => {
       worktrees: async () => [worktree],
       // an unrelated Agent appears first, so only the Place match picks the launched one
       dashboard: async (): Promise<Dashboard> => ({ generation: ++dashboards, places: [], adapters: {}, agents: dashboards > 2 ? [stale, stranger, fresh] : dashboards > 1 ? [stale, stranger] : [stale], projects: [] }),
-      target: async (id: string) => [stale, stranger, fresh].map(agent => ({ agent, socket: testSocket })).find(target => target.agent.id === id),
+      target: async (id: string) => [stale, stranger, tmux.submits > 0 ? { ...fresh, attention: 'working' as const } : fresh].map(agent => ({ agent, socket: testSocket })).find(target => target.agent.id === id),
     };
     const tmux = recordingTmux();
     const launch = launchFake();
