@@ -443,20 +443,25 @@ describe('file at revision', () => {
 
   it('truncates a large blob, rejects trees, and refuses an option-like revision', async () => {
     const root = await repo();
-    const big = `${'x'.repeat(300 * 1024)}\n`;
+    const big = `${'x'.repeat(2 * 1024 * 1024)}\n`;
+    const sizable = `${'y'.repeat(300 * 1024)}\n`;
     await mkdir(join(root, 'dir'));
     await Promise.all([
       writeFile(join(root, 'big.txt'), big),
+      writeFile(join(root, 'sizable.txt'), sizable),
       writeFile(join(root, 'dir', 'inner.txt'), 'inner\n')
     ]);
     await git(root, 'add', '.');
     await git(root, 'commit', '-m', 'base');
 
-    // a blob past the 256 KB cap comes back truncated with its true size and a capped body
+    // a blob past the 2 MB cap comes back truncated with its true size and a capped body
     const large = await fileAtRevision(root, { commit: 'HEAD' }, 'big.txt');
     expect(large).toMatchObject({ path: 'big.txt', binary: false, truncated: true });
     expect(large?.size).toBe(Buffer.byteLength(big));
-    expect(large?.content?.length).toBe(256 * 1024);
+    expect(large?.content?.length).toBe(2 * 1024 * 1024);
+    // a file past the 256 KB preview cap still reads whole, at a revision and in the working tree
+    await expect(fileAtRevision(root, { commit: 'HEAD' }, 'sizable.txt')).resolves.toMatchObject({ truncated: false, content: sizable });
+    await expect(fileAtRevision(root, { workingTree: true }, 'sizable.txt')).resolves.toMatchObject({ truncated: false, content: sizable });
 
     // a directory path resolves to a tree object, not a readable file
     await expect(fileAtRevision(root, { commit: 'HEAD' }, 'dir')).resolves.toBeUndefined();

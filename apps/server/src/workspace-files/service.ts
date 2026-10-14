@@ -126,7 +126,7 @@ export class WorkspaceFileService {
   }
 
   // load a bounded text preview
-  async preview(workspace: string, path: string): Promise<WorkspaceFilePreview | undefined> {
+  async preview(workspace: string, path: string, maxBytes = maxPreviewBytes): Promise<WorkspaceFilePreview | undefined> {
     const resolved = await resolveFile(workspace, path);
     if (resolved === undefined) return undefined;
     const handle = await open(resolved.file, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
@@ -138,7 +138,7 @@ export class WorkspaceFileService {
       const local = relative(resolved.root, opened);
       if (!local || local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local)) return undefined;
       const summary = { path: local.split(sep).join('/'), size: info.size };
-      const length = Math.min(summary.size, maxPreviewBytes);
+      const length = Math.min(summary.size, maxBytes);
       const bytes = Buffer.alloc(length);
       const read = length === 0 ? 0 : (await handle.read(bytes, 0, length, 0)).bytesRead;
       const content = bytes.subarray(0, read);

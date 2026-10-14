@@ -5,7 +5,7 @@
 // `import()`. Kept side-effect free so the isolated-component fixture can exercise item derivation
 // without the dashboard.
 import { parseDiffFromFile, parsePatchFiles, type CodeViewDiffItem, type CodeViewFileItem, type FileDiffLoadedChangedFiles } from '@pierre/diffs';
-import type { ComparisonFile, ComparisonFileContents } from './comparison.js';
+import type { ComparisonFile, ComparisonFileContents, RevisionFile } from './comparison.js';
 
 // Line cap for syntax tokenization: past this a file renders as plain (un-highlighted) text so a
 // very large diff or file never blocks the main thread. From the spike's timing measurements.
@@ -82,13 +82,17 @@ export const diffItemForPatch = (key: string, patch: string): CodeViewDiffItem |
 export const diffItemForFile = (file: ComparisonFile): CodeViewDiffItem | undefined =>
   isDiffable(file) ? diffItemForPatch(file.change.path, file.patch) : undefined;
 
+// One side's text, or undefined when it is absent, binary, or cut off by the server's size cap — a
+// partial file would diff or expand against the wrong lines.
+const sideText = (side: RevisionFile | null): string | undefined => side === null || side.truncated ? undefined : side.content;
+
 // Build a diff item from a changed file's two sides (the `/comparison/file` payload), used by the
 // "Load anyway" affordance. jsdiff produces a non-partial diff — one that already carries both
 // revisions — so it renders without a further hydration round-trip.
 export const diffItemForContents = (contents: ComparisonFileContents): CodeViewDiffItem | undefined => {
-  const oldText = contents.base?.content;
-  const newText = contents.working?.content;
-  // a side present but binary (no text) cannot be diffed as text
+  const oldText = sideText(contents.base);
+  const newText = sideText(contents.working);
+  // a side present but binary or cut off (no text) cannot be diffed as text
   if ((contents.base !== null && oldText === undefined) || (contents.working !== null && newText === undefined)) return undefined;
   const oldName = contents.base?.path ?? contents.path;
   const version = sidesHash(oldText ?? '', newText ?? '');
@@ -108,10 +112,10 @@ export const fileItemForContents = (path: string, contents: string): CodeViewFil
 
 // Map a changed file's two sides (the /comparison/file payload) into the `loadDiffFiles` result the
 // diff library hydrates a partial patch with, so Full-context mode can expand the surrounding lines.
-// Returns undefined when either side has no text (a binary side), which cannot be expanded as text.
+// Returns undefined when either side has no text (a binary or cut-off side), which cannot be expanded.
 export const loadedFilesFromContents = (contents: ComparisonFileContents): FileDiffLoadedChangedFiles | undefined => {
-  const oldText = contents.base?.content;
-  const newText = contents.working?.content;
+  const oldText = sideText(contents.base);
+  const newText = sideText(contents.working);
   if (oldText === undefined || newText === undefined) return undefined;
   const oldName = contents.base?.path ?? contents.path;
   const version = sidesHash(oldText, newText);

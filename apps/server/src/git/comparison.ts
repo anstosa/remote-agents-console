@@ -474,7 +474,8 @@ export async function captureComparisonPatch(workspace: string, comparison: Comp
 
 // ---- File at a revision ---------------------------------------------------------------------
 
-const maxRevisionBytes = 256 * 1024;
+// whole enough to expand a large source file's unchanged lines in a diff
+const maxRevisionBytes = 2 * 1024 * 1024;
 export type RevisionFile = { path: string; size: number; binary: boolean; truncated: boolean; content?: string };
 // which side of a Comparison to read a file from: a committed revision, or the live working tree
 export type FileRevision = { commit: string } | { workingTree: true };
@@ -505,12 +506,12 @@ function gitShowBounded(workspace: string, object: string, maxBytes: number): Pr
 }
 
 // read a file's contents at a revision (git object store) or from the working tree (secure fs
-// read via WorkspaceFileService), capped at 256 KB; undefined when the path is absent there
+// read via WorkspaceFileService), capped at 2 MB; undefined when the path is absent there
 export async function fileAtRevision(workspace: string, revision: FileRevision, path: string): Promise<RevisionFile | undefined> {
   // a NUL in the path makes spawn throw; treat it as absent, matching the working-tree branch
   if (path.includes('\0')) return undefined;
   if ('workingTree' in revision) {
-    const preview = await new WorkspaceFileService().preview(workspace, path);
+    const preview = await new WorkspaceFileService().preview(workspace, path, maxRevisionBytes);
     if (preview === undefined) return undefined;
     return { path: preview.path, size: preview.size, binary: preview.binary, truncated: preview.truncated, ...(preview.content === undefined ? {} : { content: preview.content }) };
   }
