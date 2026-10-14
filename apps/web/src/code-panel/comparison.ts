@@ -164,7 +164,36 @@ export type CodePanelController = {
   // fetch one changed file's two sides, for the "Load anyway" placeholder and single-file modes
   loadFile(path: string): Promise<ComparisonFileContents | undefined>;
   close(): void;
+  // the panel view's own state as it was when this Place's Workspace was last switched away from,
+  // and how the view hands it back as it unmounts
+  savedView: CodePanelView | undefined;
+  saveView(view: CodePanelView): void;
 };
+
+// Which context a diff shows: only the patched hunks, the whole file with unchanged lines expanded,
+// or the current file as plain text (no diff — single-file only).
+export type CodePanelViewMode = 'hunks' | 'full' | 'plain';
+// Where the reader was in the panel view: the topmost item and how far into that item they had
+// scrolled. Anchored to an item id — not a raw scrollTop — so it survives the single-file layout that
+// replaces the item list in between, and (the offset being into one item, bounded by its height)
+// restores exactly when the same list returns.
+export type ScrollAnchor = { id: string; offset: number };
+// The panel view's state worth keeping across a Workspace switch. `scroll` is the place on screen;
+// `listAnchor` is the place in the all-files scroll to return to from a selected file.
+export type CodePanelView = {
+  viewMode: CodePanelViewMode;
+  wrapLines: boolean;
+  railCollapsed: boolean;
+  supportingExpanded: boolean;
+  fileCollapse: Record<string, { collapsed: boolean; revision: number }>;
+  scroll?: ScrollAnchor;
+  listAnchor?: ScrollAnchor;
+};
+// A switch unmounts the Workspace's card, so each open Code panel leaves what it was showing here
+// for the card to pick back up. In memory only: a reload starts fresh, and closing the panel forgets it.
+// An entry exists only while no card shows its Worktree: mounting takes it back out.
+type RememberedPanel = { mode: CodePanelMode; commit?: CodePanelCommit; selectedPath?: string; view?: CodePanelView };
+const rememberedPanels = new Map<string, RememberedPanel>();
 
 // scope the open flag to one browser client and Worktree, mirroring the browser split's key
 const codeOpenKey = (worktreeId: string) => `rac.code-open:${worktreeId}`;
@@ -173,9 +202,10 @@ export const savedCodeOpen = (worktreeId: string | undefined): boolean => {
   if (worktreeId === undefined) return false;
   try { return localStorage.getItem(codeOpenKey(worktreeId)) === '1'; } catch { return false; }
 };
-// persist non-destructive code split visibility
+// persist non-destructive code split visibility; closing the split also forgets where it was
 export const saveCodeOpen = (worktreeId: string | undefined, open: boolean) => {
   if (worktreeId === undefined) return;
+  if (!open) rememberedPanels.delete(worktreeId);
   try { if (open) localStorage.setItem(codeOpenKey(worktreeId), '1'); else localStorage.removeItem(codeOpenKey(worktreeId)); }
   catch { /* browser storage is optional */ }
 };
@@ -189,13 +219,14 @@ export const saveCodeOpen = (worktreeId: string | undefined, open: boolean) => {
 // refresh: it refetches the current Comparison without tearing down the visible patch, so the diff
 // updates in place — file by file, preserving scroll — instead of blanking to a spinner.
 export const useCodePanel = (worktreeId: string | undefined, request: Requester, changeSignal?: string): CodePanelController => {
+  const [remembered] = useState(() => worktreeId === undefined ? undefined : rememberedPanels.get(worktreeId));
   const [open, setOpen] = useState(() => savedCodeOpen(worktreeId));
-  const [mode, setModeState] = useState<CodePanelMode>('working');
-  const [commit, setCommit] = useState<CodePanelCommit>();
+  const [mode, setModeState] = useState<CodePanelMode>(remembered?.mode ?? 'working');
+  const [commit, setCommit] = useState<CodePanelCommit | undefined>(remembered?.commit);
   const commitSha = commit?.sha;
   const [state, setState] = useState<CodePanelState>('loading');
   const [patch, setPatch] = useState<ComparisonPatch>();
-  const [selectedPath, setSelectedPath] = useState<string>();
+  const [selectedPath, setSelectedPath] = useState<string | undefined>(remembered?.selectedPath);
   const [filePreview, setFilePreview] = useState<FilePreviewView>();
   const [refreshToken, setRefreshToken] = useState(0);
   const requestId = useRef(0);
@@ -205,6 +236,14 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
   // the last change signal we reacted to; the soft-refresh effect fires only on a genuine change,
   // not on the mount tick or on the open/mode dependencies it also watches
   const signalRef = useRef(changeSignal);
+  // A commit or file restored from a Workspace switch may be gone by now (rebased away, or its change
+  // reverted); the first load after a restore drops whichever is, rather than showing an error.
+  const restoring = useRef(remembered !== undefined);
+  // the latest state, for the unmount cleanup to remember
+  const latest = useRef({ mode, commit, selectedPath });
+  latest.current = { mode, commit, selectedPath };
+  // the panel view's own state: restored into the view when it mounts, and handed back as it unmounts
+  const view = useRef(remembered?.view);
 
   // fetch and validate one Comparison patch; returns undefined on any failure so callers decide
   // whether that means "error" (a hard load) or "leave the current patch untouched" (a soft refresh)
@@ -219,15 +258,33 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
 
   // a closed or unscoped panel holds no Comparison; reopening refetches from scratch, and a
   // different Worktree drops any file the previous one was filtered to
+  const shownWorktree = useRef(worktreeId);
   useEffect(() => {
-    setOpen(savedCodeOpen(worktreeId));
-    setPatch(undefined);
-    setCommit(undefined);
-    setSelectedPath(undefined);
-    setFilePreview(undefined);
-    signalRef.current = changeSignal;
-    requestId.current += 1;
-    previewRequest.current += 1;
+    // taken back out on mount, including an entry a card swapped out in this same commit just left
+    if (worktreeId !== undefined) rememberedPanels.delete(worktreeId);
+    // a mount keeps what the state above restored; only a real Worktree change starts afresh
+    if (shownWorktree.current !== worktreeId) {
+      view.current = undefined;
+      shownWorktree.current = worktreeId;
+      setOpen(savedCodeOpen(worktreeId));
+      setPatch(undefined);
+      setCommit(undefined);
+      setSelectedPath(undefined);
+      setFilePreview(undefined);
+      restoring.current = false;
+      signalRef.current = changeSignal;
+      requestId.current += 1;
+      previewRequest.current += 1;
+    }
+    // Leaving this Worktree (a Workspace switch unmounts the card) remembers an open panel's place,
+    // with the view the panel handed back in its earlier layout cleanup. Open is read from the saved
+    // flag, not render state: a close batched with the unmount (turning a Workspace off closes its
+    // panels and its tab together) has saved it but not rendered yet.
+    return () => {
+      if (worktreeId === undefined || !savedCodeOpen(worktreeId)) return;
+      const { mode: lastMode, commit: lastCommit, selectedPath: lastPath } = latest.current;
+      rememberedPanels.set(worktreeId, { mode: lastMode, ...(lastCommit === undefined ? {} : { commit: lastCommit }), ...(lastPath === undefined ? {} : { selectedPath: lastPath }), ...(view.current === undefined ? {} : { view: view.current }) });
+    };
     // the signal belongs to the new Worktree; the open effect below reloads from scratch
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [worktreeId]);
@@ -243,6 +300,11 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
       const next = await fetchPatch(worktreeId, mode, commitSha);
       // drop a response the panel no longer awaits
       if (requestId.current !== id) return;
+      // a restored commit that no longer loads falls back to Working changes, which reload
+      if (next === undefined && restoring.current && commitSha !== undefined) { setModeState('working'); setCommit(undefined); return; }
+      const restoredPath = restoring.current ? latest.current.selectedPath : undefined;
+      if (restoredPath !== undefined && next?.files.every(file => file.change.path !== restoredPath)) setSelectedPath(undefined);
+      restoring.current = false;
       if (next === undefined) { setState('error'); return; }
       setPatch(next);
       setState('ready');
@@ -269,6 +331,7 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
   }, [changeSignal, open, worktreeId, mode, commitSha, patch, fetchPatch]);
 
   const openChanges = useCallback((next: CodePanelMode, path?: string) => {
+    restoring.current = false;
     // opening Changes leaves any File view the panel was showing
     previewRequest.current += 1;
     setFilePreview(undefined);
@@ -284,6 +347,7 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
   }, [worktreeId]);
 
   const openCommit = useCallback((next: CodePanelCommit) => {
+    restoring.current = false;
     previewRequest.current += 1;
     setFilePreview(undefined);
     setCommit(next);
@@ -325,7 +389,17 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
   const clearFile = useCallback(() => setSelectedPath(undefined), []);
 
   const refresh = useCallback(() => setRefreshToken(token => token + 1), []);
-  const close = useCallback(() => { setOpen(false); saveCodeOpen(worktreeId, false); previewRequest.current += 1; setFilePreview(undefined); }, [worktreeId]);
+  const close = useCallback(() => {
+    setOpen(false);
+    saveCodeOpen(worktreeId, false);
+    view.current = undefined;
+    previewRequest.current += 1;
+    setFilePreview(undefined);
+  }, [worktreeId]);
+  // the view hands its state back as it unmounts; a closed panel has nothing to come back to
+  const saveView = useCallback((next: CodePanelView) => {
+    if (worktreeId !== undefined && savedCodeOpen(worktreeId)) view.current = next;
+  }, [worktreeId]);
 
   const loadFile = useCallback(async (path: string): Promise<ComparisonFileContents | undefined> =>
     worktreeId === undefined ? undefined : await fetchComparisonFile(request, worktreeId, commitSha === undefined ? { kind: mode, path } : { kind: 'commit', commit: commitSha, path }), [worktreeId, mode, commitSha, request]);
@@ -334,5 +408,5 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
   // file-preview endpoint, so it can show even for an agent with no Worktree — keep the panel visible
   // whenever a File is open, or when Changes are open on a real Worktree.
   const panelVisible = filePreview !== undefined || (open && worktreeId !== undefined);
-  return { open: panelVisible, mode, commit, state, patch, selectedPath, filePreview, openChanges, openCommit, openFilePreview, closeFilePreview, setMode, selectFile, clearFile, refresh, loadFile, close };
+  return { open: panelVisible, mode, commit, state, patch, selectedPath, filePreview, openChanges, openCommit, openFilePreview, closeFilePreview, setMode, selectFile, clearFile, refresh, loadFile, close, savedView: view.current, saveView };
 };

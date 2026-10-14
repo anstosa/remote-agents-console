@@ -1,4 +1,4 @@
-import { createElement, type ReactElement, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { cloneElement, createElement, type ReactElement, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import CodePanel from '../src/code-panel/code-panel.js';
 import { useCodePanel, type CodePanelMode, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView } from '../src/code-panel/comparison.js';
@@ -113,20 +113,30 @@ type Controls = {
   // open one file in the File view via the real controller (a file-preview fetch), then leave it
   openFile(path: string, content: string): void;
   closeFile(): void;
+  // show one commit's Changes; with `missingCommits` set a commit fetch 404s, as a rebased-away one does
+  openCommit(sha: string, subject: string): void;
+  missingCommits: boolean;
+  // close the panel through the controller, as its header's Close does
+  close(): void;
+  // unmount and remount the controller and panel, the way switching Workspaces away and back does
+  remount(): Promise<void>;
+  // replace the controller and panel with a fresh pair in one commit, the way launching an Agent swaps
+  // a Worktree's card for an Agent card
+  swap(): Promise<void>;
 };
 const controlLog = (): { __ctrl?: Controls } => window as unknown as { __ctrl?: Controls };
 
-function ControllerHarness({ initialPatch }: { initialPatch: ComparisonPatch }) {
+function ControllerHarness() {
   const [signal, setSignal] = useState('s0');
-  const nextRef = useRef(initialPatch);
   // the file-preview payload the next /file-preview fetch resolves with, so the round-trip runs
   // through the real openFilePreview fetch + isFilePreview guard
   const nextFileRef = useRef<{ path: string; size: number; truncated: boolean; binary: false; content: string } | undefined>(undefined);
   const stats = useRef({ fetches: 0, patchChanges: 0 });
   const lastPatch = useRef<ComparisonPatch | undefined>(undefined);
-  const request = useCallback(async (url: string) => {
-    const body = url.includes('/file-preview') ? nextFileRef.current : nextRef.current;
+  const request = useCallback(async (url: string, init?: RequestInit) => {
+    const body = url.includes('/file-preview') ? nextFileRef.current : harness.next;
     if (!url.includes('/file-preview')) stats.current.fetches += 1;
+    if (harness.missingCommits && String(init?.body).includes('"commit"')) return new Response(JSON.stringify({ error: 'comparison unavailable' }), { status: 404 });
     return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   }, []);
   const controller = useCodePanel('cora', request, signal);
@@ -137,15 +147,24 @@ function ControllerHarness({ initialPatch }: { initialPatch: ComparisonPatch }) 
     controlLog().__ctrl = {
       get fetches() { return stats.current.fetches; },
       get patchChanges() { return stats.current.patchChanges; },
-      setNext: patch => { nextRef.current = patch; },
+      setNext: patch => { harness.next = patch; },
       open: () => controller.openChanges('working'),
       bump: next => setSignal(next),
       openFile: (path, content) => { nextFileRef.current = { path, size: content.length, truncated: false, binary: false, content }; controller.openFilePreview(path, `/api/agents/agent-1/file-preview`); },
-      closeFile: () => controller.closeFilePreview()
+      closeFile: () => controller.closeFilePreview(),
+      openCommit: (sha, subject) => controller.openCommit({ sha, subject }),
+      get missingCommits() { return harness.missingCommits; },
+      set missingCommits(value) { harness.missingCommits = value; },
+      close: () => controller.close(),
+      remount: () => harness.remount(),
+      swap: () => harness.swap()
     };
   });
+  // a closed panel unmounts, as the Workspace drops its split
+  if (!controller.open) return null;
   return createElement(Workspace, {}, createElement(CodePanel, {
     mode: controller.mode,
+    commit: controller.commit,
     state: controller.state,
     patch: controller.patch,
     selectedPath: controller.selectedPath,
@@ -157,10 +176,45 @@ function ControllerHarness({ initialPatch }: { initialPatch: ComparisonPatch }) 
     onSetMode: controller.setMode,
     onCloseFile: controller.closeFilePreview,
     onClose: controller.close,
-    onRetry: controller.refresh
+    onRetry: controller.refresh,
+    savedView: controller.savedView,
+    onSaveView: controller.saveView
   }));
 }
 
+// Script state that outlives a remount of the controller harness.
+const harness: { next?: ComparisonPatch; missingCommits: boolean; remount: () => Promise<void>; swap: () => Promise<void> } = { missingCommits: false, remount: async () => { /* set by Remountable */ }, swap: async () => { /* set by Remountable */ } };
+
+// resolve once the harness that replaced `before` has published its controls
+const freshControls = async (before: Controls | undefined) => {
+  while (controlLog().__ctrl === before) await new Promise(resolve => setTimeout(resolve, 10));
+};
+
+// Unmounts its child for one render and mounts it fresh, standing in for a Workspace switch that
+// unmounts the whole card and a switch back that mounts it again; or swaps it for a fresh instance in
+// one commit.
+function Remountable({ children }: { children: ReactElement }) {
+  const [mounted, setMounted] = useState(true);
+  const [generation, setGeneration] = useState(0);
+  useEffect(() => {
+    harness.remount = async () => {
+      const before = controlLog().__ctrl;
+      setMounted(false);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      setMounted(true);
+      await freshControls(before);
+    };
+    harness.swap = async () => {
+      const before = controlLog().__ctrl;
+      setGeneration(current => current + 1);
+      await freshControls(before);
+    };
+  }, []);
+  return mounted ? cloneElement(children, { key: generation }) : null;
+}
+
 export const renderCodeController = (root: HTMLElement, initialPatch: ComparisonPatch) => {
-  createRoot(root).render(createElement(ControllerHarness, { initialPatch }));
+  harness.next = initialPatch;
+  harness.missingCommits = false;
+  createRoot(root).render(createElement(Remountable, {}, createElement(ControllerHarness)));
 };

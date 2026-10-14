@@ -67,7 +67,7 @@ const mountController = async (page: Page, patch: ComparisonPatch) => {
     renderCodeController(root, scripted);
   }, { scripted: patch });
 };
-type Ctrl = { fetches: number; patchChanges: number; setNext(patch: ComparisonPatch): void; open(): void; bump(signal: string): void; openFile(path: string, content: string): void; closeFile(): void };
+type Ctrl = { fetches: number; patchChanges: number; setNext(patch: ComparisonPatch): void; open(): void; bump(signal: string): void; openFile(path: string, content: string): void; closeFile(): void; openCommit(sha: string, subject: string): void; missingCommits: boolean; close(): void; remount(): Promise<void>; swap(): Promise<void> };
 const controls = (page: Page) => page.evaluate(() => { const c = (window as unknown as { __ctrl: Ctrl }).__ctrl; return { fetches: c.fetches, patchChanges: c.patchChanges }; });
 
 const panel = (page: Page) => page.getByRole('region', { name: 'Code changes' });
@@ -762,4 +762,151 @@ test('opens a file in the File view through the real controller and returns to t
   await panel(page).getByRole('button', { name: '‹ Changes' }).click();
   await expect(diffHeaders(page)).toHaveText([/app\.ts/u]);
   await expect(panel(page).getByText('hello from the file view')).toHaveCount(0);
+});
+
+// Switching Workspaces unmounts the whole card, so the controller and panel mount fresh on the way
+// back; `remount` stands in for that round trip.
+const remount = (page: Page) => page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.remount());
+const eightFiles = Array.from({ length: 8 }, (_, index) => trackedFile(`src/mod${index}.ts`));
+
+test('restores the view settings and scroll position after a Workspace switch', async ({ page }) => {
+  await mountController(page, patchOf(eightFiles));
+  await openController(page);
+  const region = panel(page);
+  await (await openCodeViewMenu(region)).getByRole('checkbox', { name: 'Wrap lines' }).click();
+  await region.getByRole('button', { name: 'Collapse src/mod1.ts' }).click();
+  const view = region.locator('.code-pane-view');
+  await view.evaluate(element => { element.scrollTop = 260; element.dispatchEvent(new Event('scroll')); });
+  await expect.poll(() => view.evaluate(element => element.scrollTop)).toBeGreaterThan(100);
+  const before = await view.evaluate(element => element.scrollTop);
+
+  await remount(page);
+
+  await expect(region).toHaveAttribute('data-wrap-lines', 'true');
+  await expect(region.getByRole('button', { name: 'Expand src/mod1.ts' })).toBeVisible();
+  await expect.poll(() => view.evaluate((element, left) => Math.abs(element.scrollTop - left), before)).toBeLessThan(24);
+});
+
+test('restores the commit and file being read after a Workspace switch', async ({ page }) => {
+  await mountController(page, patchOf(eightFiles));
+  await openController(page);
+  const region = panel(page);
+  await page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.openCommit('abc1234', 'Fix the widget'));
+  await expect(region.getByText('Fix the widget')).toBeVisible();
+  const view = region.locator('.code-pane-view');
+  await view.evaluate(element => { element.scrollTop = 260; element.dispatchEvent(new Event('scroll')); });
+  await expect.poll(() => view.evaluate(element => element.scrollTop)).toBeGreaterThan(100);
+  const listTop = await view.evaluate(element => element.scrollTop);
+  await region.getByTitle('src/mod4.ts').click();
+  await expect(region.getByRole('button', { name: '‹ All files' })).toBeVisible();
+
+  await remount(page);
+
+  await expect(region.locator('.code-pane-crumb-current')).toHaveText('mod4.ts');
+  await expect(diffHeaders(page)).toHaveText([/mod4\.ts/u]);
+  // the breadcrumb still returns to where the all-files scroll was left
+  await region.getByRole('button', { name: '‹ All files' }).click();
+  await expect(region.locator('.code-pane-title')).toHaveText('Fix the widget');
+  await expect.poll(() => view.evaluate((element, left) => Math.abs(element.scrollTop - left), listTop)).toBeLessThan(24);
+});
+
+test('restores the diff mode and hidden file rail after a Workspace switch', async ({ page }) => {
+  await mountController(page, patchOf(eightFiles));
+  await openController(page);
+  const region = panel(page);
+  await (await codeViewOption(region, 'Full ctx')).click();
+  await region.getByRole('button', { name: 'Hide changed files' }).click();
+  await expect(region.locator('.code-pane-rail')).toHaveCount(0);
+
+  await remount(page);
+
+  await expect(region.getByRole('button', { name: 'Show changed files' })).toBeVisible();
+  await expect(region.locator('.code-pane-rail')).toHaveCount(0);
+  await expect(await codeViewOption(region, 'Full ctx')).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('a commit that fails to load outside a restore still shows the error', async ({ page }) => {
+  await mountController(page, patchOf(eightFiles));
+  await openController(page);
+  const region = panel(page);
+  await page.evaluate(() => { const c = (window as unknown as { __ctrl: Ctrl }).__ctrl; c.missingCommits = true; c.openCommit('abc1234', 'Fix the widget'); });
+  await expect(region.getByRole('alert')).toContainText('Unable to load changes.');
+});
+
+test('a card swapped in the same commit does not restore an older snapshot', async ({ page }) => {
+  await mountController(page, patchOf(eightFiles));
+  await openController(page);
+  const region = panel(page);
+  await region.getByTitle('src/mod4.ts').click();
+  await remount(page);
+  await expect(region.locator('.code-pane-crumb-current')).toHaveText('mod4.ts');
+  await region.getByTitle('src/mod2.ts').click();
+  await expect(region.locator('.code-pane-crumb-current')).toHaveText('mod2.ts');
+
+  // launching an Agent replaces the Worktree's card with an Agent card in one commit
+  await page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.swap());
+
+  await expect(region.getByText('8 files')).toBeVisible();
+  await expect(region.locator('.code-pane-crumb-current')).not.toHaveText('mod4.ts');
+});
+
+test('falls back to Working changes when the restored commit is gone', async ({ page }) => {
+  await mountController(page, patchOf(eightFiles));
+  await openController(page);
+  const region = panel(page);
+  // a commit opened from All PR still falls back to Working
+  await region.getByRole('button', { name: 'All PR' }).click();
+  await expect(region.locator('.code-pane-title')).toHaveText('All PR changes');
+  await page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.openCommit('abc1234', 'Fix the widget'));
+  await expect(region.locator('.code-pane-title')).toHaveText('Fix the widget');
+
+  // the commit was rebased away while the Workspace was out of view
+  await page.evaluate(() => { (window as unknown as { __ctrl: Ctrl }).__ctrl.missingCommits = true; });
+  await remount(page);
+
+  await expect(region.locator('.code-pane-title')).toHaveText('Working changes');
+  await expect(region.getByText('8 files')).toBeVisible();
+  await expect(region.getByRole('alert')).toHaveCount(0);
+});
+
+test('falls back to all files when the restored file left the Comparison', async ({ page }) => {
+  await mountController(page, patchOf(eightFiles));
+  await openController(page);
+  const region = panel(page);
+  await region.getByTitle('src/mod4.ts').click();
+  await expect(region.getByRole('button', { name: '‹ All files' })).toBeVisible();
+
+  // the file's change was reverted while the Workspace was out of view
+  await page.evaluate(patch => (window as unknown as { __ctrl: Ctrl }).__ctrl.setNext(patch), patchOf(eightFiles.filter(file => file.change.path !== 'src/mod4.ts')));
+  await remount(page);
+
+  await expect(region.getByText('7 files')).toBeVisible();
+  await expect(region.locator('.code-pane-title')).toHaveText('Working changes');
+  await expect(region.getByRole('alert')).toHaveCount(0);
+});
+
+test('closing the Code panel forgets its view state', async ({ page }) => {
+  await mountController(page, patchOf(eightFiles));
+  await openController(page);
+  const region = panel(page);
+  const wrap = async () => { await (await openCodeViewMenu(region)).getByRole('checkbox', { name: 'Wrap lines' }).click(); await expect(region).toHaveAttribute('data-wrap-lines', 'true'); };
+  const close = () => page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.close());
+  await wrap();
+  await region.getByTitle('src/mod4.ts').click();
+  await expect(region.getByRole('button', { name: '‹ All files' })).toBeVisible();
+  // a restored panel closed and reopened in place starts fresh
+  await remount(page);
+  await expect(region).toHaveAttribute('data-wrap-lines', 'true');
+  await close();
+  await expect(region).toHaveCount(0);
+  await openController(page);
+  await expect(region.getByText('8 files')).toBeVisible();
+  await expect(region).not.toHaveAttribute('data-wrap-lines', 'true');
+
+  // turning a Workspace off closes its panels and its tab in one batch; the switch back starts fresh
+  await wrap();
+  await page.evaluate(() => { const c = (window as unknown as { __ctrl: Ctrl }).__ctrl; c.close(); return c.remount(); });
+  await openController(page);
+  await expect(region.getByText('8 files')).toBeVisible();
+  await expect(region).not.toHaveAttribute('data-wrap-lines', 'true');
 });

@@ -6,7 +6,7 @@
 // them in — so it stays free of any network code and easy to drive in isolation. What the view owns
 // itself is purely visual: the diff mode (Hunks / Full context / Plain file), unified vs split, and
 // the changed-file rail/drawer.
-import { type MouseEvent as ReactMouseEvent, type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type MouseEvent as ReactMouseEvent, type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { closeOnMiddleClick } from '../middle-click.js';
 import type { CodeViewLineSelection } from '@pierre/diffs';
 import { CodeView, type CodeViewHandle, type CodeViewItem, type CodeViewReactOptions, type FileDiffMetadata } from '@pierre/diffs/react';
@@ -14,7 +14,7 @@ import { openSelectionContextMenu, preserveContextMenuPress, useSelectionActions
 import { useColorTheme } from '../color-theme.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand } from '../panel-header.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
-import { groupComparisonFiles, type CodePanelCommit, type CodePanelMode, type CodePanelState, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView } from './comparison.js';
+import { groupComparisonFiles, type CodePanelCommit, type CodePanelMode, type CodePanelState, type CodePanelView, type CodePanelViewMode, type ScrollAnchor, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView } from './comparison.js';
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, isPlaceRelativePath, type EditorTarget } from './editor-jump.js';
 import { codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, loadedFilesFromContents } from './items.js';
@@ -32,9 +32,6 @@ const RAIL_BREAKPOINT = SPLIT_MIN_WIDTH;
 // Below this (narrower) width the title pill drops its file count and branch so the title reads.
 const COMPACT_BREAKPOINT = 480;
 
-// Which context a diff shows: only the patched hunks, the whole file with unchanged lines expanded,
-// or the current file as plain text (no diff — single-file only).
-type ViewMode = 'hunks' | 'full' | 'plain';
 
 export type CodePanelProps = {
   // the Comparison the panel shows: Working tree vs HEAD, or the whole PR
@@ -65,6 +62,10 @@ export type CodePanelProps = {
   // open a file at a line in the configured editor; the file headers' editor buttons are hidden
   // without it
   onOpenInEditor?: (target: EditorTarget) => void;
+  // the view state this panel last had in its Workspace, restored on mount; `onSaveView` takes it
+  // back as the panel unmounts
+  savedView?: CodePanelView;
+  onSaveView?: (view: CodePanelView) => void;
 };
 
 // Start (or reopen) the guided review of a Comparison; `unavailable` says why it cannot start.
@@ -77,12 +78,6 @@ type PlaceholderReason = 'capped' | 'binary' | 'metadata' | 'unrenderable';
 type Placeholder = { path: string; reason: PlaceholderReason; note?: string };
 // The per-Change load status of the "Load anyway" affordance.
 type LoadStatus = 'loading' | 'error';
-// Where the reviewer was when they left the all-files scroll, so returning restores their place: the
-// topmost item and how far into that item they had scrolled. Anchored to an item id — not a raw
-// scrollTop — so it survives the single-file layout that replaces the item list in between, and (the
-// offset being into one item, bounded by its height) restores exactly when the same list returns.
-type ScrollAnchor = { id: string; offset: number };
-
 // A CodeView item paired with the patch-derived content version (`fileVersion`) it was built for.
 // The library reconciles controlled items by id + `version`, so a stable version already stops it
 // re-rendering or re-hydrating an unchanged file; caching the item by version on top of that both
@@ -163,20 +158,20 @@ function codeContextMenu(event: ReactMouseEvent<HTMLElement>, actions: Selection
   });
 }
 
-export default function CodePanel({ mode, commit, state, patch, selectedPath, filePreview, prAvailable, branch, review, loadFile, onSelectFile, onClearFile, onSetMode, onCloseFile, onClose, onRetry, onOpenInEditor }: CodePanelProps) {
+export default function CodePanel({ mode, commit, state, patch, selectedPath, filePreview, prAvailable, branch, review, loadFile, onSelectFile, onClearFile, onSetMode, onCloseFile, onClose, onRetry, onOpenInEditor, savedView, onSaveView }: CodePanelProps) {
   const selectionActions = useSelectionActions();
   const theme = useColorTheme();
   const fontSize = useTerminalFontSize();
-  const [supportingExpanded, setSupportingExpanded] = useState(false);
+  const [supportingExpanded, setSupportingExpanded] = useState(savedView?.supportingExpanded ?? false);
   // the Workspace's expansion, which promotes this panel over its siblings
   const expanded = usePanelExpand('code')?.expanded === true;
-  const [viewMode, setViewMode] = useState<ViewMode>('hunks');
+  const [viewMode, setViewMode] = useState<CodePanelViewMode>(savedView?.viewMode ?? 'hunks');
   const [split, setSplit] = useDiffSplit();
   // wrapping is opt-in so wide lines keep their horizontal scroll by default
-  const [wrapLines, setWrapLines] = useState(false);
+  const [wrapLines, setWrapLines] = useState(savedView?.wrapLines ?? false);
   // keep file collapse separate from cached diff content and version each toggle for CodeView
-  const [fileCollapse, setFileCollapse] = useState<Record<string, { collapsed: boolean; revision: number }>>({});
-  const [railCollapsed, setRailCollapsed] = useState(false);
+  const [fileCollapse, setFileCollapse] = useState<CodePanelView['fileCollapse']>(savedView?.fileCollapse ?? {});
+  const [railCollapsed, setRailCollapsed] = useState(savedView?.railCollapsed ?? false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // Changes the reviewer pulled in with "Load anyway", keyed by path; they render as ordinary diff
   // items alongside the rest.
@@ -190,7 +185,9 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
 
   const viewRef = useRef<PanelHandle>(null);
   // The place to return to when the reviewer leaves the all-files scroll for one file.
-  const anchorRef = useRef<ScrollAnchor | undefined>(undefined);
+  const anchorRef = useRef<ScrollAnchor | undefined>(savedView?.listAnchor);
+  // The place on screen to return to after a Workspace switch, once the reloaded items render.
+  const restoreRef = useRef<ScrollAnchor | undefined>(savedView?.scroll);
   // The rendered item per file id, with the content version it was built for. Kept across live
   // updates so an unchanged file hands the library the identical object (preserving its scroll and
   // full-context expansion); a version-mismatch is what marks a file as edited.
@@ -214,12 +211,13 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
       setLoaded({}); setLoadStatus({}); setPlain(undefined); setFullOverrides({});
       setFileCollapse({});
       anchorRef.current = undefined;
+      restoreRef.current = undefined;
       itemCacheRef.current.clear();
       overrideInflightRef.current.clear();
       return;
     }
     const live = patch?.files;
-    if (live === undefined) { setLoaded({}); setLoadStatus({}); setFullOverrides({}); setFileCollapse({}); return; }
+    if (live === undefined) { setLoaded({}); setLoadStatus({}); setFullOverrides({}); return; }
     // keep "Load anyway" results for files the Comparison still has (a capped/binary file the reviewer
     // pulled in stays put unless it is gone); keep an override only while its file's version is unchanged
     const present = new Set(live.map(file => file.change.path));
@@ -250,7 +248,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
 
   // Plain view is single-file only; fall back to Hunks in the all-files scroll. Split needs a wide
   // column, so a narrow panel (a phone, or a squeezed column) is always unified.
-  const effectiveMode: ViewMode = selectedPath === undefined && viewMode === 'plain' ? 'hunks' : viewMode;
+  const effectiveMode: CodePanelViewMode = selectedPath === undefined && viewMode === 'plain' ? 'hunks' : viewMode;
   const effectiveSplit = split && !narrow && effectiveMode !== 'plain';
 
   const groups = useMemo(() => patch === undefined ? { implementation: [], supporting: [] } : groupComparisonFiles(patch.files), [patch]);
@@ -400,20 +398,19 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     loadDiffFiles
   }), [theme, fontSize, wrapLines, effectiveSplit, effectiveMode, loadDiffFiles]);
 
-  // Remember the topmost item and how far into it we had scrolled, before leaving the all-files
-  // scroll for one file: the last rendered item whose top has passed the viewport top.
-  const captureAnchor = () => {
+  // The topmost item and how far into it we have scrolled: the last rendered item whose top has
+  // passed the viewport top.
+  const currentAnchor = (): ScrollAnchor | undefined => {
     const instance = viewRef.current?.getInstance();
     const container = instance?.getContainerElement();
-    if (instance === undefined || container === undefined) { anchorRef.current = undefined; return; }
+    if (instance === undefined || container === undefined) return undefined;
     const scrollTop = container.scrollTop;
     const tops = instance.getRenderedItems()
       .map(item => ({ id: item.id, top: instance.getTopForItem(item.id) ?? 0 }))
       .sort((a, b) => a.top - b.top);
     let top = tops[0];
     for (const candidate of tops) { if (candidate.top <= scrollTop) top = candidate; else break; }
-    if (top === undefined) { anchorRef.current = undefined; return; }
-    anchorRef.current = { id: top.id, offset: Math.max(0, scrollTop - top.top) };
+    return top === undefined ? undefined : { id: top.id, offset: Math.max(0, scrollTop - top.top) };
   };
 
   // Once the all-files scroll is back, jump to the captured item and offset into it (queued if layout
@@ -428,8 +425,28 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     viewRef.current?.scrollTo({ type: 'item', id: anchor.id, align: 'start', offset: -anchor.offset });
   }, [selectedPath]);
 
+  // Back on screen after a Workspace switch: once the reloaded Comparison settles, return to the saved
+  // place, or give up on it when its item is gone (or the load failed) so it cannot jump the view later.
+  const plainPending = effectiveMode === 'plain' && selectedPath !== undefined && plain?.contents === undefined && plain?.error !== true;
+  useEffect(() => {
+    const anchor = restoreRef.current;
+    if (anchor === undefined || state === 'loading' || plainPending) return;
+    restoreRef.current = undefined;
+    if (visibleItems.some(item => item.id === anchor.id)) viewRef.current?.scrollTo({ type: 'item', id: anchor.id, align: 'start', offset: -anchor.offset });
+  }, [visibleItems, state, plainPending]);
+
+  // Hand the view's state back as the panel unmounts, so a switch back to this Workspace restores it.
+  // A layout cleanup, because the scroll position is only readable before the DOM is removed.
+  const snapshot = (): CodePanelView => {
+    const scroll = filePreview === undefined && restoreRef.current === undefined ? currentAnchor() : restoreRef.current;
+    return { viewMode, wrapLines, railCollapsed, supportingExpanded, fileCollapse, ...(scroll === undefined ? {} : { scroll }), ...(anchorRef.current === undefined ? {} : { listAnchor: anchorRef.current }) };
+  };
+  const latestSnapshot = useRef(snapshot);
+  latestSnapshot.current = snapshot;
+  useLayoutEffect(() => () => onSaveView?.(latestSnapshot.current()), [onSaveView]);
+
   const openFile = (path: string) => {
-    if (selectedPath === undefined) captureAnchor();
+    if (selectedPath === undefined) anchorRef.current = currentAnchor();
     setDrawerOpen(false);
     onSelectFile(path);
   };
