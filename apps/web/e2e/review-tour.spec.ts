@@ -367,10 +367,10 @@ test('renders a placeholder for a binary or unparseable change', async ({ page }
 });
 
 // open a ready two-step tour whose first step is a small parseable patch, for the inline-comment tests
-async function openCommentTour(page: Page, { editor = false } = {}): Promise<{ dialog: ReturnType<Page['getByRole']>; prompts: string[]; shells: unknown[] }> {
+async function openCommentTour(page: Page, { editor = false, explanation = 'The route renames its constants.' } = {}): Promise<{ dialog: ReturnType<Page['getByRole']>; prompts: string[]; shells: unknown[] }> {
   const routePatch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -10,4 +10,5 @@\n const a = 1;\n-const b = 2;\n+const b = 3;\n+const c = 4;\n const d = 5;\n export {};\n';
   const servicePatch = 'diff --git a/src/service.ts b/src/service.ts\nindex 3333333..4444444 100644\n--- a/src/service.ts\n+++ b/src/service.ts\n@@ -4 +4 @@\n-old service\n+new service\n';
-  const tour = { title: 'Comment tour', overview: 'Review the route constants.', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'comment-fingerprint-123456', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: routePatch }, { id: 'chg_service01', file: 'src/service.ts', category: 'implementation', kind: 'hunk', patch: servicePatch }], steps: [{ id: 'route', title: 'Accept the request', explanation: 'The route renames its constants.', changeIds: ['chg_route0001'] }, { id: 'service', title: 'Apply the operation', explanation: 'The service performs the transition.', changeIds: ['chg_service01'] }] };
+  const tour = { title: 'Comment tour', overview: 'Review the route constants.', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'comment-fingerprint-123456', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: routePatch }, { id: 'chg_service01', file: 'src/service.ts', category: 'implementation', kind: 'hunk', patch: servicePatch }], steps: [{ id: 'route', title: 'Accept the request', explanation, changeIds: ['chg_route0001'] }, { id: 'service', title: 'Apply the operation', explanation: 'The service performs the transition.', changeIds: ['chg_service01'] }] };
   const prompts: string[] = [];
   const shells: unknown[] = [];
   await installAgentWebSocket(page);
@@ -531,6 +531,19 @@ test('folds the step notes into a drawer while the panel is narrow', async ({ pa
   await dialog.getByRole('button', { name: 'Expand guided review' }).click();
   await expect(dialog.getByRole('button', { name: 'Show step notes' })).toHaveCount(0);
   await expect(dialog.getByLabel('Feedback for this change')).toBeVisible();
+});
+
+// verify a write-up taller than the phone drawer pushes the feedback box below it instead of under it
+test('keeps a long write-up above the step feedback in the phone drawer', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const { dialog } = await openCommentTour(page, { explanation: Array.from({ length: 30 }, (_, index) => `Paragraph ${index + 1} explains the route constants.`).join('\n\n') });
+  await dialog.getByRole('button', { name: 'Show step notes' }).click();
+  const notesDrawer = dialog.getByRole('dialog', { name: 'Step notes' });
+  const layout = await notesDrawer.evaluate(element => ({ explanation: element.querySelector('.review-tour-explanation')!.getBoundingClientRect().bottom, feedback: element.querySelector('label')!.getBoundingClientRect().top, overflow: element.scrollHeight > element.clientHeight }));
+  expect(layout.overflow).toBe(true);
+  expect(layout.feedback).toBeGreaterThanOrEqual(layout.explanation);
+  await notesDrawer.getByLabel('Feedback for this change').scrollIntoViewIfNeeded();
+  await expect(notesDrawer.getByLabel('Feedback for this change')).toBeInViewport();
 });
 
 // verify the touch path: tapping a line number reveals the gutter "+" without any hover
