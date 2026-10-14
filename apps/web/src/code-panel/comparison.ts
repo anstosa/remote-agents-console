@@ -60,6 +60,16 @@ const isComparisonFileContents = (value: unknown): value is ComparisonFileConten
   && ((value as ComparisonFileContents).base === null || isRevisionFile((value as ComparisonFileContents).base))
   && ((value as ComparisonFileContents).working === null || isRevisionFile((value as ComparisonFileContents).working));
 
+// Fetch one file's two sides in a Worktree's Comparison; undefined when it is unavailable.
+export const fetchComparisonFile = async (request: Requester, worktreeId: string, comparison: { kind: CodePanelMode; path: string } | { kind: 'commit'; commit: string; path: string }): Promise<ComparisonFileContents | undefined> => {
+  try {
+    const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/comparison/file`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(comparison) });
+    if (!response.ok) return undefined;
+    const payload: unknown = await response.json();
+    return isComparisonFileContents(payload) ? payload : undefined;
+  } catch { return undefined; }
+};
+
 // Which files read as supporting (tests, specs, docs) rather than implementation. Prefer the
 // server-assigned category; fall back to the same path heuristic the GitStatus flyout uses so the
 // panel groups a Change identically to the flyout that opened it.
@@ -317,15 +327,8 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
   const refresh = useCallback(() => setRefreshToken(token => token + 1), []);
   const close = useCallback(() => { setOpen(false); saveCodeOpen(worktreeId, false); previewRequest.current += 1; setFilePreview(undefined); }, [worktreeId]);
 
-  const loadFile = useCallback(async (path: string): Promise<ComparisonFileContents | undefined> => {
-    if (worktreeId === undefined) return undefined;
-    try {
-      const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/comparison/file`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(commitSha === undefined ? { kind: mode, path } : { kind: 'commit', commit: commitSha, path }) });
-      if (!response.ok) return undefined;
-      const payload: unknown = await response.json();
-      return isComparisonFileContents(payload) ? payload : undefined;
-    } catch { return undefined; }
-  }, [worktreeId, mode, commitSha, request]);
+  const loadFile = useCallback(async (path: string): Promise<ComparisonFileContents | undefined> =>
+    worktreeId === undefined ? undefined : await fetchComparisonFile(request, worktreeId, commitSha === undefined ? { kind: mode, path } : { kind: 'commit', commit: commitSha, path }), [worktreeId, mode, commitSha, request]);
 
   // The Comparison needs a Worktree to scope its endpoints, but a File preview rides the agent-keyed
   // file-preview endpoint, so it can show even for an agent with no Worktree — keep the panel visible

@@ -367,10 +367,10 @@ test('renders a placeholder for a binary or unparseable change', async ({ page }
 });
 
 // open a ready two-step tour whose first step is a small parseable patch, for the inline-comment tests
-async function openCommentTour(page: Page, { editor = false, explanation = 'The route renames its constants.' } = {}): Promise<{ dialog: ReturnType<Page['getByRole']>; prompts: string[]; shells: unknown[] }> {
+async function openCommentTour(page: Page, { editor = false, explanation = 'The route renames its constants.', tour: custom, files = {} }: { editor?: boolean; explanation?: string; tour?: object; files?: Record<string, string> } = {}): Promise<{ dialog: ReturnType<Page['getByRole']>; prompts: string[]; shells: unknown[] }> {
   const routePatch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -10,4 +10,5 @@\n const a = 1;\n-const b = 2;\n+const b = 3;\n+const c = 4;\n const d = 5;\n export {};\n';
   const servicePatch = 'diff --git a/src/service.ts b/src/service.ts\nindex 3333333..4444444 100644\n--- a/src/service.ts\n+++ b/src/service.ts\n@@ -4 +4 @@\n-old service\n+new service\n';
-  const tour = { title: 'Comment tour', overview: 'Review the route constants.', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'comment-fingerprint-123456', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: routePatch }, { id: 'chg_service01', file: 'src/service.ts', category: 'implementation', kind: 'hunk', patch: servicePatch }], steps: [{ id: 'route', title: 'Accept the request', explanation, changeIds: ['chg_route0001'] }, { id: 'service', title: 'Apply the operation', explanation: 'The service performs the transition.', changeIds: ['chg_service01'] }] };
+  const tour = custom ?? { title: 'Comment tour', overview: 'Review the route constants.', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'comment-fingerprint-123456', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: routePatch }, { id: 'chg_service01', file: 'src/service.ts', category: 'implementation', kind: 'hunk', patch: servicePatch }], steps: [{ id: 'route', title: 'Accept the request', explanation, changeIds: ['chg_route0001'] }, { id: 'service', title: 'Apply the operation', explanation: 'The service performs the transition.', changeIds: ['chg_service01'] }] };
   const prompts: string[] = [];
   const shells: unknown[] = [];
   await installAgentWebSocket(page);
@@ -382,6 +382,12 @@ async function openCommentTour(page: Page, { editor = false, explanation = 'The 
     if (editor && url.pathname === '/api/worktrees/owen/panes') return route.fulfill({ json: { panes: [{ paneId: '%9', role: 'shell', agent: false, name: 'nvim' }] } });
     // serve the review console fixture
     if (await fulfillReviewConsole(route, url.pathname, editor)) return;
+    // serve the working tree's text of a file whose unchanged lines are expanded
+    if (url.pathname === '/api/worktrees/owen/comparison/file' && request.method() === 'POST') {
+      const { path } = request.postDataJSON() as { path: string };
+      const content = files[path];
+      return content === undefined ? route.fulfill({ status: 404, json: { error: 'file unavailable' } }) : route.fulfill({ json: { path, base: null, working: { path, size: content.length, binary: false, truncated: false, content } } });
+    }
     if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-comment', expiresAt: '2099-08-24T23:00:00.000Z', retryAfterMs: 10 } } });
     if (url.pathname === '/api/review-tour/jobs/job-comment' && request.method() === 'GET') return route.fulfill({ json: { status: 'ready', tour } });
     if (url.pathname === '/api/review-tour/jobs/job-comment' && request.method() === 'DELETE') return route.fulfill({ status: 204 });
@@ -398,7 +404,7 @@ async function openCommentTour(page: Page, { editor = false, explanation = 'The 
   await expect(branchButton).not.toHaveAttribute('aria-busy');
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('region', { name: 'Comment tour' });
+  const dialog = page.getByRole('region', { name: (tour as { title: string }).title });
   await expect(dialog).toBeVisible();
   await dialog.getByRole('button', { name: 'Start tour' }).click();
   return { dialog, prompts, shells };
@@ -520,6 +526,49 @@ test('hides the editor jump when no editor is configured', async ({ page }) => {
   const diffPane = dialog.getByLabel('Relevant changes');
   await expect(diffPane.getByText('const c = 4;')).toBeVisible();
   await expect(diffPane.getByRole('button', { name: /in the editor$/u })).toHaveCount(0);
+});
+
+// verify a step's hunks of one file share one diff whose gaps expand to the current file, showing
+// another step's change there as plain lines that take no comment
+test('merges a step\'s hunks of one file into one expandable diff', async ({ page }) => {
+  const base = Array.from({ length: 40 }, (_, index) => `const v${index + 1} = ${index + 1};`);
+  const working = [...base];
+  working[4] = 'const v5 = 50;';
+  working[34] = 'const v35 = 350;';
+  working.splice(20, 0, 'const extra1 = 1;', 'const extra2 = 2;');
+  const header = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n';
+  const context = (from: number, to: number) => base.slice(from - 1, to).map(line => ` ${line}`).join('\n');
+  const first = `${header}@@ -2,7 +2,7 @@\n${context(2, 4)}\n-${base[4]}\n+const v5 = 50;\n${context(6, 8)}\n`;
+  const inserted = `${header}@@ -18,6 +18,8 @@\n${context(18, 20)}\n+const extra1 = 1;\n+const extra2 = 2;\n${context(21, 23)}\n`;
+  const last = `${header}@@ -32,7 +34,7 @@\n${context(32, 34)}\n-${base[34]}\n+const v35 = 350;\n${context(36, 38)}\n`;
+  const tour = { title: 'Merged tour', overview: 'Review the route values.', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'merged-fingerprint-123456', changes: [{ id: 'chg_first0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: first }, { id: 'chg_extra0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: inserted }, { id: 'chg_last00001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: last }], steps: [{ id: 'values', title: 'Change the values', explanation: 'Two values change.', changeIds: ['chg_first0001', 'chg_last00001'] }, { id: 'extras', title: 'Add the extras', explanation: 'Two constants are added.', changeIds: ['chg_extra0001'] }] };
+  const { dialog } = await openCommentTour(page, { tour, files: { 'src/route.ts': `${working.join('\n')}\n` } });
+  const diffPane = dialog.getByLabel('Relevant changes');
+  // both hunks sit in one diff of the file
+  await expect(diffPane.getByText('const v5 = 50;')).toBeVisible();
+  await expect(diffPane.getByText('const v35 = 350;')).toBeVisible();
+  await expect(diffPane.locator('[data-diffs-header]')).toHaveCount(1);
+  await expect(diffPane.getByText('const extra1 = 1;')).toHaveCount(0);
+
+  // a removed line in the second hunk still comments on its base line
+  await diffPane.getByText('const v35 = 35;').hover();
+  await diffPane.locator('[data-utility-button]').click();
+  await dialog.getByLabel('Comment on line 35').fill('Why 350?');
+  await dialog.getByRole('button', { name: 'Done' }).click();
+  await expect(diffPane.locator('.review-tour-inline-comment')).toContainText('Line 35');
+
+  // expanding the gap shows the other step's added lines as plain lines of the current file
+  await diffPane.locator('[data-separator]', { hasText: '25 unmodified lines' }).locator('[data-expand-button]').first().click();
+  await expect(diffPane.getByText('const extra1 = 1;')).toBeVisible();
+  await expect(diffPane.locator('[data-line-type="context-expanded"]', { hasText: 'const extra1 = 1;' }).first()).toBeVisible();
+  await expect(diffPane.locator('[data-line-type="change-addition"]', { hasText: 'const extra1 = 1;' })).toHaveCount(0);
+  await expect(diffPane.getByText('const v35 = 350;')).toBeVisible();
+  await expect(diffPane.locator('.review-tour-inline-comment')).toContainText('Why 350?');
+  // an expanded line offers no comment
+  await diffPane.getByText('const extra1 = 1;').hover();
+  await expect(diffPane.locator('[data-utility-button]')).toBeHidden();
+  await diffPane.getByText('const v5 = 50;').hover();
+  await expect(diffPane.locator('[data-utility-button]')).toBeVisible();
 });
 
 // verify a narrow desktop panel folds the step's notes into the drawer, and expanding unfolds them

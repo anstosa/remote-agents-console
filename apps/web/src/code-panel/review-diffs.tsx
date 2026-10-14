@@ -8,8 +8,8 @@
 // and this renders them, reporting comment edits and suggestion triage back — including which comments
 // are open, which the caller holds so Escape can close them from anywhere in the dialog. The only state it owns is visual: the Unified / Split choice,
 // which (rendered at the same spot for every step) carries across steps.
-import { type CSSProperties, useMemo, useState } from 'react';
-import type { CodeViewLineSelection, DiffLineAnnotation, SelectedLineRange } from '@pierre/diffs';
+import { type CSSProperties, useCallback, useMemo, useState } from 'react';
+import type { CodeViewLineSelection, DiffLineAnnotation, FileDiffLoadedChangedFiles, FileDiffMetadata, SelectedLineRange } from '@pierre/diffs';
 import { CodeView, type CodeViewItem, type CodeViewReactOptions } from '@pierre/diffs/react';
 import { useColorTheme } from '../color-theme.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
@@ -63,7 +63,91 @@ type ReviewDiffsProps = {
   onSuggestionRestore?: (id: string) => void;
   // open a file at a line in the configured editor; the header button is hidden without it
   onOpenInEditor?: (target: EditorTarget) => void;
+  // the working tree's text of a file, which lets the unchanged lines between hunks expand
+  loadFile?: (path: string) => Promise<string | undefined>;
 };
+
+// One hunk of a file view: its Change, its range on each side of the base diff, and where its old
+// side starts in the view's old file.
+type ViewHunk = { changeId: string; oldStart: number; oldLines: number; newStart: number; newLines: number; viewOldStart: number; tail: string; body: string[] };
+// A step's hunks of one file shown as one diff. Its old side is the working file with only these
+// hunks undone, so expanding the gaps between them shows the file's current lines, other steps'
+// changes included, as unchanged context. Old-side numbers count on that file rather than the base,
+// so `changeLine` and `viewLine` translate them. A file that is one non-hunk Change (an untracked
+// file) is shown as is.
+type FileView = { file: string; patch: string; hunks: ViewHunk[]; changeId?: string };
+
+const hunkHeader = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/u;
+// where a hunk's lines sit as a zero-based index; an empty side's start names the line before it
+const sideIndex = (start: number, count: number): number => count === 0 ? start : start - 1;
+const inRange = (line: number, start: number, count: number): boolean => line >= start && line < start + count;
+
+// join a step's Changes of one file into one patch, renumbering each hunk's old side for the view
+const fileView = (changes: ReviewDiffChange[]): FileView => {
+  const [first] = changes as [ReviewDiffChange, ...ReviewDiffChange[]];
+  let header: string[] = [];
+  const hunks = changes.flatMap((change): ViewHunk[] => {
+    const lines = change.patch.split('\n');
+    const index = lines.findIndex(line => line.startsWith('@@'));
+    const match = index < 0 ? null : hunkHeader.exec(lines[index]!);
+    if (match === null) return [];
+    header = lines.slice(0, index);
+    const body = lines.slice(index + 1);
+    while (body.at(-1) === '') body.pop();
+    return [{ changeId: change.id, oldStart: Number(match[1]), oldLines: Number(match[2] ?? 1), newStart: Number(match[3]), newLines: Number(match[4] ?? 1), viewOldStart: 0, tail: match[5] ?? '', body }];
+  }).sort((a, b) => a.newStart - b.newStart);
+  if (first.kind !== 'hunk' || hunks.length !== changes.length) return { file: first.file, patch: first.patch, hunks: [], changeId: first.id };
+  // undoing the hunks above moves a hunk's old side by their difference in length
+  let shift = 0;
+  for (const hunk of hunks) {
+    const at = sideIndex(hunk.newStart, hunk.newLines) + shift;
+    hunk.viewOldStart = hunk.oldLines === 0 ? at : at + 1;
+    shift += hunk.oldLines - hunk.newLines;
+  }
+  const body = hunks.flatMap(hunk => [`@@ -${hunk.viewOldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@${hunk.tail}`, ...hunk.body]);
+  return { file: first.file, patch: `${[...header, ...body].join('\n')}\n`, hunks };
+};
+
+// The Change and base line a view line stands for, or undefined for an expanded line outside the
+// step's hunks, which takes no comment. New-side numbers are the working tree's on both.
+const changeLine = (view: FileView, side: ReviewDiffSide, line: number): { changeId: string; line: number } | undefined => {
+  if (view.changeId !== undefined) return { changeId: view.changeId, line };
+  const hunk = view.hunks.find(candidate => side === 'additions' ? inRange(line, candidate.newStart, candidate.newLines) : inRange(line, candidate.viewOldStart, candidate.oldLines));
+  return hunk && { changeId: hunk.changeId, line: side === 'additions' ? line : line - hunk.viewOldStart + hunk.oldStart };
+};
+
+// where a Change's base line sits in the view
+const viewLine = (view: FileView, changeId: string, side: ReviewDiffSide, line: number): number => {
+  const hunk = side === 'deletions' ? view.hunks.find(candidate => candidate.changeId === changeId) : undefined;
+  return hunk === undefined ? line : line - hunk.oldStart + hunk.viewOldStart;
+};
+
+// The view's two files from the working tree's text: the old one undoes each hunk, after checking
+// the text still holds the hunk's new lines, so a file changed since the tour was made stays
+// collapsed rather than showing the wrong lines.
+const viewFiles = (view: FileView, fileDiff: FileDiffMetadata, working: string): FileDiffLoadedChangedFiles => {
+  const lines = working.split('\n');
+  const newline = lines.at(-1) === '';
+  if (newline) lines.pop();
+  let oldNewline = newline;
+  const last = view.hunks.at(-1);
+  if (last !== undefined && sideIndex(last.newStart, last.newLines) + last.newLines === lines.length) oldNewline = !last.body.some((text, index) => text.startsWith('\\') && /^[ -]/u.test(last.body[index - 1] ?? ''));
+  for (const hunk of [...view.hunks].reverse()) {
+    const at = sideIndex(hunk.newStart, hunk.newLines);
+    const newSide = hunk.body.filter(text => text.startsWith(' ') || text.startsWith('+')).map(text => text.slice(1));
+    if (newSide.length !== hunk.newLines || newSide.some((text, index) => lines[at + index] !== text)) throw new Error(`${view.file} changed since the tour was made`);
+    lines.splice(at, hunk.newLines, ...hunk.body.filter(text => text.startsWith(' ') || text.startsWith('-')).map(text => text.slice(1)));
+  }
+  const old = lines.length > 0 && oldNewline ? `${lines.join('\n')}\n` : lines.join('\n');
+  return {
+    oldFile: { name: fileDiff.prevName ?? fileDiff.name, contents: old, cacheKey: `tour-old:${fileDiff.name}#${contentHash(old)}` },
+    newFile: { name: fileDiff.name, contents: working, cacheKey: `tour-new:${fileDiff.name}#${contentHash(working)}` }
+  };
+};
+
+// The comment "+" is offered only on the step's own lines: an expanded unchanged line may lie
+// outside the pull request's diff, where a review comment cannot be posted.
+const reviewCSS = '[data-line-type="context-expanded"] [data-gutter-utility-slot] { display: none; }';
 
 // how a label names a side: the base's old lines or the change's new ones
 const sideWord = (side: ReviewDiffSide): string => side === 'deletions' ? 'old' : 'new';
@@ -124,18 +208,24 @@ function SuggestedComment({ suggestion, onKeep, onDismiss, onRestore }: { sugges
 }
 
 // render one tour step with current display settings
-export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, onOpenInEditor }: ReviewDiffsProps) {
+export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, onOpenInEditor, loadFile }: ReviewDiffsProps) {
   const theme = useColorTheme();
   const terminalFontSize = useTerminalFontSize();
-  // Each renderable Change becomes one diff item, keyed by its Change id so a file split across
-  // several hunks (each its own Change) does not collide on its path. A Change whose patch is not a
-  // diff the parser can recover (a binary file, a metadata-only change) falls back to a placeholder.
+  // The step's hunk Changes of one file become one diff item, keyed by their Change ids; any other
+  // Change is an item of its own. One whose patch is not a diff the parser can recover (a binary
+  // file, a metadata-only change) falls back to a placeholder.
   const { baseItems, placeholders } = useMemo(() => {
-    const baseItems = new Map<string, NonNullable<ReturnType<typeof diffItemForPatch>>>();
-    const placeholders: ReviewDiffChange[] = [];
+    const files = new Map<string, ReviewDiffChange[]>();
     for (const change of changes) {
-      const item = diffItemForPatch(change.id, change.patch);
-      if (item === undefined) placeholders.push(change); else baseItems.set(change.id, item);
+      const key = change.kind === 'hunk' ? `${change.originalFile ?? ''}\0${change.file}` : change.id;
+      files.set(key, [...files.get(key) ?? [], change]);
+    }
+    const baseItems = new Map<string, { item: NonNullable<ReturnType<typeof diffItemForPatch>>; view: FileView }>();
+    const placeholders: ReviewDiffChange[] = [];
+    for (const group of files.values()) {
+      const view = fileView(group);
+      const item = diffItemForPatch(group.map(change => change.id).join('+'), view.patch);
+      if (item === undefined) placeholders.push(...group); else baseItems.set(item.id, { item, view });
     }
     return { baseItems, placeholders };
   }, [changes]);
@@ -144,16 +234,16 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
   // re-reads an item when its version moves, so an item's version folds in where its annotations sit —
   // and only that, so typing into a comment (which changes no anchor) never re-lays out the diff.
   const anchorKey = [...comments.map(comment => `${comment.id}@${comment.changeId}:${comment.endSide}:${comment.endLine}`), ...suggestions.map(suggestion => `${suggestion.id}@${suggestion.changeId}:${suggestion.side}:${suggestion.endLine}`)].join('|');
-  const items = useMemo(() => [...baseItems].map(([changeId, item]): ReviewItem => {
+  const items = useMemo(() => [...baseItems.values()].map(({ item, view }): ReviewItem => {
+    const inView = (changeId: string) => view.changeId === changeId || view.hunks.some(hunk => hunk.changeId === changeId);
     const annotations: DiffLineAnnotation<CommentAnchor>[] = [
-      ...suggestions.filter(suggestion => suggestion.changeId === changeId).map(suggestion => ({ side: suggestion.side, lineNumber: suggestion.endLine, metadata: { suggestionId: suggestion.id } })),
-      ...comments.filter(comment => comment.changeId === changeId).map(comment => ({ side: comment.endSide, lineNumber: comment.endLine, metadata: { commentId: comment.id } }))
+      ...suggestions.filter(suggestion => inView(suggestion.changeId)).map(suggestion => ({ side: suggestion.side, lineNumber: viewLine(view, suggestion.changeId, suggestion.side, suggestion.endLine), metadata: { suggestionId: suggestion.id } })),
+      ...comments.filter(comment => inView(comment.changeId)).map(comment => ({ side: comment.endSide, lineNumber: viewLine(view, comment.changeId, comment.endSide, comment.endLine), metadata: { commentId: comment.id } }))
     ];
     if (annotations.length === 0) return item as ReviewItem;
     return { ...item, annotations, version: contentHash(`${item.version}|${annotations.map(annotation => `${'commentId' in annotation.metadata ? annotation.metadata.commentId : annotation.metadata.suggestionId}:${annotation.side}:${annotation.lineNumber}`).join('|')}`) };
   }), [baseItems, anchorKey]); // anchorKey stands in for `comments` and `suggestions`: it covers every field read here
-  const changeIdByItemId = useMemo(() => new Map([...baseItems].map(([changeId, item]) => [item.id, changeId])), [baseItems]);
-  const fileByChangeId = useMemo(() => new Map(changes.map(change => [change.id, change.file])), [changes]);
+  const viewByDiff = useMemo(() => new Map([...baseItems.values()].map(({ item, view }) => [item.fileDiff, view])), [baseItems]);
   const patchByChangeId = useMemo(() => new Map(changes.map(change => [change.id, change.patch])), [changes]);
 
   // The selected line range, held here so starting a comment can clear it: while a range is selected
@@ -167,21 +257,35 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
   const splitFits = viewWidth >= SPLIT_MIN_WIDTH;
   const effectiveSplit = split && splitFits;
 
+  // Expanding a gap fetches the file once and swaps in the view's two files.
+  const loadDiffFiles = useCallback(async (fileDiff: FileDiffMetadata) => {
+    const view = viewByDiff.get(fileDiff);
+    const working = view === undefined ? undefined : await loadFile?.(fileDiff.name);
+    if (view === undefined || working === undefined) throw new Error(`${fileDiff.name} is unavailable`);
+    return viewFiles(view, fileDiff, working);
+  }, [viewByDiff, loadFile]);
+
   // The Code panel's shared render options (the tour has no full-context toggle), plus the gutter "+"
   // that starts a comment. On a mouse it shows on hover; on touch, tapping a line number reveals it.
-  // Clicking it — after optionally selecting a range of lines — reports the range to comment on.
+  // Clicking it — after optionally selecting a range of lines — reports the range to comment on,
+  // which must lie within one of the step's hunks.
   const options = useMemo<ReviewOptions>(() => ({
     ...codeViewBaseOptions(theme === 'latte' ? 'light' : 'dark', terminalFontSize),
     diffStyle: effectiveSplit ? 'split' : 'unified',
     enableGutterUtility: true,
+    unsafeCSS: reviewCSS,
+    ...(loadFile === undefined ? {} : { loadDiffFiles }),
     onGutterUtilityClick: (range: SelectedLineRange, context: { item: { id: string } }) => {
-      const changeId = changeIdByItemId.get(context.item.id);
-      if (changeId === undefined) return;
-      onCommentAdd({ id: crypto.randomUUID(), changeId, ...orderedRange(range, patchByChangeId.get(changeId) ?? ''), body: '' });
+      const view = baseItems.get(context.item.id)?.view;
+      const startSide = range.side ?? range.endSide ?? 'additions';
+      const start = view && changeLine(view, startSide, range.start);
+      const end = view && changeLine(view, range.endSide ?? startSide, range.end);
+      if (start === undefined || end === undefined || start.changeId !== end.changeId) return;
+      onCommentAdd({ id: crypto.randomUUID(), changeId: start.changeId, ...orderedRange({ ...range, start: start.line, end: end.line }, patchByChangeId.get(start.changeId) ?? ''), body: '' });
       // the library commits the picked range as the selection after this callback returns
       window.setTimeout(() => setSelection(null), 0);
     }
-  }), [changeIdByItemId, patchByChangeId, effectiveSplit, onCommentAdd, terminalFontSize, theme]);
+  }), [baseItems, patchByChangeId, effectiveSplit, onCommentAdd, terminalFontSize, theme, loadFile, loadDiffFiles]);
 
   const commentsById = useMemo(() => new Map(comments.map(comment => [comment.id, comment])), [comments]);
   const suggestionsById = useMemo(() => new Map(suggestions.map(suggestion => [suggestion.id, suggestion])), [suggestions]);
@@ -202,8 +306,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
   // deleted file has no copy to open.
   const renderHeaderMetadata = (item: ReviewItem) => {
     if (onOpenInEditor === undefined || item.type !== 'diff' || item.fileDiff.type === 'deleted') return null;
-    const changeId = changeIdByItemId.get(item.id);
-    const file = changeId === undefined ? undefined : fileByChangeId.get(changeId);
+    const file = baseItems.get(item.id)?.view.file;
     if (file === undefined) return null;
     return <EditorJumpButton file={file} line={diffJumpLine(item.fileDiff, selection?.id === item.id ? selection.range : undefined)} onOpen={onOpenInEditor} />;
   };
