@@ -35,6 +35,9 @@ async function fulfillReviewConsole(route: Route, pathname: string, editor = fal
   return await fulfillAgentSupport(route, pathname);
 }
 
+// wide enough that the review panel beside the agent panel keeps its step columns
+test.use({ viewport: { width: 1600, height: 900 } });
+
 // open the start sheet from the Git flyout's Review button and start with its defaults
 async function startReview(page: Page): Promise<void> {
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Review', exact: true }).click();
@@ -120,7 +123,7 @@ test('guides a human through active-scope implementation changes and sends conso
   await statusPanel.getByRole('button', { name: 'Review', exact: true }).click();
   await startSheet.getByRole('button', { name: 'Start', exact: true }).click();
 
-  const loadingDialog = page.getByRole('dialog', { name: 'Generating change tour' });
+  const loadingDialog = page.getByRole('region', { name: 'Generating change tour' });
   await expect(loadingDialog).toBeHidden();
   await expect(page.getByRole('button', { name: /Open (generating |out-of-date )?guided review/u })).toHaveCount(0);
   await expect(branchButton).toHaveAttribute('aria-busy', 'true');
@@ -140,13 +143,17 @@ test('guides a human through active-scope implementation changes and sends conso
   await generatingButton.click();
   await expect(loadingDialog).toBeVisible();
   expect(jobRequests).toHaveLength(1);
-  await expect(loadingDialog).toHaveCSS('animation-name', 'review-tour-slide-up');
-  await loadingDialog.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished)));
+  // the review is a panel in the Workspace's split, beside the agent panel rather than over it
+  const reviewPane = page.locator('.log-split > .review-pane');
+  await expect(reviewPane).toBeFocused();
+  await expect(page.locator('.log-split > .log-output')).toBeVisible();
   const loadingBounds = await loadingDialog.boundingBox();
-  expect(loadingBounds).toMatchObject({ x: 0, y: 0, width: 1280, height: 720 });
-  await loadingDialog.getByRole('button', { name: 'Minimize guided review' }).evaluate(button => button.click());
-  await expect(loadingDialog).toHaveCSS('animation-name', 'review-tour-slide-down');
+  expect(loadingBounds!.x).toBeGreaterThan(300);
+  expect(loadingBounds!.width).toBeLessThan(1000);
+  await expect(loadingDialog.getByRole('button', { name: 'Expand guided review' })).toBeVisible();
+  await loadingDialog.getByRole('button', { name: 'Minimize guided review' }).click();
   await expect(loadingDialog).toBeHidden();
+  await expect(reviewPane).toHaveCount(0);
   await expect(branchButton).toBeFocused();
   await expect(branchButton).toHaveAttribute('aria-busy', 'true');
 
@@ -158,10 +165,18 @@ test('guides a human through active-scope implementation changes and sends conso
   ).__testNotifications.map(notification => ({ title: notification.title, body: notification.options?.body, tag: notification.options?.tag, data: notification.options?.data })))).toEqual([{ title: 'Review ready in Remote Agents', body: 'Cora is ready for review', tag: 'review-ready-cora', data: { url: '/#agent=agent-1', kind: 'system', worktreeId: 'cora' } }]);
   await branchButton.click();
   await statusPanel.getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Implementation walkthrough' });
+  const dialog = page.getByRole('region', { name: 'Implementation walkthrough' });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveCSS('animation-name', 'review-tour-slide-up');
-  await expect(dialog.getByText('All PR guided review')).toBeVisible();
+  await expect(dialog.getByText('All PR review')).toBeVisible();
+  // the tour opens on its overview page, ahead of the first step's diffs
+  await expect(dialog.getByText('Overview', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('Follow the request from the route into the service.')).toBeVisible();
+  await expect(dialog.getByRole('list', { name: 'Tour steps' }).getByRole('listitem')).toHaveText(['Accept the request', 'Apply the operation']);
+  await expect(dialog.getByLabel('Relevant changes')).toHaveCount(0);
+  // the panel shares the split, so expanding it fills the Workspace and leaves room for the step's columns
+  await dialog.getByRole('button', { name: 'Expand guided review' }).click();
+  await expect(page.locator('.log-split > .log-output')).toBeHidden();
+  await dialog.getByRole('button', { name: 'Start tour' }).click();
   // the Comparison is a read-only line under the content; changing it means starting again
   const comparisonLine = dialog.locator('.review-tour-comparison');
   await expect(comparisonLine).toHaveText('All PR · tests excluded · docs excluded · vs origin/main');
@@ -170,17 +185,16 @@ test('guides a human through active-scope implementation changes and sends conso
   expect(toolbarBelowContent).toBe(true);
   await expect(dialog.getByText('Step 1 of 2')).toBeVisible();
   const reviewStep = dialog.locator('.review-tour-step');
-  // measure the permanent review columns
+  // measure the review columns of a wide panel
   const desktopColumns = await reviewStep.evaluate(element => {
     const step = element.getBoundingClientRect();
     const narration = element.querySelector('.review-tour-narration')!.getBoundingClientRect();
     const files = element.querySelector('.review-tour-diffs')!.getBoundingClientRect();
-    return { viewport: window.innerWidth, step: { left: step.left, right: step.right }, narration: { left: narration.left, right: narration.right, width: narration.width }, files: { left: files.left, right: files.right, width: files.width } };
+    return { step: { left: step.left, right: step.right }, narration: { left: narration.left, right: narration.right, width: narration.width }, files: { left: files.left, right: files.right, width: files.width } };
   });
-  expect(Math.abs(desktopColumns.step.left)).toBeLessThanOrEqual(1);
-  expect(Math.abs(desktopColumns.narration.left)).toBeLessThanOrEqual(1);
+  expect(Math.abs(desktopColumns.narration.left - desktopColumns.step.left)).toBeLessThanOrEqual(1);
   expect(Math.abs(desktopColumns.files.left - desktopColumns.narration.right)).toBeLessThanOrEqual(1);
-  expect(Math.abs(desktopColumns.files.right - desktopColumns.viewport)).toBeLessThanOrEqual(1);
+  expect(Math.abs(desktopColumns.files.right - desktopColumns.step.right)).toBeLessThanOrEqual(1);
   expect(desktopColumns.files.width).toBeGreaterThan(desktopColumns.narration.width);
   const diffPane = dialog.getByLabel('Relevant changes');
   // the step's Change renders through the diff library (a shadow-DOM diffs-container), headed by the changed file
@@ -229,13 +243,19 @@ test('guides a human through active-scope implementation changes and sends conso
   await statusPanel.getByRole('button', { name: 'Open Review' }).click();
   await expect(dialog.getByText('Changes updated')).toBeVisible();
   await dialog.getByRole('button', { name: 'Regenerate' }).click();
-  // Regenerate starts again with the same launch
+  // Regenerate starts again with the same launch, back at the new tour's overview
   await expect.poll(() => jobRequests.length).toBe(2);
   expect(jobRequests[1]).toEqual({ scope: 'pr', includeTests: false, includeDocs: false });
+  await dialog.getByRole('button', { name: 'Start tour' }).click();
   await expect(dialog.getByText('Step 1 of 2')).toBeVisible();
   await expect(dialog.getByLabel('Feedback for this change')).toHaveValue('Keep the route error copy aligned with the existing API.');
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.setViewportSize({ width: 390, height: 844 });
+  // on a phone the review is one panel of the carousel; reopening it brings it into view
+  await dialog.getByRole('button', { name: 'Minimize guided review' }).click();
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await statusPanel.getByRole('button', { name: 'Open Review' }).click();
+  await expect(dialog.getByText('Step 1 of 2')).toBeVisible();
   // on a phone the diff fills the step under a bar naming it; the narration column is gone
   const notesBar = dialog.getByRole('button', { name: 'Show step notes' });
   await expect(notesBar).toContainText('Accept the request');
@@ -254,7 +274,7 @@ test('guides a human through active-scope implementation changes and sends conso
   expect(Math.abs(mobilePanes.files.right - mobilePanes.viewport)).toBeLessThanOrEqual(1);
   // a phone-width diff pane has no room for split, so the layout choice is gone
   await expect(dialog.getByRole('group', { name: 'Diff layout' })).toHaveCount(0);
-  // the bar opens the narration and feedback as a left drawer; Escape closes it before the review
+  // the bar opens the narration and feedback as a left drawer, which Escape closes
   await notesBar.click();
   const notesDrawer = dialog.getByRole('dialog', { name: 'Step notes' });
   await expect(notesDrawer).toBeFocused();
@@ -336,8 +356,9 @@ test('renders a placeholder for a binary or unparseable change', async ({ page }
   await expect(branchButton).not.toHaveAttribute('aria-busy');
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Asset refresh tour' });
+  const dialog = page.getByRole('region', { name: 'Asset refresh tour' });
   await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Start tour' }).click();
   const diffPane = dialog.getByLabel('Relevant changes');
   // the unrenderable change shows as a labelled placeholder, and nothing renders through the library
   await expect(diffPane.locator('.review-tour-diff-placeholders')).toContainText('assets/logo.png');
@@ -377,8 +398,9 @@ async function openCommentTour(page: Page, { editor = false } = {}): Promise<{ d
   await expect(branchButton).not.toHaveAttribute('aria-busy');
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Comment tour' });
+  const dialog = page.getByRole('region', { name: 'Comment tour' });
   await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Start tour' }).click();
   return { dialog, prompts, shells };
 }
 
@@ -463,10 +485,16 @@ test('records inline comments on diff lines and sends them located and quoted', 
   await dialog.getByRole('button', { name: 'Send change request' }).click();
   await expect(dialog.getByText('Change request sent to the implementation agent.')).toBeVisible();
   expect(prompts).toEqual([value]);
-  // with nothing open, Escape minimizes the review as before
+  // with nothing open, Escape leaves the panel open, and restores it only once it is expanded
   await dialog.getByRole('button', { name: 'Finish' }).focus();
   await page.keyboard.press('Escape');
-  await expect(dialog).toBeHidden();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Expand guided review' }).click();
+  await expect(page.locator('.log-split > .log-output')).toBeHidden();
+  await dialog.getByRole('button', { name: 'Finish' }).focus();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.log-split > .log-output')).toBeVisible();
+  await expect(dialog).toBeVisible();
 });
 
 // verify the jump from a diff to its line in the configured editor
@@ -482,8 +510,8 @@ test('opens a diff line in the configured editor from the file header', async ({
   await expect(open).toHaveAccessibleName('Open src/route.ts at line 13 in the editor');
   await open.click();
   await expect.poll(() => shells).toEqual([{ editor: true, file: 'src/route.ts', line: 13 }]);
-  // the review gets out of the way of the editor's Terminal panel
-  await expect(dialog).toBeHidden();
+  // the review panel stays open beside the editor's Terminal panel
+  await expect(dialog).toBeVisible();
 });
 
 // verify the editor jump is offered only with an editor configured
@@ -492,6 +520,17 @@ test('hides the editor jump when no editor is configured', async ({ page }) => {
   const diffPane = dialog.getByLabel('Relevant changes');
   await expect(diffPane.getByText('const c = 4;')).toBeVisible();
   await expect(diffPane.getByRole('button', { name: /in the editor$/u })).toHaveCount(0);
+});
+
+// verify a narrow desktop panel folds the step's notes into the drawer, and expanding unfolds them
+test('folds the step notes into a drawer while the panel is narrow', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const { dialog } = await openCommentTour(page);
+  await expect(dialog.getByRole('button', { name: 'Show step notes' })).toBeVisible();
+  await expect(dialog.getByLabel('Feedback for this change')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Expand guided review' }).click();
+  await expect(dialog.getByRole('button', { name: 'Show step notes' })).toHaveCount(0);
+  await expect(dialog.getByLabel('Feedback for this change')).toBeVisible();
 });
 
 // verify the touch path: tapping a line number reveals the gutter "+" without any hover
@@ -536,7 +575,7 @@ test('explains when the server Codex login expires', async ({ page }) => {
   await expect(branchButton).not.toHaveAttribute('aria-busy');
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Generating change tour' });
+  const dialog = page.getByRole('region', { name: 'Generating change tour' });
   await expect(dialog.getByText('Unable to build tour', { exact: true })).toBeVisible();
   await expect(dialog.getByText('The server’s Codex login expired. Sign in to Codex on the server, then try again.')).toBeVisible();
 });
@@ -591,7 +630,7 @@ test('keeps polling through temporary console failures', async ({ page }) => {
   expect(polls).toBe(6);
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  await expect(page.getByRole('dialog', { name: 'Recovered routing tour' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Recovered routing tour' })).toBeVisible();
   expect(reconnectFlashes).toBe(0);
 });
 
@@ -632,7 +671,7 @@ test('retries temporary failures while starting a tour', async ({ page }) => {
   expect(requestIds[0]).not.toBe('');
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  await expect(page.getByRole('dialog', { name: 'Recovered start tour' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Recovered start tour' })).toBeVisible();
 });
 
 // verify cancellation stops scheduled starts
@@ -664,7 +703,7 @@ test('does not retry a tour start after cancellation', async ({ page }) => {
   await expect.poll(() => starts).toBe(1);
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Generating…' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Generating change tour' });
+  const dialog = page.getByRole('region', { name: 'Generating change tour' });
   const failedStart = page.waitForResponse(response => new URL(response.url()).pathname === '/api/agents/agent-1/review-tour/jobs' && response.status() === 503);
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   releaseStartFailure();
@@ -694,7 +733,7 @@ test('explains when another browser controls the console', async ({ page }) => {
   await expect(branchButton).not.toHaveAttribute('aria-busy');
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Generating change tour' });
+  const dialog = page.getByRole('region', { name: 'Generating change tour' });
   await expect(dialog.getByText('Unable to build tour', { exact: true })).toBeVisible();
   await expect(dialog.getByText('Another browser controls this console. Take control, then try again.')).toBeVisible();
 });
@@ -727,7 +766,7 @@ test('restores the worktree review after reload and dismisses it when stale', as
   const statusPanel = page.getByRole('region', { name: 'Changed files' });
   await expect(statusPanel.getByRole('button', { name: 'Open Review' })).toBeVisible();
   await statusPanel.getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Implementation walkthrough' });
+  const dialog = page.getByRole('region', { name: 'Implementation walkthrough' });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('heading', { name: 'Mobile layout' })).toHaveCount(0);
   await expect(dialog.getByText('Changes updated')).toBeVisible();
@@ -876,7 +915,7 @@ test('follows the AI review started with the tour, and cancels it with the tour'
   await sheet.getByRole('button', { name: 'Start', exact: true }).click();
   await branchButton.click();
   await statusPanel.getByRole('button', { name: 'Generating…' }).click();
-  const loading = page.getByRole('dialog', { name: 'Generating change tour' });
+  const loading = page.getByRole('region', { name: 'Generating change tour' });
   await expect(loading.getByText(/^AI review running · \d+s$/u)).toBeVisible();
   // cancelling the tour cancels the review that started with it
   await loading.getByRole('button', { name: 'Cancel' }).click();
@@ -890,7 +929,7 @@ test('follows the AI review started with the tour, and cancels it with the tour'
     { scope: 'pr', includeTests: false, includeDocs: false, codeReview: { preset: 'correctness', effort: 'high' } },
     { scope: 'pr', includeTests: false, includeDocs: false, codeReview: { preset: 'correctness', effort: 'high' } }
   ]);
-  const dialog = page.getByRole('dialog', { name: 'Route tour' });
+  const dialog = page.getByRole('region', { name: 'Route tour' });
   await expect(dialog.getByText(/^AI review running · \d+s$/u)).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Add AI review' })).toHaveCount(0);
   // a headless run (or an older server) names no pane to open
@@ -924,7 +963,7 @@ test('adds an AI review to a restored tour and retries a failed one', async ({ p
   await page.goto('/');
   await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Route tour' });
+  const dialog = page.getByRole('region', { name: 'Route tour' });
   const add = dialog.getByRole('button', { name: 'Add AI review' });
   await expect(add).toBeVisible();
   // Escape closes the review-only sheet without minimizing the review
@@ -973,7 +1012,7 @@ test('resumes a stored AI review and a running one with the restored tour', asyn
   const branchButton = page.getByRole('button', { name: /Git status: feature\/review-tour/ });
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Route tour' });
+  const dialog = page.getByRole('region', { name: 'Route tour' });
   await expect(dialog.getByText('AI review · 2 findings · 1 general')).toBeVisible();
   await page.reload();
 
@@ -1039,8 +1078,9 @@ async function openTriageTour(page: Page, { stored = { codeReview: triageReview 
   await page.goto('/');
   await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Triage tour' });
+  const dialog = page.getByRole('region', { name: 'Triage tour' });
   await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Start tour' }).click();
   return { dialog, prompts };
 }
 
@@ -1127,7 +1167,7 @@ test('counts untriaged Findings per step and sends kept general Findings under G
   await page.keyboard.press('Escape');
   await expect(diffPane.getByRole('group', { name: 'Suggested comment: Unchecked constant' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.setViewportSize({ width: 1600, height: 900 });
 
   // triage lowers the count; a kept general Finding becomes an editable, pre-filled note
   await diffPane.getByRole('group', { name: 'Suggested comment: Lost value' }).getByRole('button', { name: 'Dismiss' }).click();
@@ -1227,9 +1267,8 @@ test('links a running interactive AI review to its pane and counts from its star
   await expect(dialog.locator('.review-tour-ai').getByRole('button', { name: 'Open pane' })).toBeVisible();
   needsInput = true;
   await expect(dialog.locator('.review-tour-ai')).toHaveText(/^AI review needs input·Open pane$/u);
-  // Open pane selects the run's Agent and gets the review out of the way
+  // Open pane selects the run's Agent; the review panel stays open beside it
   await dialog.locator('.review-tour-ai').getByRole('button', { name: 'Open pane' }).click();
-  await expect(dialog).toBeHidden();
   await expect(page).toHaveURL(/#agent=agent-review$/u);
 });
 
@@ -1252,11 +1291,10 @@ test('links a tour run waiting on the operator to its pane', async ({ page }) =>
   await startReview(page);
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Generating…' }).click();
-  const loading = page.getByRole('dialog', { name: 'Generating change tour' });
+  const loading = page.getByRole('region', { name: 'Generating change tour' });
   await expect(loading.getByText('The tour needs input')).toBeVisible();
   await expect(loading.getByText('Claude asked a question in its pane. Answer it there to continue.')).toBeVisible();
   await loading.getByRole('button', { name: 'Open pane' }).click();
-  await expect(loading).toBeHidden();
   await expect(page).toHaveURL(/#agent=agent-tour$/u);
 });
 
@@ -1321,8 +1359,9 @@ async function openPostTour(page: Page, { scope = 'pr', pullRequest = openPullRe
   await page.goto('/');
   await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Post tour' });
+  const dialog = page.getByRole('region', { name: 'Post tour' });
   await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Start tour' }).click();
   return { dialog, posts, prompts, comparison };
 }
 
@@ -1386,7 +1425,7 @@ test('posts inline comments and notes to the pull request as a draft review and 
   await expect(posted.getByRole('button', { name: 'Retry failed' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: `${process.env.TMPDIR ?? '/tmp'}/review-pr-post-phone.png` });
-  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.setViewportSize({ width: 1600, height: 900 });
 
   // with a new comment and a first-time note waiting, Retry still re-posts only the failed comment
   await dialog.getByRole('button', { name: 'Back to tour' }).click();
@@ -1533,6 +1572,7 @@ test('posts all of the feedback again after the tour is regenerated', async ({ p
   comparison.fingerprint = 'post-fingerprint-regenerated';
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await dialog.getByRole('button', { name: 'Regenerate' }).click();
+  await dialog.getByRole('button', { name: 'Start tour' }).click();
   await expect(dialog.getByText('Step 1 of 2')).toBeVisible();
   await dialog.getByRole('button', { name: 'Next' }).click();
   await dialog.getByRole('button', { name: 'Review summary' }).click();

@@ -302,11 +302,11 @@ html.software-keyboard-open .tabs { display: none; }
 .empty-workspace-warning { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: .4rem; margin: 0; padding: .5rem .6rem; border: 1px solid color-mix(in srgb, var(--yellow) 50%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--yellow) 8%, transparent); color: var(--yellow); font-size: .76rem; }
 .empty-workspace-warning button { padding: .2rem .55rem; border: 1px solid var(--yellow); border-radius: var(--control-radius); background: transparent; color: var(--yellow); font: inherit; font-weight: 800; cursor: pointer; }
 /* leave terminal and Code compositions to the generic grid without outranking the phone override */
-.log-split.has-note:not(.has-browser):where(:not(.has-terminals, .has-files, .has-code, .has-stack, .no-agent)), .log-split.has-browser:not(.has-note):where(:not(.has-terminals, .has-files, .has-code, .has-stack, .no-agent)) { grid-template-rows: repeat(2, minmax(8rem, 1fr)); }
-.log-split.has-note.has-browser:where(:not(.has-terminals, .has-files, .has-code, .has-stack, .no-agent)) { grid-template-rows: repeat(3, minmax(8rem, 1fr)); }
+.log-split.has-note:not(.has-browser):where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .no-agent)), .log-split.has-browser:not(.has-note):where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .no-agent)) { grid-template-rows: repeat(2, minmax(8rem, 1fr)); }
+.log-split.has-note.has-browser:where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .no-agent)) { grid-template-rows: repeat(3, minmax(8rem, 1fr)); }
 /* Terminals, Code or no agent panel make the split a list of panels; in a portrait area they stack
    as rows, in a wide area they become columns (below), and on a phone one panel shows at a time. */
-.log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-stack, .log-split.no-agent { grid-template: none; grid-template-columns: minmax(0, 1fr); grid-auto-flow: row; grid-auto-rows: minmax(8rem, 1fr); }
+.log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-review, .log-split.has-stack, .log-split.no-agent { grid-template: none; grid-template-columns: minmax(0, 1fr); grid-auto-flow: row; grid-auto-rows: minmax(8rem, 1fr); }
 .split-resizer { display: none; }
 .log-output { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .log-output.expanded { width: 100%; height: 100%; }
@@ -357,8 +357,8 @@ html.software-keyboard-open .tabs { display: none; }
 /* let any supplemental split fill the output area without unmounting siblings (a phone expands
    into full screen instead, below; `not` leaves no gap at fractional widths past 768px) */
 @media not all and (max-width: 768px) {
-  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .stack-pane, .terminal-pane).expanded) { display: block; }
-  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .stack-pane, .terminal-pane).expanded) > :not(.expanded) { display: none; }
+  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane).expanded) { display: block; }
+  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane).expanded) > :not(.expanded) { display: none; }
 }
 :is(.log-output, .agent-output)::after { position: absolute; inset: 0; z-index: 30; box-sizing: border-box; border: 3px solid transparent; content: ''; pointer-events: none; }
 :is(.log-output.input-active, .agent-panel.input-active > .agent-output)::after { border-color: var(--sky); box-shadow: inset 0 0 1.4rem #00000066, inset 0 0 1.35rem color-mix(in srgb, var(--sky) 34%, transparent); }
@@ -1006,13 +1006,13 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 .code-pane-file-collapse[aria-expanded='true'] svg { transform: rotate(90deg); }
 @keyframes note-pane-appear { from { opacity: 0; } to { opacity: 1; } }
 @container output-area (min-aspect-ratio: 1 / 1) {
-  .log-split.has-note:not(.has-browser):not(.has-terminals):not(.has-files):not(.has-code):not(.has-stack):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)); }
-  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code):not(.has-stack):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
-  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code):not(.has-stack):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
+  .log-split.has-note:not(.has-browser):not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)); }
+  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
+  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
   /* With one or more Terminals, a Code panel or no agent panel the split is a generic list of
      columns (agent, terminals, note, browser, code), each `minmax(390px, <weight>fr)`, built in JS
      as `--split-cols`. */
-  .log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-stack, .log-split.no-agent { grid-template: minmax(0, 1fr) / var(--split-cols); }
+  .log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-review, .log-split.has-stack, .log-split.no-agent { grid-template: minmax(0, 1fr) / var(--split-cols); }
   /* remove the hidden browser divider's track when fixing the mobile preview width */
   .log-split:is(.has-terminals, .no-agent):has(> .browser-pane.mobile:not(.expanded)) { --browser-split-cols: var(--split-pane-min-width); }
   .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) var(--split-pane-min-width); }
@@ -1021,7 +1021,7 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
   .split-resizer::after { position: absolute; inset: 0 calc(50% - .5px); background: var(--surface-1); content: ''; transition: background .12s ease, box-shadow .12s ease; }
   .split-resizer:is(:hover, :focus-visible)::after { background: var(--blue); box-shadow: 0 0 .5rem color-mix(in srgb, var(--blue) 48%, transparent); }
   .log-split:has(> .browser-pane.mobile:not(.expanded)) > .browser-resizer { display: none; }
-  .note-pane, .browser-pane, .files-pane, .code-pane, .stack-pane { border-top: 0; border-left: 1px solid color-mix(in srgb, var(--yellow) 52%, var(--surface-1)); box-shadow: inset 1px 0 color-mix(in srgb, var(--text) 4%, transparent); }
+  .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane { border-top: 0; border-left: 1px solid color-mix(in srgb, var(--yellow) 52%, var(--surface-1)); box-shadow: inset 1px 0 color-mix(in srgb, var(--text) 4%, transparent); }
   /* editing keeps the note accent on top when the keyboard makes the split wide */
   .note-pane.editing:not(.expanded) { border-top: 1px solid color-mix(in srgb, var(--yellow) 52%, var(--surface-1)); border-left: 0; box-shadow: inset 0 1px color-mix(in srgb, var(--text) 4%, transparent); }
   .browser-pane { border-left-color: color-mix(in srgb, var(--blue) 58%, var(--surface-1)); }
@@ -1037,11 +1037,11 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
   .browser-frame-shell.desktop iframe { width: var(--browser-desktop-width, 980px); height: var(--browser-desktop-height, 100%); transform: scale(var(--browser-desktop-scale, 1)); transform-origin: top left; }
   /* A phone shows one panel per screen: the split is a horizontal swipe carousel that snaps to
      each panel in turn (the toolbar's dots show where it is). */
-  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .stack-pane, .terminal-pane)) { display: flex; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scrollbar-width: none; }
+  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane)) { display: flex; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scrollbar-width: none; }
   /* let horizontal swipes over note content reach the panel carousel */
   .note-pane :is(.note-markdown, textarea) { touch-action: pan-y; }
   .log-split::-webkit-scrollbar { display: none; }
-  .log-split > :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .stack-pane, .terminal-pane) { flex: 0 0 100%; width: 100%; min-width: 0; height: 100%; scroll-snap-align: start; scroll-snap-stop: always; }
+  .log-split > :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane) { flex: 0 0 100%; width: 100%; min-width: 0; height: 100%; scroll-snap-align: start; scroll-snap-stop: always; }
   .log-split > .split-resizer { display: none; }
   /* an expanded panel keeps its own footer while the tab row and toolbar fold away */
   .agent-view:has(.log-split > .expanded) > :is(nav.tabs, section.workspace-toolbar) { display: none; }
@@ -1049,9 +1049,9 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
   .log-split > :is(.log-output, .terminal-pane).expanded > :is(.agent-composer, .mobile-terminal-keys) { padding-bottom: .375rem; }
 }
 /* preserve output width above software keyboards */
-html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-stack, .has-terminals) { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
-html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-stack, .has-terminals) > :is(.note-pane, .browser-pane, .files-pane, .code-pane, .stack-pane, .terminal-pane, .split-resizer) { display: none; }
-html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-stack, .has-terminals) > .log-output { display: grid; }
+html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-review, .has-stack, .has-terminals) { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-review, .has-stack, .has-terminals) > :is(.note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .split-resizer) { display: none; }
+html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-review, .has-stack, .has-terminals) > .log-output { display: grid; }
 /* keep the entire static bottom bar behind any open software keyboard */
 html.software-keyboard-open .agent-view > .workspace-toolbar { display: none; }
 /* retain the keyboard gutter for split panes and pending session prompts */
@@ -1108,7 +1108,7 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
   .stack-pane-list { max-height: 11rem; border-right: 0; border-bottom: 1px solid var(--surface-1); }
 }
 /* end each split at its content edge so input footers stay below the border */
-.log-split > :is(.note-pane, .browser-pane, .code-pane, .stack-pane),
+.log-split > :is(.note-pane, .browser-pane, .code-pane, .review-pane, .stack-pane),
 .agent-panel > .agent-output,
 .terminal-pane > .terminal-canvas { border-bottom: 1px solid var(--surface-0); }
 .terminal-pane.focused::after, .terminal-pane.selection-active::after { position: absolute; inset: 0; z-index: 6; border: 2px solid var(--sky); border-radius: 2px; content: ''; pointer-events: none; }
@@ -1298,6 +1298,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 :is(.panel-dots, .panel-split-menu) .browser-dot { --dot-color: var(--blue); }
 :is(.panel-dots, .panel-split-menu) .files-dot { --dot-color: var(--sky); }
 :is(.panel-dots, .panel-split-menu) .code-dot { --dot-color: var(--mauve); }
+:is(.panel-dots, .panel-split-menu) .review-dot { --dot-color: var(--pink); }
 :is(.panel-dots, .panel-split-menu) .stack-dot { --dot-color: var(--teal); }
 /* list open splits by title and mark the one currently in view */
 .panel-split-menu { width: min(15rem, calc(100vw - 1rem)); }
@@ -1563,14 +1564,10 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 @keyframes cleanup-glow { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.22); box-shadow: inset 0 0 1rem color-mix(in srgb, var(--cleanup-glow-color, var(--yellow)) 20%, transparent), 0 0 1.1rem color-mix(in srgb, var(--cleanup-glow-color, var(--yellow)) 68%, transparent); } }
 @keyframes settings-update-glow { 0%, 100% { filter: brightness(.92); box-shadow: inset 0 0 .35rem color-mix(in srgb, var(--mauve) 18%, transparent), 0 0 .25rem color-mix(in srgb, var(--mauve) 28%, transparent); } 50% { filter: brightness(1.3); box-shadow: inset 0 0 .9rem color-mix(in srgb, var(--mauve) 42%, transparent), 0 0 1rem color-mix(in srgb, var(--mauve) 78%, transparent); } }
 @keyframes review-generating-glow { 0%, 100% { box-shadow: inset 0 0 0 color-mix(in srgb, var(--blue) 0%, transparent), 0 0 0 color-mix(in srgb, var(--blue) 0%, transparent); } 50% { box-shadow: inset 0 0 .8rem color-mix(in srgb, var(--blue) 20%, transparent), 0 0 .8rem color-mix(in srgb, var(--blue) 58%, transparent); } }
-@keyframes review-tour-slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
-@keyframes review-tour-slide-down { from { transform: translateY(0); } to { transform: translateY(100%); } }
-@keyframes review-tour-backdrop-in { from { background-color: transparent; backdrop-filter: blur(0); } }
-@keyframes review-tour-backdrop-out { to { background-color: transparent; backdrop-filter: blur(0); } }
 /* retain static attention colors when motion is reduced */
-@media (prefers-reduced-motion: reduce) { .agent-switcher-attention, .tabs button.status-working::before, .tabs button.unread:not(.status-transitioning) .tab-label, .cleanup-toggle, .notes-toggle.unread-queued-prompts, .workspace-toolbar-actions .git-status-summary.review-generating, .browser-refresh.loading, .review-tour-backdrop, .review-tour, .voice-soundwave i { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .agent-switcher-attention, .tabs button.status-working::before, .tabs button.unread:not(.status-transitioning) .tab-label, .cleanup-toggle, .notes-toggle.unread-queued-prompts, .workspace-toolbar-actions .git-status-summary.review-generating, .browser-refresh.loading, .voice-soundwave i { animation: none; } }
 /* the Reduced motion setting stills the same animations regardless of the OS */
-:root[data-motion="reduced"] .agent-switcher-attention, :root[data-motion="reduced"] .tabs button.status-working::before, :root[data-motion="reduced"] .tabs button.unread:not(.status-transitioning) .tab-label, :root[data-motion="reduced"] .cleanup-toggle, :root[data-motion="reduced"] .notes-toggle.unread-queued-prompts, :root[data-motion="reduced"] .git-status-summary.review-generating, :root[data-motion="reduced"] .browser-refresh.loading, :root[data-motion="reduced"] .review-tour-backdrop, :root[data-motion="reduced"] .review-tour, :root[data-motion="reduced"] .voice-soundwave i { animation: none; }
+:root[data-motion="reduced"] .agent-switcher-attention, :root[data-motion="reduced"] .tabs button.status-working::before, :root[data-motion="reduced"] .tabs button.unread:not(.status-transitioning) .tab-label, :root[data-motion="reduced"] .cleanup-toggle, :root[data-motion="reduced"] .notes-toggle.unread-queued-prompts, :root[data-motion="reduced"] .git-status-summary.review-generating, :root[data-motion="reduced"] .browser-refresh.loading, :root[data-motion="reduced"] .voice-soundwave i { animation: none; }
 @media (max-width: 600px) {
   :root { --edge: .75rem; }
   .tabs button { font-size: .75rem; padding: .3rem .45rem; }
@@ -2052,21 +2049,21 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .project-open.busy { border-color: var(--peach); color: var(--text); opacity: 1; }
 
 /* guided implementation review */
-.review-tour-backdrop { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 0; background: color-mix(in srgb, var(--crust) 85%, transparent); backdrop-filter: blur(8px); animation: review-tour-backdrop-in .24s ease-out both; }
-.review-tour-backdrop.closing { animation-name: review-tour-backdrop-out; animation-timing-function: ease-in; }
-.review-tour { display: grid; width: 100vw; max-width: none; height: 100dvh; min-width: 0; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 0; border-radius: 0; outline: none; background: var(--crust); box-shadow: inset 0 1px color-mix(in srgb, var(--text) 5%, transparent); animation: review-tour-slide-up .24s cubic-bezier(.22, 1, .36, 1) both; }
-.review-tour-backdrop.closing .review-tour { animation-name: review-tour-slide-down; animation-timing-function: cubic-bezier(.64, 0, .78, 0); }
-.review-tour-header { display: flex; min-width: 0; align-items: start; justify-content: space-between; gap: 1rem; padding: 1rem 1.1rem .8rem; border-bottom: 1px solid var(--surface-1); background: color-mix(in srgb, var(--mantle) 94%, var(--blue)); }
-.review-tour-header > div { display: grid; min-width: 0; gap: .25rem; }
-.review-tour-header small, .review-tour-narration > small { color: var(--blue); font: 800 .65rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
-.review-tour-header h2, .review-tour-narration h3 { margin: 0; }
-.review-tour-header h2 { overflow: hidden; color: var(--text); font: 800 1.05rem/1.3 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.review-pane { --panel-accent: var(--pink); position: relative; z-index: 1; display: grid; min-width: 0; min-height: 0; grid-template-rows: minmax(0, 1fr); border-top: 1px solid color-mix(in srgb, var(--pink) 52%, var(--surface-1)); background: var(--crust); animation: note-pane-appear .15s ease-out; }
+.review-pane.expanded { width: 100%; height: 100%; border: 0; }
+.review-tour { display: grid; min-width: 0; min-height: 0; grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; padding-top: var(--panel-header-clearance); outline: none; }
+.review-tour-title { min-width: 0; overflow: hidden; padding: 0 .35rem; text-overflow: ellipsis; white-space: nowrap; }
+.review-tour-title small { margin-right: .45rem; color: var(--overlay-1); font: 800 .6rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.review-tour-narration > small { color: var(--blue); font: 800 .65rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.review-tour-narration h3, .review-tour-overview-page h3 { margin: 0; }
 .review-tour-overview, .review-tour-explanation { height: auto; overflow: visible; padding: 0; color: var(--subtext-0); cursor: auto; }
-.review-tour-overview { max-width: 72rem; font-size: .76rem; line-height: 1.45; }
+.review-tour-overview { max-width: 48rem; font-size: .8rem; line-height: 1.55; }
+.review-tour-overview-page { display: grid; flex: 1 1 auto; width: 100%; max-width: none; min-width: 0; min-height: 0; align-content: start; gap: .9rem; overflow-y: auto; margin: 0; padding: 1.1rem; }
+.review-tour-overview-page h3 { color: var(--text); font: 800 1rem/1.35 var(--font-mono); }
+.review-tour-overview-page ol { display: grid; max-width: 48rem; gap: .3rem; margin: 0; padding-left: 1.6rem; color: var(--subtext-1); font: 700 .74rem/1.4 var(--font-mono); }
 .review-tour-overview :is(p, ul, ol, blockquote, pre), .review-tour-explanation :is(p, ul, ol, blockquote, pre) { margin-bottom: .55em; }
-.review-tour-header > button { flex: 0 0 2rem; width: 2rem; height: 2rem; justify-content: center; border: 0; padding: 0; background: transparent; box-shadow: none; color: var(--overlay-1); font-size: 1.35rem; }
-.review-tour-header > button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 2; }
-.review-tour-comparison { min-width: 0; margin: 0; overflow: hidden; padding: .45rem 1.1rem; border-top: 1px solid var(--surface-1); background: var(--mantle); color: var(--overlay-1); font: 700 .65rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.review-tour-comparison { display: flex; min-width: 0; align-items: center; gap: .6rem; padding: .3rem .4rem .3rem 1.1rem; border-top: 1px solid var(--surface-1); background: var(--mantle); color: var(--overlay-1); font: 700 .65rem var(--font-mono); }
+.review-tour-comparison > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-tour-ai { display: inline-flex; min-width: 0; flex: none; align-items: center; align-self: center; gap: .4rem; margin-left: auto; padding: .25rem .6rem; border: 1px solid var(--surface-2); border-radius: 999px; color: var(--subtext-0); font: 750 .64rem var(--font-mono); white-space: nowrap; }
 .review-tour-ai.running { border-color: color-mix(in srgb, var(--peach) 50%, var(--surface-2)); color: var(--peach); }
 .review-tour-ai.ready { border-color: color-mix(in srgb, var(--blue) 55%, var(--surface-2)); color: var(--blue); }
@@ -2077,8 +2074,6 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-ai .spinner { width: .7rem; height: .7rem; }
 .review-tour-ai-reason { max-width: 20rem; overflow: hidden; color: var(--subtext-0); font-weight: 600; text-overflow: ellipsis; }
 .review-tour-ai button { padding: .25rem .6rem; border-color: color-mix(in srgb, var(--blue) 50%, var(--surface-2)); background: transparent; box-shadow: none; color: var(--blue); font: 750 .64rem var(--font-mono); }
-/* on a phone the chip takes its own row under the title */
-@media (max-width: 600px) { .review-tour-header { flex-wrap: wrap; row-gap: .45rem; }.review-tour-header > div { flex: 1 1 calc(100% - 3rem); }.review-tour-ai { order: 1; margin-left: 0; }.review-tour-ai-reason { display: none; } }
 .review-tour-content { display: flex; min-height: 0; flex-direction: column; overflow: hidden; }
 .review-tour-message { display: grid; flex: 1 1 auto; min-height: 0; align-content: center; justify-items: center; gap: .65rem; padding: 2rem; color: var(--subtext-0); text-align: center; }
 .review-tour-message > .spinner { width: 1.5rem; height: 1.5rem; }
@@ -2089,7 +2084,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-stale { display: flex; align-items: center; gap: .65rem; padding: .5rem 1.1rem; border-bottom: 1px solid color-mix(in srgb, var(--yellow) 58%, var(--surface-1)); background: color-mix(in srgb, var(--yellow) 12%, var(--mantle)); color: var(--subtext-0); font-size: .72rem; }
 .review-tour-stale strong { color: var(--yellow); font-family: var(--font-mono); }
 .review-tour-stale button:first-of-type { margin-left: auto; }
-.review-tour-step { display: grid; flex: 1 1 auto; width: 100%; max-width: none; min-width: 0; min-height: 0; grid-template-columns: clamp(10rem, 24vw, 24rem) minmax(0, 1fr); overflow: hidden; margin: 0; padding: 0; }
+.review-tour-step { display: grid; flex: 1 1 auto; width: 100%; max-width: none; min-width: 0; min-height: 0; grid-template-columns: clamp(13rem, 32%, 24rem) minmax(0, 1fr); overflow: hidden; margin: 0; padding: 0; }
 .review-tour-narration { display: grid; min-width: 0; min-height: 0; align-content: start; gap: .65rem; overflow-y: auto; padding: 1.1rem; border-right: 1px solid var(--surface-1); }
 .review-tour-narration h3 { color: var(--text); font: 800 .95rem/1.35 var(--font-mono); }
 .review-tour-explanation { font-size: .78rem; line-height: 1.55; }
@@ -2151,7 +2146,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-actions { display: flex; min-width: 0; align-items: center; gap: .5rem; padding: .65rem 1.1rem; border-top: 1px solid var(--surface-1); background: var(--mantle); }
 .review-tour-actions > span { min-width: 0; margin-left: auto; overflow: hidden; color: var(--overlay-0); font: 650 .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .review-tour-actions button:last-child { border-color: color-mix(in srgb, var(--blue) 56%, var(--surface-2)); color: var(--crust); }
-.review-tour-summary { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; padding: 1.1rem; }
+.review-tour-summary { flex: 1 1 auto; width: 100%; max-width: none; min-width: 0; min-height: 0; overflow-y: auto; margin: 0; padding: 1.1rem; }
 .review-tour-summary h3 { margin: 0 0 .75rem; color: var(--text); font: 800 1rem var(--font-mono); }
 .review-tour-summary ul { display: grid; gap: .3rem; margin: 0; padding: 0; list-style: none; }
 .review-tour-summary li { display: grid; grid-template-columns: 5.2rem minmax(0, 1fr) auto; align-items: center; gap: .5rem; padding: .35rem .45rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); color: var(--subtext-0); font-size: .74rem; }
@@ -2197,16 +2192,17 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-notes-head button { display: grid; width: 2rem; height: 2rem; padding: 0; place-items: center; border: 0; background: transparent; box-shadow: none; color: var(--subtext-0); }
 .review-tour-notes-head button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 2; }
 
-@media (max-width: 768px) {
-  .review-tour-header { padding: .75rem; }
-  .review-tour-overview { display: none; }
-  .review-tour-filters, .review-tour-progress, .review-tour-stale { padding-right: .75rem; padding-left: .75rem; }
-  /* on phones the diff fills the step; its narration and feedback open from a bar into a left drawer */
-  .review-tour-step { position: relative; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .review-tour-diffs { padding: .6rem; }
-  .review-tour-actions { flex-wrap: wrap; padding: .55rem .75rem; }
-  .review-tour-actions > span { order: -1; flex: 1 0 100%; margin-left: 0; text-align: right; }
-}
+/* in a compact panel (and on a phone) the diff fills the step; its narration and feedback open
+   from a bar into a left drawer */
+.review-tour.compact :is(.review-tour-progress, .review-tour-stale) { padding-right: .75rem; padding-left: .75rem; }
+.review-tour.compact :is(.review-tour-overview-page, .review-tour-summary) { padding: .85rem .75rem; }
+.review-tour.compact .review-tour-step { position: relative; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+.review-tour.compact .review-tour-diffs { padding: .6rem; }
+.review-tour.compact .review-tour-actions { flex-wrap: wrap; padding: .55rem .75rem; }
+.review-tour.compact .review-tour-actions > span { order: -1; flex: 1 0 100%; margin-left: 0; text-align: right; }
+.review-tour.compact .review-tour-actions > span:empty { display: none; }
+.review-tour.compact .review-tour-comparison { padding-left: .75rem; }
+.review-tour.compact .review-tour-ai-reason { display: none; }
 
 /* Launch profile: split button, actions menu, tab badge (chunk 2) */
 .launch-kind-codex { --launch-kind: var(--green); }

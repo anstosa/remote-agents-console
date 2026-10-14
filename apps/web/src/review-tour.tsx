@@ -1,7 +1,6 @@
 import { createPortal } from 'react-dom';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { prefersReducedMotion } from './reduced-motion.js';
-import { usePhoneLayout } from './panel-header.js';
+import { type ContextType, lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { PanelExpandContext, PanelHeader, PanelIcon, usePanelExpand, usePhoneLayout } from './panel-header.js';
 import type { ReviewDiffComment, ReviewDiffSide, ReviewDiffSuggestion } from './code-panel/review-diffs.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
 import { patchRowIndex, patchRows } from './code-panel/patch-rows.js';
@@ -9,7 +8,7 @@ import { codeReviewCount, codeReviewErrorMessage, failureCode, isCodeReviewJob, 
 import { CodeReviewSheet, reviewAgentLabel, type ReviewAgentKind } from './review-start.js';
 import { MarkdownBlocks } from './note-markdown.js';
 
-// The diff renderer pulls in `@pierre/diffs` (~177 kB), so it is loaded on demand — this dialog is in
+// The diff renderer pulls in `@pierre/diffs` (~177 kB), so it is loaded on demand — this panel is in
 // the eager dashboard bundle and a static import would drag the library in. Same lazy boundary the
 // Code panel uses for the same reason.
 const ReviewDiffs = lazy(() => import('./code-panel/review-diffs.js'));
@@ -29,7 +28,8 @@ type ReviewRequest = (url: string, init?: RequestInit, observeReachability?: boo
 type StepState = 'unvisited' | 'visited' | 'skipped';
 type Job = { id: string; expiresAt: string; retryAfterMs: number };
 type PublicReviewComparison = { scope: ReviewScope; base: string; includeTests: boolean; includeDocs: boolean; fingerprint: string };
-type ViewState = 'loading' | 'tour' | 'summary' | 'empty' | 'error' | 'cancelled';
+// `overview` is the tour's first page, its title and overview ahead of the first step
+type ViewState = 'loading' | 'overview' | 'tour' | 'summary' | 'empty' | 'error' | 'cancelled';
 type ReviewFailure = { code?: string; message?: string };
 // How the operator triaged one Finding: an anchored one kept as the inline comment `commentId`, a
 // general one kept as an editable `note`, or either dismissed. Absent means untriaged, never sent.
@@ -59,7 +59,8 @@ const maxDispatch = 30_000;
 const maxPostComments = 200;
 const maxPostSections = 100;
 const maxPostMarkdown = 40_000;
-const transitionMs = 240;
+// below this panel width the step's narration and feedback fold into a drawer above the diff
+const compactWidth = 720;
 
 // replace a cached generic title until the tour is regenerated
 function displayedTourTitle(tour: ReviewTour): string {
@@ -166,7 +167,7 @@ async function responseBody(response: Response): Promise<Record<string, unknown>
 }
 
 // Mirrors commentRangeLabel in review-diffs.tsx as a `file:lines` reference; kept here because that
-// module is lazy-loaded with the diff library and this dialog is in the eager bundle.
+// module is lazy-loaded with the diff library and this panel is in the eager bundle.
 function commentLocation(file: string, comment: ReviewDiffComment): string {
   const side = (candidate: ReviewDiffSide) => candidate === 'deletions' ? 'old' : 'new';
   if (comment.startSide !== comment.endSide) return `${file} ${side(comment.startSide)} ${comment.startLine} – ${side(comment.endSide)} ${comment.endLine}`;
@@ -315,17 +316,38 @@ function pullRequestErrorMessage(body: Record<string, unknown>, status: number):
   return 'The console rejected the review request. Refresh the console and try again.';
 }
 
+// Where the guided review renders: its panel column in the reviewed Worktree's split, and that
+// split's expansion, which the review's header reads as every panel's does.
+export type ReviewPanelSlot = { element: HTMLElement; expand: ContextType<typeof PanelExpandContext> };
+
+// The guided review's column in its Worktree's split. The review itself is mounted above the tabs,
+// so a tab switch or a minimize keeps its generation, feedback and current step; this column only hands
+// its element and the split's expansion up (`onSlot`) for the review to portal into.
+export function ReviewPanelColumn({ onSlot }: { onSlot: (slot: ReviewPanelSlot | undefined) => void }) {
+  const expand = useContext(PanelExpandContext);
+  const expanded = usePanelExpand('review')?.expanded === true;
+  const [element, setElement] = useState<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (element === null) return;
+    onSlot({ element, expand });
+    return () => onSlot(undefined);
+  }, [element, expand, onSlot]);
+  return <div ref={setElement} className={`review-pane${expanded ? ' expanded' : ''}`} />;
+}
+
 // render and manage one guided review
+// It renders only into `slot`, the open panel in the reviewed Worktree's split; with none (minimized,
+// or another tab in view) it stays mounted, still generating and polling, and shows nothing.
 // `onOpenInEditor`, given only with an `editor` configured, jumps from a diff to that line in it.
 // A restored tour passes its stored Code review (`initialCodeReview`) or the job still running it
 // (`initialCodeReviewJob`); `codeReviewCapability` lists the presets "Add AI review" offers, and
 // `tourAgent` names the agent that narrates the tour in its failures. `onOpenAgent` selects an
 // interactive Review run's Agent in the console, for its "Open pane" link. `pullRequest`, the reviewed
 // branch's open or draft pull request, lets an All PR tour's summary post its feedback there as a draft review.
-export function ReviewTourDialog({ launch, request, minimized, initialTour, tourAgent, initialCodeReview, initialCodeReviewJob, codeReviewCapability, pullRequest, onMinimize, onDismiss, onIndicatorChange, onReady, onOpenInEditor, onOpenAgent }: { launch: ReviewLaunch; request: ReviewRequest; minimized: boolean; initialTour?: ReviewTour; tourAgent?: ReviewAgentKind; initialCodeReview?: CodeReview; initialCodeReviewJob?: CodeReviewJob; codeReviewCapability?: CodeReviewCapability; pullRequest?: ReviewPullRequest; onMinimize: () => void; onDismiss: () => Promise<boolean>; onIndicatorChange: (indicator: ReviewTourIndicator) => void; onReady: (tour: ReviewTour) => void; onOpenInEditor?: (target: EditorTarget) => void; onOpenAgent?: (agentId: string) => void }) {
-  // the Comparison is fixed for the dialog's lifetime: changing it means starting again
+export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent, initialCodeReview, initialCodeReviewJob, codeReviewCapability, pullRequest, onMinimize, onDismiss, onIndicatorChange, onReady, onOpenInEditor, onOpenAgent }: { launch: ReviewLaunch; request: ReviewRequest; slot?: ReviewPanelSlot; initialTour?: ReviewTour; tourAgent?: ReviewAgentKind; initialCodeReview?: CodeReview; initialCodeReviewJob?: CodeReviewJob; codeReviewCapability?: CodeReviewCapability; pullRequest?: ReviewPullRequest; onMinimize: () => void; onDismiss: () => Promise<boolean>; onIndicatorChange: (indicator: ReviewTourIndicator) => void; onReady: (tour: ReviewTour) => void; onOpenInEditor?: (target: EditorTarget) => void; onOpenAgent?: (agentId: string) => void }) {
+  // the Comparison is fixed for the review's lifetime: changing it means starting again
   const { includeTests, includeDocs } = launch;
-  const [state, setState] = useState<ViewState>(initialTour === undefined ? 'loading' : 'tour');
+  const [state, setState] = useState<ViewState>(initialTour === undefined ? 'loading' : 'overview');
   const [tour, setTour] = useState<ReviewTour | undefined>(initialTour);
   const [job, setJob] = useState<Job>();
   // an interactive tour run's Agent, once its pending poll names it
@@ -336,8 +358,13 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
   const [feedback, setFeedback] = useState<Record<string, string>>({});
   const [comments, setComments] = useState<ReviewDiffComment[]>([]);
   const [openCommentIds, setOpenCommentIds] = useState<ReadonlySet<string>>(new Set());
-  // on a phone the step's narration and feedback sit in a drawer, opened from a bar above the diff
+  // the panel's root, while it is in view
+  const [panel, setPanel] = useState<HTMLElement | null>(null);
+  // in a narrow panel (and always on a phone) the step's narration and feedback sit in a drawer,
+  // opened from a bar above the diff
   const phone = usePhoneLayout();
+  const [narrow, setNarrow] = useState(false);
+  const compact = phone || narrow;
   const [notesOpen, setNotesOpen] = useState(false);
   const notesBar = useRef<HTMLButtonElement | null>(null);
   const notesDrawer = useRef<HTMLElement | null>(null);
@@ -356,7 +383,6 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
   const [postedOrphans, setPostedOrphans] = useState<string[]>([]);
   const [stale, setStale] = useState(false);
   const [retry, setRetry] = useState(0);
-  const [closing, setClosing] = useState(false);
   const [dismissing, setDismissing] = useState(false);
   const [dismissError, setDismissError] = useState('');
   // The AI Code review beside the tour: the job running it, the completed review (its Findings are
@@ -374,32 +400,31 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
   const [focusedNote, setFocusedNote] = useState<string>();
   const agentName = reviewAgentLabel(tourAgent);
   const generation = useRef(0);
-  const dialog = useRef<HTMLDivElement | null>(null);
   const dispatchError = useRef<HTMLParagraphElement | null>(null);
   const postErrorRef = useRef<HTMLDivElement | null>(null);
-  const minimizeTimer = useRef<number | undefined>(undefined);
   const onReadyRef = useRef(onReady);
 
   // retain the latest notification callback
   useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
 
+  // fold the step's notes into the drawer by the panel's own width; a hidden panel keeps its layout
+  useLayoutEffect(() => {
+    if (panel === null) return;
+    const measure = () => {
+      const width = panel.getBoundingClientRect().width;
+      if (width > 0) setNarrow(width < compactWidth);
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(panel);
+    measure();
+    return () => observer.disconnect();
+  }, [panel]);
+
   // move focus into the step notes drawer as it opens
-  useEffect(() => { if (phone && notesOpen) notesDrawer.current?.focus(); }, [phone, notesOpen]);
+  useEffect(() => { if (compact && notesOpen) notesDrawer.current?.focus(); }, [compact, notesOpen]);
 
   // start each step's narration and diffs at the top
-  useEffect(() => { dialog.current?.querySelectorAll('.review-tour-narration, .review-tour-diff-scroll').forEach(element => { element.scrollTop = 0; }); }, [current]);
-
-  // focus the review surface when restored
-  useEffect(() => { if (!minimized) dialog.current?.focus(); }, [minimized]);
-
-  // reset the exit state while cached
-  useEffect(() => { if (minimized) setClosing(false); }, [minimized]);
-
-  // release pending transition timers
-  useEffect(() => () => {
-    // clear an active minimize delay
-    if (minimizeTimer.current !== undefined) window.clearTimeout(minimizeTimer.current);
-  }, []);
+  useEffect(() => { panel?.querySelectorAll('.review-tour-narration, .review-tour-diff-scroll').forEach(element => { element.scrollTop = 0; }); }, [current]);
 
   // publish the minimized button state
   useEffect(() => { onIndicatorChange({ generating: state === 'loading', stale }); }, [state, stale, onIndicatorChange]);
@@ -427,7 +452,7 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
       setTour(initialTour);
       setStatuses({ [initialTour.steps[0]!.id]: 'visited' });
       setCurrent(currentStep => Math.min(currentStep, initialTour.steps.length - 1));
-      setState('tour');
+      setState('overview');
       setError('');
       setStale(false);
       return;
@@ -498,7 +523,7 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
         setTour(ready);
         setStatuses({ [ready.steps[0]!.id]: 'visited' });
         setCurrent(0);
-        setState('tour');
+        setState('overview');
         tourSettled = true;
         onReadyRef.current(ready);
         return;
@@ -631,7 +656,7 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
     if (failure !== undefined) setCodeReviewError(failure);
   };
   // close the Add AI review sheet, returning focus to the review
-  const closeCodeReviewSheet = () => { setAddingCodeReview(false); dialog.current?.focus(); };
+  const closeCodeReviewSheet = () => { setAddingCodeReview(false); panel?.focus(); };
 
   const step = tour?.steps[current];
   const stepFeedback = step === undefined ? '' : feedback[step.id] ?? '';
@@ -654,7 +679,7 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
   // move focus into a newly kept general note
   useEffect(() => {
     if (focusedNote === undefined) return;
-    dialog.current?.querySelector<HTMLTextAreaElement>(`textarea[data-note="${CSS.escape(focusedNote)}"]`)?.focus();
+    panel?.querySelector<HTMLTextAreaElement>(`textarea[data-note="${CSS.escape(focusedNote)}"]`)?.focus();
     setFocusedNote(undefined);
   }, [focusedNote]);
   // the untriaged Findings each step holds: its Changes' anchored Findings, plus the general ones on
@@ -753,16 +778,20 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
   };
 
   // Jump from the summary to the first step holding an untriaged Finding. When that is only the
-  // general Findings, a phone opens the notes drawer they are listed in.
+  // general Findings, a compact panel opens the notes drawer they are listed in.
   const reviewUntriaged = () => {
     const index = tour?.steps.findIndex(candidate => (untriagedByStep.get(candidate.id) ?? 0) > 0) ?? -1;
     if (tour === undefined || index < 0) return;
     setCurrent(index);
     setState('tour');
-    if (phone && index === 0 && (untriagedByStep.get(tour.steps[0]!.id) ?? 0) === untriagedGeneral) setNotesOpen(true);
+    if (compact && index === 0 && (untriagedByStep.get(tour.steps[0]!.id) ?? 0) === untriagedGeneral) setNotesOpen(true);
   };
-  // move to the previous step
-  const back = () => { setCurrent(index => Math.max(0, index - 1)); setState('tour'); };
+  // move to the previous step, or from the first back to the overview
+  const back = () => {
+    if (current === 0) { setState('overview'); return; }
+    setCurrent(index => Math.max(0, index - 1));
+    setState('tour');
+  };
   // visit and advance one step
   const next = () => {
     // require a current step
@@ -847,19 +876,8 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
       setPosting(false);
     }
   };
-  // retain the current review after its exit transition
-  const minimize = () => {
-    // ignore repeated minimize requests
-    if (closing) return;
-    setClosing(true);
-    const delay = prefersReducedMotion() ? 0 : transitionMs;
-    minimizeTimer.current = window.setTimeout(() => {
-      minimizeTimer.current = undefined;
-      onMinimize();
-    }, delay);
-  };
-  // open an interactive Review run's pane: select its Agent and get the review out of the way
-  const openRun = (run: ReviewRunLink) => { onOpenAgent?.(run.agentId); minimize(); };
+  // open an interactive Review run's pane by selecting its Agent; the review panel stays open beside it
+  const openRun = (run: ReviewRunLink) => onOpenAgent?.(run.agentId);
   // dismiss one stale durable review
   const dismiss = async () => {
     // prevent duplicate removal requests
@@ -871,33 +889,20 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
     // preserve the review when removal fails
     if (!dismissed) { setDismissError('The cached review could not be dismissed.'); setDismissing(false); }
   };
-  // contain keyboard focus inside the modal
-  const dialogKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    // Escape dismisses the topmost thing: the phone notes drawer, then the step's open comment
-    // editors (an empty one is discarded), and only then the review itself
-    if (event.key === 'Escape' && !dispatching && !posting) {
-      if (state === 'tour' && phone && notesOpen) { closeNotes(); return; }
-      const stepChangeIds = new Set(step?.changeIds);
-      const openInStep = state === 'tour' ? comments.filter(comment => openCommentIds.has(comment.id) && stepChangeIds.has(comment.changeId)) : [];
-      if (openInStep.length > 0) {
-        for (const comment of openInStep) closeComment(comment.id);
-        // the focused editor unmounts; keep keyboard focus in the dialog
-        dialog.current?.focus();
-        return;
-      }
-      minimize();
+  // Escape dismisses the topmost thing: the compact notes drawer, then the step's open comment
+  // editors (an empty one is discarded), and only then the panel's expansion, as the split's does
+  const panelKey = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Escape' || dispatching || posting) return;
+    if (state === 'tour' && compact && notesOpen) { closeNotes(); return; }
+    const stepChangeIds = new Set(step?.changeIds);
+    const openInStep = state === 'tour' ? comments.filter(comment => openCommentIds.has(comment.id) && stepChangeIds.has(comment.changeId)) : [];
+    if (openInStep.length > 0) {
+      for (const comment of openInStep) closeComment(comment.id);
+      // the focused editor unmounts; keep keyboard focus in the panel
+      panel?.focus();
       return;
     }
-    // retain ordinary keys
-    if (event.key !== 'Tab' || dialog.current === null) return;
-    const controls = Array.from(dialog.current.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])')).filter(control => control.offsetParent !== null);
-    // retain focus when no controls exist
-    if (controls.length === 0) { event.preventDefault(); dialog.current.focus(); return; }
-    const active = document.activeElement;
-    const index = controls.indexOf(active as HTMLElement);
-    const next = event.shiftKey ? index <= 0 ? controls.length - 1 : index - 1 : index < 0 || index === controls.length - 1 ? 0 : index + 1;
-    event.preventDefault();
-    controls[next]!.focus();
+    if (slot?.expand?.expanded === 'review') { event.preventDefault(); slot.expand.restore(); }
   };
 
   const scopeLabel = launch.scope === 'working' ? 'Working' : 'All PR';
@@ -911,10 +916,10 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
     if (entry?.state === 'noted') return <div key={finding.id} className="review-tour-general-note"><label>General note{finding.file === undefined ? '' : ` · ${finding.file}`}<textarea data-note={finding.id} aria-label={`General note: ${finding.title}`} value={entry.note} maxLength={maxFeedback} onChange={event => updateGeneralNote(finding.id, event.target.value)} /></label><div><button type="button" onClick={() => restoreFinding(finding.id)}>Remove</button></div></div>;
     return <div key={finding.id} className="review-tour-suggestion" role="group" aria-label={`Suggested comment: ${finding.title}`}><div className="review-tour-suggestion-title"><span className={`review-tour-severity ${finding.severity}`}>{finding.severity}</span><strong>{finding.title}</strong></div>{finding.body.trim() !== '' && <p>{finding.body}</p>}<small>{[...(finding.file === undefined ? [] : [finding.file]), findingSource(codeReview)].join(' · ')}</small><div><button type="button" onClick={() => dismissFinding(finding.id)}>Dismiss</button><button type="button" onClick={() => keepGeneralFinding(finding.id)}>Keep</button></div></div>;
   })}</section>;
-  // the step's narration and feedback: a left column on desktop, the notes drawer on a phone; the
+  // the step's narration and feedback: a left column in a wide panel, the notes drawer in a compact one; the
   // first step leads with the general Findings
   const narration = step && <>{current === 0 && generalFindings}<small>Logical change</small><h3>{step.title}</h3><div className="note-markdown review-tour-explanation"><MarkdownBlocks text={step.explanation} /></div><label>Feedback for this change<textarea value={stepFeedback} maxLength={maxFeedback} onChange={event => updateFeedback(step.id, event.target.value)} />{stepFeedback.length >= maxFeedback && <span role="status">{maxFeedback.toLocaleString()} character limit reached</span>}</label>{orphanFeedback !== '' && <label>Feedback from regenerated steps<textarea value={orphanFeedback} maxLength={maxFeedbackTotal} onChange={event => updateOrphanFeedback(event.target.value)} />{orphanFeedback.length >= maxFeedbackTotal && <span role="status">{maxFeedbackTotal.toLocaleString()} retained feedback character limit reached</span>}</label>}</>;
-  // The Code review's state in the header: running with its time (or waiting on the operator), its
+  // The Code review's state in the status line: running with its time (or waiting on the operator), its
   // Findings count, a failure with Retry, or "Add AI review" for a current tour with none. An
   // interactive run links to its pane.
   const codeReviewRun = onOpenAgent === undefined ? undefined : codeReviewProgress.run;
@@ -927,7 +932,7 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
       ? <span className="review-tour-ai ready" role="status" title={`${codeReview.preset.label} review by ${reviewAgentLabel(codeReview.preset.agent)}`}>AI review · {codeReviewCount(codeReview)}</span>
       : codeReviewError !== ''
         ? <span className="review-tour-ai failed" role="alert"><span title={codeReviewError}>AI review failed</span><span className="review-tour-ai-reason">{codeReviewError}</span><button type="button" disabled={retryingCodeReview || stale || tour === undefined} onClick={() => void retryCodeReview()}>Retry</button></span>
-        : tour !== undefined && !stale && (state === 'tour' || state === 'summary') && codeReviewCapability !== undefined
+        : tour !== undefined && !stale && (state === 'overview' || state === 'tour' || state === 'summary') && codeReviewCapability !== undefined
           ? <span className="review-tour-ai add"><button type="button" onClick={() => setAddingCodeReview(true)}>Add AI review</button></span>
           : null;
   const codeReviewSheet = addingCodeReview && codeReviewCapability !== undefined ? <CodeReviewSheet codeReview={codeReviewCapability} onStart={async options => { const failure = await startCodeReview(options); if (failure === undefined) closeCodeReviewSheet(); return failure; }} onCancel={closeCodeReviewSheet} /> : null;
@@ -945,23 +950,25 @@ export function ReviewTourDialog({ launch, request, minimized, initialTour, tour
     {pendingComments + unpostedSections.length > 0 && <p>{[...(pendingComments > 0 ? [plural(pendingComments, 'comment')] : []), ...(unpostedSections.length > 0 ? [plural(unpostedSections.length, 'note')] : [])].join(' and ')} not posted yet{unpostedComments.length > maxPostComments || sectionBatch(unpostedSections).length < unpostedSections.length ? ' — one post cannot take them all; Post again for the rest' : ''}.</p>}
     <small>Comments and notes already posted are not updated by later edits; new comments and new or changed notes are added to the review.</small>
   </section>;
-  // keep generation and freshness polling mounted while minimized
-  if (minimized) return null;
-  const content = <div className={`review-tour-backdrop${closing ? ' closing' : ''}`}><div ref={dialog} className="review-tour" role="dialog" aria-modal="true" aria-labelledby="review-tour-title" tabIndex={-1} onKeyDown={dialogKey}>
-    <header className="review-tour-header"><div><small>{scopeLabel} guided review</small><h2 id="review-tour-title">{tour ? displayedTourTitle(tour) : 'Generating change tour'}</h2>{tour && <div className="note-markdown review-tour-overview"><MarkdownBlocks text={tour.overview} /></div>}</div>{codeReviewChip}<button type="button" aria-label="Minimize guided review" title="Minimize" onClick={minimize}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /></svg></button></header>
+  // keep generation and freshness polling mounted while minimized or out of view
+  if (slot === undefined) return null;
+  const title = tour ? displayedTourTitle(tour) : 'Generating change tour';
+  const content = <section ref={setPanel} className={`review-tour${compact ? ' compact' : ''}`} role="region" aria-label={title} tabIndex={-1} onKeyDown={panelKey}>
+    <PanelHeader panelKey="review" label="guided review" title={<span className="review-tour-title" title={`${scopeLabel} review · ${title}`}><small>{scopeLabel} review</small>{title}</span>} close={{ key: 'minimize', label: 'Minimize guided review', title: 'Minimize (the review is kept)', icon: <PanelIcon path="M5 12h14" />, onSelect: onMinimize }} />
     <div className="review-tour-content">
     {tour && stale && <div className="review-tour-stale" role="alert"><strong>Changes updated</strong><span>This cached review is out of date.</span>{dismissError && <span>{dismissError}</span>}<button type="button" disabled={dismissing} onClick={() => void dismiss()}>{dismissing ? 'Dismissing…' : 'Dismiss'}</button><button type="button" disabled={dismissing} onClick={() => { setStale(false); setRetry(value => value + 1); setState('loading'); }}>Regenerate</button></div>}
     {state === 'loading' && <div className="review-tour-message" role="status"><span className="spinner" />{tourRun?.needsInput === true ? <><strong>The tour needs input</strong><p>{agentName} asked a question in its pane. Answer it there to continue.</p></> : <><strong>Building the narrated tour…</strong><p>The AI is organizing the selected implementation changes into logical steps.</p></>}{tourRun !== undefined && onOpenAgent !== undefined && <button type="button" onClick={() => openRun(tourRun)}>Open pane</button>}<button type="button" onClick={() => { generation.current += 1; if (job !== undefined) void request(`/api/review-tour/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' }, false); cancelCodeReview(); setState('cancelled'); }}>Cancel</button></div>}
     {state === 'empty' && <div className="review-tour-message" role="status"><strong>No included changes</strong><p>Implementation changes are empty for this scope. Start again with Tests or Docs included if those are the only changed files.</p></div>}
     {(state === 'error' || state === 'cancelled') && <div className="review-tour-message error" role="alert"><strong>{state === 'cancelled' ? 'Tour cancelled' : 'Unable to build tour'}</strong><p>{error || 'Generate again when you are ready.'}</p><button type="button" onClick={() => { setRetry(value => value + 1); setState('loading'); }}>Try again</button></div>}
-    {tour && state === 'tour' && step && <><div className="review-tour-progress"><span>Step {current + 1} of {tour.steps.length}{stepUntriaged > 0 && <span className="review-tour-finding-count" title="AI review findings not yet kept or dismissed">{stepUntriaged} {stepUntriaged === 1 ? 'finding' : 'findings'}</span>}</span><span>{Object.values(statuses).filter(value => value === 'visited').length} visited · {Object.values(statuses).filter(value => value === 'skipped').length} skipped</span></div><main className="review-tour-step">{phone
+    {tour && state === 'overview' && <><div className="review-tour-progress"><span>Overview</span><span>{tour.steps.length} {tour.steps.length === 1 ? 'step' : 'steps'}</span></div><main className="review-tour-overview-page"><h3>{title}</h3><div className="note-markdown review-tour-overview"><MarkdownBlocks text={tour.overview} /></div><ol aria-label="Tour steps">{tour.steps.map(candidate => <li key={candidate.id}>{candidate.title}</li>)}</ol></main><footer className="review-tour-actions"><span /><button type="button" onClick={() => { setCurrent(0); setState('tour'); }}>Start tour</button></footer></>}
+    {tour && state === 'tour' && step && <><div className="review-tour-progress"><span>Step {current + 1} of {tour.steps.length}{stepUntriaged > 0 && <span className="review-tour-finding-count" title="AI review findings not yet kept or dismissed">{stepUntriaged} {stepUntriaged === 1 ? 'finding' : 'findings'}</span>}</span><span>{Object.values(statuses).filter(value => value === 'visited').length} visited · {Object.values(statuses).filter(value => value === 'skipped').length} skipped</span></div><main className="review-tour-step">{compact
       ? <><button ref={notesBar} type="button" className="review-tour-notes-bar" aria-label="Show step notes" aria-expanded={notesOpen} onClick={() => setNotesOpen(true)}><span><strong>{step.title}</strong><span>{step.explanation}</span></span>{current === 0 && untriagedGeneral > 0 ? <small className="has-feedback">{untriagedGeneral} general</small> : <small className={stepFeedback.trim() === '' ? undefined : 'has-feedback'}>{stepFeedback.trim() === '' ? 'Notes' : 'Feedback'}</small>}</button>
         {notesOpen && <><button type="button" className="review-tour-notes-backdrop" aria-label="Close step notes" onClick={closeNotes} /><section ref={notesDrawer} className="review-tour-narration review-tour-notes-drawer" role="dialog" aria-label="Step notes" tabIndex={-1}><div className="review-tour-notes-head"><span>Step notes</span><button type="button" aria-label="Close step notes" title="Close" onClick={closeNotes}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></div>{narration}</section></>}</>
-      : <section className="review-tour-narration">{narration}</section>}<section className="review-tour-diffs" aria-label="Relevant changes"><Suspense fallback={<p className="review-tour-diff-loading" role="status">Loading diff…</p>}><ReviewDiffs changes={changes} comments={comments} openCommentIds={openCommentIds} onCommentAdd={addComment} onCommentChange={updateComment} onCommentOpen={openComment} onCommentClose={closeComment} onCommentDelete={deleteComment} suggestions={suggestions} onSuggestionKeep={keepFinding} onSuggestionDismiss={dismissFinding} onSuggestionRestore={restoreFinding} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} /></Suspense></section></main><footer className="review-tour-actions"><button type="button" disabled={current === 0} onClick={back}>Back</button><button type="button" onClick={skip}>Skip</button><span>{feedbackTotal >= maxFeedbackTotal || limitNotice ? `${maxFeedbackTotal.toLocaleString()} total feedback character limit reached` : null}</span>{complete && <button type="button" disabled={stale || feedbackTotal > maxFeedbackTotal} onClick={() => void summarize()}>Review summary</button>}{(!complete || current < tour.steps.length - 1) && <button type="button" onClick={next}>Next</button>}</footer></>}
-    {tour && state === 'summary' && <main className="review-tour-summary"><h3>Review complete</h3><ul>{tour.steps.map(candidate => <li key={candidate.id}><span className={statuses[candidate.id]}>{statuses[candidate.id]}</span><strong>{candidate.title}</strong>{(untriagedByStep.get(candidate.id) ?? 0) > 0 && <small className="review-tour-finding-count" title="AI review findings not yet kept or dismissed">{untriagedByStep.get(candidate.id)}</small>}</li>)}</ul>{untriagedTotal > 0 && <div className="review-tour-untriaged" role="status"><span><strong>{untriagedTotal} {untriagedTotal === 1 ? 'finding' : 'findings'} not reviewed</strong> Untriaged findings are not sent.</span><button type="button" onClick={reviewUntriaged}>Review findings</button></div>}{generalFindings}{orphanFeedback !== '' && <p>Feedback from regenerated steps is retained in the consolidated change request.</p>}{feedbackTotal === 0 ? <p>No feedback was recorded. You can finish without sending anything.</p> : <><label>Consolidated change request<textarea value={dispatch} maxLength={maxDispatch} onChange={event => { setDispatch(event.target.value); setDispatchEdited(true); }} />{dispatch.length >= maxDispatch && <span role="status">{maxDispatch.toLocaleString()} character limit reached</span>}</label>{dispatchEdited && dispatch !== builtDispatch && !sent && <div className="review-tour-rebuild"><span>Edited by hand, so feedback changes are not added.</span><button type="button" onClick={rebuildDispatch}>Rebuild from feedback</button></div>}</>}{error && <p ref={dispatchError} className="review-tour-error" role="alert" tabIndex={-1}>{error}</p>}{sent && <p className="review-tour-sent" role="status">Change request sent to the implementation agent.</p>}{pullRequestStatus}{postError !== undefined && <div ref={postErrorRef} className="review-tour-pr-error" role="alert" tabIndex={-1}><p className="review-tour-error">{postError.message}</p>{postError.retryable && <button type="button" disabled={posting || stale} onClick={() => void postToPullRequest(postError.retry)}>Try again</button>}</div>}<footer className="review-tour-actions"><button type="button" onClick={() => setState('tour')}>Back to tour</button><span>{limitNotice ? `${maxFeedbackTotal.toLocaleString()} total feedback character limit reached` : null}</span>{feedbackTotal > 0 && !sent && <button type="button" disabled={dispatching || dispatch.trim() === '' || dispatch.length > maxDispatch} onClick={() => void send()}>{dispatching ? 'Sending…' : 'Send change request'}</button>}{canPost && (feedbackTotal > 0 || pullRequestPost !== undefined) && <button type="button" className="review-tour-pr-button" disabled={posting || stale || allPosted} title={allPosted ? 'Everything is posted' : `Post as your draft review on PR #${pullRequest.number}`} onClick={() => void postToPullRequest()}>{posting ? <><span className="spinner" aria-hidden="true" />Posting…</> : allPosted && pullRequestPost !== undefined ? `Posted to PR #${pullRequest.number}` : `Post to PR #${pullRequest.number}`}</button>}<button type="button" onClick={minimize}>Finish</button></footer></main>}
+      : <section className="review-tour-narration">{narration}</section>}<section className="review-tour-diffs" aria-label="Relevant changes"><Suspense fallback={<p className="review-tour-diff-loading" role="status">Loading diff…</p>}><ReviewDiffs changes={changes} comments={comments} openCommentIds={openCommentIds} onCommentAdd={addComment} onCommentChange={updateComment} onCommentOpen={openComment} onCommentClose={closeComment} onCommentDelete={deleteComment} suggestions={suggestions} onSuggestionKeep={keepFinding} onSuggestionDismiss={dismissFinding} onSuggestionRestore={restoreFinding} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} /></Suspense></section></main><footer className="review-tour-actions"><button type="button" onClick={back}>Back</button><button type="button" onClick={skip}>Skip</button><span>{feedbackTotal >= maxFeedbackTotal || limitNotice ? `${maxFeedbackTotal.toLocaleString()} total feedback character limit reached` : null}</span>{complete && <button type="button" disabled={stale || feedbackTotal > maxFeedbackTotal} onClick={() => void summarize()}>Review summary</button>}{(!complete || current < tour.steps.length - 1) && <button type="button" onClick={next}>Next</button>}</footer></>}
+    {tour && state === 'summary' && <main className="review-tour-summary"><h3>Review complete</h3><ul>{tour.steps.map(candidate => <li key={candidate.id}><span className={statuses[candidate.id]}>{statuses[candidate.id]}</span><strong>{candidate.title}</strong>{(untriagedByStep.get(candidate.id) ?? 0) > 0 && <small className="review-tour-finding-count" title="AI review findings not yet kept or dismissed">{untriagedByStep.get(candidate.id)}</small>}</li>)}</ul>{untriagedTotal > 0 && <div className="review-tour-untriaged" role="status"><span><strong>{untriagedTotal} {untriagedTotal === 1 ? 'finding' : 'findings'} not reviewed</strong> Untriaged findings are not sent.</span><button type="button" onClick={reviewUntriaged}>Review findings</button></div>}{generalFindings}{orphanFeedback !== '' && <p>Feedback from regenerated steps is retained in the consolidated change request.</p>}{feedbackTotal === 0 ? <p>No feedback was recorded. You can finish without sending anything.</p> : <><label>Consolidated change request<textarea value={dispatch} maxLength={maxDispatch} onChange={event => { setDispatch(event.target.value); setDispatchEdited(true); }} />{dispatch.length >= maxDispatch && <span role="status">{maxDispatch.toLocaleString()} character limit reached</span>}</label>{dispatchEdited && dispatch !== builtDispatch && !sent && <div className="review-tour-rebuild"><span>Edited by hand, so feedback changes are not added.</span><button type="button" onClick={rebuildDispatch}>Rebuild from feedback</button></div>}</>}{error && <p ref={dispatchError} className="review-tour-error" role="alert" tabIndex={-1}>{error}</p>}{sent && <p className="review-tour-sent" role="status">Change request sent to the implementation agent.</p>}{pullRequestStatus}{postError !== undefined && <div ref={postErrorRef} className="review-tour-pr-error" role="alert" tabIndex={-1}><p className="review-tour-error">{postError.message}</p>{postError.retryable && <button type="button" disabled={posting || stale} onClick={() => void postToPullRequest(postError.retry)}>Try again</button>}</div>}<footer className="review-tour-actions"><button type="button" onClick={() => setState('tour')}>Back to tour</button><span>{limitNotice ? `${maxFeedbackTotal.toLocaleString()} total feedback character limit reached` : null}</span>{feedbackTotal > 0 && !sent && <button type="button" disabled={dispatching || dispatch.trim() === '' || dispatch.length > maxDispatch} onClick={() => void send()}>{dispatching ? 'Sending…' : 'Send change request'}</button>}{canPost && (feedbackTotal > 0 || pullRequestPost !== undefined) && <button type="button" className="review-tour-pr-button" disabled={posting || stale || allPosted} title={allPosted ? 'Everything is posted' : `Post as your draft review on PR #${pullRequest.number}`} onClick={() => void postToPullRequest()}>{posting ? <><span className="spinner" aria-hidden="true" />Posting…</> : allPosted && pullRequestPost !== undefined ? `Posted to PR #${pullRequest.number}` : `Post to PR #${pullRequest.number}`}</button>}<button type="button" onClick={onMinimize}>Finish</button></footer></main>}
     </div>
-    <p className="review-tour-comparison">{comparisonLabel}</p>
+    <div className="review-tour-comparison"><span>{comparisonLabel}</span>{codeReviewChip}</div>
     {codeReviewSheet}
-  </div></div>;
-  return createPortal(content, document.body);
+  </section>;
+  return createPortal(<PanelExpandContext.Provider value={slot.expand}>{content}</PanelExpandContext.Provider>, slot.element);
 }
