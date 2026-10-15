@@ -107,13 +107,43 @@ describe('ComparisonService patch', () => {
     expect(result).toEqual({ ok: false, reason: 'no_base' });
   });
 
-  // keep an unavailable known pr unavailable
-  it('does not fall back when a known PR has no usable base', async () => {
+  // keep an explicitly unavailable dashboard comparison unavailable
+  it('does not override a dashboard comparison marked unavailable', async () => {
     const root = await featureRepo();
     const service = new ComparisonService(async () => null);
 
     await expect(service.patch(worktree(root, { defaultBranch: 'main' }), 'pr')).resolves.toEqual({ ok: false, reason: 'no_base' });
     await expect(service.commits(worktree(root, { defaultBranch: 'main' }))).resolves.toBeUndefined();
+  });
+
+  // apply the GitHub preference consistently without a cached dashboard base
+  it('uses gh-merge-base ahead of the source and default for patches and commits', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'branch', 'release/target');
+    await git(root, 'switch', '-c', 'source');
+    await writeFile(join(root, 'source.txt'), 'source\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'source work');
+    await git(root, 'switch', '-c', 'feature');
+    await writeFile(join(root, 'feature.txt'), 'feature\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'feature work');
+    await git(root, 'config', 'branch.feature.gh-merge-base', 'release/target');
+    const configured = worktree(root, { defaultBranch: 'source' });
+    const service = new ComparisonService(noBase);
+
+    const patch = await service.patch(configured, 'pr');
+    expect(patch.ok).toBe(true);
+    // require a resolved patch before inspecting its base
+    if (!patch.ok) return;
+    expect(patch.patch.base).toBe('release/target');
+    expect(patch.patch.files.map(file => file.change.path)).toEqual(['feature.txt', 'source.txt']);
+    const commits = await service.commits(configured);
+    expect(commits?.base).toBe('release/target');
+    expect(commits?.commits.map(commit => commit.subject)).toEqual(['feature work', 'source work']);
   });
 
   // share the configured fallback across patch and log reads

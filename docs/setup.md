@@ -407,11 +407,11 @@ within a tick — no config edit or restart.
   relative path resolves against it. Absolute paths are allowed.
 - `defaultBranch` — optional fallback branch for the branch flyout's **All PR**
   comparison, shared by the Code panel and commit list. The comparison uses the
-  PR's base first, otherwise the source branch recorded in Git's reflog, then
-  this configured branch, and finally `main`. Unknown or deleted source branches
-  fall back to the configured branch. Remote refs and local-only branches are
-  supported; a PR base that cannot be resolved is unavailable rather than
-  silently comparing with an unrelated branch.
+  current branch's `branch.<name>.gh-merge-base` first, then the PR's base,
+  the source branch recorded in Git's reflog, this configured branch, and finally
+  `main`. Missing or unresolvable bases fall through in that order. Operational
+  Git failures stop fallback to lower-priority branches. Remote refs and
+  local-only branches are supported.
 - `worktreeOrder` — optional checkout paths in display order, for example
   `[".", "../review", "../research"]`. Relative paths resolve against the
   configured Project `path`; symlinks resolve to the checkout's real path.
@@ -423,6 +423,9 @@ within a tick — no config edit or restart.
   `{taskId}` for an 8-character URL-safe random ID, and is enabled only when the
   Worktree is clean and fully pushed. `push` overrides the default
   **Commit/Push** action (which queues `review, commit, and push`).
+  A `newTask` command can set `branch.<new-branch>.gh-merge-base` after creating
+  the branch to keep its comparison and GitHub CLI pull-request target aligned;
+  creating a branch with `--no-track` does not set that preference.
 - `commands.setup` runs **once, when the console creates a Worktree**, in the new
   checkout and before any agent launches — the place to install dependencies or
   link secrets so a fresh checkout can build (for example `pnpm install`). It runs

@@ -10,7 +10,7 @@ import {
 // capture bounded so opening a review can never stream an unbounded diff into the browser
 export const DEFAULT_COMPARISON_PATCH_LIMITS: PatchLimits = { perFileBytes: 256 * 1024, totalBytes: 4 * 1024 * 1024, maxFiles: 256 };
 
-// resolve the dashboard base; null means a known PR has no usable base, undefined allows fallback
+// resolve the dashboard base; null means no usable comparison, undefined allows fallback
 export type PreferredBaseResolver = (worktreeId: string) => Promise<string | null | undefined>;
 
 // the Comparison a Code-panel read names: Working, All PR, or one commit of HEAD's history
@@ -91,8 +91,8 @@ export class ComparisonService {
   // `upstream/trunk`. Fall back to the full ladder only when no base was resolved.
   private async prCandidates(worktree: Worktree): Promise<string[]> {
     const preferred = await this.preferredBase(worktree.id);
-    // never replace an unavailable PR base with the source or default branch
+    // preserve an explicitly unavailable dashboard comparison
     if (preferred === null) return [];
-    return preferred !== undefined ? [preferred] : await prComparisonCandidates(worktree.identity, worktree.branch, undefined, false, worktree.defaultBranch);
+    return preferred !== undefined ? [preferred] : await prComparisonCandidates(worktree.identity, worktree.branch, undefined, worktree.defaultBranch);
   }
 }

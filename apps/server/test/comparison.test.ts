@@ -225,7 +225,7 @@ describe('comparison resolution', () => {
     await git(root, 'add', '.');
     await git(root, 'commit', '-m', 'feature');
 
-    const candidates = await prComparisonCandidates(root, 'feature', undefined, false, 'develop');
+    const candidates = await prComparisonCandidates(root, 'feature', undefined, 'develop');
     expect(candidates).toEqual([
       'refs/heads/release/source',
       'origin/release/source',
@@ -290,8 +290,8 @@ describe('comparison resolution', () => {
     ]);
   });
 
-  // keep exact PR candidates on one logical branch
-  it('puts the PR base first and exact mode tries only remote and local forms of that base', async () => {
+  // preserve remote and local PR refs ahead of source fallbacks
+  it('puts the PR base before source and default branches when gh-merge-base is unset', async () => {
     const root = await repo();
     await writeFile(join(root, 'base.txt'), 'base\n');
     await git(root, 'add', '.');
@@ -300,28 +300,24 @@ describe('comparison resolution', () => {
     await git(root, 'switch', '-c', 'feature');
     await git(root, 'remote', 'add', 'upstream', 'https://example.com/repository.git');
 
-    const candidates = await prComparisonCandidates(root, 'feature', 'release/target', false, 'develop');
+    const candidates = await prComparisonCandidates(root, 'feature', 'release/target', 'develop');
     expect(candidates.slice(0, 2)).toEqual(['origin/release/target', 'release/target']);
-    expect(await prComparisonCandidates(root, 'feature', 'release/target', true, 'develop')).toEqual([
-      'origin/release/target',
-      'release/target'
-    ]);
-    expect(await prComparisonCandidates(root, 'feature', 'upstream/release/target', true)).toEqual([
+    expect((await prComparisonCandidates(root, 'feature', 'upstream/release/target')).slice(0, 2)).toEqual([
       'upstream/release/target',
       'release/target'
     ]);
-    expect(await prComparisonCandidates(root, 'feature', 'refs/heads/upstream/release/target', true)).toEqual([
+    expect((await prComparisonCandidates(root, 'feature', 'refs/heads/upstream/release/target')).slice(0, 2)).toEqual([
       'origin/upstream/release/target',
       'refs/heads/upstream/release/target'
     ]);
-    expect((await comparisonAgainst(root, await prComparisonCandidates(root, 'feature', 'origin/release/target', true)))?.comparison.base).toBe('release/target');
+    expect((await comparisonAgainst(root, await prComparisonCandidates(root, 'feature', 'origin/release/target')))?.comparison.base).toBe('release/target');
   });
 
   // preserve the requested fallback order
   it('uses the configured default branch and then main when source provenance is unavailable', async () => {
     const root = await repo();
 
-    expect(await prComparisonCandidates(root, undefined, undefined, false, 'release/stable')).toEqual([
+    expect(await prComparisonCandidates(root, undefined, undefined, 'release/stable')).toEqual([
       'origin/release/stable',
       'release/stable',
       'origin/main',
@@ -330,18 +326,48 @@ describe('comparison resolution', () => {
     expect(await prComparisonCandidates(root, undefined)).toEqual(['origin/main', 'main']);
   });
 
-  // exclude pull-request creation preferences from provenance
-  it('ignores gh-merge-base when source provenance is unavailable', async () => {
+  // honor the branch-specific GitHub CLI preference before all other bases
+  it('prefers gh-merge-base when source provenance is unavailable', async () => {
     const root = await repo();
     await git(root, 'remote', 'add', 'upstream', 'https://example.com/repository.git');
     await git(root, 'config', 'branch.feature.gh-merge-base', 'upstream/release/stable');
 
-    expect(await prComparisonCandidates(root, 'feature', undefined, false, 'develop')).toEqual([
+    expect(await prComparisonCandidates(root, 'feature', undefined, 'develop')).toEqual([
+      'upstream/release/stable',
+      'release/stable',
       'origin/develop',
       'develop',
       'origin/main',
       'main'
     ]);
+  });
+
+  // resolve each usable level before trying the next fallback
+  it('falls back from gh-merge-base to PR, source, default, and main in order', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    // give every fallback its own branch identity
+    for (const branch of ['develop', 'source', 'release/pr', 'release/configured']) await git(root, 'branch', branch);
+    await git(root, 'switch', '-c', 'feature', 'source');
+    await git(root, 'config', 'branch.feature.gh-merge-base', 'release/configured');
+    // resolve through real git refs rather than just inspecting candidate order
+    const selectedBase = async () => (await comparisonAgainst(root, await prComparisonCandidates(root, 'feature', 'release/pr', 'develop')))?.comparison.base;
+
+    expect(await selectedBase()).toBe('release/configured');
+    await git(root, 'config', 'branch.feature.gh-merge-base', 'missing');
+    expect(await selectedBase()).toBe('release/pr');
+    await git(root, 'config', 'branch.feature.gh-merge-base', '');
+    expect(await selectedBase()).toBe('release/pr');
+    await git(root, 'config', '--unset', 'branch.feature.gh-merge-base');
+    expect(await selectedBase()).toBe('release/pr');
+    await git(root, 'branch', '-D', 'release/pr');
+    expect(await selectedBase()).toBe('source');
+    await git(root, 'branch', '-D', 'source');
+    expect(await selectedBase()).toBe('develop');
+    await git(root, 'branch', '-D', 'develop');
+    expect(await selectedBase()).toBe('main');
   });
 
   // ignore publication tracking as source evidence
@@ -366,7 +392,7 @@ describe('comparison resolution', () => {
     await git(root, 'branch', 'temporary-source');
     await git(root, 'branch', 'missing-source', 'temporary-source');
     await git(root, 'branch', '-D', 'temporary-source');
-    expect(await prComparisonCandidates(root, 'missing-source', undefined, false, 'develop')).toEqual([
+    expect(await prComparisonCandidates(root, 'missing-source', undefined, 'develop')).toEqual([
       'origin/develop',
       'develop',
       'origin/main',
@@ -376,7 +402,7 @@ describe('comparison resolution', () => {
     const head = (await git(root, 'rev-parse', 'HEAD')).trim();
     await git(root, 'switch', '--detach', head);
     await git(root, 'switch', '-c', 'detached-feature');
-    expect(await prComparisonCandidates(root, 'detached-feature', undefined, false, 'develop')).toEqual([
+    expect(await prComparisonCandidates(root, 'detached-feature', undefined, 'develop')).toEqual([
       'origin/develop',
       'develop',
       'origin/main',
@@ -438,7 +464,7 @@ describe('comparison resolution', () => {
     await git(root, 'switch', '-c', 'feature');
     await git(root, 'commit', '--allow-empty', '-m', 'feature work');
 
-    const candidates = await prComparisonCandidates(root, 'feature', `${remote}/main`, true);
+    const candidates = await prComparisonCandidates(root, 'feature', `${remote}/main`);
     expect((await comparisonAgainst(root, candidates))?.gitBase).toBe(mainHead);
     expect((await commitLog(root, candidates))?.commits.map(commit => commit.subject)).toEqual(['feature work']);
   });
