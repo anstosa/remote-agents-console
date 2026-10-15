@@ -6,16 +6,16 @@ import { TmuxAdapter } from '../tmux/adapter.js';
 import { codexCollapsedPasteLabel, failedTurnFromCapture, lastPromptFromHistory, latestCompletedAssistantTurn, queueReadyPrompt } from '../adapters/codex-turns.js';
 import { adapterFor } from '../adapters/registry.js';
 import { codexFamily, type Adapter, type AgentKind, type CompletionBaseline, type CompletionEvent, type PaneSnapshot, type Submission, type SubmissionDraftState, type SubmissionMode, type TmuxKey } from '../adapters/types.js';
-import { isReviewRun, type Agent } from '../domain/models.js';
+import type { Agent } from '../domain/models.js';
 import { run } from '../tmux/command.js';
 import type { PromptHistoryService } from '../prompt-history/service.js';
 import { agentAttentionState } from '../notifications.js';
-import { QueuedPromptService, type QueuedPrompt, type QueuedPromptSummary } from './queue.js';
+import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin, type QueuedPromptSummary } from './queue.js';
 import type { ResetBoundary } from './reset-boundaries.js';
 import { maxPromptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, validPromptAttachments, type PromptAttachment } from './validation.js';
 import { expandCommand } from '../launch/service.js';
 import { configuredWorktreeForWorkspace } from '../workspaces/resolver.js';
-import { isUpdateAdvisorLabel, updateAdvisorLabel, updateAdvisorPendingLabel } from '../update-advisor.js';
+import { updateAdvisorLabel, updateAdvisorPendingLabel } from '../update-advisor.js';
 import { isFullGitSha } from '../git/revision.js';
 export { maxPromptAttachmentBytes, promptAttachmentBytes, validPromptAttachments, type PromptAttachment } from './validation.js';
 
@@ -23,8 +23,14 @@ export { maxPromptAttachmentBytes, promptAttachmentBytes, validPromptAttachments
 // and removed only when the sink reports it durable. The console wires it to the notes store; a
 // false return leaves the prompt queued and the queue halted (see saveQueued).
 export type UndeliveredDrain = (scope: string, prompt: QueuedPrompt) => Promise<boolean>;
+// queued prompts and history belong to the Agent they were sent to, never to a sibling at its Worktree
+export const promptScope = (agentId: string) => `agent:${agentId}`;
 
 const answerCaptureGraceMs = 10_000;
+// a pane missing from a few discovery ticks (a socket that briefly fails to list) is not a departed Agent
+const departedAgentGraceMs = 30_000;
+// the sweep reads both stores, history from disk; it need not run every dashboard tick
+const departedSweepMs = 10_000;
 // preserve prompts through reset startup but do not strand them behind a dead pane
 const conversationResetGraceMs = 10_000;
 // a reported-state prompt must report `working` within this window or the dispatch is failed
@@ -83,6 +89,8 @@ export class PromptService {
   private readonly activeMutations = new Map<string, number>();
   private readonly openedQueuedQuestions = new Set<string>();
   private readonly mutationVersions = new Map<string, number>();
+  private readonly departedSince = new Map<string, number>();
+  private sweptAt = -Infinity;
   private lifecycleMutationVersion = 0;
 
   // bind queue delivery and optional shared host staging
@@ -101,11 +109,12 @@ export class PromptService {
       releaseMutation?.();
       return false;
     }
-    const scope = this.historyScope(first.agent, agentId);
+    const scope = promptScope(agentId);
+    const origin: QueuedPromptOrigin = { home: first.agent.home, ...(first.agent.placeId === undefined ? {} : { placeId: first.agent.placeId }) };
     // queue work arriving during a restart handoff
     if (releaseMutation === undefined || this.restartLocks.has(scope)) {
       releaseMutation?.();
-      return this.queued !== undefined && await this.queued.enqueue(scope, prompt, attachments) !== undefined;
+      return this.queued !== undefined && await this.queued.enqueue(scope, prompt, attachments, origin) !== undefined;
     }
     try {
       await this.restoreConversationReset(scope, agentId);
@@ -118,14 +127,14 @@ export class PromptService {
         const adopting = agentAttentionState(first.agent) !== 'finished' && !this.phases.has(scope) && previousReset === undefined;
         const baselineCompletion = adopting ? await this.completionSignature(agentId) : undefined;
         const rolloutBaseline = adopting ? await this.captureRolloutBaseline(agentId, this.resolveAdapter(first.agent.kind)) : undefined;
-        const queued = await this.queued.enqueue(scope, prompt, attachments);
+        const queued = await this.queued.enqueue(scope, prompt, attachments, origin);
         // track work that started outside the managed prompt flow
         if (queued !== undefined && adopting) this.phases.set(scope, { state: 'working', changedAt: Date.now(), ...(baselineCompletion === undefined ? {} : { baselineCompletion }), ...(rolloutBaseline === undefined ? {} : { rolloutBaseline }) });
         return queued !== undefined;
       }
       // persist direct work before attempting interactive delivery
       if (this.queued !== undefined) {
-        const queued = await this.queued.enqueue(scope, prompt, attachments);
+        const queued = await this.queued.enqueue(scope, prompt, attachments, origin);
         // stop before paste when durable storage is unavailable
         if (queued === undefined) return false;
         // delivery may remain queued without rejecting the accepted request
@@ -184,7 +193,7 @@ export class PromptService {
     const target = await this.discovery.target(agentId);
     // require a current target
     if (target === undefined) return undefined;
-    const scope = this.historyScope(target.agent, agentId);
+    const scope = promptScope(agentId);
     await this.restoreConversationReset(scope, agentId);
     // reject overlapping input and lifecycle work
     const reset = this.conversationResets.get(scope);
@@ -235,27 +244,27 @@ export class PromptService {
 
   async listQueued(agentId: string): Promise<QueuedPromptSummary[] | undefined> {
     const target = await this.discovery.target(agentId);
-    return target === undefined || this.queued === undefined ? undefined : await this.queued.list(this.historyScope(target.agent, agentId));
+    return target === undefined || this.queued === undefined ? undefined : await this.queued.list(promptScope(agentId));
   }
 
   async updateQueued(agentId: string, promptId: string, text: string): Promise<QueuedPromptSummary | undefined> {
     const target = await this.discovery.target(agentId);
-    return target === undefined || this.queued === undefined ? undefined : await this.queued.update(this.historyScope(target.agent, agentId), promptId, text);
+    return target === undefined || this.queued === undefined ? undefined : await this.queued.update(promptScope(agentId), promptId, text);
   }
 
   async moveQueued(agentId: string, promptId: string, direction: 'earlier' | 'later'): Promise<QueuedPromptSummary[] | undefined> {
     const target = await this.discovery.target(agentId);
-    return target === undefined || this.queued === undefined ? undefined : await this.queued.move(this.historyScope(target.agent, agentId), promptId, direction);
+    return target === undefined || this.queued === undefined ? undefined : await this.queued.move(promptScope(agentId), promptId, direction);
   }
 
   async removeQueued(agentId: string, promptId: string): Promise<boolean> {
     const target = await this.discovery.target(agentId);
-    return target !== undefined && this.queued !== undefined && await this.queued.remove(this.historyScope(target.agent, agentId), promptId) !== undefined;
+    return target !== undefined && this.queued !== undefined && await this.queued.remove(promptScope(agentId), promptId) !== undefined;
   }
 
   // advance managed prompt completion
   async observe(agent: Pick<Agent, 'id' | 'displayLabel' | 'home' | 'attention' | 'kind'>): Promise<void> {
-    const scope = this.historyScope(agent, agent.id);
+    const scope = promptScope(agent.id);
     await this.restoreConversationReset(scope, agent.id);
     // pause observation during restart handoffs and in-flight delivery
     if (this.restartLocks.has(scope) || this.dispatching.has(scope)) return;
@@ -391,6 +400,52 @@ export class PromptService {
     await this.dispatch(agent.id, scope);
   }
 
+  // an Agent's queue and history end with it: once it has been absent from discovery for the
+  // grace window, its queued prompts drain into Notes and its history is dropped. Scopes from
+  // before prompts were per-Agent (keyed by Worktree id) have no live owner and drain the same way.
+  async retireDeparted(liveAgentIds: readonly string[]): Promise<void> {
+    if (this.queued === undefined || Date.now() - this.sweptAt < departedSweepMs) return;
+    this.sweptAt = Date.now();
+    const live = new Set(liveAgentIds.map(promptScope));
+    const stored = new Set([...await this.queued.scopes(), ...await this.history?.scopes() ?? []]);
+    for (const scope of this.departedSince.keys()) if (live.has(scope) || !stored.has(scope)) this.departedSince.delete(scope);
+    const now = Date.now();
+    for (const scope of stored) {
+      // a restarting Agent is briefly absent; its restart hands the scope over
+      if (live.has(scope) || this.restartLocks.has(scope)) continue;
+      const since = this.departedSince.get(scope) ?? now;
+      if (now - since < departedAgentGraceMs) {
+        this.departedSince.set(scope, since);
+        continue;
+      }
+      // a prompt with nowhere to go stays queued; retry after another grace window
+      if (!await this.saveQueued(scope)) {
+        this.departedSince.set(scope, now);
+        continue;
+      }
+      await this.history?.clearScope(scope);
+      await this.queued.resets.clear(scope);
+      this.forget(scope);
+    }
+  }
+
+  // a restarted Agent carries on in its replacement pane: queued prompts and history follow it.
+  // Call while the restart lock still holds the departing Agent's scope.
+  async handOver(fromAgentId: string, toAgentId: string): Promise<void> {
+    const from = promptScope(fromAgentId);
+    const to = promptScope(toAgentId);
+    // prompts that cannot move stay with the departed scope and drain into Notes
+    if (this.queued !== undefined && !await this.queued.moveScope(from, to)) return;
+    await this.history?.moveScope(from, to);
+    await this.queued?.resets.clear(from);
+    this.forget(from);
+  }
+
+  private forget(scope: string): void {
+    this.departedSince.delete(scope);
+    for (const state of [this.phases, this.conversationResets, this.restoredResets, this.reconciled, this.observedWorking, this.reconciliationPendingSince]) state.delete(scope);
+  }
+
   // drain a halted queue's prompts into Notes, in order, one Note per prompt
   private async saveQueued(scope: string): Promise<boolean> {
     if (this.dispatching.has(scope) || this.queued === undefined || this.drainUndelivered === undefined) return false;
@@ -440,7 +495,7 @@ export class PromptService {
       && (prompt.trim() === capability.command || capability.aliases?.includes(prompt.trim()) === true);
     // reset commands have no model answer, even when startup briefly looks busy
     const instant = reset || (adapter.submission.completesWithoutWork?.(prompt) ?? false);
-    const scope = this.historyScope(first.agent, agentId);
+    const scope = promptScope(agentId);
     // codex can read shared files outside an unmounted scratch home
     const sharedStaging = attachments.length > 0 && codexFamily(first.agent.kind) && configuredWorktreeForWorkspace(this.discovery.worktreesNow(), first.agent.home) === undefined ? this.attachmentStaging : undefined;
     const hostWorkspace = sharedStaging?.hostWorkspace;
@@ -1052,14 +1107,6 @@ export class PromptService {
 
   // the Worktree-scoped key (queued prompts, history): the Worktree wire id
   // `<projectId>:<realpath>`, or an `agent:<id>` scope for a Scratch, advisor or Review run pane
-  private historyScope(agent: Pick<Agent, 'displayLabel' | 'home' | 'reviewRun'>, agentId: string): string {
-    // prevent advisor prompts and feedback from entering the repository queue; a Review run's
-    // prompt queued in the shared Worktree scope would drain into the operator's own Agent
-    if (isUpdateAdvisorLabel(agent.displayLabel) || isReviewRun(agent)) return `agent:${agentId}`;
-    const worktree = configuredWorktreeForWorkspace(this.discovery.worktreesNow(), agent.home);
-    return worktree === undefined ? `agent:${agentId}` : worktree.id;
-  }
-
   // keep staged attachments outside Git status
   private async ensureAttachmentRootIgnored(workspace: string, relativeRoot: string): Promise<boolean> {
     const ignored = await run('/usr/bin/git', ['-C', workspace, 'check-ignore', '--quiet', '--', relativeRoot]);
@@ -1249,7 +1296,7 @@ export class PromptService {
     // ourselves so the pane does not keep looking busy (Codex's title already stops)
     if (reportsOwnState(adapter)) await this.tmux.setReportedAttention(target.socket, target.agent.paneId, 'finished').catch(() => false);
     // record the in-flight prompt as interrupted: hold its queue rather than releasing it
-    if (this.queued !== undefined) this.phases.set(this.historyScope(target.agent, agentId), { state: 'halted', changedAt: Date.now() });
+    if (this.queued !== undefined) this.phases.set(promptScope(agentId), { state: 'halted', changedAt: Date.now() });
     return 'ok';
   }
   // stop one Agent by killing its pane; a kind with a configured teardown command

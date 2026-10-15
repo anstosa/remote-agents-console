@@ -31,6 +31,36 @@ describe('QueuedPromptService', () => {
     expect(maxStoredAttachmentFootprintBytes).toBeGreaterThan(encodedDecodedBudget + 1024 * 1024);
   });
 
+  it('keeps a prompt\'s origin across a reload', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-queued-origin-'));
+    const file = join(directory, 'queue.json');
+    try {
+      await new QueuedPromptService(file).enqueue('agent:socket:%1', 'Remember where', [], { home: '/worktrees/cora', placeId: 'place-1' });
+      await expect(new QueuedPromptService(file).next('agent:socket:%1')).resolves.toMatchObject({ text: 'Remember where', origin: { home: '/worktrees/cora', placeId: 'place-1' } });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('moves a scope\'s prompts ahead of the destination\'s, and refuses past the per-scope cap', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-queued-move-scope-'));
+    try {
+      const service = new QueuedPromptService(join(directory, 'queue.json'));
+      await service.enqueue('agent:old', 'First');
+      await service.enqueue('agent:new', 'Second');
+      await expect(service.moveScope('agent:old', 'agent:new')).resolves.toBe(true);
+      await expect(service.list('agent:new')).resolves.toMatchObject([{ text: 'First' }, { text: 'Second' }]);
+      await expect(service.scopes()).resolves.toEqual(['agent:new']);
+
+      for (let index = 0; index < 49; index += 1) await service.enqueue('agent:full', `Full ${index}`);
+      await expect(service.moveScope('agent:new', 'agent:full')).resolves.toBe(false);
+      await expect(service.list('agent:new')).resolves.toHaveLength(2);
+      await expect(service.list('agent:full')).resolves.toHaveLength(49);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('does not create storage while an empty queue is observed', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'rac-empty-queued-prompts-'));
     const file = join(directory, 'queue.json');

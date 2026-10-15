@@ -4,7 +4,7 @@ import type { DiscoveryService } from '../discovery/service.js';
 import { stackActions, type Agent, type Worktree } from '../domain/models.js';
 import { agentAttentionState, agentPresentationAttentionState } from '../notifications.js';
 import type { PromptHistoryService } from '../prompt-history/service.js';
-import type { PromptService } from '../prompts/service.js';
+import { promptScope, type PromptService } from '../prompts/service.js';
 import { validPrompt } from '../prompts/validation.js';
 import type { PullRequestSwitchService } from '../pull-requests/switch-service.js';
 import type { StoredReviewTour } from '../review-tour/contracts.js';
@@ -205,15 +205,14 @@ export class OrchestrationService {
     return worktreeById(this.dependencies.discovery.worktreesNow(), id);
   }
 
-  // resolve one configured prompt-history scope: the Worktree wire id, or an agent scope
-  // for a Scratch pane (ADR 0003)
+  // resolve one live Agent's prompt-history scope and the workspace it runs in
   private async promptScope(agentId: string): Promise<{ scope: string; agent: Agent; workspace: string } | undefined> {
     const target = await this.dependencies.discovery.target(agentId);
     // require a current target
     if (target === undefined) return undefined;
     const worktree = configuredWorktreeForWorkspace(this.dependencies.discovery.worktreesNow(), target.agent.home);
     return {
-      scope: worktree === undefined ? `agent:${agentId}` : worktree.id,
+      scope: promptScope(agentId),
       agent: target.agent,
       workspace: worktree?.identity ?? target.agent.home
     };

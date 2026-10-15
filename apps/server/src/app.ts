@@ -16,9 +16,9 @@ import { adapterFor } from './adapters/registry.js';
 import { agentKinds, codexFamily, sameConversation, type Adapter, type AgentKind, type ConversationSummary, type InlineQuestion, type PaneSnapshot, type ResetSettling } from './adapters/types.js';
 import { TmuxCommandRegistry } from './tmux/command-registry.js';
 import { TmuxAdapter } from './tmux/adapter.js';
-import { maxPromptAttachmentBytes, PromptService, type PromptAttachment } from './prompts/service.js';
+import { maxPromptAttachmentBytes, PromptService, promptScope, type PromptAttachment } from './prompts/service.js';
 import { promptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, validPromptAttachments } from './prompts/validation.js';
-import { QueuedPromptService, type QueuedPrompt } from './prompts/queue.js';
+import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin } from './prompts/queue.js';
 import { LaunchService, type TmuxSession } from './launch/service.js';
 import { launchFresh, managedRunProgress, type FreshLaunchFailure, type ReadinessOutcome } from './launch/managed-run.js';
 import { atPlace, createAgentWaiter, inWorktree, reviewRunAgent, launchPollAttempts, launchPollDelay as defaultLaunchPollDelay, launchReadyTimeoutSeconds } from './launch/wait.js';
@@ -357,13 +357,6 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     ...(account.limits?.rateLimitResetCredits === undefined ? {} : { resetCount: account.limits.rateLimitResetCredits.availableCount }),
     ...(account.error === undefined ? {} : { error: account.error })
   });
-  // share durable prompt queue scopes
-  const promptStorageKeyForAgent = (agent: Pick<Agent, 'displayLabel' | 'id' | 'home'>) => {
-    // isolate modal advisors from the configured repository prompt queue
-    if (isUpdateAdvisorLabel(agent.displayLabel)) return `agent:${agent.id}`;
-    const worktree = configuredWorktreeForWorkspace(discovery.worktreesNow(), agent.home);
-    return worktree === undefined ? `agent:${agent.id}` : worktree.id;
-  };
   // resolve project and worktree names for one agent alert
   const notificationContextForAgent = (agent: Agent, { projects, places }: Pick<DashboardPayload, 'projects' | 'places'>): AgentNotificationContext => {
     const project = projects.find(candidate => candidate.id === agent.projectId);
@@ -380,7 +373,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // count prompts before dispatch starts
   const queuedPromptCounts = async (agents: Agent[]) => new Map(await Promise.all(agents.map(async agent => {
     // suppress false completion alerts on storage errors
-    const count = await queuedPrompts.list(promptStorageKeyForAgent(agent)).then(queue => queue?.length ?? 0).catch(() => 1);
+    const count = await queuedPrompts.list(promptScope(agent.id)).then(queue => queue?.length ?? 0).catch(() => 1);
     return [agent.id, count] as const;
   })));
   // overlay a stored tour's live Code review: running beats a stored review, which beats a failure
@@ -398,6 +391,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     void interactiveRunner.releaseOrphans(discovered.agents);
     const queuedCounts = await queuedPromptCounts(discovered.agents);
     await Promise.all(discovered.agents.map(agent => prompts.observe(agent).catch(() => undefined)));
+    await prompts.retireDeparted(discovered.agents.map(agent => agent.id)).catch(() => undefined);
     // suppress completions while more work waits
     for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered));
     notifications.retain(discovered.agents);
@@ -890,21 +884,25 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return { cron: raw.cron, kind: raw.kind as AgentKind, target, enabled: raw.enabled, updatedAt: new Date().toISOString() };
   };
   // resolve durable persistence for one live agent
+  // where an Agent running at `home` keeps its notes
+  const homePersistence = async ({ home, placeId }: QueuedPromptOrigin) => {
+    const worktree = configuredWorktreeForWorkspace(discovery.worktreesNow(), home);
+    // an Agent with no Worktree of its own keeps its notes with its Place, so an Agent in a
+    // subfolder of a directory Project or Scratch folder shares the notes its Place tab shows
+    const place = worktree === undefined && placeId !== undefined ? await resolvePlace(placeId) : undefined;
+    const saveKey = worktree?.projectId ?? (place === undefined ? folderNoteKey(home) : placeNoteKey(place));
+    return { worktree, saveKey, noteLabel: worktree?.label ?? place?.label ?? (basename(home) || 'workspace') };
+  };
   const agentPersistence = async (id: string) => {
     const target = await discovery.target(id);
     // require one current agent target
     if (target === undefined) return undefined;
-    const worktree = configuredWorktreeForWorkspace(discovery.worktreesNow(), target.agent.home);
-    // an Agent with no Worktree of its own keeps its notes with its Place, so an Agent in a
-    // subfolder of a directory Project or Scratch folder shares the notes its Place tab shows
-    const place = worktree === undefined && target.agent.placeId !== undefined ? await resolvePlace(target.agent.placeId) : undefined;
-    const saveKey = worktree?.projectId ?? (place === undefined ? folderNoteKey(target.agent.home) : placeNoteKey(place));
-    return { agent: target.agent, worktree, saveKey, noteLabel: worktree?.label ?? place?.label ?? (basename(target.agent.home) || 'workspace') };
+    return { agent: target.agent, ...await homePersistence(target.agent) };
   };
   // resolve one queue scope to its note key and current operator-facing label
-  const notePersistenceForQueueScope = async (scope: string): Promise<{ saveKey: string; noteLabel: string } | undefined> => {
-    // scratch scopes still require their live agent home
-    if (scope.startsWith('agent:')) return await agentPersistence(scope.slice('agent:'.length));
+  const notePersistenceForQueueScope = async (scope: string, prompt: QueuedPrompt): Promise<{ saveKey: string; noteLabel: string } | undefined> => {
+    // a departed Agent's prompts go where it ran; one queued before origins were kept needs its live home
+    if (scope.startsWith('agent:')) return await agentPersistence(scope.slice('agent:'.length)) ?? (prompt.origin === undefined ? undefined : await homePersistence(prompt.origin));
     const worktree = configuredWorktree(scope);
     const fallbackPath = worktreePathOf(scope) ?? scope;
     return { saveKey: projectIdOf(scope), noteLabel: worktree?.label ?? (basename(fallbackPath) || 'workspace') };
@@ -919,7 +917,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   };
   // the PromptService's drain sink creates the same queued prompt notes as explicit Save
   const drainUndelivered = async (scope: string, prompt: QueuedPrompt): Promise<boolean> => {
-    const persistence = await notePersistenceForQueueScope(scope);
+    const persistence = await notePersistenceForQueueScope(scope, prompt);
     // retain the prompt when scratch persistence disappeared
     if (persistence === undefined) return false;
     return await createQueuedPromptNote(persistence, prompt) !== undefined;
@@ -1694,11 +1692,6 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.post('/api/worktrees/:id/move-branch', async (request, reply) => { controlled(request, true); const branch = body(request).branch; if (typeof branch !== 'string') return reply.code(409).send({ error: 'Unable to move that branch. The destination must be clean and the source branch must still be open in another worktree.' }); const result = await prSwitch.moveBranch((request.params as { id: string }).id, branch); if (result === 'busy') return reply.code(409).send({ error: 'An agent is busy. Wait for it to finish, then move the branch again.' }); if (result === 'moved' || result === 'recovery-required') { discovery.invalidateWorktrees(); await dashboardUpdates.refresh().catch(() => undefined); } if (result === 'recovery-required') return reply.code(409).send({ error: 'The branch move needs manual recovery. Check both worktrees; any unrecovered changes remain safely stored in Git stash.', recoveryRequired: true }); return result === 'moved' ? reply.code(202).send() : reply.code(409).send({ error: 'Unable to move that branch. The destination must be clean and the source branch must still be open in another worktree.' }); });
   app.get('/api/agents/:id/new-task', async (request, reply) => { controlled(request); const availability = await newTask.available((request.params as { id: string }).id); return availability === undefined ? reply.code(404).send({ error: 'new task unavailable' }) : availability; });
   app.post('/api/agents/:id/new-task', async (request, reply) => { controlled(request, true); if (!await newTask.start((request.params as { id: string }).id)) return reply.code(409).send({ error: 'Unable to start a new task. The working copy must be clean and pushed.' }); return reply.code(202).send(); });
-  const promptStorageKey = async (agentId: string) => {
-    const target = await discovery.target(agentId);
-    if (!target) return undefined;
-    return promptStorageKeyForAgent(target.agent);
-  };
   app.post('/api/agents/:id/prompt', { bodyLimit: Math.ceil(maxPromptAttachmentBytes * 1.4) }, async (request, reply) => {
     controlled(request, true);
     const data = body(request);
@@ -1707,7 +1700,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (!await prompts.submit((request.params as { id: string }).id, data.prompt, attachments)) return reply.code(404).send({ error: 'target unavailable' });
     return reply.code(204).send();
   });
-  app.get('/api/agents/:id/prompt-history', async (request, reply) => { controlled(request); const key = await promptStorageKey((request.params as { id: string }).id); if (key === undefined) return reply.code(404).send({ error: 'target unavailable' }); const prompts = await promptHistory.list(key); return prompts === undefined ? reply.code(400).send({ error: 'invalid prompt history scope' }) : { prompts }; });
+  app.get('/api/agents/:id/prompt-history', async (request, reply) => { controlled(request); const id = (request.params as { id: string }).id; if (await discovery.target(id) === undefined) return reply.code(404).send({ error: 'target unavailable' }); const prompts = await promptHistory.list(promptScope(id)); return prompts === undefined ? reply.code(400).send({ error: 'invalid prompt history scope' }) : { prompts }; });
   app.get('/api/agents/:id/queued-prompts', async (request, reply) => { controlled(request); const queued = await prompts.listQueued((request.params as { id: string }).id); return queued === undefined ? reply.code(404).send({ error: 'target unavailable' }) : { prompts: queued }; });
   app.put('/api/agents/:id/queued-prompts/:promptId', async (request, reply) => { controlled(request, true); const { id, promptId } = request.params as { id: string; promptId: string }; const text = body(request).prompt; if (typeof text !== 'string') return reply.code(400).send({ error: 'invalid prompt' }); const prompt = await prompts.updateQueued(id, promptId, text); return prompt === undefined ? reply.code(404).send({ error: 'queued prompt unavailable' }) : prompt; });
   app.post('/api/agents/:id/queued-prompts/:promptId/move', async (request, reply) => { controlled(request, true); const { id, promptId } = request.params as { id: string; promptId: string }; const direction = body(request).direction; if (direction !== 'earlier' && direction !== 'later') return reply.code(400).send({ error: 'invalid queue direction' }); const queued = await prompts.moveQueued(id, promptId, direction); return queued === undefined ? reply.code(404).send({ error: 'queued prompt unavailable' }) : { prompts: queued }; });
@@ -1751,10 +1744,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.post('/api/agents/:id/queued-prompts/:promptId/save', async (request, reply) => {
     controlled(request, true);
     const { id, promptId } = request.params as { id: string; promptId: string };
-    const [queueKey, persistence] = await Promise.all([promptStorageKey(id), agentPersistence(id)]);
-    if (queueKey === undefined || persistence === undefined) return reply.code(404).send({ error: 'target unavailable' });
+    const persistence = await agentPersistence(id);
+    if (persistence === undefined) return reply.code(404).send({ error: 'target unavailable' });
     let note: WorktreeNote | undefined;
-    const result = await queuedPrompts.consumeOnSuccess(queueKey, promptId, async queued => {
+    const result = await queuedPrompts.consumeOnSuccess(promptScope(id), promptId, async queued => {
       // create before consuming the queue entry
       note = await createQueuedPromptNote(persistence, queued);
       return note !== undefined;
@@ -2457,9 +2450,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (agentAttentionState(observed) !== 'finished') return { status: 'skipped', worktreeId, reason: 'not-idle', error: 'Only idle configured agents can restart.' };
       // revalidate state before closing
       if (observed.worktreeId !== worktree.id) return { status: 'skipped', worktreeId, reason: 'not-idle', error: 'The worktree agent is no longer idle.' };
-      const queued = await queuedPrompts.list(promptStorageKeyForAgent(observed)).then(prompts => prompts?.length).catch(() => undefined);
+      const queued = await queuedPrompts.list(promptScope(observed.id)).then(prompts => prompts?.length).catch(() => undefined);
       // preserve queued or unreadable prompt work
-      if (queued === undefined || queued > 0) return { status: 'skipped', worktreeId, reason: 'not-idle', error: 'The worktree has queued prompts.' };
+      if (queued === undefined || queued > 0) return { status: 'skipped', worktreeId, reason: 'not-idle', error: 'The agent has queued prompts.' };
       // With other Agents at the Worktree, "continue the latest" could pick up a sibling's
       // Conversation: a restart resumes this Agent's own, and starts fresh when it cannot (another
       // kind, or no Conversation reported yet).
@@ -2485,6 +2478,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         await dashboardUpdates.refresh().catch(() => undefined);
         return { status: 'failed', worktreeId, reason: 'timed-out', error: `The agent closed and resumed, but Codex did not become ready within ${launchReadyTimeoutSeconds} seconds.` };
       }
+      await prompts.handOver(id, agent.id).catch(() => undefined);
       await dashboardUpdates.refresh().catch(() => undefined);
       return { status: 'restarted', worktreeId, agentId: agent.id };
     } finally {
@@ -2985,16 +2979,15 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return undefined;
   };
   // delete every record a Worktree leaves behind, keyed by its wire id: the pin and last-used
-  // kind, the queued prompts, prompt history and the saved review tour with its Code review — so
-  // a removed (then possibly recreated-at-the-same-path) Worktree leaves no stale trace.
+  // kind and the saved review tour with its Code review — so a removed (then possibly
+  // recreated-at-the-same-path) Worktree leaves no stale trace. Queued prompts and history
+  // belong to its Agents and are retired with them.
   // Project-scoped notes and console-named conversations are shared and deliberately retained.
   // Shared by Remove (one Worktree) and Prune (each orphaned record).
   const deleteWorktreeRecords = async (worktreeId: string): Promise<void> => {
     codeReviews.supersedeWorktree(worktreeId);
     await Promise.all([
       worktreeStore.delete(worktreeId).catch(() => {}),
-      queuedPrompts.clearScope(worktreeId).catch(() => {}),
-      promptHistory.clearScope(worktreeId).catch(() => {}),
       reviewStore.invalidate(worktreeId).catch(() => {})
     ]);
   };

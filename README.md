@@ -30,7 +30,7 @@ pull-request state without losing the terminal-native workflow underneath.
 | --- | --- |
 | **Agent overview** | Discover Codex/OMX descendants in tmux, see working/ready/action-required state, unread activity, and launch configured or scratch agents. |
 | **Live output** | Stream the active pane, page through history, open detected links, copy selected output, answer guided questions, and temporarily switch to an interactive terminal. |
-| **Prompt workflow** | Use per-worktree prompt history, arrow-key recall, saved drafts, attachments, skill/slash-command autocomplete, press-and-hold voice dictation, and persistent queued prompt management. |
+| **Prompt workflow** | Use per-agent prompt history, arrow-key recall, saved drafts, attachments, skill/slash-command autocomplete, press-and-hold voice dictation, and persistent queued prompt management. |
 | **Worktree context** | Show branch and full Git status, changed filenames, pull-request checks and review issues, GitHub Actions, project links, and trusted stack commands. |
 | **Conversations and notes** | Name, list and resume each agent's own Conversations from the console, and keep autosaved Markdown notes with reusable file attachments beside output. Both are shared automatically across a Project's worktrees. A note's **Show in all workspaces** option also makes it available in other Projects and Scratch. |
 | **Guided review** | Generate an AI-narrated tour of active Working or All PR implementation changes, visit or skip each logical step, and send consolidated feedback to the agent. |

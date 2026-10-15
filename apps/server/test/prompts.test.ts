@@ -8,6 +8,7 @@ import { promptAttachmentData, promptAttachmentName, validPromptAttachments } fr
 import { codexAdapter } from '../src/adapters/codex.js';
 import { inlineQuestionId } from '../src/adapters/inline-questions.js';
 import { QueuedPromptService, type QueuedPrompt } from '../src/prompts/queue.js';
+import { PromptHistoryService } from '../src/prompt-history/service.js';
 import { stated } from './helpers/agent.js';
 const socket={fingerprint:'socket',path:'/tmp/sock',device:1,inode:1}; const agent=stated({id:'socket:%1',paneId:'%1',sessionId:'socket:$1',socketFingerprint:'socket',home:'/tmp',title:''});
 // records every prompt a halted queue drains into Notes, in drain order (front of the queue first)
@@ -169,7 +170,7 @@ it('maps a discovered host worktree path to its mounted workspace before staging
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });
 
-it('records successful submissions in the configured worktree history', async () => {
+it('records successful submissions in the Agent\'s own history', async () => {
   const recorded: Array<[string, string]> = [];
   let submissions = 0;
   const worktree = { id: 'cora:/tmp', projectId: 'cora', label: 'Cora', path: '/tmp', identity: '/tmp', available: true, pinned: true, main: true, detached: false, locked: false };
@@ -181,7 +182,7 @@ it('records successful submissions in the configured worktree history', async ()
   await expect(service.submit(agent.id, 'first prompt')).resolves.toBe(true);
   await expect(service.submit(agent.id, 'failed prompt')).resolves.toBe(false);
 
-  expect(recorded).toEqual([['cora:/tmp', 'first prompt']]);
+  expect(recorded).toEqual([[`agent:${agent.id}`, 'first prompt']]);
 });
 
 // preserve advisor isolation for ordinary and Unicode-rich collapsed pastes
@@ -217,7 +218,7 @@ it.each(['ordinary', 'unicode'] as const)('isolates %s update advisor prompts fr
   }
 });
 
-it('queues prompts that arrive while an idle restart holds the worktree lock', async () => {
+it('queues prompts that arrive while an idle restart holds the Agent lock', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rac-restart-lock-'));
   const queue = new QueuedPromptService(join(directory, 'queue.json'));
   const pasted: string[] = [];
@@ -233,7 +234,7 @@ it('queues prompts that arrive while an idle restart holds the worktree lock', a
     expect(release).toBeTypeOf('function');
     await expect(service.submit(agent.id, 'Run after restart')).resolves.toBe(true);
     expect(pasted).toEqual([]);
-    await expect(queue.list('cora:/tmp')).resolves.toMatchObject([{ text: 'Run after restart' }]);
+    await expect(queue.list(`agent:${agent.id}`)).resolves.toMatchObject([{ text: 'Run after restart' }]);
     release?.();
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -279,24 +280,99 @@ it('blocks restart acquisition while a submitted prompt awaits its working state
   }
 });
 
-it('releases a replacement-agent reservation after queuing behind a worktree restart', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rac-replacement-lock-'));
-  const queue = new QueuedPromptService(join(directory, 'queue.json'));
-  const replacement = { ...agent, id: 'socket:%2', paneId: '%2', sessionId: 'socket:$2' };
+describe('per-Agent prompt scope', () => {
   const worktree = { id: 'cora:/tmp', projectId: 'cora', label: 'Cora', path: '/tmp', identity: '/tmp', available: true, pinned: true, main: true, detached: false, locked: false };
-  const discovery = { worktreesNow: () => [worktree], target: async (id: string) => ({ agent: id === replacement.id ? replacement : agent, socket }) };
-  const tmux = { pastePrompt: async () => true, sendKeys: async () => true };
-  const service = new PromptService(discovery as never, tmux as never, undefined, queue);
-  try {
-    const releaseOriginal = await service.acquireRestartLock(agent.id);
-    await expect(service.submit(replacement.id, 'Run on replacement')).resolves.toBe(true);
-    releaseOriginal?.();
-    const releaseReplacement = await service.acquireRestartLock(replacement.id);
-    expect(releaseReplacement).toBeTypeOf('function');
-    releaseReplacement?.();
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+
+  it('keeps a prompt queued for a busy Agent out of its idle sibling at the same Worktree', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-sibling-scope-'));
+    const queue = new QueuedPromptService(join(directory, 'queue.json'));
+    const idle = { id: 'socket:%1', paneId: '%1', home: '/tmp', kind: 'claude' as const, title: '', attention: 'finished' as 'finished' | 'working' };
+    const busy = { ...idle, id: 'socket:%2', paneId: '%2', attention: 'working' as 'finished' | 'working' };
+    const pasted: string[] = [];
+    const discovery = { worktreesNow: () => [worktree], target: async (id: string) => ({ agent: id === busy.id ? busy : idle, socket }) };
+    const tmux = { pastePrompt: async (_socket: unknown, pane: string) => { pasted.push(pane); return true; }, sendKeys: async () => true, capture: async () => '' };
+    const service = new PromptService(discovery as never, tmux as never, undefined, queue);
+    try {
+      await expect(service.submit(busy.id, 'For the busy one')).resolves.toBe(true);
+      await service.observe(idle);
+      expect(pasted).toEqual([]);
+      await expect(queue.list(`agent:${busy.id}`)).resolves.toMatchObject([{ text: 'For the busy one' }]);
+      await expect(queue.list(`agent:${idle.id}`)).resolves.toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('drains a departed Agent\'s queue into Notes and drops its history once the grace window passes', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(100_000);
+    const directory = await mkdtemp(join(tmpdir(), 'rac-departed-'));
+    const queue = new QueuedPromptService(join(directory, 'queue.json'));
+    const history = new PromptHistoryService(join(directory, 'history.json'));
+    const { drained, drain } = drainRecorder();
+    const service = new PromptService({ worktreesNow: () => [worktree], target: async () => undefined } as never, {} as never, history, queue, drain);
+    try {
+      await queue.enqueue('agent:socket:%9', 'Left behind', [], { home: '/tmp', placeId: 'place-1' });
+      await history.record('agent:socket:%9', 'Earlier prompt');
+      await history.record('agent:socket:%1', 'Live prompt');
+      await service.retireDeparted(['socket:%1']);
+      // a pane that reappears within the window restarts its grace
+      vi.setSystemTime(129_999);
+      await service.retireDeparted(['socket:%1', 'socket:%9']);
+      vi.setSystemTime(150_000);
+      await service.retireDeparted(['socket:%1']);
+      expect(drained).toEqual([]);
+
+      vi.setSystemTime(180_000);
+      await service.retireDeparted(['socket:%1']);
+      expect(drained).toMatchObject([{ text: 'Left behind', origin: { home: '/tmp', placeId: 'place-1' } }]);
+      await expect(queue.list('agent:socket:%9')).resolves.toEqual([]);
+      await expect(history.list('agent:socket:%9')).resolves.toEqual([]);
+      await expect(history.list('agent:socket:%1')).resolves.toMatchObject([{ text: 'Live prompt' }]);
+    } finally {
+      vi.useRealTimers();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a departed Agent\'s queue when its prompts have nowhere to go', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(100_000);
+    const directory = await mkdtemp(join(tmpdir(), 'rac-departed-refused-'));
+    const queue = new QueuedPromptService(join(directory, 'queue.json'));
+    const history = new PromptHistoryService(join(directory, 'history.json'));
+    const service = new PromptService({ worktreesNow: () => [], target: async () => undefined } as never, {} as never, history, queue, async () => false);
+    try {
+      await queue.enqueue('agent:socket:%9', 'Nowhere to save');
+      await history.record('agent:socket:%9', 'Earlier prompt');
+      await service.retireDeparted([]);
+      vi.setSystemTime(130_000);
+      await service.retireDeparted([]);
+      await expect(queue.list('agent:socket:%9')).resolves.toMatchObject([{ text: 'Nowhere to save' }]);
+      await expect(history.list('agent:socket:%9')).resolves.toMatchObject([{ text: 'Earlier prompt' }]);
+    } finally {
+      vi.useRealTimers();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('hands a restarted Agent\'s queue and history to its replacement', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-hand-over-'));
+    const queue = new QueuedPromptService(join(directory, 'queue.json'));
+    const history = new PromptHistoryService(join(directory, 'history.json'));
+    const service = new PromptService({ worktreesNow: () => [worktree], target: async () => undefined } as never, {} as never, history, queue);
+    try {
+      await queue.enqueue('agent:socket:%1', 'Queued during restart');
+      await history.record('agent:socket:%1', 'Before restart');
+      await service.handOver('socket:%1', 'socket:%2');
+      await expect(queue.list('agent:socket:%2')).resolves.toMatchObject([{ text: 'Queued during restart' }]);
+      await expect(queue.list('agent:socket:%1')).resolves.toEqual([]);
+      await expect(history.list('agent:socket:%2')).resolves.toMatchObject([{ text: 'Before restart' }]);
+      await expect(history.list('agent:socket:%1')).resolves.toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 it('rejects restart acquisition after the selected mutation generation changes', async () => {

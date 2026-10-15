@@ -692,7 +692,7 @@ is ahead of or behind its upstream:
   fails, the removal still stands and the failure is reported.
 
 Removing a Worktree kills its idle shell, removes the checkout, and deletes its
-console records (pin, last-used kind, queued prompts, prompt history). It never
+console records (pin, last-used kind, review tour). It never
 touches the Project-scoped notes and console-named conversations its siblings
 share.
 
@@ -729,7 +729,8 @@ prune only what you know is truly gone.
 Console-named conversations and sticky notes belong to the
 **Project** and are shared automatically across all of its Worktrees, so related
 checkouts see the same named Conversations and use the same notes with no
-configuration. Queued prompts and prompt history stay per-Worktree. Scratch
+configuration. Queued prompts and prompt history belong to the agent they were
+sent to; when an agent exits, its queued prompts are saved as notes. Scratch
 agents derive their own persistence group from the scratch workspace, so scratch
 agents opened in the same directory share entries across restarts; resuming a
 Conversation requires a configured Project (scratch agents can name and list

@@ -1896,6 +1896,44 @@ describe('queued prompt API', () => {
     }
   }, 15_000);
 
+  it('drains a departed Agent\'s queued prompts into the notes of the Worktree it ran in', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-departed-queue-api-'));
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const worktree = { id: 'cora:/worktrees/cora', projectId: 'cora', label: 'Release Lane', path: '/worktrees/cora', identity: '/worktrees/cora', available: true };
+    const agent = stated({ id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/worktrees/cora', title: '⠋ Working' });
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    let alive = true;
+    const departedApp = await buildApp({ ...config }, {
+      auth: new AuthService(hash, Buffer.alloc(32, 15).toString('base64url')),
+      discovery: { target: async (id: string) => alive && id === agent.id ? { agent, socket } : undefined, worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: alive ? [agent] : [], projects: [] }) } as never,
+      tmux: { pastePrompt: async () => true, capture: async () => '', sendKeys: async () => true } as never,
+      queuedPrompts: new QueuedPromptService(join(directory, 'queue.json')),
+      promptHistory: new PromptHistoryService(join(directory, 'history.json')),
+      notes: new WorktreeNoteService(join(directory, 'notes.json'))
+    });
+    try {
+      const boot = await departedApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
+      const login = await departedApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
+      const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken };
+      await departedApp.inject({ method: 'POST', url: '/api/agents/agent-1/prompt', headers, payload: { prompt: 'Left behind' } });
+
+      // the pane is gone; its prompt is kept through the grace window, then saved
+      alive = false;
+      vi.useFakeTimers({ toFake: ['Date'] });
+      await departedApp.inject({ method: 'GET', url: '/api/dashboard', headers: { host: headers.host, cookie: headers.cookie } });
+      vi.setSystemTime(Date.now() + 31_000);
+      await departedApp.inject({ method: 'GET', url: '/api/dashboard', headers: { host: headers.host, cookie: headers.cookie } });
+      const worktreeNotes = await departedApp.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/notes`, headers: { host: headers.host, cookie: headers.cookie } });
+
+      expect(worktreeNotes.json().notes).toMatchObject([{ text: 'Left behind', source: 'queued-prompt' }]);
+      expect(worktreeNotes.json().notes[0].title).toMatch(/^Queued prompt in Release Lane/u);
+    } finally {
+      vi.useRealTimers();
+      await departedApp.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it('saves a scratch agent queued prompt as a note under its scratch note key', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'rac-save-scratch-note-'));
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
@@ -1968,7 +2006,7 @@ describe('queued prompt API', () => {
 });
 
 describe('prompt history API', () => {
-  it('records and lists history by configured worktree when the agent pane changes', async () => {
+  it('records and lists history per Agent, never a sibling\'s at the same Worktree', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const worktree = { id: 'cora', projectId: 'cora', label: 'Cora', path: '/worktrees/cora', identity: '/worktrees/cora', available: true };
     const agents = [
@@ -1999,11 +2037,12 @@ describe('prompt history API', () => {
       const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken };
 
       const queued = await historyApp.inject({ method: 'POST', url: '/api/agents/agent-1/prompt', headers, payload: { prompt: 'Review this branch.' } });
-      const listed = await historyApp.inject({ method: 'GET', url: '/api/agents/agent-2/prompt-history', headers: { host: headers.host, cookie: headers.cookie } });
+      const listed = await historyApp.inject({ method: 'GET', url: '/api/agents/agent-1/prompt-history', headers: { host: headers.host, cookie: headers.cookie } });
+      await historyApp.inject({ method: 'GET', url: '/api/agents/agent-2/prompt-history', headers: { host: headers.host, cookie: headers.cookie } });
 
       expect(queued.statusCode).toBe(204);
       expect(listed.json()).toEqual({ prompts: stored });
-      expect(keys).toEqual(['record:cora', 'list:cora']);
+      expect(keys).toEqual(['record:agent:agent-1', 'list:agent:agent-1', 'list:agent:agent-2']);
     } finally {
       await historyApp.close();
     }

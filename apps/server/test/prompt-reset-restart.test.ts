@@ -23,7 +23,7 @@ describe('prompt reset restart recovery', () => {
     const agent = { id: 'socket:%1', paneId: '%1', home: '/tmp', kind: 'codex' as const, title: 'Ready', attention: 'finished' as 'finished' | 'working' };
     const sibling = { ...agent, id: 'socket:%2', paneId: '%2' };
     const worktree = testWorktree({ path: '/tmp' });
-    const scope = worktree.id;
+    const scope = `agent:${agent.id}`;
     const pasted: string[] = [];
     const saved: string[] = [];
     let composer = '';
@@ -72,7 +72,7 @@ describe('prompt reset restart recovery', () => {
       // exercise both sides of the restart boundary
       if (scenario === 'queued') await first.service.submit(agent.id, 'first follow-up');
       const recovered = restart();
-      // a duplicate pane must not steal the shared worktree's reset ownership
+      // a duplicate pane must not steal another Agent's reset ownership
       if (scenario === 'sibling-first') await recovered.service.observe(sibling);
       // lifecycle reservations must hydrate pending resets before allowing a restart
       if (scenario === 'queued') await expect(recovered.service.acquireRestartLock(agent.id)).resolves.toBeUndefined();

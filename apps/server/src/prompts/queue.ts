@@ -4,7 +4,9 @@ import { dirname } from 'node:path';
 import { ResetBoundaryStore } from './reset-boundaries.js';
 import { maxStoredAttachmentFootprintBytes, promptAttachmentBytes, promptAttachmentsStorageFootprint, validPrompt, type PromptAttachment } from './validation.js';
 
-export type QueuedPrompt = { id: string; text: string; createdAt: string; attachments?: PromptAttachment[] };
+// where the queuing Agent ran, so its prompts can still become Notes after it is gone
+export type QueuedPromptOrigin = { home: string; placeId?: string };
+export type QueuedPrompt = { id: string; text: string; createdAt: string; attachments?: PromptAttachment[]; origin?: QueuedPromptOrigin };
 export type QueuedPromptSummary = { id: string; text: string; createdAt: string; attachments?: Array<{ name: string; size: number }> };
 type StoredQueues = Record<string, QueuedPrompt[]>;
 
@@ -14,15 +16,20 @@ const maxStoredTextLength = 10_000_000;
 const maxStoredAttachmentBytes = 100 * 1024 * 1024;
 const validScope = (value: string) => value.length > 0 && value.length <= 4096 && !value.includes('\0');
 const validId = (value: string) => /^[A-Za-z0-9_-]{12,64}$/u.test(value);
+const validOrigin = (value: unknown): value is QueuedPromptOrigin => {
+  if (value === null || typeof value !== 'object') return false;
+  const origin = value as { home?: unknown; placeId?: unknown };
+  return typeof origin.home === 'string' && validScope(origin.home) && (origin.placeId === undefined || typeof origin.placeId === 'string' && validScope(origin.placeId));
+};
 const parsePrompt = (value: unknown): QueuedPrompt | undefined => {
   if (value === null || typeof value !== 'object') return undefined;
-  const prompt = value as { id?: unknown; text?: unknown; createdAt?: unknown; attachments?: unknown };
+  const prompt = value as { id?: unknown; text?: unknown; createdAt?: unknown; attachments?: unknown; origin?: unknown };
   if (typeof prompt.id !== 'string' || !validId(prompt.id) || typeof prompt.text !== 'string' || typeof prompt.createdAt !== 'string' || !Number.isFinite(Date.parse(prompt.createdAt))) return undefined;
   const rawAttachments = prompt.attachments ?? [];
   if (!Array.isArray(rawAttachments)) return undefined;
   const attachments = rawAttachments.filter((attachment): attachment is PromptAttachment => attachment !== null && typeof attachment === 'object' && typeof (attachment as { name?: unknown }).name === 'string' && typeof (attachment as { data?: unknown }).data === 'string');
-  if (attachments.length !== rawAttachments.length || !validPrompt(prompt.text, attachments)) return undefined;
-  return { id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...(attachments.length === 0 ? {} : { attachments }) };
+  if (attachments.length !== rawAttachments.length || !validPrompt(prompt.text, attachments) || prompt.origin !== undefined && !validOrigin(prompt.origin)) return undefined;
+  return { id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...(attachments.length === 0 ? {} : { attachments }), ...(prompt.origin === undefined ? {} : { origin: { home: prompt.origin.home, ...(prompt.origin.placeId === undefined ? {} : { placeId: prompt.origin.placeId }) } }) };
 };
 const summarize = (prompt: QueuedPrompt): QueuedPromptSummary => ({ id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...(prompt.attachments === undefined ? {} : { attachments: prompt.attachments.map(attachment => ({ name: attachment.name, size: promptAttachmentBytes(attachment)! })) }) });
 // sum every durable queue budget across all scopes
@@ -45,14 +52,14 @@ export class QueuedPromptService {
   }
 
   // validate complete prompt content once before queue persistence
-  async enqueue(scope: string, text: string, attachments: PromptAttachment[] = []): Promise<QueuedPromptSummary | undefined> {
+  async enqueue(scope: string, text: string, attachments: PromptAttachment[] = [], origin?: QueuedPromptOrigin): Promise<QueuedPromptSummary | undefined> {
     // prompt validation includes every attachment safeguard
-    if (!validScope(scope) || !validPrompt(text, attachments)) return undefined;
+    if (!validScope(scope) || !validPrompt(text, attachments) || origin !== undefined && !validOrigin(origin)) return undefined;
     return await this.mutate(stored => {
       if (stored[scope] === undefined && Object.keys(stored).length >= maxScopes) return undefined;
       const queue = stored[scope] ?? [];
       if (queue.length >= maxPromptsPerScope) return undefined;
-      const prompt: QueuedPrompt = { id: randomBytes(18).toString('base64url'), text, createdAt: new Date().toISOString(), ...(attachments.length === 0 ? {} : { attachments }) };
+      const prompt: QueuedPrompt = { id: randomBytes(18).toString('base64url'), text, createdAt: new Date().toISOString(), ...(attachments.length === 0 ? {} : { attachments }), ...(origin === undefined ? {} : { origin }) };
       queue.push(prompt);
       stored[scope] = queue;
       const size = totals(stored);
@@ -119,6 +126,26 @@ export class QueuedPromptService {
       if (queue.length === 0) delete stored[scope];
       return 'consumed';
     }, result => result === 'consumed');
+  }
+
+  // hand one scope's prompts to another, ahead of any already waiting there; refuses rather
+  // than drop prompts past the per-scope cap
+  async moveScope(from: string, to: string): Promise<boolean> {
+    if (!validScope(from) || !validScope(to) || from === to) return false;
+    return await this.mutate(stored => {
+      const moving = stored[from];
+      if (moving === undefined) return true;
+      const merged = [...moving, ...stored[to] ?? []];
+      if (merged.length > maxPromptsPerScope) return false;
+      stored[to] = merged;
+      delete stored[from];
+      return true;
+    });
+  }
+
+  async scopes(): Promise<string[]> {
+    await this.mutation;
+    return Object.keys(await this.read());
   }
 
   async next(scope: string): Promise<QueuedPrompt | undefined> {

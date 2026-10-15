@@ -86,7 +86,23 @@ export class PromptHistoryService {
     });
   }
 
-  // drop every recorded prompt for one scope — Remove deletes the Worktree's history
+  // hand one scope's history to another, behind its newer entries
+  async moveScope(from: string, to: string): Promise<void> {
+    if (!validScope(from) || !validScope(to) || from === to) return;
+    await this.mutate(stored => {
+      const moving = stored[from];
+      if (moving === undefined) return;
+      stored[to] = [...stored[to] ?? [], ...moving].slice(0, maxEntriesPerScope);
+      delete stored[from];
+    });
+  }
+
+  async scopes(): Promise<string[]> {
+    await this.mutation;
+    return Object.keys(await this.read());
+  }
+
+  // drop every recorded prompt for one scope — a departed Agent's history goes with it
   async clearScope(scope: string): Promise<void> {
     if (!validScope(scope)) return;
     await this.mutate(stored => { delete stored[scope]; });

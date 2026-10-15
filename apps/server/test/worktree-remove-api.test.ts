@@ -265,8 +265,6 @@ describe('DELETE /api/worktrees/:id', () => {
     const { worktreeStore, queuedPrompts, promptHistory } = await stores();
     const reviewStore = { summaries: async () => [], current: async () => undefined, invalidate: async (id: string) => { invalidated.push(id); return 1; }, save: async () => undefined } as never;
     await worktreeStore.setPinned(linked.id, true);
-    await queuedPrompts.enqueue(linked.id, 'hello');
-    await promptHistory.record(linked.id, 'hello');
     const server = await app({ discovery: discoveryStub(), worktreeManagement, launch, worktreeStore, queuedPrompts, promptHistory, reviewStore });
     try {
       const response = await server.inject({ method: 'DELETE', url: `/api/worktrees/${encodeURIComponent(linked.id)}`, headers: mutationHeaders });
@@ -276,8 +274,6 @@ describe('DELETE /api/worktrees/:id', () => {
       expect(order).toEqual(['kill', 'remove']);
       // every wire-id-keyed record for the worktree is gone; the review tour is invalidated
       expect(await worktreeStore.pins()).toEqual({});
-      expect(await queuedPrompts.list(linked.id)).toEqual([]);
-      expect(await promptHistory.list(linked.id)).toEqual([]);
       expect(invalidated).toEqual([linked.id]);
     } finally { await server.close(); }
   });
@@ -373,13 +369,11 @@ describe('POST /api/projects/:id/worktrees/prune', () => {
     // one record git still lists (kept) and one it lists nowhere (orphan, deleted)
     await worktreeStore.setPinned(linked.id, true);
     await worktreeStore.setPinned('proj:/repo/wts/gone', true);
-    await queuedPrompts.enqueue('proj:/repo/wts/gone', 'stale');
     const server = await app({ discovery: discoveryStub(), worktreeManagement, worktreeStore, queuedPrompts, promptHistory });
     try {
       const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees/prune', headers: mutationHeaders });
       expect(response.statusCode).toBe(204);
       expect(await worktreeStore.pins()).toEqual({ [linked.id]: true });
-      expect(await queuedPrompts.list('proj:/repo/wts/gone')).toEqual([]);
     } finally { await server.close(); }
   });
 

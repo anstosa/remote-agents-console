@@ -344,8 +344,9 @@ export function planMigration(raw: unknown, facts: ResolvedFacts): MigrationPlan
       // notes are Project-scoped: saveKey ?? id → <projectId>; a saveKey shared across repositories warns
       if (keyMaps.notes[noteKey] !== undefined && keyMaps.notes[noteKey] !== group.projectId) warnings.push(`save key ${noteKey} spans repositories; its notes go to project ${keyMaps.notes[noteKey]}`);
       else keyMaps.notes[noteKey] = group.projectId;
-      // saved prompts, queued prompts and history are Worktree-scoped: the live reader keys all
-      // three by the Worktree wire id `<projectId>:<realpath>` (app.ts promptStorageKeyForAgent)
+      // saved prompts, queued prompts and history were Worktree-scoped, keyed by the Worktree wire
+      // id `<projectId>:<realpath>`; ADR 0012 moved the last two to the Agent, and the departed-Agent
+      // sweep drains these Worktree-keyed records
       keyMaps.savedPrompts[`worktree:${oldId}`] = worktreeKey;
       keyMaps.queued[`worktree:${oldId}`] = worktreeKey;
       keyMaps.history[`worktree:${oldId}`] = worktreeKey;
