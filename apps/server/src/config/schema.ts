@@ -67,6 +67,8 @@ const worktreeOverride = z.object({
   hostname: previewHostname.nullable().optional()
 }).strict();
 const pushAction = z.object({ label: z.string().trim().min(1).max(80), prompt: command }).strict().default({ label: 'Commit/Push', prompt: 'review, commit, and push' });
+// accept branch names rather than options or revision expressions
+const defaultBranch = z.string().min(1).max(255).refine(value => value !== 'HEAD' && (!value.startsWith('refs/') || value.startsWith('refs/heads/') || value.startsWith('refs/remotes/')) && !value.startsWith('-') && !value.includes('..') && !value.includes('@{') && !/[\s\u0000-\u001f\u007f~^:?*\[\\]/u.test(value) && value !== '@' && value.split('/').every(part => part !== '' && !part.startsWith('.') && !part.endsWith('.') && !part.endsWith('.lock')), 'invalid default branch');
 const serverName = z.string().trim().min(1).max(80).refine(value => !value.includes('\0'), 'NUL is forbidden');
 // One configured agent CLI. `program` is an absolute, real executable (not a
 // version-manager shim that needs a shell); `args` and `env` are the operator's
@@ -125,7 +127,7 @@ const sourceSchema = z.object({
   // Main worktree's container path to the host under Docker; `worktreesDirectory` is
   // where Add creates new checkouts (default `../<basename>-worktrees`, resolved
   // against the Main worktree). Scratch-only first runs omit `projects`.
-  projects: z.array(z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/).refine(value => value !== 'agent' && value !== 'scratch', 'project id `agent` and `scratch` are reserved'), label: z.string().max(120).optional(), path: z.string().min(1), hostPath: z.string().startsWith('/').optional(), worktreeOrder: z.array(z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden')).max(2000).optional(), worktreeOverrides: z.array(worktreeOverride).max(2000).optional(), worktreesDirectory: z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden').optional(), externalUrl: previewExternalUrl.optional(), port: previewPort.optional(), hostname: previewHostname.optional(), commands: stackCommands.optional(), newTask: command.optional(), push: pushAction }).strict()).max(100).default([])
+  projects: z.array(z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/).refine(value => value !== 'agent' && value !== 'scratch', 'project id `agent` and `scratch` are reserved'), label: z.string().max(120).optional(), defaultBranch: defaultBranch.optional(), path: z.string().min(1), hostPath: z.string().startsWith('/').optional(), worktreeOrder: z.array(z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden')).max(2000).optional(), worktreeOverrides: z.array(worktreeOverride).max(2000).optional(), worktreesDirectory: z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden').optional(), externalUrl: previewExternalUrl.optional(), port: previewPort.optional(), hostname: previewHostname.optional(), commands: stackCommands.optional(), newTask: command.optional(), push: pushAction }).strict()).max(100).default([])
 }).strict();
 export type ConfigInput = z.input<typeof sourceSchema>;
 export type RemoteServer = { url: URL };
@@ -254,6 +256,7 @@ async function resolveProject(raw: ParsedProject): Promise<Project> {
     ...(worktreeOrder === undefined ? {} : { worktreeOrder }),
     ...(raw.commands === undefined ? {} : { commands: raw.commands satisfies StackCommands }),
     ...(raw.newTask === undefined ? {} : { newTask: raw.newTask }),
+    ...(raw.defaultBranch === undefined ? {} : { defaultBranch: raw.defaultBranch }),
     ...(raw.hostPath === undefined ? {} : { hostPath: resolve(raw.hostPath) }),
     ...preview
   };

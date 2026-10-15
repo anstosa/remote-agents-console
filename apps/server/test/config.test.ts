@@ -31,6 +31,19 @@ async function gitRepo(name = 'work'): Promise<string> {
 const withProject = async (path: string, extra: Record<string, unknown> = {}) => ({ publicOrigin: 'https://agents.example.com', projects: [{ id: 'a', path, ...extra }] });
 
 describe('project configuration', () => {
+  // retain an optional comparison default without changing unconfigured projects
+  it('accepts a project default branch and leaves it absent when unset', async () => {
+    const repo = await gitRepo();
+    const configured = await validateConfig(await withProject(repo, { defaultBranch: 'release/stable' }));
+    expect(configured.projects[0]?.defaultBranch).toBe('release/stable');
+    expect((await validateConfig(await withProject(repo))).projects[0]?.defaultBranch).toBeUndefined();
+  });
+
+  // reject option-like values and revision expressions at the config boundary
+  it.each(['', ' ', '-main', 'main\n', 'bad\0branch', 'main~1', 'main..other', '@{-1}', 'a//b', 'a.lock', 'HEAD', 'refs/tags/v1', 'refs/notes/x'])('rejects invalid default branch %j', async defaultBranch => {
+    await expect(validateConfig(await withProject('/unused-project', { defaultBranch }))).rejects.toThrow();
+  });
+
   // resolve independent stack settings without merging command sets
   it('canonicalizes worktree overrides and resolves inherited or disabled settings', async () => {
     const repo = await gitRepo();

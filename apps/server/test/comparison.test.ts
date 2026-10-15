@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  addUntrackedLineStats, capturePatch, captureComparisonPatch, comparisonAgainst,
+  addUntrackedLineStats, capturePatch, captureComparisonPatch, commitLog, comparisonAgainst,
   fileAtRevision, gitComparisonSummary, gitStatusSummary, prComparisonCandidates,
   resolveComparison, synthesizeUntrackedPatch, workingStatus, type Comparison
 } from '../src/git/comparison.js';
@@ -206,19 +206,182 @@ describe('comparison resolution', () => {
     await expect(resolveComparison(root, 'pr', ['origin/does-not-exist'])).resolves.toEqual({ ok: false, reason: 'no_base' });
   });
 
-  it('builds the candidate ladder from the preferred base and origin fallbacks', async () => {
+  // prefer proven local provenance over a matching remote-shaped ref
+  it('uses the explicitly named creation branch as the source, preferring its local ref', async () => {
     const root = await repo();
-    const laddered = await prComparisonCandidates(root, 'feature', 'trunk', false);
-    // a bare preferred base is qualified to origin/, and origin/main + origin/master round out the ladder
-    expect(laddered[0]).toBe('origin/trunk');
-    expect(laddered).toContain('origin/main');
-    expect(laddered).toContain('origin/master');
-    const exact = await prComparisonCandidates(root, 'feature', 'origin/release', true);
-    expect(exact).toEqual(['origin/release']);
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'remote', 'add', 'release', 'https://example.com/repository.git');
+    await writeFile(join(root, 'source.txt'), 'source\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'source base');
+    await git(root, 'branch', 'release/source');
+    const sourceHead = (await git(root, 'rev-parse', 'refs/heads/release/source')).trim();
+    await git(root, 'branch', 'feature', 'release/source');
+    await git(root, 'update-ref', 'refs/remotes/release/source', 'HEAD~1');
+    await git(root, 'switch', 'feature');
+    await writeFile(join(root, 'feature.txt'), 'feature\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'feature');
 
-    // a configured gh-merge-base for the branch joins the ladder (kept verbatim when it has a remote prefix)
-    await git(root, 'config', 'branch.feature.gh-merge-base', 'upstream/trunk');
-    expect(await prComparisonCandidates(root, 'feature', undefined, false)).toContain('upstream/trunk');
+    const candidates = await prComparisonCandidates(root, 'feature', undefined, false, 'develop');
+    expect(candidates).toEqual([
+      'refs/heads/release/source',
+      'origin/release/source',
+      'origin/develop',
+      'develop',
+      'origin/main',
+      'main'
+    ]);
+    expect((await comparisonAgainst(root, candidates))?.gitBase).toBe(sourceHead);
+  });
+
+  // pair implicit creation with the current worktree head log
+  it('pairs a Created from HEAD reflog with its checkout source, including linked worktrees', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'branch', 'release/source');
+    const linked = await mkdtemp(join(tmpdir(), 'rac-comparison-linked-'));
+    roots.push(linked);
+    await git(root, 'worktree', 'add', linked, 'release/source');
+    await git(linked, 'switch', '-c', 'feature/linked');
+
+    expect(await prComparisonCandidates(linked, 'feature/linked')).toEqual([
+      'release/source',
+      'origin/release/source',
+      'origin/main',
+      'main'
+    ]);
+  });
+
+  // retain recent source evidence beyond the subprocess output limit
+  it('finds the source in a large HEAD reflog using checkout time rather than commit time', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await execute('/usr/bin/git', ['-C', root, 'commit', '-m', 'base'], {
+      env: { ...process.env, GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z' }
+    });
+    await git(root, 'switch', '-c', 'release/source');
+    const sha = (await git(root, 'rev-parse', 'HEAD')).trim();
+    const oldRecord = `${sha} ${sha} Compare Fixture <compare@example.com> 946684800 +0000\tcommit: ${'old history '.repeat(1000)}\n`;
+    await writeFile(join(root, '.git/logs/HEAD'), oldRecord.repeat(100));
+    await git(root, 'switch', '-c', 'feature/large-reflog');
+
+    expect(await prComparisonCandidates(root, 'feature/large-reflog')).toEqual([
+      'release/source', 'origin/release/source', 'origin/main', 'main'
+    ]);
+  });
+
+  // resolve real branch names before classifying detached object ids
+  it('keeps a hexadecimal branch name as the source', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'switch', '-c', 'deadbee');
+    await git(root, 'switch', '-c', 'feature');
+
+    expect(await prComparisonCandidates(root, 'feature')).toEqual([
+      'deadbee', 'origin/deadbee', 'origin/main', 'main'
+    ]);
+  });
+
+  // keep exact PR candidates on one logical branch
+  it('puts the PR base first and exact mode tries only remote and local forms of that base', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'branch', 'release/target');
+    await git(root, 'switch', '-c', 'feature');
+    await git(root, 'remote', 'add', 'upstream', 'https://example.com/repository.git');
+
+    const candidates = await prComparisonCandidates(root, 'feature', 'release/target', false, 'develop');
+    expect(candidates.slice(0, 2)).toEqual(['origin/release/target', 'release/target']);
+    expect(await prComparisonCandidates(root, 'feature', 'release/target', true, 'develop')).toEqual([
+      'origin/release/target',
+      'release/target'
+    ]);
+    expect(await prComparisonCandidates(root, 'feature', 'upstream/release/target', true)).toEqual([
+      'upstream/release/target',
+      'release/target'
+    ]);
+    expect(await prComparisonCandidates(root, 'feature', 'refs/heads/upstream/release/target', true)).toEqual([
+      'origin/upstream/release/target',
+      'refs/heads/upstream/release/target'
+    ]);
+    expect((await comparisonAgainst(root, await prComparisonCandidates(root, 'feature', 'origin/release/target', true)))?.comparison.base).toBe('release/target');
+  });
+
+  // preserve the requested fallback order
+  it('uses the configured default branch and then main when source provenance is unavailable', async () => {
+    const root = await repo();
+
+    expect(await prComparisonCandidates(root, undefined, undefined, false, 'release/stable')).toEqual([
+      'origin/release/stable',
+      'release/stable',
+      'origin/main',
+      'main'
+    ]);
+    expect(await prComparisonCandidates(root, undefined)).toEqual(['origin/main', 'main']);
+  });
+
+  // exclude pull-request creation preferences from provenance
+  it('ignores gh-merge-base when source provenance is unavailable', async () => {
+    const root = await repo();
+    await git(root, 'remote', 'add', 'upstream', 'https://example.com/repository.git');
+    await git(root, 'config', 'branch.feature.gh-merge-base', 'upstream/release/stable');
+
+    expect(await prComparisonCandidates(root, 'feature', undefined, false, 'develop')).toEqual([
+      'origin/develop',
+      'develop',
+      'origin/main',
+      'main'
+    ]);
+  });
+
+  // ignore publication tracking as source evidence
+  it('does not mistake a same-name published upstream for the branch source', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'switch', '-c', 'feature');
+    await git(root, 'config', 'branch.feature.remote', 'origin');
+    await git(root, 'config', 'branch.feature.merge', 'refs/heads/feature');
+
+    expect(await prComparisonCandidates(root, 'feature')).toEqual(['main', 'origin/main']);
+  });
+
+  // discard unusable provenance before fallback
+  it('falls back when the recorded source is missing or the branch was created from detached HEAD', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'branch', 'temporary-source');
+    await git(root, 'branch', 'missing-source', 'temporary-source');
+    await git(root, 'branch', '-D', 'temporary-source');
+    expect(await prComparisonCandidates(root, 'missing-source', undefined, false, 'develop')).toEqual([
+      'origin/develop',
+      'develop',
+      'origin/main',
+      'main'
+    ]);
+
+    const head = (await git(root, 'rev-parse', 'HEAD')).trim();
+    await git(root, 'switch', '--detach', head);
+    await git(root, 'switch', '-c', 'detached-feature');
+    expect(await prComparisonCandidates(root, 'detached-feature', undefined, false, 'develop')).toEqual([
+      'origin/develop',
+      'develop',
+      'origin/main',
+      'main'
+    ]);
   });
 
   it('overrides the base through comparisonAgainst', async () => {
@@ -234,6 +397,50 @@ describe('comparison resolution', () => {
     expect(against?.comparison.base).toBe('main');
     expect(against?.gitBase).toMatch(/^[0-9a-f]{40}$/u);
     await expect(comparisonAgainst(root, ['no-such-branch'])).resolves.toBeUndefined();
+  });
+
+  // resolve only branch namespaces
+  it('resolves branch candidates exactly instead of accepting tags with the same names', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'tag', 'collision');
+    await git(root, 'tag', 'tag-only');
+    await writeFile(join(root, 'branch.txt'), 'branch\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'branch base');
+    await git(root, 'branch', 'collision');
+    const branchHead = (await git(root, 'rev-parse', 'refs/heads/collision')).trim();
+    await git(root, 'switch', '-c', 'feature');
+    await writeFile(join(root, 'feature.txt'), 'feature\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'feature');
+
+    expect((await comparisonAgainst(root, ['collision']))?.gitBase).toBe(branchHead);
+    expect((await commitLog(root, ['collision']))?.commits.map(commit => commit.subject)).toEqual(['feature']);
+    await expect(comparisonAgainst(root, ['tag-only'])).resolves.toBeUndefined();
+    await expect(commitLog(root, ['tag-only'])).resolves.toBeUndefined();
+  });
+
+  // keep missing remote refs distinct from unrelated local slash names
+  it.each(['origin', 'upstream'])('does not resolve a missing %s ref to a same-named local branch', async remote => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'remote', 'add', remote, 'https://example.com/repository.git');
+    await git(root, 'branch', `${remote}/main`);
+    await writeFile(join(root, 'main.txt'), 'main\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'main work');
+    const mainHead = (await git(root, 'rev-parse', 'HEAD')).trim();
+    await git(root, 'switch', '-c', 'feature');
+    await git(root, 'commit', '--allow-empty', '-m', 'feature work');
+
+    const candidates = await prComparisonCandidates(root, 'feature', `${remote}/main`, true);
+    expect((await comparisonAgainst(root, candidates))?.gitBase).toBe(mainHead);
+    expect((await commitLog(root, candidates))?.commits.map(commit => commit.subject)).toEqual(['feature work']);
   });
 });
 

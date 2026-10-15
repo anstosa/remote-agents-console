@@ -382,6 +382,7 @@ within a tick — no config edit or restart.
     {
       "id": "example",
       "label": "Example",
+      "defaultBranch": "main",
       "path": "/home/me/code/example",
       "worktreesDirectory": "../example-worktrees",
       "commands": { "setup": "pnpm install", "start": "docker compose up -d", "status": "test -n running" },
@@ -404,6 +405,13 @@ within a tick — no config edit or restart.
 - `worktreesDirectory` — where the console will create new Worktrees; the
   default is a `../<basename>-worktrees` sibling of the Main worktree, and a
   relative path resolves against it. Absolute paths are allowed.
+- `defaultBranch` — optional fallback branch for the branch flyout's **All PR**
+  comparison, shared by the Code panel and commit list. The comparison uses the
+  PR's base first, otherwise the source branch recorded in Git's reflog, then
+  this configured branch, and finally `main`. Unknown or deleted source branches
+  fall back to the configured branch. Remote refs and local-only branches are
+  supported; a PR base that cannot be resolved is unavailable rather than
+  silently comparing with an unrelated branch.
 - `worktreeOrder` — optional checkout paths in display order, for example
   `[".", "../review", "../research"]`. Relative paths resolve against the
   configured Project `path`; symlinks resolve to the checkout's real path.

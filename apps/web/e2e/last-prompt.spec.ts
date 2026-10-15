@@ -56,7 +56,8 @@ test('opens prompt history from the composer row while git status expands indepe
   const prView = gitView.getByRole('button', { name: 'All PR' });
   await expect(prView).toHaveAttribute('aria-pressed', 'true');
   await expect(changedFiles).toContainText('PR changes');
-  await expect(changedFiles).toContainText('Compared with origin/main · 3 files · +1,235 −5');
+  // omit the implied remote from the comparison label
+  await expect(changedFiles).toContainText('Compared with main · 3 files · +1,235 −5');
   await expect(changedFiles).toContainText('apps/server/src/pr-only.ts');
   await expect(changedFiles).not.toContainText('notes/release plan.md');
   await workingView.tap();

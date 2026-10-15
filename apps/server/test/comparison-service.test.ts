@@ -97,12 +97,53 @@ describe('ComparisonService patch', () => {
     expect(paths).toEqual(['added.ts', 'gone.ts', 'note.txt', 'renamed.ts', 'src/a.ts']);
   });
 
+  // refuse comparison after every branch fallback disappears
   it('reports a failure reason when no base resolves for an All PR Comparison', async () => {
     const root = await featureRepo();
-    // no resolved base and no origin remote — the full ladder finds nothing
+    await git(root, 'branch', '-D', 'main');
+    // no resolved base, retained source, configured default, or main branch
     const service = new ComparisonService(noBase);
     const result = await service.patch(worktree(root, { branch: 'feature' }), 'pr');
     expect(result).toEqual({ ok: false, reason: 'no_base' });
+  });
+
+  // keep an unavailable known pr unavailable
+  it('does not fall back when a known PR has no usable base', async () => {
+    const root = await featureRepo();
+    const service = new ComparisonService(async () => null);
+
+    await expect(service.patch(worktree(root, { defaultBranch: 'main' }), 'pr')).resolves.toEqual({ ok: false, reason: 'no_base' });
+    await expect(service.commits(worktree(root, { defaultBranch: 'main' }))).resolves.toBeUndefined();
+  });
+
+  // share the configured fallback across patch and log reads
+  it('uses the workspace default branch for both the All PR patch and commit log', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'main base');
+    await git(root, 'switch', '-c', 'release/default');
+    await writeFile(join(root, 'default.txt'), 'default\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'default base');
+    const defaultHead = (await git(root, 'rev-parse', 'HEAD')).trim();
+    await git(root, 'switch', '--detach', defaultHead);
+    await git(root, 'switch', '-c', 'feature');
+    await writeFile(join(root, 'feature.txt'), 'feature\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'feature work');
+    const configured = worktree(root, { defaultBranch: 'release/default' });
+    const service = new ComparisonService(noBase);
+
+    const patch = await service.patch(configured, 'pr');
+    expect(patch.ok).toBe(true);
+    // require a resolved patch before inspecting its base
+    if (!patch.ok) return;
+    expect(patch.patch.base).toBe('release/default');
+    expect(patch.patch.files.map(file => file.change.path)).toEqual(['feature.txt']);
+    const commits = await service.commits(configured);
+    expect(commits?.base).toBe('release/default');
+    expect(commits?.commits.map(commit => commit.subject)).toEqual(['feature work']);
   });
 
   it('marks a file past the per-file cap as capped without its patch', async () => {
@@ -238,8 +279,10 @@ describe('ComparisonService commits', () => {
     expect(log?.commits.map(commit => [commit.subject, commit.pushed, commit.changes])).toEqual([['empty', false, []]]);
   });
 
+  // require every branch fallback to be unavailable
   it('is unavailable when no base resolves', async () => {
     const root = await featureRepo();
+    await git(root, 'branch', '-D', 'main');
     expect(await new ComparisonService(noBase).commits(worktree(root))).toBeUndefined();
   });
 });

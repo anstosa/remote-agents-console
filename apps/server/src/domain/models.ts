@@ -70,7 +70,7 @@ export const agentTmuxSession = (agent: Pick<Agent, 'sessionId' | 'socketFingerp
  * are defaults; canonical worktree overrides replace them for individual checkouts.
  * discovered worktrees denormalise the resolved settings for convenience.
  */
-export type Project = { id: string; label: string; path: string; identity: string; mode: 'repository' | 'directory'; hostPath?: string; worktreeOrder?: string[]; worktreeOverrides?: WorktreeOverride[]; worktreesDirectory: string; available: boolean; unavailableReason?: string; commands?: StackCommands; newTask?: string; push: PromptAction; projectUrl?: string; projectPort?: number };
+export type Project = { id: string; label: string; defaultBranch?: string; path: string; identity: string; mode: 'repository' | 'directory'; hostPath?: string; worktreeOrder?: string[]; worktreeOverrides?: WorktreeOverride[]; worktreesDirectory: string; available: boolean; unavailableReason?: string; commands?: StackCommands; newTask?: string; push: PromptAction; projectUrl?: string; projectPort?: number };
 /**
  * One checkout of a Project as `git worktree list` reports it, keyed by the wire id
  * `<projectId>:<realpath>` (ADR 0003). `identity` equals the checkout's realpath
@@ -81,7 +81,7 @@ export type Project = { id: string; label: string; path: string; identity: strin
  * `.data`. resolved stack commands and preview settings, plus project-wide newTask/push,
  * are copied on so worktree-scoped services keep reading them from the worktree.
  */
-export type Worktree = { id: string; projectId: string; label: string; customLabel?: boolean; path: string; identity: string; hostPath?: string; available: boolean; pinned: boolean; main: boolean; detached: boolean; locked: boolean; lockedReason?: string; branch?: string; sha?: string; commands?: StackCommands; newTask?: string; push?: PromptAction; projectUrl?: string; projectPort?: number };
+export type Worktree = { id: string; projectId: string; defaultBranch?: string; label: string; customLabel?: boolean; path: string; identity: string; hostPath?: string; available: boolean; pinned: boolean; main: boolean; detached: boolean; locked: boolean; lockedReason?: string; branch?: string; sha?: string; commands?: StackCommands; newTask?: string; push?: PromptAction; projectUrl?: string; projectPort?: number };
 export type CleanupTargetKind = 'orphan-worker' | 'stale-agent' | 'hud-pane' | 'hud-process' | 'merged-branch' | 'closed-pr-branch';
 export type CleanupTarget = { id: string; kind: CleanupTargetKind; label: string; detail: string };
 /**

@@ -58,12 +58,16 @@ export function worktreeHostPath(worktree: Pick<Worktree, 'identity' | 'hostPath
 // the merge target the dashboard already resolved for one Worktree — from its live Agent when it has
 // one, else from the idle Worktree view — so a worktree-scoped consumer's All PR base equals what the
 // dashboard flyout shows. The single place that reads a worktree's resolved PR base off the dashboard.
-export function worktreePrBase(dashboard: Dashboard, worktreeId: string): string | undefined {
-  const agent = dashboard.agents.find(candidate => candidate.worktreeId === worktreeId && candidate.gitPrStatus !== undefined);
-  if (agent?.gitPrStatus !== undefined) return agent.gitPrStatus.base;
+// null preserves an unavailable PR base instead of enabling unrelated fallbacks
+export function worktreePrBase(dashboard: Dashboard, worktreeId: string): string | null | undefined {
+  const agent = dashboard.agents.find(candidate => candidate.worktreeId === worktreeId && (candidate.gitPrStatus !== undefined || candidate.pullRequest !== undefined));
+  // prefer the live workspace's resolved or unavailable PR base
+  if (agent !== undefined) return agent.gitPrStatus?.base ?? null;
+  // inspect idle workspaces when no live metadata is available
   for (const project of dashboard.projects) {
     const view = project.worktrees.find(candidate => candidate.id === worktreeId);
-    if (view?.gitPrStatus !== undefined) return view.gitPrStatus.base;
+    // retain a known PR even when its base could not resolve
+    if (view?.gitPrStatus !== undefined || view?.pullRequest !== undefined) return view.gitPrStatus?.base ?? null;
   }
   return undefined;
 }

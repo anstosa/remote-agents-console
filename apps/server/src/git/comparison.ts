@@ -174,22 +174,153 @@ export async function addUntrackedLineStats(workspace: string, summary: GitStatu
 
 // ---- Base-candidate / merge-base ladder ---------------------------------------------------
 
-// build the ordered base-branch candidates for an All PR Comparison; with `exactBase`, only the
-// preferred base is tried, otherwise the configured merge base and origin fallbacks follow it
-export async function prComparisonCandidates(workspace: string, branch: string | undefined, preferredBase?: string, exactBase = false): Promise<string[]> {
-  const [configured, remoteHead] = await Promise.all([
-    branch === undefined ? Promise.resolve({ code: 1, stdout: '' }) : run(git, ['-C', workspace, 'config', '--get', `branch.${branch}.gh-merge-base`]),
-    run(git, ['-C', workspace, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
-  ]);
-  const configuredBase = configured.code === 0 ? configured.stdout.trim() : '';
-  const preferred = preferredBase === undefined ? undefined : preferredBase.startsWith('origin/') || preferredBase.startsWith('refs/') ? preferredBase : `origin/${preferredBase}`;
-  return (exactBase ? [preferred] : [
-    preferred,
-    configuredBase === '' ? undefined : configuredBase.includes('/') ? configuredBase : `origin/${configuredBase}`,
-    remoteHead.code === 0 ? remoteHead.stdout.trim() : undefined,
-    'origin/main',
-    'origin/master'
-  ]).filter((candidate): candidate is string => candidate !== undefined && candidate !== '');
+type BranchSource = { branch: string; local: boolean };
+type ReflogRecord = { selector: string; sha: string; subject: string };
+const detachedHead = /^[0-9a-f]{7,64}$/u;
+
+// parse bounded reflog records
+function reflogRecords(output: string): ReflogRecord[] {
+  return output.split('\n').flatMap(line => {
+    const [selector, sha, subject] = line.split('\0');
+    // ignore incomplete records
+    if (selector === undefined || sha === undefined || subject === undefined) return [];
+    return [{ selector, sha, subject }];
+  });
+}
+
+// read one reflog selector timestamp
+function reflogTime(selector: string): string | undefined {
+  return selector.match(/@\{(\d+)\}$/u)?.[1];
+}
+
+// recognize remote prefixes without treating every slash as a remote
+function isRemoteQualifiedBranch(branch: string, remotes: Set<string>): boolean {
+  const separator = branch.indexOf('/');
+  const prefix = branch.slice(0, separator);
+  return separator >= 0 && (prefix === 'origin' || remotes.has(prefix));
+}
+
+// expand one branch without confusing slash names for remotes
+function branchForms(branch: string | undefined, remotes: Set<string>, remoteFirst: boolean): string[] {
+  const value = branch?.trim();
+  // skip empty branch names
+  if (value === undefined || value === '') return [];
+  // preserve explicit local namespaces
+  if (value.startsWith('refs/heads/')) {
+    const remote = `origin/${value.slice('refs/heads/'.length)}`;
+    return remoteFirst ? [remote, value] : [value, remote];
+  }
+  // preserve explicit remote namespaces
+  if (value.startsWith('refs/remotes/')) {
+    const qualified = value.slice('refs/remotes/'.length);
+    const separator = qualified.indexOf('/');
+    const local = separator < 0 ? qualified : `refs/heads/${qualified.slice(separator + 1)}`;
+    return remoteFirst ? [value, local] : [local, value];
+  }
+  const localRef = value;
+  const separator = localRef.indexOf('/');
+  const qualified = isRemoteQualifiedBranch(localRef, remotes);
+  const local = qualified ? localRef.slice(separator + 1) : localRef;
+  const remote = qualified ? localRef : `origin/${local}`;
+  return remoteFirst ? [remote, local] : [local, remote];
+}
+
+// resolve only exact local or remote branch refs
+async function resolvedSource(workspace: string, source: string, current: string, remotes: Set<string>): Promise<BranchSource | undefined> {
+  const value = source.trim();
+  // reject symbolic and self sources
+  if (value === '' || value === 'HEAD' || value === current) return undefined;
+  // preserve explicit local refs
+  if (value.startsWith('refs/heads/')) {
+    const exists = await run(git, ['-C', workspace, 'show-ref', '--verify', '--quiet', value]);
+    return exists.code === 0 ? { branch: value, local: true } : undefined;
+  }
+  // preserve explicit remote refs
+  if (value.startsWith('refs/remotes/')) {
+    const exists = await run(git, ['-C', workspace, 'show-ref', '--verify', '--quiet', value]);
+    return exists.code === 0 ? { branch: value, local: false } : undefined;
+  }
+  const local = await run(git, ['-C', workspace, 'show-ref', '--verify', '--quiet', `refs/heads/${value}`]);
+  // local creation names outrank same-shaped remote names
+  if (local.code === 0) return { branch: value, local: true };
+  // unresolved hexadecimal sources represent detached object ids
+  if (detachedHead.test(value)) return undefined;
+  // reject commit expressions and unknown qualifiers
+  if (!isRemoteQualifiedBranch(value, remotes)) return undefined;
+  const remote = await run(git, ['-C', workspace, 'show-ref', '--verify', '--quiet', `refs/remotes/${value}`]);
+  return remote.code === 0 ? { branch: value, local: false } : undefined;
+}
+
+// expand a proven source without reclassifying local slash names
+function sourceForms(source: BranchSource, remotes: Set<string>): string[] {
+  // keep remote sources remote-first
+  if (!source.local) return branchForms(source.branch, remotes, true);
+  // preserve explicit local refs
+  if (source.branch.startsWith('refs/heads/')) return branchForms(source.branch, remotes, false);
+  // disambiguate local names shaped like remote refs
+  if (isRemoteQualifiedBranch(source.branch, remotes)) return [`refs/heads/${source.branch}`, `origin/${source.branch}`];
+  return [source.branch, `origin/${source.branch}`];
+}
+
+// recover branch creation provenance without guessing from topology
+async function creationSource(workspace: string, branch: string, remotes: Set<string>): Promise<BranchSource | undefined> {
+  const reflog = await run(git, ['-C', workspace, 'reflog', 'show', '--date=unix', '--format=%gD%x00%H%x00%gs', `refs/heads/${branch}`]);
+  // require the retained creation record
+  if (reflog.code !== 0) return undefined;
+  const created = reflogRecords(reflog.stdout).at(-1);
+  // avoid later reflog events
+  if (created === undefined || !created.subject.startsWith('branch: Created from ')) return undefined;
+  const source = created.subject.slice('branch: Created from '.length);
+  // resolve explicit creation names directly
+  if (source !== 'HEAD') return await resolvedSource(workspace, source, branch, remotes);
+  const createdAt = reflogTime(created.selector);
+  // require a pairable creation time
+  if (createdAt === undefined) return undefined;
+  // exclude older history before the subprocess output cap can discard this checkout
+  const head = await run(git, ['-C', workspace, 'reflog', 'show', `--since=@${createdAt}`, `--until=@${createdAt}`, '--date=unix', '--format=%gD%x00%H%x00%gs', 'HEAD']);
+  // linked worktrees expose their own HEAD reflog here
+  if (head.code !== 0) return undefined;
+  const matching = reflogRecords(head.stdout).filter(record => {
+    const checkout = record.subject.match(/^checkout: moving from (.+) to (.+)$/u);
+    // pair only the exact creation checkout
+    return record.sha === created.sha && reflogTime(record.selector) === createdAt && checkout?.[2] === branch;
+  });
+  // reject ambiguous same-second transitions
+  if (matching.length !== 1) return undefined;
+  const checkout = matching[0]!.subject.match(/^checkout: moving from (.+) to (.+)$/u);
+  return checkout === null ? undefined : await resolvedSource(workspace, checkout[1]!, branch, remotes);
+}
+
+// build PR, source, configured-default, and main candidates in priority order
+export async function prComparisonCandidates(workspace: string, branch: string | undefined, preferredBase?: string, exactBase = false, defaultBranch?: string): Promise<string[]> {
+  const remoteOutput = await run(git, ['-C', workspace, 'remote']);
+  const remotes = new Set(remoteOutput.code === 0 ? remoteOutput.stdout.split('\n').filter(Boolean) : []);
+  const preferred = branchForms(preferredBase, remotes, true);
+  // exact PR resolution stays on the named branch
+  if (exactBase) return [...new Set(preferred)];
+  const source = branch === undefined ? undefined : await creationSource(workspace, branch, remotes);
+  const sourceCandidates = source === undefined ? [] : sourceForms(source, remotes);
+  return [...new Set([
+    ...preferred,
+    ...sourceCandidates,
+    ...branchForms(defaultBranch, remotes, true),
+    ...branchForms('main', remotes, true)
+  ])];
+}
+
+// resolve candidates only through exact branch namespaces
+async function branchCandidateRef(workspace: string, candidate: string): Promise<string | undefined> {
+  let ref = candidate;
+  // preserve the namespace of abbreviated remote candidates
+  if (!candidate.startsWith('refs/')) {
+    const remoteOutput = candidate.includes('/') && !candidate.startsWith('origin/') ? await run(git, ['-C', workspace, 'remote']) : undefined;
+    const remote = isRemoteQualifiedBranch(candidate, new Set(remoteOutput?.stdout.split('\n') ?? []));
+    ref = `refs/${remote ? 'remotes' : 'heads'}/${candidate}`;
+  }
+  // reject tags and other nonbranch namespaces
+  if (!ref.startsWith('refs/heads/') && !ref.startsWith('refs/remotes/')) return undefined;
+  const exists = await run(git, ['-C', workspace, 'show-ref', '--verify', '--quiet', ref]);
+  return exists.code === 0 ? ref : undefined;
 }
 
 // try each candidate base against HEAD; the first whose merge base resolves yields the
@@ -200,7 +331,10 @@ export async function comparisonAgainst(workspace: string, candidates: string[],
     // skip duplicate fallbacks
     if (seen.has(candidate)) continue;
     seen.add(candidate);
-    const mergeBase = await run(git, ['-C', workspace, 'merge-base', 'HEAD', candidate]);
+    const candidateRef = await branchCandidateRef(workspace, candidate);
+    // skip nonbranch candidates
+    if (candidateRef === undefined) continue;
+    const mergeBase = await run(git, ['-C', workspace, 'merge-base', 'HEAD', candidateRef]);
     // skip unavailable targets
     if (mergeBase.code !== 0 || mergeBase.stdout.trim() === '') continue;
     const gitBase = mergeBase.stdout.trim();
@@ -259,7 +393,10 @@ export function commitDiffRecords(output: string, format: 'name-status' | 'numst
 // first, at most `limit` of them
 export async function commitLog(workspace: string, candidates: string[], limit = 200): Promise<CommitLog | undefined> {
   for (const candidate of new Set(candidates)) {
-    const mergeBase = await run(git, ['-C', workspace, 'merge-base', 'HEAD', candidate]);
+    const candidateRef = await branchCandidateRef(workspace, candidate);
+    // skip nonbranch candidates
+    if (candidateRef === undefined) continue;
+    const mergeBase = await run(git, ['-C', workspace, 'merge-base', 'HEAD', candidateRef]);
     if (mergeBase.code !== 0 || mergeBase.stdout.trim() === '') continue;
     const range = `${mergeBase.stdout.trim()}..HEAD`;
     const log = (...args: string[]) => run(git, ['--no-optional-locks', '-C', workspace, 'log', '-z', `--max-count=${limit + 1}`, ...args, range, '--']);

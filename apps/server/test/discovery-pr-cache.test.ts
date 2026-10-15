@@ -53,11 +53,49 @@ beforeEach(() => {
   });
   git.workingStatus.mockReset().mockResolvedValue(cleanStatus);
   git.addUntrackedLineStats.mockReset().mockResolvedValue(undefined);
-  git.prComparisonCandidates.mockReset().mockImplementation(async (_workspace: string, _branch: string | undefined, preferredBase?: string) => preferredBase === undefined ? ['origin/main'] : [comparisonBase(preferredBase)]);
+  // preserve project defaults while isolating candidate resolution from cache tests
+  git.prComparisonCandidates.mockReset().mockImplementation(async (_workspace: string, _branch: string | undefined, preferredBase?: string, _exactBase?: boolean, defaultBranch?: string) => [comparisonBase(preferredBase ?? defaultBranch ?? 'main')]);
   git.comparisonAgainst.mockReset().mockImplementation(async (_workspace: string, candidates: string[]) => ({ comparison: { base: candidates[0]!, files: 1, changes: [] }, gitBase: 'abc123' }));
 });
 
 describe('DiscoveryService pull request comparison cache', () => {
+  // never treat a known PR with incomplete metadata as a branch without a PR
+  it.each([true, false])('withholds comparison for a PR without a base with active agent %s', async active => {
+    const workspace = '/workspaces/missing-pr-base';
+    const project = testProject({ id: 'missing-base', path: workspace, defaultBranch: 'develop' });
+    // simulate incomplete GitHub metadata without a lookup failure
+    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => ({ number: 9, title: 'Incomplete', status: 'open' as const, url: 'https://github.com/acme/app/pull/9' }) };
+    const panes = active ? [{ paneId: '%1', sessionId: '$1', pid: 101, path: workspace, title: 'Ready' }] : [];
+    // expose a synthetic checkout for either presentation path
+    const service = new DiscoveryService(socketFinder(), paneLister(panes) as never, processInspector(), pullRequests, undefined, [project], undefined, async () => [worktree(workspace)]);
+
+    const dashboard = await service.dashboard(false, true);
+    const view = dashboard.agents[0] ?? dashboard.projects[0]?.worktrees[0];
+    expect(view?.pullRequest?.number).toBe(9);
+    expect(view).not.toHaveProperty('gitPrStatus');
+  });
+
+  // apply the project default to active and idle workspaces before PR metadata arrives
+  it.each([true, false])('inherits the configured comparison default with active agent %s', async active => {
+    const workspace = '/workspaces/configured';
+    const project = testProject({ id: 'configured', path: workspace, defaultBranch: 'develop' });
+    let baseBranch: string | undefined;
+    // publish PR metadata after the initial fallback snapshot
+    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => baseBranch === undefined ? undefined : { number: 9, title: 'Release', status: 'open' as const, url: 'https://github.com/acme/app/pull/9', baseBranch } };
+    const panes = active ? [{ paneId: '%1', sessionId: '$1', pid: 101, path: workspace, title: 'Ready' }] : [];
+    // expose one synthetic checkout without real filesystem dependencies
+    const service = new DiscoveryService(socketFinder(), paneLister(panes) as never, processInspector(), pullRequests, undefined, [project], undefined, async () => [worktree(workspace)]);
+
+    const fallback = await service.dashboard(false, true);
+    expect(service.worktreesNow()[0]?.defaultBranch).toBe('develop');
+    expect(fallback.agents[0]?.gitPrStatus ?? fallback.projects[0]?.worktrees[0]?.gitPrStatus).toMatchObject({ base: 'origin/develop' });
+    expect(git.prComparisonCandidates).toHaveBeenCalledWith(workspace, 'feature/cache', undefined, false, 'develop');
+
+    baseBranch = 'release';
+    const withPullRequest = await service.dashboard(false, true);
+    expect(withPullRequest.agents[0]?.gitPrStatus ?? withPullRequest.projects[0]?.worktrees[0]?.gitPrStatus).toMatchObject({ base: 'origin/release' });
+  });
+
   it('coalesces agents sharing one workspace and reuses their PR-base comparison on fresh pane scans', async () => {
     // stateless PR responses need no cache invalidation
     const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => ({ number: 1, title: 'Cache', status: 'open' as const, url: 'https://github.com/acme/app/pull/1', baseBranch: 'release' }) };
