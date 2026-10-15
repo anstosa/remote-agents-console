@@ -196,14 +196,10 @@ test('themes browser chrome and retains safe external addresses', async ({ page 
   await page.getByRole('button', { name: 'Split', exact: true }).click();
   const browser = page.getByRole('dialog', { name: 'Browser' });
   const address = browser.getByRole('textbox', { name: 'Browser address' });
-  const addressPill = browser.locator('.panel-header > .browser-address');
   const frame = browser.locator('iframe[title="Project browser"]');
   await expect(browser).toBeVisible();
-  await expect(addressPill).toHaveClass(/\bpanel-header-pill\b/u);
-  await expect(addressPill).toHaveClass(/\bpanel-header-title\b/u);
-  await expect(addressPill).toHaveAttribute('aria-label', 'Browser address');
-  await expect(addressPill.locator('input')).toHaveCount(0);
-  await expect(browser.locator('.browser-address-form')).toHaveCount(0);
+  await expect(browser.getByRole('form', { name: 'Browser address navigation' })).toBeVisible();
+  // preserve the single bordered pill while supporting native keyboard submission
   await expect(address).toHaveCSS('border-top-width', '1px');
   await expect(browser).toHaveCSS('background-color', 'rgb(18, 52, 86)');
 

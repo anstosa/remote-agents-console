@@ -894,8 +894,21 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 .browser-pane:has(> .browser-permission-consent):has(> .browser-permission-error) { grid-template-rows: auto auto minmax(0, 1fr); }
 .browser-permission-error { margin: 0; padding: .5rem .75rem; background: var(--mantle); color: var(--red); font-size: .7rem; overflow-wrap: anywhere; }
 /* the address input is the complete left pill, not a framed field inside it */
+.browser-address-form { position: relative; display: flex; flex: 1 1 0; min-width: 0; align-self: stretch; margin: 0; pointer-events: auto; }
 .panel-header .browser-address { flex: 1 1 0; width: 0; align-self: stretch; padding: .2rem .65rem; outline: 0; font-family: inherit; -webkit-touch-callout: none; }
 .panel-header .browser-address:focus { border-color: var(--blue); color: var(--text); }
+/* keep the mobile submit target inside the input without covering editable text */
+.browser-address-form:has(.browser-address-go) .browser-address { padding-right: 2.7rem; }
+.panel-header .browser-address-go { position: absolute; top: 50%; right: .2rem; width: 2rem; height: 2rem; transform: translateY(-50%); background: var(--blue); color: var(--crust); }
+.panel-header .browser-address-go:hover:not(:disabled) { background: var(--sapphire); color: var(--crust); }
+/* clipboard suggestions remain attached to the focused address field */
+.browser-address-suggestions { position: absolute; top: calc(100% + .35rem); right: 0; left: 0; display: flex; flex-direction: column; gap: .35rem; padding: .35rem; border: 1px solid var(--surface-1); border-radius: .55rem; background: var(--mantle); box-shadow: 0 .4rem 1.2rem color-mix(in srgb, var(--crust) 70%, transparent); }
+.browser-address-suggestions button { display: flex; min-width: 0; min-height: 2.75rem; align-items: center; gap: .45rem; padding: .45rem; border: 0; background: transparent; color: var(--text); text-align: left; font-size: .75rem; box-shadow: none; }
+.browser-address-suggestions button:hover { background: var(--surface-0); }
+.browser-address-suggestions svg { flex: none; }
+.browser-address-suggestions button span { min-width: 0; }
+.browser-address-suggestions small { display: block; overflow: hidden; margin-top: .2rem; color: var(--subtext-0); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 768px) { .panel-header .browser-address { font-size: 1rem; } }
 .browser-copy-status { flex: 0 0 auto; color: var(--green); font-size: .7rem; font-weight: 700; }
 .browser-copy-status.error { color: var(--red); }
 .browser-device-error { flex: 0 0 auto; color: var(--red); font-size: .7rem; font-weight: 700; }

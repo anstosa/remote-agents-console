@@ -4805,12 +4805,18 @@ const isProjectBrowserDeviceErrorMessage = (value: unknown): value is ProjectBro
 // render the embedded project browser
 function ProjectBrowserPane({ url, homeUrl, proxied, worktreeId, navigationRequest, onNavigate, onClose }: { url: string; homeUrl: string; proxied: boolean; worktreeId?: string; navigationRequest?: ProjectBrowserNavigationRequest; onNavigate: (url: string) => boolean; onClose: () => void }) {
   const selectionActions = useSelectionActions();
+  const phone = usePhoneLayout();
   const [loading, setLoading] = useState(true);
   const expanded = usePanelExpand('browser')?.expanded === true;
   const [mobile, setMobile] = useState(() => savedBrowserMobile(worktreeId));
   const [deviceError, setDeviceError] = useState<string>();
   const [chromeColor, setChromeColor] = useState<string>();
   const [address, setAddress] = useState(url);
+  const addressInputRef = useRef<HTMLInputElement>(null);
+  const addressComposing = useRef(false);
+  const [addressFocused, setAddressFocused] = useState(false);
+  const [clipboardUrl, setClipboardUrl] = useState<string>();
+  const clipboardRequest = useRef(0);
   const [addressCopyStatus, setAddressCopyStatus] = useState<'copied' | 'failed'>();
   const addressHold = useRef<{ x: number; y: number; timer: number } | undefined>(undefined);
   const addressHoldCopied = useRef(false);
@@ -4838,8 +4844,11 @@ function ProjectBrowserPane({ url, homeUrl, proxied, worktreeId, navigationReque
     permissionBroker.revoke();
   }, [permissionBroker.revoke]);
   useEffect(() => setAddress(url), [url]);
-  // discard unfinished holds when this browser closes
-  useEffect(() => () => window.clearTimeout(addressHold.current?.timer), []);
+  // discard unfinished holds and clipboard reads when this browser closes
+  useEffect(() => () => {
+    window.clearTimeout(addressHold.current?.timer);
+    clipboardRequest.current += 1;
+  }, []);
   // keep clipboard feedback brief without altering the editable url
   useEffect(() => {
     const timer = window.setTimeout(() => setAddressCopyStatus(undefined), 2000);
@@ -4966,12 +4975,15 @@ function ProjectBrowserPane({ url, homeUrl, proxied, worktreeId, navigationReque
     } catch { /* cross-origin frames can report with rac-browser-location */ }
   };
   // submit a safe browser location
-  const navigate = () => {
-    const target = normalizeBrowserUrl(address, homeUrl);
+  const navigate = (candidate = address) => {
+    clipboardRequest.current += 1;
+    setClipboardUrl(undefined);
+    const target = normalizeBrowserUrl(candidate, homeUrl);
     // restore the retained address after invalid input
     if (target === undefined) { setAddress(url); return; }
+    setAddress(target);
     // avoid reloading an already known location
-    if (target === normalizedUrl && !frameAwayFromKnownUrl) { setAddress(target); return; }
+    if (target === normalizedUrl && !frameAwayFromKnownUrl) return;
     expectedFrameLoad.current = true;
     setLoading(true);
     setFrameAwayFromKnownUrl(false);
@@ -4979,12 +4991,46 @@ function ProjectBrowserPane({ url, homeUrl, proxied, worktreeId, navigationReque
     loadFrame(target);
     onNavigate(target);
   };
-  // submit the standalone address pill with enter
-  const submitAddress = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    // leave editing shortcuts unchanged
-    if (event.key !== 'Enter') return;
+  // restore editor focus before removing the selected clipboard action
+  const navigateClipboard = (target: string) => {
+    addressInputRef.current?.focus({ preventScroll: true });
+    navigate(target);
+  };
+  // share native keyboard and arrow submission without stale input state
+  const submitAddress = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    navigate();
+    // leave unfinished input-method composition in the editor
+    if (addressComposing.current) return;
+    navigate(addressInputRef.current?.value ?? address);
+  };
+  // prevent composition confirmation from becoming implicit navigation
+  const addressKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    // all other keys retain the browser's native form behavior
+    if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
+  };
+  // accept clipboard URLs only as complete safe web addresses
+  const readAddressClipboard = async (request: number) => {
+    try {
+      const candidate = (await navigator.clipboard.readText()).trim();
+      // ignore results from a dismissed or replaced address editor
+      if (request !== clipboardRequest.current || !addressInputRef.current?.isConnected) return;
+      const target = /^https?:\/\//iu.test(candidate) && !/\s/u.test(candidate) ? normalizeBrowserUrl(candidate, homeUrl) : undefined;
+      setClipboardUrl(target);
+    } catch { /* unreadable clipboard contents offer no action */ }
+  };
+  // inspect an already-permitted clipboard without prompting on focus
+  const focusAddress = () => {
+    // internal focus transfers retain the current suggestion
+    if (addressFocused) return;
+    setAddressFocused(true);
+    setClipboardUrl(undefined);
+    const request = ++clipboardRequest.current;
+    // native paste remains available without the async clipboard API
+    if (!phone || typeof navigator.clipboard?.readText !== 'function' || navigator.permissions === undefined) return;
+    void navigator.permissions.query({ name: 'clipboard-read' as PermissionName }).then(permission => {
+      // offer only clipboard contents already available without a permission prompt
+      if (request === clipboardRequest.current && permission.state === 'granted') void readAddressClipboard(request);
+    }).catch(() => { /* unavailable permissions offer no clipboard action */ });
   };
   // update the editable address
   const changeAddress = (event: React.ChangeEvent<HTMLInputElement>) => setAddress(event.target.value);
@@ -5040,10 +5086,18 @@ function ProjectBrowserPane({ url, homeUrl, proxied, worktreeId, navigationReque
     copyAddress(event.currentTarget);
   };
   // submit genuine focus changes rather than clipboard or menu focus transfers
-  const blurAddress = (event: React.FocusEvent<HTMLInputElement>) => {
+  const blurAddress = (event: React.FocusEvent<HTMLFormElement>) => {
+    // the arrow and clipboard choice must receive their click before dismissal
+    if (event.currentTarget.contains(event.relatedTarget)) return;
     cancelAddressHold();
     // temporary focus changes must not navigate the preview
-    if (!copyingAddress.current && !contextMenuOwnsFocus(event.currentTarget)) navigate();
+    if (copyingAddress.current || contextMenuOwnsFocus(addressInputRef.current ?? event.currentTarget)) return;
+    setAddressFocused(false);
+    setClipboardUrl(undefined);
+    clipboardRequest.current += 1;
+    addressComposing.current = false;
+    // mobile native callouts are not an address submission gesture
+    if (!phone || event.relatedTarget !== null) navigate(addressInputRef.current?.value ?? address);
   };
   // return to the configured root
   const goHome = () => {
@@ -5137,7 +5191,16 @@ function ProjectBrowserPane({ url, homeUrl, proxied, worktreeId, navigationReque
     { key: 'home', label: 'Go to project home', title: 'Home', className: 'browser-home', disabled: atHome, icon: <PanelIcon path="m3 11 9-8 9 8M5 10v11h14V10M9 21v-7h6v7" />, onSelect: goHome },
     { key: 'device', label: deviceLabel, title: deviceTitle, className: 'browser-device-toggle', pressed: mobile, icon: <svg className="panel-header-icon" data-device={mobile ? 'mobile' : 'desktop'} viewBox="0 0 24 24" aria-hidden="true">{mobile ? <><rect x="7" y="2" width="10" height="20" rx="2" /><path d="M10 5h4M11 19h2" /></> : <><rect x="3" y="5" width="18" height="13" rx="1" /><path d="M8 21h8M12 18v3" /></>}</svg>, onSelect: toggleDevice }
   ];
-  const titleControl = <input className="panel-header-pill panel-header-title browser-address" type="text" inputMode="url" aria-label="Browser address" value={address} spellCheck={false} onChange={changeAddress} onKeyDown={submitAddress} onBlur={blurAddress} onTouchStart={startAddressHold} onTouchMove={moveAddressHold} onTouchEnd={cancelAddressHold} onTouchCancel={cancelAddressHold} onContextMenu={addressContextMenu} />;
+  // retain one visual input pill while providing native form submission
+  const titleControl = <form className="browser-address-form" aria-label="Browser address navigation" onSubmit={submitAddress} onBlur={blurAddress}>
+    <input ref={addressInputRef} className="panel-header-pill panel-header-title browser-address" type="text" inputMode="url" enterKeyHint="go" aria-label="Browser address" value={address} spellCheck={false} autoCapitalize="none" autoCorrect="off" onFocus={focusAddress} onChange={changeAddress} onKeyDown={addressKeyDown} onCompositionStart={() => { /* retain unfinished composition */ addressComposing.current = true; }} onCompositionEnd={() => { /* allow the next explicit submission */ addressComposing.current = false; }} onTouchStart={startAddressHold} onTouchMove={moveAddressHold} onTouchEnd={cancelAddressHold} onTouchCancel={cancelAddressHold} onContextMenu={addressContextMenu} />
+    {phone && addressFocused && <>
+      <button className="panel-header-action browser-address-go" type="submit" aria-label="Go to address" title="Go" onMouseDown={event => { /* retain the editor until the native click submits */ event.preventDefault(); }}><PanelIcon path="M5 12h14m-6-6 6 6-6 6" /></button>
+      {clipboardUrl !== undefined && <div className="browser-address-suggestions">
+        <button type="button" aria-label="Navigate to clipboard URL" title={clipboardUrl} onMouseDown={event => { /* retain the editor until the clipboard click completes */ event.preventDefault(); }} onClick={() => navigateClipboard(clipboardUrl)}><PanelIcon path={panelIcons.copy} /><span>Navigate to clipboard URL<small>{clipboardUrl}</small></span></button>
+      </div>}
+    </>}
+  </form>;
   return <section className={`browser-pane ${mobile ? 'mobile' : 'desktop'}${expanded ? ' expanded' : ''}`} style={{ '--browser-chrome-color': chromeColor } as React.CSSProperties} role="dialog" aria-label="Browser" onAuxClickCapture={event => closeOnMiddleClick(event, () => { /* revoke embedded permissions before closing */ revokeFramePermissions(); onClose(); })} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={browserContextMenu} onKeyDown={handleEscape}><PanelHeader panelKey="browser" label="browser" titleControl={titleControl} actions={actions} secondary={secondary} close={{ key: 'close', label: 'Close browser', title: 'Close', className: 'browser-close', icon: <PanelIcon path={panelIcons.close} />, onSelect: () => { /* revoke before hiding the frame */ revokeFramePermissions(); onClose(); } }} />{permissionBroker.consent}{permissionBroker.error && <p className="browser-permission-error" role="alert">{permissionBroker.error}</p>}<div ref={frameShellRef} className={`browser-frame-shell ${mobile ? 'mobile' : 'desktop'}`}><iframe ref={frameRef} src={frameSource} name={permissionFrameName} title="Project browser" referrerPolicy="no-referrer" onLoad={syncFrameLocation} /></div></section>;
 }
 
