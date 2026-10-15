@@ -25,8 +25,10 @@ export type ReviewRunProgress = { onStarted?: (run: { agentId: string }) => void
 // leaves the CLI's own default. `maxOutputBytes` bounds the structured result,
 // MAX_REVIEW_GENERATED_BYTES when absent. `validate` checks the parsed JSON and returns a
 // human-readable error; an interactive run sends that error back to its Agent once for a
-// corrected reply, while headless runs leave validation to the caller.
-export type ReviewRunRequest = { kind: ReviewAgentKind; workspace: string; worktreeId: string; prompt: string; schema: object; model?: string; effort?: string; timeoutMs: number; label: string; maxOutputBytes?: number; validate?: (value: unknown) => string | undefined } & ReviewRunProgress;
+// corrected reply, while headless runs leave validation to the caller. An interactive run keeps
+// `recovery` beside its pane, so a run a server restart orphans can still be finished from it
+// (`InteractiveReviewHost.recover`); headless runs ignore it.
+export type ReviewRunRequest = { kind: ReviewAgentKind; workspace: string; worktreeId: string; prompt: string; schema: object; model?: string; effort?: string; timeoutMs: number; label: string; maxOutputBytes?: number; validate?: (value: unknown) => string | undefined; recovery?: object } & ReviewRunProgress;
 export type ReviewRunErrorCode = 'capability_unavailable' | 'authentication_required' | 'generation_failed' | 'malformed_result' | 'timed_out' | 'cancelled';
 
 // a typed Review run failure; a ReviewTourError, so tour and review jobs map it unchanged

@@ -1,4 +1,4 @@
-import { mkdir, open, unlink } from 'node:fs/promises';
+import { mkdir, open, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { AttentionState } from '../adapters/types.js';
@@ -23,12 +23,22 @@ export type InteractiveReviewHost = {
   // resolves `false` when the rename may be left unsent in the composer, so no prompt is pasted after it
   name(agentId: string, name: string): Promise<unknown>;
   beginTurn(agent: Agent, maxBytes: number): Promise<() => Promise<string | undefined>>;
+  // the final message of the Agent's latest turn, for an orphaned run that has no pre-prompt snapshot
+  latestReply(agent: Agent, maxBytes: number): Promise<string | undefined>;
+  // how to finish an orphaned run from the `recovery` its request carried; undefined when it cannot be
+  recover(recovery: unknown, agentId: string): Promise<OrphanRecovery | undefined>;
   submit(agentId: string, text: string): Promise<boolean>;
   attention(agentId: string): Promise<AttentionState | undefined>;
   close(agentId: string): Promise<unknown>;
   release(agentId: string): Promise<unknown>;
   delay(): Promise<void>;
 };
+// how an orphaned run's reply is checked and kept; `save` resolves whether the result was kept
+export type OrphanRecovery = { validate?: (value: unknown) => string | undefined; save: (value: unknown) => Promise<boolean> };
+// what a delivered run leaves beside its pane for the orphan sweep: when its prompt went in, when
+// it times out, the bound on its reply and the request's `recovery`
+type RecoveryRecord = { deliveredAt: number; deadline: number; maxBytes: number; recovery: object };
+
 // `promptDirectory` holds the instructions of a run too long to paste (it must be readable by
 // the Agent, outside the Worktree); `startWindowMs` and `now` are test seams
 export type InteractiveReviewOptions = { promptDirectory: string; startWindowMs?: number; now?: () => number };
@@ -39,6 +49,8 @@ const maxPastedPrompt = 30_000;
 const maxReadableLine = 2_000;
 // reads of a finished turn's final message before it counts as missing: a transcript can trail the idle report
 const harvestAttempts = 20;
+// a run id as `@rac_review_run` holds it, checked before it names a file
+const runIdPattern = /^[A-Za-z0-9_-]{8,64}$/u;
 
 // the instruction appended to every interactive run's prompt (ADR 0010)
 export function replyInstruction(schema: object): string {
@@ -91,11 +103,12 @@ type WatchEnd = 'finished' | 'vanished' | 'timed-out' | 'cancelled';
 // message from its transcript and validate it. One failed validation earns one correction prompt
 // in the same conversation. Success closes the pane; a question keeps the run waiting with its
 // pane open; a timeout or a second failed validation leaves the pane open for the operator.
-// Cancellation closes the pane.
+// Cancellation closes the pane. A run a server restart orphans is finished by the orphan sweep
+// when its request carried a `recovery`; otherwise its pane is handed back to the operator.
 export class InteractiveReviewRunner implements ReviewRunner {
   private readonly now: () => number;
   private readonly startWindowMs: number;
-  // the ids of the runs in flight here, and the Agents an orphan release is handing back
+  // the ids of the runs in flight here, and the Agents an orphan sweep is finishing or handing back
   private readonly live = new Set<string>();
   private readonly releasing = new Set<string>();
 
@@ -104,16 +117,38 @@ export class InteractiveReviewRunner implements ReviewRunner {
     this.startWindowMs = options.startWindowMs ?? managedRunStartWindowMs;
   }
 
-  // Hand back every listed Agent marked for a Review run not in flight here (one a server restart
-  // orphaned, or one whose close failed) through the release a run that gives up uses: it becomes an
-  // ordinary Agent the operator can see, answer, close and be notified by. Never closed, since the
-  // operator may be mid-answer in it.
+  // Settle every listed Agent marked for a Review run not in flight here (one a server restart
+  // orphaned, or one whose close failed). One whose run left a recovery is finished from it; the
+  // rest are handed back through the release a run that gives up uses: each becomes an ordinary
+  // Agent the operator can see, answer, close and be notified by. Never closed unless finished,
+  // since the operator may be mid-answer in it.
   async releaseOrphans(agents: readonly Agent[]): Promise<void> {
     const orphans = agents.filter(candidate => candidate.reviewRun !== undefined && !this.live.has(candidate.reviewRun) && !this.releasing.has(candidate.id));
     await Promise.all(orphans.map(async orphan => {
       this.releasing.add(orphan.id);
-      try { await this.host.release(orphan.id); } catch { /* the next sweep retries */ } finally { this.releasing.delete(orphan.id); }
+      try { await this.settleOrphan(orphan, orphan.reviewRun!); } catch { /* the next sweep retries */ } finally { this.releasing.delete(orphan.id); }
     }));
+  }
+
+  // Finish one orphan as its run would have: watch it to the end of its turn, then keep a reply
+  // that validates and close the pane. No recovery, a question (nothing surfaces it now), the
+  // deadline or a reply that fails hands the pane back instead. No correction prompt is sent.
+  private async settleOrphan(orphan: Agent, runId: string): Promise<void> {
+    const left = await this.readRecovery(runId);
+    const recovery = left === undefined ? undefined : await this.host.recover(left.recovery, orphan.id).catch(() => undefined);
+    if (left !== undefined && recovery !== undefined) {
+      const asked = new AbortController();
+      const end = await this.watch(orphan.id, asked.signal, left.deadline, left.deliveredAt, needsInput => { if (needsInput) asked.abort(); });
+      if (end === 'vanished') { await this.forget(runId); return; }
+      const reply = end === 'finished' ? parseReply(await this.harvest(() => this.host.latestReply(orphan, left.maxBytes), asked.signal), left.maxBytes, recovery.validate) : undefined;
+      if (reply?.ok === true && await recovery.save(reply.value)) {
+        await this.host.close(orphan.id).catch(() => undefined);
+        await this.forget(runId, true);
+        return;
+      }
+    }
+    await this.host.release(orphan.id);
+    await this.forget(runId);
   }
 
   // the kind's adapter is configured and runnable; no login probe
@@ -145,7 +180,7 @@ export class InteractiveReviewRunner implements ReviewRunner {
         close: id => this.host.close(id),
         // report the Agent, then name its conversation with the run (best-effort)
         prepare: async candidate => { agent = candidate; request.onStarted?.({ agentId: candidate.id }); return await this.host.name(candidate.id, request.label); },
-        deliver: async candidate => { agent = candidate; read = await this.host.beginTurn(candidate, maxBytes); return await this.host.submit(candidate.id, text); }
+        deliver: async candidate => { agent = candidate; read = await this.host.beginTurn(candidate, maxBytes); await this.keepRecovery(runId, request, maxBytes); return await this.host.submit(candidate.id, text); }
       });
       if (launched.status === 'failed') {
         // a ready pane the prompt never reached is of no use to the operator
@@ -157,7 +192,7 @@ export class InteractiveReviewRunner implements ReviewRunner {
       // the timeout runs from delivery; the launch has its own bounded waits
       const deadline = this.now() + request.timeoutMs;
       for (let corrected = false; ; corrected = true) {
-        const end = await this.watch(ran.id, request, signal, deadline);
+        const end = await this.watch(ran.id, signal, deadline, this.now(), request.onAttention);
         if (end === 'vanished') throw new ReviewRunError('generation_failed', true);
         if (end === 'timed-out') return await giveUp(ran.id, 'timed_out');
         const reply = end === 'cancelled' ? undefined : parseReply(await this.harvest(read!, signal), maxBytes, request.validate);
@@ -175,14 +210,15 @@ export class InteractiveReviewRunner implements ReviewRunner {
       throw new ReviewRunError(signal.aborted ? 'cancelled' : 'generation_failed', true);
     } finally {
       this.live.delete(runId);
+      await this.forget(runId);
       if (file !== undefined && !keepFile) await unlink(file).catch(() => undefined);
     }
   }
 
   // Watch the Agent's attention until its turn finishes, it goes, the deadline passes or the run is
   // cancelled. A question keeps the run waiting (the operator answers in the pane) and is reported.
-  private async watch(agentId: string, request: ReviewRunRequest, signal: AbortSignal, deadline: number): Promise<WatchEnd> {
-    const started = this.now();
+  // `started` is when the turn's prompt went in, which the start window runs from.
+  private async watch(agentId: string, signal: AbortSignal, deadline: number, started: number, onAttention?: (needsInput: boolean) => void): Promise<WatchEnd> {
     let sawWorking = false;
     let needsInput = false;
     for (;;) {
@@ -192,7 +228,7 @@ export class InteractiveReviewRunner implements ReviewRunner {
       if (attention === undefined) return 'vanished';
       const progress = managedRunProgress(attention, sawWorking, this.now() - started, this.startWindowMs);
       // report each change of waiting on the operator
-      if ((progress === 'question') !== needsInput) { needsInput = !needsInput; request.onAttention?.(needsInput); }
+      if ((progress === 'question') !== needsInput) { needsInput = !needsInput; onAttention?.(needsInput); }
       if (progress === 'working') sawWorking = true;
       if (progress === 'finished') return 'finished';
       await this.host.delay();
@@ -207,6 +243,37 @@ export class InteractiveReviewRunner implements ReviewRunner {
       await this.host.delay();
     }
     return undefined;
+  }
+
+  // the recovery record of one run, beside its prompt file
+  private recoveryFile(runId: string): string { return join(this.options.promptDirectory, `${runId}.json`); }
+
+  // Leave the request's recovery beside the pane as its prompt goes in (best-effort: without it an
+  // orphaned run is only handed back). The deadline matches the one the run sets after delivery.
+  private async keepRecovery(runId: string, request: ReviewRunRequest, maxBytes: number): Promise<void> {
+    if (request.recovery === undefined) return;
+    const record: RecoveryRecord = { deliveredAt: this.now(), deadline: this.now() + request.timeoutMs, maxBytes, recovery: request.recovery };
+    try {
+      await mkdir(this.options.promptDirectory, { recursive: true, mode: 0o700 });
+      await writeFile(this.recoveryFile(runId), JSON.stringify(record), { mode: 0o600 });
+    } catch { /* the run goes on, unrecoverable */ }
+  }
+
+  // the recovery an orphaned run left, undefined when there is none or it is unreadable
+  private async readRecovery(runId: string): Promise<RecoveryRecord | undefined> {
+    if (!runIdPattern.test(runId)) return undefined;
+    try {
+      const record = JSON.parse(await readFile(this.recoveryFile(runId), 'utf8')) as Partial<RecoveryRecord> | null;
+      const valid = Number.isFinite(record?.deliveredAt) && Number.isFinite(record?.deadline) && Number.isSafeInteger(record?.maxBytes) && record!.maxBytes! > 0 && typeof record?.recovery === 'object' && record.recovery !== null;
+      return valid ? record as RecoveryRecord : undefined;
+    } catch { return undefined; }
+  }
+
+  // drop a settled run's recovery record and, once its result is kept, its prompt file
+  private async forget(runId: string, withPrompt = false): Promise<void> {
+    if (!runIdPattern.test(runId)) return;
+    await unlink(this.recoveryFile(runId)).catch(() => undefined);
+    if (withPrompt) await unlink(join(this.options.promptDirectory, `${runId}.md`)).catch(() => undefined);
   }
 
   // The prompt pasted into the composer: the run's prompt with the reply instruction, or, when that

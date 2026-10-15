@@ -6,8 +6,8 @@ import type { AttentionState } from '../src/adapters/types.js';
 import type { Agent } from '../src/domain/models.js';
 import type { ReviewRunLaunch } from '../src/launch/service.js';
 import { ModeDispatchReviewRunner } from '../src/review-runs/dispatch.js';
-import { beginReplyTurn } from '../src/review-runs/final-reply.js';
-import { correctionPrompt, InteractiveReviewRunner, parseReply, readablePrompt, replyInstruction, type InteractiveReviewHost } from '../src/review-runs/interactive.js';
+import { beginReplyTurn, latestReply } from '../src/review-runs/final-reply.js';
+import { correctionPrompt, InteractiveReviewRunner, parseReply, readablePrompt, replyInstruction, type InteractiveReviewHost, type OrphanRecovery } from '../src/review-runs/interactive.js';
 import type { KindReviewRunner, ReviewRunRequest } from '../src/review-runs/runner.js';
 
 const dirs: string[] = [];
@@ -18,8 +18,9 @@ const schema = { type: 'object', required: ['ok'] };
 const request = (extra: Partial<ReviewRunRequest> = {}): ReviewRunRequest => ({ kind: 'claude', workspace: '/w', worktreeId: 'proj:/w', prompt: 'Review the change.', schema, timeoutMs: 60_000, label: '🔍 Review · Correctness', effort: 'high', ...extra });
 
 // a scripted console: each attention poll takes the next state (the last one repeats), and each
-// turn's reader returns that turn's reply
-function fakeHost(script: { attention: Array<AttentionState | undefined>; replies?: Array<string | undefined>; launch?: boolean; submit?: boolean; onAttention?: () => void }) {
+// turn's reader returns that turn's reply; an orphan's latest reply is `latest`, and its recovery
+// is finished through `recover`
+function fakeHost(script: { attention: Array<AttentionState | undefined>; replies?: Array<string | undefined>; latest?: string; recover?: OrphanRecovery; launch?: boolean; submit?: boolean; onAttention?: () => void }) {
   const calls: string[] = [];
   const submitted: string[] = [];
   const launches: ReviewRunLaunch[] = [];
@@ -33,6 +34,8 @@ function fakeHost(script: { attention: Array<AttentionState | undefined>; replie
     waitForReadiness: async () => ({ state: 'ready' }),
     name: async (_id, name) => { calls.push(`name:${name}`); },
     beginTurn: async () => { const index = turn += 1; return async () => script.replies?.[index]; },
+    latestReply: async () => script.latest,
+    recover: async (recovery, agentId) => { calls.push(`recover:${agentId}:${JSON.stringify(recovery)}`); return script.recover; },
     submit: async (_id, text) => { submitted.push(text); return script.submit ?? true; },
     attention: async () => { script.onAttention?.(); return attention.length > 1 ? attention.shift() : attention[0]; },
     close: async id => { calls.push(`close:${id}`); },
@@ -117,6 +120,51 @@ describe('interactive Review runner', () => {
     // once its run has ended, a pane still marked for it (its close failed) is an orphan too
     await runner.releaseOrphans([{ ...agent, reviewRun: world.launches[0]!.runId }]);
     expect(world.calls.filter(call => call.startsWith('release:'))).toEqual(['release:agent-old', 'release:agent-9']);
+  });
+
+  it('leaves a delivered run\'s recovery beside its pane until the run settles', async () => {
+    const dir = await promptDirectory();
+    let left: Promise<unknown> | undefined;
+    const world = fakeHost({ attention: ['working', 'finished'], replies: ['{"ok":true}'], onAttention: () => { left ??= readFile(join(dir, `${world.launches[0]!.runId}.json`), 'utf8').then(JSON.parse); } });
+    const runner = new InteractiveReviewRunner(world.host, { promptDirectory: dir, now: () => 5_000 });
+    await expect(runner.run(request({ recovery: { kind: 'code-review' }, maxOutputBytes: 900 }), new AbortController().signal)).resolves.toEqual({ ok: true });
+    expect(await left).toEqual({ deliveredAt: 5_000, deadline: 65_000, maxBytes: 900, recovery: { kind: 'code-review' } });
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('finishes an orphan from the recovery its run left, keeping a reply that validates and closing the pane', async () => {
+    const dir = await promptDirectory();
+    const runId = 'run_left_by_a_restart';
+    await writeFile(join(dir, `${runId}.json`), JSON.stringify({ deliveredAt: 0, deadline: 10_000_000, maxBytes: 1_000, recovery: { kind: 'code-review' } }));
+    await writeFile(join(dir, `${runId}.md`), 'The long instructions.');
+    const saved: unknown[] = [];
+    const world = fakeHost({ attention: ['working', 'finished'], latest: 'Done:\n{"ok":true}', recover: { validate: value => (value as { ok?: boolean }).ok === true ? undefined : 'ok must be true', save: async value => { saved.push(value); return true; } } });
+    await new InteractiveReviewRunner(world.host, { promptDirectory: dir, now: () => 1_000 }).releaseOrphans([{ ...agent, id: 'agent-old', reviewRun: runId }]);
+    expect(saved).toEqual([{ ok: true }]);
+    expect(world.calls).toEqual(['recover:agent-old:{"kind":"code-review"}', 'close:agent-old']);
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('hands an orphan back when it cannot be finished: no recovery, a refused one, a question, a failing reply or a refused save', async () => {
+    const dir = await promptDirectory();
+    const keep: OrphanRecovery = { validate: value => (value as { ok?: boolean }).ok === true ? undefined : 'ok must be true', save: async () => true };
+    const cases: Array<{ name: string; left: boolean; script: Parameters<typeof fakeHost>[0] }> = [
+      { name: 'none', left: false, script: { attention: ['finished'], latest: '{"ok":true}', recover: keep } },
+      { name: 'refused', left: true, script: { attention: ['finished'], latest: '{"ok":true}' } },
+      { name: 'asked', left: true, script: { attention: ['working', 'question'], latest: '{"ok":true}', recover: keep } },
+      { name: 'failing', left: true, script: { attention: ['finished'], latest: '{"ok":false}', recover: keep } },
+      { name: 'unsaved', left: true, script: { attention: ['finished'], latest: '{"ok":true}', recover: { ...keep, save: async () => false } } },
+    ];
+    for (const each of cases) {
+      const runId = `run_${each.name}_orphaned`;
+      if (each.left) await writeFile(join(dir, `${runId}.json`), JSON.stringify({ deliveredAt: 0, deadline: 10_000_000, maxBytes: 1_000, recovery: {} }));
+      const world = fakeHost(each.script);
+      // past the start window, so an idle orphan reads as finished
+      await new InteractiveReviewRunner(world.host, { promptDirectory: dir, now: () => 120_000 }).releaseOrphans([{ ...agent, reviewRun: runId }]);
+      expect(world.calls.at(-1), each.name).toBe('release:agent-9');
+      expect(world.calls, each.name).not.toContain('close:agent-9');
+    }
+    expect(await readdir(dir)).toEqual([]);
   });
 
   it('fails a run whose Agent vanished, a refused launch and an unavailable kind', async () => {
@@ -205,6 +253,9 @@ describe('interactive Review run reply turns', () => {
       await expect(read()).resolves.toBe('{"ok":true}');
       // one fresh pane read pins the session before the prompt; the reader's polls take the snapshot
       expect(forced).toEqual([true, false, false]);
+      // an orphan, with no snapshot from before its prompt, reads the latest message with a fresh pane read
+      await expect(latestReply(sources, { id: 'agent-9', kind: 'claude' }, 1_000)).resolves.toBe('{"ok":true}');
+      expect(forced.at(-1)).toBe(true);
     } finally { if (saved === undefined) delete process.env.RAC_CLAUDE_CONFIG_DIR; else process.env.RAC_CLAUDE_CONFIG_DIR = saved; }
   });
 });

@@ -22,6 +22,11 @@ export type Finding = { id: string; changeId: string; side: FindingSide; startLi
 export type GeneralFinding = { id: string; severity: FindingSeverity; title: string; body: string; file?: string };
 export type CodeReviewPresetRef = { id: string; label: string; agent: ReviewAgentKind };
 export type CodeReview = { fingerprint: string; preset: CodeReviewPresetRef; effort?: string; focus?: string; findings: Finding[]; general: GeneralFinding[]; completedAt: string };
+// the Comparison and settings one Code review run reviews, which its result carries
+export type CodeReviewRun = Pick<CodeReview, 'fingerprint' | 'preset' | 'effort' | 'focus'>;
+// what an interactive Code review run leaves beside its pane, so a run a restart orphans can still
+// be finished: its run and the Worktree and branch whose stored tour the result joins
+export type CodeReviewRecovery = CodeReviewRun & { kind: 'code-review'; worktreeId: string; branch: string };
 export type CodeReviewOptions = { preset: string; effort?: string; focus?: string };
 // one preset as the dashboard offers it, with its agent's runnable state and effort levels
 export type CodeReviewPresetCapability = CodeReviewPresetRef & { effort?: string; efforts: string[]; available: boolean; reason?: string };
@@ -54,6 +59,7 @@ const codeReviewSchema = z.object({
   general: z.array(generalSchema).max(MAX_CODE_REVIEW_GENERAL + MAX_CODE_REVIEW_FINDINGS),
   completedAt: z.string().refine(value => Number.isFinite(Date.parse(value)))
 }).strict();
+const recoverySchema = codeReviewSchema.pick({ fingerprint: true, preset: true, effort: true, focus: true }).extend({ kind: z.literal('code-review'), worktreeId: z.string().min(1).max(4_096), branch: z.string().min(1).max(1_024) }).strict();
 
 // drop a blank focus so it neither reaches the prompt nor the idempotency check
 function normalizedOptions(options: z.output<typeof optionsSchema>): CodeReviewOptions {
@@ -162,6 +168,19 @@ export function parseGeneratedCodeReview(value: unknown, changes: ReviewChange[]
 export function codeReviewReplyError(value: unknown): string | undefined {
   const parsed = generatedSchema.safeParse(value);
   return parsed.success ? undefined : describeSchemaIssues(parsed.error);
+}
+
+// the Code review a run's structured output makes, its findings anchored in the reviewed Changes
+export function codeReviewFrom(output: unknown, changes: ReviewChange[], run: CodeReviewRun): CodeReview | undefined {
+  const parsed = parseGeneratedCodeReview(output, changes);
+  if (parsed === undefined) return undefined;
+  return { fingerprint: run.fingerprint, preset: run.preset, ...(run.effort === undefined ? {} : { effort: run.effort }), ...(run.focus === undefined ? {} : { focus: run.focus }), findings: parsed.findings, general: parsed.general, completedAt: new Date().toISOString() };
+}
+
+// validate the recovery an orphaned Code review run left
+export function parseCodeReviewRecovery(value: unknown): CodeReviewRecovery | undefined {
+  const parsed = recoverySchema.safeParse(value);
+  return parsed.success ? parsed.data as CodeReviewRecovery : undefined;
 }
 
 // validate a persisted Code review

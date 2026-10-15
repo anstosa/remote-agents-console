@@ -181,4 +181,36 @@ describe('tour starts with a code review', () => {
       expect(tours.prepares()).toBe(1);
     } finally { jobs.close(); codeReviews.close(); }
   });
+
+  it('finishes a review a restart orphaned into its stored tour, unless the tour or a newer review replaced it', async () => {
+    const { runner, runs } = controlledRunner();
+    const { store: before, directory } = await store();
+    const reviewer = new CodeReviewer(runner, { presets: [preset], defaultPreset: preset.id });
+    const tour = prepared();
+    await before.save('cora', 'feature/review', tourOf(tour.comparison));
+    const running = new CodeReviewJobs(reviewer, before);
+    await running.start('owner-a', 'agent-cora', tour, { preset: preset.id });
+    await settle();
+    // the recovery the run's request carried, as the runner's file hands it back after a restart
+    const left = JSON.parse(JSON.stringify(runs[0]!.request.recovery)) as Record<string, unknown>;
+    expect(left).toEqual({ kind: 'code-review', worktreeId: 'cora', branch: 'feature/review', fingerprint: tour.comparison.fingerprint, preset: { id: preset.id, label: preset.label, agent: preset.agent }, effort: 'high' });
+    running.close();
+    // each new process reads the same files
+    const restarted = () => new ReviewTourStore(join(directory, 'reviews.json'));
+    const after = restarted();
+    const settled: SettledCodeReviewJob[] = [];
+    const jobs = new CodeReviewJobs(reviewer, after, job => { settled.push(job); });
+    await expect(jobs.recover({ ...left, fingerprint: 'fingerprint-of-a-newer-tour' }, 'agent-orphan')).resolves.toBeUndefined();
+    await expect(jobs.recover({ ...left, branch: 'other' }, 'agent-orphan')).resolves.toBeUndefined();
+    const recovery = await jobs.recover(left, 'agent-orphan');
+    expect(recovery?.validate?.({ findings: 'none' })).toEqual(expect.any(String));
+    await expect(recovery!.save(output)).resolves.toBe(true);
+    expect(await after.codeReview('cora', 'feature/review', tour.comparison.fingerprint)).toMatchObject({ preset: { id: preset.id }, effort: 'high', findings: [{ changeId: change.id, title: 'Unchecked value' }], general: [{ title: 'No test' }] });
+    expect(settled).toMatchObject([{ agentId: 'agent-orphan', worktreeId: 'cora', state: { kind: 'ready' } }]);
+    // a review begun since the restart supersedes the orphan's
+    const later = restarted();
+    const recovering = await new CodeReviewJobs(reviewer, later).recover(left, 'agent-orphan');
+    later.beginCodeReview('cora');
+    await expect(recovering!.save(output)).resolves.toBe(false);
+  });
 });

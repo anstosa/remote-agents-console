@@ -52,7 +52,7 @@ import { ConfiguredReviewTourGenerator } from './review-tour/generator.js';
 import { CodexHeadlessReviewRunner } from './review-runs/codex-headless.js';
 import { ClaudeHeadlessReviewRunner } from './review-runs/claude-headless.js';
 import { ModeDispatchReviewRunner } from './review-runs/dispatch.js';
-import { beginReplyTurn } from './review-runs/final-reply.js';
+import { beginReplyTurn, latestReply } from './review-runs/final-reply.js';
 import { InteractiveReviewRunner } from './review-runs/interactive.js';
 import { codexMcpDisableArgs, codexMcpServers } from './review-runs/launch-args.js';
 import { isReviewRunName, type ReviewRunner } from './review-runs/runner.js';
@@ -2041,6 +2041,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       waitForReadiness: agent => waitForReadiness(agent),
       name: async (agentId, name) => await nameAgentConversation(agentId, name) !== 'stuck',
       beginTurn: (agent, maxBytes) => beginReplyTurn(discovery, agent, maxBytes),
+      latestReply: (agent, maxBytes) => latestReply(discovery, agent, maxBytes),
+      // only a Code review leaves a recovery; an orphaned tour is handed back
+      recover: async (recovery, agentId) => await codeReviews.recover(recovery, agentId),
       submit: (agentId, text) => submitConfirmed(agentId, text),
       // the cached discovery snapshot (rescanned once over 2 s old, which the dashboard poll keeps it
       // under); an Agent missing from it is confirmed gone by a forced scan inside `target`

@@ -1,10 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { ReviewTourError, type ReviewErrorCode } from '../review-tour/contracts.js';
 import { pendingRunProgress, startedReviewJob, type StartedReviewJob } from '../review-tour/jobs.js';
+import type { OrphanRecovery } from '../review-runs/interactive.js';
 import type { ReviewRunInfo } from '../review-runs/runner.js';
 import type { PreparedReviewTour } from '../review-tour/service.js';
 import type { ReviewTourStore } from '../review-tour/store.js';
-import { CODE_REVIEW_JOB_TTL_MS, type CodeReview, type CodeReviewOptions } from './contracts.js';
+import { CODE_REVIEW_JOB_TTL_MS, codeReviewFrom, codeReviewReplyError, parseCodeReviewRecovery, type CodeReview, type CodeReviewOptions } from './contracts.js';
 import type { CodeReviewer } from './reviewer.js';
 
 // `run` is an interactive run's visible Agent, once it has launched
@@ -15,7 +16,7 @@ type GoneJob = { kind: 'gone'; code: 'job_cancelled' | 'job_superseded' | 'job_e
 export type CodeReviewJobState = PendingJob | ReadyJob | FailedJob | GoneJob;
 export type StoredCodeReviewJob = { id: string; owner: string; agentId: string; worktreeId: string; fingerprint: string; generation?: number; startedAt: number; expiresAt: number; state: CodeReviewJobState; expiry: NodeJS.Timeout; removal?: NodeJS.Timeout };
 export type SettledCodeReviewJob = Pick<StoredCodeReviewJob, 'agentId' | 'worktreeId' | 'fingerprint' | 'state'>;
-type CodeReviewStore = Pick<ReviewTourStore, 'beginCodeReview' | 'saveCodeReviewIfCurrent'>;
+type CodeReviewStore = Pick<ReviewTourStore, 'beginCodeReview' | 'saveCodeReviewIfCurrent' | 'storedTour'>;
 
 // one Code review job per owner and Worktree, latest wins; a new tour supersedes every one for
 // its Worktree. Findings publish even when the Worktree changed during the run (ADR 0010).
@@ -76,6 +77,27 @@ export class CodeReviewJobs {
     }
     // publish the settled state
     await Promise.resolve(this.onSettled?.({ agentId: job.agentId, worktreeId: job.worktreeId, fingerprint: job.fingerprint, state: job.state })).catch(() => undefined);
+  }
+
+  // Finish a review a server restart orphaned, from the recovery its run left. Its reply joins the
+  // stored tour while that is still the reviewed Comparison and nothing has begun or cleared a
+  // review of the Worktree since the restart. The job itself is gone: no pending state, no polling.
+  async recover(value: unknown, agentId: string): Promise<OrphanRecovery | undefined> {
+    const run = parseCodeReviewRecovery(value);
+    const store = this.store;
+    if (run === undefined || store === undefined) return undefined;
+    const stored = await store.storedTour(run.worktreeId);
+    if (stored?.branch !== run.branch || stored.tour.fingerprint !== run.fingerprint) return undefined;
+    const { kind: _kind, worktreeId, branch, ...reviewed } = run;
+    return {
+      validate: codeReviewReplyError,
+      save: async output => {
+        const review = codeReviewFrom(output, stored.tour.changes, reviewed);
+        if (review === undefined || !await store.saveCodeReviewIfCurrent(worktreeId, branch, review, 0)) return false;
+        await Promise.resolve(this.onSettled?.({ agentId, worktreeId, fingerprint: review.fingerprint, state: { kind: 'ready', review } })).catch(() => undefined);
+        return true;
+      }
+    };
   }
 
   // read an owner-scoped job

@@ -189,6 +189,12 @@ export class ReviewTourStore {
     });
   }
 
+  // the stored tour of one Worktree as it is, without the branch reconciliation `current` applies
+  async storedTour(worktreeId: string): Promise<StoredReviewTour | undefined> {
+    if (!validWorktreeId(worktreeId)) return undefined;
+    return await this.mutate(stored => ({ value: stored[worktreeId], changed: false }), false);
+  }
+
   // begin one Code review generation: a later begin, a new tour or a dismissal refuses its save
   beginCodeReview(worktreeId: string): number {
     const generation = (this.codeReviewGenerations.get(worktreeId) ?? 0) + 1;
@@ -197,12 +203,13 @@ export class ReviewTourStore {
   }
 
   // persist a completed Code review only while its generation remains current; it joins the
-  // tour stored for the same branch and fingerprint on read, whichever finishes first
+  // tour stored for the same branch and fingerprint on read, whichever finishes first. Generation 0
+  // is a review begun before this process: current while nothing has begun or cleared one since.
   async saveCodeReviewIfCurrent(worktreeId: string, branch: string, review: CodeReview, generation: number): Promise<StoredCodeReview | false | undefined> {
     if (!validWorktreeId(worktreeId) || !validBranch(branch) || parseCodeReview(review) === undefined) return undefined;
     return await this.mutate<StoredCodeReview | false | undefined>((_stored, codeReviews) => {
       // reject a superseded review inside the serialized mutation
-      if (this.codeReviewGenerations.get(worktreeId) !== generation) return { value: false, changed: false };
+      if ((this.codeReviewGenerations.get(worktreeId) ?? 0) !== generation) return { value: false, changed: false };
       // cap distinct configured worktrees
       if (codeReviews[worktreeId] === undefined && Object.keys(codeReviews).length >= maxWorktrees) return { value: undefined, changed: false };
       const record = { worktreeId, branch, review };

@@ -2,7 +2,7 @@ import type { ReviewPreset, ResolvedReviewConfig } from '../review-runs/config.j
 import { acceptsReviewEffort, reviewEfforts } from '../review-runs/efforts.js';
 import { reviewRunLabel, type ReviewRunner, type ReviewRunProgress } from '../review-runs/runner.js';
 import { ReviewTourError, type ReviewComparison } from '../review-tour/contracts.js';
-import { CODE_REVIEW_TIMEOUT_MS, codeReviewReplyError, generatedCodeReviewJsonSchema, MAX_CODE_REVIEW_OUTPUT_BYTES, parseGeneratedCodeReview, presetCapability, type CodeReview, type CodeReviewCapability, type CodeReviewOptions } from './contracts.js';
+import { CODE_REVIEW_TIMEOUT_MS, codeReviewFrom, codeReviewReplyError, generatedCodeReviewJsonSchema, MAX_CODE_REVIEW_OUTPUT_BYTES, presetCapability, type CodeReview, type CodeReviewCapability, type CodeReviewOptions, type CodeReviewRecovery, type CodeReviewRun } from './contracts.js';
 
 // a requested Code review checked against its preset: the effort defaults to the preset's
 export type ResolvedCodeReview = { preset: ReviewPreset; effort?: string; focus?: string };
@@ -53,12 +53,15 @@ export class CodeReviewer {
   // checked against the output shape and gets one correction
   async run(comparison: ReviewComparison, resolved: ResolvedCodeReview, signal: AbortSignal, progress: ReviewRunProgress = {}): Promise<CodeReview> {
     const { preset, effort, focus } = resolved;
-    const output = await this.runner.run({ kind: preset.agent, workspace: comparison.workspace, worktreeId: comparison.worktreeId, prompt: codeReviewPrompt(preset.prompt, focus, comparison), schema: generatedCodeReviewJsonSchema, timeoutMs: CODE_REVIEW_TIMEOUT_MS, maxOutputBytes: MAX_CODE_REVIEW_OUTPUT_BYTES, label: reviewRunLabel(preset.label), validate: codeReviewReplyError, ...progress, ...(preset.model === undefined ? {} : { model: preset.model }), ...(effort === undefined ? {} : { effort }) }, signal);
+    const run: CodeReviewRun = { fingerprint: comparison.fingerprint, preset: { id: preset.id, label: preset.label, agent: preset.agent }, ...(effort === undefined ? {} : { effort }), ...(focus === undefined ? {} : { focus }) };
+    // only a branch-bound review is stored, so only one can be recovered
+    const recovery: CodeReviewRecovery | undefined = comparison.branch === undefined ? undefined : { kind: 'code-review', worktreeId: comparison.worktreeId, branch: comparison.branch, ...run };
+    const output = await this.runner.run({ kind: preset.agent, workspace: comparison.workspace, worktreeId: comparison.worktreeId, prompt: codeReviewPrompt(preset.prompt, focus, comparison), schema: generatedCodeReviewJsonSchema, timeoutMs: CODE_REVIEW_TIMEOUT_MS, maxOutputBytes: MAX_CODE_REVIEW_OUTPUT_BYTES, label: reviewRunLabel(preset.label), validate: codeReviewReplyError, ...(recovery === undefined ? {} : { recovery }), ...progress, ...(preset.model === undefined ? {} : { model: preset.model }), ...(effort === undefined ? {} : { effort }) }, signal);
     // preserve caller cancellation
     if (signal.aborted) throw new ReviewTourError('cancelled', true);
-    const parsed = parseGeneratedCodeReview(output, comparison.changes);
+    const review = codeReviewFrom(output, comparison.changes, run);
     // reject output outside the contract
-    if (parsed === undefined) throw new ReviewTourError('malformed_result', true);
-    return { fingerprint: comparison.fingerprint, preset: { id: preset.id, label: preset.label, agent: preset.agent }, ...(effort === undefined ? {} : { effort }), ...(focus === undefined ? {} : { focus }), findings: parsed.findings, general: parsed.general, completedAt: new Date().toISOString() };
+    if (review === undefined) throw new ReviewTourError('malformed_result', true);
+    return review;
   }
 }
