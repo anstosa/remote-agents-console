@@ -105,8 +105,12 @@ type Controls = {
   // reference actually changed (a same-fingerprint refresh must not bump this)
   fetches: number;
   patchChanges: number;
+  // /comparison/file fetches so far: a gap expanding loads the file's two sides
+  fileFetches: number;
   // the Comparison the next fetch resolves with
   setNext(patch: ComparisonPatch): void;
+  // the two sides a /comparison/file fetch resolves with, by path, so a gap can expand
+  setFiles(files: Record<string, ComparisonFileContents>): void;
   // open the panel (a hard load) / move the live change signal (a soft refresh)
   open(): void;
   bump(signal: string): void;
@@ -131,9 +135,14 @@ function ControllerHarness() {
   // the file-preview payload the next /file-preview fetch resolves with, so the round-trip runs
   // through the real openFilePreview fetch + isFilePreview guard
   const nextFileRef = useRef<{ path: string; size: number; truncated: boolean; binary: false; content: string } | undefined>(undefined);
-  const stats = useRef({ fetches: 0, patchChanges: 0 });
+  const stats = useRef({ fetches: 0, patchChanges: 0, fileFetches: 0 });
   const lastPatch = useRef<ComparisonPatch | undefined>(undefined);
   const request = useCallback(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/comparison/file')) {
+      stats.current.fileFetches += 1;
+      const contents = harness.files[(JSON.parse(String(init?.body)) as { path: string }).path];
+      return contents === undefined ? new Response('{}', { status: 404 }) : new Response(JSON.stringify(contents), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     const body = url.includes('/file-preview') ? nextFileRef.current : harness.next;
     if (!url.includes('/file-preview')) stats.current.fetches += 1;
     if (harness.missingCommits && String(init?.body).includes('"commit"')) return new Response(JSON.stringify({ error: 'comparison unavailable' }), { status: 404 });
@@ -147,7 +156,9 @@ function ControllerHarness() {
     controlLog().__ctrl = {
       get fetches() { return stats.current.fetches; },
       get patchChanges() { return stats.current.patchChanges; },
+      get fileFetches() { return stats.current.fileFetches; },
       setNext: patch => { harness.next = patch; },
+      setFiles: files => { harness.files = files; },
       open: () => controller.openChanges('working'),
       bump: next => setSignal(next),
       openFile: (path, content) => { nextFileRef.current = { path, size: content.length, truncated: false, binary: false, content }; controller.openFilePreview(path, `/api/agents/agent-1/file-preview`); },
@@ -183,7 +194,7 @@ function ControllerHarness() {
 }
 
 // Script state that outlives a remount of the controller harness.
-const harness: { next?: ComparisonPatch; missingCommits: boolean; remount: () => Promise<void>; swap: () => Promise<void> } = { missingCommits: false, remount: async () => { /* set by Remountable */ }, swap: async () => { /* set by Remountable */ } };
+const harness: { next?: ComparisonPatch; files: Record<string, ComparisonFileContents>; missingCommits: boolean; remount: () => Promise<void>; swap: () => Promise<void> } = { files: {}, missingCommits: false, remount: async () => { /* set by Remountable */ }, swap: async () => { /* set by Remountable */ } };
 
 // resolve once the harness that replaced `before` has published its controls
 const freshControls = async (before: Controls | undefined) => {
@@ -215,6 +226,7 @@ function Remountable({ children }: { children: ReactElement }) {
 
 export const renderCodeController = (root: HTMLElement, initialPatch: ComparisonPatch) => {
   harness.next = initialPatch;
+  harness.files = {};
   harness.missingCommits = false;
   createRoot(root).render(createElement(Remountable, {}, createElement(ControllerHarness)));
 };

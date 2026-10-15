@@ -592,6 +592,64 @@ test('explains in a toast when a merged diff cannot expand', async ({ page }) =>
   await expect(diffPane.getByText('const extra1 = 1;')).toHaveCount(0);
 });
 
+// verify hidden lines expanded in a step come back after a Workspace switch and a minimize, while
+// the step revisited from another starts collapsed
+test('keeps a step\'s expanded lines across a Workspace switch and a minimize', async ({ page }) => {
+  const { tour, working } = mergedTourFixture();
+  const { dialog } = await openCommentTour(page, { tour, second: true, files: { 'src/route.ts': `${working.join('\n')}\n` } });
+  const diffPane = dialog.getByLabel('Relevant changes');
+  const expanded = diffPane.locator('[data-line-type="context-expanded"]', { hasText: 'const extra1 = 1;' }).first();
+  await diffPane.locator('[data-separator]', { hasText: '25 unmodified lines' }).locator('[data-expand-button]').first().click();
+  await expect(expanded).toBeVisible();
+
+  // switching to another Workspace and back
+  await page.getByRole('tab', { name: /^Delta/u }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('tab', { name: /^Owen/u }).click();
+  await expect(dialog).toBeVisible();
+  await expect(expanded).toBeVisible();
+
+  // minimizing and reopening
+  await dialog.getByRole('button', { name: 'Minimize guided review' }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  await expect(dialog).toBeVisible();
+  await expect(expanded).toBeVisible();
+
+  // leaving the step and coming back starts it collapsed
+  await dialog.getByRole('button', { name: 'Next' }).click();
+  await expect(dialog.getByText('Two constants are added.')).toBeVisible();
+  await dialog.getByRole('button', { name: 'Back' }).click();
+  await expect(diffPane.getByText('const v5 = 50;')).toBeVisible();
+  await expect(diffPane.locator('[data-separator]', { hasText: '25 unmodified lines' }).first()).toBeVisible();
+  // a restore would expand straight away; give it the time to and confirm it did not
+  await page.waitForTimeout(300);
+  await expect(diffPane.getByText('const extra1 = 1;')).toHaveCount(0);
+});
+
+// verify a gap that failed to expand is not tried again after a Workspace switch, so its toast stays gone
+test('does not retry a failed expansion after a Workspace switch', async ({ page }) => {
+  const { tour, working } = mergedTourFixture();
+  const changed = [...working];
+  changed[5] = 'const v6 = 60;';
+  const { dialog } = await openCommentTour(page, { tour, second: true, files: { 'src/route.ts': `${changed.join('\n')}\n` } });
+  const diffPane = dialog.getByLabel('Relevant changes');
+  let fileLoads = 0;
+  page.on('request', request => { if (request.url().endsWith('/comparison/file')) fileLoads += 1; });
+  await diffPane.locator('[data-separator]', { hasText: '25 unmodified lines' }).locator('[data-expand-button]').first().click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Could not expand src/route.ts' })).toBeVisible();
+  const loads = fileLoads;
+
+  await page.getByRole('tab', { name: /^Delta/u }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('tab', { name: /^Owen/u }).click();
+  await expect(diffPane.getByText('const v5 = 50;')).toBeVisible();
+  // a retry would load the file straight away; give it the time to and confirm it did not
+  await page.waitForTimeout(300);
+  expect(fileLoads).toBe(loads);
+});
+
 // verify a narrow desktop panel folds the step's notes into the drawer, and expanding unfolds them
 test('folds the step notes into a drawer while the panel is narrow', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });

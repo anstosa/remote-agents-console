@@ -14,10 +14,10 @@ import { openSelectionContextMenu, preserveContextMenuPress, useSelectionActions
 import { useColorTheme } from '../color-theme.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand } from '../panel-header.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
-import { groupComparisonFiles, type CodePanelCommit, type CodePanelMode, type CodePanelState, type CodePanelView, type CodePanelViewMode, type ScrollAnchor, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView } from './comparison.js';
+import { groupComparisonFiles, type CodePanelCommit, type CodePanelMode, type CodePanelState, type CodePanelView, type CodePanelViewMode, type ExpandedLines, type ScrollAnchor, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView } from './comparison.js';
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, isPlaceRelativePath, type EditorTarget } from './editor-jump.js';
-import { codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, loadedFilesFromContents } from './items.js';
+import { codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, loadedFilesFromContents, rememberExpandedLines } from './items.js';
 
 type PanelItem = CodeViewItem<undefined>;
 type PanelOptions = CodeViewReactOptions<undefined, undefined>;
@@ -188,6 +188,8 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   const anchorRef = useRef<ScrollAnchor | undefined>(savedView?.listAnchor);
   // The place on screen to return to after a Workspace switch, once the reloaded items render.
   const restoreRef = useRef<ScrollAnchor | undefined>(savedView?.scroll);
+  // The hidden lines expanded in each diff, which the library forgets when the CodeView unmounts.
+  const [expandedLines] = useState<ExpandedLines>(() => new Map(savedView?.expanded));
   // The rendered item per file id, with the content version it was built for. Kept across live
   // updates so an unchanged file hands the library the identical object (preserving its scroll and
   // full-context expansion); a version-mismatch is what marks a file as edited.
@@ -395,8 +397,9 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     // hydrate the partial patch — so `loadDiffFiles` is always provided, not just in Full context. (It
     // is lazy: nothing is fetched until a gap is actually expanded.)
     expandUnchanged: effectiveMode === 'full',
-    loadDiffFiles
-  }), [theme, fontSize, wrapLines, effectiveSplit, effectiveMode, loadDiffFiles]);
+    loadDiffFiles,
+    onPostRender: rememberExpandedLines(expandedLines)
+  }), [theme, fontSize, wrapLines, effectiveSplit, effectiveMode, loadDiffFiles, expandedLines]);
 
   // The topmost item and how far into it we have scrolled: the last rendered item whose top has
   // passed the viewport top.
@@ -439,7 +442,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   // A layout cleanup, because the scroll position is only readable before the DOM is removed.
   const snapshot = (): CodePanelView => {
     const scroll = filePreview === undefined && restoreRef.current === undefined ? currentAnchor() : restoreRef.current;
-    return { viewMode, wrapLines, railCollapsed, supportingExpanded, fileCollapse, ...(scroll === undefined ? {} : { scroll }), ...(anchorRef.current === undefined ? {} : { listAnchor: anchorRef.current }) };
+    return { viewMode, wrapLines, railCollapsed, supportingExpanded, fileCollapse, ...(scroll === undefined ? {} : { scroll }), ...(anchorRef.current === undefined ? {} : { listAnchor: anchorRef.current }), ...(expandedLines.size === 0 ? {} : { expanded: new Map(expandedLines) }) };
   };
   const latestSnapshot = useRef(snapshot);
   latestSnapshot.current = snapshot;

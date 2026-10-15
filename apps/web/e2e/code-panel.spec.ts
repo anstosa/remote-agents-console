@@ -67,7 +67,7 @@ const mountController = async (page: Page, patch: ComparisonPatch) => {
     renderCodeController(root, scripted);
   }, { scripted: patch });
 };
-type Ctrl = { fetches: number; patchChanges: number; setNext(patch: ComparisonPatch): void; open(): void; bump(signal: string): void; openFile(path: string, content: string): void; closeFile(): void; openCommit(sha: string, subject: string): void; missingCommits: boolean; close(): void; remount(): Promise<void>; swap(): Promise<void> };
+type Ctrl = { fetches: number; patchChanges: number; fileFetches: number; setNext(patch: ComparisonPatch): void; setFiles(files: Record<string, ComparisonFileContents>): void; open(): void; bump(signal: string): void; openFile(path: string, content: string): void; closeFile(): void; openCommit(sha: string, subject: string): void; missingCommits: boolean; close(): void; remount(): Promise<void>; swap(): Promise<void> };
 const controls = (page: Page) => page.evaluate(() => { const c = (window as unknown as { __ctrl: Ctrl }).__ctrl; return { fetches: c.fetches, patchChanges: c.patchChanges }; });
 
 const panel = (page: Page) => page.getByRole('region', { name: 'Code changes' });
@@ -203,25 +203,24 @@ test('keeps the Working / All PR toggle when a Comparison resolves with no files
   await expect(panel(page).getByRole('button', { name: 'Hunks' })).toHaveCount(0);
 });
 
+// two hunks far apart leave a large collapsed gap between them in Hunks mode
+const bigBaseLines = Array.from({ length: 60 }, (_, index) => `line ${index + 1}`);
+const bigWorkingLines = bigBaseLines.map((line, index) => (index === 1 ? 'line 2 changed' : index === 49 ? 'line 50 changed' : line));
+const twoHunkPatch = ['diff --git a/src/big.ts b/src/big.ts', 'index 1111111..2222222 100644', '--- a/src/big.ts', '+++ b/src/big.ts', '@@ -1,5 +1,5 @@', ' line 1', '-line 2', '+line 2 changed', ' line 3', ' line 4', ' line 5', '@@ -47,7 +47,7 @@', ' line 47', ' line 48', ' line 49', '-line 50', '+line 50 changed', ' line 51', ' line 52', ' line 53'].join('\n') + '\n';
+const bigFile: ComparisonFile = { change: { code: ' M', path: 'src/big.ts', additions: 2, deletions: 2 }, kind: 'tracked', patch: twoHunkPatch, capped: false };
+const bigContents: ComparisonFileContents = { path: 'src/big.ts', base: revision('src/big.ts', `${bigBaseLines.join('\n')}\n`), working: revision('src/big.ts', `${bigWorkingLines.join('\n')}\n`) };
+const bigGap = (page: Page) => panel(page).locator('diffs-container').getByText(/unmodified lines/iu).first();
+
 test('expands a collapsed hunk gap in Hunks mode without first visiting Full context', async ({ page }) => {
-  // two hunks far apart leave a large collapsed gap between them in Hunks mode
-  const baseLines = Array.from({ length: 60 }, (_, index) => `line ${index + 1}`);
-  const workingLines = baseLines.map((line, index) => (index === 1 ? 'line 2 changed' : index === 49 ? 'line 50 changed' : line));
-  const base = `${baseLines.join('\n')}\n`;
-  const working = `${workingLines.join('\n')}\n`;
-  const twoHunkPatch = ['diff --git a/src/big.ts b/src/big.ts', 'index 1111111..2222222 100644', '--- a/src/big.ts', '+++ b/src/big.ts', '@@ -1,5 +1,5 @@', ' line 1', '-line 2', '+line 2 changed', ' line 3', ' line 4', ' line 5', '@@ -47,7 +47,7 @@', ' line 47', ' line 48', ' line 49', '-line 50', '+line 50 changed', ' line 51', ' line 52', ' line 53'].join('\n') + '\n';
-  const bigFile: ComparisonFile = { change: { code: ' M', path: 'src/big.ts', additions: 2, deletions: 2 }, kind: 'tracked', patch: twoHunkPatch, capped: false };
-  const contents: ComparisonFileContents = { path: 'src/big.ts', base: revision('src/big.ts', base), working: revision('src/big.ts', working) };
-  await mountPanel(page, patchOf([bigFile]), { 'src/big.ts': contents });
+  await mountPanel(page, patchOf([bigFile]), { 'src/big.ts': bigContents });
   await panel(page).getByTitle('src/big.ts').click();
 
   // Hunks (default): a line inside the gap is hidden
   await expect(panel(page).getByText('line 25', { exact: true })).toHaveCount(0);
   // the gap is expandable straight away — previously it only worked after a Full-context round trip
   // hydrated the partial patch (loadDiffFiles is now provided in every mode, not just Full context)
-  const gap = panel(page).locator('diffs-container').getByText(/unmodified lines/iu).first();
-  await expect(gap).toBeVisible();
-  await gap.click();
+  await expect(bigGap(page)).toBeVisible();
+  await bigGap(page).click();
   await expect(panel(page).getByText('line 25', { exact: true })).toBeVisible();
 });
 
@@ -823,6 +822,75 @@ test('restores the diff mode and hidden file rail after a Workspace switch', asy
   await expect(region.getByRole('button', { name: 'Show changed files' })).toBeVisible();
   await expect(region.locator('.code-pane-rail')).toHaveCount(0);
   await expect(await codeViewOption(region, 'Full ctx')).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('restores expanded hidden lines after a Workspace switch', async ({ page }) => {
+  await mountController(page, patchOf([bigFile]));
+  await openController(page);
+  await page.evaluate(files => (window as unknown as { __ctrl: Ctrl }).__ctrl.setFiles(files), { 'src/big.ts': bigContents });
+  const line25 = panel(page).getByText('line 25', { exact: true });
+  await bigGap(page).click();
+  await expect(line25).toBeVisible();
+
+  await remount(page);
+
+  await expect(diffHeaders(page)).toHaveText([/big\.ts/u]);
+  await expect(line25).toBeVisible();
+  // only the gap that was opened comes back open: the trailing one stays collapsed
+  await expect(panel(page).getByText('line 57', { exact: true })).toHaveCount(0);
+});
+
+test('returns to the place read below a diff whose expansion is restored', async ({ page }) => {
+  await mountController(page, patchOf([bigFile, ...eightFiles]));
+  await openController(page);
+  await page.evaluate(files => (window as unknown as { __ctrl: Ctrl }).__ctrl.setFiles(files), { 'src/big.ts': bigContents });
+  await bigGap(page).click();
+  await expect(panel(page).getByText('line 25', { exact: true })).toBeVisible();
+  // read on past the expanded diff, to where a later file's header sits partway down the view
+  const view = panel(page).locator('.code-pane-view');
+  await view.evaluate(element => { element.scrollTop = 1400; element.dispatchEvent(new Event('scroll')); });
+  const viewTop = (await view.boundingBox())?.y ?? 0;
+  const headerAt = async () => {
+    for (const candidate of await diffHeaders(page).all()) {
+      const offset = ((await candidate.boundingBox())?.y ?? 0) - viewTop;
+      if (offset > 100 && offset < 500) return { title: (await candidate.textContent()) ?? '', offset };
+    }
+    return undefined;
+  };
+  await expect.poll(headerAt).toBeDefined();
+  const before = (await headerAt())!;
+  const header = diffHeaders(page).filter({ hasText: before.title });
+  const offsetInView = async () => ((await header.boundingBox())?.y ?? 0) - viewTop;
+
+  await remount(page);
+
+  await expect.poll(async () => Math.abs(await offsetInView() - before.offset)).toBeLessThan(24);
+  // and still there once the expansion above has loaded its files and grown
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.fileFetches)).toBeGreaterThan(0);
+  await page.waitForTimeout(300);
+  expect(Math.abs(await offsetInView() - before.offset)).toBeLessThan(24);
+  await view.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
+  await expect(panel(page).getByText('line 25', { exact: true })).toBeVisible();
+});
+
+test('a changed patch comes back without the old expansions', async ({ page }) => {
+  await mountController(page, patchOf([bigFile]));
+  await openController(page);
+  await page.evaluate(files => (window as unknown as { __ctrl: Ctrl }).__ctrl.setFiles(files), { 'src/big.ts': bigContents });
+  await bigGap(page).click();
+  await expect(panel(page).getByText('line 25', { exact: true })).toBeVisible();
+
+  // the second hunk moved, so the saved hunk index no longer names the same gap
+  const moved: ComparisonFile = { ...bigFile, patch: bigFile.patch.replace('@@ -47,7 +47,7 @@', '@@ -46,7 +46,7 @@').replace(' line 47', ' line 46\n line 47').replace(' line 53\n', '') };
+  await page.evaluate(patch => (window as unknown as { __ctrl: Ctrl }).__ctrl.setNext(patch), patchOf([moved]));
+  await remount(page);
+
+  await expect(diffHeaders(page)).toHaveText([/big\.ts/u]);
+  await expect(bigGap(page)).toBeVisible();
+  // a restore would expand straight away, loading the file again; give it the time to and confirm it did not
+  await page.waitForTimeout(300);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.fileFetches)).toBe(0);
+  await expect(panel(page).getByText('line 25', { exact: true })).toHaveCount(0);
 });
 
 test('a commit that fails to load outside a restore still shows the error', async ({ page }) => {

@@ -178,6 +178,10 @@ export type CodePanelViewMode = 'hunks' | 'full' | 'plain';
 // replaces the item list in between, and (the offset being into one item, bounded by its height)
 // restores exactly when the same list returns.
 export type ScrollAnchor = { id: string; offset: number };
+// The hidden lines a reader expanded in each diff, by CodeView item id: per collapsed gap (the library's
+// hunk index), how many lines were revealed from its start and its end. `signature` is the diff's hunk
+// layout when they were saved, so a changed patch does not open the wrong gap.
+export type ExpandedLines = Map<string, { signature: string; regions: [number, { fromStart: number; fromEnd: number }][] }>;
 // The panel view's state worth keeping across a Workspace switch. `scroll` is the place on screen;
 // `listAnchor` is the place in the all-files scroll to return to from a selected file.
 export type CodePanelView = {
@@ -188,6 +192,7 @@ export type CodePanelView = {
   fileCollapse: Record<string, { collapsed: boolean; revision: number }>;
   scroll?: ScrollAnchor;
   listAnchor?: ScrollAnchor;
+  expanded?: ExpandedLines;
 };
 // A switch unmounts the Workspace's card, so each open Code panel leaves what it was showing here
 // for the card to pick back up. In memory only: a reload starts fresh, and closing the panel forgets it.

@@ -4,8 +4,8 @@
 // importers, code-panel.tsx and code-panel/review-diffs.tsx, are both reached through a dynamic
 // `import()`. Kept side-effect free so the isolated-component fixture can exercise item derivation
 // without the dashboard.
-import { parseDiffFromFile, parsePatchFiles, type CodeViewDiffItem, type CodeViewFileItem, type FileDiffLoadedChangedFiles } from '@pierre/diffs';
-import type { ComparisonFile, ComparisonFileContents, RevisionFile } from './comparison.js';
+import { parseDiffFromFile, parsePatchFiles, type CodeViewDiffItem, type CodeViewFileItem, type CodeViewItem, type FileDiffLoadedChangedFiles, type FileDiffMetadata, type HunkExpansionRegion, type PostRenderPhase } from '@pierre/diffs';
+import type { ComparisonFile, ComparisonFileContents, ExpandedLines, RevisionFile } from './comparison.js';
 
 // Line cap for syntax tokenization: past this a file renders as plain (un-highlighted) text so a
 // very large diff or file never blocks the main thread. From the spike's timing measurements.
@@ -123,4 +123,46 @@ export const loadedFilesFromContents = (contents: ComparisonFileContents): FileD
     oldFile: { name: oldName, contents: oldText, cacheKey: `old:${contents.path}#${version}` },
     newFile: { name: contents.path, contents: newText, cacheKey: `new:${contents.path}#${version}` }
   };
+};
+
+// A diff's hunk layout, which the library's per-gap expansion keys (hunk indices) only mean anything against.
+const hunkSignature = (fileDiff: FileDiffMetadata): string => fileDiff.hunks.map(hunk => `${hunk.deletionStart},${hunk.deletionCount},${hunk.additionStart},${hunk.additionCount}`).join(';');
+
+// The library has no public read of a diff's expansions, so this reaches into its renderer. A library
+// upgrade that moves it reads as undefined, which turns remembering off rather than throwing. The retry
+// below also leans on library behaviour: expanding by no lines loads a partial diff's files again.
+type ExpandableInstance = { expandHunk?: (hunkIndex: number, direction: 'up' | 'down', lineCount: number) => void; hunksRenderer?: { getExpandedHunksMap?: () => Map<number, HunkExpansionRegion> } };
+
+// The instances a restore expanded, until they next mount. A restore can land on an item that is only on
+// screen until the saved scroll is put back; scrolling it out cancels its file load, so its next mount
+// loads them again.
+const restoredInstances = new WeakSet<object>();
+
+// An `onPostRender` that keeps `store` up to date with the hidden lines expanded in each diff, and
+// expands them again when an item renders in a fresh instance (a remounted CodeView, or an item that
+// left the list and came back). The library drops its expansions with the instance; `store` outlives it.
+// An expansion is kept only once its files have loaded, so one that failed is not retried on every remount.
+// Expanding re-renders the item, so each expansion waits until the library's render pass returns.
+export const rememberExpandedLines = (store: ExpandedLines) => (_node: HTMLElement, instance: unknown, phase: PostRenderPhase, { item }: { item: CodeViewItem<unknown> }) => {
+  const target = instance as ExpandableInstance;
+  const current = target.hunksRenderer?.getExpandedHunksMap?.();
+  if (item.type !== 'diff' || phase === 'unmount' || current === undefined) return;
+  const signature = hunkSignature(item.fileDiff);
+  if (current.size > 0) {
+    const [first] = current.keys();
+    if (!item.fileDiff.isPartial) store.set(item.id, { signature, regions: [...current].map(([index, region]) => [index, { ...region }]) });
+    else if (phase === 'mount' && restoredInstances.delete(target) && first !== undefined) queueMicrotask(() => target.expandHunk?.(first, 'up', 0));
+    return;
+  }
+  const saved = store.get(item.id);
+  if (phase !== 'mount' || saved === undefined) return;
+  // a changed patch starts collapsed, and forgets the gaps it no longer has
+  if (saved.signature !== signature) { store.delete(item.id); return; }
+  restoredInstances.add(target);
+  queueMicrotask(() => {
+    for (const [index, { fromStart, fromEnd }] of saved.regions) {
+      if (fromStart > 0) target.expandHunk?.(index, 'up', fromStart);
+      if (fromEnd > 0) target.expandHunk?.(index, 'down', fromEnd);
+    }
+  });
 };

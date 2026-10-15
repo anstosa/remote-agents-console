@@ -16,7 +16,8 @@ import { useColorTheme } from '../color-theme.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, type EditorTarget } from './editor-jump.js';
-import { codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch } from './items.js';
+import { codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch, rememberExpandedLines } from './items.js';
+import type { ExpandedLines } from './comparison.js';
 import { patchRowIndex, patchRows } from './patch-rows.js';
 
 // an annotation is either an inline comment or a suggested comment (an untriaged or dismissed Finding)
@@ -72,6 +73,8 @@ type ReviewDiffsProps = {
   // reports each move
   scrollTop?: number;
   onScroll?: (scrollTop: number) => void;
+  // the hidden lines expanded in the step's diffs, which this updates in place and expands again on mount
+  expandedLines: ExpandedLines;
 };
 
 // One hunk of a file view: its Change, its range on each side of the base diff, and where its old
@@ -215,7 +218,7 @@ function SuggestedComment({ suggestion, onKeep, onDismiss, onRestore }: { sugges
 }
 
 // render one tour step with current display settings
-export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll }: ReviewDiffsProps) {
+export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll, expandedLines }: ReviewDiffsProps) {
   const theme = useColorTheme();
   const codeView = useRef<CodeViewHandle<CommentAnchor, undefined>>(null);
   const initialScrollTop = useRef(scrollTop);
@@ -299,6 +302,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
     enableGutterUtility: true,
     unsafeCSS: reviewCSS,
     ...(loadFile === undefined ? {} : { loadDiffFiles }),
+    onPostRender: rememberExpandedLines(expandedLines),
     onGutterUtilityClick: (range: SelectedLineRange, context: { item: { id: string } }) => {
       const view = baseItems.get(context.item.id)?.view;
       const startSide = range.side ?? range.endSide ?? 'additions';
@@ -309,7 +313,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
       // the library commits the picked range as the selection after this callback returns
       window.setTimeout(() => setSelection(null), 0);
     }
-  }), [baseItems, patchByChangeId, effectiveSplit, onCommentAdd, terminalFontSize, theme, loadFile, loadDiffFiles]);
+  }), [baseItems, patchByChangeId, effectiveSplit, onCommentAdd, terminalFontSize, theme, loadFile, loadDiffFiles, expandedLines]);
 
   const commentsById = useMemo(() => new Map(comments.map(comment => [comment.id, comment])), [comments]);
   const suggestionsById = useMemo(() => new Map(suggestions.map(suggestion => [suggestion.id, suggestion])), [suggestions]);
