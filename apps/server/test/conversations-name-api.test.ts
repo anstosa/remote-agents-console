@@ -91,7 +91,7 @@ describe('conversation naming API', () => {
       expect(calls.pasted).toBe('/rename Wire the adapter');
       expect(calls.keys).toEqual(['Enter']);
       // the returned row is the named Conversation, now console-named and current
-      expect(named.json().conversation).toEqual({ kind: 'claude', id: claudeId, name: 'Wire the adapter', lastActiveAt: 500, directory: cwd, worktreeId: cora.id, consoleNamed: true, current: true });
+      expect(named.json().conversation).toEqual({ kind: 'claude', id: claudeId, name: 'Wire the adapter', lastActiveAt: 500, directory: cwd, worktreeId: cora.id, consoleNamed: true, reviewRun: false, current: true });
       // the console recorded which Conversation it named, keyed by Project id
       const records = await consoleNamed.list('potato');
       expect(records?.map(record => ({ kind: record.kind, id: record.id }))).toEqual([{ kind: 'claude', id: claudeId }]);

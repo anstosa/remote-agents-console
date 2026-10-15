@@ -6,6 +6,12 @@ import type { ReviewAgentKind } from './efforts.js';
 // Bash withheld, a skill can only read; one that runs a command or edits fails at that step
 export const claudeReviewTools = 'Read,Grep,Glob,Skill';
 
+// the name an interactive run gives its conversation: "🗺 Tour · branch" or "🔍 Review · preset".
+// The Named conversations list recognises a run's conversation by this prefix and keeps it apart.
+export const tourRunLabel = (subject: string) => `🗺 Tour · ${subject}`;
+export const reviewRunLabel = (subject: string) => `🔍 Review · ${subject}`;
+export const isReviewRunName = (name: string) => name.startsWith(tourRunLabel('')) || name.startsWith(reviewRunLabel(''));
+
 export type ReviewRunUnavailableReason = 'generator_unavailable' | 'unsupported_cli' | 'configuration_invalid' | 'authentication_required' | 'interactive_unavailable';
 export type ReviewRunCapability = { available: true } | { available: false; reason: ReviewRunUnavailableReason };
 // an interactive run's visible Agent, and whether it is asking the operator a question

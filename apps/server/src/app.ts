@@ -55,7 +55,7 @@ import { ModeDispatchReviewRunner } from './review-runs/dispatch.js';
 import { beginReplyTurn } from './review-runs/final-reply.js';
 import { InteractiveReviewRunner } from './review-runs/interactive.js';
 import { codexMcpDisableArgs, codexMcpServers } from './review-runs/launch-args.js';
-import type { ReviewRunner } from './review-runs/runner.js';
+import { isReviewRunName, type ReviewRunner } from './review-runs/runner.js';
 import { CodeReviewer } from './code-review/reviewer.js';
 import { CodeReviewJobs } from './code-review/jobs.js';
 import { parseCodeReviewAdd, parseReviewTourStart } from './code-review/contracts.js';
@@ -123,8 +123,9 @@ const comparisonScope = (request: FastifyRequest): ComparisonScope | undefined =
   return kind === 'commit' && typeof commit === 'string' ? { commit } : undefined;
 };
 // one Named conversation on the wire: the Adapter's summary tagged with its kind, plus the
-// server-resolved Worktree, console-named flag and whether it is the current Conversation
-type ConversationRow = ConversationSummary & { kind: AgentKind; worktreeId?: string; consoleNamed: boolean; current: boolean };
+// server-resolved Worktree, console-named flag, whether a Tour or Review run named it, and
+// whether it is the current Conversation
+type ConversationRow = ConversationSummary & { kind: AgentKind; worktreeId?: string; consoleNamed: boolean; reviewRun: boolean; current: boolean };
 // parse an optional launch kind from a request body; a present-but-unknown value is rejected
 const requestedKind = (request: FastifyRequest): { kind?: AgentKind; invalid?: true } => {
   const value = body(request).kind;
@@ -1426,6 +1427,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         directory: row.directory,
         ...(worktreeId === undefined ? {} : { worktreeId }),
         consoleNamed: rowConsoleNamed(consoleNamedRecords, { kind: row.kind, id: row.id }),
+        reviewRun: isReviewRunName(row.name),
         current: currentId !== undefined && row.id === currentId,
       };
     });

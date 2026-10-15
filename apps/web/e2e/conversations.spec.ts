@@ -9,9 +9,9 @@ function requireBounds(bounds: { x: number; y: number; width: number; height: nu
 const currentId = 'aaaaaaaa-2222-4333-8444-555555555555';
 const now = Date.now();
 const conversations = [
-  { kind: 'claude', id: currentId, name: 'Diagnose the shell', automatic: false, lastActiveAt: now - 3_600_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, current: true },
-  { kind: 'claude', id: 'bbbbbbbb-2222-4333-8444-555555555555', name: 'tmux fish shell issue', automatic: true, lastActiveAt: now - 86_400_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, current: false },
-  { kind: 'claude', id: 'cccccccc-2222-4333-8444-555555555555', name: 'Release plan review', automatic: false, lastActiveAt: now - 172_800_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, current: false },
+  { kind: 'claude', id: currentId, name: 'Diagnose the shell', automatic: false, lastActiveAt: now - 3_600_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: true },
+  { kind: 'claude', id: 'bbbbbbbb-2222-4333-8444-555555555555', name: 'tmux fish shell issue', automatic: true, lastActiveAt: now - 86_400_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: false },
+  { kind: 'claude', id: 'cccccccc-2222-4333-8444-555555555555', name: 'Release plan review', automatic: false, lastActiveAt: now - 172_800_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: false },
 ];
 
 // stub every route the live-agent view preloads, plus the conversations list
@@ -115,11 +115,11 @@ const codexId = 'ffffffff-2222-4333-8444-555555555555';
 // a richer list: current, resumable-here, a sibling-Worktree row, an orphaned row, and an
 // unlaunchable-kind row, across two Worktrees of one Project
 const resumableConversations = [
-  { kind: 'claude', id: currentId, name: 'Diagnose the shell', automatic: false, lastActiveAt: now - 3_600_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, current: true },
-  { kind: 'claude', id: 'bbbbbbbb-2222-4333-8444-555555555555', name: 'Release plan review', automatic: false, lastActiveAt: now - 7_200_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, current: false },
-  { kind: 'claude', id: owenId, name: 'Owen investigation', automatic: false, lastActiveAt: now - 10_800_000, directory: '/worktrees/owen', worktreeId: 'owen', consoleNamed: false, current: false },
-  { kind: 'claude', id: orphanId, name: 'Old scratch chat', automatic: false, lastActiveAt: now - 14_400_000, directory: '/gone/away', consoleNamed: false, current: false },
-  { kind: 'codex', id: codexId, name: 'Retired codex thread', lastActiveAt: now - 18_000_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, current: false },
+  { kind: 'claude', id: currentId, name: 'Diagnose the shell', automatic: false, lastActiveAt: now - 3_600_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: true },
+  { kind: 'claude', id: 'bbbbbbbb-2222-4333-8444-555555555555', name: 'Release plan review', automatic: false, lastActiveAt: now - 7_200_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: false },
+  { kind: 'claude', id: owenId, name: 'Owen investigation', automatic: false, lastActiveAt: now - 10_800_000, directory: '/worktrees/owen', worktreeId: 'owen', consoleNamed: false, reviewRun: false, current: false },
+  { kind: 'claude', id: orphanId, name: 'Old scratch chat', automatic: false, lastActiveAt: now - 14_400_000, directory: '/gone/away', consoleNamed: false, reviewRun: false, current: false },
+  { kind: 'codex', id: codexId, name: 'Retired codex thread', lastActiveAt: now - 18_000_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: false },
 ];
 
 // two agents on two Worktrees of one Project; Claude is launchable, Codex is not
@@ -273,7 +273,7 @@ test('shows the reason inline when the agent does not confirm the name', async (
 // six console-named rows across the Project, newest-active first, to exercise the five-row cap
 const consoleNamedRows = Array.from({ length: 6 }, (_, index) => ({
   kind: 'claude', id: `1${index}111111-2222-4333-8444-555555555555`, name: `Named ${index}`,
-  automatic: false, lastActiveAt: now - index * 3_600_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: true, current: false,
+  automatic: false, lastActiveAt: now - index * 3_600_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: true, reviewRun: false, current: false,
 }));
 
 test('the fly-out shows at most five console-named rows, newest first, each removable', async ({ page }) => {
@@ -324,6 +324,23 @@ test('the dialog splits Named here from All named', async ({ page }) => {
   const namedHere = dialog.locator('.conversation-rows').first();
   await expect(namedHere.locator('.conversation-row')).toHaveCount(1);
   await expect(namedHere.locator('.conversation-remove')).toBeVisible();
+});
+
+test('Tour and Review run conversations show only to a search, in their own group', async ({ page }) => {
+  const run = { ...conversations[1]!, name: '🗺 Tour · cora', consoleNamed: true, reviewRun: true };
+  await mockNamingConsole(page, { rows: [conversations[0]!, run, conversations[2]!] });
+  await page.setViewportSize({ width: 900, height: 780 });
+  await page.goto('/');
+  // neither the fly-out's quick list nor its count include the run
+  await page.getByRole('button', { name: 'Conversations (0)' }).click();
+  await expect(page.locator('.conversations-menu .conversation-rows')).toHaveCount(0);
+  await page.locator('.conversations-menu .conversations-all').click();
+  const dialog = page.locator('.conversations-dialog');
+  await expect(dialog.locator('.conversations-heading')).toHaveText(['All named']);
+  await expect(dialog).not.toContainText('🗺 Tour · cora');
+  await dialog.getByRole('searchbox', { name: 'Search conversations' }).fill('tour');
+  await expect(dialog.locator('.conversations-heading')).toHaveText(['Tour and Review runs']);
+  await expect(dialog.locator('.conversation-row')).toContainText('🗺 Tour · cora');
 });
 
 test('opens the conversations dialog full-screen on a phone', async ({ page }) => {

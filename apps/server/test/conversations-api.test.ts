@@ -57,6 +57,31 @@ describe('conversations listing API', () => {
     }
   }, 15_000);
 
+  it('marks the conversations Tour and Review runs named as review runs', async () => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const cora = testWorktree({ id: 'potato:/wt/cora', projectId: 'potato', label: 'Cora', path: '/wt/cora', identity: '/wt/cora', hostPath: '/host/cora' });
+    const discovery = {
+      target: async () => undefined,
+      conversationId: async () => undefined,
+      worktreesNow: () => [cora],
+      conversations: async () => [
+        { kind: 'claude', id: '11111111-2222-4333-8444-555555555555', name: '🗺 Tour · cora', automatic: false, lastActiveAt: 300, directory: '/host/cora' },
+        { kind: 'codex', id: '0198c555-5555-7555-8555-555555555555', name: '🔍 Review · Security', lastActiveAt: 200, directory: '/host/cora' },
+        { kind: 'claude', id: '22222222-3333-4333-8444-555555555555', name: 'Tour of the parser', automatic: false, lastActiveAt: 100, directory: '/host/cora' },
+      ],
+    };
+    const directory = await mkdtemp(join(tmpdir(), 'rac-conv-review-run-')); dirs.push(directory);
+    const consoleNamed = new ConsoleNamedConversationService({ file: join(directory, 'records.json') });
+    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 46).toString('base64url')), discovery: discovery as never, launch: { canResumeConversation: () => true } as never, consoleNamed });
+    try {
+      const headers = await authenticatedHeaders(app);
+      const listed = await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations`, headers: { host: headers.host, cookie: headers.cookie } });
+      expect((listed.json().conversations as Array<{ reviewRun: boolean }>).map(row => row.reviewRun)).toEqual([true, true, false]);
+    } finally {
+      await app.close();
+    }
+  }, 15_000);
+
   it('lists a Project-wide union across its worktrees, resolving worktreeId, current and ordering', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     // two Linked worktrees of one Project; the host-visible checkout root is what the Adapters scan
@@ -89,10 +114,10 @@ describe('conversations listing API', () => {
         canResume: true,
         conversations: [
           // newest-active first across kinds and worktrees
-          { kind: 'claude', id: 'bbbbbbbb-2222-4333-8444-555555555555', name: 'beta', automatic: true, lastActiveAt: 300, directory: '/host/owen', worktreeId: owen.id, consoleNamed: false, current: false },
-          { kind: 'claude', id: 'aaaaaaaa-2222-4333-8444-555555555555', name: 'alpha', automatic: false, lastActiveAt: 200, directory: '/host/cora', worktreeId: cora.id, consoleNamed: false, current: true },
+          { kind: 'claude', id: 'bbbbbbbb-2222-4333-8444-555555555555', name: 'beta', automatic: true, lastActiveAt: 300, directory: '/host/owen', worktreeId: owen.id, consoleNamed: false, reviewRun: false, current: false },
+          { kind: 'claude', id: 'aaaaaaaa-2222-4333-8444-555555555555', name: 'alpha', automatic: false, lastActiveAt: 200, directory: '/host/cora', worktreeId: cora.id, consoleNamed: false, reviewRun: false, current: true },
           // a directory that is no longer a Worktree carries no worktreeId
-          { kind: 'claude', id: 'cccccccc-2222-4333-8444-555555555555', name: 'gamma', automatic: false, lastActiveAt: 100, directory: '/gone/away', consoleNamed: false, current: false },
+          { kind: 'claude', id: 'cccccccc-2222-4333-8444-555555555555', name: 'gamma', automatic: false, lastActiveAt: 100, directory: '/gone/away', consoleNamed: false, reviewRun: false, current: false },
         ],
       });
       // the union of the Project's current Worktree host roots was the scan input
@@ -137,10 +162,10 @@ describe('conversations listing API', () => {
         canResume: true,
         conversations: [
           // Owen's rollout is badged OMX because Owen last launched OMX; ordered first (newest active)
-          { kind: 'omx', id: 'bbbbbbbb-2222-4333-8444-555555555555', name: 'codex on owen', lastActiveAt: 300, directory: '/host/owen', worktreeId: owen.id, consoleNamed: false, current: false },
+          { kind: 'omx', id: 'bbbbbbbb-2222-4333-8444-555555555555', name: 'codex on owen', lastActiveAt: 300, directory: '/host/owen', worktreeId: owen.id, consoleNamed: false, reviewRun: false, current: false },
           // Cora last launched Claude, so its Codex rollout stays Codex rather than following the launch kind
-          { kind: 'codex', id: 'cccccccc-2222-4333-8444-555555555555', name: 'codex on cora', lastActiveAt: 200, directory: '/host/cora', worktreeId: cora.id, consoleNamed: false, current: false },
-          { kind: 'claude', id: 'aaaaaaaa-2222-4333-8444-555555555555', name: 'alpha', automatic: false, lastActiveAt: 100, directory: '/host/cora', worktreeId: cora.id, consoleNamed: false, current: false },
+          { kind: 'codex', id: 'cccccccc-2222-4333-8444-555555555555', name: 'codex on cora', lastActiveAt: 200, directory: '/host/cora', worktreeId: cora.id, consoleNamed: false, reviewRun: false, current: false },
+          { kind: 'claude', id: 'aaaaaaaa-2222-4333-8444-555555555555', name: 'alpha', automatic: false, lastActiveAt: 100, directory: '/host/cora', worktreeId: cora.id, consoleNamed: false, reviewRun: false, current: false },
         ],
       });
     } finally {
@@ -171,7 +196,7 @@ describe('conversations listing API', () => {
       expect(listed.json()).toEqual({
         // Scratch has no Worktree to resume into
         canResume: false,
-        conversations: [{ kind: 'claude', id: 'dddddddd-2222-4333-8444-555555555555', name: 'scratch chat', automatic: false, lastActiveAt: 50, directory: '/home/me', consoleNamed: false, current: true }],
+        conversations: [{ kind: 'claude', id: 'dddddddd-2222-4333-8444-555555555555', name: 'scratch chat', automatic: false, lastActiveAt: 50, directory: '/home/me', consoleNamed: false, reviewRun: false, current: true }],
       });
       expect(scanned).toEqual([['/home/me']]);
     } finally {
