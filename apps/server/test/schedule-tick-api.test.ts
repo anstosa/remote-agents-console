@@ -105,8 +105,8 @@ describe('scheduler tick fires Schedules unattended', () => {
     } finally { await server.close(); }
   }, 15_000);
 
-  // Claude's first launch of a morning took both pastes (`/rename`, then the note) but dropped the
-  // Enter after each, so the run sat unsent until the reconciler recorded it `completed`
+  // both pastes (`/rename`, then the note) landed but tmux refused each Enter ("client is
+  // read-only"), so the run sat unsent until the reconciler recorded it `completed`
   it('presses Enter again and fails the Run, keeping the pane, when the fresh agent never starts the note', async () => {
     const discovery = appearingDiscovery({ worktree, agent: { ...codexPane, attention: 'finished' }, socket: testSocket });
     const { messages, push } = pushRecorder();

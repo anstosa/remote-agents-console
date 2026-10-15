@@ -87,8 +87,9 @@ export class TmuxControlClient implements PaneClient {
   constructor(binary: string, socketPath: string, session: string | undefined, private readonly onGone: () => void, private readonly options: { commandOnly?: boolean; timeoutMs?: number } = {}) {
     this.parser = new ControlProtocolParser(event => this.onEvent(event));
     // `-C` over pipes (never `-CC`), `-f ignore-size` so the client does not affect any
-    // window's size; default stdio is 'pipe' for all three fds
-    // tmux borrows this client for spawned send-keys, so read-only would block launches
+    // window's size; default stdio is 'pipe' for all three fds. Never `read-only`: a command-line
+    // `send-keys` without `-c` checks the most recently active client, which is this one whenever
+    // no terminal is attached, and refuses with "client is read-only" (the paste still lands).
     const flags = options.commandOnly ? 'ignore-size,no-output,no-detach-on-destroy' : 'ignore-size';
     this.child = spawn(binary, ['-S', socketPath, ...(options.commandOnly ? ['-N'] : []), '-C', 'attach-session', ...(options.commandOnly ? ['-E'] : []), ...(session === undefined ? [] : ['-t', session]), '-f', flags], { env: safeEnv() });
     this.ready = new Promise<void>((resolve, reject) => this.blockWaiters.push({ resolve: reply => {

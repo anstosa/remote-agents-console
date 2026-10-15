@@ -1969,7 +1969,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // lifecycle mutation lock, poll the agent's own store until it reports the name, then record it as
   // console-named so the closed managed Run stays discoverable in the Named list. Best-effort — a kind
   // that cannot rename or a busy pane is `skipped` and the Run proceeds unnamed. A freshly started
-  // agent can take the paste but drop its Enter, so the keys are pressed again while the read-back
+  // agent's paste can land while its Enter does not, so the keys are pressed again while the read-back
   // has not confirmed; a rename still unconfirmed is `stuck`, its text possibly left in the composer.
   // The route keeps its own HTTP guards (question check, returned row).
   const conversationNamePresses = 3;
@@ -2009,8 +2009,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     }
   };
   // Submit a server-sent prompt to a freshly launched agent and confirm the agent started it
-  // (reported itself busy). Claude's first launch of a morning took the paste but dropped the Enter,
-  // so the submit keys are pressed again a couple of times before the delivery counts as failed. A
+  // (reported itself busy). A paste can land while its Enter does not, so the submit keys are
+  // pressed again a couple of times before the delivery counts as failed. A
   // prompt that completes without work, or a shell-mode one, reports nothing to confirm.
   const promptStartAttempts = 40;
   const promptStartPressEvery = 8;
