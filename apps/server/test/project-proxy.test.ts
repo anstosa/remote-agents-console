@@ -315,6 +315,72 @@ describe('project browser proxy', () => {
     expect(forwarded.body).toBe('retained request body');
   });
 
+  // require fresh representations without changing write or range preconditions
+  it('bypasses read validators while retaining application preconditions', async () => {
+    const received: Array<{ method: string | undefined; headers: IncomingHttpHeaders }> = [];
+    const upstream = createServer((incoming, response) => {
+      received.push({ method: incoming.method, headers: incoming.headers });
+      response.setHeader('content-type', 'application/json');
+      response.setHeader('etag', '"current"');
+      response.end('{"fresh":true}');
+    });
+    servers.push(upstream);
+    const upstreamPort = await listen(upstream);
+    const projectProxy = new ProjectProxy(() => [testWorktree({ projectUrl: 'https://project.example.com', projectPort: upstreamPort })], 'https://agents.example.com');
+    const proxy = createServer((incoming, response) => { projectProxy.handle(incoming, response); });
+    servers.push(proxy);
+    const proxyPort = await listen(proxy);
+    const preconditions = { 'if-none-match': '*', 'if-modified-since': 'Wed, 01 Jan 2025 00:00:00 GMT', 'if-match': '"current"', 'if-unmodified-since': 'Wed, 01 Jan 2025 00:00:00 GMT', 'if-range': '"current"', range: 'bytes=0-9' };
+
+    // bypass cache validation only for reads, not conditional writes
+    for (const method of ['GET', 'HEAD', 'PUT', 'PATCH', 'DELETE']) {
+      const result = await request(proxyPort, '/api/item', { method, headers: { ...preconditions, 'cache-control': 'only-if-cached, max-age=3600' } });
+      const forwarded = received.at(-1)?.headers;
+      const read = method === 'GET' || method === 'HEAD';
+      expect(received.at(-1)?.method).toBe(method);
+      expect(forwarded?.['cache-control']).toBe('no-cache, no-store');
+      expect(forwarded?.['if-none-match']).toBe(read ? undefined : preconditions['if-none-match']);
+      expect(forwarded?.['if-modified-since']).toBe(read ? undefined : preconditions['if-modified-since']);
+      expect(forwarded).toMatchObject({ 'if-match': preconditions['if-match'], 'if-unmodified-since': preconditions['if-unmodified-since'], 'if-range': preconditions['if-range'], range: preconditions.range });
+      expect(result.headers.etag).toBe('"current"');
+    }
+  });
+
+  // prevent storage of every managed preview resource and generated response
+  it('overrides cacheable documents, assets, data, redirects and errors', async () => {
+    const upstream = createServer((incoming, response) => {
+      response.setHeader('cache-control', 'public, max-age=31536000, immutable');
+      response.setHeader('content-type', incoming.url === '/' ? 'text/html' : 'text/plain');
+      // emulate a conditional cache hit that must not reach the project
+      if (incoming.headers['if-none-match'] !== undefined || incoming.headers['if-modified-since'] !== undefined) { response.writeHead(304); response.end(); return; }
+      // retain upstream redirect semantics
+      if (incoming.url === '/redirect') { response.writeHead(302, { location: '/destination' }); response.end(); return; }
+      // retain cacheable upstream errors
+      if (incoming.url === '/missing') response.statusCode = 404;
+      response.end(incoming.url === '/' ? '<html><head></head><body>fresh</body></html>' : 'fresh');
+    });
+    servers.push(upstream);
+    const upstreamPort = await listen(upstream);
+    const projectProxy = new ProjectProxy(() => [testWorktree({ projectUrl: 'https://project.example.com', projectPort: upstreamPort })], 'https://agents.example.com');
+    const proxy = createServer((incoming, response) => {
+      // leave unmatched hosts outside the preview cache policy
+      if (!projectProxy.handle(incoming, response)) { response.writeHead(200, { 'cache-control': 'max-age=60' }); response.end('console'); }
+    });
+    servers.push(proxy);
+    const proxyPort = await listen(proxy);
+
+    // include generated proxy responses as well as upstream representations
+    for (const [path, status] of [['/', 200], ['/app.js', 200], ['/style.css', 200], ['/api/item', 200], ['/redirect', 302], ['/missing', 404], ['/__rac/browser-bridge.js', 200], ['/__rac/browser-device', 400], ['/__rac/browser-device?mode=desktop&location=%2F', 302]] as const) {
+      const result = await request(proxyPort, path, { headers: { 'if-none-match': '"old"', 'if-modified-since': 'Wed, 01 Jan 2025 00:00:00 GMT' } });
+      expect(result.status).toBe(status);
+      expect(result.headers['cache-control']).toBe('no-store');
+      // still inject the bridge into the fresh document
+      if (path === '/') expect(result.body).toContain('<head><script src="/__rac/browser-bridge.js"></script>');
+    }
+    const consoleResponse = await request(proxyPort, '/', { headers: { host: 'agents.example.com' } });
+    expect(consoleResponse.headers['cache-control']).toBe('max-age=60');
+  });
+
   // verify paired viewport identities
   it('applies mobile and desktop identities to project traffic', async () => {
     const receivedHeaders: IncomingHttpHeaders[] = [];

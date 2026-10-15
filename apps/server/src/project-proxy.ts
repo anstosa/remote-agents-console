@@ -357,13 +357,13 @@ const browserDeviceRedirect = (requestUrl: string | undefined) => {
   } catch { return undefined; }
 };
 
-// omit transport-owned response headers
+// retain the proxy's cache policy instead of the project's cache policy
 const downstreamHeaders = (headers: IncomingHttpHeaders) => {
   const forwarded: IncomingHttpHeaders = {};
   // retain end-to-end headers
   for (const [name, value] of Object.entries(headers)) {
-    // skip connection-specific headers
-    if (hopByHopHeaders.has(name)) continue;
+    // skip connection-specific headers and upstream cache policy
+    if (hopByHopHeaders.has(name) || name === 'cache-control') continue;
     forwarded[name] = value;
   }
   return forwarded;
@@ -428,6 +428,8 @@ export class ProjectProxy {
     const target = this.target(request.headers.host);
     // leave console hosts to Fastify
     if (target === undefined) return false;
+    // prevent storage of preview documents, resources, redirects and errors
+    response.setHeader('cache-control', 'no-store');
     // set preview identity before loading the retained location
     if (request.url === browserDevicePath || request.url?.startsWith(`${browserDevicePath}?`)) {
       const redirect = browserDeviceRedirect(request.url);
@@ -437,7 +439,7 @@ export class ProjectProxy {
         response.end('invalid browser device');
         return true;
       }
-      response.writeHead(302, { 'cache-control': 'no-store', location: redirect.location, 'set-cookie': `${browserDeviceCookie}=${redirect.device}; Path=/; HttpOnly; Secure; SameSite=None; Partitioned` });
+      response.writeHead(302, { location: redirect.location, 'set-cookie': `${browserDeviceCookie}=${redirect.device}; Path=/; HttpOnly; Secure; SameSite=None; Partitioned` });
       response.end();
       return true;
     }
@@ -446,7 +448,7 @@ export class ProjectProxy {
       const device = requestBrowserDevice(request.headers);
       const profile = device === undefined ? undefined : browserDeviceProfile(device, typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : '');
       const bridge = browserBridge(this.parentOrigin, profile);
-      response.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(bridge) });
+      response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(bridge) });
       response.end(bridge);
       return true;
     }
@@ -464,7 +466,14 @@ export class ProjectProxy {
       requestBytes += Buffer.byteLength(chunk);
       if (requestBytes > maxRequestBytes) request.destroy(new Error('project request too large'));
     });
-    const upstream = sendHttpRequest({ hostname: this.upstreamHost, port: target.port, method: request.method, path: request.url, headers: upstreamHeaders(request.headers, target) }, upstreamResponse => {
+    const requestHeaders = upstreamHeaders(request.headers, target);
+    requestHeaders['cache-control'] = 'no-cache, no-store';
+    // fetch complete read responses without removing conditional write or range safeguards
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      delete requestHeaders['if-none-match'];
+      delete requestHeaders['if-modified-since'];
+    }
+    const upstream = sendHttpRequest({ hostname: this.upstreamHost, port: target.port, method: request.method, path: request.url, headers: requestHeaders }, upstreamResponse => {
       const headers = downstreamHeaders(upstreamResponse.headers);
       const contentType = upstreamResponse.headers['content-type'];
       const html = typeof contentType === 'string' && contentType.toLowerCase().includes('text/html');

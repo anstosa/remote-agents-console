@@ -560,6 +560,11 @@ within a tick — no config edit or restart.
   that origin directly and does not proxy it. Omit all three fields for no
   preview. Direct previews require the external site to permit framing; their
   mobile control changes viewport size only, without user-agent emulation.
+  Proxied previews request fresh responses and send `Cache-Control: no-store`
+  for pages, assets, API responses, redirects, and errors. This also
+  applies when the proxied preview is opened in its own tab. It does not purge
+  existing browser cache entries or change application service-worker caches;
+  direct external previews retain the external site's cache policy.
 - `worktreeOverrides` — optional runtime settings for individual discovered
   checkouts. Each entry's `path` resolves relative to the configured Project
   `path` (or may be absolute); symlinks resolve to the checkout's real path.
