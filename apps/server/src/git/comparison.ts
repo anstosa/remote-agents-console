@@ -333,6 +333,38 @@ async function branchCandidateRef(workspace: string, candidate: string): Promise
   return exists.code === 0 ? ref : null;
 }
 
+// the checked-out branch (absent when detached), its saved All PR base — `branch.<b>.gh-merge-base`,
+// which `gh` reads too — and the origin branches that base may name; undefined when listing fails
+export async function mergeBaseChoices(workspace: string): Promise<{ branch?: string; configured?: string; branches: string[] } | undefined> {
+  const [head, listed] = await Promise.all([
+    run(git, ['-C', workspace, 'symbolic-ref', '--quiet', '--short', 'HEAD']),
+    run(git, ['-C', workspace, 'for-each-ref', '--format=%(refname:lstrip=3)', 'refs/remotes/origin'])
+  ]);
+  if (listed.code !== 0) return undefined;
+  const branches = listed.stdout.split('\n').filter(name => name !== '' && name !== 'HEAD');
+  const branch = head.code === 0 ? head.stdout.trim() : '';
+  if (branch === '') return { branches };
+  const configured = await run(git, ['-C', workspace, 'config', '--get', `branch.${branch}.gh-merge-base`]);
+  const value = configured.code === 0 ? configured.stdout.trim() : '';
+  return { branch, ...(value === '' ? {} : { configured: value }), branches };
+}
+
+// save `base` as the checked-out branch's All PR base, or clear it with null. A named base must be
+// an origin branch: the candidate ladder silently skips one that does not resolve.
+export async function saveMergeBase(workspace: string, base: string | null): Promise<'saved' | 'detached' | 'unknown_base' | 'failed'> {
+  const choices = await mergeBaseChoices(workspace);
+  if (choices === undefined) return 'failed';
+  if (choices.branch === undefined) return 'detached';
+  const key = `branch.${choices.branch}.gh-merge-base`;
+  if (base === null) {
+    const unset = await run(git, ['-C', workspace, 'config', '--unset', key]);
+    // 5: the key was not set
+    return unset.code === 0 || unset.code === 5 ? 'saved' : 'failed';
+  }
+  if (!choices.branches.includes(base)) return 'unknown_base';
+  return (await run(git, ['-C', workspace, 'config', key, base])).code === 0 ? 'saved' : 'failed';
+}
+
 // try each candidate base against HEAD; the first whose merge base resolves yields the
 // comparison summary (its `base` is the candidate label) and the merge-base sha (`gitBase`)
 export async function comparisonAgainst(workspace: string, candidates: string[], untracked: GitStatusChange[] = []): Promise<{ comparison: GitComparisonSummary; gitBase: string } | undefined> {

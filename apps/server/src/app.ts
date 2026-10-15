@@ -67,6 +67,7 @@ import { INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS, parseReviewRequestId, parseRe
 import { configuredWorktreeForWorkspace, projectIdOf, worktreeById, worktreeHostRoot, worktreeMatchesWorkspace, worktreePathOf, worktreePrBase, worktreeWireId } from './workspaces/resolver.js';
 import { previewFileBytes, WorkspaceFileService } from './workspace-files/service.js';
 import { ComparisonService, type ComparisonScope } from './git/comparison-service.js';
+import { mergeBaseChoices, saveMergeBase } from './git/comparison.js';
 import { loadInstanceIconSvg, isInstanceIcon } from './instance-icon.js';
 import { instanceAttention, RemoteInstanceStatusPoller, validInstanceStatusRequest, type InstanceStatus } from './instance-status.js';
 import { createHmac, randomBytes } from 'node:crypto';
@@ -1661,6 +1662,29 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const worktree = configuredWorktree((request.params as { id: string }).id);
     const url = worktree === undefined ? undefined : await prSwitch.actionsUrlAt(worktree.identity);
     return url === undefined ? reply.code(404).send({ error: 'GitHub Actions unavailable' }) : { url };
+  });
+  // a Worktree branch's saved All PR base (git config `gh-merge-base`) and the origin branches it may name
+  app.get('/api/worktrees/:id/merge-base', async (request, reply) => {
+    controlled(request);
+    const worktree = configuredWorktree((request.params as { id: string }).id);
+    if (worktree === undefined) return reply.code(404).send({ error: 'worktree unavailable' });
+    const choices = await mergeBaseChoices(worktree.identity);
+    return choices === undefined ? reply.code(409).send({ error: 'Could not list the branches on origin.' }) : choices;
+  });
+  // save (or, with `branch: null`, clear) the All PR base of the Worktree's branch
+  app.put('/api/worktrees/:id/merge-base', async (request, reply) => {
+    controlled(request, true);
+    const worktree = configuredWorktree((request.params as { id: string }).id);
+    if (worktree === undefined) return reply.code(404).send({ error: 'worktree unavailable' });
+    const base = body(request).branch;
+    if (base !== null && (typeof base !== 'string' || base === '' || base.length > 255)) return reply.code(400).send({ error: 'No base branch was named.' });
+    const result = await saveMergeBase(worktree.identity, base);
+    if (result === 'detached') return reply.code(409).send({ error: 'This worktree has no branch checked out.' });
+    if (result === 'unknown_base') return reply.code(400).send({ error: `origin has no branch named ${base}.` });
+    if (result === 'failed') return reply.code(409).send({ error: 'Could not save the base branch.' });
+    discovery.invalidateWorktrees();
+    await dashboardUpdates.refresh().catch(() => undefined);
+    return reply.code(204).send();
   });
   app.post('/api/worktrees/:id/switch-pr', async (request, reply) => { controlled(request, true); const number = body(request).number; if (!Number.isInteger(number)) return reply.code(409).send({ error: 'That is not a valid pull request number.' }); const result = await prSwitch.switch((request.params as { id: string }).id, number as number); if (result === 'busy') return reply.code(409).send({ error: 'An agent in this worktree is busy. Wait for it to finish, then switch again.' }); if (result !== 'switched') return reply.code(409).send({ error: result.error }); discovery.invalidateWorktrees(); await dashboardUpdates.refresh().catch(() => undefined); return reply.code(202).send(); });
   // move one occupied pull request into the requested worktree

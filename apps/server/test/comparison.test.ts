@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
   addUntrackedLineStats, capturePatch, captureComparisonPatch, commitLog, comparisonAgainst,
-  fileAtRevision, gitComparisonSummary, gitStatusSummary, prComparisonCandidates,
+  fileAtRevision, gitComparisonSummary, gitStatusSummary, mergeBaseChoices, prComparisonCandidates, saveMergeBase,
   resolveComparison, synthesizeUntrackedPatch, workingStatus, type Comparison
 } from '../src/git/comparison.js';
 
@@ -408,6 +408,38 @@ describe('comparison resolution', () => {
       'origin/main',
       'main'
     ]);
+  });
+
+  it('saves a branch base on origin that the candidate ladder then compares against', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'a.txt'), 'a\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    await git(root, 'switch', '-c', 'stack/parent');
+    await writeFile(join(root, 'parent.txt'), 'parent\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'parent');
+    await git(root, 'update-ref', 'refs/remotes/origin/stack/parent', 'HEAD');
+    await git(root, 'switch', '-c', 'child');
+    await writeFile(join(root, 'child.txt'), 'child\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'child');
+
+    await expect(mergeBaseChoices(root)).resolves.toEqual({ branch: 'child', branches: ['main', 'stack/parent'] });
+    await expect(saveMergeBase(root, 'local-only')).resolves.toBe('unknown_base');
+    await expect(saveMergeBase(root, 'stack/parent')).resolves.toBe('saved');
+    expect((await mergeBaseChoices(root))?.configured).toBe('stack/parent');
+    // a slashed bare name means the origin branch, not a local ref of that name
+    const against = await comparisonAgainst(root, await prComparisonCandidates(root, 'child'));
+    expect(against?.comparison.base).toBe('origin/stack/parent');
+    expect(against?.comparison.changes.map(change => change.path)).toEqual(['child.txt']);
+
+    await expect(saveMergeBase(root, null)).resolves.toBe('saved');
+    await expect(saveMergeBase(root, null)).resolves.toBe('saved');
+    expect((await mergeBaseChoices(root))?.configured).toBeUndefined();
+    await git(root, 'switch', '--detach');
+    await expect(saveMergeBase(root, 'main')).resolves.toBe('detached');
   });
 
   it('overrides the base through comparisonAgainst', async () => {

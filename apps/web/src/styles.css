@@ -1902,6 +1902,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-start-dialog textarea { box-sizing: border-box; width: 100%; min-height: 5rem; font-size: .76rem; }
 .review-start-dialog option:disabled { color: var(--overlay-0); }
 .review-start-hint { color: var(--overlay-0); font-size: .62rem; text-align: right; }
+.review-start-base { display: grid; gap: .4rem; }
+.review-start-base-note { margin: 0; color: var(--subtext-0); font-size: .72rem; line-height: 1.45; }
 .review-start-error { margin: 0; color: var(--red); font-size: .74rem; line-height: 1.4; }
 @media (max-width: 600px) { .review-start-dialog { place-items: end stretch; padding: 0; }.review-start-dialog > div { width: 100%; max-height: 88dvh; border-bottom: 0; border-radius: .9rem .9rem 0 0; padding-bottom: env(safe-area-inset-bottom); animation: workspace-sheet-up .18s ease-out; } }
 @media (prefers-reduced-motion: reduce) { .review-start-dialog > div { animation: none; } }

@@ -1073,6 +1073,79 @@ test('hides the AI code review without Review presets and shows the start sheet 
   await expect(sheet).toHaveCount(0);
 });
 
+test('saves a picked All PR base only when the tour starts', async ({ page }) => {
+  const calls: string[] = [];
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, reviewTour: { available: true }, agents: [startSheetAgent], projects: [] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname === '/api/worktrees/owen/merge-base' && request.method() === 'GET') return route.fulfill({ json: { branch: 'feature/review-tour', branches: ['main', 'stack/parent'] } });
+    if (url.pathname === '/api/worktrees/owen/merge-base' && request.method() === 'PUT') { calls.push(`PUT ${request.postData()}`); return route.fulfill({ status: 204 }); }
+    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') { calls.push('start'); return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } }); }
+    if (/^\/api\/review-tour\/jobs\/[\w-]+$/u.test(url.pathname)) return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  await page.goto('/');
+  // Cancel closes the Git flyout too, so each open starts from the status button
+  const openSheet = async () => {
+    await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+    await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Review', exact: true }).click();
+    const sheet = page.getByRole('dialog', { name: 'Start guided review' });
+    await sheet.getByRole('button', { name: 'All PR' }).click();
+    return sheet;
+  };
+  let sheet = await openSheet();
+  const compare = sheet.getByLabel('Compare with');
+  await expect(compare).toHaveValue('');
+  await expect(compare.locator('option').first()).toHaveText('Default (origin/main)');
+  await compare.selectOption('stack/parent');
+  await expect(compare).toHaveAccessibleDescription(/Starting saves origin\/stack\/parent as the All PR base of feature\/review-tour everywhere in the console/u);
+  // Working needs no base, so the picker goes away
+  await sheet.getByRole('button', { name: 'Working' }).click();
+  await expect(sheet.getByLabel('Compare with')).toHaveCount(0);
+  await sheet.getByRole('button', { name: 'Cancel' }).click();
+  await expect(sheet).toHaveCount(0);
+  expect(calls).toEqual([]);
+
+  sheet = await openSheet();
+  await sheet.getByLabel('Compare with').selectOption('stack/parent');
+  await sheet.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect.poll(() => calls).toEqual(['PUT {"branch":"stack/parent"}', 'start']);
+});
+
+test('offers to save a base over a pull request\'s base', async ({ page }) => {
+  const calls: string[] = [];
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, reviewTour: { available: true }, agents: [{ ...startSheetAgent, gitPrStatus: { ...startSheetAgent.gitPrStatus, base: 'origin/stack/parent' }, pullRequest: { number: 7, title: 'Child', status: 'open', url: 'https://github.com/example/repo/pull/7', baseBranch: 'stack/parent' } }], projects: [] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname === '/api/worktrees/owen/merge-base' && request.method() === 'GET') return route.fulfill({ json: { branch: 'feature/review-tour', branches: ['main', 'stack/parent'] } });
+    if (url.pathname === '/api/worktrees/owen/merge-base' && request.method() === 'PUT') { calls.push(`PUT ${request.postData()}`); return route.fulfill({ status: 204 }); }
+    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') { calls.push('start'); return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } }); }
+    if (/^\/api\/review-tour\/jobs\/[\w-]+$/u.test(url.pathname)) return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Review', exact: true }).click();
+  const sheet = page.getByRole('dialog', { name: 'Start guided review' });
+  await sheet.getByRole('button', { name: 'All PR' }).click();
+  const compare = sheet.getByLabel('Compare with');
+  await expect(compare).toBeEnabled();
+  await expect(compare.locator('option').first()).toHaveText('Default (origin/stack/parent)');
+  await compare.selectOption('main');
+  await sheet.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect.poll(() => calls).toEqual(['PUT {"branch":"main"}', 'start']);
+});
+
 // a one-step stored tour and Code review fixture for the AI review chip
 const chipTour = { title: 'Route tour', overview: 'Follow the route change.', scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'chip-fingerprint-123456', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -1 +1 @@\n-old\n+new\n' }], steps: [{ id: 'route', title: 'Accept the request', explanation: 'The route delegates to the service.', changeIds: ['chg_route0001'] }] };
 const chipReview = { fingerprint: chipTour.fingerprint, preset: { id: 'correctness', label: 'Correctness', agent: 'claude' }, effort: 'high', findings: [{ id: 'f1', changeId: 'chg_route0001', side: 'additions', startLine: 1, endLine: 1, severity: 'high', title: 'Unchecked input', body: 'The route trusts the body.' }, { id: 'f2', changeId: 'chg_route0001', side: 'deletions', startLine: 1, endLine: 1, severity: 'low', title: 'Lost comment', body: 'The old line explained why.' }], general: [{ id: 'g1', severity: 'medium', title: 'No tests', body: 'Nothing covers the route.', file: null }], completedAt: '2026-10-04T12:00:00.000Z' };
