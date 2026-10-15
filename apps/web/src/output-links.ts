@@ -86,6 +86,20 @@ const capturedUrlContinues = (terminal: XTerm, line: number, text: string, nextT
   const columns = terminal.buffer.active.getLine(line)?.length ?? terminal.cols;
   // retain the existing full-width captured-wrap heuristic
   if (!indent && lastColumn === columns) return true;
+  // retain the original padding after native soft wraps
+  const logicalIndent = /^ */u.exec(text)?.[0].length ?? 0;
+  const identifierStart = /\/([0-9a-f-]+)$/iu.exec(fragment[0])?.[1];
+  // inspect identifier continuations only at matching logical indentation
+  if (indent === logicalIndent && identifierStart !== undefined) {
+    let continuation = nextText;
+    // the UUID suffix may itself span native soft wraps
+    for (let following = line + 2; terminal.buffer.active.getLine(following)?.isWrapped; following += 1) {
+      continuation += outputLineText(terminal, following);
+    }
+    const identifierEnd = /^([0-9a-f-]+)(?=[/?#\s)]|$)/iu.exec(continuation)?.[1];
+    // rejoin split UUIDs without broadly accepting neighboring prose or paths
+    if (identifierEnd !== undefined && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(identifierStart + identifierEnd)) return true;
+  }
   const previousIndent = /^ */u.exec(rowText)?.[0].length ?? 0;
   // structural inference away from the edge requires matching indentation
   if (!indent || indent !== previousIndent) return false;

@@ -118,3 +118,33 @@ test('current Agent chat opens and copies a padded multiline link', async ({ pag
 test('Scratch chat opens and copies a padded multiline link', async ({ page }) => {
   await expectChatLink(page, scratchAgent);
 });
+
+// cover captured UUID breaks through both production chat surfaces
+for (const fixture of [currentAgent, scratchAgent]) {
+  // preserve the full target for opening and copying from either side of the break
+  test(`${fixture.agentId} opens and copies a captured UUID link`, async ({ page }) => {
+    const first = 'https://example.com/project/e9e7cc10-a174-49ed-95a2-5a011509c988/parameter/optimizer/889ea2fd-8dc3-496a-8528-68c8ba56bf71/trial/abad44dc-6180-4d3a-';
+    const last = 'aac3-641b3af3a5c9/entity/protocol/0a7ce623-ed88-4325-b364-4fbb32fd0768/execution?protocol-tab=plate_maps';
+    const uri = first + last;
+    await mountChat(page, fixture);
+    await pushBytes(page, fixture.agentId, `  ${first}\r\n  ${last}`);
+
+    const log = page.getByLabel('Live log', { exact: true });
+    const links = log.getByRole('link', { name: `Open ${uri}`, exact: true });
+    await expect(links).toHaveCount(Math.ceil((first.length + 2) / 62) + Math.ceil((last.length + 2) / 62));
+    // no physical fragment may retain a truncated destination
+    for (const link of await links.all()) await expect(link).toHaveAttribute('href', uri);
+    await expect(log.getByRole('link', { name: /^Preview /u })).toHaveCount(0);
+    // verify opening and copying on both sides of the captured break
+    for (const [index, link] of [links.first(), links.last()].entries()) {
+      const popupPromise = page.waitForEvent('popup');
+      await link.click();
+      const popup = await popupPromise;
+      await expect(popup).toHaveURL(uri);
+      await popup.close();
+      await link.click({ button: 'right' });
+      await page.getByRole('menu', { name: 'Agent actions' }).getByRole('menuitem', { name: 'Copy URL', exact: true }).click();
+      await expect.poll(() => page.evaluate(() => (window as LinkWindow).__linkClipboard)).toEqual(Array.from({ length: index + 1 }, () => uri));
+    }
+  });
+}

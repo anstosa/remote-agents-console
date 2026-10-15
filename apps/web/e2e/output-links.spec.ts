@@ -80,6 +80,65 @@ const overlayCells = async (page: Page, link: Locator, columns = 80) => {
   return { column: (linkBox.x - screenBox.x) / cellWidth, columns: linkBox.width / cellWidth };
 };
 
+// preserve the reported protocol targets across captured UUID boundaries
+for (const fixture of [
+  { name: '96-well ELISA', optimizer: 'cb19a22a-15d5-4d55-83e4-6fc1a9bcb5af', trial: 'e70d6fd5-8ede-486a-9642-448ef47e6401', protocol: 'dffeab9f-c3d1-48c8-a1b0-5c7165af8b85', split: 19, indent: '', columns: 160 },
+  { name: '384-well ELISA', optimizer: '39742947-b953-426a-992a-d06278030760', trial: 'a1fa85de-e9ef-415d-969a-a31073632b18', protocol: '7e0c6efd-3300-4fef-8bb3-26e466e8e302', split: 19, indent: '  ', columns: 160 },
+  { name: 'Monomer1536 with native wrapping', optimizer: '889ea2fd-8dc3-496a-8528-68c8ba56bf71', trial: 'abad44dc-6180-4d3a-aac3-641b3af3a5c9', protocol: '0a7ce623-ed88-4325-b364-4fbb32fd0768', split: 19, indent: '  ', columns: 80 },
+  { name: 'mid-hex UUID', optimizer: 'cb19a22a-15d5-4d55-83e4-6fc1a9bcb5af', trial: 'e70d6fd5-8ede-486a-9642-448ef47e6401', protocol: 'dffeab9f-c3d1-48c8-a1b0-5c7165af8b85', split: 21, indent: '  ', columns: 160 },
+  { name: 'UUID continuation with native wrapping', optimizer: 'cb19a22a-15d5-4d55-83e4-6fc1a9bcb5af', trial: 'e70d6fd5-8ede-486a-9642-448ef47e6401', protocol: 'dffeab9f-c3d1-48c8-a1b0-5c7165af8b85', split: 3, indent: '  ', columns: 34 }
+]) {
+  // verify every physical segment and both navigation ends
+  test(`opens the full captured UUID link for ${fixture.name}`, async ({ page }) => {
+    const uri = `https://example.com/project/e9e7cc10-a174-49ed-95a2-5a011509c988/parameter/optimizer/${fixture.optimizer}/trial/${fixture.trial}/entity/protocol/${fixture.protocol}/execution?protocol-tab=plate_maps`;
+    const cut = uri.indexOf(fixture.trial) + fixture.split;
+    const first = `${fixture.indent}${uri.slice(0, cut)}`;
+    const last = `${fixture.indent}${uri.slice(cut)}`;
+    // keep navigation on a controlled destination
+    await page.route('https://example.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main>protocol fixture</main>' }));
+    await mountCapturedLink(page, `${first}\r\n${last}`, fixture.columns);
+
+    const links = page.getByRole('link', { name: `Open ${uri}`, exact: true });
+    await expect(links).toHaveCount(Math.ceil(first.length / fixture.columns) + Math.ceil(last.length / fixture.columns));
+    // every captured and native-wrapped row has the complete destination
+    for (const link of await links.all()) await expect(link).toHaveAttribute('href', uri);
+    await expect(page.getByRole('link', { name: /^Preview /u })).toHaveCount(0);
+    // both the first and continuation rows must navigate to the same target
+    for (const link of [links.first(), links.last()]) {
+      const popupPromise = page.waitForEvent('popup');
+      await link.click();
+      const popup = await popupPromise;
+      await expect(popup).toHaveURL(uri);
+      await popup.close();
+    }
+  });
+}
+
+// a complete identifier must not absorb neighboring prose or another path
+for (const next of ['Next topic', 'src/plate_maps.ts', 'abad44dc-6180-4d3a-aac3-641b3af3a5c9/entity/protocol']) {
+  // keep each hard-break counterexample independent
+  test(`does not extend a complete UUID URL with ${next}`, async ({ page }) => {
+    const uri = 'https://example.com/trial/e70d6fd5-8ede-486a-9642-448ef47e6401';
+    await mountCapturedLink(page, `  ${uri}\r\n  ${next}`, 160);
+
+    const links = page.getByRole('link', { name: /^Open /u });
+    await expect(links).toHaveCount(1);
+    await expect(links).toHaveAttribute('href', uri);
+  });
+}
+
+// native wraps must not relax the older directory-continuation guard
+test('keeps a file mention separate after a native-wrapped directory URL', async ({ page }) => {
+  const uri = 'https://example.com/very/long/assets/';
+  await mountCapturedLink(page, `  ${uri}\r\n  src/plate_maps.ts`, 30);
+
+  const links = page.getByRole('link', { name: /^Open /u });
+  await expect(links).toHaveCount(2);
+  // both native rows retain the original URL
+  for (const link of await links.all()) await expect(link).toHaveAttribute('href', uri);
+  await expect(page.getByRole('link', { name: 'Preview src/plate_maps.ts', exact: true })).toHaveCount(1);
+});
+
 // cover padding before the terminal edge
 test('joins an indented captured URL before the physical terminal edge', async ({ page }) => {
   const uri = 'https://example.com/instance-icons/heart.svg';
