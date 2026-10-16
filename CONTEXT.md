@@ -214,3 +214,7 @@ _Avoid_: PR (fine as a UI label), merge request
 **Draft review**:
 The operator's unsubmitted GitHub review on a Pull request, which a Review tour's notes and inline comments can be posted to. The console only ever creates or adds to it; the operator submits or discards it on GitHub. GitHub's API calls it a pending review.
 _Avoid_: Pending review, review draft, submitted review
+
+**Review thread**:
+Comments on a Pull request anchored to lines of one file, with their replies. Only GitHub resolves one. The git flyout's PR comments list shows the unresolved ones, alongside review summaries and conversation comments, and adds the ones the operator picks to the composer; the console never writes back.
+_Avoid_: Inline comment (a Review tour's own), PR comment (for a thread)

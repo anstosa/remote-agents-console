@@ -17,7 +17,14 @@ export type Pane = { paneId: string; sessionId: string; sessionName?: string; wi
 export type PaneListingSnapshot = { status: 'available'; panes: readonly Pane[] } | { status: 'unavailable' };
 export type PullRequestIssues = { mergeConflicts?: boolean; failingChecks?: boolean; unresolvedComments?: boolean };
 export type PullRequestCheckStatus = 'passed' | 'pending' | 'failed';
-export type PullRequestSummary = { number: number; title: string; status: 'draft' | 'open' | 'merged'; url: string; baseBranch?: string; checks?: PullRequestCheckStatus; issues?: PullRequestIssues };
+export type PullRequestSummary = { number: number; title: string; status: 'draft' | 'open' | 'merged'; url: string; baseBranch?: string; checks?: PullRequestCheckStatus; issues?: PullRequestIssues; unresolvedThreads?: number };
+// One comment on a Pull request as the console reads it from GitHub; `bot` is a GitHub App author
+export type PullRequestComment = { id: string; author: string; bot: boolean; body: string; createdAt: string; url: string };
+// A Review thread: comments anchored to lines of one file; `line`/`startLine` fall back to the
+// original lines once the thread is outdated, and `diffHunk` is the code the first comment was on
+export type PullRequestReviewThread = { id: string; path: string; line?: number; startLine?: number; resolved: boolean; outdated: boolean; diffHunk: string; comments: PullRequestComment[] };
+export type PullRequestReviewSummary = PullRequestComment & { state: string };
+export type PullRequestComments = { number: number; url: string; threads: PullRequestReviewThread[]; reviews: PullRequestReviewSummary[]; comments: PullRequestComment[] };
 export const stackActions = ['start', 'stop', 'build', 'restart', 'migrate'] as const;
 export type StackAction = typeof stackActions[number];
 // `status` (a health probe) and `setup` (a run-once, worktree-creation hook) are commands

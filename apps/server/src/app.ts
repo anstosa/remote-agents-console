@@ -27,6 +27,7 @@ import { folderNoteKey, placeLaunchScope, placeNoteKey, worktreePlace, type Plac
 import { safeEnv } from './tmux/command.js';
 import { PushService } from './push-service.js';
 import { processActions, WorktreeCommandService } from './worktree-commands/service.js';
+import { PullRequestLookupError } from './pull-requests/service.js';
 import { PullRequestSwitchService } from './pull-requests/switch-service.js';
 import { NewTaskService } from './new-task/service.js';
 import { WorktreeManagementService } from './worktrees/management.js';
@@ -1662,6 +1663,19 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const worktree = configuredWorktree((request.params as { id: string }).id);
     const url = worktree === undefined ? undefined : await prSwitch.actionsUrlAt(worktree.identity);
     return url === undefined ? reply.code(404).send({ error: 'GitHub Actions unavailable' }) : { url };
+  });
+  // the review threads, review summaries and conversation on a Worktree branch's open pull request
+  app.get('/api/worktrees/:id/pull-request/comments', async (request, reply) => {
+    controlled(request);
+    const id = (request.params as { id: string }).id;
+    const worktree = configuredWorktree(id);
+    if (worktree === undefined) return reply.code(404).send({ error: 'worktree unavailable' });
+    try {
+      return await prSwitch.commentsAt(worktree.identity, await reviewBranch(id));
+    } catch (error) {
+      if (error instanceof PullRequestLookupError) return reply.code(error.statusCode).send({ error: error.message });
+      throw error;
+    }
   });
   // a Worktree branch's saved All PR base (git config `gh-merge-base`) and the origin branches it may name
   app.get('/api/worktrees/:id/merge-base', async (request, reply) => {

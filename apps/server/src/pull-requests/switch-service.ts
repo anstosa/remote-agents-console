@@ -8,7 +8,7 @@ import { branchCommitSummary, type BranchCommitSummary } from '../git/comparison
 import { worktreeById, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
 import { agentAttentionState } from '../notifications.js';
 import { PullRequestService, type PullRequestChoice } from './service.js';
-import type { Worktree } from '../domain/models.js';
+import type { PullRequestComments, Worktree } from '../domain/models.js';
 
 // bound the local-branch list folded into the availability payload
 const maxSwitchableBranches = 200;
@@ -194,6 +194,11 @@ export class PullRequestSwitchService {
   // the Actions page of the GitHub repository checked out at one folder, with no Agent needed
   async actionsUrlAt(checkout: string): Promise<string | undefined> {
     return await this.pullRequests.actionsUrl(checkout);
+  }
+
+  // the comments on the open pull request of the branch checked out at one folder
+  async commentsAt(checkout: string, branch: string | undefined): Promise<PullRequestComments> {
+    return await this.pullRequests.comments(checkout, branch);
   }
 
   async switch(worktreeId: string, number: number): Promise<BranchSwitchResult> {

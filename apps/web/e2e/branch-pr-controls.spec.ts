@@ -148,7 +148,8 @@ test('keeps the current pull request in the Working footer and queues one active
   // keep the standalone fixup immediately after push
   const fixup = actions.getByRole('button', { name: 'Queue $fixup' });
   await expect(actions.locator('.git-status-push + .pull-request-fixup')).toHaveCount(1);
-  await expect(card.getByRole('button')).toHaveCount(0);
+  await expect(card.getByRole('button')).toHaveCount(1);
+  await expect(card.getByRole('button', { name: 'Show PR comments' })).toBeVisible();
   await fixup.click();
   await expect.poll(() => promptRequests).toBe(1);
   await expect(fixup).toBeDisabled();
@@ -375,7 +376,7 @@ test('stacks standard-height Working footer controls at 375px without growing th
   expect(fixup.y).toBeCloseTo(push.y, 0);
   expect(fixup.x).toBeGreaterThanOrEqual(push.x + push.width);
   expect(fixup.height).toBeCloseTo(attachmentBox.height, 0);
-  await expect(card.getByRole('button')).toHaveCount(0);
+  await expect(card.getByRole('button')).toHaveCount(1);
   await expect(card.locator('.pull-request-card-main > span')).toHaveCount(1);
   await expect(card.locator('.pull-request-card-main > span')).toHaveCSS('text-overflow', 'ellipsis');
   // verify truncation instead of a wrapped title
@@ -385,8 +386,9 @@ test('stacks standard-height Working footer controls at 375px without growing th
 
   await page.setViewportSize({ width: 667, height: 320 });
   await expect(panel).toHaveCSS('overflow-y', 'auto');
+  // the popup refits on the resize event, a render after the viewport changes
+  await expect.poll(async () => (await renderedBox(panel)).y).toBeGreaterThanOrEqual(0);
   const shortPanelBox = await renderedBox(panel);
-  expect(shortPanelBox.y).toBeGreaterThanOrEqual(0);
   expect(shortPanelBox.y + shortPanelBox.height).toBeLessThanOrEqual(320);
   await expectReachableWithin(actions, panel);
   await expectReachableWithin(card, panel);

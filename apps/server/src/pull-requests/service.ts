@@ -1,6 +1,6 @@
 import { run } from '../tmux/command.js';
-import type { PullRequestCheckStatus, PullRequestIssues, PullRequestSummary } from '../domain/models.js';
-import { GithubClient, GithubRequestError, githubRepository, githubToken, type Command, type GithubRepository, type Request, type ResponseLike, type Token } from './github.js';
+import type { PullRequestCheckStatus, PullRequestComment, PullRequestComments, PullRequestIssues, PullRequestReviewThread, PullRequestSummary } from '../domain/models.js';
+import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, githubToken, type Command, type GithubRepository, type Request, type ResponseLike, type Token } from './github.js';
 
 // the lookup failure the switch routes surface, kept under its old name
 export { GithubRequestError as PullRequestLookupError, githubRepository } from './github.js';
@@ -12,7 +12,30 @@ export type PullRequestChoice = { number: number; title: string; branch: string;
 export type OpenPullRequestChoices = { own: PullRequestChoice[]; others: PullRequestChoice[] };
 const cacheTtlMs = 60_000;
 const repositoryCacheTtlMs = 30_000;
+const commentsQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){
+  reviewThreads(first:100){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine comments(first:50){nodes{id author{login __typename} body createdAt url diffHunk}}}}
+  reviews(last:100){nodes{id author{login __typename} state body submittedAt url}}
+  comments(last:100){nodes{id author{login __typename} body createdAt url}}
+}}}`;
 const failingCheckConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale']);
+
+// the `nodes` of one GraphQL connection
+function nodes(connection: unknown): unknown[] {
+  const value = at(connection, 'nodes');
+  return Array.isArray(value) ? value : [];
+}
+
+function positive(value: unknown): number | undefined {
+  return Number.isInteger(value) && (value as number) > 0 ? value as number : undefined;
+}
+
+// one well-formed comment; a deleted account reads as GitHub's own `ghost`
+function prComment(value: unknown): PullRequestComment[] {
+  const [id, body, createdAt, url] = [at(value, 'id'), at(value, 'body'), at(value, 'createdAt'), at(value, 'url')];
+  if (typeof id !== 'string' || typeof body !== 'string' || typeof createdAt !== 'string' || typeof url !== 'string' || !url.startsWith('https://github.com/')) return [];
+  const login = at(value, 'author', 'login');
+  return [{ id, author: typeof login === 'string' ? login : 'ghost', bot: at(value, 'author', '__typename') === 'Bot', body, createdAt, url }];
+}
 
 // identify rejected GitHub credentials
 function githubAuthenticationFailure(error: unknown): boolean {
@@ -91,6 +114,41 @@ export class PullRequestService {
       const { checks, issues } = await this.issueStatus(repository, choice.number, headSha, token);
       return { ...choice, checks, ...(Object.keys(issues).length === 0 ? {} : { issues }) };
     })), others };
+  }
+
+  // the review threads, review summaries and conversation of the branch's open pull request, read fresh
+  async comments(workspace: string, branch: string | undefined): Promise<PullRequestComments> {
+    const repository = await this.cachedRepository(workspace);
+    if (repository === undefined) throw new GithubRequestError('The worktree does not have a supported GitHub origin.', 404);
+    const cached = await this.lookupCached(workspace, branch);
+    const pullRequest = cached?.pending === undefined ? cached?.value : await cached.pending;
+    if (pullRequest === undefined || pullRequest.status === 'merged') throw new GithubRequestError('This branch has no open pull request.', 404);
+    this.token ??= this.getToken();
+    const token = await this.token;
+    if (token === undefined) {
+      this.token = undefined;
+      throw new GithubRequestError('GitHub authentication is not configured for pull request lookup.', 503);
+    }
+    const payload = await this.github.query(token, commentsQuery, { owner: repository.owner, repo: repository.name, number: pullRequest.number }, 'GitHub could not load the pull request comments');
+    const node = at(payload, 'data', 'repository', 'pullRequest');
+    if (node === null || typeof node !== 'object') throw graphqlError(payload, 'GitHub could not load the pull request comments');
+    const threads = nodes(at(node, 'reviewThreads')).flatMap((thread): PullRequestReviewThread[] => {
+      const comments = nodes(at(thread, 'comments')).flatMap(prComment);
+      const path = at(thread, 'path');
+      const id = at(thread, 'id');
+      if (typeof id !== 'string' || typeof path !== 'string' || comments.length === 0) return [];
+      const line = positive(at(thread, 'line')) ?? positive(at(thread, 'originalLine'));
+      const startLine = positive(at(thread, 'startLine')) ?? positive(at(thread, 'originalStartLine'));
+      const diffHunk = at(nodes(at(thread, 'comments'))[0], 'diffHunk');
+      return [{ id, path, ...(line === undefined ? {} : { line }), ...(startLine === undefined || startLine === line ? {} : { startLine }), resolved: at(thread, 'isResolved') === true, outdated: at(thread, 'isOutdated') === true, diffHunk: typeof diffHunk === 'string' ? diffHunk : '', comments }];
+    });
+    // a review with no summary text is only its inline threads; a pending one is the viewer's unsent draft
+    const reviews = nodes(at(node, 'reviews')).flatMap(review => {
+      const state = at(review, 'state');
+      if (typeof state !== 'string' || state === 'PENDING') return [];
+      return prComment({ ...review as object, createdAt: at(review, 'submittedAt') }).filter(comment => comment.body.trim() !== '').map(comment => ({ ...comment, state }));
+    });
+    return { number: pullRequest.number, url: pullRequest.url, threads, reviews, comments: nodes(at(node, 'comments')).flatMap(prComment) };
   }
 
   async supports(workspace: string): Promise<boolean> { return await this.repository(workspace) !== undefined; }
@@ -245,8 +303,8 @@ export class PullRequestService {
     const selected = summaries.find(pullRequest => pullRequest.status !== 'merged') ?? summaries[0];
     if (selected === undefined) return undefined;
     const { headSha, ...summary } = selected;
-    const { checks, issues } = await this.issueStatus(repository, summary.number, headSha, token);
-    return { ...summary, checks, ...(summary.status === 'merged' || Object.keys(issues).length === 0 ? {} : { issues }) };
+    const { checks, issues, unresolvedThreads } = await this.issueStatus(repository, summary.number, headSha, token);
+    return { ...summary, checks, ...(summary.status === 'merged' || Object.keys(issues).length === 0 ? {} : { issues }), ...(summary.status === 'merged' || unresolvedThreads === 0 ? {} : { unresolvedThreads }) };
   }
 
   // scan every bounded result page so a later open pull request can veto cleanup
@@ -302,7 +360,7 @@ export class PullRequestService {
     return undefined;
   }
 
-  private async issueStatus(repository: GithubRepository, number: number, headSha: string | undefined, token: string | undefined): Promise<{ checks: PullRequestCheckStatus; issues: PullRequestIssues }> {
+  private async issueStatus(repository: GithubRepository, number: number, headSha: string | undefined, token: string | undefined): Promise<{ checks: PullRequestCheckStatus; issues: PullRequestIssues; unresolvedThreads: number }> {
     const base = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
     const headers = { Accept: 'application/vnd.github+json', ...(token === undefined ? {} : { Authorization: `Bearer ${token}` }) };
     const detailRequest = this.request(`${base}/pulls/${number}`, { headers, signal: AbortSignal.timeout(8_000) }).catch(() => undefined);
@@ -346,7 +404,8 @@ export class PullRequestService {
         ? 'pending'
         : 'passed';
     const threads = reviews !== null && typeof reviews === 'object' ? (reviews as { data?: { repository?: { pullRequest?: { reviewThreads?: { nodes?: unknown } } } } }).data?.repository?.pullRequest?.reviewThreads?.nodes : undefined;
-    if (Array.isArray(threads) && threads.some(thread => thread !== null && typeof thread === 'object' && (thread as { isResolved?: unknown }).isResolved === false && (thread as { isOutdated?: unknown }).isOutdated !== true)) issues.unresolvedComments = true;
-    return { checks: checkStatus, issues };
+    const unresolvedThreads = Array.isArray(threads) ? threads.filter(thread => thread !== null && typeof thread === 'object' && (thread as { isResolved?: unknown }).isResolved === false && (thread as { isOutdated?: unknown }).isOutdated !== true).length : 0;
+    if (unresolvedThreads > 0) issues.unresolvedComments = true;
+    return { checks: checkStatus, issues, unresolvedThreads };
   }
 }

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 export type PullRequestIssues = { mergeConflicts?: boolean; failingChecks?: boolean; unresolvedComments?: boolean };
 export type PullRequestCheckStatus = 'passed' | 'pending' | 'failed';
-export type PullRequestSummary = { number: number; title: string; status: 'draft' | 'open' | 'merged'; url: string; baseBranch?: string; checks?: PullRequestCheckStatus; issues?: PullRequestIssues };
+export type PullRequestSummary = { number: number; title: string; status: 'draft' | 'open' | 'merged'; url: string; baseBranch?: string; checks?: PullRequestCheckStatus; issues?: PullRequestIssues; unresolvedThreads?: number };
 
 const statusLabel = { draft: 'Draft', open: 'Open', merged: 'Merged' } as const;
 type IssueName = keyof PullRequestIssues;
@@ -37,12 +37,18 @@ export function PullRequestIndicators({ checks, issues: issueFlags }: Pick<PullR
   return <span className="pull-request-issues" aria-label="Pull request status"><CheckStatusIcon status={checkStatus} />{issues.map(issue => <IssueIcon key={issue} issue={issue} />)}</span>;
 }
 
-// render the single-line current pr link and health indicators
-export function PullRequestCard({ pullRequest }: { pullRequest?: PullRequestSummary }) {
+export type PullRequestCommentsToggle = { open: boolean; unresolved: number; onToggle: () => void };
+
+// render the single-line current pr link and health indicators; with `comments`, an open pr's
+// unresolved-comments indicator becomes the button that shows its comments
+export function PullRequestCard({ pullRequest, comments }: { pullRequest?: PullRequestSummary; comments?: PullRequestCommentsToggle }) {
   // omit absent pull requests
   if (pullRequest === undefined) return null;
   const label = `${statusLabel[pullRequest.status]} pull request #${pullRequest.number}: ${pullRequest.title}`;
-  return <div className={`pull-request-card status-${pullRequest.status}`}><a className="pull-request-card-main" href={pullRequest.url} target="_blank" rel="noreferrer" aria-label={label} title={label}><PullRequestStatusIcon status={pullRequest.status} className="pull-request-card-icon" /><strong>#{pullRequest.number}</strong><span>{pullRequest.title}</span></a><PullRequestIndicators checks={pullRequest.checks} issues={pullRequest.issues} /></div>;
+  const toggle = pullRequest.status === 'merged' ? undefined : comments;
+  const { unresolvedComments: _unresolvedComments, ...otherIssues } = pullRequest.issues ?? {};
+  const commentsLabel = toggle === undefined ? '' : `${toggle.open ? 'Hide' : 'Show'} PR comments${toggle.unresolved > 0 ? ` (${toggle.unresolved} unresolved)` : ''}`;
+  return <div className={`pull-request-card status-${pullRequest.status}`}><a className="pull-request-card-main" href={pullRequest.url} target="_blank" rel="noreferrer" aria-label={label} title={label}><PullRequestStatusIcon status={pullRequest.status} className="pull-request-card-icon" /><strong>#{pullRequest.number}</strong><span>{pullRequest.title}</span></a><PullRequestIndicators checks={pullRequest.checks} issues={toggle === undefined ? pullRequest.issues : otherIssues} />{toggle !== undefined && <button type="button" className={`pull-request-comments-toggle${toggle.unresolved > 0 ? ' unresolved' : ''}`} aria-pressed={toggle.open} aria-label={commentsLabel} title={commentsLabel} onClick={toggle.onToggle}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4V5Zm4 4h6m-6 3h4" /></svg>{toggle.unresolved > 0 && <span>{toggle.unresolved}</span>}</button>}</div>;
 }
 
 // keep fixup queue state independent of the pr link
