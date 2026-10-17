@@ -38,6 +38,11 @@ describe('review tour contracts', () => {
     expect(parseReviewTourInput({ scope: 'pr', includeTests: true, includeDocs: false, effort: 'high' })).toEqual({ scope: 'pr', includeTests: true, includeDocs: false, effort: 'high' });
     expect(parseReviewTourInput({ scope: 'pr', includeTests: true, includeDocs: false, effort: 3 })).toBeUndefined();
     expect(parseReviewTourInput({ scope: 'pr', includeTests: true, includeDocs: false, effort: 'x'.repeat(21) })).toBeUndefined();
+    const sha = 'a'.repeat(40);
+    expect(parseReviewTourInput({ scope: 'commit', commit: sha, includeTests: false, includeDocs: false })).toEqual({ scope: 'commit', commit: sha, includeTests: false, includeDocs: false });
+    expect(parseReviewTourInput({ scope: 'commit', includeTests: false, includeDocs: false })).toBeUndefined();
+    expect(parseReviewTourInput({ scope: 'commit', commit: 'HEAD~1', includeTests: false, includeDocs: false })).toBeUndefined();
+    expect(parseReviewTourInput({ scope: 'pr', commit: sha, includeTests: false, includeDocs: false })).toBeUndefined();
     expect(parseReviewRequestId('review-start_1234567890')).toBe('review-start_1234567890');
     expect(parseReviewRequestId('short')).toBeUndefined();
   });

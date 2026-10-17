@@ -501,10 +501,10 @@ html.software-keyboard-open .tabs { display: none; }
 .git-commit-badge.local { border-color: color-mix(in srgb, var(--yellow) 55%, transparent); color: var(--yellow); }
 .git-commit-badge.fixup { border-color: color-mix(in srgb, var(--red) 55%, transparent); color: var(--red); }
 .git-commit-badge.merge { border-color: var(--surface-2); color: var(--overlay-1); }
-.git-commit-message-toggle, .git-commit-view-changes { display: inline-flex; margin-left: .4rem; padding: .1rem .2rem; border: 1px solid var(--surface-1); border-radius: .2rem; background: transparent; box-shadow: none; color: var(--overlay-1); vertical-align: middle; }
-.git-commit-message-toggle:not(:disabled):hover, .git-commit-message-toggle[aria-pressed="true"], .git-commit-view-changes:hover { border-color: var(--blue); color: var(--blue); filter: none; }
-.git-commit-message-toggle svg, .git-commit-view-changes svg { width: .75rem; height: .75rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
-@media (pointer: coarse) { .git-commit-message-toggle, .git-commit-view-changes { padding: .3rem .45rem; } }
+.git-commit-message-toggle, .git-commit-view-changes, .git-commit-review { display: inline-flex; margin-left: .4rem; padding: .1rem .2rem; border: 1px solid var(--surface-1); border-radius: .2rem; background: transparent; box-shadow: none; color: var(--overlay-1); vertical-align: middle; }
+.git-commit-message-toggle:not(:disabled):hover, .git-commit-message-toggle[aria-pressed="true"], .git-commit-view-changes:hover, .git-commit-review:not(:disabled):hover { border-color: var(--blue); color: var(--blue); filter: none; }
+.git-commit-message-toggle svg, .git-commit-view-changes svg, .git-commit-review svg { width: .75rem; height: .75rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+@media (pointer: coarse) { .git-commit-message-toggle, .git-commit-view-changes, .git-commit-review { padding: .3rem .45rem; } }
 .git-commit-message { margin: 0 .5rem .35rem 1.75rem; padding: .35rem .5rem; border-left: 2px solid var(--surface-1); color: var(--subtext-1); font-size: .64rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .git-commit-section > .git-status-file-list { padding: 0 .5rem 0 1.75rem; }
 /* a fixed removed-lines column flush right, so a commit's totals and its file rows share both columns */
@@ -1959,10 +1959,13 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .client-rename-dialog footer .worktree-rename-reset { margin-right: auto; }
 /* the guided review's start sheet: the rename dialog's frame, a bottom sheet on a phone */
 .review-start-dialog > div { width: min(30rem, 100%); max-height: min(90vh, 46rem); overflow-y: auto; }
+.review-start-dialog form { grid-template-columns: minmax(0, 1fr); }
 .review-start-dialog header > div { display: grid; min-width: 0; }
 .review-start-dialog header svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 2; }
 .review-start-row { display: flex; align-items: center; justify-content: space-between; gap: .75rem; color: var(--subtext-0); font: 700 .68rem var(--font-mono); }
 .review-start-checks { display: inline-flex; gap: 1rem; }
+.review-start-commit { min-width: 0; overflow: hidden; color: var(--text); font-weight: 400; white-space: nowrap; text-overflow: ellipsis; }
+.review-start-commit code { margin-right: .5rem; color: var(--peach); }
 .client-rename-dialog form .review-start-checks label, .client-rename-dialog form label.review-start-check { display: inline-flex; align-items: center; gap: .4rem; color: var(--text); }
 .review-start-dialog input[type='checkbox'] { width: auto; margin: 0; accent-color: var(--blue); }
 .review-start-dialog header > button { color: var(--subtext-0); }

@@ -14,9 +14,10 @@ import { MarkdownBlocks } from './note-markdown.js';
 // Code panel uses for the same reason.
 const ReviewDiffs = lazy(() => import('./code-panel/review-diffs.js'));
 
-export type ReviewScope = 'working' | 'pr';
+// `commit` narrates one commit of HEAD's history, named by the target's `commit` (a full object id)
+export type ReviewScope = 'working' | 'pr' | 'commit';
 // the Worktree and default scope the Review button asks for, before the start sheet's choices
-export type ReviewTarget = { agentId: string; worktreeId: string; scope: ReviewScope };
+export type ReviewTarget = { agentId: string; worktreeId: string; scope: ReviewScope; commit?: string; commitSubject?: string };
 // one tour start: the Comparison (scope, Tests, Docs), the tour's effort and the opt-in Code review
 // that runs beside it; a restored tour's launch carries its stored Comparison, and Retry and
 // Regenerate start again with the same launch
@@ -24,11 +25,11 @@ export type ReviewLaunch = ReviewTarget & { includeTests: boolean; includeDocs: 
 export type ReviewTourIndicator = { generating: boolean; stale: boolean };
 type ReviewChange = { id: string; file: string; originalFile?: string; category: 'implementation' | 'test' | 'doc'; kind: 'hunk' | 'binary' | 'rename' | 'metadata' | 'untracked'; patch: string };
 type ReviewStep = { id: string; title: string; explanation: string; changeIds: string[] };
-export type ReviewTour = { title: string; overview: string; scope: ReviewScope; base: string; includeTests: boolean; includeDocs: boolean; fingerprint: string; changes: ReviewChange[]; steps: ReviewStep[] };
+export type ReviewTour = { title: string; overview: string; scope: ReviewScope; commit?: string; base: string; includeTests: boolean; includeDocs: boolean; fingerprint: string; changes: ReviewChange[]; steps: ReviewStep[] };
 type ReviewRequest = (url: string, init?: RequestInit, observeReachability?: boolean) => Promise<Response>;
 type StepState = 'unvisited' | 'visited' | 'skipped';
 type Job = { id: string; expiresAt: string; retryAfterMs: number };
-type PublicReviewComparison = { scope: ReviewScope; base: string; includeTests: boolean; includeDocs: boolean; fingerprint: string };
+type PublicReviewComparison = { scope: ReviewScope; commit?: string; base: string; includeTests: boolean; includeDocs: boolean; fingerprint: string };
 // `overview` is the tour's first page, its title and overview ahead of the first step
 type ViewState = 'loading' | 'overview' | 'tour' | 'summary' | 'empty' | 'error' | 'cancelled';
 type ReviewFailure = { code?: string; message?: string };
@@ -63,6 +64,21 @@ const maxPostMarkdown = 40_000;
 // below this panel width the step's narration and feedback fold into a drawer above the diff
 const compactWidth = 720;
 
+// a scope and, for exactly the commit scope, its commit
+function isScoped(value: { scope: unknown; commit?: unknown }): boolean {
+  return value.scope === 'working' || value.scope === 'pr' ? value.commit === undefined : value.scope === 'commit' && typeof value.commit === 'string';
+}
+
+// the Comparison fields of a request: the scope and, for one commit, which
+function comparisonParams(target: Pick<ReviewTarget, 'scope' | 'commit'>): { scope: ReviewScope; commit?: string } {
+  return { scope: target.scope, ...(target.commit === undefined ? {} : { commit: target.commit }) };
+}
+
+// how a tour's header and dispatch name its Comparison
+export function reviewScopeLabel(target: Pick<ReviewTarget, 'scope' | 'commit'>): string {
+  return target.scope === 'working' ? 'Working' : target.scope === 'pr' ? 'All PR' : `Commit ${target.commit?.slice(0, 7) ?? ''}`;
+}
+
 // replace a cached generic title until the tour is regenerated
 function displayedTourTitle(tour: ReviewTour): string {
   // preserve specific generated titles
@@ -86,7 +102,7 @@ export function isReviewTour(value: unknown): value is ReviewTour {
   if (value === null || typeof value !== 'object') return false;
   const tour = value as ReviewTour;
   const structural = typeof tour.title === 'string' && typeof tour.overview === 'string' && typeof tour.base === 'string' && typeof tour.fingerprint === 'string'
-    && (tour.scope === 'working' || tour.scope === 'pr') && typeof tour.includeTests === 'boolean' && typeof tour.includeDocs === 'boolean'
+    && isScoped(tour) && typeof tour.includeTests === 'boolean' && typeof tour.includeDocs === 'boolean'
     && Array.isArray(tour.changes) && tour.changes.every(isChange) && Array.isArray(tour.steps) && tour.steps.length > 0
     && tour.steps.every(step => step !== null && typeof step === 'object' && typeof step.id === 'string' && typeof step.title === 'string' && typeof step.explanation === 'string' && Array.isArray(step.changeIds) && step.changeIds.every(id => typeof id === 'string'));
   // require a structurally safe artifact
@@ -104,7 +120,7 @@ function isJob(value: unknown): value is Job {
 
 // validate public comparison identities
 function isPublicReviewComparison(value: unknown): value is PublicReviewComparison {
-  return value !== null && typeof value === 'object' && ((value as PublicReviewComparison).scope === 'working' || (value as PublicReviewComparison).scope === 'pr') && typeof (value as PublicReviewComparison).base === 'string' && typeof (value as PublicReviewComparison).includeTests === 'boolean' && typeof (value as PublicReviewComparison).includeDocs === 'boolean' && typeof (value as PublicReviewComparison).fingerprint === 'string';
+  return value !== null && typeof value === 'object' && isScoped(value as PublicReviewComparison) && typeof (value as PublicReviewComparison).base === 'string' && typeof (value as PublicReviewComparison).includeTests === 'boolean' && typeof (value as PublicReviewComparison).includeDocs === 'boolean' && typeof (value as PublicReviewComparison).fingerprint === 'string';
 }
 
 // extract structured and transport failures
@@ -250,7 +266,7 @@ function feedbackDraft(tour: ReviewTour, feedback: Record<string, string>, comme
     return note || inline.length > 0 ? [[`## ${step.title} (${statuses[step.id] ?? 'unvisited'})`, ...(note ? [note] : []), ...inline].join('\n\n')] : [];
   });
   // kept general Findings lead, and feedback retained from regenerated steps trails
-  return [`Please address the feedback from my guided review of ${tour.scope === 'working' ? 'Working' : 'All PR'} changes against ${tour.base}.`, `Tour: ${displayedTourTitle(tour)}`, `Comparison: ${tour.fingerprint.slice(0, 12)}`, ...generalSection(generalNotes.flatMap(generalItem)), ...notes, ...retainedSection(orphanFeedback)].join('\n\n');
+  return [`Please address the feedback from my guided review of ${reviewScopeLabel(tour)} changes against ${tour.base}.`, `Tour: ${displayedTourTitle(tour)}`, `Comparison: ${tour.fingerprint.slice(0, 12)}`, ...generalSection(generalNotes.flatMap(generalItem)), ...notes, ...retainedSection(orphanFeedback)].join('\n\n');
 }
 
 // A section key from a generated id: the id itself when the server's key alphabet allows it, else a
@@ -517,7 +533,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
         return;
       }
       // publish a validated tour
-      if (response.ok && body.status === 'ready' && isReviewTour(body.tour) && body.tour.scope === launch.scope && body.tour.includeTests === includeTests && body.tour.includeDocs === includeDocs) {
+      if (response.ok && body.status === 'ready' && isReviewTour(body.tour) && body.tour.scope === launch.scope && body.tour.commit === launch.commit && body.tour.includeTests === includeTests && body.tour.includeDocs === includeDocs) {
         const ready = body.tour;
         const nextStepIds = new Set(ready.steps.map(candidate => candidate.id));
         const nextChangeIds = new Set(ready.changes.map(candidate => candidate.id));
@@ -561,7 +577,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     const start = async () => {
       // stop obsolete retries before transport
       if (closed || generation.current !== run) return;
-      const response = await request(`/api/agents/${encodeURIComponent(launch.agentId)}/review-tour/jobs`, { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': startRequestId }, body: JSON.stringify({ scope: launch.scope, includeTests, includeDocs, ...(launch.effort === undefined ? {} : { effort: launch.effort }), ...(launch.codeReview === undefined ? {} : { codeReview: launch.codeReview }) }) }, false);
+      const response = await request(`/api/agents/${encodeURIComponent(launch.agentId)}/review-tour/jobs`, { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': startRequestId }, body: JSON.stringify({ ...comparisonParams(launch), includeTests, includeDocs, ...(launch.effort === undefined ? {} : { effort: launch.effort }), ...(launch.codeReview === undefined ? {} : { codeReview: launch.codeReview }) }) }, false);
       const body = await responseBody(response);
       const pending = body.job;
       const reviewJob = body.codeReview !== null && typeof body.codeReview === 'object' ? (body.codeReview as { job?: unknown }).job : undefined;
@@ -609,11 +625,11 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     if (tour === undefined || state === 'loading') return;
     let stopped = false;
     const check = async () => {
-      const query = new URLSearchParams({ scope: launch.scope, includeTests: String(includeTests), includeDocs: String(includeDocs) });
+      const query = new URLSearchParams({ ...comparisonParams(launch), includeTests: String(includeTests), includeDocs: String(includeDocs) });
       const response = await request(`/api/agents/${encodeURIComponent(launch.agentId)}/review-tour/fingerprint?${query}`, undefined, false);
       const body = await responseBody(response);
       const comparison = body.comparison;
-      const currentComparison = response.ok && isPublicReviewComparison(comparison) && comparison.scope === launch.scope && comparison.includeTests === includeTests && comparison.includeDocs === includeDocs && comparison.fingerprint === tour.fingerprint;
+      const currentComparison = response.ok && isPublicReviewComparison(comparison) && comparison.scope === launch.scope && comparison.commit === launch.commit && comparison.includeTests === includeTests && comparison.includeDocs === includeDocs && comparison.fingerprint === tour.fingerprint;
       // fail closed on freshness
       if (!stopped && !currentComparison) setStale(true);
     };
@@ -622,7 +638,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     const focus = () => { void check(); };
     window.addEventListener('focus', focus);
     return () => { stopped = true; window.clearInterval(timer); window.removeEventListener('focus', focus); };
-  }, [tour, state, launch.agentId, launch.scope, includeTests, includeDocs, request]);
+  }, [tour, state, launch.agentId, launch.scope, launch.commit, includeTests, includeDocs, request]);
 
   // settle the running Code review into its Findings or its failure
   const codeReviewSettled = useCallback((outcome: CodeReviewOutcome) => {
@@ -652,7 +668,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
   const startCodeReview = async (options: CodeReviewOptions): Promise<string | undefined> => {
     // require a current tour to anchor the Findings on
     if (tour === undefined) return 'The tour is not ready.';
-    const response = await request(`/api/agents/${encodeURIComponent(launch.agentId)}/code-review/jobs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: launch.scope, includeTests, includeDocs, fingerprint: tour.fingerprint, ...options }) }, false);
+    const response = await request(`/api/agents/${encodeURIComponent(launch.agentId)}/code-review/jobs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...comparisonParams(launch), includeTests, includeDocs, fingerprint: tour.fingerprint, ...options }) }, false);
     const body = await responseBody(response);
     // follow the started job
     if (response.status === 202 && isCodeReviewJob(body.job)) {
@@ -681,9 +697,9 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
   const stepFeedback = step === undefined ? '' : feedback[step.id] ?? '';
   // a file's working-tree text, read only when its unchanged lines are expanded
   const loadFile = useCallback(async (path: string) => {
-    const working = (await fetchComparisonFile(request, launch.worktreeId, { kind: launch.scope, path }))?.working;
+    const working = (await fetchComparisonFile(request, launch.worktreeId, launch.scope === 'commit' ? { kind: 'commit', commit: launch.commit ?? '', path } : { kind: launch.scope, path }))?.working;
     return working === null || working === undefined || working.truncated ? undefined : working.content;
-  }, [request, launch.worktreeId, launch.scope]);
+  }, [request, launch.worktreeId, launch.scope, launch.commit]);
   const expandError = useCallback((file: string, detail: string) => onError?.(`Could not expand ${file}`, detail), [onError]);
   const changes = useMemo(() => step === undefined || tour === undefined ? [] : step.changeIds.map(id => tour.changes.find(change => change.id === id)).filter((change): change is ReviewChange => change !== undefined), [step, tour]);
   const generalNotes = generalNotesOf(codeReview, triage);
@@ -792,11 +808,11 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
   const comparisonCurrent = async (): Promise<boolean> => {
     // require a generated artifact
     if (tour === undefined) return false;
-    const query = new URLSearchParams({ scope: launch.scope, includeTests: String(includeTests), includeDocs: String(includeDocs) });
+    const query = new URLSearchParams({ ...comparisonParams(launch), includeTests: String(includeTests), includeDocs: String(includeDocs) });
     const response = await request(`/api/agents/${encodeURIComponent(launch.agentId)}/review-tour/fingerprint?${query}`, undefined, false);
     const body = await responseBody(response);
     const comparison = body.comparison;
-    const currentComparison = response.ok && isPublicReviewComparison(comparison) && comparison.scope === launch.scope && comparison.includeTests === includeTests && comparison.includeDocs === includeDocs && comparison.fingerprint === tour.fingerprint;
+    const currentComparison = response.ok && isPublicReviewComparison(comparison) && comparison.scope === launch.scope && comparison.commit === launch.commit && comparison.includeTests === includeTests && comparison.includeDocs === includeDocs && comparison.fingerprint === tour.fingerprint;
     // freeze stale or unverifiable tours
     if (!currentComparison) setStale(true);
     return currentComparison;
@@ -930,7 +946,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     if (slot?.expand?.expanded === 'review') { event.preventDefault(); slot.expand.restore(); }
   };
 
-  const scopeLabel = launch.scope === 'working' ? 'Working' : 'All PR';
+  const scopeLabel = reviewScopeLabel(launch);
   // the launch's Comparison, read-only: changing it means starting again from the Review button
   const comparisonLabel = [scopeLabel, includeTests ? 'tests included' : 'tests excluded', includeDocs ? 'docs included' : 'docs excluded', ...(tour?.base ? [`vs ${tour.base}`] : [])].join(' · ');
   // The general Findings, on the first step and the summary: an untriaged one offers Keep and Dismiss,

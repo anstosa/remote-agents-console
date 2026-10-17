@@ -1,5 +1,5 @@
 import { classifyReviewPath } from '../git/change-classification.js';
-import { capturePatch, digest, resolveComparison, synthesizeUntrackedPatch } from '../git/comparison.js';
+import { capturePatch, digest, resolveCommitComparison, resolveComparison, synthesizeUntrackedPatch } from '../git/comparison.js';
 import type { ComparisonKind } from '../git/comparison.js';
 import type { GitStatusChange } from '../domain/models.js';
 import type { ResolvedWorkspace } from '../workspaces/resolver.js';
@@ -27,15 +27,15 @@ function atomicPatches(patch: string, fallbackKind: ReviewChangeKind): Array<{ p
 }
 
 // resolve a fresh comparison summary through the shared git comparison module
-async function comparison(resolved: ResolvedWorkspace, input: ReviewTourInput): Promise<{ base: string; gitBase: string; changes: GitStatusChange[] }> {
+async function comparison(resolved: ResolvedWorkspace, input: ReviewTourInput): Promise<{ base: string; gitBase: string; head?: string; changes: GitStatusChange[] }> {
   const kind: ComparisonKind = input.scope === 'working' ? 'working' : 'pr';
   // the dashboard's resolved merge target is the only PR base; a working snapshot needs none
   const preferred = resolved.agent.gitPrStatus?.base;
   const candidates = kind === 'pr' && preferred !== undefined ? [preferred] : [];
-  const result = await resolveComparison(resolved.workspace, kind, candidates);
+  const result = input.scope === 'commit' ? await resolveCommitComparison(resolved.workspace, input.commit ?? '') : await resolveComparison(resolved.workspace, kind, candidates);
   // map the module's failure reasons onto the tour's typed errors
   if (!result.ok) throw new ReviewTourError(result.reason === 'conflicted' ? 'conflicted_unavailable' : 'scope_unavailable', true);
-  return { base: result.comparison.base, gitBase: result.comparison.gitBase, changes: result.comparison.changes };
+  return { base: result.comparison.base, gitBase: result.comparison.gitBase, ...(result.comparison.head === undefined ? {} : { head: result.comparison.head }), changes: result.comparison.changes };
 }
 
 // capture a canonical review Comparison
@@ -60,7 +60,7 @@ export async function captureReviewComparison(resolved: ResolvedWorkspace, input
       if ('tooLarge' in synth) throw new ReviewTourError('too_large', false);
       captured = synth;
     } else {
-      const tracked = await capturePatch(resolved.workspace, current.gitBase, change);
+      const tracked = await capturePatch(resolved.workspace, current.gitBase, change, current.head);
       // surface git failures as unavailable scope
       if (!tracked.ok) throw new ReviewTourError('scope_unavailable', true);
       captured = { patch: tracked.patch, kind: change.code.trim().startsWith('R') ? 'rename' : 'metadata' };
@@ -78,6 +78,6 @@ export async function captureReviewComparison(resolved: ResolvedWorkspace, input
       changes.push({ id: `chg_${digest(key).slice(0, 28)}`, file: change.path, ...(change.originalPath === undefined ? {} : { originalFile: change.originalPath }), category, kind: unit.kind, ...(unit.oldStart === undefined ? {} : { oldStart: unit.oldStart, oldLines: unit.oldLines, newStart: unit.newStart, newLines: unit.newLines }), patch: unit.patch });
     }
   }
-  const fingerprint = digest(JSON.stringify({ scope: input.scope, base: current.base, gitBase: current.gitBase, includeTests: input.includeTests, includeDocs: input.includeDocs, changes }));
-  return { agentId: resolved.agent.id, worktreeId: resolved.worktree.id, workspace: resolved.workspace, ...(resolved.agent.branch === undefined ? {} : { branch: resolved.agent.branch }), scope: input.scope, base: current.base, includeTests: input.includeTests, includeDocs: input.includeDocs, fingerprint, changes };
+  const fingerprint = digest(JSON.stringify({ scope: input.scope, commit: input.commit, base: current.base, gitBase: current.gitBase, includeTests: input.includeTests, includeDocs: input.includeDocs, changes }));
+  return { agentId: resolved.agent.id, worktreeId: resolved.worktree.id, workspace: resolved.workspace, ...(resolved.agent.branch === undefined ? {} : { branch: resolved.agent.branch }), scope: input.scope, ...(input.commit === undefined ? {} : { commit: input.commit }), base: current.base, includeTests: input.includeTests, includeDocs: input.includeDocs, fingerprint, changes };
 }

@@ -324,10 +324,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const reviewQuery = (value: unknown): ReviewTourInput | undefined => {
     // require an object query
     if (value === null || typeof value !== 'object') return undefined;
-    const query = value as { scope?: unknown; includeTests?: unknown; includeDocs?: unknown };
-    // require the exact public query shape
-    if (Object.keys(query).sort().join(',') !== 'includeDocs,includeTests,scope' || (query.includeTests !== 'true' && query.includeTests !== 'false') || (query.includeDocs !== 'true' && query.includeDocs !== 'false')) return undefined;
-    return parseReviewTourInput({ scope: query.scope, includeTests: query.includeTests === 'true', includeDocs: query.includeDocs === 'true' });
+    const query = value as { scope?: unknown; commit?: unknown; includeTests?: unknown; includeDocs?: unknown };
+    // require the exact public query shape; a commit Comparison also names its commit
+    if (Object.keys(query).filter(key => key !== 'commit').sort().join(',') !== 'includeDocs,includeTests,scope' || (query.includeTests !== 'true' && query.includeTests !== 'false') || (query.includeDocs !== 'true' && query.includeDocs !== 'false')) return undefined;
+    return parseReviewTourInput({ scope: query.scope, ...(query.commit === undefined ? {} : { commit: query.commit }), includeTests: query.includeTests === 'true', includeDocs: query.includeDocs === 'true' });
   };
   // describe one authenticated browser session
   const sessionState = async (s: Session, active: boolean) => {

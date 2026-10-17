@@ -62,6 +62,21 @@ describe('review Comparison capture', () => {
     expect(first.fingerprint).toBe(second.fingerprint);
   });
 
+  it('captures one commit against its parent, leaving later commits and working edits out', async () => {
+    const resolved = await fixture();
+    await git(resolved.workspace, 'commit', '-am', 'feature');
+    const { stdout } = await execute('/usr/bin/git', ['-C', resolved.workspace, 'rev-parse', 'HEAD']);
+    const commit = stdout.trim();
+    await writeFile(join(resolved.workspace, 'src', 'feature.ts'), 'export const value = 3;\n');
+    await git(resolved.workspace, 'commit', '-am', 'later');
+    await writeFile(join(resolved.workspace, 'src', 'other.ts'), 'export const other = 1;\n');
+    const comparison = await captureReviewComparison(resolved, { scope: 'commit', commit, includeTests: false, includeDocs: false });
+    expect(comparison).toMatchObject({ scope: 'commit', commit, base: `${commit.slice(0, 7)}^` });
+    expect(comparison.changes.map(change => change.file)).toEqual(['src/feature.ts']);
+    expect(comparison.changes[0]!.patch).toContain('+export const enabled = true;');
+    expect(comparison.changes[0]!.patch).not.toContain('value = 3');
+  });
+
   it('includes tests and docs only when requested', async () => {
     const resolved = await fixture();
     const comparison = await captureReviewComparison(resolved, { scope: 'working', includeTests: true, includeDocs: true });

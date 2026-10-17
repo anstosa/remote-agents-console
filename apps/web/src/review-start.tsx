@@ -104,12 +104,13 @@ function CodeReviewFields({ choice }: { choice: CodeReviewChoiceState }) {
 type MergeBaseChoices = { branch?: string; configured?: string; branches: string[] };
 
 // Start a guided review: the Comparison (scope, base, Tests, Docs) and the tour's effort. Opened from
-// the Review button when the Worktree has no tour; `prBase` is the flyout's PR base. The All PR base
+// the Review button when the Worktree has no tour, or from a commit in the flyout's commit list, which
+// fixes the scope to that commit; `prBase` is the flyout's PR base. The All PR base
 // can be picked from origin's branches; Start saves a changed pick as the branch's `gh-merge-base`,
 // which outranks a pull request's base, before launching. Cancel saves nothing.
 // The opt-in AI Code review is unchecked on every open; `codeReview` absent hides it.
 export function ReviewStartSheet({ target, prBase, request, tour, codeReview, onStart, onCancel }: { target: ReviewTarget; prBase?: string; request: (url: string, init?: RequestInit) => Promise<Response>; tour?: ReviewTourCapability; codeReview?: CodeReviewCapability; onStart: (launch: ReviewLaunch) => void; onCancel: () => void }) {
-  const [scope, setScope] = useState<ReviewScope>(target.scope === 'pr' && prBase !== undefined ? 'pr' : 'working');
+  const [scope, setScope] = useState<ReviewScope>(target.scope === 'commit' ? 'commit' : target.scope === 'pr' && prBase !== undefined ? 'pr' : 'working');
   const [includeTests, setIncludeTests] = useState(false);
   const [includeDocs, setIncludeDocs] = useState(false);
   const tourEfforts = effortList(tour?.efforts);
@@ -162,10 +163,10 @@ export function ReviewStartSheet({ target, prBase, request, tour, codeReview, on
       }
     }
     if (reviewOptions !== undefined) choice.remember();
-    onStart({ agentId: target.agentId, worktreeId: target.worktreeId, scope, includeTests, includeDocs, ...(tourEffort === '' ? {} : { effort: tourEffort }), ...(reviewOptions === undefined ? {} : { codeReview: reviewOptions }) });
+    onStart({ agentId: target.agentId, worktreeId: target.worktreeId, scope, ...(scope === 'commit' && target.commit !== undefined ? { commit: target.commit } : {}), includeTests, includeDocs, ...(tourEffort === '' ? {} : { effort: tourEffort }), ...(reviewOptions === undefined ? {} : { codeReview: reviewOptions }) });
   };
   return <StartSheetFrame title="Start guided review" eyebrow="Guided review" submitLabel="Start" submitDisabled={(reviewEnabled && reviewOptions === undefined) || (scope === 'pr' && !prReady)} pending={saving} {...(saveError === undefined ? {} : { error: saveError })} onSubmit={() => void start()} onCancel={onCancel}>
-    <div className="review-start-row"><span id="review-start-scope">Scope</span><span className="git-status-mode" role="group" aria-labelledby="review-start-scope"><button type="button" aria-pressed={scope === 'working'} onClick={() => setScope('working')}>Working</button><button type="button" aria-pressed={scope === 'pr'} disabled={prBase === undefined && !pickable} title={prBase === undefined ? pickable ? 'Pick a base to compare with' : 'Merge target unavailable' : `Compare with ${prBase}`} onClick={() => setScope('pr')}>All PR</button></span></div>
+    {scope === 'commit' ? <div className="review-start-row"><span>Commit</span><span className="review-start-commit" title={target.commit}><code>{target.commit?.slice(0, 7)}</code>{target.commitSubject}</span></div> : <div className="review-start-row"><span id="review-start-scope">Scope</span><span className="git-status-mode" role="group" aria-labelledby="review-start-scope"><button type="button" aria-pressed={scope === 'working'} onClick={() => setScope('working')}>Working</button><button type="button" aria-pressed={scope === 'pr'} disabled={prBase === undefined && !pickable} title={prBase === undefined ? pickable ? 'Pick a base to compare with' : 'Merge target unavailable' : `Compare with ${prBase}`} onClick={() => setScope('pr')}>All PR</button></span></div>}
     {scope === 'pr' && <div className="review-start-base"><label htmlFor="review-start-base">Compare with</label>{pickable
       ? <select id="review-start-base" value={base} aria-describedby={baseNote === undefined ? undefined : 'review-start-base-note'} onChange={event => setBase(event.target.value)}><option value="">{loaded?.configured === undefined && prBase !== undefined ? `Default (${prBase})` : 'Default'}</option>{baseOptions.map(name => <option key={name} value={name}>origin/{name}</option>)}</select>
       : <select id="review-start-base" value="" disabled aria-describedby="review-start-base-note"><option value="">{prBase ?? 'No base'}</option></select>}{baseNote !== undefined && <p id="review-start-base-note" className="review-start-base-note">{baseNote}</p>}</div>}

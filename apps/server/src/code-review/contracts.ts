@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { digest } from '../git/comparison.js';
 import type { ReviewAgentKind } from '../review-runs/efforts.js';
 import type { ReviewRunCapability } from '../review-runs/runner.js';
-import { describeSchemaIssues, parseReviewTourInput, type ReviewChange, type ReviewTourInput } from '../review-tour/contracts.js';
+import { commitMatchesScope, describeSchemaIssues, parseReviewTourInput, reviewScopeShape, type ReviewChange, type ReviewTourInput } from '../review-tour/contracts.js';
 
 export const CODE_REVIEW_TIMEOUT_MS = 900_000;
 export const CODE_REVIEW_JOB_TTL_MS = 1_800_000;
@@ -43,7 +43,7 @@ const presetId = z.string().regex(/^[a-zA-Z0-9_-]{1,40}$/u);
 const focus = z.string().max(MAX_CODE_REVIEW_FOCUS).refine(value => !value.includes('\0'));
 const optionsShape = { preset: presetId, effort: z.string().min(1).max(20).optional(), focus: focus.optional() };
 const optionsSchema = z.object(optionsShape).strict();
-const addSchema = z.object({ scope: z.enum(['working', 'pr']), includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), ...optionsShape }).strict();
+const addSchema = z.object({ ...reviewScopeShape, includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), ...optionsShape }).strict().refine(commitMatchesScope);
 const generatedFindingSchema = z.object({ changeId: z.string().min(1).max(100), side: z.enum(['additions', 'deletions']), startLine: line, endLine: line, severity, title, body }).strict();
 const generatedGeneralSchema = z.object({ severity, title, body, file: file.nullable().optional() }).strict();
 const generatedSchema = z.object({ findings: z.array(generatedFindingSchema).max(MAX_CODE_REVIEW_FINDINGS), general: z.array(generatedGeneralSchema).max(MAX_CODE_REVIEW_GENERAL) }).strict();
@@ -92,8 +92,8 @@ export function parseCodeReviewAdd(value: unknown): { input: ReviewTourInput; fi
   const parsed = addSchema.safeParse(value);
   // require the exact request shape
   if (!parsed.success) return undefined;
-  const { scope, includeTests, includeDocs, fingerprint, ...options } = parsed.data;
-  return { input: { scope, includeTests, includeDocs }, fingerprint, options: normalizedOptions(options) };
+  const { scope, commit, includeTests, includeDocs, fingerprint, ...options } = parsed.data;
+  return { input: { scope, ...(commit === undefined ? {} : { commit }), includeTests, includeDocs }, fingerprint, options: normalizedOptions(options) };
 }
 
 // whether two requested Code reviews are the same logical request

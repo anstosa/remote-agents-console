@@ -38,12 +38,12 @@ export class ReviewTourService {
     const generated = await this.generator.generate(prepared.comparison, signal, prepared.effort, progress);
     // preserve caller cancellation
     if (signal.aborted) throw new ReviewTourError('cancelled', true);
-    const current = await captureReviewComparison(prepared.resolved, { scope: prepared.comparison.scope, includeTests: prepared.comparison.includeTests, includeDocs: prepared.comparison.includeDocs });
+    const current = await captureReviewComparison(prepared.resolved, { scope: prepared.comparison.scope, ...(prepared.comparison.commit === undefined ? {} : { commit: prepared.comparison.commit }), includeTests: prepared.comparison.includeTests, includeDocs: prepared.comparison.includeDocs });
     // reject stale narration before publication
     if (current.fingerprint !== prepared.comparison.fingerprint || current.branch !== prepared.comparison.branch) throw new ReviewTourError('stale_during_generation', true);
     // reject agent replacement before publication
     if (!await sameConfiguredWorkspace(this.discovery, prepared.comparison.agentId, prepared.resolved)) throw new ReviewTourError('target_unavailable', true);
-    return { ...generated, scope: prepared.comparison.scope, base: prepared.comparison.base, includeTests: prepared.comparison.includeTests, includeDocs: prepared.comparison.includeDocs, fingerprint: prepared.comparison.fingerprint, changes: prepared.comparison.changes };
+    return { ...generated, scope: prepared.comparison.scope, ...(prepared.comparison.commit === undefined ? {} : { commit: prepared.comparison.commit }), base: prepared.comparison.base, includeTests: prepared.comparison.includeTests, includeDocs: prepared.comparison.includeDocs, fingerprint: prepared.comparison.fingerprint, changes: prepared.comparison.changes };
   }
 
   // capture the agent's current Comparison without generation

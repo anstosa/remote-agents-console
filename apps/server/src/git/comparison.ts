@@ -408,7 +408,7 @@ export async function comparisonAgainst(workspace: string, candidates: string[],
 export type GitCommit = { sha: string; subject: string; body: string; author: string; authoredAt: string; merge: boolean; pushed: boolean; changes: GitStatusChange[] };
 export type CommitLog = { base: string; commits: GitCommit[]; truncated: boolean };
 export type BranchCommitSummary = { subject: string; count: number };
-const objectId = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+export const objectId = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
 // cap every optional history subprocess at the remaining shared budget
 function deadlineRunner(deadline: number, command: GitRunner = run): GitRunner {
