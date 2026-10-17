@@ -76,7 +76,7 @@ type Stack = { actions: StackAction[]; running?: boolean; transition?: 'starting
 type PullRequestChoice = { number: number; title: string; branch: string; draft: boolean; url: string } & Pick<PullRequestSummary, 'checks' | 'issues'>;
 type PullRequestWorktree = { worktreeId: string; worktreeName: string; agentId?: string };
 type SwitchablePullRequest = PullRequestChoice & { checkedOut: boolean; openIn?: PullRequestWorktree };
-type SwitchableBranch = { branch: string; checkedOut: boolean; openIn?: PullRequestWorktree };
+type SwitchableBranch = { branch: string; checkedOut: boolean; openIn?: PullRequestWorktree; commitSummary?: { subject: string; count: number } };
 type PullRequestSwitchAvailability = { enabled: boolean; pullRequests: SwitchablePullRequest[]; otherPullRequests: SwitchablePullRequest[]; branches: SwitchableBranch[]; pullRequestsSupported: boolean };
 type DashboardTarget = { worktreeId: string; agentId?: string };
 type PromptAction = { label: string; prompt: string };
@@ -6928,7 +6928,12 @@ function switchablePullRequests(values: unknown[]): SwitchablePullRequest[] {
 // retain only well-formed local branch targets
 function switchableBranches(values: unknown[]): SwitchableBranch[] {
   return values.filter((value): value is SwitchableBranch =>
-    value !== null && typeof value === 'object' && typeof (value as SwitchableBranch).branch === 'string' && typeof (value as SwitchableBranch).checkedOut === 'boolean' && validCheckoutWorktree((value as SwitchableBranch).openIn));
+    value !== null && typeof value === 'object' && typeof (value as SwitchableBranch).branch === 'string' && typeof (value as SwitchableBranch).checkedOut === 'boolean' && validCheckoutWorktree((value as SwitchableBranch).openIn)).map(value => {
+      // discard malformed summaries without hiding checkout targets
+      const summary = value.commitSummary;
+      const validSummary = summary !== null && typeof summary === 'object' && typeof summary.subject === 'string' && Number.isSafeInteger(summary.count) && summary.count > 0;
+      return { ...value, commitSummary: validSummary ? summary : undefined };
+    });
 }
 
 // explain one unavailable switch target
@@ -6984,9 +6989,30 @@ function branchCheckoutReason(branch: SwitchableBranch, enabled: boolean, refres
   return branch.checkedOut ? `Move ${branch.branch} here` : `Check out ${branch.branch}`;
 }
 
+// reuse Unicode grapheme boundaries across branch rows
+const branchSummarySegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+// cap the subject without splitting combining marks or compound emoji
+function branchSummaryPreview(subject: string): string {
+  let preview = '';
+  let count = 0;
+  // stop after fifty complete user-perceived characters
+  for (const { segment } of branchSummarySegmenter.segment(subject)) {
+    // leave the remaining subject available in the tooltip
+    if (count === 50) break;
+    preview += segment;
+    count += 1;
+  }
+  return preview;
+}
+
 // render one local branch switch target
 function SwitchBranchOption({ branch, enabled, loading, refreshFailed, switchingBranch, movingBranch, onSwitch, onMove, onDelete, onSelectTarget }: { branch: SwitchableBranch; enabled: boolean; loading: boolean; refreshFailed: boolean; switchingBranch?: string; movingBranch?: string; onSwitch: (branch: string) => void | Promise<void>; onMove: (branch: string) => void | Promise<void>; onDelete?: (branch: SwitchableBranch) => void; onSelectTarget: (target: DashboardTarget) => void }) {
   const openIn = branch.openIn;
+  const summary = branch.commitSummary;
+  // shorten only the subject and preserve the additional commit count
+  const summarySubject = summary?.subject.split(/\r?\n/u, 1)[0] ?? '';
+  const summaryMore = summary !== undefined && summary.count > 1 ? ` and ${summary.count - 1} more` : '';
   const operationPending = switchingBranch !== undefined || movingBranch !== undefined;
   const checkoutReason = branchCheckoutReason(branch, enabled, refreshFailed);
   // run one checkout transaction
@@ -6995,7 +7021,7 @@ function SwitchBranchOption({ branch, enabled, loading, refreshFailed, switching
     if (branch.checkedOut) return void onMove(branch.branch);
     void onSwitch(branch.branch);
   };
-  return <div className="switch-pr-option switch-branch-option" role="group" aria-label={branch.branch}><div className="switch-pr-main"><strong className="switch-branch-name">{branch.branch}</strong></div><span className="switch-pr-actions">{onDelete !== undefined && <button className="switch-pr-action switch-branch-delete icon-button outline-button" disabled={loading || operationPending} aria-label={`Delete ${branch.branch}`} title={`Review deletion safeguards for ${branch.branch}`} onClick={() => onDelete(branch)}><svg className="more-menu-icon action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg></button>}<button className="switch-pr-action switch-pr-checkout outline-button" disabled={loading || refreshFailed || operationPending || !enabled || (branch.checkedOut && openIn === undefined)} title={checkoutReason} onClick={checkout}>{movingBranch === branch.branch ? <><span className="spinner" />Moving…</> : switchingBranch === branch.branch ? <><span className="spinner" />Checking out…</> : 'Checkout'}</button></span>{branch.checkedOut && <div className="switch-pr-owner"><SwitchOpenInLine openIn={openIn} here={false} operationPending={operationPending} onSelectTarget={onSelectTarget} /></div>}</div>;
+  return <div className="switch-pr-option switch-branch-option" role="group" aria-label={branch.branch}><div className="switch-pr-main"><strong className="switch-branch-name">{branch.branch}</strong>{summary !== undefined && <small className="switch-branch-summary" title={`${summarySubject}${summaryMore}`}><span>{branchSummaryPreview(summarySubject)}</span>{summaryMore !== '' && <span className="switch-branch-summary-more">{summaryMore}</span>}</small>}</div><span className="switch-pr-actions">{onDelete !== undefined && <button className="switch-pr-action switch-branch-delete icon-button outline-button" disabled={loading || operationPending} aria-label={`Delete ${branch.branch}`} title={`Review deletion safeguards for ${branch.branch}`} onClick={() => onDelete(branch)}><svg className="more-menu-icon action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg></button>}<button className="switch-pr-action switch-pr-checkout outline-button" disabled={loading || refreshFailed || operationPending || !enabled || (branch.checkedOut && openIn === undefined)} title={checkoutReason} onClick={checkout}>{movingBranch === branch.branch ? <><span className="spinner" />Moving…</> : switchingBranch === branch.branch ? <><span className="spinner" />Checking out…</> : 'Checkout'}</button></span>{branch.checkedOut && <div className="switch-pr-owner"><SwitchOpenInLine openIn={openIn} here={false} operationPending={operationPending} onSelectTarget={onSelectTarget} /></div>}</div>;
 }
 
 // explain pull request availability

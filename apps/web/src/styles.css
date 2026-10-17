@@ -2031,6 +2031,11 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .switch-pr-copy strong.status-draft { color: var(--overlay-2); }
 .switch-pr-copy strong.status-open { color: var(--green); }
 .switch-branch-name { color: var(--text); font: 700 .72rem/1.25 var(--font-mono); letter-spacing: normal; overflow-wrap: anywhere; }
+/* keep branch summaries on one line without clipping the remaining count */
+.switch-branch-option > .switch-pr-main { display: grid; gap: .18rem; }
+.switch-branch-summary { display: flex; min-width: 0; color: var(--subtext-0); font: 500 .64rem/1.3 var(--font-mono); letter-spacing: normal; white-space: pre; }
+.switch-branch-summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.switch-branch-summary > .switch-branch-summary-more { flex-shrink: 0; }
 .switch-pr-owner { flex-basis: 100%; min-width: 0; }
 .switch-pr-open-in { display: inline-block; max-width: 100%; color: var(--blue); font: 650 .64rem/1.2 var(--font-mono); letter-spacing: normal; overflow-wrap: anywhere; }
 .git-status-panel button.switch-pr-open-in-link { width: auto; min-height: 0; padding: 0; border: 0; border-radius: 0; gap: .15rem; background: none; box-shadow: none; color: var(--blue); white-space: normal; }

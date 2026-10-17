@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  addUntrackedLineStats, capturePatch, captureComparisonPatch, commitLog, comparisonAgainst,
+  addUntrackedLineStats, branchCommitSummary, capturePatch, captureComparisonPatch, commitLog, comparisonAgainst,
   fileAtRevision, gitComparisonSummary, gitStatusSummary, mergeBaseChoices, prComparisonCandidates, saveMergeBase,
   resolveComparison, synthesizeUntrackedPatch, workingStatus, type Comparison
 } from '../src/git/comparison.js';
@@ -369,6 +369,87 @@ describe('comparison resolution', () => {
     await git(root, 'branch', '-D', 'develop');
     expect(await selectedBase()).toBe('main');
   });
+
+  // summarize the named branch rather than the checked-out branch
+  it('uses the oldest unique commit literal first line from the local source branch', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'base.txt'), 'base\n');
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'base');
+    await git(root, 'switch', '-c', 'source');
+    await git(root, 'commit', '--allow-empty', '-m', 'source commit');
+    await git(root, 'branch', 'feature/summary');
+    await git(root, 'switch', 'feature/summary');
+    await git(root, 'commit', '--allow-empty', '-m', 'literal first line\ncontinued same paragraph');
+    await git(root, 'commit', '--allow-empty', '-m', 'newest commit');
+    await git(root, 'switch', 'main');
+
+    await expect(branchCommitSummary(root, 'feature/summary', 'main')).resolves.toEqual({
+      subject: 'literal first line',
+      count: 2
+    });
+  });
+
+  // honor the branch-specific configured comparison base before creation provenance
+  it('uses gh-merge-base for a branch commit summary', async () => {
+    const root = await repo();
+    await git(root, 'commit', '--allow-empty', '-m', 'base');
+    await git(root, 'switch', '-c', 'feature/configured');
+    await git(root, 'commit', '--allow-empty', '-m', 'excluded by configured base');
+    await git(root, 'branch', 'release/summary-base');
+    await git(root, 'commit', '--allow-empty', '-m', 'included after configured base');
+    await git(root, 'config', 'branch.feature/configured.gh-merge-base', 'release/summary-base');
+    await git(root, 'switch', 'main');
+
+    await expect(branchCommitSummary(root, 'feature/configured', 'main')).resolves.toEqual({
+      subject: 'included after configured base',
+      count: 1
+    });
+  });
+
+  // use the configured workspace default when creation provenance cannot name a source
+  it('falls back to the default branch and omits branches with no unique or known-base commits', async () => {
+    const root = await repo();
+    await git(root, 'commit', '--allow-empty', '-m', 'main base');
+    await git(root, 'switch', '-c', 'develop');
+    await git(root, 'commit', '--allow-empty', '-m', 'develop base');
+    const develop = (await git(root, 'rev-parse', 'HEAD')).trim();
+    // create without source text in the branch reflog
+    await git(root, 'update-ref', 'refs/heads/feature/default', develop);
+    await git(root, 'switch', 'feature/default');
+    await git(root, 'commit', '--allow-empty', '-m', 'default-based work');
+    await git(root, 'switch', 'develop');
+    await git(root, 'branch', 'no-unique');
+
+    await expect(branchCommitSummary(root, 'feature/default', 'develop')).resolves.toEqual({ subject: 'default-based work', count: 1 });
+    await expect(branchCommitSummary(root, 'no-unique', 'develop')).resolves.toBeUndefined();
+
+    await git(root, 'switch', 'feature/default');
+    await git(root, 'branch', '-D', 'main', 'develop', 'no-unique');
+    await git(root, 'config', '--unset-all', 'branch.feature/default.gh-merge-base').catch(() => undefined);
+    await expect(branchCommitSummary(root, 'feature/default', 'missing')).resolves.toBeUndefined();
+  });
+
+  // keep exact local namespaces even when a branch name resembles an origin ref
+  it('summarizes a remote-shaped local branch beyond the full-log display limit', async () => {
+    const root = await repo();
+    await git(root, 'commit', '--allow-empty', '-m', 'base');
+    const base = (await git(root, 'rev-parse', 'HEAD')).trim();
+    // import the complete history in one process without changing the worktree
+    const history = Array.from({ length: 205 }, (_value, index) => {
+      const subject = `summary commit ${index}`;
+      const parent = index === 0 ? base : `:${index}`;
+      return `commit refs/heads/origin/topic\nmark :${index + 1}\ncommitter Compare Fixture <compare@example.com> ${1_700_000_000 + index} +0000\ndata ${Buffer.byteLength(subject)}\n${subject}\nfrom ${parent}\n\n`;
+    }).join('');
+    const imported = execute('/usr/bin/git', ['-C', root, 'fast-import', '--quiet']);
+    imported.child.stdin!.end(history);
+    await imported;
+
+    await expect(branchCommitSummary(root, 'origin/topic', 'main')).resolves.toEqual({
+      subject: 'summary commit 0',
+      count: 205
+    });
+  }, 20_000);
 
   // ignore publication tracking as source evidence
   it('does not mistake a same-name published upstream for the branch source', async () => {

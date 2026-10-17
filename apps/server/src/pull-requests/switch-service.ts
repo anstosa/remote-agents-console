@@ -4,6 +4,7 @@ import type { ValidatedConfig } from '../config/schema.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import { run } from '../tmux/command.js';
 import { cleanWorkingTree, type GitCommand } from '../git/worktree-state.js';
+import { branchCommitSummary, type BranchCommitSummary } from '../git/comparison.js';
 import { worktreeById, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
 import { agentAttentionState } from '../notifications.js';
 import { PullRequestService, type PullRequestChoice } from './service.js';
@@ -11,6 +12,10 @@ import type { Worktree } from '../domain/models.js';
 
 // bound the local-branch list folded into the availability payload
 const maxSwitchableBranches = 200;
+// bound local git history reads while enriching a large branch list
+const branchSummaryConcurrency = 4;
+// bound total optional history enrichment latency
+const branchSummaryBudgetMs = 2_000;
 // the switch path runs a network `git fetch` in-process; the old pane-driven flow let it run as
 // long as it needed, so bound it generously rather than at run's 5s default. Local ops finish well
 // under this; the ceiling only keeps a hung fetch from wedging the mutation lock indefinitely.
@@ -19,12 +24,13 @@ const runGit: GitCommand = (binary, args) => run(binary, args, undefined, gitCom
 
 export type PullRequestWorktree = { worktreeId: string; worktreeName: string; agentId?: string };
 export type SwitchablePullRequest = PullRequestChoice & { checkoutBranch: string; checkedOut: boolean; openIn?: PullRequestWorktree };
-export type SwitchableBranch = { branch: string; checkedOut: boolean; openIn?: PullRequestWorktree };
+export type SwitchableBranch = { branch: string; checkedOut: boolean; openIn?: PullRequestWorktree; commitSummary?: BranchCommitSummary };
 export type PullRequestSwitchAvailability = { enabled: boolean; pullRequests: SwitchablePullRequest[]; otherPullRequests: SwitchablePullRequest[]; branches: SwitchableBranch[]; pullRequestsSupported: boolean };
 export type PullRequestMoveResult = 'moved' | 'unavailable' | 'recovery-required' | 'busy';
 // a branch/PR checkout outcome; 'busy' means an involved agent is working and, with job
 // control gone, cannot be interrupted for the checkout; `error` explains any other refusal
 export type BranchSwitchResult = 'switched' | 'busy' | { error: string };
+type BranchSummaryOwner = { workspace: string; defaultBranch?: string };
 const mutationInProgress = 'Another branch checkout or move is already running. Try again when it finishes.';
 const switchingUnavailable = 'Branch switching is unavailable for this worktree.';
 const uncommittedChanges = 'The worktree has uncommitted changes. Commit or stash them, then try again.';
@@ -47,47 +53,59 @@ export class PullRequestSwitchService {
   constructor(private readonly config: ValidatedConfig, private readonly discovery: DiscoveryService, private readonly pullRequests = new PullRequestService(), private readonly command: GitCommand = runGit) {}
 
   // list one worktree's switchable pull requests and local branches, whether or not an agent runs there
-  async available(worktreeId: string): Promise<PullRequestSwitchAvailability | undefined> {
-    const worktree = worktreeById(this.discovery.worktreesNow(), worktreeId);
+  async available(worktreeId: string, includeCommitSummaries = true): Promise<PullRequestSwitchAvailability | undefined> {
+    const discoveredWorktrees = this.discovery.worktreesNow();
+    const worktree = worktreeById(discoveredWorktrees, worktreeId);
     if (worktree === undefined) return undefined;
     // require one canonical repository identity, not merely a GitHub origin
     const repository = await this.repositoryIdentity(worktree.identity);
     if (repository === undefined) return undefined;
     const dashboard = await this.discovery.dashboard().catch(() => undefined);
     const checkedOut = new Map<string, PullRequestWorktree | undefined>();
+    const branchOwners = new Map<string, BranchSummaryOwner>();
     const head = await this.command('/usr/bin/git', ['-C', worktree.identity, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
     const currentBranch = head.code === 0 ? head.stdout.trim() : '';
     // prefer the live destination branch over cached dashboard metadata
     if (currentBranch) checkedOut.set(currentBranch, { worktreeId: worktree.id, worktreeName: worktree.label });
     const agents = await Promise.all((dashboard?.agents ?? []).map(async agent => {
-      const agentWorktree = this.worktree(agent.home);
+      const agentWorktree = discoveredWorktrees.find(candidate => worktreeMatchesWorkspace(candidate, agent.home));
       // skip agents in this worktree, whose live branch is read above, and branchless agents
       if (agentWorktree?.id === worktree.id || agent.branch === undefined) return undefined;
-      const candidate = agentWorktree?.identity ?? agent.home;
-      return await this.repositoryIdentity(candidate) === repository ? agent : undefined;
+      const workspace = agentWorktree?.identity ?? agent.home;
+      // keep only owners proven to share the target repository
+      if (await this.repositoryIdentity(workspace) !== repository) return undefined;
+      return { agent, branch: agent.branch, owner: { workspace, ...(agentWorktree?.defaultBranch === undefined ? {} : { defaultBranch: agentWorktree.defaultBranch }) } };
     }));
     // prioritize active agents in this repository
-    for (const agent of agents) {
-      if (agent === undefined || agent.branch === undefined || checkedOut.has(agent.branch)) continue;
-      const worktreeName = agent.worktreeId === undefined ? undefined : worktreeById(this.discovery.worktreesNow(), agent.worktreeId)?.label;
-      checkedOut.set(agent.branch, agent.worktreeId === undefined || worktreeName === undefined ? undefined : { agentId: agent.id, worktreeId: agent.worktreeId, worktreeName });
+    for (const entry of agents) {
+      // skip unavailable or already-owned entries
+      if (entry === undefined || checkedOut.has(entry.branch)) continue;
+      const { agent, branch, owner } = entry;
+      branchOwners.set(branch, owner);
+      const worktreeName = agent.worktreeId === undefined ? undefined : worktreeById(discoveredWorktrees, agent.worktreeId)?.label;
+      checkedOut.set(branch, agent.worktreeId === undefined || worktreeName === undefined ? undefined : { agentId: agent.id, worktreeId: agent.worktreeId, worktreeName });
     }
     const worktrees = await Promise.all((dashboard?.projects.flatMap(project => project.worktrees) ?? []).map(async candidate => {
       // ignore branchless worktrees; every dashboard Worktree is a real discovered checkout
       if (candidate.branch === undefined) return undefined;
-      return await this.repositoryIdentity(candidate.path) === repository ? candidate : undefined;
+      const ownerWorktree = worktreeById(discoveredWorktrees, candidate.id);
+      const workspace = ownerWorktree?.identity ?? candidate.path;
+      // keep only worktrees proven to share the target repository
+      if (await this.repositoryIdentity(workspace) !== repository) return undefined;
+      return { candidate, branch: candidate.branch, owner: { workspace, ...(ownerWorktree?.defaultBranch === undefined ? {} : { defaultBranch: ownerWorktree.defaultBranch }) } };
     }));
     // fill inactive worktrees after active agents
-    for (const candidate of worktrees) {
-      if (candidate === undefined || candidate.branch === undefined || checkedOut.has(candidate.branch)) continue;
-      checkedOut.set(candidate.branch, { worktreeId: candidate.id, worktreeName: candidate.label });
+    for (const entry of worktrees) {
+      // skip unavailable or already-owned entries
+      if (entry === undefined || checkedOut.has(entry.branch)) continue;
+      const { candidate, branch, owner } = entry;
+      branchOwners.set(branch, owner);
+      checkedOut.set(branch, { worktreeId: candidate.id, worktreeName: candidate.label });
     }
     // list pull requests only for a supported GitHub origin
     const pullRequestsSupported = await this.pullRequests.supports(worktree.identity);
     // load slow remote metadata before taking the readiness snapshot
     const pullRequests = pullRequestsSupported ? await this.pullRequests.open(worktree.identity) : { own: [], others: [] };
-    // reflect git changes completed while GitHub was loading
-    const enabled = await this.switchReady(worktree);
     // apply worktree availability around each checkout branch
     const switchable = (choices: PullRequestChoice[]): SwitchablePullRequest[] => choices.map(pullRequest => {
       const branch = pullRequest.headOnOrigin ? pullRequest.branch : this.pullRequestBranch(pullRequest);
@@ -95,7 +113,17 @@ export class PullRequestSwitchService {
     });
     const own = switchable(pullRequests.own);
     const others = switchable(pullRequests.others);
-    const branches = await this.localBranches(worktree.identity, checkedOut, currentBranch, new Set([...own, ...others].map(pullRequest => pullRequest.checkoutBranch)));
+    const branches = await this.localBranches(
+      worktree.identity,
+      checkedOut,
+      currentBranch,
+      new Set([...own, ...others].map(pullRequest => pullRequest.checkoutBranch)),
+      includeCommitSummaries,
+      worktree.defaultBranch,
+      branchOwners
+    );
+    // reflect git changes completed while remote and branch metadata were loading
+    const enabled = await this.switchReady(worktree);
     return { enabled, pullRequests: own, otherPullRequests: others, branches, pullRequestsSupported };
   }
 
@@ -106,7 +134,15 @@ export class PullRequestSwitchService {
   }
 
   // list local branches outside the current branch and the shown pull requests, bounded for very large repositories
-  private async localBranches(workspace: string, checkedOut: Map<string, PullRequestWorktree | undefined>, currentBranch: string, pullRequestBranches: Set<string>): Promise<SwitchableBranch[]> {
+  private async localBranches(
+    workspace: string,
+    checkedOut: Map<string, PullRequestWorktree | undefined>,
+    currentBranch: string,
+    pullRequestBranches: Set<string>,
+    includeCommitSummaries: boolean,
+    defaultBranch: string | undefined,
+    branchOwners: Map<string, BranchSummaryOwner>
+  ): Promise<SwitchableBranch[]> {
     const listed = await this.command('/usr/bin/git', ['-C', workspace, 'for-each-ref', 'refs/heads', '--format=%(refname:short)']);
     // omit branches when the listing fails
     if (listed.code !== 0) return [];
@@ -118,6 +154,32 @@ export class PullRequestSwitchService {
       branches.push({ branch, ...this.checkoutAnnotation(branch, checkedOut) });
       // cap the payload for repositories with very many local branches
       if (branches.length >= maxSwitchableBranches) break;
+    }
+    // keep mutation revalidation cheap while enriching display payloads in bounded batches
+    if (!includeCommitSummaries) return branches;
+    const deadline = Date.now() + branchSummaryBudgetMs;
+    // bound concurrent history reads
+    for (let index = 0; index < branches.length; index += branchSummaryConcurrency) {
+      // stop scheduling batches once the shared budget expires
+      if (Date.now() >= deadline) break;
+      const batch = branches.slice(index, index + branchSummaryConcurrency);
+      // resolve each branch independently
+      const summaries = await Promise.all(batch.map(candidate => {
+        const owner = branchOwners.get(candidate.branch);
+        const summaryWorkspace = owner?.workspace ?? workspace;
+        // read a checked-out branch in its own worktree so HEAD-reflog creation provenance remains available
+        return branchCommitSummary(summaryWorkspace, candidate.branch, owner?.defaultBranch ?? defaultBranch, deadline).catch(error => {
+          // report unexpected failures without dropping the branch
+          console.warn(`[branch-switch] ${summaryWorkspace}: failed to summarize ${candidate.branch}`, error);
+          return undefined;
+        });
+      }));
+      // attach only resolved, positive commit summaries
+      for (let offset = 0; offset < batch.length; offset += 1) {
+        const summary = summaries[offset];
+        // omit unavailable metadata without dropping the branch
+        if (summary !== undefined) batch[offset]!.commitSummary = summary;
+      }
     }
     return branches;
   }
@@ -139,7 +201,7 @@ export class PullRequestSwitchService {
     if (this.branchMutationInProgress) return { error: mutationInProgress };
     this.branchMutationInProgress = true;
     try {
-      const available = await this.available(worktreeId);
+      const available = await this.available(worktreeId, false);
       if (available === undefined) return { error: switchingUnavailable };
       const pullRequest = available.pullRequests.find(candidate => candidate.number === number) ?? available.otherPullRequests.find(candidate => candidate.number === number);
       if (pullRequest === undefined) return { error: `Pull request #${number} is no longer open.` };
@@ -158,7 +220,7 @@ export class PullRequestSwitchService {
     if (this.branchMutationInProgress) return { error: mutationInProgress };
     this.branchMutationInProgress = true;
     try {
-      const available = await this.available(worktreeId);
+      const available = await this.available(worktreeId, false);
       if (available === undefined) return { error: switchingUnavailable };
       // require the branch on the availability list, held by no other worktree
       const switchable = available.branches.find(candidate => candidate.branch === branch);
@@ -193,7 +255,7 @@ export class PullRequestSwitchService {
     if (!Number.isInteger(number) || number < 1 || this.branchMutationInProgress) return 'unavailable';
     this.branchMutationInProgress = true;
     try {
-      const available = await this.available(worktreeId);
+      const available = await this.available(worktreeId, false);
       const pullRequest = [...(available?.pullRequests ?? []), ...(available?.otherPullRequests ?? [])].find(candidate => candidate.number === number);
       if (available === undefined || pullRequest === undefined) return 'unavailable';
       return await this.moveCheckedOutBranch(worktreeId, available.enabled, { branch: pullRequest.checkoutBranch, checkedOut: pullRequest.checkedOut, openIn: pullRequest.openIn });
@@ -208,7 +270,7 @@ export class PullRequestSwitchService {
     if (typeof branch !== 'string' || branch === '' || this.branchMutationInProgress) return 'unavailable';
     this.branchMutationInProgress = true;
     try {
-      const available = await this.available(worktreeId);
+      const available = await this.available(worktreeId, false);
       const switchable = available?.branches.find(candidate => candidate.branch === branch);
       if (available === undefined || switchable === undefined) return 'unavailable';
       return await this.moveCheckedOutBranch(worktreeId, available.enabled, switchable);

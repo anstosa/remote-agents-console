@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +7,7 @@ import type { ValidatedConfig } from '../src/config/schema.js';
 import type { GitCommand } from '../src/git/worktree-state.js';
 import type { AttentionState } from '../src/adapters/types.js';
 import { run } from '../src/tmux/command.js';
+import * as commands from '../src/tmux/command.js';
 
 const worktree = { id: 'cora:/worktrees/cora', projectId: 'cora', label: 'Cora', path: '/worktrees/cora', identity: '/worktrees/cora', available: true, pinned: true, main: true, detached: false, locked: false };
 const config: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen: { host: '127.0.0.1', port: 8787 }, publicOrigin: new URL('https://agents.example.com'), trustedProxyIps: new Set(), pollIntervalMs: 500, adapters: {}, projects: [] };
@@ -286,8 +287,46 @@ describe('pull request switching', () => {
     const listing = Array.from({ length: 250 }, (_value, index) => `feature/branch-${index}`).join('\n');
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand(listing));
 
-    const availability = await service.available(worktree.id);
+    const availability = await service.available(worktree.id, false);
     expect(availability?.branches).toHaveLength(200);
+  });
+
+  // optional history reads must not hold checkout choices hostage
+  it('returns every branch with fresh readiness when the summary budget expires', async () => {
+    const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [] }) };
+    const pulls = { supports: async () => false };
+    const listing = Array.from({ length: 200 }, (_value, index) => `feature/branch-${index}`).join('\n');
+    let dirty = false;
+    const listBranches = branchListingCommand(listing);
+    // change working state while optional summaries are loading
+    const command: GitCommand = async (binary, args) => args.includes('status')
+      ? { code: 0, stdout: dirty ? ' M tracked.txt\n' : '' }
+      : await listBranches(binary, args);
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, command);
+    vi.useFakeTimers();
+    // finish successfully at the subprocess deadline to exercise the next-command guard
+    const history = vi.spyOn(commands, 'run').mockImplementation((_binary, _args, _input, timeoutMs = 5_000) => new Promise(resolve => {
+      setTimeout(() => { dirty = true; resolve({ code: 0, stdout: '', stderr: '' }); }, timeoutMs);
+    }));
+    try {
+      let returned = false;
+      // observe completion without awaiting a stuck request
+      const availability = service.available(worktree.id).then(value => { returned = true; return value; });
+      await vi.waitFor(() => { expect(history).toHaveBeenCalledTimes(4); });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(returned).toBe(true);
+      const listed = await availability;
+      expect(listed?.enabled).toBe(false);
+      expect(listed?.branches).toHaveLength(200);
+      expect(listed?.branches.every(branch => branch.commitSummary === undefined)).toBe(true);
+      // no active pipeline or later batch may resume after the response
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(history).toHaveBeenCalledTimes(4);
+      expect(listed?.branches.every(branch => branch.commitSummary === undefined)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      history.mockRestore();
+    }
   });
 
   it('returns local branches with pull requests unsupported when there is no GitHub origin', async () => {
@@ -526,6 +565,38 @@ describe('pull request switching', () => {
       await expect(service.switchBranch(targetWorktree.id, 'feature/solo')).resolves.toBe('switched');
 
       await expect(run('/usr/bin/git', ['-C', repository.targetPath, 'branch', '--show-current'])).resolves.toMatchObject({ stdout: 'feature/solo\n' });
+    } finally {
+      await rm(repository.root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // enrich a checked-out local branch from the worktree that owns its creation reflog
+  it.each([true, false])('lists the oldest unique commit summary in another worktree with agent worktree id: %s', async hasWorktreeId => {
+    const repository = await createMoveRepository();
+    try {
+      await run('/usr/bin/git', ['-C', repository.sourcePath, 'commit', '--allow-empty', '-m', 'source-only base']);
+      await run('/usr/bin/git', ['-C', repository.sourcePath, 'switch', '-c', 'feature/summary']);
+      await run('/usr/bin/git', ['-C', repository.sourcePath, 'commit', '--allow-empty', '-m', 'first summary line\ncontinued same paragraph']);
+      await run('/usr/bin/git', ['-C', repository.sourcePath, 'commit', '--allow-empty', '-m', 'newest summary commit']);
+      const targetWorktree = { ...worktree, id: `cora:${repository.targetPath}`, path: repository.targetPath, identity: repository.targetPath, defaultBranch: 'main' };
+      const sourceWorktree = { ...worktree, id: 'delta', projectId: 'cora', label: 'Delta', path: repository.sourcePath, identity: repository.sourcePath, defaultBranch: 'main' };
+      const targetAgent = { ...agent, home: repository.targetPath, branch: 'main' };
+      const sourceAgent = { ...agent, id: 'agent-2', home: repository.sourcePath, branch: 'feature/summary', ...(hasWorktreeId ? { worktreeId: 'delta' } : {}) };
+      const discovery = {
+        worktreesNow: () => [targetWorktree, sourceWorktree],
+        dashboard: async () => ({ generation: 1, places: [], agents: [targetAgent, sourceAgent], projects: [] })
+      };
+      const service = new PullRequestSwitchService(config, discovery as never, branchOnlyPulls as never, run);
+
+      const listed = await service.available(targetWorktree.id);
+      expect(listed?.branches.find(candidate => candidate.branch === 'feature/summary')).toEqual({
+        branch: 'feature/summary',
+        checkedOut: true,
+        ...(hasWorktreeId ? { openIn: { agentId: 'agent-2', worktreeId: 'delta', worktreeName: 'Delta' } } : {}),
+        commitSummary: { subject: 'first summary line', count: 2 }
+      });
+      const revalidated = await service.available(targetWorktree.id, false);
+      expect(revalidated?.branches.find(candidate => candidate.branch === 'feature/summary')?.commitSummary).toBeUndefined();
     } finally {
       await rm(repository.root, { recursive: true, force: true });
     }
