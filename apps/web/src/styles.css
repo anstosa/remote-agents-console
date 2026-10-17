@@ -1288,6 +1288,7 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 .workspace-toolbar-actions .launch-split.quiet:has(> button:not(:disabled):hover) { box-shadow: inset 0 0 0 1px var(--prompt-control-hover-border); background: var(--prompt-control-hover-background); filter: none; }
 .workspace-toolbar-actions .launch-split.quiet > button:not(:disabled):hover { color: var(--prompt-control-hover-foreground); }
 .workspace-toolbar-actions .launch-split.quiet .launch-lock { stroke: currentColor; }
+.workspace-toolbar-actions .launch-split .launch-minimized-count { position: static; box-shadow: none; }
 /* show directional flyout carets only for opted-in browsers */
 button:has(> .flyout-caret) { position: relative; }
 button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 3.5'%3E%3Cpath d='M1 .75 5 2.8 9 .75' fill='none' stroke='white' stroke-width='1.1' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); position: absolute; bottom: .1rem; left: 50%; z-index: 1; display: none; width: .625rem; min-width: .625rem; height: .21875rem; padding: 0; overflow: visible; background: var(--overlay-1); -webkit-mask: var(--caret-mask) center / 100% 100% no-repeat; mask: var(--caret-mask) center / 100% 100% no-repeat; pointer-events: none; transform: translateX(-50%); }
@@ -1328,6 +1329,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
   .workspace-toolbar-actions { flex-wrap: nowrap; justify-content: flex-start; gap: .375rem; }
   /* float icon-mode counts above their buttons */
   .workspace-toolbar-actions .toolbar-button .saved-prompts-count { position: absolute; top: -.4rem; right: -.35rem; box-shadow: 0 .2rem .55rem color-mix(in srgb, var(--crust) 60%, transparent); }
+  .workspace-toolbar-actions .launch-split:has(.launch-minimized-count) { position: relative; overflow: visible; }
+  .workspace-toolbar-actions .launch-split .launch-minimized-count { position: absolute; top: -.4rem; right: -.35rem; box-shadow: 0 .2rem .55rem color-mix(in srgb, var(--crust) 60%, transparent); }
   /* one square trigger replaces the phone's direct-launch segment and separate chevron */
   .workspace-toolbar-actions .launch-menu-only .launch-menu-trigger { width: var(--standard-control-size); padding: 0 .25rem; }
   .workspace-toolbar-actions .launch-menu-trigger-label { display: none; }

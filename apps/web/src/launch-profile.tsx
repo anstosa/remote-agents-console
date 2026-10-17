@@ -151,8 +151,10 @@ export type LaunchPrimary = { label: string; ariaLabel: string; onSelect: () => 
 // dashboard carries no resolution (`resolution === undefined`) the desktop control degrades to a
 // single plain "Launch agent" that launches without a kind, as before the split button. On a
 // phone, a single button always opens the agent menu instead of launching a default kind.
+// `minimized` is the toolbar's hidden agent panel: the primary (the phone's single button) shows
+// it again, badged with the Agents it holds, and the chevron still launches another.
 // keep place actions compact and opt into toolbar management explicitly
-export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch, disabled = false, disabledReason, pending = false, compact = false, quiet = false, primary, entries = [], launchDisabled = false, placeActions = false, alwaysShowMenu = false, showAgentSettings = false }: { verb?: LaunchVerb; label: string; resolution: LaunchResolution | undefined; onLaunch: (choice?: LaunchChoice) => void; disabled?: boolean; disabledReason?: string; pending?: boolean; compact?: boolean; quiet?: boolean; primary?: LaunchPrimary; entries?: readonly LaunchMenuEntry[]; launchDisabled?: boolean; placeActions?: boolean; alwaysShowMenu?: boolean; showAgentSettings?: boolean }) {
+export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch, disabled = false, disabledReason, pending = false, compact = false, quiet = false, primary, entries = [], launchDisabled = false, placeActions = false, alwaysShowMenu = false, showAgentSettings = false, minimized }: { verb?: LaunchVerb; label: string; resolution: LaunchResolution | undefined; onLaunch: (choice?: LaunchChoice) => void; disabled?: boolean; disabledReason?: string; pending?: boolean; compact?: boolean; quiet?: boolean; primary?: LaunchPrimary; entries?: readonly LaunchMenuEntry[]; launchDisabled?: boolean; placeActions?: boolean; alwaysShowMenu?: boolean; showAgentSettings?: boolean; minimized?: { count: number; onShow: () => void } }) {
   const adapters = useContext(AdaptersContext);
   const accounts = useContext(AgentAccountsMenuContext);
   const settings = useContext(AgentLaunchSettingsContext);
@@ -190,6 +192,8 @@ export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch
   const launch = (choice?: LaunchChoice) => { closeMenu(); onLaunch(choice); };
   // an entry closes the menu before it acts, as a launch does
   const menuEntries = entries.map(entry => ({ ...entry, onSelect: () => { closeMenu(); entry.onSelect(); } }));
+  const minimizedTitle = minimized === undefined ? undefined : `Show the minimized agent panel (${minimized.count} Agent${minimized.count === 1 ? '' : 's'})`;
+  const minimizedBadge = minimized !== undefined && <span className="saved-prompts-count launch-minimized-count" aria-hidden="true">{minimized.count}</span>;
   const primaryButton = primary === undefined ? undefined : <button type="button" className={`${primaryClass} launch-primary`} aria-label={primary.ariaLabel} disabled={disabled} onClick={() => { closeMenu(); primary.onSelect(); }}>{primary.label}</button>;
   // both phone and desktop controls open the same anchored menu, including extra actions
   let menuLabel = 'Choose agent';
@@ -203,6 +207,12 @@ export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch
   if (placeActions && entries.length === 0 && !alwaysShowMenu) return primaryButton ?? <button type="button" className={primaryClass} aria-label={`Launch ${label}`} disabled={disabled || launchDisabled || pending || (resolution !== undefined && resolution.kind === undefined)} onClick={() => launch(resolution?.kind === undefined ? undefined : { kind: resolution.kind, sandboxed: defaultSandboxed(adapters?.[resolution.kind]) })}>{pending ? <span className="spinner" /> : null}{verb}</button>;
   // launcher rows keep their split action even on a phone; the full-size Launch uses one chooser
   if (phone && !compact && primary === undefined) {
+    if (minimized !== undefined) return <span className={`launch-split launch-menu-only${quiet ? ' quiet' : ''}`}>
+      <button type="button" className="queue launch-menu-trigger" aria-label="Show agent" aria-description={minimizedTitle} title={minimizedTitle} onClick={minimized.onShow}>
+        {resolution?.kind === undefined ? <span className="launch-kind-mark" aria-hidden="true">+</span> : <KindMark kind={resolution.kind} />}
+        <span className="launch-menu-trigger-label">Show agent</span>{minimizedBadge}
+      </button>
+    </span>;
     return <>
       <span className={`launch-split launch-menu-only${quiet ? ' quiet' : ''}${updatesAvailable ? ' updates-available' : ''}`} ref={anchorRef}>
         <button type="button" className="queue launch-menu-trigger" aria-label={updatesAvailable ? `${verb} agent — update available` : `${verb} agent`} aria-haspopup="menu" data-context-flyout aria-expanded={open} disabled={disabled || pending} title={disabled ? disabledReason : undefined} onClick={() => { /* toggle the same menu on phone */ if (open) closeMenu(); else setOpen(true); }}>
@@ -229,9 +239,11 @@ export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch
   return <>
     {!compact && hint !== undefined && <small className="launch-hint">{hint}</small>}
     <span className={`launch-split${compact ? ' compact' : ''}${quiet ? ' quiet' : ''}${updatesAvailable ? ' updates-available' : ''}`} role="group" data-context-dropdown aria-label={`${verb} agent`} ref={anchorRef}>
-      {primaryButton ?? <button type="button" className={`${primaryClass} launch-primary`} aria-label={placeActions ? `${verb} ${label}` : actionCopy(verb, resolvedKind)} disabled={(resolution !== undefined && resolvedKind === undefined) || disabled || launchDisabled || pending} title={primaryTitle} onClick={() => launch(resolvedKind === undefined ? undefined : { kind: resolvedKind, sandboxed })}>
+      {primaryButton ?? (minimized !== undefined ? <button type="button" className={`${primaryClass} launch-primary`} aria-description={minimizedTitle} title={minimizedTitle} onClick={() => { closeMenu(); minimized.onShow(); }}>
+        {resolvedKind !== undefined && <KindMark kind={resolvedKind} />}<span className="launch-primary-label">Show agent</span>{minimizedBadge}
+      </button> : <button type="button" className={`${primaryClass} launch-primary`} aria-label={placeActions ? `${verb} ${label}` : actionCopy(verb, resolvedKind)} disabled={(resolution !== undefined && resolvedKind === undefined) || disabled || launchDisabled || pending} title={primaryTitle} onClick={() => launch(resolvedKind === undefined ? undefined : { kind: resolvedKind, sandboxed })}>
         {/* identify resolved launches without adding management details */}{pending ? <span className="spinner" /> : resolvedKind !== undefined && <KindMark kind={resolvedKind} />}<span className="launch-primary-label">{visibleAction}</span>{!placeActions && sandboxed && <LockIcon />}
-      </button>}
+      </button>)}
       <button type="button" className={`launch-chevron${compact ? ' compact' : ''}`} aria-label={updatesAvailable ? `${menuLabel} — update available` : menuLabel} aria-haspopup="menu" data-context-flyout aria-expanded={open} disabled={(none && entries.length === 0) || disabled || pending} onClick={() => { /* toggle the split flyout */ if (open) closeMenu(); else setOpen(true); }}><ChevronIcon /></button>
       {updatesAvailable && <span className="launch-update-dot" aria-hidden="true" />}
     </span>

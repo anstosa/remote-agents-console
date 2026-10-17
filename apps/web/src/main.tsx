@@ -7254,7 +7254,7 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
   const addToPrompt = (text: string) => setPromptDraft(agent.id, current => appendTextBlock(current, text));
   // the panel is keyed by Agent, so a switch swaps its output, draft, queue and pending actions
   const output = <AgentPanel key={agent.id} agent={agent} agents={agents} onSelectAgent={onSelectAgent} active={active} displayLabel={displayLabel} workspace={workspace} promptHistory={promptHistory} historyOpen={historyOpen} onHistoryOpenChange={changeHistoryOpen} latestAssistantMessage={latestAssistantMessage} onMetadata={reportMetadata} onAddToPrompt={addToPrompt} onOpenFile={openFileInCode} onOpenUrl={openOutputUrl} onDeleted={onDeleted} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} />;
-  return <article className="agent-view"><Workspace workspace={workspace} output={output} git={gitActions} reviewPanel={review?.panel} onAddToPrompt={addToPrompt} onOpenWorktreeStack={onOpenWorktreeStack} />{tabBar}{renderNotifications(upstreamRebase)}<WorkspaceToolbar workspace={workspace} hasAgent launch={launch} onOpenWorktreeStack={onOpenWorktreeStack} git={gitActions} onGitToggle={() => setHistoryOpen(false)} cleanupControl={cleanupControl} menu={{ agentId: agent.id, worktreeId: agent.worktreeId, git: agent.worktreeId !== undefined || agent.placeId === undefined, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason }} /></article>;
+  return <article className="agent-view"><Workspace workspace={workspace} output={output} git={gitActions} reviewPanel={review?.panel} onAddToPrompt={addToPrompt} onOpenWorktreeStack={onOpenWorktreeStack} />{tabBar}{renderNotifications(upstreamRebase)}<WorkspaceToolbar workspace={workspace} agentCount={agents.length} launch={launch} onOpenWorktreeStack={onOpenWorktreeStack} git={gitActions} onGitToggle={() => setHistoryOpen(false)} cleanupControl={cleanupControl} menu={{ agentId: agent.id, worktreeId: agent.worktreeId, git: agent.worktreeId !== undefined || agent.placeId === undefined, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason }} /></article>;
 }
 
 // One Agent's panel inside its Place's Workspace: the live output under the floating header (the
@@ -7408,7 +7408,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const power = <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || clearing || deactivating || deleting} hidden={active} {...(active ? { disabledReason: 'Cancel the agent’s work before restarting, clearing or turning it off' } : {})} onClear={() => void clear()} onTurnOff={() => void (agent.worktreeId === undefined ? remove() : deactivate())} newTask={agent.worktreeId !== undefined || agent.placeId === undefined ? { agentId: agent.id, worktreeId: agent.worktreeId, configured: agent.newTaskConfigured === true, onOperationFeedback } : undefined} {...(agent.worktreeId === undefined ? {} : { onRestart: () => void restart(), restartAs: { label: displayLabel, resolution: agent.launch, onLaunch: choice => void restart(choice) } })} />;
   const title = conversationName ?? displayLabel;
   const switcher = <AgentSwitcher agent={agent} agents={agents} title={title} placeLabel={displayLabel} onSelect={onSelectAgent} />;
-  const header = (connection: string) => <PanelHeader panelKey="agent" label="agent output" title={<AgentPanelTitle kind={agent.kind} sandboxed={agent.sandboxed} title={title} switcher={switcher} state={panelState} connection={connection} />} actions={<>{workspace.conversations.control}{responseFiles.control}</>} close={<>{cancelButton}{power}</>} />;
+  const header = (connection: string) => <PanelHeader panelKey="agent" label="agent output" title={<AgentPanelTitle kind={agent.kind} sandboxed={agent.sandboxed} title={title} switcher={switcher} state={panelState} connection={connection} />} actions={<>{workspace.conversations.control}{responseFiles.control}</>} close={<>{cancelButton}{power}<button type="button" className="panel-header-action pane-minimize" aria-label="Minimize agent output" title="Minimize agent (it keeps running)" onClick={() => setAgentSplitHidden(workspace.viewKey, true)}><PanelIcon path="M5 12h14" /></button></>} />;
   const prompt = <Prompt id={agent.id} history={promptHistory.history} onHistoryChanged={promptHistory.refresh} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} question={dashboardQuestion ?? question} worktreeId={agent.worktreeId} placeId={workspace.place.id} historyControl={<PromptHistoryControl agentId={agent.id} history={promptHistory.history} refreshHistory={promptHistory.refresh} notes={workspace.notes} open={historyOpen} onOpenChange={onHistoryOpenChange} />} />;
   const composer = agent.paneMode === undefined ? prompt : <><PaneModeNotice agentId={agent.id} mode={agent.paneMode} worktreeId={agent.worktreeId} onOperationFeedback={onOperationFeedback} />{prompt}</>;
   // reuse power actions without bypassing lifecycle safeguards
@@ -7525,8 +7525,9 @@ const GlobalLaunchContext = createContext<ToolbarLaunch | undefined>(undefined);
 // with and without an Agent. Persistent Launch leads at the far left, followed by panel
 // buttons, place status and actions; secondary phone panels move into the ⋮, and
 // the carousel's position dots sit in the middle. `onOpenWorktreeStack` is a Process notice's
-// Open, which switches to another Worktree with its stack menu open.
-function WorkspaceToolbar({ workspace, hasAgent = false, launch, onOpenWorktreeStack, conversations, git, onGitToggle, cleanupControl, menu }: { workspace?: WorkspaceState; hasAgent?: boolean; launch?: ToolbarLaunch; onOpenWorktreeStack?: (worktreeId: string) => void; conversations?: ReactNode; git?: WorkspaceGitActions; onGitToggle?: () => void; cleanupControl?: ReactNode; menu?: PlaceMenuProps }) {
+// Open, which switches to another Worktree with its stack menu open. `agentCount` is the Agents
+// at the Place, which a minimized agent panel's Launch badge counts.
+function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeStack, conversations, git, onGitToggle, cleanupControl, menu }: { workspace?: WorkspaceState; agentCount?: number; launch?: ToolbarLaunch; onOpenWorktreeStack?: (worktreeId: string) => void; conversations?: ReactNode; git?: WorkspaceGitActions; onGitToggle?: () => void; cleanupControl?: ReactNode; menu?: PlaceMenuProps }) {
   const phone = usePhoneLayout();
   const settingsSplit = useContext(ClientSettingsSplitContext);
   const globalLaunch = useContext(GlobalLaunchContext);
@@ -7550,8 +7551,8 @@ function WorkspaceToolbar({ workspace, hasAgent = false, launch, onOpenWorktreeS
   }
   // a phone toolbar action replaces the settings panel with its chosen workspace view
   return <section className="workspace-toolbar" aria-label="Workspace toolbar" onClickCapture={phone && settingsSplit?.open ? settingsSplit.close : undefined}><div className="workspace-toolbar-actions">
-    {visibleLaunch !== undefined && <LaunchSplitButton label={visibleLaunch.label} resolution={visibleLaunch.resolution} quiet={hasAgent} disabled={visibleLaunch.disabled} disabledReason={visibleLaunch.disabledReason} pending={visibleLaunch.pending} alwaysShowMenu showAgentSettings onLaunch={visibleLaunch.start} />}
-    {workspace?.agentHidden && <button type="button" className="toolbar-button" onClick={workspace.showAgent}>Show agent</button>}
+    {visibleLaunch !== undefined && <LaunchSplitButton label={visibleLaunch.label} resolution={visibleLaunch.resolution} quiet={agentCount > 0} disabled={visibleLaunch.disabled} disabledReason={visibleLaunch.disabledReason} pending={visibleLaunch.pending} alwaysShowMenu showAgentSettings onLaunch={visibleLaunch.start} minimized={workspace?.agentHidden ? { count: Math.max(agentCount, 1), onShow: workspace.showAgent } : undefined} />}
+    {workspace?.agentHidden && visibleLaunch === undefined && <button type="button" className="toolbar-button" onClick={workspace.showAgent}>Show agent</button>}
     {conversations}
     {workspace?.terminals.control}
     {workspace?.notes.control}

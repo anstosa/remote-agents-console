@@ -255,6 +255,15 @@ test('workspace tab actions target inactive workspaces, jump to splits and close
   expect(fixture.mutations.some(entry => entry.method === 'DELETE' || entry.path.endsWith('/deactivate'))).toBe(false);
   await toolbar.getByRole('button', { name: 'Show agent' }).click();
   await expect(page.locator('.log-output')).toBeVisible();
+  await expect(toolbar.locator('.launch-minimized-count')).toHaveCount(0);
+
+  // the agent header minimizes too, and Launch restores it without launching
+  await page.getByRole('button', { name: 'Minimize agent output' }).click();
+  await expect(page.locator('.log-output')).toHaveCount(0);
+  await expect(toolbar.locator('.launch-minimized-count')).toHaveText('1');
+  await toolbar.getByRole('button', { name: 'Show agent' }).click();
+  await expect(page.locator('.log-output')).toBeVisible();
+  expect(fixture.mutations.some(entry => entry.method === 'DELETE' || entry.path.endsWith('/deactivate') || entry.path.endsWith('/launch'))).toBe(false);
 });
 
 test('mobile workspace context menu stays on screen and right click does not open the workspace sheet', async ({ page }) => {
