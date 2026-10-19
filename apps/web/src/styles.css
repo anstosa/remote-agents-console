@@ -581,7 +581,15 @@ html.software-keyboard-open .tabs { display: none; }
 .note-menu-error { margin: 0; padding: .35rem .5rem; color: var(--red); font: 650 .64rem/1.35 var(--font-mono); }
 .note-menu-hint { margin: 0; padding: .35rem .5rem; color: var(--subtext-0); font: 600 .64rem/1.4 var(--font-mono); }
 .notes-menu .new-note { border-color: color-mix(in srgb, var(--yellow) 65%, var(--surface-1)); color: var(--yellow); }
-.notes-menu .save-latest-response { border-color: color-mix(in srgb, var(--blue) 72%, var(--surface-1)); color: var(--blue); }
+/* keep the capture shortcuts together without widening the flyout past the viewport */
+.note-capture-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; gap: .35rem; }
+.notes-menu .note-capture-actions .log-control { min-width: 0; text-align: center; }
+/* distinguish both note capture actions from existing notes */
+.notes-menu .save-latest-response, .notes-menu .save-current-prompt { border-color: color-mix(in srgb, var(--blue) 72%, var(--surface-1)); color: var(--blue); }
+/* retain both full labels on narrow phones */
+@media (max-width: 360px) {
+  .notes-menu .note-capture-actions .log-control { padding-inline: .15rem; font-size: .62rem; }
+}
 /* conversations control: a fly-out with an "All conversations" entry that opens a full-screen searchable dialog */
 .conversations-control { position: relative; z-index: 4; }
 .conversations-toggle.active { border-color: var(--sky); color: var(--sky); }

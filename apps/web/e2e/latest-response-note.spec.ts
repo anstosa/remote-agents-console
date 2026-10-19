@@ -1,6 +1,5 @@
 import { expect, test } from '@playwright/test';
 import { installPaneMock, seedPaneSize, pushBytes, pushMetadata } from './pane-stream-mock.js';
-import { clickPanelAction } from './panel-header';
 
 test('saves the newest response with at least fifty words and only highlights current overflowing replies', async ({ page }) => {
   const notes: Array<{ id: string; text: string; title?: string }> = [];
@@ -73,7 +72,7 @@ test('saves the newest response with at least fifty words and only highlights cu
   const noteTitle = pane.locator('.note-picker strong');
   await expect(noteTitle).toHaveText('Summary');
   // renaming is one of the note header's actions
-  await clickPanelAction(pane, 'Rename note');
+  await pane.getByRole('button', { name: 'Rename note', exact: true }).click();
   const noteName = page.getByRole('textbox', { name: 'Note name' });
   await expect(noteName).toHaveValue('Summary');
   await noteName.fill('Release checklist');

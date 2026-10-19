@@ -325,6 +325,7 @@ type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
 
 const promptDrafts = new Map<string, string>();
 const promptDraftListeners = new Map<string, Set<() => void>>();
+type PromptNoteSource = Pick<Agent, 'id' | 'placeId' | 'worktreeId'> & { onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void };
 const promptDraftKey = (id: string) => `remote-agent-console:prompt-draft:${id}`;
 const readPromptDraft = (id: string) => {
   try { return localStorage.getItem(promptDraftKey(id)) ?? ''; }
@@ -367,19 +368,20 @@ const emptyPromptAttachments: File[] = [];
 // identify drafts prepared before a worktree has an agent
 const worktreePromptId = (worktreeId: string) => `worktree-prompt:${worktreeId}`;
 const promptHandoffFocus = new Map<string, { start: number; end: number }>();
+// publish file changes even when the composer is minimized
+const setPromptAttachments = (id: string, next: SetStateAction<File[]>) => {
+  const current = promptAttachments.get(id) ?? emptyPromptAttachments;
+  const files = typeof next === 'function' ? next(current) : next;
+  // release file buffers when the draft is cleared
+  if (files.length === 0) promptAttachments.delete(id);
+  else promptAttachments.set(id, files);
+  // notify every mounted draft consumer
+  promptDraftListeners.get(id)?.forEach(listener => listener());
+};
 // share attachment snapshots with the draft's existing subscription
 const usePromptAttachments = (id: string): [File[], Dispatch<SetStateAction<File[]>>] => [
   useSyncExternalStore(listener => subscribeToPromptDraft(id, listener), () => promptAttachments.get(id) ?? emptyPromptAttachments),
-  // publish file changes before a tab or lifecycle transition can unmount the composer
-  next => {
-    const current = promptAttachments.get(id) ?? emptyPromptAttachments;
-    const files = typeof next === 'function' ? next(current) : next;
-    // release file buffers when the draft is cleared
-    if (files.length === 0) promptAttachments.delete(id);
-    else promptAttachments.set(id, files);
-    // notify every mounted draft consumer
-    promptDraftListeners.get(id)?.forEach(listener => listener());
-  }
+  next => setPromptAttachments(id, next)
 ];
 // hand a prepared draft to the dashboard-confirmed agent without sending it
 const handoffPromptDraft = (from: string, to: string) => {
@@ -2406,7 +2408,6 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   const [queuedPromptAction, setQueuedPromptAction] = useState<{ id: string; kind: 'cancel' | 'edit' | 'move' | 'save' }>();
   const [queuedPromptEdit, setQueuedPromptEdit] = useState<{ id: string; text: string }>();
   const [queuedPromptError, setQueuedPromptError] = useState<string>();
-  const [draftNotePending, setDraftNotePending] = useState(false);
   const [normalPromptQuestionId, setNormalPromptQuestionId] = useState<string>();
   const [notesQuestionId, setNotesQuestionId] = useState<string>();
   const answerMode = question === undefined || normalPromptQuestionId !== question.id;
@@ -2424,6 +2425,14 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
   const promptSelection = useRef<number | undefined>(undefined);
   const historyIndex = useRef<number | undefined>(undefined);
   const historyDraft = useRef('');
+  // reset composer navigation after either note-save entry point clears its draft
+  useEffect(() => {
+    // preserve navigation for a newer nonempty draft
+    if (value) return;
+    historyIndex.current = undefined;
+    historyDraft.current = '';
+    setCommandToken(undefined);
+  }, [value]);
   const focusPromptAtEnd = useRef(false);
   const { anchorRef: queuedPromptAnchorRef, flyoutRef: queuedPromptFlyoutRef, style: queuedPromptFlyoutStyle } = useViewportFlyout<HTMLDivElement>(queuedPromptsOpen, { matchContainerWidth: '.agent-panel' });
   const { anchorRef: commandAnchorRef, flyoutRef: commandFlyoutRef, style: commandFlyoutStyle } = useViewportFlyout<HTMLDivElement>(commandToken !== undefined, { placement: 'above', matchAnchorWidth: true });
@@ -2700,37 +2709,11 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     } catch { setQueuedPromptError('Unable to save this queued prompt as a note.'); }
     finally { setQueuedPromptAction(undefined); }
   };
-  // save a composer snapshot with its files before clearing the submitted draft
+  // keep undiscovered scratch composers local while sharing the retained-draft save
   const saveDraftAsNote = async () => {
-    const text = value;
-    const submittedAttachments = attachments;
-    const base = persistenceResourceBase(notesPlaceId, id);
-    const title = text.trim() ? assistantNoteTitle(text) : submittedAttachments[0]?.name.slice(0, 120);
-    // serialize saves and sends while allowing attachment-only drafts
-    if (!ready || draftNotePending || base === undefined || title === undefined || !beginPendingOperation(pendingKey, agentItemKey({ id, placeId, worktreeId }))) return;
-    setDraftNotePending(true);
-    try {
-      const payload = await Promise.all(submittedAttachments.map(encodeAttachment));
-      const response = await request(`${base}/notes`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title, text, ...(payload.length === 0 ? {} : { attachments: payload }) }) });
-      // retain the full draft after a failed save
-      if (!response.ok) throw new Error();
-      const note: unknown = await response.json();
-      // require acknowledgement before releasing submitted files
-      if (!isWorktreeNote(note)) throw new Error();
-      // preserve text typed while the snapshot was saving
-      if (getPromptDraft(id) === text) {
-        historyIndex.current = undefined;
-        historyDraft.current = '';
-        setValue('');
-        setCommandToken(undefined);
-      }
-      // release only files included in the successful snapshot
-      setAttachments(current => current.filter(file => !submittedAttachments.includes(file)));
-      // refetch the sibling notes fly-out so the new Note appears there
-      noteReloadRequests.get(notesViewId)?.();
-      onOperationFeedback({ tone: 'success', message: 'Draft saved to notes', detail: note.title ?? 'Note', worktreeId });
-    } catch { onOperationFeedback({ tone: 'error', message: 'Unable to save draft as a note', detail: 'The console could not be reached, or this project has reached its note limit.', worktreeId }); }
-    finally { setDraftNotePending(false); setPendingOperation(pendingKey, false); }
+    // wait for a discovered agent or a persistent place
+    if (!ready && notesPlaceId === undefined) return;
+    await savePromptDraftAsNote({ id, placeId, worktreeId, onOperationFeedback });
   };
   // C-s in this composer saves its draft as a Note; anywhere else the key passes through
   useKeyAction('save-note', event => { if (event === undefined || keyTarget(event) !== promptInput.current) return false; void saveDraftAsNote(); });
@@ -3029,6 +3012,55 @@ const assistantNoteTitle = (text: string) => {
   const characters = Array.from(cleaned);
   return characters.length <= 80 ? cleaned : `${characters.slice(0, 79).join('').trimEnd()}…`;
 };
+// save one retained draft atomically without depending on composer visibility
+const savePromptDraftAsNote = async (source: PromptNoteSource) => {
+  const { id, placeId, worktreeId, onOperationFeedback } = source;
+  const notesPlaceId = placeId ?? worktreeId;
+  const base = persistenceResourceBase(notesPlaceId, id);
+  const text = getPromptDraft(id);
+  const submittedAttachments = promptAttachments.get(id) ?? emptyPromptAttachments;
+  const title = text.trim() ? assistantNoteTitle(text) : submittedAttachments[0]?.name.slice(0, 120);
+  // allow attachment-only keyboard saves without creating empty notes
+  if (base === undefined || title === undefined) return;
+  // reject oversized drafts without truncating their contents
+  if (text.length > 30_000) {
+    onOperationFeedback({ tone: 'error', message: 'Unable to save draft as a note', detail: 'Notes are limited to 30,000 characters', worktreeId });
+    return;
+  }
+  const pendingKey = `prompt:${id}`;
+  // explain competing workspace operations instead of silently ignoring the action
+  if (!beginPendingOperation(pendingKey, agentItemKey(source))) {
+    onOperationFeedback({ tone: 'error', message: 'Draft not saved', detail: 'Wait for the current workspace action to finish, then try again.', worktreeId });
+    return;
+  }
+  try {
+    const payload = await Promise.all(submittedAttachments.map(encodeAttachment));
+    const response = await request(`${base}/notes`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title, text, ...(payload.length === 0 ? {} : { attachments: payload }) }) });
+    // retain the full draft after a failed save
+    if (!response.ok) throw new Error();
+    const note: unknown = await response.json();
+    // require acknowledgement before releasing submitted files
+    if (!isWorktreeNote(note)) throw new Error();
+    // preserve text typed while the snapshot was saving
+    if (getPromptDraft(id) === text) setPromptDraft(id, '');
+    // release only files included in the successful snapshot
+    setPromptAttachments(id, current => current.filter(file => !submittedAttachments.includes(file)));
+    noteReloadRequests.get(notesPlaceId ?? `agent:${id}`)?.();
+    onOperationFeedback({ tone: 'success', message: 'Draft saved to notes', detail: note.title ?? 'Note', worktreeId });
+  } catch { onOperationFeedback({ tone: 'error', message: 'Unable to save draft as a note', detail: 'The console could not be reached, or this project has reached its note limit.', worktreeId }); }
+  finally { setPendingOperation(pendingKey, false); }
+};
+// subscribe only the flyout action to draft edits, not the entire workspace
+function SaveCurrentPromptButton({ source, disabled }: { source?: PromptNoteSource; disabled: boolean }) {
+  const id = source?.id ?? 'unavailable';
+  const [text] = usePromptDraft(id);
+  const pending = usePendingOperation(`prompt:${id}`);
+  const available = source !== undefined && Boolean(text.trim()) && text.length <= 30_000;
+  return <button className="log-control save-current-prompt" type="button" disabled={disabled || pending || !available} title={text.length > 30_000 ? 'Notes are limited to 30,000 characters' : undefined} onClick={() => {
+    // read the retained snapshot at invocation time, including while minimized
+    if (available && source !== undefined) void savePromptDraftAsNote(source);
+  }}>Save current prompt</button>;
+}
 // find the newest response substantial enough to save
 const latestSubstantialResponse = (latestAssistantMessage: string | undefined, history: PromptHistoryEntry[]) => {
   const candidates = [...(latestAssistantMessage === undefined ? [] : [latestAssistantMessage]), ...history.flatMap(entry => entry.answer === undefined ? [] : [entry.answer])];
@@ -3456,7 +3488,7 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
 // manage persistent worktree notes
 // `expansion` is the Workspace's: the note pane expands through it, and a retained note view
 // restores its expansion into it.
-function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpansion, agentId?: string, agentWorking = false, latestAssistantMessage?: string, latestAssistantMessageOverflows = false, onPromptHistoryChanged?: () => void | Promise<void>, promptHistory: PromptHistoryEntry[] = [], schedulePrefill?: SchedulePrefill, onLaunchAndRun?: (noteId: string) => Promise<boolean>, launchRunLabel?: string) {
+function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpansion, agentId?: string, agentWorking = false, latestAssistantMessage?: string, latestAssistantMessageOverflows = false, onPromptHistoryChanged?: () => void | Promise<void>, promptHistory: PromptHistoryEntry[] = [], schedulePrefill?: SchedulePrefill, onLaunchAndRun?: (noteId: string) => Promise<boolean>, launchRunLabel?: string, promptNote?: PromptNoteSource) {
   const noteFeedback = useContext(NoteFeedbackContext);
   // use the shared mobile text-editing breakpoint
   const phone = usePhoneLayout();
@@ -3541,7 +3573,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const actionStatusTimer = useRef<number | undefined>(undefined);
   const selectionCopiedTimer = useRef<number | undefined>(undefined);
   const [selectionToolbar, setSelectionToolbar] = useState<{ text: string; top: number }>();
-  const promptPendingKey = `prompt:${agentId ?? 'unavailable'}`;
+  // share save guards with live and pre-launch composers
+  const promptPendingKey = `prompt:${agentId ?? promptNote?.id ?? 'unavailable'}`;
   const promptPending = usePendingOperation(promptPendingKey);
   // Retain the open note's expansion with its view. Only an expansion change writes: when the view
   // itself changes, the ref still holds the previous view's note until the reset below clears it.
@@ -4448,10 +4481,13 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const control = <div className="notes-control" ref={anchorRef}>
     <button ref={triggerRef} className={`log-control page-arrow notes-toggle toolbar-button${unreadQueuedNotes ? ' unread-queued-prompts' : ''}${menuOpen || activeNote !== undefined ? ' active' : ''}${activeNote !== undefined ? ' panel-open' : ''}${dirtyCount > 0 ? ' unsaved' : ''}${highlightLatestResponse ? ' latest-response-available' : ''}`} aria-label={notesLabel} title={`${notesLabel}${unreadQueuedNotes ? ' — unread queued prompts' : ''}`} data-context-flyout aria-expanded={menuOpen} disabled={loading} onPointerDown={event => event.preventDefault()} onClick={() => void toggle()}><span className="flyout-caret" aria-hidden="true" />{loading ? <span className="spinner" /> : <svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="notes-icon-sheet" d="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M15 21v-6h6" /></svg>}<span className="toolbar-label">Notes</span>{noteCount > 0 && <span className={`saved-prompts-count notes-count${unreadQueuedNotes ? ' unread' : ''}`} aria-hidden="true">{noteCount}</span>}</button>
     {menuOpen && <FlyoutPortal onDismiss={() => setMenuOpen(false)}><div ref={flyoutRef} className="notes-menu" style={flyoutStyle} aria-label={worktreeId === undefined ? 'Scratch notes' : 'Worktree notes'}>
-      <button className="log-control save-latest-response" disabled={!latestResponseAvailable || noteMenuBusy || menuRenameDraft !== undefined} onClick={() => {
-        // save only an available response
-        if (substantialResponse !== undefined) void create(substantialResponse, assistantNoteTitle(substantialResponse));
-      }}>Save latest response</button>
+      <div className="note-capture-actions">
+        <button className="log-control save-latest-response" disabled={!latestResponseAvailable || noteMenuBusy || menuRenameDraft !== undefined} onClick={() => {
+          // save only an available response
+          if (substantialResponse !== undefined) void create(substantialResponse, assistantNoteTitle(substantialResponse));
+        }}>Save latest response</button>
+        <SaveCurrentPromptButton source={promptNote} disabled={loading || noteMenuBusy || menuRenameDraft !== undefined} />
+      </div>
       {launchAndRunMode && launchRunLabel !== undefined && <p className="note-menu-hint">No agent on this tab: Run becomes Launch and run ({launchRunLabel}).</p>}
       {menuError && <p className="note-menu-error" role="alert">{menuError}</p>}
       {notes?.map(note => {
@@ -6446,7 +6482,7 @@ type WorkspaceNotesOptions = { agentWorking?: boolean; latestAssistantMessage?: 
 // and git expansion. The tab's card holds it, so it outlives a switch between the Agents there;
 // the agent panel's composer drives the same browser and Terminals, and the Workspace renders it.
 // `onCloseReview`, given while the guided review's panel is open here, minimizes it.
-function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNavigateWorktree, onOperationFeedback, onCloseReview }: { agentId?: string; noteOptions: WorkspaceNotesOptions; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void; onCloseReview?: () => void }) {
+function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNavigateWorktree, onOperationFeedback, onCloseReview }: { agentId?: string; noteOptions: WorkspaceNotesOptions; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; onCloseReview?: () => void }) {
   const browser = useProjectBrowser(place.projectUrl, place.id, place.projectProxied);
   const code = useCodePanel(place.worktreeId, request, comparisonChangeSignal(place.gitStatus, place.gitPrStatus, place.attention));
   const files = useFilesController(place.id, request);
@@ -6458,7 +6494,10 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   const conversations = useWorktreeConversations(place.worktreeId, agentId, { onNavigateWorktree, onOperationFeedback });
   // the panel filling the Workspace; the notes restore theirs, so they share it
   const expansion = usePanelExpansion();
-  const placeNotes = useWorktreeNotes(place.id, expansion, agentId, notes.agentWorking, notes.latestAssistantMessage, notes.latestAssistantMessageOverflows, notes.onPromptHistoryChanged, notes.promptHistory, notes.schedulePrefill, notes.onLaunchAndRun, notes.launchRunLabel);
+  // keep note capture available even when the agent panel is minimized
+  const promptDraftId = agentId ?? (place.worktreeId === undefined ? undefined : worktreePromptId(place.worktreeId));
+  const promptNote = promptDraftId === undefined ? undefined : { id: promptDraftId, placeId: place.id, worktreeId: place.worktreeId, onOperationFeedback };
+  const placeNotes = useWorktreeNotes(place.id, expansion, agentId, notes.agentWorking, notes.latestAssistantMessage, notes.latestAssistantMessageOverflows, notes.onPromptHistoryChanged, notes.promptHistory, notes.schedulePrefill, notes.onLaunchAndRun, notes.launchRunLabel, promptNote);
   const [gitExpanded, setGitExpanded] = useState(false);
   const key = place.id === undefined ? `agent-${agentId ?? 'pending'}` : placeItemKey(place.id);
   useWorkspaceViewRevision();
