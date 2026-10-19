@@ -52,11 +52,45 @@ top of a file in the File view), by appending
 understand that form; an editor that wants another one (VS Code's `-g
 path:LINE`, say) is not supported by the jump.
 
+### Browser preferences
+
+In **Settings → This browser**, Name, terminal font, theme, reduced motion,
+flyout markers and dynamic worktrees remain drafts until the top-right
+**Save changes** action. **Done** in the Rename dialog stages the name; it does
+not save it. **Validate** does not apply preferences, and **Discard changes**
+restores the currently applied values. Browser-only saves remain available
+when installation files cannot load. When saving browser and file edits
+together, failed file validation or saving leaves browser preferences unapplied.
+
+Settings lists start as compact item summaries. Use **Edit** to open an item's
+fields; closing the editor keeps its staged changes. Arrow buttons reorder
+ordered lists, the trash button removes an item, and **Add** opens a new item
+for editing. These actions still use the global **Save changes** button.
+
+Settings with a code-defined default always show their controls, even when omitted
+from the config file. Viewing them does not write defaults into the file; editing
+stages only the changed values and any default container needed to preserve its
+other items. Boolean switches sit to the right of their label and description.
+Restart guidance appears in the non-dismissable **Restart pending** toast after
+saving, rather than on individual settings or pages. Successful saves show a
+temporary **Saved** toast that dismisses after five seconds.
+
+Restarting RAC arms a temporary three-minute watchdog in the host settings
+worker, independent of the RAC process and browser. The watchdog requires a new
+RAC boot with the expected settings and a healthy local listener; the old running
+process does not count as a successful restart. If RAC does not return in time,
+the worker stops the forward restart commands and automatically runs the same
+last-known-healthy recovery used by the host recovery command. Recovery retains
+the saved settings so they can be corrected and retried. Cloudflare-only
+operations do not arm the RAC watchdog.
+
 ### Keyboard shortcuts
 
-The web app's shortcuts work like tmux key tables. `root` is always active, and `C-b` switches to the `prefix` table for one key: `c` opens a Terminal, `1`–`9` and `0` go to a panel, `n`/`p`/`l` step through panels, `w` and `s` pick a Workspace, `z` expands the current panel, `x` closes it after a y/n question, `g` opens Lazygit, `:` opens the command palette and `?` lists every binding. Press `C-b` twice to send it to the focused terminal. A table waits 10 seconds for its key, and a floating indicator above the active split’s input controls shows shortcut attempts in purple and consumed bindings in green. Ordinary typing in prompts, notes, terminal output, and other fields stays hidden, as do modal and shortcut-recorder keystrokes. Leader keys remain visible while their table waits; the completed command appears alongside its leader and the whole sequence fades together. `Ctrl+?` or **Settings → Keyboard shortcuts → View/Edit Shortcuts** opens the bindings sheet, which groups every command’s shortcuts together. Direct bindings have no table label; prefixed bindings show their prefix table. Disabled commands keep their description struck through and hide their keys and edit buttons. Its **Edit shortcuts** button switches the popup into edit mode; **Done editing** returns to the reference. Simultaneous keys are separated by **+**, with each key in its own outline and familiar modifier labels: Ctrl, Alt, Shift, and Win on Windows, Cmd on macOS, or Super elsewhere.
+The web app's shortcuts work like tmux key tables. `root` is always active, and `C-b` switches to the `prefix` table for one key: `c` opens a Terminal, `1`–`9` and `0` go to a panel, `n`/`p`/`l` step through panels, `w` and `s` pick a Workspace, `z` expands the current panel, `x` closes it after a y/n question, `g` opens Lazygit, `:` opens the command palette and `?` lists every binding. Press `C-b` twice to send it to the focused terminal. A table waits 10 seconds for its key, and a floating indicator above the active split’s input controls shows shortcut attempts in purple and consumed bindings in green. Ordinary typing in prompts, notes, terminal output, and other fields stays hidden, as do modal and shortcut-recorder keystrokes. Leader keys remain visible while their table waits; the completed command appears alongside its leader and the whole sequence fades together. `Ctrl+?` or **Settings → Keyboard shortcuts → View active shortcuts** opens the bindings sheet, which groups every command’s shortcuts together. Direct bindings have no table label; prefixed bindings show their prefix table. Disabled commands keep their description struck through and hide their keys and edit buttons. The sheet is read-only; **Edit in Settings** opens the server’s dedicated Keyboard shortcuts settings section. Simultaneous keys are separated by **+**, with each key in its own outline and familiar modifier labels: Ctrl, Alt, Shift, and Win on Windows, Cmd on macOS, or Super elsewhere.
 
-In the quick reference’s **Edit shortcuts** mode, select the pencil beside a shortcut, press the replacement keys and select **Save**. **+ Add** assigns another shortcut to the same command. The trash icon immediately beside the pencil removes that assignment. The **Use prefix** switch appears when adding or editing a binding: turn it off for a direct shortcut or on to require a leader key first. Existing keys are prefilled, so you can change only the prefix choice and save. If custom prefix tables exist, a selector chooses which one. Moving a shortcut preserves its original server command authorization; direct shortcuts still cannot steal ordinary typing. Duplicate assignments to the same command are consolidated. The outlined **Disable**/**Enable** and **Reset** controls sit on the right and apply to the whole command; **Enable** and **Reset** restore its default assignments. Every app binding, including custom tables and prompt newline shortcuts, can be changed or disabled. **Reset all shortcuts** restores the current server configuration and built-in defaults. Changes apply immediately, persist in this browser, and synchronize across its tabs; previously saved single shortcuts are retained. When different commands share a shortcut in the same table, both are highlighted in reference and edit modes and that shortcut is ignored until the conflict is resolved. Their other, unshared shortcuts still work. Browser-reserved keys remain rejected. Native editor navigation and terminal/CLI keys are unchanged. Terminal-command aliases retain their original server authorization; separately configured terminal commands remain separate even when their displayed program names match, and a terminal command disabled by the server cannot be re-enabled here.
+In **Settings → Keyboard shortcuts**, select the pencil beside a binding, press the replacement keys and select **Apply shortcut** to stage the edit. **+ Add** stages another assignment; the red trash icon removes one. **Use prefix** chooses a direct shortcut or a leader table, and a custom dropdown selects among configured prefix tables. **Disable**, **Enable**, **Reset** and **Reset all shortcuts** also stage config changes. Reset restores built-in assignments rather than browser preferences. Browser-reserved and unsafe typing keys remain rejected; a chord already assigned to another command cannot be overwritten by the recorder.
+
+The application config file’s `keys` field is the source of truth for this server. All shortcut changes use the top-right **Save changes** button together with other staged Settings edits; they never write browser-local shortcut preferences. **Discard changes** restores the saved file values, and failed validation or a revision conflict retains the draft. Keyboard changes require a server restart: the non-dismissable **Restart pending** notice supplies the explicit restart action, while the quick reference and active shortcuts continue to use the running server’s bindings until then. Legacy browser overrides are ignored and are not automatically promoted to server-wide settings. **Advanced key tables and terminal commands** edits the same file-backed keys, including exact terminal commands and protected credential values. The recorder preserves full unmasked terminal commands when moving them; masked commands must be edited through the advanced controls rather than copied from a redacted dashboard label. Native editor navigation and terminal/CLI keys are unchanged.
 
 The top-level `keys` adds tables and bindings, replaces default bindings, and removes them with `null`:
 

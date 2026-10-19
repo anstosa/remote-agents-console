@@ -8,7 +8,23 @@ const phoneQuery = '(max-width: 768px)';
 // Below this panel width a header's secondary actions fold into its ⋮.
 const panelFoldWidth = 620;
 // the header's shared glyphs, for panels to reuse in their own actions
-export const panelIcons = { expand: 'M9 3H3v6m18 6v6h-6M3 3l6 6m6 6 6 6', restore: 'M9 3v6H3m18 6h-6v6M3 9l6-6m6 18 6-6', close: 'm6 6 12 12M18 6 6 18', copy: 'M9 9h10v10H9zM5 15H4V5h10v1', check: 'm5 12 4 4L19 6' };
+export const panelIcons = {
+  expand: 'M9 3H3v6m18 6v6h-6M3 3l6 6m6 6 6 6',
+  restore: 'M9 3v6H3m18 6h-6v6M3 9l6-6m6 18 6-6',
+  close: 'm6 6 12 12M18 6 6 18',
+  copy: 'M9 9h10v10H9zM5 15H4V5h10v1',
+  check: 'm5 12 4 4L19 6',
+  save: 'M4 3h13l4 4v14H3V3h1Zm3 0v6h10V3M7 21v-8h10v8',
+  refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6',
+  moveUp: 'M12 19V5m-6 6 6-6 6 6',
+  moveDown: 'M12 5v14m-6-6 6 6 6-6',
+  trash: 'M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v6M14 11v6',
+  editor: 'm4 20 4-1 11-11-3-3L5 16l-1 4ZM14 7l3 3',
+  external: 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
+  eye: 'M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12Zm10-3a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z',
+  eyeClosed: 'm3 3 18 18M10.6 5.1A10.9 10.9 0 0 1 12 5c7 0 10 7 10 7a16.1 16.1 0 0 1-3.1 4.1M6.5 6.5A15.4 15.4 0 0 0 2 12s3 7 10 7a10.4 10.4 0 0 0 5.5-1.5M9.9 9.9a3 3 0 0 0 4.2 4.2',
+  format: 'M4 5h16M9 10h11M9 15h11M4 20h16m-16-10 3 2.5L4 15'
+};
 
 const matchesPhone = () => typeof window !== 'undefined' && window.matchMedia(phoneQuery).matches;
 const subscribePhone = (listener: () => void) => {

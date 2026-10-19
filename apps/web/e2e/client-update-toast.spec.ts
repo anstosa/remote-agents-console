@@ -130,7 +130,7 @@ test('keeps a stale UI reload toast visible in the shared upper-right stack', as
   await settingsButton.click();
   let settings = page.getByRole('dialog', { name: 'Settings' });
   await expect(settings.getByRole('button', { name: /reload/iu })).toHaveCount(0);
-  const insetRenameClientActionable = await isPointerActionable(settings.getByRole('button', { name: 'Rename Client' }));
+  const insetRenameClientActionable = await isPointerActionable(settings.getByRole('button', { name: 'Rename browser name' }));
   await expect(notification).toBeVisible();
   await page.screenshot({ path: '/tmp/client-update-toast-settings-mobile.png', fullPage: true });
   await insetStyle.evaluate(element => element.remove());
@@ -162,7 +162,7 @@ test('keeps a stale UI reload toast visible in the shared upper-right stack', as
   const shortSettingsTriggerActionable = await isPointerActionable(settingsButton);
   await settingsButton.click();
   settings = page.getByRole('dialog', { name: 'Settings' });
-  const shortRenameClientActionable = await isPointerActionable(settings.getByRole('button', { name: 'Rename Client' }));
+  const shortRenameClientActionable = await isPointerActionable(settings.getByRole('button', { name: 'Rename browser name' }));
   await expect(notification).toBeVisible();
   await page.screenshot({ path: '/tmp/client-update-toast-settings-landscape.png', fullPage: true });
   await settings.getByRole('button', { name: 'Close settings' }).click();
@@ -196,7 +196,7 @@ test('keeps a stale UI reload toast visible in the shared upper-right stack', as
   await page.setViewportSize({ width: 1440, height: 900 });
   await settingsButton.click();
   settings = page.getByRole('dialog', { name: 'Settings' });
-  await settings.getByRole('button', { name: 'Rename Client' }).click({ trial: true });
+  await settings.getByRole('button', { name: 'Rename browser name' }).click({ trial: true });
   await expect(notification).toBeVisible();
   await page.screenshot({ path: '/tmp/client-update-toast-settings-desktop.png', fullPage: true });
   await settings.getByRole('button', { name: 'Close settings' }).click();

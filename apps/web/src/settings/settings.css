@@ -1,0 +1,418 @@
+/* reserve the remaining split height for the active tab rather than the whole page */
+.settings-center-page > .client-settings-page-content { grid-template-rows: minmax(0, 1fr); align-content: stretch; overflow: hidden; }
+.settings-center { --settings-control-height: calc(1.98rem + 2px); display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 1rem; }
+/* keep shared headings, search and transaction feedback outside the tab scroller */
+.settings-center > :not(.settings-center-layout) { flex: none; }
+/* share one border-box height across single-line settings controls */
+.settings-center input:is([type='text'], [type='number'], [type='password'], [type='search'], :not([type])) { box-sizing: border-box; height: var(--settings-control-height); min-height: var(--settings-control-height); }
+/* adapt the editor to its resizable split rather than the viewport */
+.settings-center-page { container-type: inline-size; container-name: settings-panel; }
+/* retain desktop status alignment after removing the page introduction */
+.settings-center-header { display: flex; min-width: 0; justify-content: flex-end; }
+.settings-dirty-summary { flex: none; border: 1px solid var(--surface-2); border-radius: 999px; padding: .3rem .55rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.settings-center-summary { display: flex; flex: none; align-items: center; gap: .4rem; }
+.settings-search { display: grid; min-width: 0; gap: .3rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.settings-search input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .52rem .62rem; background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); color: var(--text); font: 600 .7rem var(--font-mono); }
+.settings-search input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.settings-center-layout { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: minmax(10rem, 13rem) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; border: 1px solid var(--surface-1); border-radius: .65rem; background: color-mix(in srgb, var(--mantle) 88%, var(--crust)); }
+/* keep custom mobile navigation out of the desktop layout and accessibility tree */
+.settings-source-select { display: none; min-width: 0; gap: .35rem; border-bottom: 1px solid var(--surface-1); padding: .65rem; background: color-mix(in srgb, var(--crust) 88%, var(--mantle)); color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.settings-source-select small { font: 500 .62rem var(--font-mono); }
+.settings-source-nav { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: .18rem; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid var(--surface-1); padding: .65rem; background: color-mix(in srgb, var(--crust) 88%, var(--mantle)); }
+.settings-source-nav h3 { margin: .65rem .45rem .2rem; color: var(--overlay-1); font: 800 .58rem var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
+.settings-source-nav h3:first-child { margin-top: .15rem; }
+.settings-source-nav button { display: flex; width: 100%; min-width: 0; min-height: 2rem; align-items: center; justify-content: space-between; gap: .45rem; border: 1px solid transparent; padding: .38rem .48rem; background: transparent; box-shadow: none; color: var(--subtext-0); font: 650 .68rem var(--font-mono); text-align: left; }
+/* match mobile artwork while reserving room for labels and status indicators */
+.settings-source-nav-icon { display: grid; width: 1.1rem; height: 1.1rem; flex: 0 0 1.1rem; place-items: center; color: var(--mauve); }
+.settings-source-nav-icon > svg { width: 100%; height: 100%; }
+.settings-source-nav-label { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-source-nav button:not(:disabled):hover { border-color: var(--surface-2); background: var(--surface-0); color: var(--text); }
+/* keep pending destinations visible without implying they are interactive */
+.settings-source-nav button:disabled { color: var(--overlay-0); cursor: default; opacity: .65; }
+.settings-source-nav button > .spinner { box-sizing: border-box; width: .75rem; height: .75rem; flex: 0 0 .75rem; border-width: 1.5px; }
+.settings-source-nav button.active { border-color: color-mix(in srgb, var(--mauve) 62%, var(--surface-2)); background: color-mix(in srgb, var(--mauve) 14%, var(--surface-0)); color: var(--text); }
+.settings-source-nav button i { width: .42rem; height: .42rem; flex: none; border-radius: 50%; background: var(--yellow); box-shadow: 0 0 .5rem color-mix(in srgb, var(--yellow) 50%, transparent); }
+/* contain wheel and touch scrolling within the selected tab */
+.settings-source-panel { display: grid; min-width: 0; min-height: 0; align-content: start; gap: 1rem; overflow-y: auto; overscroll-behavior: contain; padding: 1rem; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
+/* keep the keyboard scrolling target visible inside the clipped tab frame */
+.settings-source-panel:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+/* place browser controls in the same field grid as file-backed settings */
+.settings-preferences { min-width: 0; }
+/* keep the shared TMUX sources in one scrollable tab */
+.settings-tmux { display: grid; min-width: 0; gap: 1rem; }
+/* keep each browser preference on its own row at every width */
+.settings-preferences .client-settings-overview { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem 1.25rem; }
+/* stack voice identity and context without changing their inline actions */
+.settings-preferences .client-settings-davo-form { grid-template-columns: minmax(0, 1fr); }
+.settings-preference-description { margin: 0; color: var(--subtext-0); font-size: .7rem; line-height: 1.45; }
+.settings-catalog-state { display: flex; min-width: 0; align-items: center; gap: .65rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); padding: .65rem; color: var(--subtext-0); font: 600 .65rem/1.4 var(--font-mono); }
+.settings-catalog-state > span:not(.spinner) { flex: 1; }
+.settings-catalog-state button { width: max-content; flex: none; padding: .3rem .5rem; font: 700 .62rem var(--font-mono); }
+.settings-source-header { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 1rem; padding-bottom: .85rem; border-bottom: 1px solid var(--surface-1); }
+.settings-source-header > div { display: grid; min-width: 0; gap: .2rem; }
+.settings-source-header h2 { margin: 0; font-size: 1.12rem; }
+.settings-source-header code { overflow: hidden; color: var(--overlay-1); font: 600 .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+/* retain the base-file action to the right even in narrow settings splits */
+.settings-source-header.settings-docker-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .6rem; }
+/* keep the secondary base-file action outlined and on a single line */
+.settings-docker-header > button { width: max-content; background: transparent; border-color: var(--blue); color: var(--blue); box-shadow: none; font-size: .68rem; white-space: nowrap; }
+.settings-source-kicker { color: var(--mauve); font: 800 .58rem var(--font-mono); letter-spacing: .1em; text-transform: uppercase; }
+.settings-source-origin { color: var(--subtext-0); font: 600 .61rem/1.35 var(--font-mono); overflow-wrap: anywhere; }
+.settings-source-warning { margin: 0; border: 1px solid color-mix(in srgb, var(--yellow) 52%, var(--surface-1)); border-radius: var(--control-radius); padding: .65rem; background: color-mix(in srgb, var(--yellow) 8%, transparent); color: var(--yellow); font-size: .7rem; line-height: 1.45; }
+.settings-schema-section { display: grid; min-width: 0; gap: .75rem; border: 0; padding: 0; }
+.settings-schema-section + .settings-schema-section { padding-top: 1rem; border-top: 1px solid var(--surface-1); }
+.settings-schema-section > header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .75rem; }
+.settings-schema-section > header > div { display: grid; gap: .12rem; }
+.settings-schema-section h3 { margin: 0; color: var(--text); font: 800 .78rem var(--font-mono); }
+.settings-schema-section p { margin: 0; color: var(--subtext-0); font-size: .68rem; line-height: 1.4; }
+/* keep future adapters visible without implying their controls work */
+.settings-unimplemented-field { opacity: .55; }
+.settings-unimplemented-field :is(h3, strong, small) { color: var(--overlay-0); }
+.settings-unimplemented-field > header small { font: 500 .6rem/1.35 var(--font-mono); }
+/* share one form column across root and nested source fields */
+.settings-object-fields,
+.settings-env-fields { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: .7rem .9rem; }
+.settings-object-fields > .settings-schema-section,
+.settings-env-fields > .settings-schema-section,
+.settings-object-fields > .settings-field-array,
+.settings-object-fields > .settings-field-record { grid-column: 1 / -1; }
+.settings-field { position: relative; display: grid; min-width: 0; align-content: start; gap: .3rem; }
+.settings-field-summary { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .65rem; }
+.settings-field-copy { display: grid; flex: 1; min-width: 0; gap: .3rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.settings-field-copy > label { min-width: 0; color: var(--subtext-0); font: inherit; }
+.settings-field-copy > strong,
+.settings-field-copy > label > strong { overflow-wrap: anywhere; }
+.settings-field-copy > small { color: var(--overlay-1); font: 500 .6rem/1.35 var(--font-mono); }
+.settings-field > label,
+.settings-blind-replace,
+.settings-password-replacement > label,
+.settings-env-add label,
+.settings-raw-editor > label { display: grid; min-width: 0; gap: .3rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.settings-field-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .45rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.settings-field-heading > strong { min-width: 0; overflow-wrap: anywhere; }
+.settings-field-heading > small { color: var(--overlay-1); font-size: .58rem; }
+.settings-field-badges { display: inline-flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: .25rem; }
+.settings-field-actions { display: inline-flex; flex: none; align-items: center; gap: .25rem; }
+/* keep boolean switches centered beside their full field copy */
+.settings-field-boolean .client-settings-toggle { flex: none; min-height: 1.8rem; }
+.settings-field > label > small,
+.settings-protected-field > small { color: var(--overlay-1); font: 500 .6rem/1.35 var(--font-mono); }
+/* reserve source provenance styling for environment precedence details */
+.settings-field .settings-field-origin { color: var(--overlay-0); font-size: .56rem; }
+.settings-field input[type='text'],
+.settings-field input[type='number'],
+.settings-field input[type='password'],
+.settings-field textarea,
+.settings-json-input,
+.settings-env-add input,
+.settings-raw-editor textarea,
+.settings-password-replacement input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .5rem .58rem; background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); color: var(--text); box-shadow: inset 0 1px #0003; font: 600 .7rem/1.4 var(--font-mono); }
+.settings-field textarea,
+.settings-json-input { min-height: 5.5rem; resize: vertical; }
+.settings-field input:focus-visible,
+.settings-field textarea:focus-visible,
+.settings-json-input:focus-visible,
+.settings-env-add input:focus-visible,
+.settings-raw-editor textarea:focus-visible,
+.settings-password-replacement input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* default to compact outlines without overriding dedicated settings controls */
+.settings-center :where(button) { min-height: 1.85rem; justify-content: center; border-color: var(--surface-2); padding: .3rem .55rem; background: transparent; color: var(--blue); box-shadow: none; font: 600 .65rem/1.35 var(--font-mono); }
+.settings-center :where(button:not(:disabled):hover) { border-color: var(--blue); color: var(--text); }
+.settings-center button:not(:disabled):hover { filter: none; }
+/* reserve solid purple for explicit primary actions */
+.settings-center button.settings-primary-button { border-color: var(--mauve); background: var(--mauve); color: var(--crust); }
+.settings-center button.settings-primary-button:not(:disabled):hover { border-color: var(--lavender); background: var(--lavender); color: var(--crust); }
+.settings-field button.danger,
+.settings-schema-section button.danger,
+.settings-record button.danger,
+.settings-raw-editor button.danger { color: var(--red); }
+.settings-field button.danger:not(:disabled):hover,
+.settings-schema-section button.danger:not(:disabled):hover,
+.settings-record button.danger:not(:disabled):hover,
+.settings-raw-editor button.danger:not(:disabled):hover { border-color: var(--red); }
+.settings-remove-button { flex: none; align-items: center; gap: .32rem; color: var(--red); }
+.settings-remove-button .panel-header-icon { flex: none; width: .9rem; height: .9rem; }
+/* keep protection cards out of the environment field grid */
+.settings-protected-field:not(.settings-environment-field) { border: 1px solid color-mix(in srgb, var(--mauve) 35%, var(--surface-1)); border-radius: var(--control-radius); padding: .65rem; background: color-mix(in srgb, var(--mauve) 5%, transparent); }
+.settings-protected-badge { flex: none; border: 1px solid color-mix(in srgb, var(--mauve) 50%, var(--surface-2)); border-radius: 999px; padding: .15rem .35rem; color: var(--mauve); font-size: .55rem; }
+.settings-trusted-badge { flex: none; border: 1px solid color-mix(in srgb, var(--yellow) 50%, var(--surface-2)); border-radius: 999px; padding: .15rem .35rem; color: var(--yellow); font-size: .55rem; }
+.settings-masked-value { min-height: 2.15rem; border: 1px dashed var(--surface-2); border-radius: var(--control-radius); padding: .5rem .6rem; color: var(--overlay-1); font: 700 .7rem var(--font-mono); letter-spacing: .08em; }
+/* contain disclosure inside the field while reserving its trailing text area */
+.settings-secret-control { position: relative; min-width: 0; }
+.settings-secret-control > .settings-masked-value { display: block; box-sizing: border-box; min-height: 2.6rem; padding-right: 2.8rem; }
+/* match single-line fields and center the masking glyphs vertically */
+.settings-environment-secret-control > .settings-masked-value { display: flex; height: var(--settings-control-height); min-height: var(--settings-control-height); align-items: center; line-height: 1; white-space: nowrap; }
+.settings-field .settings-environment-secret-control > input { display: block; padding-right: 2.8rem; }
+/* keep the native textarea scrollbar wholly left of the eye's trailing rail */
+.settings-secret-control:has(> textarea) { border: 1px solid var(--surface-2); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); }
+.settings-secret-control > textarea { display: block; border: 0; border-radius: inherit; padding-right: .6rem; background: transparent; box-shadow: none; }
+.settings-secret-control:has(> .settings-reveal-button) > textarea { width: calc(100% - 2.4rem); }
+.settings-secret-control:has(> textarea:focus-visible) { outline: 2px solid var(--blue); outline-offset: 2px; }
+.settings-secret-control > textarea:focus-visible { outline: 0; }
+.settings-secret-control > .settings-reveal-button { position: absolute; right: .35rem; top: 50%; transform: translateY(-50%); }
+.settings-inline-actions { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: .35rem; }
+.settings-blind-replace { margin-top: .2rem; }
+/* keep password entry and confirmation in separate full-width rows */
+.settings-password-replacement { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: .45rem; }
+.settings-password-replacement > .settings-field-error,
+.settings-password-replacement > .settings-inline-actions { grid-column: 1 / -1; }
+.settings-field-error { color: var(--red); font: 600 .62rem/1.35 var(--font-mono); }
+.settings-array { display: grid; min-width: 0; gap: .55rem; }
+.settings-array-list { display: grid; min-width: 0; gap: .55rem; }
+/* distinguish existing collection rows with solid transparent outlines */
+.settings-array-list > .settings-array-entry { display: grid; min-width: 0; gap: .65rem; margin: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .6rem; background: transparent; }
+.settings-array-entry-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .65rem; }
+.settings-array-actions { display: flex; flex: none; gap: .25rem; }
+.settings-array-actions button { min-width: 1.75rem; gap: .3rem; }
+/* preserve painted glyphs even when compact labels are hidden */
+.settings-array-actions .panel-header-icon { flex: none; width: .9rem; height: .9rem; }
+.settings-project-remove-confirm { display: grid; gap: .45rem; border: 1px solid color-mix(in srgb, var(--red) 58%, var(--surface-1)); border-radius: var(--control-radius); padding: .55rem; background: color-mix(in srgb, var(--red) 7%, transparent); }
+.settings-project-remove-confirm p { margin: 0; color: var(--subtext-0); font-size: .66rem; line-height: 1.4; }
+.settings-project-remove-confirm > span { display: flex; justify-content: flex-end; gap: .35rem; }
+.settings-record { display: grid; min-width: 0; gap: .55rem; }
+.settings-record-entry { display: grid; min-width: 0; gap: .5rem; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .7rem; background: transparent; }
+.settings-record-key { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .5rem; }
+.settings-record-key code { overflow: hidden; color: var(--lavender); font-size: .66rem; text-overflow: ellipsis; white-space: nowrap; }
+.settings-record-add { display: flex; min-width: 0; align-items: end; gap: .45rem; border: 1px solid transparent; border-radius: var(--control-radius); padding: .6rem; background: transparent; }
+/* keep add-placeholder copy smaller and lighter than existing item summaries */
+.settings-record-add label { display: grid; flex: 1; min-width: 0; gap: .25rem; color: var(--subtext-0); font: 400 .6rem var(--font-mono); }
+.settings-record-add > button { font: 400 .62rem var(--font-mono); }
+.settings-record-add input { box-sizing: border-box; width: 100%; min-width: 0; }
+/* keep list summaries compact while centering their icon actions against all copy */
+.settings-collection-entry { min-width: 0; margin: 0; }
+.settings-collection-entry-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .5rem; }
+.settings-collection-entry-copy { display: grid; flex: 1 1 auto; min-width: 0; gap: .15rem; }
+.settings-collection-entry-copy > :is(strong, code) { min-width: 0; overflow: hidden; color: var(--subtext-0); font: 800 .6rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.settings-collection-summary { display: block; min-width: 0; overflow: hidden; color: var(--text); font: 600 .7rem/1.4 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.settings-collection-entry-copy > small { min-width: 0; overflow: hidden; color: var(--overlay-1); font: 500 .6rem/1.35 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.settings-collection-actions { display: flex; flex: none; align-items: center; gap: .2rem; }
+/* center compact outlined list actions */
+.settings-collection-actions > button { display: grid; box-sizing: border-box; width: 1.85rem; min-width: 1.85rem; height: 1.85rem; min-height: 1.85rem; place-items: center; justify-content: center; border: 1px solid var(--surface-2); padding: 0; background: transparent; box-shadow: none; color: var(--blue); filter: none; }
+.settings-collection-actions > button:not(:disabled):hover { border-color: var(--blue); background: var(--surface-0); color: var(--text); filter: none; }
+.settings-collection-actions > button.settings-remove-button { border-color: color-mix(in srgb, var(--red) 58%, var(--surface-2)); background: transparent; color: var(--red); }
+.settings-collection-actions > button.settings-remove-button:not(:disabled):hover { border-color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); color: var(--red); }
+.settings-collection-actions > button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.settings-collection-actions > button:disabled { border-color: var(--surface-1); background: transparent; color: var(--overlay-0); filter: none; }
+.settings-collection-actions > button > span { display: none; }
+.settings-collection-actions .panel-header-icon { width: .9rem; height: .9rem; flex: none; }
+button.settings-collection-add-button { width: 100%; min-height: 2.65rem; justify-content: center; border: 1px solid transparent; background: transparent; box-shadow: none; color: var(--blue); filter: none; font: 400 .62rem var(--font-mono); }
+button.settings-collection-add-button:not(:disabled):hover { --settings-placeholder-border: var(--blue); border-color: transparent; background: transparent; color: var(--text); filter: none; }
+button.settings-collection-add-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+button.settings-collection-add-button:disabled { --settings-placeholder-border: var(--surface-1); border-color: transparent; background: transparent; color: var(--overlay-0); filter: none; }
+/* paint fixed ten-pixel dashes with eight-pixel gaps without filling the placeholder */
+.settings-record-add,
+button.settings-collection-add-button { --settings-placeholder-border: var(--surface-2); position: relative; }
+.settings-record-add::before,
+button.settings-collection-add-button::before {
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background:
+    repeating-linear-gradient(90deg, var(--settings-placeholder-border) 0 10px, transparent 10px 18px) top / 100% 1px no-repeat,
+    repeating-linear-gradient(90deg, var(--settings-placeholder-border) 0 10px, transparent 10px 18px) bottom / 100% 1px no-repeat,
+    repeating-linear-gradient(0deg, var(--settings-placeholder-border) 0 10px, transparent 10px 18px) left / 1px 100% no-repeat,
+    repeating-linear-gradient(0deg, var(--settings-placeholder-border) 0 10px, transparent 10px 18px) right / 1px 100% no-repeat;
+  content: '';
+  pointer-events: none;
+}
+.settings-record-add:focus-within { --settings-placeholder-border: var(--blue); }
+.settings-record-add:has(input:disabled) { --settings-placeholder-border: var(--surface-1); }
+/* retain a visible native outline when forced colors suppress decorative backgrounds */
+@media (forced-colors: active) {
+  .settings-record-add,
+  button.settings-collection-add-button,
+  button.settings-collection-add-button:not(:disabled):hover { border-color: ButtonText; border-style: dashed; }
+  button.settings-collection-add-button:disabled { border-color: GrayText; }
+  .settings-record-add::before,
+  button.settings-collection-add-button::before { display: none; }
+}
+.settings-collection-editor { display: grid; min-width: 0; gap: .7rem; border-top: 1px solid var(--surface-1); padding-top: .7rem; }
+.settings-collection-issue-badge { width: max-content; border: 1px solid var(--red); border-radius: 999px; padding: .1rem .35rem; color: var(--red); font: 700 .58rem var(--font-mono); }
+.settings-collection-issue { color: var(--red); font: 600 .62rem/1.4 var(--font-mono); overflow-wrap: anywhere; }
+.settings-collection-protected-note { margin: 0; color: var(--subtext-0); font: 500 .64rem/1.4 var(--font-mono); }
+/* retain usable summaries even in very narrow resizable splits */
+@container settings-panel (max-width: 360px) {
+  .settings-collection-entry-header { flex-wrap: wrap; }
+  .settings-collection-entry-copy { flex-basis: 5rem; }
+  .settings-collection-actions { margin-left: auto; }
+}
+.settings-union { display: grid; min-width: 0; gap: .5rem; }
+/* present the installation mode as one segmented control */
+.settings-installation-editor { display: grid; min-width: 0; gap: 1rem; }
+.settings-installation-mode { display: flex; width: max-content; max-width: 100%; min-width: 0; flex-wrap: wrap; margin: 0; border: 0; padding: 0; }
+.settings-installation-mode > legend { width: 100%; margin: 0 0 .3rem; padding: 0; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.settings-installation-mode > label { position: relative; display: inline-flex; min-width: 6rem; min-height: 1.9rem; align-items: center; justify-content: center; border: 1px solid var(--surface-2); padding: .28rem .65rem; background: transparent; color: var(--subtext-0); cursor: pointer; font: 700 .66rem var(--font-mono); }
+.settings-installation-mode > label:first-of-type { border-radius: var(--control-radius) 0 0 var(--control-radius); }
+.settings-installation-mode > label:last-of-type { margin-left: -1px; border-radius: 0 var(--control-radius) var(--control-radius) 0; }
+.settings-installation-mode > label:has(input:checked) { z-index: 1; border-color: var(--blue); background: color-mix(in srgb, var(--blue) 10%, transparent); color: var(--blue); }
+.settings-installation-mode > label:has(input:focus-visible) { outline: 2px solid var(--blue); outline-offset: 2px; }
+.settings-installation-mode > label:has(input:disabled) { color: var(--overlay-0); cursor: not-allowed; opacity: .55; }
+/* mute file-only values without dimming their working source-navigation links */
+.settings-installation-read-only :is(input, textarea, button):disabled { color: var(--overlay-0); cursor: not-allowed; opacity: .55; }
+/* keep pinned file navigation beside the path without adopting square list-action styling */
+button.settings-installation-file-link { flex: 0 1 auto; max-width: 100%; min-height: 1.85rem; margin-left: auto; border: 0; padding: .25rem 0 .25rem .4rem; background: transparent; box-shadow: none; color: var(--blue); filter: none; font: 400 .62rem/1.4 var(--font-mono); text-align: right; text-decoration: underline; text-underline-offset: .15em; }
+button.settings-installation-file-link:not(:disabled):hover { background: transparent; color: var(--text); filter: none; }
+button.settings-installation-file-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+button.settings-installation-file-link:disabled { background: transparent; color: var(--overlay-0); filter: none; }
+.settings-installation-mode input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; }
+/* keep the creation placeholder in one ordinary environment grid cell */
+.settings-env-add { display: grid; min-width: 0; align-content: start; }
+.settings-env-add > .settings-collection-add-button { height: 100%; min-height: 4rem; }
+.settings-env-add-form { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); align-items: start; gap: .45rem; }
+.settings-env-add-form > .settings-inline-actions { justify-content: flex-end; }
+.settings-env-add label { font-weight: 400; }
+/* use a title-sized name above the normal full-width value control */
+.settings-center .settings-env-add input.settings-env-variable-name { width: 24ch; max-width: 100%; height: 1.45rem; min-height: 1.45rem; padding: .15rem .3rem; color: var(--subtext-0); font: 700 .62rem/1.35 var(--font-mono); }
+/* keep custom deletion beside its name rather than beside the field description */
+.settings-environment-key { display: inline-flex; min-width: 0; align-items: center; gap: .35rem; }
+.settings-environment-key > strong { min-width: 0; overflow-wrap: anywhere; }
+.settings-environment-key > .settings-remove-button { display: inline-flex; box-sizing: border-box; width: 1.4rem; height: 1.4rem; min-height: 1.4rem; justify-content: center; border-color: color-mix(in srgb, var(--red) 58%, var(--surface-2)); padding: 0; background: transparent; box-shadow: none; }
+.settings-environment-key > .settings-remove-button > .panel-header-icon { width: .75rem; height: .75rem; }
+.settings-raw-editor { display: grid; min-width: 0; gap: .65rem; }
+.settings-raw-mode { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .75rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); padding: .58rem .65rem; background: color-mix(in srgb, var(--surface-0) 72%, transparent); }
+.settings-raw-mode > span { display: grid; min-width: 0; gap: .12rem; }
+.settings-raw-mode strong { color: var(--text); font: 750 .65rem var(--font-mono); }
+.settings-raw-mode small { color: var(--subtext-0); font: 500 .61rem/1.4 var(--font-mono); }
+.settings-raw-mode button { width: max-content; flex: none; min-height: 1.9rem; justify-content: center; border-color: var(--surface-2); padding: .3rem .55rem; background: transparent; color: var(--blue); box-shadow: none; font: 700 .62rem var(--font-mono); }
+.settings-raw-editor textarea { min-height: 24rem; resize: vertical; tab-size: 2; white-space: pre; }
+.settings-trusted-warning,
+.settings-tracked-warning { display: grid; gap: .15rem; border: 1px solid color-mix(in srgb, var(--yellow) 46%, var(--surface-1)); border-radius: var(--control-radius); padding: .6rem; background: color-mix(in srgb, var(--yellow) 7%, transparent); }
+.settings-trusted-warning strong,
+.settings-tracked-warning strong { color: var(--yellow); font: 800 .67rem var(--font-mono); }
+.settings-trusted-warning span,
+.settings-tracked-warning span { color: var(--subtext-0); font-size: .67rem; line-height: 1.42; }
+.settings-tracked-warning { border-color: color-mix(in srgb, var(--red) 45%, var(--surface-1)); background: color-mix(in srgb, var(--red) 6%, transparent); }
+.settings-tracked-warning strong { color: var(--red); }
+.settings-raw-masked { display: grid; min-height: 12rem; place-content: center; justify-items: center; gap: .8rem; border: 1px dashed var(--surface-2); border-radius: var(--control-radius); color: var(--overlay-1); font: 700 .74rem var(--font-mono); }
+/* collect ownership choices only inside the save-time split overlay */
+.settings-handover-fields { display: grid; min-width: 0; gap: 1rem; }
+.settings-handover-options { display: grid; min-width: 0; gap: .4rem; margin: 0; border: 0; padding: 0; }
+.settings-handover-options legend { margin-bottom: .4rem; padding: 0; color: var(--blue); font: 800 .72rem var(--font-mono); }
+.settings-handover-options > label { display: flex; min-width: 0; align-items: flex-start; gap: .5rem; border: 1px solid transparent; border-radius: var(--control-radius); padding: .5rem; cursor: pointer; }
+.settings-handover-options > label:has(input:checked) { border-color: color-mix(in srgb, var(--blue) 55%, var(--surface-2)); background: color-mix(in srgb, var(--blue) 7%, transparent); }
+.settings-handover-options input { flex: none; margin-top: .15rem; accent-color: var(--blue); }
+.settings-handover-options label span { display: grid; min-width: 0; gap: .12rem; }
+.settings-handover-options label strong { color: var(--text); font: 700 .7rem var(--font-mono); }
+.settings-handover-options label small { color: var(--subtext-0); font-size: .66rem; line-height: 1.4; }
+.settings-feedback { display: grid; gap: .3rem; }
+.settings-feedback p { margin: 0; border-radius: var(--control-radius); padding: .5rem .6rem; background: var(--surface-0); color: var(--subtext-0); font: 600 .64rem/1.4 var(--font-mono); }
+.settings-feedback p.warning { color: var(--yellow); }
+.settings-feedback p.error { color: var(--red); }
+.settings-restart-notice { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .65rem; min-width: 0; border: 1px solid color-mix(in srgb, var(--yellow) 62%, var(--surface-1)); border-radius: var(--control-radius); padding: .58rem .7rem; background: color-mix(in srgb, var(--mantle) 92%, var(--yellow)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent); }
+.settings-restart-notice.failed { border-color: color-mix(in srgb, var(--red) 68%, var(--surface-1)); background: color-mix(in srgb, var(--mantle) 90%, var(--red)); }
+.settings-restart-icon { display: grid; width: 1.4rem; height: 1.4rem; place-items: center; border: 1px solid currentColor; border-radius: 50%; color: var(--yellow); font: 900 .78rem var(--font-mono); }
+.settings-restart-notice.failed .settings-restart-icon { color: var(--red); }
+.settings-restart-icon .spinner { width: .72rem; height: .72rem; border-width: 1.5px; }
+.settings-restart-copy { display: grid; min-width: 0; gap: .14rem; }
+.settings-restart-copy strong { color: var(--text); font: 800 .73rem var(--font-mono); }
+.settings-restart-copy span,
+.settings-restart-copy small,
+.settings-restart-copy a { color: var(--subtext-0); font: 500 .63rem/1.35 var(--font-mono); overflow-wrap: anywhere; }
+.settings-restart-copy small { color: var(--red); }
+.settings-restart-copy a { color: var(--blue); }
+.settings-restart-notice > button { flex: none; min-height: 2rem; justify-content: center; border-color: color-mix(in srgb, var(--yellow) 70%, var(--surface-1)); padding: .3rem .58rem; background: transparent; color: var(--yellow); box-shadow: none; font: 800 .65rem var(--font-mono); }
+.settings-restart-notice.failed > button { border-color: var(--red); color: var(--red); }
+@media (max-width: 780px) {
+  .settings-center-header { display: grid; }
+  .settings-center-summary { flex-wrap: wrap; }
+  .settings-dirty-summary { width: max-content; }
+  .settings-center-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  /* show one accessible custom dropdown instead of the horizontal tab strip */
+  .settings-source-select { display: grid; }
+  .settings-source-nav { display: none; }
+  .settings-source-header { display: grid; }
+}
+@media (max-width: 520px) {
+  .settings-source-panel { padding: .72rem; }
+  .settings-record-add { align-items: stretch; flex-direction: column; }
+  .settings-restart-notice { grid-template-columns: auto minmax(0, 1fr); }
+  .settings-restart-notice > button { grid-column: 1 / -1; width: 100%; }
+  .settings-raw-mode { align-items: stretch; flex-direction: column; }
+  .settings-raw-mode button { width: 100%; }
+  .settings-array-actions .settings-array-remove-label { display: none; }
+}
+
+/* keep narrow desktop splits as usable as phone panels */
+@container settings-panel (max-width: 900px) {
+  .settings-center-header { flex-direction: column; }
+  .settings-center-summary { flex-wrap: wrap; }
+  .settings-center-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-source-nav { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--surface-1); }
+  .settings-source-nav h3 { display: none; }
+  .settings-source-nav button { width: max-content; flex: none; }
+}
+@container settings-panel (max-width: 640px) {
+  .settings-source-header { display: grid; }
+}
+
+/* separate staged voice fields from browser preference controls */
+.settings-voice-advanced { display: grid; min-width: 0; gap: .8rem; padding-top: 1rem; border-top: 1px solid var(--surface-1); }
+.settings-voice-advanced > header { display: grid; gap: .3rem; }
+.settings-voice-advanced h3 { margin: 0; font-size: .85rem; }
+.settings-voice-advanced p { color: var(--subtext-0); font-size: .68rem; }
+
+/* edit local artwork beside its consumer without adding navigation tabs */
+.settings-application-icon { display: grid; min-width: 0; gap: .8rem; padding-top: .9rem; border-top: 1px solid var(--surface-1); }
+.settings-application-icon > header { display: grid; gap: .3rem; }
+.settings-application-icon h3 { margin: 0; font-size: .85rem; }
+.settings-application-icon p { color: var(--subtext-0); font-size: .68rem; line-height: 1.45; }
+.settings-icon-choice { display: grid; min-width: 0; grid-template-columns: 3.5rem minmax(0, 1fr); align-items: start; gap: .7rem; }
+.settings-icon-choice > div { display: grid; min-width: 0; gap: .35rem; }
+.settings-icon-choice small { color: var(--overlay-0); font-size: .6rem; }
+.settings-icon-choice button:not(.settings-select-trigger) { width: max-content; padding: .3rem .48rem; background: transparent; color: var(--blue); box-shadow: none; font: 700 .6rem var(--font-mono); }
+.settings-icon-selected-preview { display: grid; width: 3.5rem; height: 3.5rem; place-items: center; }
+.settings-icon-thumbnail { display: grid; width: 2.3rem; height: 2.3rem; flex: none; place-items: center; }
+.settings-icon-selected-preview > img, .settings-icon-thumbnail > img { width: 100%; height: 100%; object-fit: contain; }
+.settings-icon-preview-unavailable { display: grid; width: 100%; height: 100%; place-items: center; color: var(--overlay-1); }
+.settings-icon-preview-unavailable > svg { width: 80%; height: 80%; }
+.settings-icon-artwork { display: grid; min-width: 0; gap: .65rem; }
+.settings-icon-source { min-width: 0; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: color-mix(in srgb, var(--crust) 45%, var(--mantle)); }
+.settings-icon-source > summary { display: flex; min-width: 0; align-items: center; gap: .65rem; padding: .65rem; list-style: none; cursor: pointer; }
+.settings-icon-source > summary::-webkit-details-marker { display: none; }
+.settings-icon-source > summary > span:not(.settings-icon-thumbnail) { display: grid; flex: 1; min-width: 0; gap: .2rem; }
+.settings-icon-source > summary strong { overflow-wrap: anywhere; color: var(--text); font: 700 .7rem var(--font-mono); }
+.settings-icon-source > summary small { color: var(--overlay-1); font: 500 .6rem var(--font-mono); }
+.settings-icon-source > summary > svg { width: 1rem; height: 1rem; flex: none; color: var(--mauve); }
+/* keep source removal beside the edit glyph and centered against all copy */
+.settings-icon-source > summary > .settings-remove-button { box-sizing: border-box; width: 2rem; height: 2rem; min-height: 2rem; justify-content: center; padding: .3rem; border-color: var(--surface-2); background: transparent; color: var(--red); box-shadow: none; }
+.settings-icon-source > summary > .settings-remove-button:not(:disabled):hover { border-color: var(--red); background: var(--surface-1); }
+/* mirror native disclosure state without duplicating it in react */
+.settings-icon-source > summary .settings-icon-source-close,
+.settings-icon-source[open] > summary .settings-icon-source-edit { display: none; }
+.settings-icon-source[open] > summary .settings-icon-source-close { display: inline; }
+.settings-icon-source > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.settings-icon-source-content { display: grid; min-width: 0; gap: .7rem; padding: .7rem; border-top: 1px solid var(--surface-1); }
+.settings-icon-source-content > code { overflow-wrap: anywhere; color: var(--overlay-1); font: 500 .6rem var(--font-mono); }
+
+/* keep file-backed shortcut controls inside a resizable settings split */
+.settings-keyboard { display: grid; min-width: 0; gap: .8rem; }
+.settings-keyboard > p,
+.settings-keyboard-advanced > p { margin: 0; color: var(--subtext-0); font-size: .7rem; line-height: 1.45; }
+.settings-keyboard > button { width: max-content; justify-content: center; }
+.settings-keyboard .shortcut-editor { min-width: 0; padding: 0; }
+.settings-keyboard .shortcut-setting { align-items: center; }
+.settings-keyboard .shortcut-remove { color: var(--red); border-color: color-mix(in srgb, var(--red) 50%, var(--surface-2)); }
+.settings-keyboard-advanced { min-width: 0; border-top: 1px solid var(--surface-1); padding-top: .75rem; }
+.settings-keyboard-advanced > summary { color: var(--mauve); cursor: pointer; font: 700 .7rem var(--font-mono); }
+.settings-keyboard-advanced[open] > summary { margin-bottom: .7rem; }
+.settings-keyboard-advanced > p { margin-bottom: .75rem; }
+/* center right actions against the complete copy rather than just the first label */
+@container settings-panel (max-width: 620px) {
+  .settings-keyboard .shortcut-setting { grid-template-columns: minmax(0, 1fr) auto; }
+  .settings-keyboard .shortcut-setting-description { grid-column: 1; grid-row: 1; }
+  .settings-keyboard .shortcut-setting-keys { grid-column: 1; grid-row: 2; }
+  .settings-keyboard .shortcut-binding-controls { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+  .settings-keyboard .shortcut-keys { flex-wrap: wrap; }
+}
+
+/* reuse the existing header pill without leaving empty action placeholders */
+.settings-header-actions { display: contents; }
+.client-settings-page.settings-center-page { padding-top: max(var(--panel-header-clearance), var(--settings-header-clearance, 0px), var(--settings-toast-region-clearance, var(--toast-region-clearance, 0px))); }
+.settings-center-page > .panel-header { flex-wrap: wrap; }
+.settings-center-page .panel-header-actions { max-width: 100%; flex-wrap: wrap; margin-left: auto; }
+.settings-center-page .settings-header-labelled-action { display: inline-flex; flex: none; width: auto; align-items: center; justify-content: center; gap: .35rem; padding: 0 .45rem; font: 700 .62rem var(--font-mono); white-space: nowrap; }
+.settings-center-page .settings-header-validate { color: var(--green); }
+.settings-center-page .settings-header-discard { color: var(--red); }
+.settings-center-page .settings-header-discard:not(:disabled):hover { border-color: var(--red); color: var(--red); }
+.settings-center-page .settings-header-save { border-color: var(--mauve); background: var(--mauve); color: var(--crust); }
+.settings-center-page .settings-header-save:not(:disabled):hover { border-color: var(--lavender); background: var(--lavender); color: var(--crust); }

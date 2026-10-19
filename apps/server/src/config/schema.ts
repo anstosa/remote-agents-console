@@ -99,7 +99,7 @@ const integrationFeatures = z.object({
   realtime: z.object({ enabled: z.boolean().default(false), name: davoName.default(defaultDavoName), context: davoContext.default(defaultDavoContext), writeToolsEnabled: z.boolean().default(false) }).strict().default({}),
   multiInstance: z.object({ enabled: z.boolean().default(false) }).strict().default({})
 }).strict().default({});
-const sourceSchema = z.object({
+export const sourceSchema = z.object({
   listen: z.object({ host: z.string(), port: z.number().int().min(1).max(65535) }).strict().default({ host: '127.0.0.1', port: 8787 }),
   name: serverName.default('Remote Agents'),
   icon: instanceIcon.optional(),
@@ -130,7 +130,7 @@ const sourceSchema = z.object({
   projects: z.array(z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/).refine(value => value !== 'agent' && value !== 'scratch', 'project id `agent` and `scratch` are reserved'), label: z.string().max(120).optional(), defaultBranch: defaultBranch.optional(), path: z.string().min(1), hostPath: z.string().startsWith('/').optional(), worktreeOrder: z.array(z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden')).max(2000).optional(), worktreeOverrides: z.array(worktreeOverride).max(2000).optional(), worktreesDirectory: z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden').optional(), externalUrl: previewExternalUrl.optional(), port: previewPort.optional(), hostname: previewHostname.optional(), commands: stackCommands.optional(), newTask: command.optional(), push: pushAction }).strict()).max(100).default([])
 }).strict();
 export type ConfigInput = z.input<typeof sourceSchema>;
-export type RemoteServer = { url: URL };
+export type RemoteServer = { url: URL; name?: string; icon?: InstanceIcon };
 export type IntegrationConfig = z.output<typeof integrationFeatures>;
 export type DavoSettings = z.output<typeof davoSettingsSchema>;
 export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; review: ResolvedReviewConfig; projects: Project[] };
@@ -376,8 +376,8 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
   if (wildcard.has(parsed.listen.host)) throw new Error('listener must bind to a specific address, not a wildcard');
   if (parsed.proxy.trustedSourceIps.some((ip) => !loopback.has(ip))) throw new Error('only loopback proxy sources are permitted');
   const publicOrigin = canonicalOrigin(parsed.publicOrigin, 'publicOrigin', true);
-  // retain only canonical remote origins
-  const remoteServers = parsed.remoteServers.map(server => ({ url: canonicalOrigin(server.url, 'remote server') }));
+  // retain canonical remote origins and optional local identity overrides
+  const remoteServers = parsed.remoteServers.map(server => ({ url: canonicalOrigin(server.url, 'remote server'), ...(server.name === undefined ? {} : { name: server.name }), ...(server.icon === undefined ? {} : { icon: server.icon }) }));
   const serverUrls = new Set([publicOrigin.origin]);
   // reject duplicate server switch targets
   for (const server of remoteServers) {

@@ -276,10 +276,14 @@ deployment can run plain Codex in some worktrees and OMX in others.
 }
 ```
 
-`name` identifies the current Remote Agents server. Remote entries contain only
-their canonical URL; each server publishes its own name and icon through the
-authenticated peer-status API. The login, control, and output screens show one
-direct navigation button for each server.
+`name` identifies the current Remote Agents server. Remote entries require their
+canonical URL and may include optional local `name` and `icon` overrides. Without
+an override, each server's identity comes from its authenticated peer-status API.
+In Application settings, leave Name blank or select **Server Default** for Icon
+to remove the corresponding override; the controls remain visible and show the
+published defaults. Save changes persists these choices to config, and a RAC
+restart applies them to navigation. Overrides affect only this console's display
+of the remote, never the remote server's own published identity.
 
 Only the terminal icon is bundled. Custom `heart` and `potato` SVGs are
 server-local files named `heart.svg` and `potato.svg` in an `instance-icons/`

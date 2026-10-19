@@ -1,5 +1,8 @@
 import { expect, test } from '@playwright/test';
 
+// keep the fixture call entry point enabled through authenticated session refreshes
+const enabledDavo = { enabled: true, available: true, name: 'Davo', context: '' };
+
 test('opens Davo with the selected canonical context', async ({ page }) => {
   const longWorktreeLabel = `Very long worktree label ${'x'.repeat(120)}`;
   await page.addInitScript(() => {
@@ -32,11 +35,11 @@ test('opens Davo with the selected canonical context', async ({ page }) => {
     const request = route.request();
     const url = new URL(request.url());
     // restore one authenticated browser session
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', server: { name: currentServerName, url: 'https://framework.santosa.dev', remotes: [] } } });
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', davo: enabledDavo, server: { name: currentServerName, url: 'https://framework.santosa.dev', remotes: [] } } });
     // persist one renamed client
     if (url.pathname === '/api/auth/device-name') {
       renamedClient = request.postDataJSON();
-      return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Office Mac', server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
+      return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Office Mac', davo: enabledDavo, server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
     }
     // persist one renamed server
     if (url.pathname === '/api/server/name') {
@@ -91,22 +94,26 @@ test('opens Davo with the selected canonical context', async ({ page }) => {
   await expect.poll(() => settings.evaluate(button => { const box = button.getBoundingClientRect(); return Math.abs(box.width - box.height); })).toBeLessThanOrEqual(1);
   await settings.click();
   const settingsPage = page.getByRole('dialog', { name: 'Settings' });
-  const clientCard = settingsPage.getByRole('group', { name: 'Client' });
+  const clientCard = settingsPage.getByRole('group', { name: 'Name', exact: true });
   await expect(clientCard).toContainText('Test device');
-  await expect(settingsPage.getByRole('button', { name: 'Rename Client' })).toBeVisible();
+  await expect(settingsPage.getByRole('button', { name: 'Rename browser name' })).toBeVisible();
   await expect(settingsPage.getByRole('group', { name: 'Server' })).toHaveCount(0);
   await expect(settingsPage.getByRole('button', { name: 'Rename Server' })).toHaveCount(0);
   await expect(settingsPage.getByRole('button', { name: '+ Add account' })).toHaveCount(0);
   await expect(settingsPage.getByRole('button', { name: 'Update Server' })).toHaveCount(0);
-  await settingsPage.getByRole('button', { name: 'Rename Client' }).click();
+  await settingsPage.getByRole('button', { name: 'Rename browser name' }).click();
   await expect(settingsPage).toBeVisible();
-  const renameDialog = page.getByRole('dialog', { name: 'Rename Client' });
+  const renameDialog = page.getByRole('dialog', { name: 'Rename browser' });
   await expect(renameDialog).toBeVisible();
-  await renameDialog.getByLabel('Client name').fill('Office Mac');
-  await renameDialog.getByRole('button', { name: 'Save' }).click();
+  await renameDialog.getByLabel('Name', { exact: true }).fill('Office Mac');
+  await renameDialog.getByRole('button', { name: 'Done', exact: true }).click();
   await expect(renameDialog).toHaveCount(0);
+  expect(renamedClient).toBeUndefined();
+  await expect(settingsPage.getByRole('group', { name: 'Name', exact: true })).toContainText('Office Mac');
+  await settingsPage.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect.poll(() => renamedClient).toEqual({ deviceName: 'Office Mac' });
   expect(renamedClient).toEqual({ deviceName: 'Office Mac' });
-  await expect(settingsPage.getByRole('group', { name: 'Client' })).toContainText('Office Mac');
+  await expect(settingsPage.getByRole('group', { name: 'Name', exact: true })).toContainText('Office Mac');
   await settingsPage.getByRole('button', { name: 'Close settings' }).click();
   const serverSelector = page.getByRole('button', { name: /^Switch server/u });
   await expect(serverSelector).toHaveAccessibleName(/update available/u);
@@ -198,7 +205,7 @@ test('shows graceful Davo context fallbacks without worktree or instance data', 
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     // restore a session without instance metadata
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', server: { name: '   ', url: '', remotes: [] } } });
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', davo: enabledDavo, server: { name: '   ', url: '', remotes: [] } } });
     // provide one scratch agent without a worktree
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-scratch', sessionId: 'socket:$1', home: '/tmp', title: 'Scratch', unread: false }], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
@@ -271,7 +278,7 @@ test('mobile swaps between an ongoing Davo call and the main UI', async ({ page 
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     // restore one authenticated browser session
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', davo: enabledDavo, server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
     // provide one selected agent and worktree
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-cora', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready', unread: false }], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
@@ -396,7 +403,7 @@ test('waits for MCP tools and requests a spoken follow-up after tool completion'
     const request = route.request();
     const url = new URL(request.url());
     // restore one authenticated browser session
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'voice-csrf', active: true, deviceName: 'Test device', davo: enabledDavo, server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
     // provide two selectable active worktrees
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-cora', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 1, title: 'Ready', unread: false }, { id: 'agent-ferry', paneId: '%2', sessionId: 'socket:$2', socketFingerprint: 'socket', home: '/worktrees/ferry-fyi', worktreeId: 'ferry-fyi', worktreeLabel: 'Ferry FYI', worktreeOrder: 2, title: 'Ready', unread: false }], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });

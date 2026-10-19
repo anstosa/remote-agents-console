@@ -6,6 +6,7 @@ import type { AgentKind } from '../adapters/types.js';
 import { serverCheckout, serverCheckoutOnHost } from '../workspaces/server-checkout.js';
 import { run, tmuxFormatLiteral } from '../tmux/command.js';
 import { isFullGitSha } from '../git/revision.js';
+import { HostSettingsTransport, settingsControlRoot } from '../settings/transport.js';
 
 export type ServerUpdateState = 'queued' | 'running' | 'complete' | 'failed';
 export type ServerUpdateStatus = { id: string; kind: 'update'; state: ServerUpdateState; targetSha: string };
@@ -180,7 +181,10 @@ export class ServerAdminService {
     await writeFile(this.statusPath(id), `${JSON.stringify(status)}\n`, { mode: 0o600 });
     const session = `rac-update-${id.slice(0, 12)}`;
     const script = join(this.hostRepository, 'scripts', 'update-server.sh');
-    const result = await this.runCommand(this.tmuxBinary, ['-S', this.tmuxSocket, 'new-session', '-d', '-s', session, '-c', tmuxFormatLiteral(this.hostRepository), '/bin/bash', script, id, targetSha], undefined, 5_000);
+    // source the updater lock locator only from immutable installer metadata
+    const installation = await new HostSettingsTransport(settingsControlRoot()).installation();
+    const controlEnvironment = installation?.hostControlRoot === undefined ? [] : ['-e', `RAC_SETTINGS_CONTROL_ROOT=${installation.hostControlRoot}`];
+    const result = await this.runCommand(this.tmuxBinary, ['-S', this.tmuxSocket, 'new-session', '-d', '-s', session, '-c', tmuxFormatLiteral(this.hostRepository), ...controlEnvironment, '/bin/bash', script, id, targetSha], undefined, 5_000);
     // replace queued state after launch failure
     if (result.code !== 0) {
       const failed: ServerUpdateStatus = { ...status, state: 'failed' };

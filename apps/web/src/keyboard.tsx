@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { eventChord, isTableBinding, isTerminalBinding, keyActions, lookupKeyBinding, resolveKeyTables, type KeyBinding, type KeyRow, type KeysConfig, type ResolvedKeyTables } from '../../server/src/config/keys.js';
+import { eventChord, isTableBinding, isTerminalBinding, keyActions, lookupKeyBinding, resolveKeyTables, terminalProgramName, type KeyBinding, type KeyRow, type KeysConfig, type ResolvedKeyTables } from '../../server/src/config/keys.js';
 import { createKeyDispatcher, type KeyDispatchState } from './key-dispatch.js';
-import { resolveShortcutTables, reconcileShortcutOverrides, shortcutOrigin, shortcutKeys, shortcutLabel, shortcutCommands, editShortcutOverrides, validateShortcutOverrides, type ShortcutOverrides, type ShortcutCommand, type ShortcutEdit } from './shortcut-config.js';
+import { editServerShortcuts, resetServerShortcuts, serverShortcutModel, shortcutKeys, shortcutLabel, shortcutCommands, type ServerShortcutCommand, type ShortcutCommand, type ShortcutEdit } from './shortcut-config.js';
+import type { SettingsPatch } from './settings/contracts.js';
+import { SettingsSelect } from './settings/select.js';
 import { resetTerminalFontSize, stepTerminalFontSize } from './terminal-font-size.js';
 
 // What a handler hears about the key that ran it; undefined when the palette runs it.
@@ -13,37 +15,20 @@ export type KeyActionHandler = (event: KeyboardEvent | undefined, context: KeyAc
 // the action a `{ terminal }` binding runs; its handler asks the server to open the binding's Terminal
 export const terminalBindingAction = 'open-terminal-binding';
 
-export const shortcutStorageKey = 'rac.keyboard-shortcuts';
-// tolerate unavailable or malformed browser storage
-const readShortcuts = (): { choices: ShortcutOverrides; error?: string } => {
-  try { return { choices: validateShortcutOverrides(JSON.parse(localStorage.getItem(shortcutStorageKey) ?? '{}')) }; }
-  catch { return { choices: {}, error: 'Saved shortcuts could not be loaded. Defaults are active; reset all shortcuts to clear the saved preferences.' }; }
-};
 let configured: KeysConfig | undefined;
 let baseTables = resolveKeyTables(undefined);
-const initialShortcuts = readShortcuts();
-let savedShortcuts = initialShortcuts.choices;
-let shortcutLoadError = initialShortcuts.error;
-const initialReconciliation = reconcileShortcutOverrides(baseTables, savedShortcuts);
-let shortcuts = initialReconciliation.overrides;
-// preserve conflicting choices while explaining why their keys do not run
-const conflictWarning = (conflicts: string[]) => conflicts.length > 0 ? `Conflicting shortcuts are ignored until resolved: ${conflicts.map(conflict => conflict.replace(/^root\./u, '')).join(', ')}. Edit or remove a shared shortcut to resolve the conflict.` : undefined;
-let shortcutWarning = shortcutLoadError ?? conflictWarning(initialReconciliation.conflicts);
-let tables = resolveShortcutTables(baseTables, shortcuts);
+let tables = baseTables;
 let tablesRevision = 0;
 const tableListeners = new Set<() => void>();
-// refresh dispatch and every mounted shortcut surface together
+// refresh dispatch and every mounted shortcut reference together
 const refreshTables = () => {
-  const reconciled = reconcileShortcutOverrides(baseTables, savedShortcuts);
-  shortcuts = reconciled.overrides;
-  shortcutWarning = shortcutLoadError ?? conflictWarning(reconciled.conflicts);
-  tables = resolveShortcutTables(baseTables, shortcuts);
+  tables = baseTables;
   dispatcher.reset();
   clearKeyPress();
   tablesRevision += 1;
   tableListeners.forEach(listener => listener());
 };
-// adopt the operator's tables while retaining this browser's choices
+// adopt only the server dashboard's effective key config
 export const setKeysConfig = (keys: KeysConfig | undefined) => {
   // skip identical dashboard updates
   if (JSON.stringify(keys) === JSON.stringify(configured)) return;
@@ -51,45 +36,16 @@ export const setKeysConfig = (keys: KeysConfig | undefined) => {
   baseTables = resolveKeyTables(keys);
   refreshTables();
 };
-// subscribe both the reference and the settings editor to live bindings
+// subscribe shortcut references to live server bindings
 const useKeyTables = () => {
   useSyncExternalStore(listener => { tableListeners.add(listener); return () => { tableListeners.delete(listener); }; }, () => tablesRevision);
   return tables;
 };
-// expose original binding identities for the per-browser editor
+// expose only the server-provided command reference
 export const useShortcutSettings = () => {
   useKeyTables();
-  return { commands: shortcutCommands(baseTables, shortcuts), warning: shortcutWarning, hasSavedShortcuts: Object.keys(savedShortcuts).length > 0 || shortcutWarning !== undefined };
+  return { commands: shortcutCommands(baseTables, {}) };
 };
-// persist overrides only after storage succeeds so saving never silently fails
-const saveShortcuts = (next: ShortcutOverrides): string | undefined => {
-  try {
-    // an empty preference follows future server defaults
-    if (Object.keys(next).length === 0) localStorage.removeItem(shortcutStorageKey);
-    else localStorage.setItem(shortcutStorageKey, JSON.stringify(next));
-  } catch { return 'Could not save shortcuts in this browser. Check browser storage permissions.'; }
-  savedShortcuts = next;
-  shortcutLoadError = undefined;
-  refreshTables();
-};
-// persist one validated command edit without changing its server authorization
-const editShortcutCommand = (id: string, edit: ShortcutEdit): string | undefined => {
-  const result = editShortcutOverrides(baseTables, shortcuts, id, edit);
-  // keep validation errors free of internal names for direct bindings
-  if (result.error !== undefined) return result.error.replace(/\broot\b/gu, 'non-prefixed');
-  return saveShortcuts(result.overrides!);
-};
-// restore the operator's current configuration and the built-in defaults
-export const resetShortcuts = () => saveShortcuts({});
-// follow changes made by another tab of this browser
-window.addEventListener('storage', event => {
-  // ignore unrelated browser preferences
-  if (event.key !== null && event.key !== shortcutStorageKey) return;
-  const stored = readShortcuts();
-  savedShortcuts = stored.choices;
-  shortcutLoadError = stored.error;
-  refreshTables();
-});
 // use the operating system's familiar modifier name
 const platform = navigator.platform || navigator.userAgent;
 // separate simultaneous keys without putting the plus sign inside a keycap
@@ -171,8 +127,8 @@ const dispatcher = createKeyDispatcher<KeyboardEvent>({
   tables: () => tables,
   // distinguish successful dispatch from an inapplicable root binding
   onMatch: () => { keyPressMatched = true; },
-  // retain the server binding identity when a terminal shortcut is remapped
-  run: (binding, { table, chord, event }) => runKeyAction(typeof binding === 'string' ? binding : terminalBindingAction, event, { ...shortcutOrigin(baseTables, shortcuts, table, chord), binding })
+  // send the exact server-provided binding identity
+  run: (binding, { table, chord, event }) => runKeyAction(typeof binding === 'string' ? binding : terminalBindingAction, event, { table, chord, binding })
 });
 // ask a y/n question in the indicator; the next key answers it
 export const confirmKey = (message: string, onYes: () => void) => dispatcher.confirm(message, onYes);
@@ -242,6 +198,13 @@ const setOverlay = (next: KeyboardOverlay) => {
   overlayListeners.forEach(listener => listener());
 };
 export const openBindingsSheet = () => setOverlay('bindings');
+export const shortcutSettingsNavigationEvent = 'rac:open-shortcut-settings';
+// open Settings and request its server keyboard section
+export const openShortcutSettings = () => {
+  // preserve search parameters while using the existing Settings route
+  if (location.hash !== '#settings') location.hash = 'settings';
+  window.dispatchEvent(new CustomEvent(shortcutSettingsNavigationEvent));
+};
 const useOverlay = () => useSyncExternalStore(listener => { overlayListeners.add(listener); return () => { overlayListeners.delete(listener); }; }, () => overlay);
 
 registerKeyAction('show-bindings', () => setOverlay(overlay === 'bindings' ? undefined : 'bindings'));
@@ -256,7 +219,7 @@ registerKeyAction('font-reset', event => { if (fontKeyDeclines(event)) return fa
 // how a binding reads in the sheet and the palette
 export const describeBinding = (binding: KeyBinding): string => typeof binding === 'string'
   ? keyActions[binding]?.description ?? binding
-  : isTableBinding(binding) ? `Switch to the ${binding.table} table` : `Terminal running ${binding.terminal}${binding.reuse === true ? ' (reused)' : ''}`;
+  : isTableBinding(binding) ? `Switch to the ${binding.table} table` : `Terminal running ${terminalProgramName(binding.terminal)}${binding.reuse === true ? ' (reused)' : ''}`;
 const sourceLabel: Record<KeyRow['source'], string> = { default: 'Default', config: 'Config', replaced: 'Config, replaces the default', removed: 'Default, removed by config' };
 export type KeyPickerOption = { id: string; label: string; detail?: string; nested?: boolean; current?: boolean; onSelect: () => void };
 // A filterable list in a dialog: type to filter, arrows to move, Enter to choose, Escape to close.
@@ -306,8 +269,25 @@ const commandConflict = (command: ShortcutCommand): string | undefined => {
 // summarize provenance once for each consolidated command
 const commandSource = (command: ShortcutCommand): string => command.shortcuts.length === 0 ? 'Disabled' : command.customized ? 'Custom' : [...new Set(command.shortcuts.map(shortcut => sourceLabel[shortcut.source]))].join(', ');
 
-// edit aliases together without changing the server identity behind terminal commands
-function ShortcutSetting({ command }: { command: ShortcutCommand }) {
+// capture a chord without activating dashboard shortcuts
+export function ShortcutCaptureInput({ chord, label, disabled = false, onCapture, onCancel }: { chord?: string; label: string; disabled?: boolean; onCapture: (chord: string) => void; onCancel: () => void }) {
+  // record complete chords without dispatching them or trapping focus traversal
+  const record = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    // tab belongs to normal focus traversal
+    if (event.key === 'Tab') return;
+    event.stopPropagation();
+    event.preventDefault();
+    // escape cancels the current capture only
+    if (event.key === 'Escape') { onCancel(); return; }
+    const next = eventChord(event.nativeEvent);
+    // bare modifiers and composition are not complete shortcuts
+    if (next !== undefined) onCapture(next);
+  };
+  return <input autoFocus readOnly disabled={disabled} data-shortcut-recorder aria-label={label} placeholder="Press a shortcut…" value={chord === undefined ? '' : readableShortcut(chord)} onKeyDown={record} />;
+}
+
+// edit one server-backed command without activating the draft in this browser
+function ShortcutSetting({ command, keys, tables, disabled: editorDisabled, onChange }: { command: ServerShortcutCommand; keys: unknown; tables: ResolvedKeyTables; disabled: boolean; onChange: (patches: SettingsPatch[]) => boolean }) {
   const [editing, setEditing] = useState<{ table: string; prefixTable: string; from?: { table: string; chord: string } }>();
   const [draft, setDraft] = useState<string>();
   const [error, setError] = useState<string>();
@@ -315,10 +295,9 @@ function ShortcutSetting({ command }: { command: ShortcutCommand }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const recorderRef = useRef<HTMLDivElement>(null);
   const signature = JSON.stringify(command);
-  const description = describeBinding(command.binding);
-  const disabled = command.shortcuts.length === 0;
-  const conflict = commandConflict(command);
-  const prefixTables = Object.keys(baseTables).filter(table => table !== 'root');
+  const description = command.protected ? 'Protected terminal command' : describeBinding(command.binding);
+  const commandDisabled = command.shortcuts.length === 0;
+  const prefixTables = Object.keys(tables).filter(table => table !== 'root');
   // recover focus when an assignment or its old edit icon disappears
   const focusControl = () => {
     const trigger = triggerRef.current;
@@ -326,7 +305,7 @@ function ShortcutSetting({ command }: { command: ShortcutCommand }) {
     if (trigger?.isConnected === true && !trigger.disabled) trigger.focus();
     else rowRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
   };
-  // abandon stale drafts after live server or cross-tab changes
+  // abandon stale recorder state after the shared settings draft changes
   useEffect(() => {
     const restoreFocus = recorderRef.current?.contains(document.activeElement) === true;
     setEditing(undefined);
@@ -334,96 +313,77 @@ function ShortcutSetting({ command }: { command: ShortcutCommand }) {
     // avoid stealing focus from another command's controls
     if (restoreFocus) requestAnimationFrame(focusControl);
   }, [signature]);
-  // record a replacement or an additional shortcut without executing it
+  // start one replacement or addition recorder
   const begin = (trigger: HTMLButtonElement, table: string, from?: string) => {
     triggerRef.current = trigger;
     setDraft(from);
     setError(undefined);
-    setEditing({ table, prefixTable: table === 'root' ? 'prefix' : table, ...(from === undefined ? {} : { from: { table, chord: from } }) });
+    setEditing({ table, prefixTable: table === 'root' ? prefixTables[0] ?? 'prefix' : table, ...(from === undefined ? {} : { from: { table, chord: from } }) });
   };
-  // cancel capture without leaving the quick reference
+  // cancel capture without changing the shared settings draft
   const cancel = () => { setEditing(undefined); setError(undefined); requestAnimationFrame(focusControl); };
-  // persist one atomic command edit and leave invalid drafts available for correction
+  // compile one edit into application-config leaf patches
   const apply = (edit: ShortcutEdit) => {
-    const failure = editShortcutCommand(command.id, edit);
-    setError(failure);
-    // focus a surviving control only after a successful save
-    if (failure === undefined) { setEditing(undefined); requestAnimationFrame(focusControl); }
-  };
-  // retain tab navigation and escape cancellation while capturing a complete chord
-  const record = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    // the dialog still owns keyboard focus navigation
-    if (event.key === 'Tab') return;
-    event.stopPropagation();
-    event.preventDefault();
-    // escape cancels recording rather than dismissing the reference
-    if (event.key === 'Escape') { cancel(); return; }
-    const next = eventChord(event.nativeEvent);
-    // wait for a nonmodifier key and exclude composition
-    if (next === undefined) return;
-    setDraft(next);
-    setError(undefined);
+    const result = editServerShortcuts(keys, command.id, edit);
+    setError(result.error);
+    // retain invalid recorder state for correction
+    if (result.error !== undefined) return;
+    // preserve the recorder when a captured transaction rejects staging
+    if (!onChange(result.patches ?? [])) return;
+    setEditing(undefined);
+    requestAnimationFrame(focusControl);
   };
   const assignments = command.shortcuts.map(shortcut => assignmentLabel(shortcut.table, shortcut.chord)).join(', ');
-  return <div ref={rowRef} className={`shortcut-setting${disabled ? ' key-binding-removed' : ''}${conflict === undefined ? '' : ' shortcut-conflict'}`} role="group" aria-label={`${description} (${disabled ? 'disabled' : assignments})`} data-shortcut-command={command.id} data-shortcut-origins={commandOrigins(command)}>
+  const unavailable = editorDisabled || command.protected;
+  return <div ref={rowRef} className={`shortcut-setting${commandDisabled ? ' key-binding-removed' : ''}`} role="group" aria-label={`${description} (${commandDisabled ? 'disabled' : assignments})`} data-shortcut-command={command.id} data-shortcut-origins={commandOrigins(command)}>
     <div className="shortcut-setting-keys">
-      {command.shortcuts.map(shortcut => <span key={`${shortcut.table}:${shortcut.chord}`} className={`shortcut-assignment${shortcut.conflicted ? ' shortcut-assignment-conflict' : ''}`} data-shortcut-id={`${shortcut.originTable}:${shortcut.original}`} data-shortcut-table={shortcut.table} data-shortcut-chord={shortcut.chord}>
+      {command.shortcuts.map(shortcut => <span key={`${shortcut.table}:${shortcut.chord}`} className="shortcut-assignment" data-shortcut-id={`${shortcut.originTable}:${shortcut.original}`} data-shortcut-table={shortcut.table} data-shortcut-chord={shortcut.chord}>
         <span className="shortcut-assignment-controls">
-          <button type="button" className="shortcut-change shortcut-outline" aria-label={`Change shortcut for ${description} (${assignmentLabel(shortcut.table, shortcut.chord)})`} title="Rebind shortcut" onClick={event => { /* capture only this visible alias */ begin(event.currentTarget, shortcut.table, shortcut.chord); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4-1 11-11-3-3L5 16l-1 4ZM14 7l3 3" /></svg></button>
-          <button type="button" className="shortcut-remove shortcut-outline" aria-label={`Remove shortcut ${assignmentLabel(shortcut.table, shortcut.chord)} for ${description}`} title="Remove shortcut" onClick={() => { /* remove all duplicate owners of this alias */ apply({ kind: 'remove', table: shortcut.table, from: shortcut.chord }); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" /></svg></button>
+          <button type="button" className="shortcut-change shortcut-outline" disabled={unavailable} aria-label={`Change shortcut for ${description} (${assignmentLabel(shortcut.table, shortcut.chord)})`} title="Rebind shortcut" onClick={event => { /* capture only this visible binding */ begin(event.currentTarget, shortcut.table, shortcut.chord); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4-1 11-11-3-3L5 16l-1 4ZM14 7l3 3" /></svg></button>
+          <button type="button" className="shortcut-remove shortcut-outline" disabled={unavailable} aria-label={`Remove shortcut ${assignmentLabel(shortcut.table, shortcut.chord)} for ${description}`} title="Remove shortcut" onClick={() => { /* remove only this config-backed leaf */ apply({ kind: 'remove', table: shortcut.table, from: shortcut.chord }); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" /></svg></button>
         </span>
         {shortcut.table !== 'root' && <span className="shortcut-table-label">{shortcut.table}</span>}<ShortcutKeys chord={shortcut.chord} />
       </span>)}
-      {!disabled && <button type="button" className="shortcut-add shortcut-outline" aria-label={`Add shortcut for ${description}`} onClick={event => { /* start in this command's current context */ begin(event.currentTarget, command.shortcuts[0]!.table); }}>+ Add</button>}
+      {!commandDisabled && <button type="button" className="shortcut-add shortcut-outline" disabled={unavailable} aria-label={`Add shortcut for ${description}`} onClick={event => { /* start in the command's current table */ begin(event.currentTarget, command.shortcuts[0]!.table); }}>+ Add</button>}
     </div>
-    <div className="shortcut-setting-description"><strong>{disabled ? <s>{description}</s> : description}</strong></div>
+    <div className="shortcut-setting-description"><strong>{commandDisabled ? <s>{description}</s> : description}</strong></div>
     <div className="shortcut-setting-actions shortcut-binding-controls">
-      <button type="button" className="shortcut-outline" disabled={command.unavailable} title={disabled ? 'Restore the default shortcuts' : 'Disable all shortcuts for this command'} onClick={() => { /* toggle every assignment for the consolidated command */ apply({ kind: disabled ? 'reset' : 'disable' }); }}>{disabled ? 'Enable' : 'Disable'}</button>
-      <button type="button" className="shortcut-outline" disabled={!command.customized} onClick={() => { /* restore all original assignments for this command */ apply({ kind: 'reset' }); }}>Reset</button>
+      <button type="button" className="shortcut-outline" disabled={unavailable} title={commandDisabled ? 'Restore the built-in shortcuts' : 'Disable all shortcuts for this command'} onClick={() => { /* toggle this command through config patches */ apply({ kind: commandDisabled ? 'reset' : 'disable' }); }}>{commandDisabled ? 'Enable' : 'Disable'}</button>
+      <button type="button" className="shortcut-outline" disabled={unavailable || !command.customized} onClick={() => { /* restore only this command's built-in defaults */ apply({ kind: 'reset' }); }}>Reset</button>
     </div>
     {editing !== undefined && <div ref={recorderRef} className="shortcut-recorder">
-      <label className="client-settings-toggle shortcut-prefix-toggle"><span>Use prefix</span><input role="switch" type="checkbox" aria-label={`Use prefix for ${description}`} checked={editing.table !== 'root'} onChange={event => { /* change only the destination context until save */ setEditing({ ...editing, table: event.currentTarget.checked ? editing.prefixTable : 'root' }); setError(undefined); }} /><span className="client-settings-switch-state">{editing.table === 'root' ? 'Off' : 'On'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label>
-      {editing.table !== 'root' && prefixTables.length > 1 && <label>Prefix table<select aria-label={`Prefix table for ${description}`} value={editing.table} onChange={event => { /* retain the original alias while choosing a different prefix */ setEditing({ ...editing, table: event.target.value, prefixTable: event.target.value }); setError(undefined); }}>{prefixTables.map(table => <option key={table} value={table}>{table}</option>)}</select></label>}
-      <input autoFocus readOnly data-shortcut-recorder aria-label={`New shortcut for ${description}`} placeholder="Press a shortcut…" value={draft === undefined ? '' : readableShortcut(draft)} onKeyDown={record} />
-      <span>Press keys, then Save. Escape cancels.</span>
-      <div className="shortcut-setting-actions"><button type="button" disabled={draft === undefined} onClick={() => { /* save a replacement or an additional assignment */ if (draft !== undefined) apply(editing.from === undefined ? { kind: 'add', table: editing.table, chord: draft } : { kind: 'replace', table: editing.table, fromTable: editing.from.table, from: editing.from.chord, chord: draft }); }}>Save</button><button type="button" onClick={cancel}>Cancel</button></div>
+      <label className="client-settings-toggle shortcut-prefix-toggle"><span>Use prefix</span><input role="switch" type="checkbox" aria-label={`Use prefix for ${description}`} checked={editing.table !== 'root'} disabled={editorDisabled} onChange={event => { /* change only the pending destination table */ setEditing({ ...editing, table: event.currentTarget.checked ? editing.prefixTable : 'root' }); setError(undefined); }} /><span className="client-settings-switch-state">{editing.table === 'root' ? 'Off' : 'On'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label>
+      {editing.table !== 'root' && prefixTables.length > 1 && <label>Prefix table<SettingsSelect label={`Prefix table for ${description}`} value={editing.table} disabled={editorDisabled} options={prefixTables.map(table => ({ value: table, label: table }))} onChange={table => { /* retain the recorded chord while changing tables */ setEditing({ ...editing, table, prefixTable: table }); setError(undefined); }} /></label>}
+      <ShortcutCaptureInput chord={draft} label={`New shortcut for ${description}`} disabled={editorDisabled} onCapture={chord => { /* retain the same normal recorder semantics */ setDraft(chord); setError(undefined); }} onCancel={cancel} />
+      <span>Press keys, then Apply shortcut. Escape cancels.</span>
+      <div className="shortcut-setting-actions"><button type="button" disabled={editorDisabled || draft === undefined} onClick={() => { /* apply a replacement or additional binding */ if (draft !== undefined) apply(editing.from === undefined ? { kind: 'add', table: editing.table, chord: draft } : { kind: 'replace', table: editing.table, fromTable: editing.from.table, from: editing.from.chord, chord: draft }); }}>Apply shortcut</button><button type="button" onClick={cancel}>Cancel</button></div>
     </div>}
-    {command.unavailable && <small>Disabled by the server.</small>}
-    {conflict !== undefined && <p className="shortcut-conflict-message">{conflict}</p>}
+    {command.protected && <small>This terminal binding is masked. Choose the Key tables editor view to edit it.</small>}
     {error && <p className="shortcut-error" role="alert">{error}</p>}
   </div>;
 }
 
-// consolidate every command while keeping all of its table-specific assignments editable
-function ShortcutEditor() {
-  const { commands, hasSavedShortcuts } = useShortcutSettings();
+// stage server-wide keyboard changes through the shared Settings transaction
+export function ShortcutEditor({ keys, disabled, onChange }: { keys: unknown; disabled: boolean; onChange: (patches: SettingsPatch[]) => boolean }) {
+  const model = serverShortcutModel(keys);
   const [query, setQuery] = useState('');
-  const [error, setError] = useState<string>();
   const searchRef = useRef<HTMLInputElement>(null);
   const needle = query.trim().toLowerCase();
-  // search descriptions, original contexts and every current assignment
-  const shown = commands.filter(command => `${describeBinding(command.binding)} ${command.origins.map(origin => `${origin.table} ${readableShortcut(origin.chord)}`).join(' ')} ${command.shortcuts.map(shortcut => `${shortcut.table} ${readableShortcut(shortcut.chord)}`).join(' ')} ${commandConflict(command) ?? ''}`.toLowerCase().includes(needle));
-  // reset all assignments without leaving a stale recorder or disabled focus target
-  const reset = () => {
-    const failure = resetShortcuts();
-    setError(failure);
-    // focus the search before reset becomes disabled
-    if (failure === undefined) requestAnimationFrame(() => searchRef.current?.focus());
-  };
+  // search display-safe descriptions and assignments only
+  const shown = model.commands.filter(command => `${command.protected ? 'Protected terminal command' : describeBinding(command.binding)} ${command.origins.map(origin => `${origin.table} ${readableShortcut(origin.chord)}`).join(' ')} ${command.shortcuts.map(shortcut => `${shortcut.table} ${readableShortcut(shortcut.chord)}`).join(' ')}`.toLowerCase().includes(needle));
   return <div className="shortcut-editor" role="region" aria-label="Edit keyboard shortcuts">
-    <p>Add multiple shortcuts per command. Use the prefix switch to choose whether to press a leader key first. Changes apply only to this browser.</p>
-    <div className="shortcut-editor-actions"><button type="button" className="shortcut-outline" disabled={!hasSavedShortcuts} onClick={reset}>Reset all shortcuts</button></div>
-    {error && <p className="shortcut-error" role="alert">{error}</p>}
-    <input ref={searchRef} type="search" aria-label="Find keyboard shortcuts" placeholder="Find a shortcut…" value={query} onChange={event => { /* filter without changing assignments */ setQuery(event.target.value); }} />
-    <div className="shortcut-table">{shown.map(command => <ShortcutSetting key={command.id} command={command} />)}</div>
-    {shown.length === 0 && <p>No matching shortcuts.</p>}
+    <p>These shortcuts are server-wide and come from the application config. Recorder changes join the Settings draft and take effect after the server restarts.</p>
+    <div className="shortcut-editor-actions"><button type="button" className="shortcut-outline" disabled={disabled || !model.hasConfig} onClick={() => { /* restore every built-in key table */ if (onChange(resetServerShortcuts())) requestAnimationFrame(() => searchRef.current?.focus()); }}>Reset all shortcuts</button></div>
+    {model.error && <p className="shortcut-error" role="alert">{model.error} Choose the Key tables editor view or Application whole source to repair it.</p>}
+    <input ref={searchRef} type="search" aria-label="Find keyboard shortcuts" placeholder="Find a shortcut…" value={query} disabled={disabled || model.error !== undefined} onChange={event => { /* filter without changing the draft */ setQuery(event.target.value); }} />
+    <div className="shortcut-table">{shown.map(command => <ShortcutSetting key={command.id} command={command} keys={keys} tables={model.tables} disabled={disabled || model.error !== undefined} onChange={onChange} />)}</div>
+    {shown.length === 0 && model.error === undefined && <p>No matching shortcuts.</p>}
   </div>;
 }
 
 // show each command once with disabled and conflicting assignments clearly marked
 function BindingsSheet({ onClose }: { onClose: () => void }) {
   const { commands } = useShortcutSettings();
-  const [editing, setEditing] = useState(false);
   const sheetRef = useRef<HTMLDivElement>(null);
   const returnFocus = useRef(document.activeElement);
   // recover focus if a live configuration update removes the focused control
@@ -434,7 +394,7 @@ function BindingsSheet({ onClose }: { onClose: () => void }) {
   });
   // hand focus back however the sheet closes, C-? again included
   useLayoutEffect(() => () => { if (returnFocus.current instanceof HTMLElement) returnFocus.current.focus({ preventScroll: true }); }, []);
-  // contain keyboard navigation across both reference and editor controls
+  // contain keyboard navigation inside the quick reference
   const sheetKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     // dismiss without also closing settings behind the portal
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); return; }
@@ -451,10 +411,9 @@ function BindingsSheet({ onClose }: { onClose: () => void }) {
     }
   };
   return createPortal(<div ref={sheetRef} className="dialog key-bindings-dialog" role="dialog" aria-modal="true" aria-labelledby="key-bindings-title" onKeyDown={sheetKey} onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><div>
-    <header><h2 id="key-bindings-title">Key bindings</h2><button className="key-bindings-edit" type="button" aria-pressed={editing} onClick={() => { /* switch modes without leaving the popup */ setEditing(current => !current); }}>{editing ? 'Done editing' : 'Edit shortcuts'}</button><button type="button" autoFocus aria-label="Close key bindings" onClick={onClose}>×</button></header>
-    {shortcutWarning && <p className="key-bindings-hint shortcut-error" role="alert">{shortcutWarning}</p>}
+    <header><h2 id="key-bindings-title">Key bindings</h2><button className="key-bindings-edit" type="button" onClick={() => { /* move editing to the server settings source */ onClose(); openShortcutSettings(); }}>Edit in Settings</button><button type="button" autoFocus aria-label="Close key bindings" onClick={onClose}>×</button></header>
     <p className="key-bindings-hint">Unlabeled shortcuts run directly. Prefix labels mean press that table&rsquo;s leader first. Press a leader twice to send it to the focused terminal; otherwise it waits 10 seconds for the next key.</p>
-    {editing ? <ShortcutEditor /> : <section aria-label="Keyboard shortcuts"><table><tbody>{commands.map(command => {
+    <section aria-label="Keyboard shortcuts"><table><tbody>{commands.map(command => {
       const disabled = command.shortcuts.length === 0;
       const conflict = commandConflict(command);
       return <tr key={command.id} data-shortcut-command={command.id} data-shortcut-origins={commandOrigins(command)} className={`key-binding-${disabled ? 'removed' : command.origins[0]!.source}${conflict === undefined ? '' : ' shortcut-conflict'}`}>
@@ -462,7 +421,7 @@ function BindingsSheet({ onClose }: { onClose: () => void }) {
         <td>{disabled ? <s>{describeBinding(command.binding)}</s> : describeBinding(command.binding)}{conflict !== undefined && <p className="shortcut-conflict-message">{conflict}</p>}</td>
         <td className="key-binding-source">{commandSource(command)}</td>
       </tr>;
-    })}</tbody></table></section>}
+    })}</tbody></table></section>
   </div></div>, document.body);
 }
 
@@ -474,12 +433,12 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
   // copy and save-note act on the key's own target, so they only make sense as keys
   const actions = Object.entries(keyActions).filter(([name]) => name !== 'copy-selection' && name !== 'save-note' && name !== 'prompt-newline' && name !== 'command-palette').map(([name, action]): KeyPickerOption => ({ id: name, label: action.description, detail: keysFor(binding => binding === name) || name, onSelect: () => runKeyAction(name) }));
   // keep one terminal command option even when it has several aliases
-  const terminals = shortcutCommands(baseTables, shortcuts).flatMap((command): KeyPickerOption[] => {
+  const terminals = shortcutCommands(baseTables, {}).flatMap((command): KeyPickerOption[] => {
     // operator-disabled terminal commands remain unavailable
     if (!isTerminalBinding(command.binding) || command.unavailable) return [];
     const origin = command.origins.find(candidate => candidate.source !== 'removed')!;
     const detail = command.shortcuts.filter(shortcut => !shortcut.conflicted).map(shortcut => shortcut.table === 'root' ? readableShortcut(shortcut.chord) : `${shortcut.table} ${readableShortcut(shortcut.chord)}`).join(', ');
-    return [{ id: command.id, label: `Open ${command.binding.terminal}`, detail: detail || 'No active shortcut', onSelect: () => runKeyAction(terminalBindingAction, undefined, { table: origin.table, chord: origin.chord, binding: command.binding }) }];
+    return [{ id: command.id, label: `Open ${terminalProgramName(command.binding.terminal)}`, detail: detail || 'No active shortcut', onSelect: () => runKeyAction(terminalBindingAction, undefined, { table: origin.table, chord: origin.chord, binding: command.binding }) }];
   });
   return <KeyPicker title="Command palette" placeholder="Run a command" options={[...actions, ...terminals]} onClose={onClose} />;
 }
@@ -492,7 +451,7 @@ function KeyIndicatorTimer({ expiresAt }: { expiresAt: number }) {
 
 // place feedback above the current split's composer and terminal helper controls
 function useKeyIndicatorPosition(target: Element | null) {
-  const [position, setPosition] = useState({ right: 12, bottom: 104, maxWidth: 'calc(100vw - 24px)' });
+  const [position, setPosition] = useState<{ right: number; bottom: number; maxWidth: string }>();
   // follow resized composers, split navigation and the software keyboard
   useLayoutEffect(() => {
     const panelSelector = '.log-split > *';
@@ -558,6 +517,8 @@ function KeyIndicatorFeedback({ feedback, state }: { feedback: KeyPressFeedback 
   const [duration] = useState(() => Math.max(0, expiresAt - Date.now()));
   const label = state?.confirm ?? (pending ? state.table === 'prefix' ? readableShortcut(state.chord!) : state.table : undefined);
   const accessibleLabel = state?.confirm ?? (pending ? `Key table ${label}` : `Key press ${sequence}`);
+  // do not flash a guessed position before the split geometry is measured
+  if (position === undefined) return null;
   return createPortal(<div style={{ ...position, animationDuration: `${duration}ms` }} className={`key-indicator${matched ? ' matched' : ''}${pending ? '' : ' completed'}${state?.confirm === undefined ? '' : ' confirm'}`} role="status" aria-live={pending ? 'polite' : 'off'} aria-label={`${accessibleLabel}, ${matched ? 'binding matched' : 'no binding matched'}`}>
     {chords.length > 0 && <span className="key-indicator-label">{chords.map((keys, index) => <Fragment key={index}>{index > 0 && <span className="key-indicator-next" aria-hidden="true">→</span>}<KeyCaps keys={keys} /></Fragment>)}</span>}
     {label !== undefined && (state?.confirm !== undefined || label !== sequence) && <span className="key-indicator-context">{label}{state?.confirm !== undefined && <kbd>y/n</kbd>}</span>}

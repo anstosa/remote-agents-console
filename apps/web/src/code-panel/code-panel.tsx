@@ -639,9 +639,10 @@ function FileView({ filePreview, options, style, expanded, onBack, onClose, onOp
   // the header's editor button opens the selected line, else the top; only a path inside the Place
   // can be opened (a response file may name one elsewhere, such as a `/tmp` screenshot)
   const [selection, setSelection] = useState<CodeViewLineSelection | null>(null);
-  const backLabel = filePreview.source === 'files' ? 'Files' : 'Changes';
+  const backLabel = filePreview.source === 'settings' ? 'Settings' : filePreview.source === 'files' ? 'Files' : 'Changes';
   const renderHeaderMetadata = () => {
-    if (onOpenInEditor === undefined || !isPlaceRelativePath(path)) return null;
+    // keep redacted settings snapshots read only
+    if (filePreview.source === 'settings' || onOpenInEditor === undefined || !isPlaceRelativePath(path)) return null;
     return <EditorJumpButton file={path} line={selection === null ? 1 : Math.min(selection.range.start, selection.range.end)} onOpen={onOpenInEditor} />;
   };
   return (

@@ -1,9 +1,20 @@
 import { expect, test } from '@playwright/test';
 
+type VoiceSettings = { enabled: boolean; available: boolean; name: string; context: string };
+type SettingsPatch = { op: string; path: string[]; value?: unknown };
+type SettingsSave = { changes: Array<{ sourceId: string; revisionId: string; patches?: SettingsPatch[] }> };
+
 // stub a controlled console whose dashboard carries the given adapter capabilities
-async function openSettings(page: import('@playwright/test').Page, adapters: unknown, options: { defaultAgent?: string; davo?: { enabled: boolean; available: boolean; name: string; context: string }; onDefaultAgent?: (kind: string) => void; onDavo?: (settings: { enabled: boolean; name: string; context: string }) => void; agentUpdates?: Array<{ kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string }>; onAgentUpdate?: (kind: string) => { kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string }; emptyWorkspace?: boolean; open?: boolean } = {}) {
-  const davo = options.davo ?? { enabled: false, available: true, name: 'Davo', context: 'Existing Davo persona.' };
+async function openSettings(page: import('@playwright/test').Page, adapters: unknown, options: { defaultAgent?: string; davo?: VoiceSettings; onDefaultAgent?: (kind: string) => void; onDavo?: (settings: Omit<VoiceSettings, 'available'>) => void; onSettingsSave?: (settings: SettingsSave) => void; agentUpdates?: Array<{ kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string }>; onAgentUpdate?: (kind: string) => { kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string }; emptyWorkspace?: boolean; open?: boolean } = {}) {
+  let davo = options.davo ?? { enabled: false, available: true, name: 'Davo', context: 'Existing Davo persona.' };
+  let settingsRevision = 1;
   let agentUpdates = options.agentUpdates ?? [];
+  const settingsStatus = { pending: false, targets: [], effective: 'known', restartAvailable: true };
+  const appSource = {
+    id: 'app', label: 'Application config', path: '/fixture/config/config.json', format: 'json', exists: true, writable: true, protected: false, tracked: false, revisionId: `app-voice-r${settingsRevision}`, apply: 'rac-restart',
+    value: { integrations: { realtime: { enabled: davo.enabled, name: davo.name, context: davo.context, writeToolsEnabled: false } } },
+    schema: { type: 'object', label: 'Application config', properties: { integrations: { type: 'object', properties: { realtime: { type: 'object', label: 'Voice configuration', properties: { enabled: { type: 'boolean', label: 'Enable voice' }, name: { type: 'string', label: 'Voice name' }, context: { type: 'string', label: 'Voice context' }, writeToolsEnabled: { type: 'boolean', label: 'Write tools enabled' } } } } } } }
+  };
   await page.addInitScript(() => {
     class MockWebSocket {
       static readonly CONNECTING = 0;
@@ -21,8 +32,39 @@ async function openSettings(page: import('@playwright/test').Page, adapters: unk
     Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockWebSocket });
   });
   await page.route('**/api/**', async route => {
-    const url = new URL(route.request().url());
+    const request = route.request();
+    const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'adapter-csrf', active: true, deviceName: 'Test device', ...(options.defaultAgent === undefined ? {} : { defaultAgent: options.defaultAgent }), davo, server: { name: 'Framework', url: 'https://framework.santosa.dev', remotes: [] } } });
+    // expose one stateful application source for unified voice drafts
+    if (url.pathname === '/api/settings/status') return route.fulfill({ json: settingsStatus });
+    if (url.pathname === '/api/settings' && request.method() === 'GET') return route.fulfill({ json: { version: 1, revisionId: `adapter-settings-r${settingsRevision}`, sources: [appSource], status: settingsStatus } });
+    if (url.pathname === '/api/settings/validate' && request.method() === 'POST') return route.fulfill({ json: { valid: true, issues: [], warnings: [] } });
+    // commit all staged voice fields through the one global settings write
+    if (url.pathname === '/api/settings' && request.method() === 'PATCH') {
+      const body = request.postDataJSON() as SettingsSave;
+      options.onSettingsSave?.(body);
+      const voicePatches = body.changes.find(change => change.sourceId === 'app')?.patches?.filter(patch => patch.op === 'set' && patch.path[0] === 'integrations' && patch.path[1] === 'realtime') ?? [];
+      const enabled = voicePatches.find(patch => patch.path[2] === 'enabled')?.value;
+      const name = voicePatches.find(patch => patch.path[2] === 'name')?.value;
+      const context = voicePatches.find(patch => patch.path[2] === 'context')?.value;
+      const writeToolsEnabled = voicePatches.find(patch => patch.path[2] === 'writeToolsEnabled')?.value;
+      // apply only well-typed fixture values
+      if (typeof enabled === 'boolean') appSource.value.integrations.realtime.enabled = enabled;
+      // apply only well-typed fixture values
+      if (typeof name === 'string') appSource.value.integrations.realtime.name = name;
+      // apply only well-typed fixture values
+      if (typeof context === 'string') appSource.value.integrations.realtime.context = context;
+      // apply only well-typed fixture values
+      if (typeof writeToolsEnabled === 'boolean') appSource.value.integrations.realtime.writeToolsEnabled = writeToolsEnabled;
+      // publish current basic voice metadata only after the global commit
+      if (voicePatches.some(patch => patch.path[2] === 'enabled' || patch.path[2] === 'name' || patch.path[2] === 'context')) {
+        davo = { ...davo, enabled: appSource.value.integrations.realtime.enabled, name: appSource.value.integrations.realtime.name, context: appSource.value.integrations.realtime.context };
+        options.onDavo?.({ enabled: davo.enabled, name: davo.name, context: davo.context });
+      }
+      settingsRevision += 1;
+      appSource.revisionId = `app-voice-r${settingsRevision}`;
+      return route.fulfill({ json: { version: 1, revisionId: `adapter-settings-r${settingsRevision}`, sources: [appSource], status: settingsStatus } });
+    }
     // persist one selected default agent
     if (url.pathname === '/api/server/default-agent' && route.request().method() === 'PATCH') {
       const payload = route.request().postDataJSON() as { kind: string };
@@ -39,12 +81,6 @@ async function openSettings(page: import('@playwright/test').Page, adapters: unk
       agentUpdates = [...agentUpdates.filter(status => status.kind !== kind), updated];
       return route.fulfill({ json: { agent: updated } });
     }
-    // persist one voice settings update
-    if (url.pathname === '/api/server/davo' && route.request().method() === 'PATCH') {
-      const payload = route.request().postDataJSON() as { enabled: boolean; name: string; context: string };
-      options.onDavo?.(payload);
-      return route.fulfill({ json: { davo: { ...payload, available: davo.available } } });
-    }
     // provide an agentless worktree for the two full-size launch controls
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters, scratchLaunch: { kind: 'codex', origin: 'default' }, agents: options.emptyWorkspace ? [] : [{ id: 'agent-cora', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready', unread: false }], projects: options.emptyWorkspace ? [{ id: 'proj', label: 'Proj', available: true, worktrees: [{ id: 'cora', label: 'Cora', path: '/worktrees/cora', available: true, pinned: true, order: 1, launch: { kind: 'codex', origin: 'worktree' } }] }] : [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
@@ -55,6 +91,7 @@ async function openSettings(page: import('@playwright/test').Page, adapters: unk
     if (url.pathname === '/api/agents/agent-cora/commands') return route.fulfill({ json: { commands: [] } });
     if (url.pathname === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [] } });
     if (url.pathname === '/api/server/revision') return route.fulfill({ json: { sha: 'a1b2c3d4e5f6789012345678901234567890abcd', committedAt: '2026-09-06T14:22:31-07:00' } });
+    if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: false } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/codex/accounts') return route.fulfill({ json: { accounts: [] } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -221,9 +258,11 @@ test('marks an unavailable persisted default in the launch menu', async ({ page 
   await expect(claude.getByRole('menuitem', { name: /^Claude(?! accounts)/u })).toBeDisabled();
 });
 
-test('enables Davo and saves a configurable name and context', async ({ page }) => {
+test('stages Davo and advanced voice fields until the global settings save', async ({ page }) => {
   const updates: Array<{ enabled: boolean; name: string; context: string }> = [];
-  const settingsPage = await openSettings(page, {}, { onDavo: settings => { updates.push(settings); } });
+  const saves: SettingsSave[] = [];
+  const settingsPage = await openSettings(page, {}, { onDavo: settings => { updates.push(settings); }, onSettingsSave: save => { saves.push(save); } });
+  await settingsPage.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Voice', exact: true }).click();
   const enabled = settingsPage.getByRole('switch', { name: 'Enable Davo' });
   const davoSection = settingsPage.locator('.client-settings-davo');
   const switchTrack = davoSection.locator('.client-settings-switch-track');
@@ -247,19 +286,46 @@ test('enables Davo and saves a configurable name and context', async ({ page }) 
   await context.fill('Speak plainly and keep the tone dry.');
   await expect.poll(() => context.evaluate(element => element.clientHeight)).toBeLessThan(expandedHeight);
   await settingsPage.getByLabel('Davo name').fill('Riley');
-  await expect(settingsPage.getByRole('heading', { name: 'Riley' })).toBeVisible();
+  // keep the editable assistant name without repeating it as a heading
+  await expect(settingsPage.getByRole('heading', { name: 'Riley', exact: true })).toHaveCount(0);
+  await expect(settingsPage.getByLabel('Davo name')).toHaveValue('Riley');
   await expect(settingsPage.getByRole('switch', { name: 'Enable Riley' })).toBeChecked();
   await expect(context).toHaveValue('Speak plainly and keep the tone dry.');
-  await settingsPage.getByRole('button', { name: 'Save' }).click();
+  await settingsPage.getByRole('switch', { name: 'Write tools enabled', exact: true }).check();
+  await expect(settingsPage.getByRole('button', { name: 'Save', exact: true })).toHaveCount(0);
+  expect(updates).toEqual([]);
+  expect(saves).toEqual([]);
+  await settingsPage.getByRole('button', { name: 'Save changes', exact: true }).click();
 
-  await expect.poll(() => updates).toEqual([
-    { enabled: true, name: 'Davo', context: 'Existing Davo persona.' },
-    { enabled: true, name: 'Riley', context: 'Speak plainly and keep the tone dry.' }
-  ]);
-  await expect(settingsPage.getByText('Saved.')).toBeVisible();
+  await expect.poll(() => updates).toEqual([{ enabled: true, name: 'Riley', context: 'Speak plainly and keep the tone dry.' }]);
+  await expect.poll(() => saves).toHaveLength(1);
+  expect(saves[0]?.changes).toHaveLength(1);
+  expect(saves[0]?.changes[0]).toMatchObject({ sourceId: 'app', revisionId: 'app-voice-r1' });
+  expect(saves[0]?.changes[0]?.patches).toEqual(expect.arrayContaining([
+    { op: 'set', path: ['integrations', 'realtime', 'enabled'], value: true },
+    { op: 'set', path: ['integrations', 'realtime', 'name'], value: 'Riley' },
+    { op: 'set', path: ['integrations', 'realtime', 'context'], value: 'Speak plainly and keep the tone dry.' },
+    { op: 'set', path: ['integrations', 'realtime', 'writeToolsEnabled'], value: true }
+  ]));
+  expect(saves[0]?.changes[0]?.patches).toHaveLength(4);
+  await expect(settingsPage.getByText(/Saved\./u)).toBeVisible();
   await expect(settingsPage).toBeVisible();
   await settingsPage.getByRole('button', { name: 'Close settings' }).click();
   await expect(page.getByRole('button', { name: 'Call Riley' }).first()).toBeVisible();
+});
+
+// size an already-enabled voice editor whenever its navigation panel mounts
+test('fits existing voice context when opening and revisiting its settings page', async ({ page }) => {
+  const context = Array.from({ length: 16 }, (_, index) => `Existing voice context line ${index + 1}`).join('\n');
+  const settingsPage = await openSettings(page, {}, { davo: { enabled: true, available: true, name: 'Davo', context } });
+  const nav = settingsPage.getByRole('navigation', { name: 'Settings sources' });
+  await nav.getByRole('button', { name: 'Voice', exact: true }).click();
+  const editor = settingsPage.getByLabel('Davo context');
+  await expect(editor).toHaveValue(context);
+  await expect.poll(() => editor.evaluate(element => element.clientHeight >= element.scrollHeight)).toBe(true);
+  await nav.getByRole('button', { name: 'This browser', exact: true }).click();
+  await nav.getByRole('button', { name: 'Voice', exact: true }).click();
+  await expect.poll(() => editor.evaluate(element => element.clientHeight >= element.scrollHeight)).toBe(true);
 });
 
 test('hides agent and Codex account settings on an observe-only console', async ({ page }) => {
@@ -267,7 +333,7 @@ test('hides agent and Codex account settings on an observe-only console', async 
   await expect(settingsPage.getByRole('radiogroup', { name: 'Agents' })).toHaveCount(0);
   await expect(settingsPage.getByRole('button', { name: '+ Add account' })).toHaveCount(0);
   // client settings remain while server administration lives in its selector
-  await expect(settingsPage.getByRole('group', { name: 'Client' })).toBeVisible();
+  await expect(settingsPage.getByRole('group', { name: 'Name', exact: true })).toBeVisible();
   await expect(settingsPage.getByRole('group', { name: 'Server' })).toHaveCount(0);
 });
 
@@ -297,7 +363,7 @@ test('shows settings above the static controls on a phone', async ({ page }) => 
   await expect(settingsPage).not.toHaveAttribute('aria-modal', 'true');
   await expect(tabs).toBeVisible();
   await expect(toolbar).toBeVisible();
-  const clientBounds = await settingsPage.getByRole('group', { name: 'Client' }).boundingBox();
+  const clientBounds = await settingsPage.getByRole('group', { name: 'Name', exact: true }).boundingBox();
   const terminalBounds = await settingsPage.getByRole('group', { name: 'Terminal font' }).boundingBox();
   const themeBounds = await settingsPage.getByRole('group', { name: 'Theme' }).boundingBox();
   // retain visible breathing room between flat settings
@@ -312,13 +378,77 @@ test('shows settings above the static controls on a phone', async ({ page }) => 
   await page.keyboard.press('Escape');
   await expect(settingsPage).toHaveCount(0);
   await expect(trigger).toBeFocused();
-  // a toolbar action leaves the settings slide for its own panel
+  // other toolbar controls do not dismiss the settings split
   await trigger.click();
   await toolbar.locator('.terminal-picker-toggle').click();
-  await expect(settingsPage).toHaveCount(0);
+  await expect(settingsPage).toHaveCount(1);
 });
 
-test('opens settings as the right-hand content split on desktop', async ({ page }) => {
+// keep settings mounted in the same resizable and swipeable panel system
+test('resizes settings and switches splits without closing it', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const settings = await openSettings(page, {});
+  const split = page.locator('.log-split').first();
+  await expect(split.locator(':scope > .client-settings-page')).toHaveCount(1);
+  const divider = split.getByRole('separator', { name: 'Resize agent and settings panels' });
+  await expect(divider).toBeVisible();
+  const before = await settings.boundingBox();
+  const bounds = await divider.boundingBox();
+  // require real draggable panel geometry
+  if (before === null || bounds === null) throw new Error('Settings split has no bounds');
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + 100, bounds.y + 100);
+  await page.mouse.up();
+  const after = await settings.boundingBox();
+  // retain the resized settings panel
+  if (after === null) throw new Error('Settings split disappeared');
+  expect(before.width - after.width).toBeGreaterThan(50);
+
+  // expand and restore settings through the shared split header
+  await settings.getByRole('button', { name: 'Expand settings' }).click();
+  await expect(settings).toHaveClass(/expanded/u);
+  await expect(split.locator(':scope > .log-output')).toBeHidden();
+  await page.keyboard.press('Escape');
+  await expect(settings).toHaveCount(1);
+  await expect(settings).not.toHaveClass(/expanded/u);
+  await expect(split.locator(':scope > .log-output')).toBeVisible();
+
+  // navigate to output without dismissing the phone settings split
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Choose split' }).click();
+  await page.getByRole('menuitem', { name: 'Agent output' }).click();
+  await expect(settings).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Global settings' })).toHaveAttribute('aria-expanded', 'true');
+  await page.getByRole('button', { name: 'Choose split' }).click();
+  await page.getByRole('menuitem', { name: 'Settings', exact: true }).click();
+  await expect.poll(() => split.evaluate(element => element.scrollLeft)).toBeGreaterThan(300);
+
+  // retain an unsaved voice draft during a real touch swipe
+  await settings.getByRole('combobox', { name: 'Settings section', exact: true }).click();
+  await page.getByRole('listbox', { name: 'Settings section options', exact: true }).getByRole('option', { name: 'Voice', exact: true }).click();
+  await settings.getByRole('switch', { name: 'Enable Davo' }).check();
+  await settings.getByLabel('Davo context').fill('Retain this unsaved context.');
+  await settings.getByLabel('Davo context').blur();
+  const swipeTarget = await settings.locator('.settings-center-header').boundingBox();
+  // require swipe target geometry
+  if (swipeTarget === null) throw new Error('Settings swipe target has no bounds');
+  const touch = await page.context().newCDPSession(page);
+  const y = Math.round(swipeTarget.y + swipeTarget.height / 2);
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 55, y }] });
+  // drag across noninteractive settings content
+  for (let step = 1; step <= 12; step += 1) await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 55 + step * 24, y }] });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await touch.detach();
+  await expect.poll(() => split.evaluate(element => element.scrollLeft)).toBeLessThan(10);
+  await expect(settings).toHaveCount(1);
+  await page.getByRole('button', { name: 'Choose split' }).click();
+  await page.getByRole('menuitem', { name: 'Settings', exact: true }).click();
+  await expect(settings.getByLabel('Davo context')).toHaveValue('Retain this unsaved context.');
+
+});
+
+test('opens the full settings workspace beside desktop output and above narrow static controls', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   const settingsPage = await openSettings(page, {});
   // reuse the floating title and action pills from other workspace splits
@@ -342,14 +472,19 @@ test('opens settings as the right-hand content split on desktop', async ({ page 
     const tabsBounds = await consoleView.locator('nav.tabs').first().boundingBox();
     const toolbarBounds = await consoleView.locator('.workspace-toolbar').first().boundingBox();
     const terminalBounds = await consoleView.locator('.workspace-toolbar-actions .terminal-picker-toggle').first().boundingBox();
-    // require every split surface to have measurable bounds
-    if (settingsBounds === null || consoleBounds === null || logBounds === null || tabsBounds === null || toolbarBounds === null || terminalBounds === null) throw new Error('Split panes have no layout bounds');
+    // static controls stay measurable at both workspace widths
+    if (settingsBounds === null || consoleBounds === null || tabsBounds === null || toolbarBounds === null || terminalBounds === null) throw new Error('Split panes have no layout bounds');
     expect(consoleBounds.x).toBe(0);
     expect(consoleBounds.width).toBe(width);
-    expect(settingsBounds.width).toBeGreaterThanOrEqual(384);
-    expect(settingsBounds.width).toBeLessThanOrEqual(448);
-    expect(logBounds.x).toBe(0);
-    expect(Math.abs(settingsBounds.x - logBounds.width)).toBeLessThanOrEqual(1);
+    // generic splits retain output and a draggable divider at desktop widths
+    if (logBounds === null) throw new Error('Desktop output has no layout bounds');
+    const outputBounds = await consoleView.locator('.log-output').first().boundingBox();
+    if (outputBounds === null) throw new Error('Agent split has no layout bounds');
+    expect(settingsBounds.width).toBeGreaterThanOrEqual(390);
+    expect(logBounds.width).toBe(width);
+    expect(settingsBounds.x - outputBounds.width).toBeGreaterThan(5);
+    expect(settingsBounds.x - outputBounds.width).toBeLessThan(10);
+    await expect(consoleView.getByRole('separator', { name: 'Resize agent and settings panels' })).toBeVisible();
     expect(Math.abs(settingsBounds.x + settingsBounds.width - width)).toBeLessThanOrEqual(1);
     expect(settingsBounds.y + settingsBounds.height).toBeLessThanOrEqual(tabsBounds.y + 1);
     expect(tabsBounds.x).toBe(0);

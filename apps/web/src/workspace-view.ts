@@ -8,6 +8,8 @@ export type WorkspaceSplit = { key: string; label: string };
 export type WorkspaceView = {
   splits: WorkspaceSplit[];
   canClose: boolean;
+  // confirm unsaved split drafts before workspace lifecycle mutations
+  prepareClose?: () => Promise<boolean>;
   closeAll: () => void;
   jump: (key: string, input?: boolean) => void;
   currentPanel: () => string | undefined;
@@ -60,3 +62,7 @@ export const setAgentSplitHidden = (key: string, hidden: boolean) => write(`rac.
 export const workspaceAlias = (key: string) => read(`rac.workspace-name:${key}`);
 // clear an empty alias back to the discovered workspace name
 export const setWorkspaceAlias = (key: string, name: string) => write(`rac.workspace-name:${key}`, name.trim() || null);
+// restore settings visibility without sharing it across workspace identities
+export const settingsSplitOpen = (key: string) => read(`rac.settings-open:${key}`) === '1';
+// retain visibility only and keep settings values out of browser persistence
+export const setSettingsSplitOpen = (key: string, open: boolean) => write(`rac.settings-open:${key}`, open ? '1' : null);

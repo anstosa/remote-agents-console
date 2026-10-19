@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch Remote Agent Console settings operations
+
+[Path]
+# authenticated polling must not exhaust the path trigger burst limit
+TriggerLimitIntervalSec=0
+DirectoryNotEmpty=@CONTROL_ROOT@/queued
+PathExistsGlob=@CONTROL_ROOT@/claimed/*.json
+Unit=remote-agent-settings-apply.service
+
+[Install]
+WantedBy=default.target

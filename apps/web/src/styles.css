@@ -302,11 +302,11 @@ html.software-keyboard-open .tabs { display: none; }
 .empty-workspace-warning { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: .4rem; margin: 0; padding: .5rem .6rem; border: 1px solid color-mix(in srgb, var(--yellow) 50%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--yellow) 8%, transparent); color: var(--yellow); font-size: .76rem; }
 .empty-workspace-warning button { padding: .2rem .55rem; border: 1px solid var(--yellow); border-radius: var(--control-radius); background: transparent; color: var(--yellow); font: inherit; font-weight: 800; cursor: pointer; }
 /* leave terminal and Code compositions to the generic grid without outranking the phone override */
-.log-split.has-note:not(.has-browser):where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .no-agent)), .log-split.has-browser:not(.has-note):where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .no-agent)) { grid-template-rows: repeat(2, minmax(8rem, 1fr)); }
-.log-split.has-note.has-browser:where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .no-agent)) { grid-template-rows: repeat(3, minmax(8rem, 1fr)); }
+.log-split.has-note:not(.has-browser):where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .has-settings, .no-agent)), .log-split.has-browser:not(.has-note):where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .has-settings, .no-agent)) { grid-template-rows: repeat(2, minmax(8rem, 1fr)); }
+.log-split.has-note.has-browser:where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .has-settings, .no-agent)) { grid-template-rows: repeat(3, minmax(8rem, 1fr)); }
 /* Terminals, Code or no agent panel make the split a list of panels; in a portrait area they stack
    as rows, in a wide area they become columns (below), and on a phone one panel shows at a time. */
-.log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-review, .log-split.has-stack, .log-split.no-agent { grid-template: none; grid-template-columns: minmax(0, 1fr); grid-auto-flow: row; grid-auto-rows: minmax(8rem, 1fr); }
+.log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-review, .log-split.has-stack, .log-split.has-settings, .log-split.no-agent { grid-template: none; grid-template-columns: minmax(0, 1fr); grid-auto-flow: row; grid-auto-rows: minmax(8rem, 1fr); }
 .split-resizer { display: none; }
 .log-output { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .log-output.expanded { width: 100%; height: 100%; }
@@ -357,8 +357,8 @@ html.software-keyboard-open .tabs { display: none; }
 /* let any supplemental split fill the output area without unmounting siblings (a phone expands
    into full screen instead, below; `not` leaves no gap at fractional widths past 768px) */
 @media not all and (max-width: 768px) {
-  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane).expanded) { display: block; }
-  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane).expanded) > :not(.expanded) { display: none; }
+  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .client-settings-page).expanded) { display: block; }
+  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .client-settings-page).expanded) > :not(.expanded) { display: none; }
 }
 :is(.log-output, .agent-output)::after { position: absolute; inset: 0; z-index: 30; box-sizing: border-box; border: 3px solid transparent; content: ''; pointer-events: none; }
 :is(.log-output.input-active, .agent-panel.input-active > .agent-output)::after { border-color: var(--sky); box-shadow: inset 0 0 1.4rem #00000066, inset 0 0 1.35rem color-mix(in srgb, var(--sky) 34%, transparent); }
@@ -1019,17 +1019,17 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 .code-pane-file-collapse[aria-expanded='true'] svg { transform: rotate(90deg); }
 @keyframes note-pane-appear { from { opacity: 0; } to { opacity: 1; } }
 @container output-area (min-aspect-ratio: 1 / 1) {
-  .log-split.has-note:not(.has-browser):not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)); }
-  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
-  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
+  .log-split.has-note:not(.has-browser):not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)); }
+  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
+  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
   /* With one or more Terminals, a Code panel or no agent panel the split is a generic list of
      columns (agent, terminals, note, browser, code), each `minmax(390px, <weight>fr)`, built in JS
      as `--split-cols`. */
-  .log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-review, .log-split.has-stack, .log-split.no-agent { grid-template: minmax(0, 1fr) / var(--split-cols); }
+  .log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-review, .log-split.has-stack, .log-split.has-settings, .log-split.no-agent { grid-template: minmax(0, 1fr) / var(--split-cols); }
   /* remove the hidden browser divider's track when fixing the mobile preview width */
-  .log-split:is(.has-terminals, .no-agent):has(> .browser-pane.mobile:not(.expanded)) { --browser-split-cols: var(--split-pane-min-width); }
-  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) var(--split-pane-min-width); }
-  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) var(--split-pane-min-width); }
+  .log-split:is(.has-terminals, .has-review, .has-settings, .no-agent):has(> .browser-pane.mobile:not(.expanded)) { --browser-split-cols: var(--split-pane-min-width); }
+  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-review):not(.has-settings):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) var(--split-pane-min-width); }
+  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-review):not(.has-settings):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) var(--split-pane-min-width); }
   .split-resizer { position: relative; z-index: 5; display: block; width: .45rem; min-width: .45rem; height: 100%; cursor: col-resize; touch-action: none; outline: 0; }
   .split-resizer::after { position: absolute; inset: 0 calc(50% - .5px); background: var(--surface-1); content: ''; transition: background .12s ease, box-shadow .12s ease; }
   .split-resizer:is(:hover, :focus-visible)::after { background: var(--blue); box-shadow: 0 0 .5rem color-mix(in srgb, var(--blue) 48%, transparent); }
@@ -1050,11 +1050,11 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
   .browser-frame-shell.desktop iframe { width: var(--browser-desktop-width, 980px); height: var(--browser-desktop-height, 100%); transform: scale(var(--browser-desktop-scale, 1)); transform-origin: top left; }
   /* A phone shows one panel per screen: the split is a horizontal swipe carousel that snaps to
      each panel in turn (the toolbar's dots show where it is). */
-  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane)) { display: flex; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scrollbar-width: none; }
+  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .client-settings-page)) { display: flex; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scrollbar-width: none; }
   /* let horizontal swipes over note content reach the panel carousel */
   .note-pane :is(.note-markdown, textarea) { touch-action: pan-y; }
   .log-split::-webkit-scrollbar { display: none; }
-  .log-split > :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane) { flex: 0 0 100%; width: 100%; min-width: 0; height: 100%; scroll-snap-align: start; scroll-snap-stop: always; }
+  .log-split > :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .client-settings-page) { flex: 0 0 100%; width: 100%; min-width: 0; height: 100%; scroll-snap-align: start; scroll-snap-stop: always; }
   .log-split > .split-resizer { display: none; }
   /* an expanded panel keeps its own footer while the tab row and toolbar fold away */
   .agent-view:has(.log-split > .expanded) > :is(nav.tabs, section.workspace-toolbar) { display: none; }
@@ -1593,6 +1593,9 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* preview token palette */
 .response-file-dialog .syntax-comment { color: var(--overlay-0); font-style: italic; }
 .response-file-dialog .syntax-keyword { color: var(--mauve); font-weight: 700; }
+/* share shell token colors with editable settings sources */
+.response-file-dialog .syntax-command { color: var(--mauve); font-weight: 700; }
+.response-file-dialog .syntax-option { color: var(--blue); }
 .response-file-dialog .syntax-string { color: var(--green); }
 .response-file-dialog .syntax-number { color: var(--peach); }
 .response-file-dialog .syntax-constant { color: var(--sapphire); font-weight: 700; }
@@ -1719,7 +1722,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* Float the transient console notices in the top-right corner instead of a strip below the tab bar. */
 /* toasts sit below the panels' floating header pills, so they never cover a panel's actions */
 /* scroll crowded notices while leaving most of the settings surface available */
-.toast-region { position: fixed; top: calc(var(--panel-header-clearance) + .6rem + env(safe-area-inset-top, 0px)); right: calc(.6rem + env(safe-area-inset-right, 0px)); z-index: calc(var(--layer-dialog) + 1); display: flex; flex-direction: column; gap: .5rem; width: min(24rem, calc(100vw - 1.2rem)); max-height: min(calc(var(--app-height, 100dvh) * .4), max(0px, calc(var(--app-height, 100dvh) - var(--panel-header-clearance) - 1.2rem - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)))); overflow-y: auto; pointer-events: none; }
+.toast-region { --toast-region-top: max(calc(var(--panel-header-clearance) + .6rem + env(safe-area-inset-top, 0px)), var(--settings-header-toast-clearance, 0px)); position: fixed; top: var(--toast-region-top); right: calc(.6rem + env(safe-area-inset-right, 0px)); z-index: calc(var(--layer-dialog) + 1); display: flex; flex-direction: column; gap: .5rem; width: min(24rem, calc(100vw - 1.2rem)); max-height: min(calc(var(--app-height, 100dvh) * .4), max(0px, calc(var(--app-height, 100dvh) - var(--toast-region-top) - .6rem - env(safe-area-inset-bottom, 0px)))); overflow-y: auto; pointer-events: none; }
 .toast { position: relative; flex-shrink: 0; pointer-events: auto; animation: toast-in .18s ease-out; }
 /* reserve a thin countdown beneath timed notices without shifting their controls */
 .toast:has(.toast-timer-bar) { padding-bottom: .8rem; }
@@ -1744,7 +1747,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .toast-error { display: flex; align-items: center; min-height: 2rem; margin: 0; padding: .5rem .7rem; border: 1px solid color-mix(in srgb, var(--red) 65%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 90%, var(--red)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent); color: var(--red); font-size: .72rem; line-height: 1.35; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-.35rem) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 /* On phones the corner is cramped: span the top edge with side insets instead. */
-@media (max-width: 600px) { .toast-region { top: calc(var(--panel-header-clearance) + .5rem + env(safe-area-inset-top, 0px)); right: calc(.5rem + env(safe-area-inset-right, 0px)); left: calc(.5rem + env(safe-area-inset-left, 0px)); width: auto; } }
+@media (max-width: 600px) { .toast-region { --toast-region-top: max(calc(var(--panel-header-clearance) + .5rem + env(safe-area-inset-top, 0px)), var(--settings-header-toast-clearance, 0px)); top: var(--toast-region-top); right: calc(.5rem + env(safe-area-inset-right, 0px)); left: calc(.5rem + env(safe-area-inset-left, 0px)); width: auto; } }
 .console-recovery { width: max-content; max-width: calc(100vw - 2rem); justify-items: start; color: var(--subtext-0); }
 .console-recovery .server-switcher-button { flex: none; max-width: none; }
 .console-recovery strong { color: var(--text); }
@@ -1842,15 +1845,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .more-menu button { width: 100%; justify-content: flex-start; border: 0; background: transparent; color: var(--text); box-shadow: none; white-space: nowrap; transition: background-color .15s ease, color .15s ease; }
 /* reserve the toast stack above settings without hiding persistent notices */
 .client-settings-page { --panel-accent: var(--mauve); position: relative; isolation: isolate; display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: minmax(0, 1fr); overflow: hidden; padding-top: max(var(--panel-header-clearance), var(--toast-region-clearance, 0px)); background: radial-gradient(circle at 80% -12rem, #3a3765 0, var(--mantle) 34rem, var(--crust) 78rem); color: var(--text); }
-/* keep settings inside the workspace row, leaving the static tab and toolbar below */
-.log-shell:has(> .client-settings-page) { grid-template: minmax(0, 1fr) / minmax(0, 1fr) clamp(24rem, 30vw, 28rem); }
-.log-shell:has(> .client-settings-page) > .log { width: 100%; margin-left: 0; }
-.log-shell > .client-settings-page { grid-column: 2; grid-row: 1; border-left: 1px solid var(--surface-1); box-shadow: -.4rem 0 1.5rem color-mix(in srgb, var(--crust) 55%, transparent); }
-@media (max-width: 768px) {
-  .log-shell:has(> .client-settings-page) { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
-  .log-shell:has(> .client-settings-page) > .log { display: none; }
-  .log-shell > .client-settings-page { grid-column: 1; border-left: 0; box-shadow: none; }
-}
+/* share workspace sizing and mobile carousel behavior with every other split */
+.log-split > .client-settings-page { border-left: 1px solid var(--surface-1); }
 .client-settings-page::before { position: absolute; inset: 0; z-index: -1; content: ''; opacity: .28; background-image: linear-gradient(#585b7018 1px, transparent 1px), linear-gradient(90deg, #585b7018 1px, transparent 1px); background-size: 2.5rem 2.5rem; mask-image: radial-gradient(ellipse at 70% 0, #000 0, transparent 72%); }
 .client-settings-page:focus { outline: none; }
 .client-settings-page .panel-header-title h1 { margin: 0; font: inherit; }
@@ -1862,11 +1858,14 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .client-settings-section > header { display: grid; gap: .08rem; }
 .client-settings-section > header > h2 { margin: 0; font-size: 1.05rem; }
 .client-settings-overview { display: flex; min-width: 0; flex-direction: column; gap: 1.1rem; }
-.client-settings-setting { display: flex; min-width: 0; flex-direction: column; gap: .25rem; padding: .1rem 0; }
-.client-settings-setting > header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .6rem; }
-.client-settings-setting > header > small { color: var(--mauve); font: 800 .58rem var(--font-mono); letter-spacing: .12em; }
-.client-settings-setting > strong { overflow: hidden; color: var(--text); font-size: .86rem; text-overflow: ellipsis; white-space: nowrap; }
-.client-settings-setting > span:not(.client-settings-setting-actions) { overflow: hidden; color: var(--overlay-1); font: 600 .64rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+/* center each action beside the complete label and description pair */
+.client-settings-setting { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) max-content; align-items: center; gap: .6rem; padding: .1rem 0; }
+.client-settings-setting-copy { display: grid; min-width: 0; gap: .25rem; }
+.client-settings-setting-copy > header { min-width: 0; }
+.client-settings-setting-copy > header > small { color: var(--mauve); font: 800 .58rem var(--font-mono); letter-spacing: .12em; overflow-wrap: anywhere; }
+.client-settings-setting-copy > strong { overflow: hidden; color: var(--text); font-size: .86rem; text-overflow: ellipsis; white-space: nowrap; }
+.client-settings-setting-copy > span:not(.client-settings-terminal-preview) { color: var(--overlay-1); font: 600 .64rem/1.45 var(--font-mono); overflow-wrap: anywhere; }
+.client-settings-setting-control { align-self: center; justify-self: end; }
 .client-settings-setting-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .3rem; }
 .client-settings-setting-actions > button { width: auto; min-height: 1.8rem; justify-content: center; border: 1px solid var(--surface-2); border-radius: calc(var(--control-radius) - .08rem); padding: .25rem .55rem; background: transparent; color: var(--blue); box-shadow: none; font-size: .62rem; }
 .client-settings-setting-actions > button:hover { border-color: var(--blue); background: var(--surface-1); color: var(--text); }
@@ -1878,7 +1877,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .client-settings-stepper > button:not(:disabled):hover { border-color: var(--blue); background: var(--surface-1); color: var(--text); }
 .client-settings-stepper > button:disabled { color: var(--overlay-0); opacity: .5; }
 .client-settings-segmented { display: flex; gap: .35rem; }
-.client-settings-segmented > button { min-width: 6rem; min-height: 1.8rem; justify-content: center; border: 1px solid var(--surface-2); border-radius: calc(var(--control-radius) - .08rem); padding: .3rem .5rem; background: transparent; color: var(--blue); box-shadow: none; font: 700 .72rem var(--font-mono); }
+.client-settings-segmented > button { min-width: 2.8rem; min-height: 1.8rem; justify-content: center; border: 1px solid var(--surface-2); border-radius: calc(var(--control-radius) - .08rem); padding: .3rem .5rem; background: transparent; color: var(--blue); box-shadow: none; font: 700 .72rem var(--font-mono); }
 .client-settings-segmented > button:not(.active):hover { border-color: var(--blue); background: var(--surface-1); color: var(--text); }
 .client-settings-segmented > button.active { border-color: var(--mauve); background: var(--mauve); color: var(--crust); }
 .client-settings-stepper > .client-settings-font-reset { min-width: 3.4rem; font-size: .62rem; }

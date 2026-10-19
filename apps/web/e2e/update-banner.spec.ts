@@ -98,7 +98,7 @@ test('reloads a stale client without adding a settings action or animation', asy
   const settings = page.getByRole('dialog', { name: 'Settings' });
   await expect(settings.getByRole('group', { name: 'Server' })).toHaveCount(0);
   await expect(settings.getByRole('button', { name: /reload/iu })).toHaveCount(0);
-  await settings.getByRole('button', { name: 'Rename Client' }).click({ trial: true });
+  await settings.getByRole('button', { name: 'Rename browser name' }).click({ trial: true });
   await settings.getByRole('button', { name: 'Close settings' }).click();
   await reload.click();
 

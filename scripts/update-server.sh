@@ -21,9 +21,9 @@ temporary_file="$status_file.tmp"
 last_status_file="$status_directory/server-update-last.json"
 last_temporary_file="$last_status_file.$operation_id.tmp"
 log_file="$status_directory/server-update-$operation_id.log"
-lock_file="$status_directory/server-update.lock"
+control_root="${RAC_SETTINGS_CONTROL_ROOT:-}"
 
-# capture detached host output
+# record only allowlisted lifecycle output
 mkdir -p "$status_directory"
 touch "$log_file"
 chmod 600 "$log_file"
@@ -61,12 +61,22 @@ trap on_error ERR
 write_status running
 printf '[%s] server update started\n' "$(date -Is)"
 
+# require the installer-owned shared mutation root
+if [[ -z "$control_root" || ! -d "$control_root" ]]; then
+  printf '[%s] settings control root is unavailable\n' "$(date -Is)"
+  fail_update 2
+fi
+lock_file="$control_root/mutation.lock"
+
 # serialize host repository and Compose mutations
 exec 9> "$lock_file"
 if ! flock -n 9; then
   printf '[%s] another server update is already running\n' "$(date -Is)"
   fail_update 1
 fi
+
+# verify the immutable descriptor before changing git or Compose state
+node scripts/settings/update.mjs "$control_root" "$operation_id" --verify-only >/dev/null 2>&1
 
 # update only the deployed main branch
 if [[ "$(git symbolic-ref --short HEAD)" != "main" ]]; then
@@ -81,7 +91,7 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
 fi
 
 # install only the reviewed upstream revision
-git fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main'
+git fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' >/dev/null 2>&1
 fetched_target="$(git rev-parse refs/remotes/origin/main)"
 if [[ "$fetched_target" != "$target_sha" ]]; then
   printf '[%s] upstream changed after review; expected %s and found %s\n' "$(date -Is)" "$target_sha" "$fetched_target"
@@ -91,8 +101,9 @@ if ! git merge-base --is-ancestor refs/heads/main "$target_sha"; then
   printf '[%s] reviewed update is not a fast-forward from local main\n' "$(date -Is)"
   fail_update 1
 fi
-git merge --ff-only "$target_sha"
-docker compose up -d --build --wait
-docker compose ps
+git merge --ff-only "$target_sha" >/dev/null 2>&1
+
+# deploy through the same fixed invocation and proof boundary
+node scripts/settings/update.mjs "$control_root" "$operation_id" >/dev/null 2>&1
 write_status complete
 printf '[%s] server update completed\n' "$(date -Is)"

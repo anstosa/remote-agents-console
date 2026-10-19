@@ -1,819 +1,1243 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
-import { installPaneMock, paneInputText, pushBytes, seedPaneSize } from './pane-stream-mock.js';
+import { expect, test, type Locator, type Page } from "@playwright/test";
+import { mockAccountSocket } from "./account-fixture";
+import { confirmSettingsDiscard } from "./settings-confirmation-helpers.js";
 
-type Pane = { paneId: string; session: string; window?: string; role?: string; name?: string; command: string; path: string; title: string; agent: boolean; busy?: boolean };
-type FixtureState = {
-  shells: unknown[];
-  prompts: unknown[];
-  pageErrors: string[];
-  consoleErrors: string[];
+type SettingsPatch = { op: "set" | "remove"; path: string[]; value?: unknown };
+type ShortcutFixtureState = {
+  runtimeKeys: Record<string, unknown>;
+  savedKeys: Record<string, unknown>;
+  saves: Array<{
+    changes: Array<{ sourceId: string; patches: SettingsPatch[] }>;
+  }>;
+  validations: unknown[];
+  reveals: unknown[];
+  remasks: unknown[];
+  saveStatus: number;
+};
+type ShortcutWatchWindow = typeof window & {
+  __shortcutSecretSeen?: boolean;
+  __shortcutSecretTimer?: number;
 };
 
-const appUrl = process.env.SHORTCUT_TEST_URL ?? 'http://127.0.0.1:4173/';
+const appSource = (state: ShortcutFixtureState) => ({
+  id: "app",
+  label: "Application config",
+  path: "/checkout/config/config.json",
+  format: "json",
+  exists: true,
+  writable: true,
+  protected: false,
+  tracked: false,
+  revisionId: "app-r1",
+  apply: "rac-restart",
+  value: {
+    name: "Shortcut server",
+    keys: state.savedKeys,
+    integrations: {
+      realtime: {
+        enabled: false,
+        name: "Davo",
+        context: "",
+        writeToolsEnabled: false,
+      },
+    },
+  },
+  schema: {
+    type: "object",
+    properties: {
+      name: { type: "string", label: "Server name" },
+      keys: {
+        type: "json",
+        label: "Key tables",
+        description: "Advanced key-table configuration.",
+        optional: true,
+        apply: "rac-restart",
+      },
+      integrations: {
+        type: "object",
+        properties: {
+          realtime: {
+            type: "object",
+            properties: {
+              enabled: { type: "boolean" },
+              name: { type: "string" },
+              context: { type: "string" },
+              writeToolsEnabled: { type: "boolean" },
+            },
+          },
+        },
+      },
+    },
+  },
+});
 
-// keep the shortcut surface attached to one Agent and one focused Terminal
-const panes = (): Pane[] => [
-  { paneId: '%1', session: '$1', window: '@0', command: 'codex', path: '/worktrees/cora', title: '', agent: true },
-  { paneId: '%5', session: '$1', window: '@1', role: 'shell', name: 'build', command: 'zsh', path: '/worktrees/cora', title: '', agent: false, busy: false }
-];
+// apply the same direct object patches emitted by the Settings editor
+const applyPatch = (root: Record<string, unknown>, patch: SettingsPatch) => {
+  // remove the complete keys object explicitly
+  if (
+    patch.path.length === 1 &&
+    patch.path[0] === "keys" &&
+    patch.op === "remove"
+  ) {
+    delete root.keys;
+    return;
+  }
+  let target = root;
+  // create intermediate key tables for additions
+  for (const key of patch.path.slice(0, -1)) {
+    const child = target[key];
+    if (child === null || typeof child !== "object" || Array.isArray(child))
+      target[key] = {};
+    target = target[key] as Record<string, unknown>;
+  }
+  const leaf = patch.path.at(-1)!;
+  // preserve remove versus explicit null
+  if (patch.op === "remove") delete target[leaf];
+  else target[leaf] = structuredClone(patch.value);
+};
 
-// provide a synthetic authenticated dashboard and capture shortcut side effects
-const routeApi = async (page: Page, state: FixtureState, keys?: unknown) => {
-  // keep the synthetic Terminal tab icon from becoming static-server console noise
-  await page.route('**/instance-icons/terminal.svg', route => route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="m3 4 3 4-3 4m5 0h5"/></svg>' }));
-  await page.route('**/api/**', async route => {
+// provide a complete stateful settings source and a separately running dashboard config
+async function setupShortcutSettings(
+  page: Page,
+  options: {
+    runtimeKeys?: Record<string, unknown>;
+    savedKeys?: Record<string, unknown>;
+    width?: number;
+  } = {},
+) {
+  await mockAccountSocket(page);
+  await page.setViewportSize({ width: options.width ?? 1400, height: 900 });
+  const state: ShortcutFixtureState = {
+    runtimeKeys: structuredClone(options.runtimeKeys ?? {}),
+    savedKeys: structuredClone(options.savedKeys ?? {}),
+    saves: [],
+    validations: [],
+    reveals: [],
+    remasks: [],
+    saveStatus: 200,
+  };
+  await page.route("**/api/**", async (route) => {
     const request = route.request();
-    const url = new URL(request.url());
-    const path = url.pathname;
-    // establish one controlling browser with Settings authority
-    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'shortcut-settings-csrf', active: true, deviceName: 'Test browser', server: { name: 'Test server', url: appUrl, remotes: [] } } });
-    // expose one Agent and any operator-defined shortcut tables
-    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Working', attention: 'working', queuedPromptCount: 0 }], projects: [], ...(keys === undefined ? {} : { keys }) } });
-    // authorize the inert dashboard socket
-    if (path === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
-    // avoid unrelated update indicators
-    if (path === '/api/push/public-key' || path === '/api/agents/updates') return route.fulfill({ json: {} });
-    // authorize both Agent and Terminal pane streams
-    if (path === '/api/agents/agent-1/tickets' || path === '/api/worktrees/cora/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
-    // keep composer discovery and polling empty
-    if (path === '/api/agents/agent-1/commands') return route.fulfill({ json: { commands: [] } });
-    if (path === '/api/agents/agent-1/saved-prompts' || path === '/api/agents/agent-1/prompt-history' || path === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
-    // capture a submission if an old newline chord accidentally submits
-    if (path === '/api/agents/agent-1/prompt' && request.method() === 'POST') {
-      state.prompts.push(request.postDataJSON());
-      return route.fulfill({ status: 202, json: {} });
+    const path = new URL(request.url()).pathname;
+    // authenticate one controlling browser
+    if (path === "/api/auth/session")
+      return route.fulfill({
+        json: {
+          csrfToken: "shortcut-csrf",
+          active: true,
+          deviceName: "Shortcut browser",
+          server: {
+            name: "Shortcut server",
+            url: "https://shortcut.test",
+            remotes: [],
+          },
+          davo: { enabled: false, available: false, name: "Davo", context: "" },
+        },
+      });
+    // keep runtime dispatch independent from unsaved and restart-pending config
+    if (path === "/api/dashboard")
+      return route.fulfill({
+        json: {
+          generation: 1,
+          adapters: {},
+          agents: [],
+          projects: [],
+          cleanupPending: 0,
+          reviews: [],
+          reviewTour: { available: false, reason: "generator_unavailable" },
+          keys: state.runtimeKeys,
+        },
+      });
+    if (path === "/api/dashboard/ticket")
+      return route.fulfill({ json: { ticket: "shortcut-ticket" } });
+    if (path === "/api/push/public-key") return route.fulfill({ json: {} });
+    if (path === "/api/agents/updates")
+      return route.fulfill({ json: { agents: [] } });
+    if (path === "/api/server/update-available")
+      return route.fulfill({ json: { available: false } });
+    if (path === "/api/settings/status")
+      return route.fulfill({
+        json: {
+          pending: state.saves.length > 0,
+          targets: state.saves.length > 0 ? ["rac"] : [],
+          effective: "known",
+          restartAvailable: true,
+        },
+      });
+    if (path === "/api/settings" && request.method() === "GET")
+      return route.fulfill({
+        json: {
+          version: 1,
+          revisionId: "settings-r1",
+          sources: [appSource(state)],
+          status: {
+            pending: false,
+            targets: [],
+            effective: "known",
+            restartAvailable: true,
+          },
+        },
+      });
+    if (path === "/api/settings/validate" && request.method() === "POST") {
+      state.validations.push(request.postDataJSON());
+      return route.fulfill({ json: { valid: true, issues: [], warnings: [] } });
     }
-    // keep the Place's notes empty
-    if (path === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [] } });
-    // expose the shared Agent and Terminal panes
-    if (path === '/api/worktrees/cora/panes' && request.method() === 'GET') return route.fulfill({ json: { panes: panes() } });
-    // retain the original terminal binding identity sent by the browser
-    if (path === '/api/worktrees/cora/shells' && request.method() === 'POST') {
-      state.shells.push(request.postDataJSON());
-      return route.fulfill({ status: 201, json: { paneId: '%5' } });
+    if (path === "/api/settings" && request.method() === "PATCH") {
+      const body = request.postDataJSON() as {
+        changes: Array<{ sourceId: string; patches: SettingsPatch[] }>;
+      };
+      state.saves.push(structuredClone(body));
+      // preserve the client draft when persistence fails
+      if (state.saveStatus !== 200)
+        return route.fulfill({
+          status: state.saveStatus,
+          json: { error: "shortcut fixture conflict" },
+        });
+      const value = appSource(state).value as Record<string, unknown>;
+      // apply only the application source transaction
+      for (const change of body.changes) {
+        if (change.sourceId !== "app") continue;
+        for (const patch of change.patches ?? []) applyPatch(value, patch);
+      }
+      state.savedKeys = structuredClone(
+        (value.keys as Record<string, unknown> | undefined) ?? {},
+      );
+      return route.fulfill({
+        json: {
+          version: 1,
+          revisionId: "settings-r2",
+          sources: [appSource(state)],
+          status: {
+            pending: true,
+            targets: ["rac"],
+            effective: "known",
+            restartAvailable: true,
+            recoveryCommand: "rac-settings-recover fixture",
+          },
+        },
+      });
     }
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+    // disclose only synthetic fixture text for protected-terminal races
+    if (path === "/api/settings/reveal" && request.method() === "POST") {
+      const body = request.postDataJSON() as { revisionId: string };
+      state.reveals.push(body);
+      return route.fulfill({
+        json: {
+          value: "synthetic-terminal-command",
+          revisionId: body.revisionId,
+          leaseId: `shortcut-lease-${state.reveals.length}`,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      });
+    }
+    if (path === "/api/settings/remask" && request.method() === "POST") {
+      state.remasks.push(request.postDataJSON());
+      return route.fulfill({ status: 204, body: "" });
+    }
+    return route.fulfill({
+      status: 404,
+      json: { error: `not mocked: ${path}` },
+    });
   });
-};
+  // prove legacy browser preferences are ignored by both dispatch and editing
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      "rac.keyboard-shortcuts",
+      JSON.stringify({ prefix: { c: ["C-F12"] } }),
+    ),
+  );
+  await page.goto("/");
+  return state;
+}
 
-// open one fully rendered dashboard at the requested platform and viewport
-const openDashboard = async (page: Page, options: { keys?: unknown; platform?: string; width?: number; height?: number } = {}) => {
-  const state: FixtureState = { shells: [], prompts: [], pageErrors: [], consoleErrors: [] };
-  // collect uncaught failures from the rendered application
-  page.on('pageerror', error => state.pageErrors.push(error.message));
-  page.on('console', message => { if (message.type() === 'error') state.consoleErrors.push(message.text()); });
-  await page.setViewportSize({ width: options.width ?? 1400, height: options.height ?? 900 });
-  await installPaneMock(page);
-  // report the requested desktop platform before application modules read navigator.platform
-  if (options.platform !== undefined) await page.addInitScript(platform => { Object.defineProperty(navigator, 'platform', { configurable: true, value: platform }); }, options.platform);
-  // retain one named Terminal panel across application startup
-  await page.addInitScript(() => localStorage.setItem('rac.terminals:cora', JSON.stringify([{ paneId: '%5', name: 'build' }])));
-  await routeApi(page, state, options.keys);
-  await page.goto(appUrl);
-  await seedPaneSize(page, 'agent-1', 80, 24);
-  await seedPaneSize(page, '%5', 80, 24);
-  await pushBytes(page, '%5', '$ \r\n');
-  const terminal = page.locator('.terminal-pane[data-panel-key="%5"]');
-  await terminal.locator('.xterm-screen').click();
-  await expect(terminal).toHaveClass(/focused/u);
-  return { state, terminal };
-};
+// navigate with either desktop buttons or the mobile custom selector
+async function selectKeyboardSettings(settings: Locator) {
+  const selector = settings.getByRole("combobox", {
+    name: "Settings section",
+    exact: true,
+  });
+  // phones use the custom dropdown
+  if (await selector.isVisible()) {
+    await selector.click();
+    await settings
+      .page()
+      .getByRole("listbox")
+      .getByRole("option", { name: "Keyboard shortcuts", exact: true })
+      .click();
+    return;
+  }
+  await settings
+    .getByRole("navigation", { name: "Settings sources" })
+    .getByRole("button", { name: "Keyboard shortcuts", exact: true })
+    .click();
+}
 
-// open the global Settings panel through its persistent navigation control
-const openSettings = async (page: Page) => {
-  await page.getByRole('button', { name: 'Global settings' }).click();
-  const settings = page.getByRole('dialog', { name: 'Settings' });
+// open the dedicated server keyboard section
+async function openKeyboardSettings(page: Page) {
+  await page.getByRole("button", { name: "Global settings" }).first().click();
+  const settings = page.getByRole("dialog", { name: "Settings" });
   await expect(settings).toBeVisible();
+  await selectKeyboardSettings(settings);
+  // command-oriented coverage uses the exclusive quick-assignment view
+  const view = settings.getByRole("combobox", {
+    name: "Keyboard editor view",
+    exact: true,
+  });
+  if (await view.count()) {
+    await view.click();
+    await page
+      .getByRole("listbox", {
+        name: "Keyboard editor view options",
+        exact: true,
+      })
+      .getByRole("option", { name: "Command shortcuts", exact: true })
+      .click();
+  }
+  await expect(
+    settings.getByRole("region", { name: "Edit keyboard shortcuts" }),
+  ).toBeVisible();
   return settings;
-};
+}
 
-// address one command and one physical assignment in the popup
-const shortcutCommand = (page: Page, identity: string) => page.locator(`[data-shortcut-command="${identity}"]`);
-const shortcutAssignment = (page: Page, identity: string, chord?: string) => page.locator(`[data-shortcut-id="${identity}"]${chord === undefined ? '' : `[data-shortcut-chord="${chord}"]`}`);
-const shortcutAssignmentInTable = (page: Page, identity: string, table: string, chord: string) => page.locator(`[data-shortcut-id="${identity}"][data-shortcut-table="${table}"][data-shortcut-chord="${chord}"]`);
+// open the primary table-oriented keyboard editor
+async function openKeyTables(page: Page) {
+  const settings = await openKeyboardSettings(page);
+  await chooseEditorOption(settings, "Keyboard editor view", "Key tables");
+  const editor = settings.getByRole("region", {
+    name: "Edit key tables",
+    exact: true,
+  });
+  await expect(editor).toBeVisible();
+  return { settings, editor };
+}
 
-// open the quick reference from the compact Settings entry
-const openShortcutReference = async (page: Page, settings: Locator) => {
-  await settings.getByRole('group', { name: 'Keyboard shortcuts' }).getByRole('button', { name: 'View/Edit Shortcuts' }).click();
-  const reference = page.getByRole('dialog', { name: 'Key bindings' });
-  await expect(reference).toBeVisible();
-  return reference;
-};
+const command = (page: Page, id: string) =>
+  page.locator(`[data-shortcut-command=${JSON.stringify(id)}]`);
 
-// enter editing without replacing the mounted reference dialog
-const editShortcuts = async (reference: Locator) => {
-  const toggle = reference.getByRole('button', { name: 'Edit shortcuts' });
-  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
-  await toggle.click();
-  const done = reference.getByRole('button', { name: 'Done editing' });
-  await expect(done).toHaveAttribute('aria-pressed', 'true');
-  await expect(reference.getByRole('region', { name: 'Edit keyboard shortcuts' })).toBeVisible();
-  return done;
-};
+// select an explicit option in the shared custom dropdown
+async function chooseEditorOption(
+  settings: Locator,
+  label: string,
+  option: string,
+) {
+  await settings.getByRole("combobox", { name: label, exact: true }).click();
+  await settings
+    .page()
+    .getByRole("listbox", { name: `${label} options`, exact: true })
+    .getByRole("option", { name: option, exact: true })
+    .click();
+}
 
-// record and save one replacement chord without depending on the visible key label
-const changeShortcut = async (page: Page, identity: string, description: string, chord: string, currentChord?: string) => {
-  const assignment = shortcutAssignment(page, identity, currentChord);
-  await assignment.locator('.shortcut-change').click();
-  const row = assignment.locator('xpath=ancestor::*[@data-shortcut-command][1]');
-  const recorder = row.getByRole('textbox', { name: `New shortcut for ${description}` });
-  // every existing binding exposes its dispatch context while it is edited
-  await expect(row.getByRole('switch', { name: `Use prefix for ${description}` })).toBeVisible();
+// align key-table selectors with their adjacent text control
+for (const width of [320, 390, 1440]) {
+  test(`keeps key-table dropdowns the same height as text controls at ${width}px`, async ({
+    page,
+  }) => {
+    await setupShortcutSettings(page, { width });
+    const { settings, editor } = await openKeyTables(page);
+    const view = settings.getByRole("combobox", {
+      name: "Keyboard editor view",
+      exact: true,
+    });
+    const table = editor.getByRole("combobox", {
+      name: "Key table",
+      exact: true,
+    });
+    const name = editor.getByRole("textbox", {
+      name: "New table name",
+      exact: true,
+    });
+    const [viewBox, tableBox, nameBox] = await Promise.all([
+      view.boundingBox(),
+      table.boundingBox(),
+      name.boundingBox(),
+    ]);
+    expect(viewBox).not.toBeNull();
+    expect(tableBox).not.toBeNull();
+    expect(nameBox).not.toBeNull();
+    expect(Math.abs(viewBox!.height - nameBox!.height)).toBeLessThanOrEqual(1);
+    expect(Math.abs(tableBox!.height - nameBox!.height)).toBeLessThanOrEqual(1);
+  });
+}
+
+// table and binding controls must compile only staged file-backed changes
+for (const width of [390, 1440]) {
+  test(`configures key tables with captured keys and table dropdowns at ${width}px`, async ({
+    page,
+  }) => {
+    const state = await setupShortcutSettings(page, { width });
+    const settings = await openKeyboardSettings(page);
+    await chooseEditorOption(settings, "Keyboard editor view", "Key tables");
+    const editor = settings.getByRole("region", {
+      name: "Edit key tables",
+      exact: true,
+    });
+    await expect(editor.locator("select")).toHaveCount(0);
+    await editor
+      .getByRole("textbox", { name: "New table name", exact: true })
+      .fill("tools");
+    await editor
+      .getByRole("button", { name: "Add table", exact: true })
+      .click();
+    await expect(
+      editor.getByRole("combobox", { name: "Key table", exact: true }),
+    ).toHaveAttribute("data-value", "tools");
+    await editor
+      .getByRole("button", { name: "Add binding", exact: true })
+      .click();
+    const form = editor.getByRole("group", {
+      name: "New binding in tools",
+      exact: true,
+    });
+    await form
+      .getByRole("textbox", { name: "Key for binding in tools", exact: true })
+      .press("Control+Shift+k");
+    await chooseEditorOption(form, "Binding type", "Action");
+    await chooseEditorOption(form, "Action", "Command palette");
+    await form
+      .getByRole("button", { name: "Apply binding", exact: true })
+      .click();
+    await expect(editor.locator('[data-key-chord="C-S-k"]')).toBeVisible();
+    await chooseEditorOption(editor, "Key table", "root");
+    const prefix = editor.locator('[data-key-chord="C-b"]');
+    await prefix
+      .getByRole("button", { name: "Edit binding", exact: true })
+      .click();
+    const edit = editor.getByRole("group", {
+      name: "Edit binding C-b in root",
+      exact: true,
+    });
+    await chooseEditorOption(edit, "Binding type", "Switch table");
+    await chooseEditorOption(edit, "Switch to table", "tools");
+    await edit
+      .getByRole("button", { name: "Apply binding", exact: true })
+      .click();
+    await expect(prefix).toContainText("Switch to the tools table");
+    expect(state.validations).toHaveLength(0);
+    expect(state.saves).toHaveLength(0);
+    await settings
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    await expect.poll(() => state.saves.length).toBe(1);
+    expect(state.savedKeys).toEqual({
+      tools: { "C-S-k": "command-palette" },
+      root: { "C-b": { table: "tools" } },
+    });
+    await expect(
+      page.getByRole("status").filter({ hasText: "Restart pending" }),
+    ).toBeVisible();
+  });
+}
+
+test("retains an Add binding form after active chord collisions without staging a draft", async ({
+  page,
+}) => {
+  const state = await setupShortcutSettings(page, {
+    savedKeys: { prefix: { v: "new-terminal" } },
+  });
+  const { settings, editor } = await openKeyTables(page);
+  await chooseEditorOption(editor, "Key table", "prefix");
+  await editor
+    .getByRole("button", { name: "Add binding", exact: true })
+    .click();
+  const form = editor.getByRole("group", {
+    name: "New binding in prefix",
+    exact: true,
+  });
+  const recorder = form.getByRole("textbox", {
+    name: "Key for binding in prefix",
+    exact: true,
+  });
+  await recorder.press("c");
+  await chooseEditorOption(form, "Action", "Command palette");
+  await form
+    .getByRole("button", { name: "Apply binding", exact: true })
+    .click();
+  await expect(editor.getByRole("alert")).toContainText("already assigned");
+  await expect(form).toBeVisible();
+  await expect(
+    form.getByRole("combobox", { name: "Action", exact: true }),
+  ).toHaveAttribute("data-value", "command-palette");
+  // configured rows collide just like inherited defaults
+  await recorder.press("v");
+  await form
+    .getByRole("button", { name: "Apply binding", exact: true })
+    .click();
+  await expect(editor.getByRole("alert")).toContainText("already assigned");
+  await expect(form).toBeVisible();
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
+  expect(state.validations).toHaveLength(0);
+  expect(state.saves).toHaveLength(0);
+});
+
+test("preserves an unapplied binding form when the active editor and table are reselected", async ({
+  page,
+}) => {
+  await setupShortcutSettings(page);
+  const { settings, editor } = await openKeyTables(page);
+  await chooseEditorOption(editor, "Key table", "prefix");
+  await editor
+    .getByRole("button", { name: "Add binding", exact: true })
+    .click();
+  const form = editor.getByRole("group", {
+    name: "New binding in prefix",
+    exact: true,
+  });
+  const recorder = form.getByRole("textbox", {
+    name: "Key for binding in prefix",
+    exact: true,
+  });
+  await recorder.press("Control+F9");
+  await chooseEditorOption(form, "Binding type", "Terminal command");
+  await form
+    .getByRole("textbox", { name: "New terminal command", exact: true })
+    .fill("  printf synthetic-form  ");
+  await chooseEditorOption(settings, "Keyboard editor view", "Key tables");
+  await expect(form).toBeVisible();
+  await chooseEditorOption(editor, "Key table", "prefix");
+  await expect(form).toBeVisible();
+  await expect(recorder).toHaveValue("Ctrl + F9");
+  await expect(
+    form.getByRole("textbox", { name: "New terminal command", exact: true }),
+  ).toHaveValue("  printf synthetic-form  ");
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("reactivates an explicit null slot at its raw chord and labels custom null removal", async ({
+  page,
+}) => {
+  const state = await setupShortcutSettings(page, {
+    savedKeys: { tools: { "S-C-c": null } },
+  });
+  const { settings, editor } = await openKeyTables(page);
+  await chooseEditorOption(editor, "Key table", "tools");
+  const disabled = editor.locator('[data-key-chord="C-S-c"]');
+  await expect(disabled).toContainText("Disabled binding");
+  await expect(
+    disabled.getByRole("button", { name: "Remove binding", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    disabled.getByRole("button", { name: "Restore default", exact: true }),
+  ).toHaveCount(0);
+  await editor
+    .getByRole("button", { name: "Add binding", exact: true })
+    .click();
+  const form = editor.getByRole("group", {
+    name: "New binding in tools",
+    exact: true,
+  });
+  await form
+    .getByRole("textbox", { name: "Key for binding in tools", exact: true })
+    .press("Control+Shift+c");
+  await chooseEditorOption(form, "Action", "Command palette");
+  await form
+    .getByRole("button", { name: "Apply binding", exact: true })
+    .click();
+  await expect(editor.locator('[data-key-chord="C-S-c"]')).toContainText(
+    "Command palette",
+  );
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  expect(state.savedKeys).toEqual({ tools: { "S-C-c": "command-palette" } });
+});
+
+test("retargets inbound bindings on table rename and blocks removal until references are repaired", async ({
+  page,
+}) => {
+  const state = await setupShortcutSettings(page, {
+    savedKeys: { root: { "C-g": { table: "tools" } }, tools: {} },
+  });
+  const { settings, editor } = await openKeyTables(page);
+  await chooseEditorOption(editor, "Key table", "tools");
+  await expect(
+    editor.getByText("Entered by: root: Ctrl + G", { exact: true }),
+  ).toBeVisible();
+  await editor
+    .getByRole("button", { name: "Remove tools table", exact: true })
+    .click();
+  await expect(editor.getByRole("alert")).toContainText(
+    "still referenced by root.C-g",
+  );
+  await editor
+    .getByRole("button", { name: "Rename table", exact: true })
+    .click();
+  await editor
+    .getByRole("textbox", { name: "Table name", exact: true })
+    .fill("utilities");
+  await editor
+    .getByRole("button", { name: "Apply table name", exact: true })
+    .click();
+  await expect(
+    editor.getByRole("combobox", { name: "Key table", exact: true }),
+  ).toHaveAttribute("data-value", "utilities");
+  await expect(
+    editor.getByText("Entered by: root: Ctrl + G", { exact: true }),
+  ).toBeVisible();
+  await chooseEditorOption(editor, "Key table", "root");
+  const inbound = editor.locator('[data-key-chord="C-g"]');
+  await expect(inbound).toContainText("Switch to the utilities table");
+  await inbound
+    .getByRole("button", { name: "Edit binding", exact: true })
+    .click();
+  const form = editor.getByRole("group", {
+    name: "Edit binding C-g in root",
+    exact: true,
+  });
+  await chooseEditorOption(form, "Binding type", "Action");
+  await chooseEditorOption(form, "Action", "Command palette");
+  await form
+    .getByRole("button", { name: "Apply binding", exact: true })
+    .click();
+  await chooseEditorOption(editor, "Key table", "utilities");
+  await editor
+    .getByRole("button", { name: "Remove utilities table", exact: true })
+    .click();
+  await expect(
+    editor.getByRole("combobox", { name: "Key table", exact: true }),
+  ).toHaveAttribute("data-value", "root");
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  expect(state.savedKeys).toEqual({ root: { "C-g": "command-palette" } });
+});
+
+test("moves a raw-spelled terminal binding without changing command bytes or reuse", async ({
+  page,
+}) => {
+  const terminal = {
+    terminal: "  env SYNTHETIC_TOKEN=fake /usr/bin/gh dash  ",
+    reuse: false,
+  };
+  const state = await setupShortcutSettings(page, {
+    savedKeys: { tools: { "C-G": terminal } },
+  });
+  const { settings, editor } = await openKeyTables(page);
+  await chooseEditorOption(editor, "Key table", "tools");
+  const row = editor.locator('[data-key-chord="C-S-g"]');
+  await expect(row).toContainText("Terminal running gh");
+  await expect(editor).not.toContainText("SYNTHETIC_TOKEN");
+  await row
+    .getByRole("button", { name: "Change key C-S-g in tools", exact: true })
+    .click();
+  await row
+    .getByRole("textbox", { name: "New key for C-S-g in tools", exact: true })
+    .press("Alt+h");
+  await row
+    .getByRole("button", { name: "Apply shortcut", exact: true })
+    .click();
+  await expect(editor.locator('[data-key-chord="M-h"]')).toContainText(
+    "Terminal running gh",
+  );
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  const patches = state.saves[0]!.changes[0]!.patches;
+  expect(patches).toEqual(
+    expect.arrayContaining([
+      { op: "remove", path: ["keys", "tools", "C-G"] },
+      { op: "set", path: ["keys", "tools", "M-h"], value: terminal },
+    ]),
+  );
+  expect(state.savedKeys).toEqual({ tools: { "M-h": terminal } });
+});
+
+test("locks editor navigation during held validation and preserves an unapplied form after failure", async ({
+  page,
+}) => {
+  const state = await setupShortcutSettings(page);
+  const { settings, editor } = await openKeyTables(page);
+  await chooseEditorOption(editor, "Key table", "prefix");
+  await editor
+    .getByRole("button", { name: "Disable c in prefix", exact: true })
+    .click();
+  await editor
+    .getByRole("button", { name: "Add binding", exact: true })
+    .click();
+  const form = editor.getByRole("group", {
+    name: "New binding in prefix",
+    exact: true,
+  });
+  const recorder = form.getByRole("textbox", {
+    name: "Key for binding in prefix",
+    exact: true,
+  });
+  await recorder.press("Control+F9");
+  await chooseEditorOption(form, "Binding type", "Terminal command");
+  const commandInput = form.getByRole("textbox", {
+    name: "New terminal command",
+    exact: true,
+  });
+  await commandInput.fill("  printf held-form  ");
+  let releaseValidation!: () => void;
+  let validationRequests = 0;
+  const heldValidation = new Promise<void>((resolve) => {
+    releaseValidation = resolve;
+  });
+  await page.route("**/api/settings/validate", async (route) => {
+    validationRequests += 1;
+    await heldValidation;
+    await route.fulfill({ json: { valid: false, issues: [], warnings: [] } });
+  });
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => validationRequests).toBe(1);
+  await expect(
+    settings.getByRole("button", { name: "Saving…", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    settings.getByRole("combobox", {
+      name: "Keyboard editor view",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await expect(
+    editor.getByRole("combobox", { name: "Key table", exact: true }),
+  ).toBeDisabled();
+  await expect(form).toBeVisible();
+  await expect(recorder).toHaveValue("Ctrl + F9");
+  await expect(commandInput).toHaveValue("  printf held-form  ");
+  await expect(commandInput).toBeDisabled();
+  releaseValidation();
+  await expect(
+    settings.getByText("Fix the validation issues before saving.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(form).toBeVisible();
+  await expect(commandInput).toBeEnabled();
+  await expect(commandInput).toHaveValue("  printf held-form  ");
+  await expect(
+    settings.getByRole("combobox", {
+      name: "Keyboard editor view",
+      exact: true,
+    }),
+  ).toBeEnabled();
+  await expect(
+    editor.getByRole("combobox", { name: "Key table", exact: true }),
+  ).toBeEnabled();
+  expect(state.saves).toHaveLength(0);
+});
+
+test("revokes a delayed protected terminal reveal when the binding is disabled", async ({
+  page,
+}) => {
+  const protectedTerminal = {
+    terminal: { __racProtected: true, present: true },
+    reuse: true,
+  };
+  const state = await setupShortcutSettings(page, {
+    savedKeys: { secret: { "C-G": protectedTerminal } },
+  });
+  let releaseReveal!: () => void;
+  let revealRequests = 0;
+  const heldReveal = new Promise<void>((resolve) => {
+    releaseReveal = resolve;
+  });
+  await page.route("**/api/settings/reveal", async (route) => {
+    revealRequests += 1;
+    const body = route.request().postDataJSON() as { revisionId: string };
+    await heldReveal;
+    await route.fulfill({
+      json: {
+        value: "synthetic-late-terminal-plaintext",
+        revisionId: body.revisionId,
+        leaseId: "late-shortcut-lease",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    });
+  });
+  const { settings, editor } = await openKeyTables(page);
+  await chooseEditorOption(editor, "Key table", "secret");
+  const row = editor.locator('[data-key-chord="C-S-g"]');
+  await page.evaluate((secret) => {
+    const current = window as ShortcutWatchWindow;
+    current.__shortcutSecretSeen = false;
+    current.__shortcutSecretTimer = window.setInterval(() => {
+      const fieldContainsSecret = [
+        ...document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+          "input, textarea",
+        ),
+      ].some((field) => field.value.includes(secret));
+      // retain any transient plaintext observation for the final assertion
+      if (fieldContainsSecret || document.body.textContent?.includes(secret))
+        current.__shortcutSecretSeen = true;
+    }, 1);
+  }, "synthetic-late-terminal-plaintext");
+  await row
+    .getByRole("button", { name: "Reveal Terminal command", exact: true })
+    .click();
+  await expect.poll(() => revealRequests).toBe(1);
+  await row
+    .getByRole("button", { name: "Disable C-S-g in secret", exact: true })
+    .click();
+  await expect(row).toContainText("Disabled binding");
+  releaseReveal();
+  await expect
+    .poll(() => state.remasks)
+    .toContainEqual({ leaseId: "late-shortcut-lease" });
+  const plaintextSeen = await page.evaluate(() => {
+    const current = window as ShortcutWatchWindow;
+    window.clearInterval(current.__shortcutSecretTimer);
+    return current.__shortcutSecretSeen;
+  });
+  expect(plaintextSeen).toBe(false);
+  await expect(settings).not.toContainText("synthetic-late-terminal-plaintext");
+  const plaintextField = await settings
+    .locator("input, textarea")
+    .evaluateAll(
+      (fields, secret) =>
+        fields.some((field) =>
+          (field as HTMLInputElement | HTMLTextAreaElement).value.includes(
+            secret,
+          ),
+        ),
+      "synthetic-late-terminal-plaintext",
+    );
+  expect(plaintextField).toBe(false);
+  await settings
+    .getByRole("button", { name: "Discard changes", exact: true })
+    .click();
+  await confirmSettingsDiscard(page);
+  await expect(row).toContainText("Protected terminal command");
+  await expect(
+    row.getByRole("button", { name: "Reveal Terminal command", exact: true }),
+  ).toBeVisible();
+  await expect(settings).not.toContainText("synthetic-late-terminal-plaintext");
+  expect(state.saves).toHaveLength(0);
+});
+
+for (const delayed of [false, true]) {
+  test(`revokes an ${delayed ? "in-flight" : "accepted"} protected terminal reveal when Add table navigates`, async ({
+    page,
+  }) => {
+    const protectedTerminal = {
+      terminal: { __racProtected: true, present: true },
+      reuse: false,
+    };
+    const state = await setupShortcutSettings(page, {
+      savedKeys: { secret: { s: protectedTerminal } },
+    });
+    let releaseReveal = () => undefined;
+    let revealRequests = 0;
+    // delay only the in-flight variant so both disclosure states cross Add table
+    if (delayed) {
+      const heldReveal = new Promise<void>((resolve) => {
+        releaseReveal = resolve;
+      });
+      await page.route("**/api/settings/reveal", async (route) => {
+        revealRequests += 1;
+        const body = route.request().postDataJSON() as { revisionId: string };
+        await heldReveal;
+        await route.fulfill({
+          json: {
+            value: "synthetic-add-table-plaintext",
+            revisionId: body.revisionId,
+            leaseId: "add-table-late-lease",
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        });
+      });
+    }
+    const { editor } = await openKeyTables(page);
+    await chooseEditorOption(editor, "Key table", "secret");
+    const protectedRow = editor.locator('[data-key-chord="s"]');
+    await protectedRow
+      .getByRole("button", { name: "Reveal Terminal command", exact: true })
+      .click();
+    // wait for either the pending request or accepted disclosure
+    if (delayed) await expect.poll(() => revealRequests).toBe(1);
+    else
+      await expect(
+        protectedRow.getByRole("button", {
+          name: "Mask Terminal command",
+          exact: true,
+        }),
+      ).toBeVisible();
+    await editor
+      .getByRole("textbox", { name: "New table name", exact: true })
+      .fill(delayed ? "pending-table" : "accepted-table");
+    await editor
+      .getByRole("button", { name: "Add table", exact: true })
+      .click();
+    releaseReveal();
+    await expect(
+      editor.getByRole("combobox", { name: "Key table", exact: true }),
+    ).toHaveAttribute(
+      "data-value",
+      delayed ? "pending-table" : "accepted-table",
+    );
+    await expect
+      .poll(() => state.remasks)
+      .toContainEqual({
+        leaseId: delayed ? "add-table-late-lease" : "shortcut-lease-1",
+      });
+    await expect(editor).not.toContainText(
+      delayed ? "synthetic-add-table-plaintext" : "synthetic-terminal-command",
+    );
+    expect(state.saves).toHaveLength(0);
+  });
+}
+
+for (const action of ["Discard changes", "Refresh files"] as const) {
+  test(`${action} clears an unapplied key-table binding form`, async ({
+    page,
+  }) => {
+    await setupShortcutSettings(page);
+    const { settings, editor } = await openKeyTables(page);
+    await chooseEditorOption(editor, "Key table", "prefix");
+    // discard needs one shared draft while refresh intentionally exercises local-only state
+    if (action === "Discard changes")
+      await editor
+        .getByRole("button", { name: "Disable c in prefix", exact: true })
+        .click();
+    await editor
+      .getByRole("button", { name: "Add binding", exact: true })
+      .click();
+    const form = editor.getByRole("group", {
+      name: "New binding in prefix",
+      exact: true,
+    });
+    await form
+      .getByRole("textbox", { name: "Key for binding in prefix", exact: true })
+      .press("Control+F10");
+    await chooseEditorOption(form, "Binding type", "Terminal command");
+    await form
+      .getByRole("textbox", { name: "New terminal command", exact: true })
+      .fill("synthetic-stale-form");
+    await settings.getByRole("button", { name: action, exact: true }).click();
+    // discard now requires an explicit destructive decision
+    if (action === "Discard changes") await confirmSettingsDiscard(page);
+    await expect(form).toHaveCount(0);
+    await expect(
+      editor.getByRole("button", { name: "Add binding", exact: true }),
+    ).toBeVisible();
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toHaveCount(0);
+  });
+}
+
+test("locks key-table controls while Refresh waits for an active terminal remask", async ({
+  page,
+}) => {
+  const protectedTerminal = {
+    terminal: { __racProtected: true, present: true },
+    reuse: true,
+  };
+  const state = await setupShortcutSettings(page, {
+    savedKeys: { secret: { s: protectedTerminal } },
+  });
+  const { settings, editor } = await openKeyTables(page);
+  await chooseEditorOption(editor, "Key table", "secret");
+  const row = editor.locator('[data-key-chord="s"]');
+  await row
+    .getByRole("button", { name: "Reveal Terminal command", exact: true })
+    .click();
+  await expect(
+    row.getByRole("button", { name: "Mask Terminal command", exact: true }),
+  ).toBeVisible();
+  await editor
+    .getByRole("button", { name: "Add binding", exact: true })
+    .click();
+  const form = editor.getByRole("group", {
+    name: "New binding in secret",
+    exact: true,
+  });
+  await form
+    .getByRole("textbox", { name: "Key for binding in secret", exact: true })
+    .press("Control+F11");
+  let releaseRemask!: () => void;
+  let remaskRequests = 0;
+  const heldRemask = new Promise<void>((resolve) => {
+    releaseRemask = resolve;
+  });
+  await page.route("**/api/settings/remask", async (route) => {
+    remaskRequests += 1;
+    state.remasks.push(route.request().postDataJSON());
+    await heldRemask;
+    await route.fulfill({ status: 204, body: "" });
+  });
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await expect.poll(() => remaskRequests).toBe(1);
+  const refresh = settings.getByRole("button", {
+    name: "Refresh files",
+    exact: true,
+  });
+  await expect(refresh).toBeDisabled();
+  await expect(refresh).toHaveAttribute("aria-busy", "true");
+  await expect(
+    settings.getByRole("combobox", {
+      name: "Keyboard editor view",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await expect(
+    editor.getByRole("combobox", { name: "Key table", exact: true }),
+  ).toBeDisabled();
+  await expect(form).toHaveCount(0);
+  await expect(
+    editor.getByRole("button", { name: "Add binding", exact: true }),
+  ).toBeDisabled();
+  releaseRemask();
+  await expect(refresh).toBeEnabled();
+  await expect(refresh).toHaveAttribute("aria-busy", "false");
+  await expect(
+    row.getByRole("button", { name: "Reveal Terminal command", exact: true }),
+  ).toBeVisible();
+  await expect(settings).not.toContainText("synthetic-terminal-command");
+  expect(state.remasks).toContainEqual({ leaseId: "shortcut-lease-1" });
+});
+
+// replace one visible shortcut through the recorder
+async function replaceShortcut(
+  page: Page,
+  id: string,
+  description: string,
+  chord: string,
+) {
+  const row = command(page, id);
+  await row.locator(".shortcut-change").first().click();
+  const recorder = row.getByRole("textbox", {
+    name: `New shortcut for ${description}`,
+  });
   await recorder.press(chord);
-  await row.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(recorder).toHaveCount(0);
-  return row;
-};
+  await row.getByRole("button", { name: "Apply shortcut" }).click();
+}
 
-// read the current outlined key sequence for one editor row
-const expectShortcutLabel = async (page: Page, identity: string, label: string) => {
-  await expect(shortcutAssignment(page, identity).locator('.shortcut-keys')).toHaveAttribute('aria-label', label);
-};
-
-// compare one rendered color with the active theme token
-const expectThemeColor = async (element: Locator, token: '--green' | '--mauve') => {
-  const colors = await element.evaluate((node, variable) => {
-    const probe = document.createElement('span');
-    probe.style.color = `var(${variable})`;
-    node.append(probe);
-    const expected = getComputedStyle(probe).color;
-    probe.remove();
-    return { actual: getComputedStyle(node).color, expected };
-  }, token);
-  expect(colors.actual).toBe(colors.expected);
-};
-
-// ignore only resource noise produced by intentionally unimplemented fixture APIs
-const unexpectedConsoleErrors = (state: FixtureState) => state.consoleErrors.filter(message => message !== 'Failed to load resource: the server responded with a status of 404 (Not Found)');
-
-test.describe.configure({ timeout: 180_000 });
-
-test('keeps Settings compact while the reference owns a trapped read and edit mode', async ({ page }) => {
-  const { state } = await openDashboard(page, { platform: 'Linux x86_64' });
-  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
-  await expect(toolbar.getByRole('button', { name: 'Key bindings', exact: true })).toHaveCount(0);
-  const settings = await openSettings(page);
-  const keyboardSetting = settings.getByRole('group', { name: 'Keyboard shortcuts' });
-  const entry = keyboardSetting.getByRole('button', { name: 'View/Edit Shortcuts' });
-  await expect(keyboardSetting.getByText('KEYBOARD SHORTCUTS', { exact: true })).toBeVisible();
-  await expect(keyboardSetting.getByRole('heading')).toHaveCount(0);
-  await expect(entry).toBeVisible();
-  await expect(keyboardSetting.getByText('Customize keyboard shortcuts for this browser.', { exact: true })).toBeVisible();
-  await expect(keyboardSetting.locator(':scope > *')).toHaveCount(2);
-  await expect(keyboardSetting.getByRole('searchbox')).toHaveCount(0);
-  await expect(keyboardSetting.locator('[data-shortcut-id]')).toHaveCount(0);
-
-  // match neighboring row typography and keep the action on the eyebrow line
-  const compactMetrics = await settings.evaluate(element => {
-    const keyboard = element.querySelector<HTMLElement>('.client-settings-keyboard')!;
-    const neighbor = element.querySelector<HTMLElement>('.client-settings-reduced-motion')!;
-    const header = keyboard.querySelector<HTMLElement>('header')!;
-    const eyebrow = keyboard.querySelector<HTMLElement>('small')!;
-    const button = keyboard.querySelector<HTMLElement>('button')!;
-    const description = keyboard.querySelector<HTMLElement>(':scope > span')!;
-    const neighborDescription = neighbor.querySelector<HTMLElement>(':scope > span')!;
-    return {
-      descriptionFont: getComputedStyle(description).fontSize,
-      neighborFont: getComputedStyle(neighborDescription).fontSize,
-      headerRight: header.getBoundingClientRect().right,
-      eyebrowRight: eyebrow.getBoundingClientRect().right,
-      buttonLeft: button.getBoundingClientRect().left,
-      buttonRight: button.getBoundingClientRect().right
-    };
+test("keeps the quick reference read-only and opens the server keyboard settings section", async ({
+  page,
+}) => {
+  await setupShortcutSettings(page, {
+    runtimeKeys: { root: { "C-F6": "command-palette" } },
   });
-  expect(compactMetrics.descriptionFont).toBe(compactMetrics.neighborFont);
-  expect(Number.parseFloat(compactMetrics.descriptionFont)).toBeCloseTo(10.24, 1);
-  expect(compactMetrics.buttonLeft).toBeGreaterThan(compactMetrics.eyebrowRight);
-  expect(compactMetrics.headerRight - compactMetrics.buttonRight).toBeLessThan(1);
-  for (const [groupName, eyebrow] of [['Reduced motion setting', 'REDUCED MOTION'], ['Flyout markers setting', 'FLYOUT MARKERS'], ['Dynamic worktrees setting', 'DYNAMIC WORKTREES']] as const) {
-    const row = settings.getByRole('group', { name: groupName });
-    await expect(row.getByText(eyebrow, { exact: true })).toBeVisible();
-    await expect(row.locator(':scope > strong')).toHaveCount(0);
-  }
-  await page.screenshot({ path: '/tmp/remoteagents-shortcut-v2-settings-desktop.png', fullPage: true });
-
-  let reference = await openShortcutReference(page, settings);
-  const close = reference.getByRole('button', { name: 'Close key bindings' });
-  const closeColors = await close.evaluate(element => {
-    const probe = document.createElement('span');
-    probe.style.color = 'var(--subtext-0)';
-    element.append(probe);
-    const expected = getComputedStyle(probe).color;
-    probe.remove();
-    return {
-      actual: getComputedStyle(element).color,
-      background: getComputedStyle(element.closest('header')!).backgroundColor,
-      expected
-    };
-  });
-  expect(closeColors.actual).toBe(closeColors.expected);
-  expect(closeColors.actual).not.toBe(closeColors.background);
-  let mode = reference.getByRole('button', { name: 'Edit shortcuts' });
-  await expect(mode).toHaveAttribute('aria-pressed', 'false');
-  await expect(reference.getByRole('region', { name: 'Edit keyboard shortcuts' })).toHaveCount(0);
-  await expect(reference.getByRole('searchbox', { name: 'Find keyboard shortcuts' })).toHaveCount(0);
-  await expect(reference.getByRole('button', { name: 'Reset all shortcuts' })).toHaveCount(0);
-  await expect(settings).toBeVisible();
-  const ctrlShift = reference.getByLabel('Ctrl + Shift + C');
-  await expect(ctrlShift.locator('kbd')).toHaveText(['Ctrl', 'Shift', 'C']);
-  await expect(ctrlShift.locator('.shortcut-key-separator')).toHaveText([' + ', ' + ']);
-  await expect(ctrlShift).toHaveText('Ctrl + Shift + C');
-  await expect(reference.getByLabel('Super + C').locator('kbd')).toHaveText(['Super', 'C']);
-  // direct bindings do not expose the internal root table name
-  await expect(reference.getByText('root', { exact: true })).toHaveCount(0);
-  await expect(close).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(mode).toBeFocused();
-  await page.screenshot({ path: '/tmp/remoteagents-shortcut-v2-close-unfocused.png', fullPage: true });
-  await page.keyboard.press('Tab');
-  await expect(close).toBeFocused();
-  // a modal must not launch a background workspace action
-  await page.keyboard.press('Control+b');
-  await page.keyboard.press('c');
-  expect(state.shells).toEqual([]);
-  const modalIndicator = page.locator('.key-indicator');
-  await expect(modalIndicator).toHaveCount(0);
-  await page.screenshot({ path: '/tmp/remoteagents-shortcut-v2-reference-desktop.png', fullPage: true });
-
-  const done = await editShortcuts(reference);
-  await expect(reference.getByRole('searchbox', { name: 'Find keyboard shortcuts' })).toBeVisible();
-  await expect(reference.getByRole('button', { name: 'Reset all shortcuts' })).toBeVisible();
-  const initialEditorRow = shortcutCommand(page, 'table:prefix');
-  const initialReset = initialEditorRow.getByRole('button', { name: 'Reset', exact: true });
-  await expect(initialEditorRow.getByRole('button', { name: 'Disable', exact: true })).toBeVisible();
-  await expect(initialReset).toBeDisabled();
-  const editorMetrics = await initialEditorRow.evaluate(element => {
-    const keys = element.querySelector<HTMLElement>('.shortcut-setting-keys')!;
-    const description = element.querySelector<HTMLElement>('.shortcut-setting-description')!;
-    const controls = element.querySelector<HTMLElement>('.shortcut-binding-controls')!;
-    const change = element.querySelector<HTMLElement>('.shortcut-change')!;
-    const reset = controls.querySelector<HTMLElement>('button:last-child')!;
-    const icon = change.querySelector<SVGElement>('svg')!;
-    return {
-      keysLeft: keys.getBoundingClientRect().left,
-      descriptionLeft: description.getBoundingClientRect().left,
-      controlsLeft: controls.getBoundingClientRect().left,
-      changeBackground: getComputedStyle(change).backgroundColor,
-      changeBorder: getComputedStyle(change).borderStyle,
-      resetBackground: getComputedStyle(reset).backgroundColor,
-      iconWidth: icon.getBoundingClientRect().width
-    };
-  });
-  expect(editorMetrics.keysLeft).toBeLessThan(editorMetrics.descriptionLeft);
-  expect(editorMetrics.descriptionLeft).toBeLessThan(editorMetrics.controlsLeft);
-  expect(editorMetrics.changeBackground).toBe('rgba(0, 0, 0, 0)');
-  expect(editorMetrics.changeBorder).toBe('solid');
-  expect(editorMetrics.resetBackground).toBe('rgba(0, 0, 0, 0)');
-  expect(editorMetrics.iconWidth).toBeGreaterThan(0);
-  await expect(reference.getByText('root', { exact: true })).toHaveCount(0);
-  const prefixAssignment = shortcutAssignment(page, 'prefix:n', 'n');
-  const assignmentOrder = await prefixAssignment.evaluate(element => {
-    const change = element.querySelector<HTMLElement>('.shortcut-change')!;
-    const remove = element.querySelector<HTMLElement>('.shortcut-remove')!;
-    const controls = change.parentElement!;
-    return {
-      removeImmediatelyAfterChange: change.nextElementSibling === remove,
-      controlsBeforeBinding: controls.nextElementSibling?.matches('.shortcut-table-label, .shortcut-keys') ?? false,
-      removeText: remove.textContent?.trim() ?? '',
-      removeIcons: remove.querySelectorAll('svg').length
-    };
-  });
-  expect(assignmentOrder).toEqual({ removeImmediatelyAfterChange: true, controlsBeforeBinding: true, removeText: '', removeIcons: 1 });
-  const enabledControls = reference.locator('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])');
-  const first = enabledControls.first();
-  const last = enabledControls.last();
-  await first.focus();
-  await page.keyboard.press('Shift+Tab');
-  await expect(last).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(first).toBeFocused();
-  await page.screenshot({ path: '/tmp/remoteagents-shortcut-v2-editor-desktop.png', fullPage: true });
-  await done.click();
-  mode = reference.getByRole('button', { name: 'Edit shortcuts' });
-  await expect(mode).toHaveAttribute('aria-pressed', 'false');
-  await expect(reference.getByRole('region', { name: 'Edit keyboard shortcuts' })).toHaveCount(0);
-  await close.click();
-  await expect(reference).toHaveCount(0);
-  await expect(settings).toBeVisible();
-  reference = await openShortcutReference(page, settings);
-  await expect(reference.getByRole('button', { name: 'Edit shortcuts' })).toHaveAttribute('aria-pressed', 'false');
-  await reference.getByRole('button', { name: 'Close key bindings' }).click();
-
-  await page.setViewportSize({ width: 320, height: 640 });
-  await keyboardSetting.scrollIntoViewIfNeeded();
-  await expect(keyboardSetting).toBeInViewport();
-  const horizontal = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth, body: document.body.scrollWidth }));
-  expect(horizontal.document).toBeLessThanOrEqual(horizontal.viewport);
-  expect(horizontal.body).toBeLessThanOrEqual(horizontal.viewport);
-  await page.screenshot({ path: '/tmp/remoteagents-shortcut-v2-settings-mobile.png', fullPage: true });
-  reference = await openShortcutReference(page, settings);
-  await editShortcuts(reference);
-  await expect(reference.getByRole('searchbox', { name: 'Find keyboard shortcuts' })).toBeInViewport();
-  await reference.getByRole('searchbox', { name: 'Find keyboard shortcuts' }).press('Shift');
-  const mobileIndicator = page.locator('.key-indicator');
-  await expect(mobileIndicator).toHaveCount(0);
-  const mobileHorizontal = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth, body: document.body.scrollWidth }));
-  expect(mobileHorizontal.document).toBeLessThanOrEqual(mobileHorizontal.viewport);
-  expect(mobileHorizontal.body).toBeLessThanOrEqual(mobileHorizontal.viewport);
-  await page.screenshot({ path: '/tmp/remoteagents-shortcut-v2-editor-mobile.png', fullPage: true });
-  expect(state.pageErrors).toEqual([]);
-  expect(unexpectedConsoleErrors(state)).toEqual([]);
-});
-
-test('uses familiar platform names while keeping every modifier in a separate key outline', async ({ browser }) => {
-  const platforms = [['Win32', 'Win'], ['MacIntel', 'Cmd'], ['Linux x86_64', 'Super']] as const;
-  // exercise a fresh module load for each platform label
-  for (const [platform, label] of platforms) {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    const { state } = await openDashboard(page, { platform });
-    await page.keyboard.press('Control+?');
-    const reference = page.getByRole('dialog', { name: 'Key bindings' });
-    const platformChord = reference.getByLabel(`${label} + C`);
-    await expect(platformChord.locator('kbd')).toHaveText([label, 'C']);
-    await expect(platformChord.locator('.shortcut-key-separator')).toHaveText(' + ');
-    const shiftedChord = reference.getByLabel('Ctrl + Shift + C');
-    await expect(shiftedChord.locator('kbd')).toHaveText(['Ctrl', 'Shift', 'C']);
-    await expect(shiftedChord.locator('.shortcut-key-separator')).toHaveText([' + ', ' + ']);
-    expect(state.pageErrors).toEqual([]);
-    expect(unexpectedConsoleErrors(state)).toEqual([]);
-    await context.close();
-  }
-});
-
-test('adds, persists, removes, disables, and resets multiple shortcuts for one command', async ({ page }) => {
-  const { state, terminal } = await openDashboard(page);
-  let settings = await openSettings(page);
-  let reference = await openShortcutReference(page, settings);
-  await editShortcuts(reference);
-  let leader = shortcutCommand(page, 'table:prefix');
-  const description = 'Switch to the prefix table';
-
-  // prove Escape cancels capture without closing the modal or running the binding
-  await shortcutAssignment(page, 'root:C-b', 'C-b').locator('.shortcut-change').click();
-  let recorder = leader.getByRole('textbox', { name: `New shortcut for ${description}` });
-  await expect(recorder).toBeFocused();
-  await recorder.press('Control+a');
-  await expect(recorder).toHaveValue('Ctrl + A');
-  await expect(page.locator('.key-indicator')).toHaveCount(0);
-  await recorder.press('Escape');
+  const settings = await openKeyboardSettings(page);
+  await settings.getByRole("button", { name: "View active shortcuts" }).click();
+  const reference = page.getByRole("dialog", { name: "Key bindings" });
   await expect(reference).toBeVisible();
-  await expect(reference.getByRole('button', { name: 'Done editing' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-b').locator('.shortcut-change')).toBeFocused();
+  await expect(
+    reference.getByRole("button", { name: "Edit shortcuts" }),
+  ).toHaveCount(0);
+  await expect(
+    reference.getByRole("button", { name: "Edit in Settings" }),
+  ).toBeVisible();
+  await expect(reference.getByLabel("Ctrl + F6")).toBeVisible();
+  await reference.getByRole("button", { name: "Edit in Settings" }).click();
 
-  // add an alias without replacing the command's existing assignment
-  await leader.getByRole('button', { name: `Add shortcut for ${description}` }).click();
-  recorder = leader.getByRole('textbox', { name: `New shortcut for ${description}` });
-  await recorder.press('Control+a');
-  await leader.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-b')).toHaveCount(1);
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-a')).toHaveCount(1);
-  await expect(leader.locator('.shortcut-keys')).toHaveCount(2);
-  await reference.getByRole('button', { name: 'Close key bindings' }).click();
-  await settings.getByRole('button', { name: 'Close settings' }).click();
+  await expect(
+    settings.getByRole("region", { name: "Edit keyboard shortcuts" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#settings$/u);
+  await expect(page.getByRole("dialog", { name: "Key bindings" })).toHaveCount(
+    0,
+  );
+});
 
-  // either physical key now runs the same command
-  const prompt = page.getByRole('textbox', { name: 'Prompt' });
-  await terminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+b');
-  await page.keyboard.press('1');
-  await expect(prompt).toBeFocused();
-  await terminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+a');
-  await page.keyboard.press('1');
-  await expect(prompt).toBeFocused();
+test("stages recorder changes in one config transaction without changing runtime dispatch", async ({
+  page,
+}) => {
+  const state = await setupShortcutSettings(page);
+  const settings = await openKeyboardSettings(page);
 
-  // reload to prove the whole assignment list is browser-persistent
-  await page.reload();
-  await seedPaneSize(page, 'agent-1', 80, 24);
-  await seedPaneSize(page, '%5', 80, 24);
-  const reloadedTerminal = page.locator('.terminal-pane[data-panel-key="%5"]');
-  await reloadedTerminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+a');
-  await page.keyboard.press('1');
-  await expect(prompt).toBeFocused();
-  settings = await openSettings(page);
-  reference = await openShortcutReference(page, settings);
-  await editShortcuts(reference);
-  leader = shortcutCommand(page, 'table:prefix');
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-b')).toHaveCount(1);
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-a')).toHaveCount(1);
+  await replaceShortcut(
+    page,
+    "table:prefix",
+    "Switch to the prefix table",
+    "Control+a",
+  );
+  await expect(
+    settings.getByRole("button", { name: "Save changes" }),
+  ).toBeEnabled();
+  expect(state.saves).toHaveLength(0);
+  expect(state.validations).toHaveLength(0);
+  // unsaved drafts never change the dashboard-provided runtime table
+  await settings.getByRole("button", { name: "View active shortcuts" }).click();
+  const reference = page.getByRole("dialog", { name: "Key bindings" });
+  await expect(
+    reference.locator(
+      '[data-shortcut-command="table:prefix"] [data-shortcut-chord="C-b"]',
+    ),
+  ).toBeVisible();
+  await expect(
+    reference.locator(
+      '[data-shortcut-command="table:prefix"] [data-shortcut-chord="C-a"]',
+    ),
+  ).toHaveCount(0);
+  await reference.getByRole("button", { name: "Close key bindings" }).click();
 
-  // remove one alias while retaining and dispatching the other
-  await shortcutAssignment(page, 'root:C-b', 'C-a').getByRole('button', { name: `Remove shortcut Ctrl + A for ${description}` }).click();
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-a')).toHaveCount(0);
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-b')).toHaveCount(1);
-  await reference.getByRole('button', { name: 'Close key bindings' }).click();
-  await settings.getByRole('button', { name: 'Close settings' }).click();
-  await reloadedTerminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+a');
-  await page.keyboard.press('1');
-  await expect(reloadedTerminal).toHaveClass(/focused/u);
-  await page.keyboard.press('Control+b');
-  await page.keyboard.press('1');
-  await expect(prompt).toBeFocused();
+  await settings.getByRole("button", { name: "Save changes" }).click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  expect(state.validations).toHaveLength(1);
+  const patches = state.saves[0]!.changes.find(
+    (change) => change.sourceId === "app",
+  )!.patches;
+  expect(patches).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        op: "set",
+        path: ["keys", "root", "C-b"],
+        value: null,
+      }),
+      expect.objectContaining({
+        op: "set",
+        path: ["keys", "root", "C-a"],
+        value: { table: "prefix" },
+      }),
+    ]),
+  );
+  await expect(
+    page.getByRole("status", { name: "Restart pending" }),
+  ).toBeVisible();
+});
 
-  // disabling applies to the whole command and removes every editing affordance
-  settings = await openSettings(page);
-  reference = await openShortcutReference(page, settings);
-  await editShortcuts(reference);
-  leader = shortcutCommand(page, 'table:prefix');
-  await leader.getByRole('button', { name: 'Disable', exact: true }).click();
-  await expect(leader).toHaveAccessibleName(`${description} (disabled)`);
-  await expect(leader.locator('.shortcut-keys')).toHaveCount(0);
-  await expect(leader.locator('.shortcut-change')).toHaveCount(0);
-  await expect(leader.getByRole('button', { name: `Add shortcut for ${description}` })).toHaveCount(0);
-  await expect(leader.locator('.shortcut-setting-description s')).toHaveText(description);
-  await expect(leader.getByRole('button', { name: 'Enable', exact: true })).toBeVisible();
-  await expect(leader.getByRole('button', { name: 'Reset', exact: true })).toBeEnabled();
-  await reference.getByRole('button', { name: 'Done editing' }).click();
-  const disabledReference = shortcutCommand(page, 'table:prefix');
-  await expect(disabledReference.locator('.shortcut-keys')).toHaveCount(0);
-  await expect(disabledReference.locator('s')).toHaveText(description);
-
-  // command-level Reset restores defaults and discards added aliases together
-  await editShortcuts(reference);
-  leader = shortcutCommand(page, 'table:prefix');
-  await leader.getByRole('button', { name: 'Reset', exact: true }).click();
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-b')).toHaveCount(1);
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-a')).toHaveCount(0);
-  await expect(leader.getByRole('button', { name: 'Reset', exact: true })).toBeDisabled();
-
-  // browser-reserved keys remain rejected without losing the current assignments
-  await shortcutAssignment(page, 'root:C-b', 'C-b').locator('.shortcut-change').click();
-  recorder = leader.getByRole('textbox', { name: `New shortcut for ${description}` });
-  await recorder.evaluate(element => element.dispatchEvent(new KeyboardEvent('keydown', { key: 't', code: 'KeyT', ctrlKey: true, bubbles: true, composed: true, cancelable: true })));
-  await expect(recorder).toHaveValue('Ctrl + T');
-  await leader.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(leader.getByRole('alert')).toContainText('Firefox and Chromium both reserve it');
-  await leader.getByRole('button', { name: 'Cancel', exact: true }).click();
-
-  // unreadable browser storage remains recoverable through the global reset
-  await page.evaluate(() => {
-    localStorage.setItem('rac.keyboard-shortcuts', '{broken');
-    window.dispatchEvent(new StorageEvent('storage', { key: 'rac.keyboard-shortcuts', newValue: '{broken', storageArea: localStorage }));
+test("rejects collisions and leaves the existing command intact", async ({
+  page,
+}) => {
+  await setupShortcutSettings(page);
+  const settings = await openKeyboardSettings(page);
+  const row = command(page, "action:new-terminal");
+  await row.locator(".shortcut-change").first().click();
+  const recorder = row.getByRole("textbox", {
+    name: "New shortcut for New Terminal panel",
   });
-  await expect(reference.getByRole('alert')).toContainText('Saved shortcuts could not be loaded. Defaults are active');
-  const editor = reference.getByRole('region', { name: 'Edit keyboard shortcuts' });
-  await editor.getByRole('button', { name: 'Reset all shortcuts' }).click();
-  await expect(editor.getByRole('searchbox', { name: 'Find keyboard shortcuts' })).toBeFocused();
-  expect(await page.evaluate(() => localStorage.getItem('rac.keyboard-shortcuts'))).toBeNull();
-  expect(state.pageErrors).toEqual([]);
-  expect(unexpectedConsoleErrors(state)).toEqual([]);
+  await recorder.press("n");
+  await row.getByRole("button", { name: "Apply shortcut" }).click();
+
+  await expect(row.getByRole("alert")).toContainText(
+    "already assigned to another command",
+  );
+  await expect(
+    settings.getByRole("button", { name: "Save changes" }),
+  ).toHaveCount(0);
+  await expect(
+    row.locator('[data-shortcut-table="prefix"][data-shortcut-chord="n"]'),
+  ).toHaveCount(0);
 });
 
-test('consolidates duplicate command rows and same-command chords across tables', async ({ page }) => {
-  const { state } = await openDashboard(page);
-  const settings = await openSettings(page);
-  const reference = await openShortcutReference(page, settings);
-
-  // each action is one global row even when defaults contain several assignments
-  for (const [command, origins] of [
-    ['action:font-larger', ['root:C-=', 'root:C-+', 'root:Super-=', 'root:Super-+']],
-    ['action:copy-selection', ['root:C-S-c', 'root:y', 'root:C-c', 'root:Super-c']],
-    ['action:prompt-newline', ['root:C-Enter', 'root:S-Enter', 'root:C-S-Enter', 'root:Super-Enter']],
-    ['action:next-panel', ['prefix:n', 'prefix:o']],
-    ['action:show-bindings', ['root:C-?', 'prefix:?']]
-  ] as const) {
-    const commandRow = shortcutCommand(page, command);
-    await expect(commandRow).toHaveCount(1);
-    for (const origin of origins) await expect(commandRow).toHaveAttribute('data-shortcut-origins', new RegExp(`(?:^|\\s)${origin.replace(/[+?]/gu, '\\$&')}(?:\\s|$)`, 'u'));
-  }
-  const showBindings = shortcutCommand(page, 'action:show-bindings');
-  await expect(showBindings).toContainText('prefix');
-  await expect(showBindings.getByText('root', { exact: true })).toHaveCount(0);
-
-  await editShortcuts(reference);
-  // a new assignment uses the same prefix switch as an existing assignment
-  await showBindings.getByRole('button', { name: 'Add shortcut for Show key bindings' }).click();
-  const prefixSwitch = showBindings.getByRole('switch', { name: 'Use prefix for Show key bindings' });
-  await expect(prefixSwitch).not.toBeChecked();
-  await expect(showBindings.getByRole('combobox', { name: 'Prefix table for Show key bindings' })).toHaveCount(0);
-  await prefixSwitch.click();
-  await expect(prefixSwitch).toBeChecked();
-  await showBindings.getByRole('button', { name: 'Cancel', exact: true }).click();
-
-  // assigning two origins of one command to the same chord renders one physical shortcut
-  const font = shortcutCommand(page, 'action:font-larger');
-  await changeShortcut(page, 'root:C-=', 'Larger terminal font', 'Control+F6', 'C-=');
-  await expect(font.getByRole('button', { name: 'Reset', exact: true })).toBeEnabled();
-  await changeShortcut(page, 'root:C-+', 'Larger terminal font', 'Control+F6', 'C-+');
-  const chords = await font.locator('[data-shortcut-chord]').evaluateAll(elements => elements.map(element => element.getAttribute('data-shortcut-chord')));
-  expect(chords.filter(chord => chord === 'C-F6')).toHaveLength(1);
-  expect(new Set(chords).size).toBe(chords.length);
-  await expect(font).not.toHaveClass(/shortcut-conflict/u);
-
-  // command controls update every default origin together
-  await font.getByRole('button', { name: 'Reset', exact: true }).click();
-  await font.getByRole('button', { name: 'Disable', exact: true }).click();
-  await expect(font.locator('.shortcut-keys')).toHaveCount(0);
-  await expect(font.locator('.shortcut-change')).toHaveCount(0);
-  await expect(font.getByRole('button', { name: 'Add shortcut for Larger terminal font' })).toHaveCount(0);
-  await expect(font.locator('.shortcut-setting-description s')).toHaveText('Larger terminal font');
-  const enable = font.getByRole('button', { name: 'Enable', exact: true });
-  await expect(enable).toBeEnabled();
-  await enable.click();
-  const restored = await font.locator('[data-shortcut-chord]').evaluateAll(elements => elements.map(element => element.getAttribute('data-shortcut-chord')));
-  expect(restored).toEqual(['C-=', 'C-+', 'Super-=', 'Super-+']);
-  expect(state.pageErrors).toEqual([]);
-  expect(unexpectedConsoleErrors(state)).toEqual([]);
-});
-
-test('moves bindings between direct and prefixed contexts with one persistent switch', async ({ page }) => {
-  const keys = { root: { 'C-g': { table: 'git' } }, git: { '?': 'show-bindings' } };
-  const { state, terminal } = await openDashboard(page, { keys });
-  let settings = await openSettings(page);
-  let reference = await openShortcutReference(page, settings);
-  await editShortcuts(reference);
-  let bindings = shortcutCommand(page, 'action:show-bindings');
-  const description = 'Show key bindings';
-
-  // adding always exposes the direct-or-prefix choice and only lists prefix tables
-  await bindings.getByRole('button', { name: `Add shortcut for ${description}` }).click();
-  let prefixSwitch = bindings.getByRole('switch', { name: `Use prefix for ${description}` });
-  await expect(prefixSwitch).not.toBeChecked();
-  await prefixSwitch.click();
-  await expect(prefixSwitch).toBeChecked();
-  const prefixTable = bindings.getByRole('combobox', { name: `Prefix table for ${description}` });
-  await expect(prefixTable.locator('option')).toHaveText(['prefix', 'git']);
-  await expect(prefixTable.locator('option[value="root"]')).toHaveCount(0);
-  await bindings.getByRole('button', { name: 'Cancel', exact: true }).click();
-
-  // an existing direct binding starts unchecked and can move without rerecording its key
-  const direct = shortcutAssignment(page, 'root:C-?', 'C-?');
-  await direct.locator('.shortcut-change').click();
-  let recorder = bindings.getByRole('textbox', { name: `New shortcut for ${description}` });
-  await expect(recorder).toHaveValue('Ctrl + ?');
-  prefixSwitch = bindings.getByRole('switch', { name: `Use prefix for ${description}` });
-  await expect(prefixSwitch).not.toBeChecked();
-  await prefixSwitch.click();
-  await expect(prefixSwitch).toBeChecked();
-  await bindings.getByRole('combobox', { name: `Prefix table for ${description}` }).selectOption('prefix');
-  await bindings.getByRole('button', { name: 'Save', exact: true }).click();
-  const movedToPrefix = shortcutAssignmentInTable(page, 'root:C-?', 'prefix', 'C-?');
-  await expect(movedToPrefix).toHaveCount(1);
-  await expect(movedToPrefix).toHaveAttribute('data-shortcut-id', 'root:C-?');
-
-  // a prefixed bare key cannot become direct until a safe modified key replaces it
-  const prefixed = shortcutAssignmentInTable(page, 'prefix:?', 'prefix', '?');
-  await prefixed.locator('.shortcut-change').click();
-  recorder = bindings.getByRole('textbox', { name: `New shortcut for ${description}` });
-  await expect(recorder).toHaveValue('?');
-  prefixSwitch = bindings.getByRole('switch', { name: `Use prefix for ${description}` });
-  await expect(prefixSwitch).toBeChecked();
-  await prefixSwitch.click();
-  await expect(prefixSwitch).not.toBeChecked();
-  await bindings.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(bindings.getByRole('alert')).toContainText('cannot steal typing');
-  await expect(recorder).toBeVisible();
-  await recorder.press('Control+F7');
-  await bindings.getByRole('button', { name: 'Save', exact: true }).click();
-  const movedToDirect = shortcutAssignmentInTable(page, 'prefix:?', 'root', 'C-F7');
-  await expect(movedToDirect).toHaveCount(1);
-  await expect(movedToDirect).toHaveAttribute('data-shortcut-id', 'prefix:?');
-  await expect(reference.getByText('root', { exact: true })).toHaveCount(0);
-  await reference.getByRole('button', { name: 'Close key bindings' }).click();
-  await settings.getByRole('button', { name: 'Close settings' }).click();
-
-  // both context moves survive reload and dispatch only from their new contexts
-  await page.reload();
-  await seedPaneSize(page, 'agent-1', 80, 24);
-  await seedPaneSize(page, '%5', 80, 24);
-  const reloadedTerminal = page.locator('.terminal-pane[data-panel-key="%5"]');
-  await reloadedTerminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+?');
-  await expect(page.getByRole('dialog', { name: 'Key bindings' })).toHaveCount(0);
-  await page.keyboard.press('Control+b');
-  await page.keyboard.press('Control+?');
-  await expect(page.getByRole('dialog', { name: 'Key bindings' })).toBeVisible();
-  await page.getByRole('button', { name: 'Close key bindings' }).click();
-  await reloadedTerminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+F7');
-  await expect(page.getByRole('dialog', { name: 'Key bindings' })).toBeVisible();
-
-  settings = page.getByRole('dialog', { name: 'Settings' });
-  reference = page.getByRole('dialog', { name: 'Key bindings' });
-  await reference.getByRole('button', { name: 'Edit shortcuts' }).click();
-  bindings = shortcutCommand(page, 'action:show-bindings');
-  await expect(shortcutAssignmentInTable(page, 'root:C-?', 'prefix', 'C-?')).toHaveCount(1);
-  await expect(shortcutAssignmentInTable(page, 'prefix:?', 'root', 'C-F7')).toHaveCount(1);
-  await expect(bindings.getByText('root', { exact: true })).toHaveCount(0);
-  expect(state.pageErrors).toEqual([]);
-  expect(unexpectedConsoleErrors(state)).toEqual([]);
-});
-
-test('persists conflicts, highlights every command, suppresses dispatch, and resolves one alias', async ({ page }) => {
-  const { state, terminal } = await openDashboard(page);
-  let settings = await openSettings(page);
-  let reference = await openShortcutReference(page, settings);
-  await editShortcuts(reference);
-  const leader = shortcutCommand(page, 'table:prefix');
-  const bindings = shortcutCommand(page, 'action:show-bindings');
-
-  // the same chord in a prefix context remains independent from its direct counterpart
-  await leader.getByRole('button', { name: 'Add shortcut for Switch to the prefix table' }).click();
-  let recorder = leader.getByRole('textbox', { name: 'New shortcut for Switch to the prefix table' });
-  const prefixSwitch = leader.getByRole('switch', { name: 'Use prefix for Switch to the prefix table' });
-  await prefixSwitch.click();
-  await expect(prefixSwitch).toBeChecked();
-  await recorder.press('Control+?');
-  await leader.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(recorder).toHaveCount(0);
-  await expect(shortcutAssignmentInTable(page, 'root:C-b', 'prefix', 'C-?')).toHaveCount(1);
-  await expect(leader).not.toHaveClass(/shortcut-conflict/u);
-  await expect(bindings).not.toHaveClass(/shortcut-conflict/u);
-
-  // saving the duplicate in the same direct context exposes both conflict participants
-  await leader.getByRole('button', { name: 'Add shortcut for Switch to the prefix table' }).click();
-  recorder = leader.getByRole('textbox', { name: 'New shortcut for Switch to the prefix table' });
-  await expect(leader.getByRole('switch', { name: 'Use prefix for Switch to the prefix table' })).not.toBeChecked();
-  await recorder.press('Control+?');
-  await leader.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(shortcutAssignmentInTable(page, 'root:C-b', 'root', 'C-?')).toHaveCount(1);
-  // same-chord deletion controls announce which context they remove
-  await expect(leader.getByRole('button', { name: 'Remove shortcut Ctrl + ? for Switch to the prefix table', exact: true })).toHaveCount(1);
-  await expect(leader.getByRole('button', { name: 'Remove shortcut prefix: Ctrl + ? for Switch to the prefix table', exact: true })).toHaveCount(1);
-  for (const row of [leader, bindings]) {
-    await expect(row).toHaveClass(/shortcut-conflict/u);
-    await expect(row.getByText(/Conflict/u)).toBeVisible();
-    await expect(row.getByText(/Conflict/u)).not.toContainText(/root/iu);
-  }
-  await expect(reference.getByRole('alert')).not.toContainText(/root/iu);
-
-  // conflict state remains visible outside edit mode
-  await reference.getByRole('button', { name: 'Done editing' }).click();
-  for (const row of [shortcutCommand(page, 'table:prefix'), shortcutCommand(page, 'action:show-bindings')]) {
-    await expect(row).toHaveClass(/shortcut-conflict/u);
-    await expect(row.getByText(/Conflict/u)).toBeVisible();
-  }
-  await reference.getByRole('button', { name: 'Close key bindings' }).click();
-  await settings.getByRole('button', { name: 'Close settings' }).click();
-
-  // reload while ambiguous so saved conflicts cannot silently fall back to defaults
-  await page.reload();
-  await seedPaneSize(page, 'agent-1', 80, 24);
-  await seedPaneSize(page, '%5', 80, 24);
-  settings = await openSettings(page);
-  reference = await openShortcutReference(page, settings);
-  for (const row of [shortcutCommand(page, 'table:prefix'), shortcutCommand(page, 'action:show-bindings')]) {
-    await expect(row).toHaveClass(/shortcut-conflict/u);
-    await expect(row.getByText(/Conflict/u)).toBeVisible();
-  }
-  await reference.getByRole('button', { name: 'Close key bindings' }).click();
-  await settings.getByRole('button', { name: 'Close settings' }).click();
-
-  // the conflicting chord runs neither command while their unconflicted aliases still work
-  await terminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+?');
-  await page.keyboard.press('1');
-  await expect(page.getByRole('dialog', { name: 'Key bindings' })).toHaveCount(0);
-  await expect(terminal).toHaveClass(/focused/u);
-  await page.keyboard.press('Control+b');
-  await page.keyboard.press('Control+?');
-  await page.keyboard.press('1');
-  await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeFocused();
-  await terminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+b');
-  await page.keyboard.press('?');
-  await expect(page.getByRole('dialog', { name: 'Key bindings' })).toBeVisible();
-
-  // removing the conflicting alias makes the remaining command dispatchable again
-  await page.getByRole('button', { name: 'Edit shortcuts' }).click();
-  await shortcutAssignmentInTable(page, 'root:C-b', 'root', 'C-?').getByRole('button', { name: 'Remove shortcut Ctrl + ? for Switch to the prefix table' }).click();
-  await expect(shortcutAssignmentInTable(page, 'root:C-b', 'prefix', 'C-?')).toHaveCount(1);
-  await expect(shortcutCommand(page, 'table:prefix')).not.toHaveClass(/shortcut-conflict/u);
-  await expect(shortcutCommand(page, 'action:show-bindings')).not.toHaveClass(/shortcut-conflict/u);
-  await page.getByRole('button', { name: 'Done editing' }).click();
-  await expect(page.getByText(/Conflict/u)).toHaveCount(0);
-  await page.getByRole('button', { name: 'Close key bindings' }).click();
-  await terminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+?');
-  await expect(page.getByRole('dialog', { name: 'Key bindings' })).toBeVisible();
-  expect(state.pageErrors).toEqual([]);
-  expect(unexpectedConsoleErrors(state)).toEqual([]);
-});
-
-test('adopts legacy cross-tab aliases during recording and preserves colliding updates', async ({ page }) => {
-  const { state } = await openDashboard(page);
-  const settings = await openSettings(page);
-  const reference = await openShortcutReference(page, settings);
-  await editShortcuts(reference);
-  const leader = shortcutCommand(page, 'table:prefix');
-
-  // a storage update cancels stale capture and migrates the legacy scalar in memory
-  await shortcutAssignment(page, 'root:C-b', 'C-b').locator('.shortcut-change').click();
-  const recorder = leader.getByRole('textbox', { name: 'New shortcut for Switch to the prefix table' });
-  await expect(recorder).toBeFocused();
-  await page.evaluate(() => {
-    const value = JSON.stringify({ root: { 'C-b': 'C-a' } });
-    localStorage.setItem('rac.keyboard-shortcuts', value);
-    window.dispatchEvent(new StorageEvent('storage', { key: 'rac.keyboard-shortcuts', newValue: value, storageArea: localStorage }));
+test("preserves safe terminal commands while displaying only their program name", async ({
+  page,
+}) => {
+  const fullCommand =
+    "env RAC_TOKEN=safe-value /usr/bin/gh dash --repo example/private";
+  const state = await setupShortcutSettings(page, {
+    savedKeys: { prefix: { g: { terminal: fullCommand, reuse: true } } },
+    runtimeKeys: { prefix: { g: { terminal: "gh", reuse: true } } },
   });
-  await expect(recorder).toHaveCount(0);
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-a')).toHaveCount(1);
-  await expect(leader.locator('.shortcut-change')).toBeFocused();
+  const settings = await openKeyboardSettings(page);
 
-  // a later colliding update stays assigned and highlighted instead of restoring C-b
-  await page.evaluate(() => {
-    const value = JSON.stringify({ root: { 'C-b': 'C-?' } });
-    localStorage.setItem('rac.keyboard-shortcuts', value);
-    window.dispatchEvent(new StorageEvent('storage', { key: 'rac.keyboard-shortcuts', newValue: value, storageArea: localStorage }));
+  const terminalRow = command(page, "terminal:prefix:g");
+  await expect(terminalRow).toContainText("Terminal running gh (reused)");
+  await expect(terminalRow).not.toContainText(fullCommand);
+  await replaceShortcut(
+    page,
+    "terminal:prefix:g",
+    "Terminal running gh (reused)",
+    "Control+F8",
+  );
+  await settings.getByRole("button", { name: "Save changes" }).click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  const patches = state.saves[0]!.changes[0]!.patches;
+  expect(patches).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        op: "set",
+        path: ["keys", "prefix", "C-F8"],
+        value: { terminal: fullCommand, reuse: true },
+      }),
+    ]),
+  );
+});
+
+test("requires advanced controls for masked terminals and supports discard and failed-save retention", async ({
+  page,
+}) => {
+  const state = await setupShortcutSettings(page, {
+    savedKeys: {
+      prefix: {
+        g: { terminal: { __racProtected: true, present: true }, reuse: true },
+      },
+    },
   });
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-?')).toHaveCount(1);
-  await expect(shortcutAssignment(page, 'root:C-b', 'C-b')).toHaveCount(0);
-  await expect(shortcutCommand(page, 'table:prefix')).toHaveClass(/shortcut-conflict/u);
-  await expect(shortcutCommand(page, 'action:show-bindings')).toHaveClass(/shortcut-conflict/u);
-  await reference.getByRole('button', { name: 'Done editing' }).click();
-  await expect(shortcutCommand(page, 'table:prefix')).toHaveClass(/shortcut-conflict/u);
-  await expect(shortcutCommand(page, 'action:show-bindings')).toHaveClass(/shortcut-conflict/u);
-  expect(state.pageErrors).toEqual([]);
-  expect(unexpectedConsoleErrors(state)).toEqual([]);
+  const settings = await openKeyboardSettings(page);
+  const protectedRow = command(page, "terminal:prefix:g");
+
+  await expect(protectedRow).toContainText("Choose the Key tables editor view");
+  await expect(protectedRow.locator(".shortcut-change")).toBeDisabled();
+  await command(page, "action:new-terminal")
+    .getByRole("button", { name: "Disable", exact: true })
+    .click();
+  await settings.getByRole("button", { name: "Discard changes" }).click();
+  await confirmSettingsDiscard(page);
+  await expect(
+    command(page, "action:new-terminal").getByRole("button", {
+      name: "Disable",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await command(page, "action:new-terminal")
+    .getByRole("button", { name: "Disable", exact: true })
+    .click();
+  state.saveStatus = 409;
+  await settings.getByRole("button", { name: "Save changes" }).click();
+  await expect(settings.getByRole("alert")).toContainText(
+    "changed outside Settings",
+  );
+  await expect(
+    command(page, "action:new-terminal").getByRole("button", {
+      name: "Enable",
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect(JSON.stringify(state.saves)).not.toContain("__racProtected");
 });
 
-test('preserves terminal binding identity after remapping from keys and the palette', async ({ page }) => {
-  const keys = { root: { 'C-g': { table: 'git' } }, git: { l: { terminal: 'lazygit' } } };
-  const { state, terminal } = await openDashboard(page, { keys });
-  const settings = await openSettings(page);
-  const reference = await openShortcutReference(page, settings);
-  await editShortcuts(reference);
-  await changeShortcut(page, 'prefix:g', 'Terminal running lazygit (reused)', 'j');
-  const gitTerminal = shortcutCommand(page, 'terminal:git:l');
-  await shortcutAssignment(page, 'git:l', 'l').locator('.shortcut-change').click();
-  const recorder = gitTerminal.getByRole('textbox', { name: 'New shortcut for Terminal running lazygit' });
-  await expect(recorder).toHaveValue('L');
-  const prefixSwitch = gitTerminal.getByRole('switch', { name: 'Use prefix for Terminal running lazygit' });
-  await expect(prefixSwitch).toBeChecked();
-  await prefixSwitch.click();
-  await expect(prefixSwitch).not.toBeChecked();
-  await recorder.press('Control+F8');
-  await gitTerminal.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(shortcutAssignmentInTable(page, 'git:l', 'root', 'C-F8')).toHaveCount(1);
-  await reference.getByRole('button', { name: 'Close key bindings' }).click();
-  await settings.getByRole('button', { name: 'Close settings' }).click();
+test("keeps keyboard drafts isolated to each server settings source", async ({
+  browser,
+}) => {
+  const firstContext = await browser.newContext();
+  const secondContext = await browser.newContext();
+  const first = await firstContext.newPage();
+  const second = await secondContext.newPage();
+  await setupShortcutSettings(first, {
+    savedKeys: { prefix: { v: "new-terminal" } },
+  });
+  await setupShortcutSettings(second, {
+    savedKeys: { prefix: { z: "new-terminal" } },
+  });
 
-  await terminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+b');
-  await page.keyboard.press('j');
-  await expect.poll(() => state.shells).toEqual([
-    { binding: { table: 'prefix', key: 'g' } }
-  ]);
-  await terminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+F8');
-  await expect.poll(() => state.shells).toEqual([
-    { binding: { table: 'prefix', key: 'g' } },
-    { binding: { table: 'git', key: 'l' } }
-  ]);
+  await openKeyboardSettings(first);
+  await openKeyboardSettings(second);
+  await expect(
+    command(first, "action:new-terminal").locator(
+      '[data-shortcut-table="prefix"][data-shortcut-chord="v"]',
+    ),
+  ).toBeVisible();
+  await expect(
+    command(first, "action:new-terminal").locator(
+      '[data-shortcut-table="prefix"][data-shortcut-chord="z"]',
+    ),
+  ).toHaveCount(0);
+  await expect(
+    command(second, "action:new-terminal").locator(
+      '[data-shortcut-table="prefix"][data-shortcut-chord="z"]',
+    ),
+  ).toBeVisible();
+  await expect(
+    command(second, "action:new-terminal").locator(
+      '[data-shortcut-table="prefix"][data-shortcut-chord="v"]',
+    ),
+  ).toHaveCount(0);
 
-  await page.keyboard.press('Control+b');
-  await page.keyboard.press(':');
-  let palette = page.getByRole('dialog', { name: 'Command palette' });
-  await palette.getByRole('option').filter({ hasText: 'prefix J' }).click();
-  await expect.poll(() => state.shells).toEqual([
-    { binding: { table: 'prefix', key: 'g' } },
-    { binding: { table: 'git', key: 'l' } },
-    { binding: { table: 'prefix', key: 'g' } }
-  ]);
-  await terminal.locator('.xterm-screen').click();
-  await page.keyboard.press('Control+b');
-  await page.keyboard.press(':');
-  palette = page.getByRole('dialog', { name: 'Command palette' });
-  await palette.getByRole('option').filter({ hasText: 'Ctrl + F8' }).click();
-  await expect.poll(() => state.shells).toEqual([
-    { binding: { table: 'prefix', key: 'g' } },
-    { binding: { table: 'git', key: 'l' } },
-    { binding: { table: 'prefix', key: 'g' } },
-    { binding: { table: 'git', key: 'l' } }
-  ]);
-  expect(state.pageErrors).toEqual([]);
-  expect(unexpectedConsoleErrors(state)).toEqual([]);
-});
-
-test('remaps prompt newline immediately without submitting on the old chord', async ({ page }) => {
-  const { state } = await openDashboard(page);
-  const prompt = page.getByRole('textbox', { name: 'Prompt' });
-  await prompt.fill('first line');
-  await prompt.press('Control+Enter');
-  await expect(prompt).toHaveValue('first line\n');
-  expect(state.prompts).toEqual([]);
-  await prompt.fill('command line');
-  await prompt.press('Meta+Enter');
-  await expect(prompt).toHaveValue('command line\n');
-  expect(state.prompts).toEqual([]);
-
-  const settings = await openSettings(page);
-  const reference = await openShortcutReference(page, settings);
-  await editShortcuts(reference);
-  await changeShortcut(page, 'root:C-Enter', 'Insert a newline in the prompt', 'Control+j');
-  await reference.getByRole('button', { name: 'Close key bindings' }).click();
-  await settings.getByRole('button', { name: 'Close settings' }).click();
-
-  await prompt.fill('second line');
-  await prompt.press('Control+Enter');
-  await expect(prompt).toHaveValue('second line');
-  expect(state.prompts).toEqual([]);
-  await prompt.press('Control+j');
-  await expect(prompt).toHaveValue('second line\n');
-  expect(state.prompts).toEqual([]);
-  expect(state.pageErrors).toEqual([]);
-  expect(unexpectedConsoleErrors(state)).toEqual([]);
+  await firstContext.close();
+  await secondContext.close();
 });

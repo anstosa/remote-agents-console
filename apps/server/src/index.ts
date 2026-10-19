@@ -14,13 +14,18 @@ import { CleanupService } from './cleanup/service.js';
 import { CleanupMonitor } from './cleanup/monitor.js';
 import { WorktreeLaunchStore } from './worktrees/store.js';
 import { WorktreeManagementService } from './worktrees/management.js';
+import { attestBoot, bootInstallation } from './settings/boot.js';
 
-const envFile = new URL('../../../.env', import.meta.url);
+// use the fixed installer identity for native environment sources
+const settingsInstallation = await bootInstallation().catch(() => { process.stderr.write('Settings host capability unavailable; configuration remains read-only.\n'); return undefined; });
+const envFile = settingsInstallation?.sources.env?.serverPath ?? new URL('../../../.env', import.meta.url);
+// retain inherited environment precedence during bootstrap
 if (existsSync(envFile)) process.loadEnvFile(envFile);
+let applicationContent = '';
 
 // migrate a legacy config in place, then validate; surface every content or writability
 // problem as `Configuration invalid:` lines and exit, never an unhandled-rejection trace
-const config = await acquireConfig().catch((error: unknown) => {
+const config = await acquireConfig(process.env, undefined, content => { applicationContent = content; }).catch((error: unknown) => {
   for (const message of migrationErrorLines(error)) process.stderr.write(`Configuration invalid: ${message}\n`);
   process.exit(1);
 });
@@ -40,6 +45,8 @@ const notes = new WorktreeNoteService();
 const savedPromptsLines = formatSavedPromptsToNotes(await migrateSavedPromptsToNotes({ projectIds: config.projects.map(project => project.id), notes }));
 if (savedPromptsLines.length > 0) { process.stderr.write('Saved prompts migration:\n'); for (const line of savedPromptsLines) process.stderr.write(`  ${line}\n`); }
 const app = await buildApp(config, { tmux, discovery, push, notifications, cleanup, dashboardUpdates, worktreeStore, worktreeManagement, notes });
+// publish evidence before serving health without a host queue dependency
+await attestBoot(settingsInstallation, config, applicationContent);
 // honor the configured cadence while overlapping refreshes coalesce
 const dashboardTimer = setInterval(() => void dashboardUpdates.refresh().catch(() => {}), dashboardPollMs);
 const cleanupMonitor = new CleanupMonitor(cleanup, dashboardUpdates, push);

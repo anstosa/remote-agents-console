@@ -69,7 +69,7 @@ import { configuredWorktreeForWorkspace, projectIdOf, worktreeById, worktreeHost
 import { previewFileBytes, WorkspaceFileService } from './workspace-files/service.js';
 import { ComparisonService, type ComparisonScope } from './git/comparison-service.js';
 import { mergeBaseChoices, saveMergeBase } from './git/comparison.js';
-import { loadInstanceIconSvg, isInstanceIcon } from './instance-icon.js';
+import { loadInstanceIconSvg, isInstanceIcon, type InstanceIcon } from './instance-icon.js';
 import { instanceAttention, RemoteInstanceStatusPoller, validInstanceStatusRequest, type InstanceStatus } from './instance-status.js';
 import { createHmac, randomBytes } from 'node:crypto';
 import { defaultIntegrationConfig, parseDavoSettings, resolveClaudeProgram, resolveCodexProgram, reviewConfig } from './config/schema.js';
@@ -96,8 +96,11 @@ import { registerHostFilesRoutes } from './host-files/routes.js';
 import { HostFilesError } from './host-files/contracts.js';
 import { HostFilesTransportError } from './host-files/protocol.js';
 import { browserKeysConfig, terminalBindingCommand, terminalProgramName } from './config/keys.js';
+import { SettingsError } from './settings/contracts.js';
+import { SettingsService } from './settings/service.js';
+import { registerSettingsRoutes } from './settings/routes.js';
 
-export type Dependencies = { auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider };
+export type Dependencies = { settings?: SettingsService; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use.
 declare module 'fastify' {
@@ -109,8 +112,8 @@ const body = (request: FastifyRequest): Record<string, unknown> => (request.body
 // a path relative to a Place's folder that cannot climb out of it: no leading `/`, no `..`
 // segment, and nothing a shell line or tmux could misread
 const isPlaceRelativeFile = (value: unknown): value is string => typeof value === 'string' && value !== '' && value.length <= 4096 && !/[\0\r\n]/u.test(value) && !value.startsWith('/') && !value.split('/').includes('..');
-// the configured editor's command line, opening `file` (relative to the shell's cwd, the Place
-// folder) at `line` with the `+N file` convention vim, nvim, emacs, nano, micro and kakoune share
+// the configured editor's command line, opening one fixed relative or absolute `file` at `line`
+// with the `+N file` convention vim, nvim, emacs, nano, micro and kakoune share
 const editorCommand = (editor: string, file?: string, line?: number): string => {
   if (file === undefined) return editor;
   // `./` keeps a path that begins with `-` from reading as an option
@@ -229,6 +232,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   await app.register(websocket, { options: { maxPayload: 98_304 } });
   app.setErrorHandler((error, request, reply) => {
     const failure = error as { code?: unknown; statusCode?: number; message?: string };
+    // redact parser errors before settings endpoint wrappers can run
+    if (request.url.startsWith('/api/settings')) return reply.code(failure.statusCode === 413 ? 413 : 400).send({ error: 'invalid_settings_request' });
     // normalize review parser failures
     if ((request.url.includes('/review-tour') || request.url.includes('/code-review')) && (failure.code === 'FST_ERR_CTP_BODY_TOO_LARGE' || failure.code === 'FST_ERR_CTP_INVALID_JSON_BODY' || error instanceof SyntaxError)) return reply.code(400).send({ status: 'error', error: { code: 'invalid_request', retryable: false } });
     return reply.code(failure.statusCode ?? 500).send({ error: failure.message ?? 'internal error' });
@@ -285,16 +290,38 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     reply.hijack();
     temporaryPreviewProxy.handle(request.raw, reply.raw, target, upstreamPath, prefix, accessCookie);
   };
-  type PublishedServer = { name: string; url: string; icon?: InstanceStatus['icon'] };
+  type PublishedServer = { name: string; url: string; icon?: InstanceIcon; defaultName?: string; defaultIcon?: InstanceIcon };
+  type PublishedRemoteServer = PublishedServer & { icon: InstanceIcon; defaultName: string; defaultIcon: InstanceIcon };
+  type PublishedRemoteStatus = PublishedRemoteServer & Pick<InstanceStatus, 'attention'>;
   type PublishedServerNavigation = PublishedServer & { remotes: PublishedServer[] };
+  const remotesByOrigin = new Map(config.remoteServers.map(remote => [remote.url.origin, remote]));
+  // apply local display overrides without mutating peer-published status cache entries
+  const publishedRemote = (status: Pick<InstanceStatus, 'url' | 'name' | 'icon'>): PublishedRemoteServer => {
+    const configured = remotesByOrigin.get(status.url);
+    const defaultIcon: InstanceIcon = status.icon ?? 'terminal';
+    return { url: status.url, defaultName: status.name, defaultIcon, name: configured?.name ?? status.name, icon: configured?.icon ?? defaultIcon };
+  };
+  // retain remote attention while overlaying only the browser-facing identity
+  const publishedRemoteStatus = (status: InstanceStatus): PublishedRemoteStatus => ({ ...publishedRemote(status), attention: status.attention });
   // publish configured navigation before peer checks
-  const configuredRemotes = config.remoteServers.map(remote => ({ name: remote.url.hostname, url: remote.url.origin }));
+  const configuredRemotes = config.remoteServers.map(remote => publishedRemote({ name: remote.url.hostname, url: remote.url.origin }));
   // publish safe local server metadata
   const server: PublishedServerNavigation = { name: config.name, url: config.publicOrigin.origin, ...(config.icon === undefined ? {} : { icon: config.icon }), remotes: configuredRemotes };
+  // apply only the existing live settings after serialized durable writes
+  const settings = deps.settings ?? new SettingsService(config, { live: {
+    // refresh the published instance identity
+    name: name => { config.name = name; server.name = name; },
+    // keep launch resolutions aligned with the saved fallback
+    defaultAgent: async kind => { config.defaultAgent = kind; await dashboardUpdates.refresh().catch(() => undefined); },
+    // retain the proven voice-only live surface
+    davo: saved => { if (saved.enabled && !davoAvailable) throw new Error('davo_unavailable'); integrationConfig.realtime = { ...integrationConfig.realtime, ...saved }; }
+  } });
+  // reuse browser auth without granting integration principals settings capabilities
+  await registerSettingsRoutes(app, { service: settings, session, controlled, isController: id => control.ownerSessionId() === id });
   // refresh remote identities from their publishers
   const refreshRemoteServers = async (known?: InstanceStatus[]) => {
     const statuses = known ?? await instanceStatusPoller.statuses(config.remoteServers);
-    server.remotes = statuses.map(status => ({ name: status.name, url: status.url, ...(status.icon === undefined ? {} : { icon: status.icon }) }));
+    server.remotes = statuses.map(publishedRemote);
     return statuses;
   };
   // map typed review failures
@@ -427,8 +454,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   };
   dashboardUpdates.setLoader(dashboard);
   // keep sensitive browser capabilities scoped to the console origin
-  app.addHook('onSend', async (_request, reply, payload) => {
-    reply.header('Cache-Control', 'no-store').header('X-Frame-Options', 'DENY').header('X-Content-Type-Options', 'nosniff').header('Referrer-Policy', 'no-referrer').header('Permissions-Policy', 'camera=(), microphone=(self), geolocation=(self)').header('Cross-Origin-Opener-Policy', 'same-origin-allow-popups').header('Cross-Origin-Resource-Policy', 'same-origin').header('Content-Security-Policy', `default-src 'self'; connect-src 'self' ${websocketScheme}://${expectedHost}${integrationConfig.realtime.enabled ? ' https://api.openai.com' : ''}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; ${frameSourcePolicy}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+  app.addHook('onSend', async (request, reply, payload) => {
+    // authorize WebAssembly only in the isolated formatter worker, never in the page
+    const formatterPolicy = /^\/assets\/shell-format-worker-[\w-]+\.js(?:\?.*)?$/u.test(request.url) ? "script-src 'self' 'wasm-unsafe-eval'; " : '';
+    reply.header('Cache-Control', 'no-store').header('X-Frame-Options', 'DENY').header('X-Content-Type-Options', 'nosniff').header('Referrer-Policy', 'no-referrer').header('Permissions-Policy', 'camera=(), microphone=(self), geolocation=(self)').header('Cross-Origin-Opener-Policy', 'same-origin-allow-popups').header('Cross-Origin-Resource-Policy', 'same-origin').header('Content-Security-Policy', `default-src 'self'; ${formatterPolicy}connect-src 'self' ${websocketScheme}://${expectedHost}${integrationConfig.realtime.enabled ? ' https://api.openai.com' : ''}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; ${frameSourcePolicy}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+    // isolate editable static artwork from the application policy
+    if (request.url === '/favicon.svg' || request.url.startsWith('/instance-icons/')) reply.header('Content-Security-Policy', "default-src 'none'; style-src 'none'; sandbox; base-uri 'none'; frame-ancestors 'none'");
     // publish HSTS only for HTTPS deployments
     if (secureOrigin) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     return payload;
@@ -558,7 +589,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     session(request);
     const [localAttention, remotes] = await Promise.all([localInstanceAttention(), instanceStatusPoller.statuses(config.remoteServers)]);
     await refreshRemoteServers(remotes);
-    return { servers: [{ url: config.publicOrigin.origin, name: server.name, ...(server.icon === undefined ? {} : { icon: server.icon }), attention: localAttention }, ...remotes] };
+    return { servers: [{ url: config.publicOrigin.origin, name: server.name, ...(server.icon === undefined ? {} : { icon: server.icon }), attention: localAttention }, ...remotes.map(publishedRemoteStatus)] };
   });
   app.post('/api/auth/login', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => { browser(request, true); const data = body(request); const preauth = request.headers['x-csrf-token']; if (typeof data.password !== 'string' || typeof preauth !== 'string') return reply.code(401).send({ error: 'invalid credentials' }); const s = await auth.login(data.password, preauth); if (!s) return reply.code(401).send({ error: 'invalid credentials' }); reply.setCookie(cookieName, auth.sign(s), { path: '/', secure: secureOrigin, httpOnly: true, sameSite: 'lax', signed: false, maxAge: 400 * 24 * 60 * 60 }); return await sessionState(s, control.connect(s.id)); });
   app.post('/api/auth/take-control', async (request, reply) => {
@@ -583,12 +614,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   // rename the current server persistently
   app.patch('/api/server/name', async (request, reply) => {
-    controlled(request, true);
+    const browserSession = controlled(request, true);
     const providedName = body(request).name;
     // require a valid configuration name
     if (typeof providedName !== 'string') return reply.code(400).send({ error: 'Server name must be between 1 and 80 visible characters.' });
     try {
-      const name = await serverAdmin.renameServer(providedName);
+      // retain narrow injected test services while production uses the shared serializer
+      const name = deps.serverAdmin !== undefined && deps.settings === undefined ? await serverAdmin.renameServer(providedName) : await settings.updateApplication([{ op: 'set', path: ['name'], value: providedName.trim() }], browserSession.id).then(() => providedName.trim());
       // reject invalid or unavailable configuration writes
       if (name === undefined) return reply.code(400).send({ error: 'Server name must be between 1 and 80 visible characters.' });
       server.name = name;
@@ -599,7 +631,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   // persist the launch fallback selected by the controlling browser
   app.patch('/api/server/default-agent', async (request, reply) => {
-    controlled(request, true);
+    const browserSession = controlled(request, true);
     const selected = requestedKind(request);
     // require one known agent kind
     if (selected.invalid || selected.kind === undefined) return reply.code(400).send({ error: 'Choose a valid default agent.' });
@@ -607,7 +639,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (!launch.isLaunchableKind(selected.kind)) return reply.code(409).send({ error: 'The selected default agent is unavailable.' });
     let kind: AgentKind | undefined;
     try {
-      kind = await serverAdmin.setDefaultAgent(selected.kind);
+      // retain injected legacy doubles without bypassing production serialization
+      kind = deps.serverAdmin !== undefined && deps.settings === undefined ? await serverAdmin.setDefaultAgent(selected.kind) : await settings.updateApplication([{ op: 'set', path: ['defaultAgent'], value: selected.kind }], browserSession.id).then(() => selected.kind);
     } catch {
       return reply.code(503).send({ error: 'Unable to update the server configuration.' });
     }
@@ -663,7 +696,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   // persist the configurable voice surface
   app.patch('/api/server/davo', async (request, reply) => {
-    controlled(request, true);
+    const browserSession = controlled(request, true);
     const requested = parseDavoSettings(body(request));
     // require one exact settings payload
     if (requested === undefined) return reply.code(400).send({ error: 'Choose valid Davo settings.' });
@@ -671,7 +704,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (requested.enabled && !davoAvailable) return reply.code(409).send({ error: 'Davo is unavailable on this server.' });
     let saved;
     try {
-      saved = await serverAdmin.setDavoSettings(requested);
+      // route the established voice mutation through the same source transaction
+      saved = deps.serverAdmin !== undefined && deps.settings === undefined ? await serverAdmin.setDavoSettings(requested) : await settings.updateApplication(Object.entries(requested).map(([key, value]) => ({ op: 'set' as const, path: ['integrations', 'realtime', key], value })), browserSession.id).then(() => requested);
     } catch {
       return reply.code(503).send({ error: 'Unable to update Davo settings.' });
     }
@@ -771,7 +805,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     controlled(request);
     const preview = await serverAdmin.updatePreview();
     // require the configured host bridge
-    return preview === undefined ? reply.code(503).send({ error: 'Server update previews are unavailable on this deployment.' }) : preview;
+    if (preview === undefined) return reply.code(503).send({ error: 'Server update previews are unavailable on this deployment.' });
+    // warn that explicit update activates saved deployment settings too
+    const pending = await settings.status().catch(() => undefined);
+    return pending?.pending ? { ...preview, settingsImpact: { pendingTargets: pending.targets, warning: `Updating rebuilds RAC with all saved pending RAC settings${pending.targets.includes('cloudflared') ? '; Cloudflare changes still require their separate Restart proof' : ''}.` } } : preview;
   });
   app.post('/api/auth/logout', async (request, reply) => { const s = session(request, true); control.release(s.id); auth.logout(s.id); reply.clearCookie(cookieName, { path: '/', secure: secureOrigin, httpOnly: true, sameSite: 'lax' }); return reply.code(204).send(); });
   app.get('/api/dashboard', async (request) => { controlled(request); return await dashboardUpdates.refresh(); });
@@ -2899,12 +2936,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const browserSession = controlled(request, true);
     const place = await resolvePlace((request.params as { id: string }).id);
     if (place === undefined) return reply.code(404).send({ error: 'place unavailable' });
-    const { name, editor, file, line, objectToken, binding } = body(request);
+    const { name, editor, file, line, objectToken, binding, settingsSource } = body(request);
     if (name !== undefined && (typeof name !== 'string' || name.length > 120 || name.includes('\0') || /[\r\n]/u.test(name))) return reply.code(400).send({ error: 'invalid terminal name' });
     // a key binding's Terminal: the browser names the binding, and its command comes from config
     if (binding !== undefined) {
       const { table, key } = (binding !== null && typeof binding === 'object' ? binding : {}) as { table?: unknown; key?: unknown };
-      if (typeof table !== 'string' || typeof key !== 'string' || Object.keys(binding as object).length !== 2 || name !== undefined || editor !== undefined || file !== undefined || line !== undefined || objectToken !== undefined) return reply.code(400).send({ error: 'invalid key binding' });
+      if (typeof table !== 'string' || typeof key !== 'string' || Object.keys(binding as object).length !== 2 || name !== undefined || editor !== undefined || file !== undefined || line !== undefined || objectToken !== undefined || settingsSource !== undefined) return reply.code(400).send({ error: 'invalid key binding' });
       const resolved = terminalBindingCommand(config.keys, table, key);
       if (resolved === undefined) return reply.code(400).send({ error: 'no terminal is bound to that key' });
       const bindingId = `${table} ${key}`;
@@ -2921,6 +2958,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (objectToken !== undefined && (editor !== true || typeof objectToken !== 'string')) return reply.code(400).send({ error: 'invalid editor file selection' });
     // keep capability launches distinct from legacy Place-relative file and line launches
     if (objectToken !== undefined && (file !== undefined || line !== undefined)) return reply.code(400).send({ error: 'invalid editor file selection' });
+    const sourceSelection = settingsSource !== null && typeof settingsSource === 'object' && !Array.isArray(settingsSource) ? settingsSource as Record<string, unknown> : undefined;
+    // accept only one exact revision-bound settings source selection
+    if (settingsSource !== undefined && (sourceSelection === undefined || Object.keys(sourceSelection).length !== 2 || !Object.hasOwn(sourceSelection, 'sourceId') || !Object.hasOwn(sourceSelection, 'revisionId') || typeof sourceSelection.sourceId !== 'string' || sourceSelection.sourceId.length < 1 || sourceSelection.sourceId.length > 64 || /[\0\r\n]/u.test(sourceSelection.sourceId) || typeof sourceSelection.revisionId !== 'string' || sourceSelection.revisionId.length < 1 || sourceSelection.revisionId.length > 128 || /[\0\r\n]/u.test(sourceSelection.revisionId))) return reply.code(400).send({ error: 'invalid settings source selection' });
+    // keep installed settings authority distinct from every browser-selected file capability
+    if (settingsSource !== undefined && (editor !== true || file !== undefined || line !== undefined || objectToken !== undefined || binding !== undefined)) return reply.code(400).send({ error: 'invalid settings source selection' });
     // the Editor button: a shell that runs the configured editor first, named for its program
     if (editor === true && config.editor === undefined) return reply.code(400).send({ error: 'no editor is configured' });
     // the guided review's jump to a line: a file inside the Place, opened at that line
@@ -2938,6 +2980,17 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         if (error instanceof HostFilesTransportError) return reply.code(503).send({ error: 'host files bridge is unavailable' });
         throw error;
       }
+    }
+    // resolve only the current installed settings source after fixed input checks
+    if (sourceSelection !== undefined) {
+      try { selectedFile = await settings.editorFile(sourceSelection.sourceId as string, sourceSelection.revisionId as string); }
+      catch (error) {
+        // publish only bounded settings failure codes
+        if (error instanceof SettingsError) return reply.code(error.statusCode).send({ error: error.code });
+        throw error;
+      }
+      // prevent a controller takeover during source inspection from launching the editor
+      controlled(request, true);
     }
     const command = editor === true ? editorCommand(config.editor ?? '', selectedFile, line as number | undefined) : '';
     const paneId = await launch.createConsoleShell(place, typeof name === 'string' ? name : command === '' ? '' : basename(command.split(/\s+/u)[0]!), command);

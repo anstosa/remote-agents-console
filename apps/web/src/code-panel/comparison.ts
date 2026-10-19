@@ -107,7 +107,7 @@ export type PreviewImage = { mediaType: 'image/gif' | 'image/jpeg' | 'image/png'
 export type FilePreview = { path: string; size: number; truncated: boolean } & ({ binary: true; image?: PreviewImage } | { binary: false; content: string });
 // The panel's File view: the path a response file or terminal link opened, the fetch lifecycle, and
 // the payload once ready. A peer of the Comparison — a panel shows Changes or one File, not both.
-export type FilePreviewView = { path: string; state: CodePanelState; preview?: FilePreview; source?: 'files' };
+export type FilePreviewView = { path: string; state: CodePanelState; preview?: FilePreview; source?: 'files' | 'settings' };
 
 const previewMediaTypes = new Set<PreviewImage['mediaType']>(['image/gif', 'image/jpeg', 'image/png', 'image/webp']);
 const isPreviewImage = (value: unknown): value is PreviewImage =>
@@ -152,6 +152,8 @@ export type CodePanelController = {
   // open (or refocus) the panel on one file, fetched from the given preview endpoint (agent-keyed for
   // an agent-context file so the `/tmp` screenshot bridge works, worktree-keyed otherwise)
   openFilePreview(path: string, previewUrl: string, options?: { body?: unknown; source?: 'files' }): void;
+  // open a transient in-memory text preview without persisting or fetching it
+  openContentPreview(path: string, content: string): void;
   // leave the File view, revealing the Comparison the panel would otherwise show
   closeFilePreview(): void;
   // switch the Comparison in place (the panel-header Working / All PR toggle), leaving any commit; refetches
@@ -381,10 +383,23 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
     })();
   }, [request]);
 
+  // open a transient settings preview from already-redacted snapshot content
+  const openContentPreview = useCallback((path: string, content: string) => {
+    previewRequest.current += 1;
+    setFilePreview({
+      path,
+      state: 'ready',
+      source: 'settings',
+      preview: { path, size: new TextEncoder().encode(content).byteLength, truncated: false, binary: false, content }
+    });
+    setOpen(true);
+  }, []);
+
+  // leave the preview while retaining an explicitly opened comparison
   const closeFilePreview = useCallback(() => {
     previewRequest.current += 1;
-    // close transient files previews unless changes was retained
-    if (filePreview?.source === 'files' && !savedCodeOpen(worktreeId)) setOpen(false);
+    // close transient source previews unless changes was retained
+    if ((filePreview?.source === 'files' || filePreview?.source === 'settings') && !savedCodeOpen(worktreeId)) setOpen(false);
     setFilePreview(undefined);
   }, [filePreview?.source, worktreeId]);
 
@@ -413,5 +428,5 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
   // file-preview endpoint, so it can show even for an agent with no Worktree — keep the panel visible
   // whenever a File is open, or when Changes are open on a real Worktree.
   const panelVisible = filePreview !== undefined || (open && worktreeId !== undefined);
-  return { open: panelVisible, mode, commit, state, patch, selectedPath, filePreview, openChanges, openCommit, openFilePreview, closeFilePreview, setMode, selectFile, clearFile, refresh, loadFile, close, savedView: view.current, saveView };
+  return { open: panelVisible, mode, commit, state, patch, selectedPath, filePreview, openChanges, openCommit, openFilePreview, openContentPreview, closeFilePreview, setMode, selectFile, clearFile, refresh, loadFile, close, savedView: view.current, saveView };
 };

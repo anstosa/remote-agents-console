@@ -19,6 +19,7 @@ const idleId = 'repo:/repo/wts/idle';
 const cora = { id: coraId, projectId: 'repo', label: 'Cora', path: '/repo/wts/cora', main: false, detached: false, locked: false, branch: 'feature/context-menu', available: true, pinned: false, order: 0 };
 const idle = { id: idleId, projectId: 'repo', label: 'Idle', path: '/repo/wts/idle', main: false, detached: false, locked: false, branch: 'idle', available: true, pinned: true, order: 1 };
 const davo = { enabled: true, available: true, name: 'Davo', context: 'Be concise.' };
+type FileDavo = Pick<typeof davo, 'enabled' | 'name' | 'context'>;
 const codePatch = {
   kind: 'working', base: 'HEAD', gitBase: 'HEAD', fingerprint: 'context-menu-code', truncated: false,
   files: [{
@@ -88,9 +89,19 @@ function mutation(request: Request): Mutation {
 }
 
 // serve two workspaces, a live Agent, one shell and one Note for contextual-action coverage
-async function mountConsole(page: Page, { coraPinned = cora.pinned }: { coraPinned?: boolean } = {}) {
+async function mountConsole(page: Page, { coraPinned = cora.pinned, sessionDavo = davo, authoritativeDavo = davo, enabledPathRevision }: { coraPinned?: boolean; sessionDavo?: typeof davo; authoritativeDavo?: FileDavo; enabledPathRevision?: string } = {}) {
   const mutations: Mutation[] = [];
   const fixtureCora = { ...cora, pinned: coraPinned };
+  const settingsState = { davo: { enabled: authoritativeDavo.enabled, name: authoritativeDavo.name, context: authoritativeDavo.context } };
+  let runtimeDavo = { ...sessionDavo };
+  let settingsRevision = 1;
+  const settingsStatus = { pending: false, targets: [], effective: 'known', restartAvailable: true };
+  const appSource = {
+    id: 'app', label: 'Application config', path: '/fixture/config/config.json', format: 'json', exists: true, writable: true, protected: false, tracked: false, revisionId: `app-context-r${settingsRevision}`, apply: 'rac-restart',
+    ...(enabledPathRevision === undefined ? {} : { pathRevisions: { '["integrations","realtime","enabled"]': enabledPathRevision } }),
+    value: { integrations: { realtime: { ...settingsState.davo } } },
+    schema: { type: 'object', properties: { integrations: { type: 'object', properties: { realtime: { type: 'object', properties: { enabled: { type: 'boolean' }, name: { type: 'string' }, context: { type: 'string' } } } } } } }
+  };
   await installPaneMock(page);
   await page.route('**/api/**', async route => {
     const request = route.request();
@@ -98,7 +109,23 @@ async function mountConsole(page: Page, { coraPinned = cora.pinned }: { coraPinn
     const path = decodeURIComponent(url.pathname);
     // retain every write so non-destructive menu actions can be proven
     if (request.method() !== 'GET') mutations.push(mutation(request));
-    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'context-csrf', active: true, deviceName: 'Test device', davo, server: { name: 'Framework', url: 'https://framework.test', remotes: [] } } });
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'context-csrf', active: true, deviceName: 'Test device', davo: runtimeDavo, server: { name: 'Framework', url: 'https://framework.test', remotes: [] } } });
+    // provide the authoritative application source used by contextual voice actions
+    if (path === '/api/settings/status') return route.fulfill({ json: settingsStatus });
+    if (path === '/api/settings' && request.method() === 'GET') return route.fulfill({ json: { version: 1, revisionId: `context-settings-r${settingsRevision}`, sources: [appSource], status: settingsStatus } });
+    // apply only the requested voice feature gate and retain newer file values
+    if (path === '/api/settings' && request.method() === 'PATCH') {
+      const body = request.postDataJSON() as { changes?: Array<{ sourceId?: string; patches?: Array<{ op?: string; path?: string[]; value?: unknown }> }> };
+      const patch = body.changes?.find(change => change.sourceId === 'app')?.patches?.find(candidate => candidate.path?.join('.') === 'integrations.realtime.enabled');
+      // reject a malformed contextual disable instead of masking a regression
+      if (patch?.op !== 'set' || typeof patch.value !== 'boolean') return route.fulfill({ status: 400, json: { error: 'Expected one voice enabled patch.' } });
+      settingsState.davo = { ...settingsState.davo, enabled: patch.value };
+      appSource.value.integrations.realtime = { ...settingsState.davo };
+      settingsRevision += 1;
+      appSource.revisionId = `app-context-r${settingsRevision}`;
+      runtimeDavo = { ...settingsState.davo, available: true };
+      return route.fulfill({ json: { version: 1, revisionId: `context-settings-r${settingsRevision}`, sources: [appSource], status: settingsStatus } });
+    }
     if (path === '/api/dashboard') return route.fulfill({ json: {
       generation: 1,
       agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: cora.path, placeId: coraId, worktreeId: coraId, projectId: 'repo', worktreeLabel: cora.label, title: 'Ready', branch: cora.branch, projectUrl: 'https://project.example.test', queuedPromptCount: 0 }],
@@ -107,7 +134,6 @@ async function mountConsole(page: Page, { coraPinned = cora.pinned }: { coraPinn
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     if (path === '/api/server/revision') return route.fulfill({ status: 404, json: { error: 'not mocked' } });
     if (path === '/api/server-statuses') return route.fulfill({ json: { servers: [] } });
-    if (path === '/api/server/davo' && request.method() === 'PATCH') return route.fulfill({ json: { davo: { ...(request.postDataJSON() as typeof davo), available: true } } });
     if (path === '/api/agents/agent-1/tickets' || path === `/api/worktrees/${coraId}/tickets`) return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (/^\/api\/agents\/agent-1\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
     if (path === `/api/worktrees/${coraId}/notes` && request.method() === 'GET') return route.fulfill({ json: { notes: [{ id: 'note-1', title: 'Plan', text: 'Context menu plan' }] } });
@@ -121,7 +147,7 @@ async function mountConsole(page: Page, { coraPinned = cora.pinned }: { coraPinn
   });
   await page.goto('/');
   await seedPaneSize(page, 'agent-1', 80, 24);
-  return { mutations };
+  return { mutations, settingsState };
 }
 
 // open all non-Agent split kinds through the same visible controls a user operates
@@ -193,10 +219,31 @@ test('Davo context action disables Davo without opening a call', async ({ page }
   await expect(menu).toBeVisible();
   await expect(page.locator('.voice-dialog')).toHaveCount(0);
   await menu.getByRole('menuitem', { name: 'Disable Davo' }).click();
-  await expect.poll(() => fixture.mutations.filter(entry => entry.path === '/api/server/davo')).toEqual([
-    { method: 'PATCH', path: '/api/server/davo', body: { enabled: false, available: true, name: 'Davo', context: 'Be concise.' } }
+  await expect.poll(() => fixture.mutations.filter(entry => entry.path === '/api/settings')).toEqual([
+    { method: 'PATCH', path: '/api/settings', body: { changes: [{ sourceId: 'app', revisionId: 'app-context-r1', patches: [{ op: 'set', path: ['integrations', 'realtime', 'enabled'], value: false }] }] } }
   ]);
+  expect(fixture.mutations.filter(entry => entry.path === '/api/server/davo')).toEqual([]);
+  expect(fixture.settingsState.davo).toEqual({ enabled: false, name: 'Davo', context: 'Be concise.' });
   await expect(page.locator('.voice-dialog')).toHaveCount(0);
+  await expect(call).toHaveCount(0);
+});
+
+// disable from the authoritative source when runtime voice metadata is stale
+test('Davo context action preserves newer file-backed identity and context', async ({ page }) => {
+  const fixture = await mountConsole(page, {
+    sessionDavo: { enabled: true, available: true, name: 'Davo', context: 'Old runtime context.' },
+    authoritativeDavo: { enabled: true, name: 'Riley', context: 'New file-backed context.' },
+    enabledPathRevision: 'voice-enabled-r7'
+  });
+  const call = page.locator('.tab-row-lead').getByRole('button', { name: 'Call Davo' });
+  await call.click({ button: 'right' });
+  await page.getByRole('menu', { name: 'Davo options' }).getByRole('menuitem', { name: 'Disable Davo' }).click();
+
+  await expect.poll(() => fixture.mutations.filter(entry => entry.path === '/api/settings')).toEqual([
+    { method: 'PATCH', path: '/api/settings', body: { changes: [{ sourceId: 'app', revisionId: 'app-context-r1', patches: [{ op: 'set', path: ['integrations', 'realtime', 'enabled'], value: false, revisionId: 'voice-enabled-r7' }] }] } }
+  ]);
+  expect(fixture.mutations.filter(entry => entry.path === '/api/server/davo')).toEqual([]);
+  expect(fixture.settingsState.davo).toEqual({ enabled: false, name: 'Riley', context: 'New file-backed context.' });
   await expect(call).toHaveCount(0);
 });
 
@@ -264,6 +311,48 @@ test('workspace tab actions target inactive workspaces, jump to splits and close
   await toolbar.getByRole('button', { name: 'Show agent' }).click();
   await expect(page.locator('.log-output')).toBeVisible();
   expect(fixture.mutations.some(entry => entry.method === 'DELETE' || entry.path.endsWith('/deactivate') || entry.path.endsWith('/launch'))).toBe(false);
+});
+
+test('cancelling dirty Settings preflight leaves every close-all sibling mounted', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const fixture = await mountConsole(page);
+  await openWorkspaceSplits(page);
+  await page.getByRole('button', { name: 'Global settings', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await settings.getByRole('radio', { name: 'Light theme', exact: true }).click();
+
+  const tab = page.getByRole('tab', { name: /^Cora —/u });
+  await tab.click({ button: 'right' });
+  await page
+    .getByRole('menu', { name: 'Cora workspace' })
+    .getByRole('menuitem', { name: 'Close all splits', exact: true })
+    .click();
+  const confirmation = settings.getByRole('alertdialog', {
+    name: 'Close Settings with unsaved changes?',
+    exact: true,
+  });
+  await expect(confirmation).toBeVisible();
+
+  // a sibling remains interactive while only Settings is covered
+  const terminal = page.locator('.terminal-pane[data-panel-key="%5"]');
+  await terminal.locator('.xterm-screen').click();
+  await expect(terminal).toHaveClass(/focused/u);
+  await confirmation
+    .getByRole('button', { name: 'Cancel', exact: true })
+    .click();
+
+  await expect(settings).toBeVisible();
+  await expect(
+    settings.getByRole('radio', { name: 'Light theme', exact: true }),
+  ).toHaveAttribute('aria-checked', 'true');
+  await expect(
+    page.locator('.log-output, .terminal-pane, .note-pane, .browser-pane, .code-pane'),
+  ).toHaveCount(5);
+  expect(
+    fixture.mutations.some(
+      entry => entry.method === 'DELETE' || entry.path.endsWith('/deactivate'),
+    ),
+  ).toBe(false);
 });
 
 test('mobile workspace context menu stays on screen and right click does not open the workspace sheet', async ({ page }) => {

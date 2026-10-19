@@ -30,6 +30,10 @@ if [[ "$(basename "$node_binary")" != node* ]]; then
   fi
 fi
 
+# install the fixed host settings control plane first
+settings_installation="$(NODE_BIN="$node_binary" "$repository/scripts/install-settings-applier.sh" systemd --environment-file "$environment_file")"
+settings_control="$($node_binary -e 'const value=JSON.parse(process.argv[1]); if(typeof value.controlRoot!=="string") process.exit(1); process.stdout.write(value.controlRoot)' "$settings_installation")"
+
 executable_path="$(dirname "$node_binary"):$HOME/.local/share/mise/shims:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 escape_sed() {
@@ -42,6 +46,7 @@ sed \
   -e "s|@ENVIRONMENT_FILE@|$(escape_sed "$environment_file")|g" \
   -e "s|@EXECUTABLE_PATH@|$(escape_sed "$executable_path")|g" \
   -e "s|@NODE@|$(escape_sed "$node_binary")|g" \
+  -e "s|@SETTINGS_CONTROL@|$(escape_sed "$settings_control")|g" \
   "$template" > "$unit_file"
 chmod 600 "$unit_file"
 

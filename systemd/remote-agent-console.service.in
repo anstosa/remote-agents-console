@@ -10,7 +10,7 @@ WorkingDirectory=@REPOSITORY@
 EnvironmentFile=@ENVIRONMENT_FILE@
 Environment=NODE_ENV=production
 Environment=PATH=@EXECUTABLE_PATH@
-ExecStart=@NODE@ apps/server/dist/index.js
+ExecStart=@NODE@ apps/server/dist/index.js --settings-control @SETTINGS_CONTROL@
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=20s

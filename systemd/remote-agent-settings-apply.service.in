@@ -1,0 +1,17 @@
+[Unit]
+Description=Apply Remote Agent Console settings operations
+After=network-online.target
+Wants=network-online.target
+# routine status inspections intentionally trigger frequent short drains
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# leave enough time for a failed build and its proven recovery
+TimeoutStartSec=40min
+WorkingDirectory=@REPOSITORY@
+ExecStart=@NODE@ @REPOSITORY@/scripts/apply-settings.mjs --control-root @CONTROL_ROOT@
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=false

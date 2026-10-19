@@ -49,6 +49,9 @@ for (const width of [1400, 390]) {
     const markers = await openSettings(page);
     await expect(markers).not.toBeChecked();
     await markers.check();
+    await expect(marker).toBeHidden();
+    expect(await storedMarkers(page)).toBeNull();
+    await page.getByRole('button', { name: 'Save changes', exact: true }).click();
     await expect(marker).toBeVisible();
     expect(await storedMarkers(page)).toBe('enabled');
     await page.getByRole('button', { name: 'Close settings' }).click();
@@ -61,6 +64,9 @@ for (const width of [1400, 390]) {
     const restored = await openSettings(page);
     await expect(restored).toBeChecked();
     await restored.uncheck();
+    await expect(marker).toBeVisible();
+    expect(await storedMarkers(page)).toBe('enabled');
+    await page.getByRole('button', { name: 'Save changes', exact: true }).click();
     await expect(visibleMarkers(page)).toHaveCount(0);
     expect(await storedMarkers(page)).toBeNull();
     await page.getByRole('button', { name: 'Close settings' }).click();
@@ -84,6 +90,7 @@ test('the activation link enables this browser once and opens settings', async (
   await expect(page).toHaveURL('/?keep=value#settings');
   expect(await storedMarkers(page)).toBe('enabled');
   await markers.uncheck();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await page.reload();
   await expect(markers).not.toBeChecked();
   await expect(visibleMarkers(page)).toHaveCount(0);
@@ -99,12 +106,17 @@ test('open tabs follow enabled, disabled, and cleared preferences', async ({ pag
   const markers = await openSettings(page);
   const peerMarkers = await openSettings(peer);
   await markers.check();
+  await expect(peerMarkers).not.toBeChecked();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(peerMarkers).toBeChecked();
   await expect(peer.locator('.tabs .server-selector > .flyout-caret')).toBeVisible();
   await markers.uncheck();
+  await expect(peerMarkers).toBeChecked();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(peerMarkers).not.toBeChecked();
   await expect(visibleMarkers(peer)).toHaveCount(0);
   await markers.check();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(peerMarkers).toBeChecked();
   // clearing browser preferences restores the hidden default
   await page.evaluate(() => localStorage.clear());
@@ -135,7 +147,11 @@ test('blocked storage does not prevent toggling markers', async ({ page }) => {
   const markers = await openSettings(page);
   await expect(markers).not.toBeChecked();
   await markers.check();
+  await expect(page.locator('.tabs .server-selector > .flyout-caret')).toBeHidden();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(page.locator('.tabs .server-selector > .flyout-caret')).toBeVisible();
   await markers.uncheck();
+  await expect(page.locator('.tabs .server-selector > .flyout-caret')).toBeVisible();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(visibleMarkers(page)).toHaveCount(0);
 });

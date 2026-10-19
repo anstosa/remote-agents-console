@@ -25,7 +25,7 @@ export function formatReport(report: MigrationReport): string[] {
  * everything and reads no data file. Errors propagate — the caller prints them as
  * `Configuration invalid:` lines and exits, replacing today's unhandled-rejection trace.
  */
-export async function acquireConfig(env: NodeJS.ProcessEnv = process.env, log: (message: string) => void = message => process.stderr.write(message)): Promise<ValidatedConfig> {
+export async function acquireConfig(env: NodeJS.ProcessEnv = process.env, log: (message: string) => void = message => process.stderr.write(message), loaded?: (content: string) => void): Promise<ValidatedConfig> {
   const configPath = env.RAC_CONFIG;
   if (!configPath) throw new Error('RAC_CONFIG must point to a server-local configuration file');
   const raw = JSON.parse(await readFile(configPath, 'utf8')) as unknown;
@@ -34,6 +34,9 @@ export async function acquireConfig(env: NodeJS.ProcessEnv = process.env, log: (
     log(`Configuration migrated: ${configPath}\n`);
     for (const line of formatReport(report)) log(`  ${line}\n`);
   }
-  const finalRaw = JSON.parse(await readFile(configPath, 'utf8')) as unknown;
+  // capture the exact consumed revision for settings boot proof
+  const finalContent = await readFile(configPath, 'utf8');
+  const finalRaw = JSON.parse(finalContent) as unknown;
+  loaded?.(finalContent);
   return validateConfig(applyListenOverrides(finalRaw, env), { warn: message => log(`Configuration warning: ${message}\n`) });
 }

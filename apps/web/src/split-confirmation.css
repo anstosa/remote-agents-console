@@ -1,0 +1,81 @@
+.split-confirmation-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: var(--layer-dialog);
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  place-items: center;
+  padding: clamp(.75rem, 4vw, 1.5rem);
+  overscroll-behavior: contain;
+  background: color-mix(in srgb, var(--crust) 78%, transparent);
+  backdrop-filter: blur(7px) saturate(.78);
+  -webkit-backdrop-filter: blur(7px) saturate(.78);
+}
+
+.split-confirmation-card {
+  display: grid;
+  width: min(30rem, 100%);
+  max-height: 100%;
+  gap: 1.25rem;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--red) 52%, var(--surface-1));
+  border-radius: calc(var(--control-radius) + .2rem);
+  padding: clamp(1rem, 4vw, 1.35rem);
+  background: color-mix(in srgb, var(--base) 96%, transparent);
+  box-shadow: 0 1.25rem 3.5rem color-mix(in srgb, var(--crust) 82%, transparent);
+  color: var(--text);
+}
+
+.split-confirmation-copy {
+  display: grid;
+  gap: .55rem;
+  min-width: 0;
+}
+
+/* distinguish a save-time decision from destructive confirmations */
+.split-confirmation-normal { border-color: color-mix(in srgb, var(--blue) 52%, var(--surface-1)); }
+
+.split-confirmation-copy h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.35;
+}
+
+.split-confirmation-description {
+  color: var(--subtext-0);
+  font-size: .75rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.split-confirmation-description :first-child { margin-top: 0; }
+.split-confirmation-description :last-child { margin-bottom: 0; }
+
+.split-confirmation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: .6rem;
+}
+
+.split-confirmation-actions button {
+  min-height: 2.4rem;
+  justify-content: center;
+}
+
+.split-confirmation-actions > button:first-child {
+  border-color: var(--surface-2);
+  background: transparent;
+  box-shadow: none;
+  color: var(--subtext-1);
+}
+
+.split-confirmation-confirm { min-width: 9rem; }
+
+@media (max-width: 480px) {
+  .split-confirmation-card { align-self: end; }
+  .split-confirmation-actions > button { flex: 1 1 9rem; }
+}

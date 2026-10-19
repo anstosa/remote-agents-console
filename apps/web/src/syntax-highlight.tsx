@@ -1,7 +1,17 @@
-import { useMemo, type ReactNode } from 'react';
+import { useMemo, type ReactNode, type Ref } from 'react';
+import { highlightShellSource } from './settings/shell-source.js';
 
-type TokenKind = 'comment'|'string'|'number'|'keyword'|'constant'|'tag'|'operator';
+type TokenKind = 'comment'|'string'|'number'|'keyword'|'constant'|'tag'|'operator'|'property'|'command'|'option';
 type HighlightSegment = { text: string; kind?: TokenKind };
+
+type SyntaxHighlightedCodeProps = {
+  path?: string;
+  code: string;
+  label?: string;
+  language?: string;
+  presentation?: boolean;
+  preRef?: Ref<HTMLPreElement>;
+};
 
 // map exact filenames
 const filenameLanguages: Record<string, string> = {
@@ -17,6 +27,7 @@ const extensionLanguages: Record<string, string> = {
   cpp: 'cpp',
   cs: 'csharp',
   css: 'css',
+  env: 'env',
   go: 'go',
   graphql: 'graphql',
   gql: 'graphql',
@@ -40,6 +51,7 @@ const extensionLanguages: Record<string, string> = {
   sh: 'shell',
   sql: 'sql',
   svelte: 'svelte',
+  svg: 'xml',
   swift: 'swift',
   toml: 'toml',
   ts: 'typescript',
@@ -52,7 +64,7 @@ const extensionLanguages: Record<string, string> = {
 };
 
 // select comment grammars
-const hashCommentLanguages = new Set(['dockerfile', 'makefile', 'python', 'ruby', 'shell', 'toml', 'yaml']);
+const hashCommentLanguages = new Set(['dockerfile', 'env', 'makefile', 'python', 'ruby', 'shell', 'toml', 'yaml']);
 const markupLanguages = new Set(['html', 'markdown', 'mdx', 'svelte', 'vue', 'xml']);
 // match common source tokens
 const keywords = String.raw`\b(?:abstract|and|as|async|await|break|case|catch|class|const|continue|def|default|delete|do|elif|else|enum|export|extends|finally|fn|for|from|function|go|if|implements|import|in|instanceof|interface|let|match|namespace|new|not|of|or|package|private|protected|public|readonly|return|select|static|struct|switch|throw|trait|try|type|typeof|var|void|while|with|yield)\b`;
@@ -76,8 +88,12 @@ const tokenPattern = (language: string) => {
       ? String.raw`#[^\n]*`
       : String.raw`\/\*[\s\S]*?\*\/|\/\/[^\n]*`;
   const tag = markupLanguages.has(language) ? String.raw`<\/?[A-Za-z][^>]*>` : String.raw`(?!)`;
-  return new RegExp(`(?<comment>${comment})|(?<string>${strings})|(?<tag>${tag})|(?<number>${numbers})|(?<keyword>${keywords})|(?<constant>${constants})|(?<operator>${operators})`, 'gimu');
+  const property = language === 'env' ? String.raw`[A-Za-z_][A-Za-z0-9_]*(?=[ \t]*=)` : String.raw`(?!)`;
+  return new RegExp(`(?<comment>${comment})|(?<string>${strings})|(?<tag>${tag})|(?<property>${property})|(?<number>${numbers})|(?<keyword>${keywords})|(?<constant>${constants})|(?<operator>${operators})`, 'gimu');
 };
+
+// tokenize Bash with the shared semantics-aware lexer
+const highlightedShellSegments = (code: string): HighlightSegment[] => highlightShellSource(code);
 
 // classify one matched token
 const tokenKind = (match: RegExpExecArray): TokenKind => {
@@ -85,16 +101,19 @@ const tokenKind = (match: RegExpExecArray): TokenKind => {
   return groups.comment !== undefined ? 'comment'
     : groups.string !== undefined ? 'string'
       : groups.tag !== undefined ? 'tag'
-        : groups.number !== undefined ? 'number'
-          : groups.keyword !== undefined ? 'keyword'
-            : groups.constant !== undefined ? 'constant'
-              : 'operator';
+        : groups.property !== undefined ? 'property'
+          : groups.number !== undefined ? 'number'
+            : groups.keyword !== undefined ? 'keyword'
+              : groups.constant !== undefined ? 'constant'
+                : 'operator';
 };
 
 // tokenize one preview safely
 const highlightedSegments = (code: string, language: string): HighlightSegment[] => {
   // preserve unknown file contents
   if (language === 'plaintext') return [{ text: code }];
+  // use Bash-aware lexical state for shell editors
+  if (language === 'shell') return highlightedShellSegments(code);
   const segments: HighlightSegment[] = [];
   const pattern = tokenPattern(language);
   let cursor = 0;
@@ -140,10 +159,12 @@ const renderSegment = (segment: HighlightSegment, index: number): ReactNode => s
 const renderLine = (line: HighlightSegment[], index: number) => <span className="syntax-line" key={index}><span className="syntax-line-number" aria-hidden="true">{index + 1}</span><span className="syntax-line-content">{line.map(renderSegment)}</span></span>;
 
 // render one highlighted preview
-export function SyntaxHighlightedCode({ path, code, label }: { path: string; code: string; label: string }) {
-  const language = languageForPath(path);
+export function SyntaxHighlightedCode({ path = '', code, label, language: languageOverride, presentation = false, preRef }: SyntaxHighlightedCodeProps) {
+  const language = languageOverride ?? languageForPath(path);
   // cache numbered token rows
   const lines = useMemo(() => highlightedLines(code, language), [code, language]);
+  // keep editor decoration out of the accessibility tree
+  if (presentation) return <pre ref={preRef} className="syntax-highlight-presentation" aria-hidden="true"><code data-language={language}>{lines.map(renderLine)}</code></pre>;
   // allow keyboard scrolling inside the preview modal
-  return <pre tabIndex={0} aria-label={label}><code data-language={language}>{lines.map(renderLine)}</code></pre>;
+  return <pre ref={preRef} tabIndex={0} aria-label={label}><code data-language={language}>{lines.map(renderLine)}</code></pre>;
 }

@@ -1,1 +1,1 @@
-{"extends":"../../tsconfig.base.json","compilerOptions":{"composite":true,"noEmit":true,"jsx":"react-jsx","lib":["ES2022","DOM"]},"include":["src","vite.config.ts","../server/src/config/keys.ts"]}
+{"extends":"../../tsconfig.base.json","compilerOptions":{"composite":true,"noEmit":true,"jsx":"react-jsx","lib":["ES2022","DOM"]},"include":["src","vite.config.ts","../server/src/config/keys.ts","../server/src/settings/catalog.ts","../server/src/settings/contracts.ts","../server/src/settings/patches.ts","../server/src/settings/project-normalization.ts"]}

@@ -69,17 +69,23 @@ test('the toggle flips the whole UI between Dark and Light', async ({ page }) =>
   await expect(light).toHaveAttribute('aria-checked', 'false');
 
   await light.click();
-  // Light sets the attribute, recolours a real element live, updates the chrome,
-  // and moves the checked state — with no reload.
-  await expect.poll(() => themeAttr(page), { timeout: 5_000 }).toBe('latte');
+  // retain the draft without recolouring the applied browser
+  expect(await themeAttr(page)).toBeUndefined();
+  expect(await rootBackground(page)).toBe(mochaBackground);
+  expect(await metaThemeColor(page)).toBe('#1e1e2e');
   await expect(light).toHaveAttribute('aria-checked', 'true');
   await expect(dark).toHaveAttribute('aria-checked', 'false');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  // apply the staged theme without reloading
+  await expect.poll(() => themeAttr(page), { timeout: 5_000 }).toBe('latte');
   const latteBackground = await rootBackground(page);
   expect(latteBackground).not.toBe(mochaBackground);
   expect(await metaThemeColor(page)).toBe('#eff1f5');
 
   await dark.click();
-  // Dark removes the attribute and returns to the Mocha default cleanly.
+  expect(await themeAttr(page)).toBe('latte');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  // apply the dark default cleanly
   await expect.poll(() => themeAttr(page), { timeout: 5_000 }).toBeUndefined();
   expect(await rootBackground(page)).toBe(mochaBackground);
   expect(await metaThemeColor(page)).toBe('#1e1e2e');
@@ -90,6 +96,8 @@ test('the choice persists across a reload', async ({ page }) => {
   await openConsole(page);
   await openSettings(page);
   await page.getByRole('radio', { name: 'Light theme' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('rac.color-theme'))).toBeNull();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect.poll(() => themeAttr(page), { timeout: 5_000 }).toBe('latte');
   expect(await page.evaluate(() => localStorage.getItem('rac.color-theme'))).toBe('latte');
 
@@ -120,6 +128,8 @@ test('switching back to Dark forgets the stored key', async ({ page }) => {
   await expect.poll(() => themeAttr(page), { timeout: 10_000 }).toBe('latte');
   await openSettings(page);
   await page.getByRole('radio', { name: 'Dark theme' }).click();
+  expect(await themeAttr(page)).toBe('latte');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect.poll(() => themeAttr(page), { timeout: 5_000 }).toBeUndefined();
   // Mocha is the key's absence, so returning to Dark clears storage.
   expect(await page.evaluate(() => localStorage.getItem('rac.color-theme'))).toBeNull();
@@ -134,15 +144,18 @@ test('an already-open terminal repaints live when the flavour flips', async ({ p
 
   await openSettings(page);
   await page.getByRole('radio', { name: 'Light theme' }).click();
-  // The already-open terminal follows the switch with no reload or reconnect: its
-  // painted background flips to the Latte base the moment the document reflavours.
+  await expect.poll(() => terminalBackground(page), { timeout: 5_000 }).toBe(mochaTerminal);
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  // the already-open terminal follows the saved switch without reconnecting
   await expect.poll(() => themeAttr(page), { timeout: 5_000 }).toBe('latte');
   await expect.poll(() => terminalBackground(page), { timeout: 5_000 }).not.toBe(mochaTerminal);
   const latteTerminal = await terminalBackground(page);
   expect(latteTerminal).not.toBe('');
 
   await page.getByRole('radio', { name: 'Dark theme' }).click();
-  // And back: switching to Dark repaints the same open terminal to Mocha again.
+  await expect.poll(() => terminalBackground(page), { timeout: 5_000 }).toBe(latteTerminal);
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  // save dark and repaint the same open terminal again
   await expect.poll(() => terminalBackground(page), { timeout: 5_000 }).toBe(mochaTerminal);
 });
 

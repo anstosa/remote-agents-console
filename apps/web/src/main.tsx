@@ -13,7 +13,7 @@ import { FlyoutPortal } from './flyout-portal.js';
 import { ContextMenuHost, contextMenuOwnsFocus, openContextMenu, type ContextMenuItem } from './context-menu.js';
 import { SelectionActionsContext, openSelectionContextMenu, preserveContextMenuPress, useSelectionActions, type ClipboardContents, type SelectionActions } from './selection-context-menu.js';
 import { ContextFlyoutEvents } from './context-flyouts.js';
-import { agentSplitHidden, setAgentSplitHidden, workspaceAlias, setWorkspaceAlias, useWorkspaceViewRevision, workspaceViews, pendingWorkspaceJumps, type WorkspaceSplit, type WorkspaceView } from './workspace-view.js';
+import { agentSplitHidden, setAgentSplitHidden, workspaceAlias, setWorkspaceAlias, settingsSplitOpen, setSettingsSplitOpen, useWorkspaceViewRevision, workspaceViews, pendingWorkspaceJumps, type WorkspaceSplit, type WorkspaceView } from './workspace-view.js';
 import { PanelExpandContext, type PanelAction, type PanelExpansion, PanelHeader, PanelIcon, panelIcons, useExpansionScope, usePanelExpand, usePanelExpansion, usePhoneLayout } from './panel-header.js';
 import { type CarouselPanel, type PanelCarousel, PanelDots, usePanelCarousel, usePanelSwipe } from './panel-carousel.js';
 import { NoteMarkdown } from './note-markdown.js';
@@ -28,13 +28,12 @@ import { StackPanel } from './stack-panel.js';
 import { StackIcon, stackGlyphs, type ProcessAction, type StackHandlers } from './stack-controls.js';
 import { SyntaxHighlightedCode } from './syntax-highlight.js';
 import { isPromptKeyboardTarget, useWorkspaceCycleKeys } from './tab-navigation.js';
-import { confirmKey, KeyboardLayer, KeyPicker, keyTarget, openBindingsSheet, terminalBindingAction, useKeyAction, useKeyActions, type KeyPickerOption } from './keyboard.js';
+import { confirmKey, KeyboardLayer, KeyPicker, keyTarget, shortcutSettingsNavigationEvent, terminalBindingAction, useKeyAction, useKeyActions, type KeyPickerOption } from './keyboard.js';
 import type { KeysConfig } from '../../server/src/config/keys.js';
-import { defaultTerminalFontSize, maxTerminalFontSize, minTerminalFontSize, resetTerminalFontSize, stepTerminalFontSize, useTerminalFontSize } from './terminal-font-size.js';
-import { applyColorTheme, setColorTheme, useColorTheme } from './color-theme.js';
-import { setDynamicWorktrees, useDynamicWorktrees } from './dynamic-worktrees.js';
-import { applyReducedMotion, setReducedMotion, useReducedMotion } from './reduced-motion.js';
-import { applyFlyoutMarkers, setFlyoutMarkers, useFlyoutMarkers } from './flyout-markers.js';
+import { applyColorTheme } from './color-theme.js';
+import { useDynamicWorktrees } from './dynamic-worktrees.js';
+import { applyReducedMotion } from './reduced-motion.js';
+import { applyFlyoutMarkers } from './flyout-markers.js';
 import { UpstreamRebaseNotification, type GitUpstreamSummary } from './upstream-rebase.js';
 import { useViewportFlyout } from './viewport-flyout.js';
 import { isReviewTour, ReviewPanelColumn, ReviewTourPanel, type ReviewLaunch, type ReviewPanelSlot, type ReviewScope, type ReviewTarget, type ReviewTour, type ReviewTourIndicator } from './review-tour.js';
@@ -47,6 +46,11 @@ import { useBrowserPermissionBroker } from './browser-permissions.js';
 import { FilesPanel } from './files-panel/files-panel.js';
 import { saveFilesOpen, useFilesController } from './files-panel/controller.js';
 import type { FileEntry } from './files-panel/contracts.js';
+import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './settings/settings-center.js';
+import { SettingsHeaderActionsContext } from './settings/header-actions.js';
+import { isSettingsSnapshot, settingsResponseError } from './settings/contracts.js';
+import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
+import { SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, useSettingsRestartNoticeVisible } from './settings/runtime.js';
 import './styles.css';
 
 // preserve both middle-click and context-menu presses
@@ -265,7 +269,8 @@ type AssistantPreviewImage = { mediaType: 'image/gif'|'image/jpeg'|'image/png'|'
 type AssistantFilePreview = AssistantFile & { truncated: boolean } & ({ binary: true; image?: AssistantPreviewImage } | { binary: false; content: string });
 type FilePreviewState = 'loading'|'ready'|'error';
 type InstanceIcon = 'terminal'|'potato'|'heart';
-type RemoteServer = { name: string; url: string; icon?: InstanceIcon };
+// retain inherited peer identity separately from local navigation overrides
+type RemoteServer = { name: string; url: string; icon?: InstanceIcon; defaultName?: string; defaultIcon?: InstanceIcon };
 type ServerInfo = { name: string; url: string; icon?: InstanceIcon; remotes: RemoteServer[] };
 type InstanceAttention = 'idle'|'working'|'question'|'completed'|'unavailable';
 type InstanceStatus = RemoteServer & { attention: InstanceAttention };
@@ -911,7 +916,7 @@ type AgentUpdateJob =
   | { id: string; kind: AgentKind; state: 'failed'; error: string };
 type ServerUpdateCommit = { sha: string; subject: string; author: string; authoredAt: string };
 type ServerUpdateAdvisoryReason = { kind: 'config' | 'compose' | 'runtime' | 'dependency' | 'state' | 'other'; paths: string[] };
-type ServerUpdatePreview = { available: boolean; rebuildRetryAvailable: boolean; baseSha: string; targetSha: string; fastForwardable: boolean; commitCount: number; commits: ServerUpdateCommit[]; commitsTruncated: boolean; filesTruncated: boolean; advisory: { required: boolean; reasons: ServerUpdateAdvisoryReason[] } };
+type ServerUpdatePreview = { available: boolean; rebuildRetryAvailable: boolean; baseSha: string; targetSha: string; fastForwardable: boolean; commitCount: number; commits: ServerUpdateCommit[]; commitsTruncated: boolean; filesTruncated: boolean; advisory: { required: boolean; reasons: ServerUpdateAdvisoryReason[] }; settingsImpact?: { pendingTargets: Array<'rac' | 'cloudflared'>; warning: string } };
 type ClientSettings = {
   deviceName: string;
   serverName: string;
@@ -926,7 +931,8 @@ type ClientSettings = {
   loadServerRevision: () => Promise<ServerRevision | undefined>;
   reloadClient: () => void;
   openServerUpdate: () => void;
-  updateDavo: (settings: Pick<DavoSettings, 'enabled' | 'name' | 'context'>) => Promise<string | undefined>;
+  refreshDavo: () => Promise<void>;
+  disableDavo: () => Promise<string | undefined>;
   codexAccounts: () => Promise<{ accounts?: CodexAccount[]; error?: string }>;
   claudeAccounts: () => Promise<{ accounts?: CodexAccount[]; error?: string }>;
   switchCodexAccount: (id: string) => Promise<{ account?: CodexAccount; restarts?: CodexAccountRestart[]; error?: string }>;
@@ -1053,7 +1059,9 @@ const isInstanceIcon = (value: unknown): value is InstanceIcon => value === 'ter
 const isRemoteServer = (value: unknown): value is RemoteServer => value !== null && typeof value === 'object'
   && typeof (value as RemoteServer).name === 'string'
   && typeof (value as RemoteServer).url === 'string'
-  && ((value as RemoteServer).icon === undefined || isInstanceIcon((value as RemoteServer).icon));
+  && ((value as RemoteServer).icon === undefined || isInstanceIcon((value as RemoteServer).icon))
+  && ((value as RemoteServer).defaultName === undefined || typeof (value as RemoteServer).defaultName === 'string')
+  && ((value as RemoteServer).defaultIcon === undefined || isInstanceIcon((value as RemoteServer).defaultIcon));
 // validate public server metadata
 const isServerInfo = (value: unknown): value is ServerInfo => isRemoteServer(value)
   && Array.isArray((value as ServerInfo).remotes)
@@ -1511,40 +1519,89 @@ function ServerUpdateDialog({ open, minimized, onMinimize, onClose }: { open: bo
     body = <div className="update-review-loading"><strong>Server is current.</strong><span>No upstream commits are waiting.</span></div>;
   // render the exact pending range
   } else {
-    body = <div className="update-review-body"><section className="update-review-summary"><div><small>{preview.baseSha.slice(0, 7)}</small><span aria-hidden="true">→</span><strong>{preview.targetSha.slice(0, 7)}</strong></div><span>{preview.commitCount} new {preview.commitCount === 1 ? 'commit' : 'commits'}{preview.commitsTruncated ? ` · showing ${preview.commits.length}` : ''}</span></section>{!preview.fastForwardable && <p className="update-review-warning" role="alert">Local main cannot be fast-forwarded to this update. Resolve the checkout manually before updating.</p>}<ol className="update-commit-list" aria-label="Pending commits">{preview.commits.map(commit => <li key={commit.sha}><code>{commit.sha.slice(0, 7)}</code><span><strong>{commit.subject}</strong><small>{commit.author} · {updateCommitDate(commit.authoredAt)}</small></span></li>)}</ol>{preview.advisory.required && <section className="update-advisor"><header><div><small>UPDATE ADVISOR</small><h3>Host changes need review</h3></div><span className={`update-advisor-state ${advisorDisplayState}`}>{advisorError ? 'Unavailable' : advisorDisplayState === 'action-required' ? 'Needs input' : adviceReady ? 'Ready' : advisorId === undefined ? 'Starting' : 'Reviewing'}</span></header><p>The changed paths below may require host-local actions. The advisor inspects the exact commit range without modifying it.</p><div className="update-advisory-reasons">{preview.advisory.reasons.map(reason => <div key={reason.kind}><strong>{updateAdvisoryLabels[reason.kind]}</strong>{reason.paths.length === 0 ? <span>Manual Git reconciliation required</span> : reason.paths.map(path => <code key={path}>{path}</code>)}</div>)}</div>{preview.filesTruncated && <small className="update-review-warning">Changed-path review was truncated; the advisor will inspect the complete Git range.</small>}{advisorError ? <div className="update-advisor-error" role="alert">{advisorError}</div> : advisorId === undefined ? <div className="update-advisor-launching" role="status"><span className="spinner" />Starting a dedicated advisor…</div> : <><EmbeddedAgentOutput id={advisorId} onMetadata={advisorMetadata} />{visibleQuestion !== undefined && <div className="update-advisor-question"><strong>{visibleQuestion.text}</strong><div>{visibleQuestion.choices.map(choice => <button type="button" key={`${choice.answerIndex}-${choice.label}`} disabled={feedbackPending} onClick={() => void answerAdvisor(choice.answerIndex)}><b>{choice.number}</b><span>{choice.label}</span></button>)}</div></div>}<form className="update-advisor-feedback" onSubmit={event => void submitFeedback(event)}><label>Approval or feedback<textarea value={feedback} maxLength={32_000} disabled={feedbackBlocked} placeholder={advisorNeedsInput ? 'Reply to the advisor…' : advisorResponsePending || advisorResponse === undefined ? 'Waiting for the advisor response…' : 'Queue a follow-up for the advisor…'} onFocus={() => { /* leave terminal input */ if (advisorId !== undefined) exitTerminalInput.get(advisorId)?.(); }} onChange={event => setFeedback(event.target.value)} /></label><button type="submit" disabled={feedbackBlocked || !feedback.trim()}>{feedbackPending ? <><span className="spinner" />Sending…</> : 'Send'}</button></form>{feedbackMessage && <small className="update-advisor-feedback-status" role="status">{feedbackMessage}</small>}{adviceReady && <label className="update-advisor-acknowledgement"><input type="checkbox" checked={advisorAcknowledged} onChange={event => setAdvisorAcknowledged(event.target.checked)} /><span>I reviewed the advisor guidance for this exact update.</span></label>}</>}</section>}</div>;
+    body = <div className="update-review-body"><section className="update-review-summary"><div><small>{preview.baseSha.slice(0, 7)}</small><span aria-hidden="true">→</span><strong>{preview.targetSha.slice(0, 7)}</strong></div><span>{preview.commitCount} new {preview.commitCount === 1 ? 'commit' : 'commits'}{preview.commitsTruncated ? ` · showing ${preview.commits.length}` : ''}</span></section>{!preview.fastForwardable && <p className="update-review-warning" role="alert">Local main cannot be fast-forwarded to this update. Resolve the checkout manually before updating.</p>}{preview.settingsImpact !== undefined && <p className="update-review-warning" role="alert">{preview.settingsImpact.warning}</p>}<ol className="update-commit-list" aria-label="Pending commits">{preview.commits.map(commit => <li key={commit.sha}><code>{commit.sha.slice(0, 7)}</code><span><strong>{commit.subject}</strong><small>{commit.author} · {updateCommitDate(commit.authoredAt)}</small></span></li>)}</ol>{preview.advisory.required && <section className="update-advisor"><header><div><small>UPDATE ADVISOR</small><h3>Host changes need review</h3></div><span className={`update-advisor-state ${advisorDisplayState}`}>{advisorError ? 'Unavailable' : advisorDisplayState === 'action-required' ? 'Needs input' : adviceReady ? 'Ready' : advisorId === undefined ? 'Starting' : 'Reviewing'}</span></header><p>The changed paths below may require host-local actions. The advisor inspects the exact commit range without modifying it.</p><div className="update-advisory-reasons">{preview.advisory.reasons.map(reason => <div key={reason.kind}><strong>{updateAdvisoryLabels[reason.kind]}</strong>{reason.paths.length === 0 ? <span>Manual Git reconciliation required</span> : reason.paths.map(path => <code key={path}>{path}</code>)}</div>)}</div>{preview.filesTruncated && <small className="update-review-warning">Changed-path review was truncated; the advisor will inspect the complete Git range.</small>}{advisorError ? <div className="update-advisor-error" role="alert">{advisorError}</div> : advisorId === undefined ? <div className="update-advisor-launching" role="status"><span className="spinner" />Starting a dedicated advisor…</div> : <><EmbeddedAgentOutput id={advisorId} onMetadata={advisorMetadata} />{visibleQuestion !== undefined && <div className="update-advisor-question"><strong>{visibleQuestion.text}</strong><div>{visibleQuestion.choices.map(choice => <button type="button" key={`${choice.answerIndex}-${choice.label}`} disabled={feedbackPending} onClick={() => void answerAdvisor(choice.answerIndex)}><b>{choice.number}</b><span>{choice.label}</span></button>)}</div></div>}<form className="update-advisor-feedback" onSubmit={event => void submitFeedback(event)}><label>Approval or feedback<textarea value={feedback} maxLength={32_000} disabled={feedbackBlocked} placeholder={advisorNeedsInput ? 'Reply to the advisor…' : advisorResponsePending || advisorResponse === undefined ? 'Waiting for the advisor response…' : 'Queue a follow-up for the advisor…'} onFocus={() => { /* leave terminal input */ if (advisorId !== undefined) exitTerminalInput.get(advisorId)?.(); }} onChange={event => setFeedback(event.target.value)} /></label><button type="submit" disabled={feedbackBlocked || !feedback.trim()}>{feedbackPending ? <><span className="spinner" />Sending…</> : 'Send'}</button></form>{feedbackMessage && <small className="update-advisor-feedback-status" role="status">{feedbackMessage}</small>}{adviceReady && <label className="update-advisor-acknowledgement"><input type="checkbox" checked={advisorAcknowledged} onChange={event => setAdvisorAcknowledged(event.target.checked)} /><span>I reviewed the advisor guidance for this exact update.</span></label>}</>}</section>}</div>;
   }
   const progress = updateState === undefined ? null : <div className={`update-review-progress ${updateState}`} role="status">{updateState === 'failed' ? <span>Update failed. Check the server update log.</span> : updateState === 'complete' ? <><strong>Update complete.</strong><button type="button" onClick={() => location.reload()}>Reload</button></> : <><span className="spinner" /><span>{updateState === 'queued' ? 'Waiting for the host…' : 'Pulling the reviewed revision, rebuilding, and restarting…'}</span></>}</div>;
   return createPortal(<div ref={dialog} className="dialog server-update-dialog" role="dialog" aria-modal="true" aria-labelledby="server-update-review-title" tabIndex={-1} onKeyDown={dialogKey}><div><header><div><small>SERVER UPDATE</small><h2 id="server-update-review-title">Review update</h2></div><span className="server-update-controls"><button type="button" aria-label="Minimize server update" title="Minimize" onClick={onMinimize}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /></svg></button><button type="button" aria-label="Close server update" title="Close" disabled={updating} onClick={closeDialog}><PanelIcon path={panelIcons.close} /></button></span></header>{body}{error && preview !== undefined && <p className="update-review-error" role="alert">{error}</p>}{progress}<footer><span>{preview?.advisory.required && !advisorAcknowledged ? 'Advisor acknowledgement required' : preview?.fastForwardable === false ? 'Manual Git reconciliation required' : preview?.rebuildRetryAvailable ? 'Retry the failed host rebuild.' : 'The update will rebuild this host only.'}</span><button type="button" disabled={updateBlocked} onClick={() => void startUpdate()}>{updating ? <><span className="spinner" />Updating…</> : preview?.rebuildRetryAvailable ? 'Retry rebuild' : 'Update'}</button></footer></div></div>, document.body);
 }
 
 // share the global settings panel with the active workspace split and tab trigger
-const ClientSettingsSplitContext = createContext<{ open: boolean; page: ReactNode; trigger: ReactNode; close: () => void; renameServer: () => void } | null>(null);
+const ClientSettingsSplitContext = createContext<{ open: boolean; page: ReactNode; trigger: ReactNode; close: () => Promise<boolean>; renameServer: () => void } | null>(null);
 
-// keep settings state mounted while its panel moves with the active workspace
-function ClientSettingsLayout({ settings, children }: { settings: ClientSettings; children: ReactNode }) {
+const settingsHeaderLayoutEvent = 'rac-settings-header-layout';
+
+// keep global notices below any visible settings toolbar with file actions
+const syncSettingsToastClearance = () => {
+  let clearance = 0;
+  // ignore offscreen carousel panels and settings hidden by another dialog
+  for (const header of Array.from(document.querySelectorAll<HTMLElement>('.settings-center-page:not([aria-hidden="true"]):not([inert]) > .panel-header:has(.settings-header-actions > button)'))) {
+    const bounds = header.getBoundingClientRect();
+    // reserve only toolbar geometry that intersects this browser viewport
+    if (bounds.width > 0 && bounds.right > 0 && bounds.left < window.innerWidth && bounds.bottom > 0 && bounds.top < window.innerHeight) clearance = Math.max(clearance, Math.ceil(bounds.bottom + 8));
+  }
+  const root = document.documentElement;
+  const next = `${clearance}px`;
+  // avoid feedback when measuring unchanged header geometry
+  if (root.style.getPropertyValue('--settings-header-toast-clearance') === next) return;
+  root.style.setProperty('--settings-header-toast-clearance', next);
+  window.dispatchEvent(new Event(settingsHeaderLayoutEvent));
+};
+
+// apply split expansion inside the owning workspace context
+function ClientSettingsPage({ panelRef, busy, hidden, onKeyDown, onClose, children }: { panelRef: React.RefObject<HTMLDivElement | null>; busy: boolean; hidden: boolean; onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void; onClose: () => void; children: ReactNode }) {
+  const expanded = usePanelExpand('settings')?.expanded === true;
+  const [actionsTarget, setActionsTarget] = useState<HTMLSpanElement | null>(null);
+  // keep scrollable content below header actions when a narrow split wraps
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    const header = actionsTarget?.closest<HTMLElement>('.panel-header');
+    // wait for the existing toolbar's mount target
+    if (panel === null || header == null) return;
+    // measure only the header rather than changing any split geometry
+    const measure = () => {
+      panel.style.setProperty('--settings-header-clearance', `${Math.ceil(header.getBoundingClientRect().bottom - panel.getBoundingClientRect().top + 6)}px`);
+      syncSettingsToastClearance();
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(header);
+    observer.observe(panel);
+    // action width can change even while the outer header remains one row
+    if (actionsTarget?.parentElement !== null && actionsTarget?.parentElement !== undefined) observer.observe(actionsTarget.parentElement);
+    const intersection = new IntersectionObserver(measure);
+    intersection.observe(header);
+    window.addEventListener('resize', measure);
+    measure();
+    return () => { observer.disconnect(); intersection.disconnect(); window.removeEventListener('resize', measure); requestAnimationFrame(syncSettingsToastClearance); };
+  }, [actionsTarget, hidden, panelRef]);
+  // restore expansion before allowing escape to close the split
+  const panelKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape' && expanded) return;
+    onKeyDown(event);
+  };
+  return <SettingsHeaderActionsContext.Provider value={actionsTarget}><div ref={panelRef} id="global-settings-page" className={`client-settings-page settings-center-page${expanded ? ' expanded' : ''}`} role="dialog" aria-hidden={hidden || undefined} inert={hidden} aria-labelledby="global-settings-title" aria-busy={busy} tabIndex={-1} onKeyDown={panelKey}><PanelHeader panelKey="settings" label="settings" title={<h1 id="global-settings-title">Settings</h1>} actions={<span ref={setActionsTarget} className="settings-header-actions" />} close={{ key: 'close', label: 'Close settings', icon: <PanelIcon path={panelIcons.close} />, onSelect: onClose }} /><div className="client-settings-page-content">{children}</div></div></SettingsHeaderActionsContext.Provider>;
+}
+
+// scope split visibility while retaining one shared settings transaction
+function ClientSettingsLayout({ settings, workspaceKey, children, onOperationFeedback }: { settings: ClientSettings; workspaceKey: string; children: ReactNode; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+  const serverIdentity = useContext(ServerContext);
   const adapters = useContext(AdaptersContext);
   // Codex account management is available only when adapters.codex is configured
   const codexConfigured = adapters?.codex?.program !== undefined;
   const claudeConfigured = adapters?.claude?.program !== undefined;
-  const terminalFontSize = useTerminalFontSize();
-  const colorTheme = useColorTheme();
-  const dynamicWorktrees = useDynamicWorktrees();
-  const reducedMotion = useReducedMotion();
-  const flyoutMarkers = useFlyoutMarkers();
-  const terminalFontIsDefault = terminalFontSize === defaultTerminalFontSize();
-  // open settings from the initial authenticated destination
-  const [open, setOpen] = useState(() => location.hash === '#settings');
+  // observe the same optional persistence used by other workspace controls
+  useWorkspaceViewRevision();
+  const open = settingsSplitOpen(workspaceKey);
+  const setOpen = useCallback((next: boolean) => setSettingsSplitOpen(workspaceKey, next), [workspaceKey]);
+  const currentWorkspace = useRef(workspaceKey);
+  currentWorkspace.current = workspaceKey;
+  const settingsSession = useSettingsSession();
+  const [requestedSection, setRequestedSection] = useState<{ id: string; request: number; workspaceKey: string }>();
   const [accountsVisible, setAccountsVisible] = useState(false);
-  const [dialog, setDialog] = useState<'client' | 'server' | 'account-login' | 'account-rename'>();
-  const [name, setName] = useState(settings.deviceName);
+  const [dialog, setDialog] = useState<'server' | 'account-login' | 'account-rename'>();
+  const [name, setName] = useState(settings.serverName);
   const [renamingAccount, setRenamingAccount] = useState<CodexAccount>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
-  const [davoEnabled, setDavoEnabled] = useState(settings.davo.enabled);
-  const [davoDraft, setDavoDraft] = useState(() => ({ name: settings.davo.name, context: settings.davo.context }));
-  const [davoPending, setDavoPending] = useState(false);
-  const [davoError, setDavoError] = useState('');
-  const [davoMessage, setDavoMessage] = useState('');
   const [accounts, setAccounts] = useState<CodexAccount[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(false);
   const [switchingAccountId, setSwitchingAccountId] = useState<string>();
@@ -1567,7 +1624,34 @@ function ClientSettingsLayout({ settings, children }: { settings: ClientSettings
   const accountLoginRequest = useRef(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
-  const davoContextRef = useRef<HTMLTextAreaElement>(null);
+  const settingsCloseGuard = useRef<SettingsCloseGuard>(null);
+  const pendingSettingsClose = useRef(new Map<string, Promise<boolean>>());
+  // honor settings links while the authenticated workspace stays mounted
+  useEffect(() => {
+    // reopen the panel without disturbing unrelated hash destinations
+    const openFromHash = () => {
+      // accept only the settings destination
+      if (location.hash === '#settings') setSettingsSplitOpen(currentWorkspace.current, true);
+    };
+    openFromHash();
+    window.addEventListener('hashchange', openFromHash);
+    return () => window.removeEventListener('hashchange', openFromHash);
+  }, []);
+  // retain keyboard navigation requests even when the settings split is closed
+  useEffect(() => {
+    // stage navigation without changing the saved keyboard configuration
+    const openShortcuts = () => {
+      const owner = currentWorkspace.current;
+      setRequestedSection(current => ({ id: 'keyboard', request: (current?.request ?? 0) + 1, workspaceKey: owner }));
+      setSettingsSplitOpen(owner, true);
+    };
+    window.addEventListener(shortcutSettingsNavigationEvent, openShortcuts);
+    return () => window.removeEventListener(shortcutSettingsNavigationEvent, openShortcuts);
+  }, []);
+  // consume a navigation request only after the target section accepts it
+  const consumeSettingsSection = useCallback((request: number) => {
+    setRequestedSection(current => current?.request === request && current.workspaceKey === workspaceKey ? undefined : current);
+  }, [workspaceKey]);
   // return server rename focus to its selector after the dialog closes
   useEffect(() => {
     if (dialog !== 'server') return;
@@ -1581,27 +1665,6 @@ function ClientSettingsLayout({ settings, children }: { settings: ClientSettings
     pageRef.current?.focus();
     return () => trigger?.focus();
   }, [open]);
-  // follow settings saved by this page or another client
-  useEffect(() => {
-    setDavoEnabled(settings.davo.enabled);
-    setDavoDraft({ name: settings.davo.name, context: settings.davo.context });
-  }, [settings.davo.context, settings.davo.enabled, settings.davo.name]);
-  // fit the voice context to saved and edited text as the split width changes
-  useLayoutEffect(() => {
-    const textarea = davoContextRef.current;
-    // skip the unmounted field while voice is off or settings is closed
-    if (!textarea) return;
-    // measure again after removing the previous inline height
-    const fit = () => {
-      textarea.style.height = 'auto';
-      textarea.style.height = `${textarea.scrollHeight + textarea.offsetHeight - textarea.clientHeight}px`;
-    };
-    fit();
-    const observer = new ResizeObserver(fit);
-    // track wrapping changes caused by the split's width
-    if (textarea.parentElement) observer.observe(textarea.parentElement);
-    return () => observer.disconnect();
-  }, [open, davoEnabled, davoDraft.context]);
   // refresh accounts when their launcher opens and at utc day rollover
   useEffect(() => {
     // skip hidden launchers and consoles without a configured Codex adapter
@@ -1642,11 +1705,11 @@ function ClientSettingsLayout({ settings, children }: { settings: ClientSettings
     const interval = window.setInterval(() => setAccountClock(Date.now()), 1_000);
     return () => window.clearInterval(interval);
   }, [accountsVisible]);
-  // start editing the current client name
-  const beginRename = (target: 'client' | 'server') => {
-    setName(target === 'client' ? settings.deviceName : settings.serverName);
+  // start editing the current server name
+  const beginServerRename = () => {
+    setName(settings.serverName);
     setError('');
-    setDialog(target);
+    setDialog('server');
   };
   // edit a saved label without selecting the account
   const beginAccountRename = (account: CodexAccount) => {
@@ -1832,7 +1895,7 @@ function ClientSettingsLayout({ settings, children }: { settings: ClientSettings
   const submitRename = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     // prevent duplicate writes and missing targets
-    if (pending || (dialog !== 'client' && dialog !== 'server' && dialog !== 'account-rename')) return;
+    if (pending || (dialog !== 'server' && dialog !== 'account-rename')) return;
     const normalized = name.trim();
     // reject empty or control-bearing names locally
     if (!normalized || /[\u0000-\u001f\u007f-\u009f]/u.test(name)) {
@@ -1854,7 +1917,7 @@ function ClientSettingsLayout({ settings, children }: { settings: ClientSettings
         setAccounts(current => current.map(account => account.id === renamed.id ? { ...account, label: renamed.label } : account));
         setAccountMessage(`Renamed to ${renamed.label}.`);
       } else {
-        const failure = dialog === 'client' ? await settings.renameClient(normalized) : await settings.renameServer(normalized);
+        const failure = await settings.renameServer(normalized);
         // retain the editor after a failed rename
         if (failure !== undefined) { setError(failure); return; }
       }
@@ -1865,47 +1928,6 @@ function ClientSettingsLayout({ settings, children }: { settings: ClientSettings
     } finally {
       setPending(false);
     }
-  };
-  // persist the voice feature gate immediately
-  const toggleDavo = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    // prevent duplicate writes
-    if (davoPending) return;
-    const enabled = event.currentTarget.checked;
-    const previous = davoEnabled;
-    setDavoEnabled(enabled);
-    setDavoPending(true);
-    setDavoError('');
-    setDavoMessage('');
-    const failure = await settings.updateDavo({ enabled, name: davoDraft.name.trim() || settings.davo.name, context: davoDraft.context.trim() });
-    setDavoPending(false);
-    // retain the current server state after failure
-    if (failure !== undefined) {
-      setDavoEnabled(previous);
-      setDavoError(failure);
-    }
-  };
-  // persist the editable voice identity and context
-  const saveDavo = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    // prevent duplicate writes
-    if (davoPending) return;
-    const name = davoDraft.name.trim();
-    // keep invalid names local
-    if (!name) {
-      setDavoError('Enter a Davo name.');
-      return;
-    }
-    setDavoPending(true);
-    setDavoError('');
-    setDavoMessage('');
-    const failure = await settings.updateDavo({ enabled: davoEnabled, name, context: davoDraft.context.trim() });
-    setDavoPending(false);
-    // retain the editor after a failed write
-    if (failure !== undefined) {
-      setDavoError(failure);
-      return;
-    }
-    setDavoMessage('Saved.');
   };
   // poll one device-code login
   useEffect(() => {
@@ -1954,58 +1976,45 @@ function ClientSettingsLayout({ settings, children }: { settings: ClientSettings
     const busy = accountsLoading || switchingAccountId !== undefined || resettingAccountId !== undefined || pending;
     return <div key={account.id} className="chatgpt-account-option"><button className="chatgpt-account-select" type="button" role="radio" aria-checked={account.active} disabled={account.active || busy} onClick={() => void switchAccount(account)}><span className="chatgpt-account-check" aria-hidden="true">{switchingAccountId === account.id ? <span className="spinner" /> : account.active ? '✓' : ''}</span><AccountCopy account={account} now={accountClock} /></button>{/* keep account actions in one shared row */}<div className="chatgpt-account-actions" role="group" aria-label={`Actions for ${email}`}><button className="chatgpt-account-rename" type="button" aria-label={`Rename ${email}`} disabled={busy} onClick={() => { /* edit this account label */ beginAccountRename(account); }}>Rename</button>{atLimit && account.resetCount !== undefined && account.resetCount > 0 && <button className="chatgpt-account-reset" type="button" aria-label={`Use reset for ${email}`} disabled={busy} onClick={() => void useAccountReset(account)}>{resettingAccountId === account.id ? <><span className="spinner" />Using reset…</> : 'Use reset'}</button>}{account.error !== undefined && account.authMode !== 'apikey' && <button className="chatgpt-account-relogin" type="button" aria-label={`Re-login to ${email}`} disabled={busy} onClick={() => void beginAccountLogin(account)}>Re-login</button>}</div></div>;
   });
-  // keep the preview and reserved controls in one stable row
-  const terminalFontSetting = <div className="client-settings-setting client-settings-terminal-font" role="group" aria-label="Terminal font"><header><small>TERMINAL FONT</small></header><div className="client-settings-terminal-control"><span className="client-settings-terminal-preview" aria-label="Terminal font preview" style={{ fontSize: `${terminalFontSize}px` }}>Aa ~/agent $</span><div className="client-settings-stepper"><button className={`client-settings-font-reset${terminalFontIsDefault ? ' reserved' : ''}`} type="button" aria-label="Reset terminal font" aria-hidden={terminalFontIsDefault} tabIndex={terminalFontIsDefault ? -1 : undefined} disabled={terminalFontIsDefault} onClick={() => resetTerminalFontSize()}>Reset</button><button type="button" aria-label="Smaller terminal font" disabled={terminalFontSize <= minTerminalFontSize} onClick={() => stepTerminalFontSize(-1)}>−</button><strong aria-live="polite">{terminalFontSize}px</strong><button type="button" aria-label="Larger terminal font" disabled={terminalFontSize >= maxTerminalFontSize} onClick={() => stepTerminalFontSize(1)}>+</button></div></div></div>;
-  // switch the persisted browser theme
-  const themeSetting = <div className="client-settings-setting client-settings-color-theme" role="group" aria-label="Theme"><header><small>THEME</small></header><div className="client-settings-segmented" role="radiogroup" aria-label="Theme">{/* render each theme choice */}{([['mocha', 'Dark'], ['latte', 'Light']] as const).map(([theme, label]) => <button key={theme} type="button" role="radio" aria-checked={colorTheme === theme} aria-label={`${label} theme`} className={colorTheme === theme ? 'active' : undefined} onClick={() => setColorTheme(theme)}>{label}</button>)}</div></div>;
-  // switch the persisted browser motion preference
-  const reducedMotionSetting = <div className="client-settings-setting client-settings-reduced-motion" role="group" aria-label="Reduced motion setting"><header><small>REDUCED MOTION</small><label className="client-settings-toggle"><input aria-label="Reduced motion" role="switch" type="checkbox" checked={reducedMotion} onChange={event => setReducedMotion(event.currentTarget.checked)} /><span className="client-settings-switch-state">{reducedMotion ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></header><span>Keep status colours but stop shimmers and pulses.</span></div>;
-  // switch the persisted flyout marker preference
-  const flyoutMarkersSetting = <div className="client-settings-setting client-settings-flyout-markers" role="group" aria-label="Flyout markers setting"><header><small>FLYOUT MARKERS</small><label className="client-settings-toggle"><input aria-label="Flyout markers" role="switch" type="checkbox" checked={flyoutMarkers} onChange={event => { /* update this browser's markers */ setFlyoutMarkers(event.currentTarget.checked); }} /><span className="client-settings-switch-state">{flyoutMarkers ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></header><span>Show little carets on buttons that open flyouts.</span></div>;
-  // switch the persisted worktree launcher mode
-  const dynamicWorktreesSetting = <div className="client-settings-setting client-settings-dynamic-worktrees" role="group" aria-label="Dynamic worktrees setting"><header><small>DYNAMIC WORKTREES</small><label className="client-settings-toggle"><input aria-label="Dynamic worktrees" role="switch" type="checkbox" checked={dynamicWorktrees} onChange={event => setDynamicWorktrees(event.currentTarget.checked)} /><span className="client-settings-switch-state">{dynamicWorktrees ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></header><span>Create and manage multiple worktrees from the launcher.</span></div>;
-  // keep shortcut editing in the quick reference rather than the settings list
-  const keyboardSetting = <div className="client-settings-setting client-settings-keyboard" role="group" aria-label="Keyboard shortcuts"><header><small>KEYBOARD SHORTCUTS</small><span className="client-settings-setting-actions"><button type="button" onClick={openBindingsSheet}>View/Edit Shortcuts</button></span></header><span>Customize keyboard shortcuts for this browser.</span></div>;
-  // render each general setting without a card container
-  const settingsRows = <div className="client-settings-overview">
-    <div className="client-settings-setting client-settings-identity" role="group" aria-label="Client">
-      <header><small>CLIENT</small><span className="client-settings-setting-actions"><button type="button" aria-label="Rename Client" onClick={() => beginRename('client')}>Rename</button></span></header>
-      <strong>{settings.deviceName}</strong><span>This browser</span>
-    </div>
-    {terminalFontSetting}{themeSetting}{reducedMotionSetting}{flyoutMarkersSetting}{dynamicWorktreesSetting}{keyboardSetting}
-  </div>;
-  // configure the optional voice surface without an outer card
-  const davoTitle = davoDraft.name.trim() || 'Davo';
-  let davoStateLabel = 'Unavailable';
-  // prefer the enabled state
-  if (davoEnabled) davoStateLabel = 'On';
-  // retain the available disabled state
-  else if (settings.davo.available) davoStateLabel = 'Off';
-  const davoSection = <section className="client-settings-section client-settings-davo" aria-labelledby="settings-davo-title"><header><div><small>VOICE</small><h2 id="settings-davo-title">{davoTitle}</h2></div><label className="client-settings-toggle"><input aria-label={`Enable ${davoTitle}`} role="switch" type="checkbox" checked={davoEnabled} disabled={davoPending || !settings.davo.available && !davoEnabled} onChange={event => void toggleDavo(event)} /><span className="client-settings-switch-state">{davoStateLabel}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></header>{davoEnabled && <form className="client-settings-davo-form" onSubmit={event => void saveDavo(event)}><label>Name<input aria-label="Davo name" type="text" value={davoDraft.name} maxLength={80} disabled={davoPending} onChange={event => setDavoDraft(current => ({ ...current, name: event.target.value }))} /></label><label>Context<textarea ref={davoContextRef} aria-label="Davo context" value={davoDraft.context} maxLength={16_000} disabled={davoPending} onChange={event => setDavoDraft(current => ({ ...current, context: event.target.value }))} /></label><footer>{davoError && <span className="client-settings-davo-error" role="alert">{davoError}</span>}{!davoError && davoMessage && <span className="client-settings-davo-message" role="status">{davoMessage}</span>}<button type="submit" disabled={davoPending || !davoDraft.name.trim()}>{davoPending ? <><span className="spinner" />Saving…</> : 'Save'}</button></footer></form>}{!davoEnabled && davoError && <span className="client-settings-davo-error" role="alert">{davoError}</span>}</section>;
   // the Codex accounts section renders only when adapters.codex is configured
   const accountsSection = !codexConfigured ? null : <section className="client-settings-section client-settings-accounts" aria-labelledby="launcher-accounts-title"><header><small>CODEX</small><h2 id="launcher-accounts-title">Accounts</h2><button className="chatgpt-account-add" type="button" disabled={accountsLoading || switchingAccountId !== undefined || resettingAccountId !== undefined} onClick={() => void beginAccountLogin()}>+ Add account</button></header>{/* define billing periods separately from account selection */}{accounts.some(account => account.authMode === 'apikey') && <p className="api-key-spend-note">API-key spend is in USD, using UTC days and weeks starting Monday. OpenAI reporting may be delayed.</p>}<div className="client-settings-account-list" role="radiogroup" aria-label="ChatGPT accounts">{accountsLoading && accounts.length === 0 ? <div className="chatgpt-account-loading" role="status"><span className="spinner" />Loading ChatGPT accounts…</div> : accountRows}</div>{accountMessage && <span className="chatgpt-account-message" role="status">{accountMessage}</span>}</section>;
   // Claude has one signed-in account, so its section only reports usage
   const claudeAccountsSection = !claudeConfigured ? null : <section className="client-settings-section client-settings-accounts" aria-labelledby="launcher-claude-accounts-title"><header><small>CLAUDE</small><h2 id="launcher-claude-accounts-title">Account</h2></header><div className="client-settings-account-list">{claudeAccounts.length === 0 && !claudeAccountMessage ? <div className="chatgpt-account-loading" role="status"><span className="spinner" />Loading Claude usage…</div> : claudeAccounts.map(account => <div key={account.id} className="chatgpt-account-option"><AccountCopy account={account} now={accountClock} /></div>)}</div>{claudeAccountMessage && <span className="chatgpt-account-message" role="status">{claudeAccountMessage}</span>}</section>;
-  // close the settings page and consume its notification route
-  const closeSettings = () => {
-    setOpen(false);
-    // remove only the settings hash
-    if (location.hash === '#settings') history.replaceState(null, '', `${location.pathname}${location.search}`);
-  };
+  // serialize closes within their originating workspace until explicitly resolved
+  const closeSettings = useCallback((): Promise<boolean> => {
+    // share one unresolved confirmation across header, keyboard and workspace callers
+    const pendingClose = pendingSettingsClose.current.get(workspaceKey);
+    if (pendingClose !== undefined) return pendingClose;
+    // an already closed split has no draft to discard
+    if (!settingsSplitOpen(workspaceKey)) return Promise.resolve(true);
+    // stale workspace callbacks must never discard another workspace's visible draft
+    if (currentWorkspace.current !== workspaceKey || settingsCloseGuard.current === null) return Promise.resolve(false);
+    const decision = settingsCloseGuard.current.requestClose();
+    const closing = decision.then(confirmed => {
+      // cancelled close requests leave the mounted draft untouched
+      if (!confirmed) return false;
+      setOpen(false);
+      // remove only the settings hash
+      if (currentWorkspace.current === workspaceKey && location.hash === '#settings') history.replaceState(null, '', `${location.pathname}${location.search}`);
+      return true;
+    }).finally(() => { pendingSettingsClose.current.delete(workspaceKey); });
+    pendingSettingsClose.current.set(workspaceKey, closing);
+    return closing;
+  }, [workspaceKey, setOpen]);
   // close the nonmodal split without trapping focus away from static controls
   const pageKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
     // ignore keys belonging to a child dialog
-    if (event.key === 'Escape' && !event.defaultPrevented && dialog === undefined) closeSettings();
+    if (event.key === 'Escape' && !event.defaultPrevented && dialog === undefined) { event.preventDefault(); event.stopPropagation(); void closeSettings(); }
   };
-  const settingsPage = !open ? null : <div ref={pageRef} id="global-settings-page" className="client-settings-page" role="dialog" aria-hidden={settings.serverUpdateVisible || undefined} inert={settings.serverUpdateVisible} aria-labelledby="global-settings-title" aria-busy={davoPending} tabIndex={-1} onKeyDown={pageKey}><PanelHeader panelKey="settings" label="settings" title={<h1 id="global-settings-title">Settings</h1>} close={{ key: 'close', label: 'Close settings', icon: <PanelIcon path={panelIcons.close} />, onSelect: closeSettings }} /><div className="client-settings-page-content"><section className="client-settings-section client-settings-console" aria-label="Console settings">{settingsRows}</section>{davoSection}</div></div>;
-  const renameTarget = dialog === 'client' || dialog === 'server' || dialog === 'account-rename' ? dialog : undefined;
+  // render staged browser and file-backed settings through one shared workspace
+  const settingsPage = !open ? null : <ClientSettingsPage panelRef={pageRef} busy={false} hidden={settings.serverUpdateVisible} onKeyDown={pageKey} onClose={closeSettings}><SettingsCenter active={open} session={settingsSession} closeGuardRef={settingsCloseGuard} remoteServers={serverIdentity?.remotes} browser={{ deviceName: settings.deviceName, renameClient: settings.renameClient }} voice={settings.davo} onSaved={settings.refreshDavo} onSavedNotice={detail => { /* share transient save feedback with the global toast stack */ onOperationFeedback({ tone: 'success', message: 'Saved', detail }); }} requestedSection={requestedSection?.workspaceKey === workspaceKey ? requestedSection : undefined} onSectionSelected={consumeSettingsSection} /></ClientSettingsPage>;
+  const renameTarget = dialog === 'server' || dialog === 'account-rename' ? dialog : undefined;
   let renameTitle = renamingAccount?.authMode === 'apikey' ? 'API key' : 'account';
   let renameMaxLength = 120;
-  // retain the existing bounds for console identities
-  if (renameTarget === 'client') { renameTitle = 'Client'; renameMaxLength = 64; }
-  else if (renameTarget === 'server') { renameTitle = 'Server'; renameMaxLength = 80; }
+  // retain the existing bound for server identity
+  if (renameTarget === 'server') { renameTitle = 'Server'; renameMaxLength = 80; }
   // reuse the bounded name editor for accounts and console identities
-  const renameDialog = renameTarget === undefined ? null : createPortal(<div className="dialog client-rename-dialog" data-launch-submenu-dialog={renameTarget === 'account-rename' || undefined} role="dialog" aria-modal="true" aria-labelledby="settings-rename-title" onKeyDown={accountLoginKey}><div><header><div><small>{renameTarget === 'server' ? 'SERVER' : renameTarget === 'account-rename' ? 'CODEX ACCOUNTS' : 'GLOBAL SETTINGS'}</small><h2 id="settings-rename-title">Rename {renameTitle}</h2></div><button type="button" aria-label={`Close rename ${renameTitle.toLowerCase()}`} disabled={pending} onClick={closeDialog}><PanelIcon path={panelIcons.close} /></button></header><form onSubmit={event => { /* save the edited name */ void submitRename(event); }}><label>{renameTitle} name<input autoFocus type="text" value={name} maxLength={renameMaxLength} autoComplete="off" disabled={pending} onChange={event => { /* retain the current draft */ setName(event.target.value); }} /></label>{error && <span className="auth-error" role="alert">{error}</span>}<footer><button type="button" disabled={pending} onClick={closeDialog}>Cancel</button><button type="submit" disabled={pending || !name.trim()}>{pending ? <><span className="spinner" />Renaming…</> : 'Save'}</button></footer></form></div></div>, document.body);
+  const renameDialog = renameTarget === undefined ? null : createPortal(<div className="dialog client-rename-dialog" data-launch-submenu-dialog={renameTarget === 'account-rename' || undefined} role="dialog" aria-modal="true" aria-labelledby="settings-rename-title" onKeyDown={accountLoginKey}><div><header><div><small>{renameTarget === 'server' ? 'SERVER' : 'CODEX ACCOUNTS'}</small><h2 id="settings-rename-title">Rename {renameTitle}</h2></div><button type="button" aria-label={`Close rename ${renameTitle.toLowerCase()}`} disabled={pending} onClick={closeDialog}><PanelIcon path={panelIcons.close} /></button></header><form onSubmit={event => { /* save the edited name */ void submitRename(event); }}><label>{renameTitle} name<input autoFocus type="text" value={name} maxLength={renameMaxLength} autoComplete="off" disabled={pending} onChange={event => { /* retain the current draft */ setName(event.target.value); }} /></label>{error && <span className="auth-error" role="alert">{error}</span>}<footer><button type="button" disabled={pending} onClick={closeDialog}>Cancel</button><button type="submit" disabled={pending || !name.trim()}>{pending ? <><span className="spinner" />Renaming…</> : 'Save'}</button></footer></form></div></div>, document.body);
   let accountLoginContent: ReactNode;
   // offer device authorization again after an API-key attempt
   if (accountLoginState === 'idle') {
@@ -2038,7 +2047,7 @@ function ClientSettingsLayout({ settings, children }: { settings: ClientSettings
   const accountMenus = { ...(accountsSection === null ? {} : { codex: { content: accountsSection, activeName: activeName(accounts) } }), ...(claudeAccountsSection === null ? {} : { claude: { content: claudeAccountsSection, activeName: activeName(claudeAccounts) } }) };
   // keep account mutations mounted while the launch flyout changes menu pages
   const accountsMenu = Object.keys(accountMenus).length === 0 ? undefined : { menus: accountMenus, onOpen: showAccounts, onClose: hideAccounts };
-  return <ClientSettingsSplitContext.Provider value={{ open, page: settingsPage, trigger, close: closeSettings, renameServer: () => beginRename('server') }}><AgentAccountsMenuContext.Provider value={accountsMenu}>{children}</AgentAccountsMenuContext.Provider>{renameDialog}{accountLoginDialog}</ClientSettingsSplitContext.Provider>;
+  return <ClientSettingsSplitContext.Provider value={{ open, page: settingsPage, trigger, close: closeSettings, renameServer: beginServerRename }}><AgentAccountsMenuContext.Provider value={accountsMenu}>{children}</AgentAccountsMenuContext.Provider>{renameDialog}{accountLoginDialog}</ClientSettingsSplitContext.Provider>;
 }
 
 // place the global settings button at the end of the static tab row
@@ -2046,17 +2055,11 @@ function ClientSettingsTrigger() {
   return useContext(ClientSettingsSplitContext)?.trigger ?? null;
 }
 
-// render settings in the active workspace's content row
-function ClientSettingsPane() {
-  const settings = useContext(ClientSettingsSplitContext);
-  return settings?.open ? settings.page : null;
-}
-
 // omit settings state when the active client has no settings authority
-function OptionalClientSettingsLayout({ settings, children }: { settings?: ClientSettings; children: ReactNode }) {
+function OptionalClientSettingsLayout({ settings, workspaceKey, children, onOperationFeedback }: { settings?: ClientSettings; workspaceKey: string; children: ReactNode; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
   // leave unavailable settings out of the workspace tree
   if (settings === undefined) return <>{children}</>;
-  return <ClientSettingsLayout settings={settings}>{children}</ClientSettingsLayout>;
+  return <ClientSettingsLayout settings={settings} workspaceKey={workspaceKey} onOperationFeedback={onOperationFeedback}>{children}</ClientSettingsLayout>;
 }
 
 // the current server first, then its configured remotes
@@ -2152,7 +2155,7 @@ function TabRowLead() {
     setDisabling(true);
     setDisableError(undefined);
     try {
-      const error = await settings.updateDavo({ ...settings.davo, enabled: false });
+      const error = await settings.disableDavo();
       setDisableError(error);
     } catch { setDisableError('Unable to disable Davo. Try again.'); }
     finally { setDisabling(false); }
@@ -5230,7 +5233,7 @@ type TerminalColumn = { key: string; label: string; node: ReactElement<TerminalC
 type SplitSizes = Record<string, number>;
 type SplitStyle = React.CSSProperties & { '--agent-split': string; '--note-split': string; '--browser-split': string; '--split-cols': string };
 type SplitDrag = { pointerId: number; startX: number; left: string; right: string; leftWidth: number; rightWidth: number; sizes: SplitSizes; resized?: SplitSizes };
-type FixedSplitPanelKey = 'agent' | 'note' | 'browser' | 'files' | 'code' | 'review' | 'stack';
+type FixedSplitPanelKey = 'agent' | 'note' | 'browser' | 'files' | 'code' | 'review' | 'stack' | 'settings';
 type SplitPanelKind = FixedSplitPanelKey | 'terminal';
 // keep fixed split identity in one typed source of truth
 const fixedSplitPanels: { [Key in FixedSplitPanelKey]: { selector: string; kind: Key; title: string } } = {
@@ -5240,7 +5243,8 @@ const fixedSplitPanels: { [Key in FixedSplitPanelKey]: { selector: string; kind:
   files: { selector: '.files-pane', kind: 'files', title: 'Files' },
   code: { selector: '.code-pane', kind: 'code', title: 'Code changes' },
   review: { selector: '.review-pane', kind: 'review', title: 'Guided review' },
-  stack: { selector: '.stack-pane', kind: 'stack', title: 'Stack' }
+  stack: { selector: '.stack-pane', kind: 'stack', title: 'Stack' },
+  settings: { selector: '.client-settings-page', kind: 'settings', title: 'Settings' }
 };
 // return fixed metadata without treating terminal ids as object keys
 const fixedSplitPanel = (key: string) => Object.prototype.hasOwnProperty.call(fixedSplitPanels, key) ? fixedSplitPanels[key as FixedSplitPanelKey] : undefined;
@@ -5254,10 +5258,10 @@ const splitPanelKind = (key: string): SplitPanelKind => fixedSplitPanel(key)?.ki
 const splitSizesKey = (worktreeId: string, signature: string) => `rac.split-sizes:${worktreeId}:${signature}`;
 // one panel weight is valid when finite, positive and not absurd
 const validSplitWeight = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 100_000;
-// restore one validated browser-local layout, defaulting every key the store lacks to 1
+// restore saved widths with a larger initial settings weight
 const savedSplitSizes = (worktreeId: string | undefined, signature: string, keys: readonly string[]): SplitSizes => {
   const sizes: SplitSizes = {};
-  for (const key of keys) sizes[key] = 1;
+  for (const key of keys) sizes[key] = key === 'settings' ? 2 : 1;
   // keep unscoped agent layouts ephemeral
   if (worktreeId === undefined) return sizes;
   try {
@@ -5280,13 +5284,16 @@ const CodePanel = lazy(() => import('./code-panel/code-panel.js'));
 // Render one Worktree's open Code panel from its controller (callers gate on `controller.open`, so
 // this is only mounted while open). The lazy chunk resolves behind a lightweight fallback so the
 // split does not jump.
-function CodePane({ controller, prAvailable, branch, review, onOpenInEditor, onReturnToFiles }: { controller: CodePanelController; prAvailable: boolean; branch?: string; review?: CodePanelReview; onOpenInEditor?: (target: EditorTarget) => void; onReturnToFiles?: () => void }) {
-  // return transient host-file previews to files
+function CodePane({ controller, prAvailable, branch, review, onOpenInEditor, onReturnToFiles, onReturnToSettings }: { controller: CodePanelController; prAvailable: boolean; branch?: string; review?: CodePanelReview; onOpenInEditor?: (target: EditorTarget) => void; onReturnToFiles?: () => void; onReturnToSettings?: () => void }) {
+  // return transient previews to their owning split
   const closeFile = () => {
     const fromFiles = controller.filePreview?.source === 'files';
+    const fromSettings = controller.filePreview?.source === 'settings';
     controller.closeFilePreview();
     // restore files only for its explicit source
     if (fromFiles) onReturnToFiles?.();
+    // restore settings without remounting or discarding its draft
+    if (fromSettings) onReturnToSettings?.();
   };
   return <Suspense fallback={<section className="code-pane" role="region" aria-label="Code changes"><p className="code-pane-status">Loading changes…</p></section>}>
     <CodePanel mode={controller.mode} commit={controller.commit} state={controller.state} patch={controller.patch} selectedPath={controller.selectedPath} filePreview={controller.filePreview} prAvailable={prAvailable} branch={branch} review={review} loadFile={controller.loadFile} onSelectFile={controller.selectFile} onClearFile={controller.clearFile} onSetMode={controller.setMode} onCloseFile={closeFile} onClose={controller.close} onRetry={controller.refresh} savedView={controller.savedView} onSaveView={controller.saveView} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} />
@@ -5296,15 +5303,48 @@ function CodePane({ controller, prAvailable, branch, review, onOpenInEditor, onR
 // `expansion` is the Workspace's expanded panel; a split without a Workspace keeps its own.
 // On a phone the panels sit in a swipe carousel, one per screen; `onCarousel` hears its panels and
 // the one in view, for the toolbar's dots.
-function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, code, review, stack, terminals, terminalSelectionActions, onCarousel, initialPanelsReady, expansion: workspaceExpansion }: { worktreeId?: string; output?: ReactNode; empty?: ReactNode; note?: ReactNode; browser?: ReactNode; files?: ReactNode; code?: ReactNode; review?: ReactNode; stack?: ReactNode; terminals?: TerminalColumn[]; terminalSelectionActions?: TerminalSelectionActions; onCarousel?: (carousel: PanelCarousel) => void; initialPanelsReady?: boolean; expansion?: PanelExpansion }) {
+function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, code, codeController, review, stack, withSettings = false, terminals, terminalSelectionActions, onCarousel, initialPanelsReady, expansion: workspaceExpansion }: { worktreeId?: string; output?: ReactNode; empty?: ReactNode; note?: ReactNode; browser?: ReactNode; files?: ReactNode; code?: ReactNode; codeController?: CodePanelController; review?: ReactNode; stack?: ReactNode; withSettings?: boolean; terminals?: TerminalColumn[]; terminalSelectionActions?: TerminalSelectionActions; onCarousel?: (carousel: PanelCarousel) => void; initialPanelsReady?: boolean; expansion?: PanelExpansion }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const settingsState = useContext(ClientSettingsSplitContext);
+  const editorConfigured = useContext(EditorConfiguredContext);
   const ownExpansion = usePanelExpansion();
   const expansion = workspaceExpansion ?? ownExpansion;
+  // support read-only settings previews even before a workspace exists
+  const standaloneCode = useCodePanel(undefined, request);
+  const previewController = codeController ?? standaloneCode;
+  // retire settings previews when their return destination is explicitly closed
+  useEffect(() => {
+    // retain ordinary file previews and any saved comparison behind the base file
+    if (withSettings && !settingsState?.open && previewController.filePreview?.source === 'settings') previewController.closeFilePreview();
+  }, [withSettings, settingsState?.open, previewController.filePreview?.source, previewController.closeFilePreview]);
+  // return from the base file to the same settings split
+  const returnToSettings = () => { expansion.restore(); carousel.show('settings'); };
+  const codePane = code ?? (standaloneCode.open ? <CodePane controller={standaloneCode} prAvailable={false} onReturnToSettings={returnToSettings} /> : null);
+  // resolve native editor ownership where the global Settings page is rendered
+  const settingsEditor = {
+    configured: editorConfigured,
+    placeId: worktreeId,
+    open: !editorConfigured || worktreeId === undefined ? undefined : async (target: SettingsEditorTarget) => {
+      expansion.restore();
+      return await openEditorShell(worktreeId, { settingsSource: target });
+    },
+    // reuse catalog bytes instead of sending a host path through Files
+    preview: (target: SettingsPreviewTarget) => {
+      expansion.restore();
+      const mounted = previewController.open;
+      previewController.openContentPreview(target.path, target.content);
+      // wait for the destination column when opening Code for the first time
+      if (mounted) carousel.show('code');
+      else window.requestAnimationFrame(() => carousel.show('code'));
+    }
+  };
+  const settingsPane = withSettings && settingsState?.open ? <SettingsTerminalEditorContext.Provider value={settingsEditor}>{settingsState.page}</SettingsTerminalEditorContext.Provider> : null;
+  const hasSettings = settingsPane !== null;
   const dragRef = useRef<SplitDrag | undefined>(undefined);
   const hasNote = note !== undefined && note !== null;
   const hasBrowser = browser !== undefined && browser !== null;
   const hasFiles = files !== undefined && files !== null;
-  const hasCode = code !== undefined && code !== null;
+  const hasCode = codePane !== undefined && codePane !== null;
   const hasReview = review !== undefined && review !== null;
   const hasStack = stack !== undefined && stack !== null;
   const termCols = terminals ?? [];
@@ -5317,9 +5357,10 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
     ...(hasNote ? [{ key: 'note', node: note }] : []),
     ...(hasBrowser ? [{ key: 'browser', node: browser }] : []),
     ...(hasFiles ? [{ key: 'files', node: files }] : []),
-    ...(hasCode ? [{ key: 'code', node: code }] : []),
+    ...(hasCode ? [{ key: 'code', node: codePane }] : []),
     ...(hasReview ? [{ key: 'review', node: review }] : []),
-    ...(hasStack ? [{ key: 'stack', node: stack }] : [])
+    ...(hasStack ? [{ key: 'stack', node: stack }] : []),
+    ...(hasSettings ? [{ key: 'settings', node: settingsPane }] : [])
   ];
   const keys = columns.map(column => column.key);
   // one layout per open-panel composition (the ordered keys), so opening or closing a panel
@@ -5404,10 +5445,11 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
     return { key: column.key, kind, title, label };
   });
   const contentSwipe = usePanelSwipe({ panels: carouselPanels, visibleKey: carousel.visibleKey, show: carousel.show });
-  // enable carousel swipes only over nested note scrollers or wrapped diff content
+  // enable carousel swipes over notes, wrapped diffs and noninteractive settings content
   const swipeContentTarget = (target: EventTarget | null) => target instanceof Element && (
     target.closest('.note-pane :is(.note-markdown, textarea)') !== null
     || target.closest('.code-pane[data-wrap-lines="true"] .code-pane-view') !== null
+    || target.closest('.client-settings-page-content') !== null && target.closest('input, textarea, select, button, a, .settings-source-nav, .settings-code-editor') === null
   );
   // leave unwrapped horizontal diff scrolling alone
   const startContentSwipe = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -5459,7 +5501,7 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
     return index === 0 ? [node] : [resizer(columns[index - 1].key, column.key), node];
   });
   const mobileView = carousel.visibleKey !== undefined ? ` mobile-${splitPanelKind(carousel.visibleKey)}-view` : '';
-  return <PanelExpandContext.Provider value={expansionScope.context}><div ref={containerRef} className={`log-split${hasAgent ? '' : ' no-agent'}${hasNote ? ' has-note' : ''}${hasBrowser ? ' has-browser' : ''}${hasFiles ? ' has-files' : ''}${hasCode ? ' has-code' : ''}${hasReview ? ' has-review' : ''}${hasStack ? ' has-stack' : ''}${hasTerminals ? ' has-terminals' : ''}${mobileView}`} style={style} onKeyDown={expansionScope.onKeyDown} onPointerDownCapture={preserveMiddleClickPress} onMouseDownCapture={preserveMiddleClickPress} onPointerDown={startContentSwipe} onPointerUp={contentSwipe.onPointerUp} onPointerCancel={contentSwipe.onPointerCancel} onTouchStart={startContentTouchSwipe} onTouchEnd={contentSwipe.onTouchEnd} onTouchCancel={contentSwipe.onTouchCancel} onClickCapture={contentSwipe.onClickCapture}>{columns.length === 0 ? empty : laidOut}</div></PanelExpandContext.Provider>;
+  return <PanelExpandContext.Provider value={expansionScope.context}><div ref={containerRef} className={`log-split${hasAgent ? '' : ' no-agent'}${hasNote ? ' has-note' : ''}${hasBrowser ? ' has-browser' : ''}${hasFiles ? ' has-files' : ''}${hasCode ? ' has-code' : ''}${hasReview ? ' has-review' : ''}${hasStack ? ' has-stack' : ''}${hasSettings ? ' has-settings' : ''}${hasTerminals ? ' has-terminals' : ''}${mobileView}`} style={style} onKeyDown={expansionScope.onKeyDown} onPointerDownCapture={preserveMiddleClickPress} onMouseDownCapture={preserveMiddleClickPress} onPointerDown={startContentSwipe} onPointerUp={contentSwipe.onPointerUp} onPointerCancel={contentSwipe.onPointerCancel} onTouchStart={startContentTouchSwipe} onTouchEnd={contentSwipe.onTouchEnd} onTouchCancel={contentSwipe.onTouchCancel} onClickCapture={contentSwipe.onClickCapture}>{columns.length === 0 ? empty : laidOut}</div></PanelExpandContext.Provider>;
 }
 
 // One pane of a Worktree the picker can show as a Terminal (the wire shape of
@@ -5548,10 +5590,10 @@ const endConsoleShell = async (placeId: string, pane: WorktreePane, confirmed = 
   finally { endingConsoleShells.delete(key); }
 };
 // keep full-host Files capabilities separate from relative Code and review paths
-type EditorShellTarget = EditorTarget | { objectToken: string };
+type EditorShellTarget = EditorTarget | { objectToken: string } | { settingsSource: SettingsEditorTarget };
 // open a console shell: a plain one, the configured editor (`{ editor: true }` and an optional
 // target), or a key binding's Terminal (`{ binding }`)
-const createPlaceShell = async (placeId: string, payload: { editor?: true; binding?: { table: string; key: string } } & Partial<EditorTarget> & { objectToken?: string } = {}): Promise<{ paneId: string } | { error: string }> => {
+const createPlaceShell = async (placeId: string, payload: { editor?: true; binding?: { table: string; key: string }; settingsSource?: SettingsEditorTarget } & Partial<EditorTarget> & { objectToken?: string } = {}): Promise<{ paneId: string } | { error: string }> => {
   const operationKey = `shell-create:${placeId}`;
   // keep new shells outside workspace shutdown snapshots
   if (!beginPendingOperation(operationKey, placeItemKey(placeId))) return { error: 'This workspace is busy. Try again after its current operation finishes.' };
@@ -6406,6 +6448,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   const terminals = useTerminalViews(place.id, onOperationFeedback);
   // keep the toolbar dots aligned with the visible phone panel
   const [carousel, setCarousel] = useState<PanelCarousel>();
+  const settingsSplit = useContext(ClientSettingsSplitContext);
   const conversations = useWorktreeConversations(place.worktreeId, agentId, { onNavigateWorktree, onOperationFeedback });
   // the panel filling the Workspace; the notes restore theirs, so they share it
   const expansion = usePanelExpansion();
@@ -6457,6 +6500,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
     else if (panelKey === 'code') code.close();
     else if (panelKey === 'stack') stackPanel.close();
     else if (panelKey === 'review') onCloseReview?.();
+    else if (panelKey === 'settings') settingsSplit?.close();
     else terminals.end(panelKey);
   };
   // open a Terminal (a new shell, or a key binding's). A new panel comes into view and takes focus
@@ -6470,9 +6514,13 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
     const view = {
       splits: (carousel?.panels ?? []).map(panel => ({ key: panel.key, label: panel.title })),
       canClose: !placeNotes.active || placeNotes.canClose,
-      closeAll: () => {
+      // preflight settings before external workspace shutdown can stop sessions
+      prepareClose: () => settingsSplit?.close() ?? Promise.resolve(true),
+      closeAll: async () => {
         // preserve attachment or metadata mutations before closing any siblings
         if (placeNotes.active && !placeNotes.canClose) return;
+        // cancelled settings confirmation leaves every sibling split open
+        if (settingsSplit?.open && !await settingsSplit.close()) return;
         // close only a visible note
         if (placeNotes.active) placeNotes.close();
         browser.close();
@@ -6588,12 +6636,12 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
     if (mounted) workspace.carousel?.show('code'); else window.requestAnimationFrame(() => workspace.carousel?.show('code'));
   };
   const filesPane = files.open && place.id !== undefined ? <FilesPanel controller={files} onOpenFile={openFilesEntry} /> : null;
-  const codePane = code.open ? <CodePane controller={code} prAvailable={place.gitPrStatus !== undefined} branch={place.branch} review={review} onReturnToFiles={() => { expansion.restore(); workspace.carousel?.show('files'); }} {...(openInEditor === undefined ? {} : { onOpenInEditor: (target: EditorTarget) => void openInEditor(target) })} /> : null;
+  const codePane = code.open ? <CodePane controller={code} prAvailable={place.gitPrStatus !== undefined} branch={place.branch} review={review} onReturnToFiles={() => { expansion.restore(); workspace.carousel?.show('files'); }} onReturnToSettings={() => { /* retain settings drafts while returning from the read-only base */ expansion.restore(); workspace.carousel?.show('settings'); }} {...(openInEditor === undefined ? {} : { onOpenInEditor: (target: EditorTarget) => void openInEditor(target) })} /> : null;
   const stackName = stackPlaceName(place.worktreeId, projects);
   const placeId = place.id;
   // the Stack panel shows only for a Worktree whose stack has processes to show
   const stackPane = !stackPanel.open || place.worktreeId === undefined || (place.stack?.processes?.length ?? 0) === 0 ? null : <StackPanel worktreeId={place.worktreeId} title={stackName === undefined ? 'this worktree' : `${stackName.project} / ${stackName.worktree}`} stack={place.stack} selection={stackPanel.selection} onSelect={stackPanel.select} onClose={stackPanel.close} handlers={stackHandlers(place.worktreeId)} onOpenWorktree={onOpenWorktreeStack} onOpenTerminal={placeId === undefined ? undefined : (paneId, name) => { /* on a phone an already-open panel is scrolled to; a new one comes into view as it opens */ workspace.carousel?.show(paneId); requestTerminalFocus(placeId, { paneId, name }); }} readOutput={processOutput} clearOutput={clearProcessOutput} />;
-  return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} review={reviewPanel} stack={stackPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesLoaded} /></div><ClientSettingsPane /></section></SelectionActionsContext.Provider>;
+  return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} codeController={code} review={reviewPanel} stack={stackPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesLoaded} /></div></section></SelectionActionsContext.Provider>;
 }
 
 type LogProps = { id: string; onTurnOff?: () => void; embedded?: boolean; codexScrollControls?: boolean; onQuestion: (question: ChoiceQuestion | undefined) => void; onMetadata?: (response: string | undefined, overflow: boolean) => void; header?: (connection: string) => ReactNode; composer?: ReactNode; notes?: WorktreeNotes; onAddToPrompt?: (text: string) => void; onOpenUrl?: (url: string) => boolean; onOpenFile?: (path: string) => void; processingLabel?: string; processingDetail?: string };
@@ -7609,7 +7657,7 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
     {workspace !== undefined && !phone && <BrowserToggle browser={workspace.browser} />}
     {workspace !== undefined && !phone && place?.id !== undefined && <FilesToggle files={workspace.files} />}
     {workspace !== undefined && !phone && worktreeId !== undefined && <CodeToggle code={workspace.code} />}
-    {phone && !settingsSplit?.open && workspace?.carousel !== undefined && workspace.carousel.panels.length > 1 ? <PanelDots carousel={workspace.carousel} /> : <span className="toolbar-spacer" aria-hidden="true" />}
+    {phone && workspace?.carousel !== undefined && workspace.carousel.panels.length > 1 ? <PanelDots carousel={workspace.carousel} /> : <span className="toolbar-spacer" aria-hidden="true" />}
     {cleanupControl}
     {workspace !== undefined && (hasGit ? <WorkspaceGitStatus workspace={workspace} actions={git} onToggle={onGitToggle} /> : place?.path !== undefined && <span className="toolbar-path" title={place.path}>{place.path}</span>)}
     {workspace !== undefined && <ProjectOpen url={place?.projectUrl} title={stackPlaceName(worktreeId, projects)?.worktree} stack={place?.stack} browserOpen={workspace.browser.open} onBrowserToggle={workspace.browser.toggle} {...(worktreeId === undefined ? {} : stackHandlers(worktreeId))} onStackLog={worktreeId === undefined ? undefined : () => stackLog(worktreeId)} onOpenStackPanel={worktreeId === undefined ? undefined : workspace.openStackPanel} worktreeId={worktreeId} onOpenWorktree={onOpenWorktreeStack} onStartNoticeTarget={startNoticeProcess} menuRequested={stackMenuRequested} />}
@@ -7946,7 +7994,7 @@ function PendingSessionCard({ launch, tabBar, cleanupControl, retrying, onRetry,
   const discard: PanelAction | undefined = launch.phase === 'failed' ? { key: 'discard', label: 'Discard failed launch', className: 'agent-discard', icon: <PanelIcon path={actionIconPaths.trash} />, onSelect: onDiscard } : undefined;
   // only a failed start offers Launch, which retries without replacing the prepared draft
   const retry: ToolbarLaunch | undefined = launch.phase === 'failed' ? { label: launch.label, resolution: launch.resolution, disabled: retrying, start: onRetry } : undefined;
-  return <article className="agent-view"><section className="log-shell"><div className="log inactive-log"><PendingAgentPanel kind={kind} title={launch.label} state={state} loading={loading} close={discard} composer={<PreparingPrompt id={launch.draftId} onOperationFeedback={onOperationFeedback} />} /></div><ClientSettingsPane /></section>{tabBar}{launch.error !== undefined && <p className="launch-error" role="alert">{launch.error}</p>}<WorkspaceToolbar launch={retry} cleanupControl={cleanupControl} /></article>;
+  return <article className="agent-view"><section className="log-shell"><div className="log inactive-log"><ResizableLogSplit withSettings output={<PendingAgentPanel kind={kind} title={launch.label} state={state} loading={loading} close={discard} composer={<PreparingPrompt id={launch.draftId} onOperationFeedback={onOperationFeedback} />} />} /></div></section>{tabBar}{launch.error !== undefined && <p className="launch-error" role="alert">{launch.error}</p>}<WorkspaceToolbar launch={retry} cleanupControl={cleanupControl} /></article>;
 }
 
 // A tab's marks: one overlapping kind mark per Agent at the Place (or the kind a launch is
@@ -8113,6 +8161,7 @@ function NoteFeedbackProvider({ children }: { children: ReactNode }) {
 function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDismissUpdateError, launchErrorMessage, launchErrorExpires }: { children?: ReactNode; feedback?: OperationFeedback; onDismissFeedback: () => void; updateError?: string; onDismissUpdateError: () => void; launchErrorMessage?: string; launchErrorExpires?: number }) {
   const clientSettings = useContext(ClientSettingsContext);
   const noteFeedback = useContext(NoteFeedbackContext);
+  const showSettingsRestart = useSettingsRestartNoticeVisible();
   // keep stale-client guidance visible until the browser reloads
   const showClientUpdate = clientSettings?.clientUpdateAvailable === true;
   // the launch error is redundant while an error-tone operation toast already says the same thing
@@ -8123,19 +8172,26 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
     if (element === null) return;
     const root = document.documentElement;
     // include the resolved safe-area inset and keep wrapped notices clear of settings
-    const measure = () => root.style.setProperty('--toast-region-clearance', element.offsetHeight === 0 ? '0px' : `${Math.ceil(element.getBoundingClientRect().bottom)}px`);
+    const measure = () => {
+      const bottom = element.offsetHeight === 0 ? 0 : Math.ceil(element.getBoundingClientRect().bottom);
+      root.style.setProperty('--toast-region-clearance', `${bottom}px`);
+      // reserve notice space relative to each split rather than the document origin
+      for (const panel of Array.from(document.querySelectorAll<HTMLElement>('.settings-center-page'))) panel.style.setProperty('--settings-toast-region-clearance', `${Math.max(0, Math.ceil(bottom - panel.getBoundingClientRect().top))}px`);
+    };
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     window.addEventListener('resize', measure);
+    window.addEventListener(settingsHeaderLayoutEvent, measure);
     measure();
     // release the reservation when this workspace's region unmounts
-    return () => { observer.disconnect(); window.removeEventListener('resize', measure); root.style.removeProperty('--toast-region-clearance'); };
+    return () => { observer.disconnect(); window.removeEventListener('resize', measure); window.removeEventListener(settingsHeaderLayoutEvent, measure); root.style.removeProperty('--toast-region-clearance'); for (const panel of Array.from(document.querySelectorAll<HTMLElement>('.settings-center-page'))) panel.style.removeProperty('--settings-toast-region-clearance'); };
   }, []);
   // omit an empty stack when there is no persistent notice
-  if (children == null && feedback === undefined && !updateError && !showLaunchError && !showClientUpdate && !noteFeedback?.toasts.length) return null;
+  if (children == null && feedback === undefined && !updateError && !showLaunchError && !showClientUpdate && !showSettingsRestart && !noteFeedback?.toasts.length) return null;
   return createPortal(<div className="toast-region" ref={reserveToastSpace}>
     {noteFeedback?.toasts}
     {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>Reload to use the latest version.</span></div><button type="button" onClick={clientSettings.reloadClient}>Reload UI</button></section>}
+    <SettingsRestartNotice />
     {feedback && <OperationFeedbackToast key={feedback.id} feedback={feedback} onDismiss={onDismissFeedback} />}
     {/* keep update failures independent from other operation feedback */}
     {updateError && <OperationFeedbackToast ariaLabel="Agent update failed" feedback={{ id: 0, tone: 'error', message: 'Agent update failed', detail: updateError }} onDismiss={onDismissUpdateError} />}
@@ -8672,7 +8728,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       // preserve newer navigation choices
       if (shouldActivate) setActivateAgentId(replacement.id);
     }
-    const content = JSON.stringify([nextPayload.agents, nextPayload.projects, nextPayload.places ?? [], nextPayload.cleanupPending ?? 0, nextPayload.reviewTour, nextPayload.codeReview, nextPayload.reviews, nextPayload.notesRevision, nextPayload.serverStartedAt]);
+    const content = JSON.stringify([nextPayload.agents, nextPayload.projects, nextPayload.places ?? [], nextPayload.cleanupPending ?? 0, nextPayload.reviewTour, nextPayload.codeReview, nextPayload.reviews, nextPayload.notesRevision, nextPayload.serverStartedAt, nextPayload.keys]);
     if (content !== dashboardContent.current || pendingCompletions.current.size > 0) {
       dashboardContent.current = content;
       setData(nextPayload);
@@ -9099,6 +9155,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     'rename-panel': onPanels((view, _panels, current) => { if (current !== undefined) view.renamePanel(current); }),
     'close-panel': onPanels((view, _panels, current) => {
       const split = view.splits.find(candidate => candidate.key === current);
+      // settings owns its dirty-aware confirmation instead of the generic key prompt
+      if (split?.key === 'settings') { view.closePanel(split.key); return; }
       if (split !== undefined) confirmKey(`Close ${split.label}?`, () => view.closePanel(split.key));
     }),
     [terminalBindingAction]: (_event, context) => context === undefined ? false : onPanels(view => view.openTerminal({ table: context.table, key: context.chord }))(),
@@ -9724,6 +9782,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     // use mounted panels rather than storage while the workspace is active
     if (live !== undefined) return live.splits;
     const splits: WorkspaceSplit[] = [];
+    // include settings saved for this inactive workspace without opening it elsewhere
+    if (settingsSplitOpen(entry.key)) splits.push({ key: 'settings', label: 'Settings' });
     // include the one visible agent panel
     if (!agentSplitHidden(entry.key) && (entry.agents.length > 0 || entry.pendingLaunch !== undefined)) splits.push({ key: 'agent', label: 'Agent output' });
     const placeId = entry.placeId;
@@ -9750,6 +9810,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const live = workspaceViews.get(entry.key);
     // flush mounted note drafts before minimizing their panels
     if (live !== undefined) { live.closeAll(); return; }
+    // hiding an inactive settings split does not discard the shared in-memory draft
+    setSettingsSplitOpen(entry.key, false);
     // inactive panes have already flushed on unmount
     if (entry.placeId !== undefined) { forgetOpenPanels(entry.placeId); saveCodeOpen(entry.placeId, false); }
     const selectedAgent = currentAgentOf(entry);
@@ -9789,6 +9851,9 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
         if (!window.confirm(`End ${terminalPaneLabel(shell)}? It is running a command.`)) return;
         confirmed.add(shell.paneId);
       }
+      const prepareClose = workspaceViews.get(entry.key)?.prepareClose;
+      // discard settings only after every cancellable shutdown preflight succeeds
+      if (prepareClose !== undefined && !await prepareClose()) return;
       showOperationFeedback({ tone: 'pending', message: `Turning off ${entry.label}…`, detail: 'Stopping every agent and managed terminal in this workspace.' });
       // only discovered places can own managed terminals
       if (worktreeId !== undefined) {
@@ -9845,7 +9910,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       note: <PanelIcon path="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2ZM15 21v-6h6" />,
       browser: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{browserGlyph}</svg>,
       code: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{codeGlyph}</svg>,
-      stack: <StackIcon path={stackGlyphs.panel} className="more-menu-icon" />
+      stack: <StackIcon path={stackGlyphs.panel} className="more-menu-icon" />,
+      settings: <PanelIcon path="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 3v2m0 14v2M3 12h2m14 0h2M6 6l1 1m10 10 1 1M6 18l1-1m10-10 1-1" />
     };
     const menu: ContextMenuItem[] = [
       { type: 'action', id: 'pin', label: place?.pinned ? 'Unpin workspace' : 'Pin workspace', icon: place?.pinned ? <LauncherRowIcon name="pin" /> : undefined, mode: 'checkbox', checked: place?.pinned ?? false, disabled: place === undefined, onSelect: () => { /* require a pinnable discovered place */ if (place !== undefined) void togglePin(place); } },
@@ -9870,8 +9936,9 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     return <button key={entry.key} id={`tab-${index}`} role="tab" aria-selected={index === visibleActive} aria-controls={`panel-${index}`} tabIndex={index === visibleActive ? 0 : -1} className={`${index === visibleActive ? 'active ' : ''}${className}`} title={label} aria-label={`${entry.label} — ${label}`} aria-busy={transition !== undefined} onPointerDownCapture={preserveWorkspacePress} onMouseDownCapture={preserveWorkspacePress} onContextMenu={event => workspaceContextMenu(event, entry)} onAuxClickCapture={event => closeOnMiddleClick(event, () => void turnOffWorkspace(entry))} onClick={() => select(index)}><TabKindStack entry={entry} />{entry.worktree?.locked === true && <span className="tab-git-lock" aria-hidden="true" title="Git has locked this worktree">🔒</span>}{transition !== undefined ? <span className="tab-transition-label"><span><span className="spinner" aria-hidden="true" />{entry.label}</span><small>{transition}…</small></span> : <span className="tab-label" aria-hidden="true">{entry.label}</span>}</button>;
   })}<NotificationControl /><span className="launcher" ref={launcherRef}><button ref={plusRef} className="new-agent-tab" type="button" disabled={creatingAgent} aria-label={creatingAgent ? 'Starting agent' : 'Launch agent'} data-context-flyout aria-expanded={launcherOpen} onClick={() => { /* toggle the launcher */ if (launcherOpen) closeLauncher(); else setLauncherOpen(true); }}><span className="flyout-caret" aria-hidden="true" />{creatingAgent ? <span className="spinner" /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>}</button></span>{launcherOpen && <FlyoutPortal onDismiss={closeLauncher}><div className="launcher-menu more-menu flyout-menu" ref={launcherMenuRef} style={launcherStyle} role="group" aria-label="Agent launcher"><div className="launcher-row"><span className="launcher-row-label launcher-symbol-label"><LauncherLabelIcon name="scratch" /><span>Scratch</span></span>{launcherPlaceControls(scratchPlace)}{launcherPlaceSplit('~ Scratch', scratchPlace, data.scratchLaunch, '/api/agents/launch', choice => void createAgent(choice))}</div>{data.projects.map(launcherProject)}</div></FlyoutPortal>}{plusAlone && <span className="tab-spacer" aria-hidden="true" />}{clientSettings && <ClientSettingsTrigger />}</nav>{agent === undefined && item?.worktree === undefined && renderNotifications()}</>;
   const consoleClass = `console${davo.enabled && voiceOpen ? ' voice-visible' : ''}`;
-  if (items.length === 0) return <AdaptersContext.Provider value={data.adapters}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<article className="agent-view cleanup-empty-view"><section className="log-shell"><div className="log inactive-log"><div className="empty-workspace"><h2>No sessions</h2></div></div><ClientSettingsPane /></section>{tabBar}<WorkspaceToolbar cleanupControl={cleanupControl} />{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</article></main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></AdaptersContext.Provider>;
-  return <AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>;
+  // preserve editor availability when no workspace can own a terminal yet
+  if (items.length === 0) return <EditorConfiguredContext.Provider value={data.editor === true}><AdaptersContext.Provider value={data.adapters}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey="dashboard"><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<article className="agent-view cleanup-empty-view"><section className="log-shell"><div className="log inactive-log"><ResizableLogSplit withSettings empty={<div className="empty-workspace"><h2>No sessions</h2></div>} /></div></section>{tabBar}<WorkspaceToolbar cleanupControl={cleanupControl} />{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</article></main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></AdaptersContext.Provider></EditorConfiguredContext.Provider>;
+  return <AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey={activeItemKey ?? 'dashboard'}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>;
 }
 
 // coordinate console session and update lifecycle
@@ -10049,18 +10116,38 @@ function App() {
       void dismissNotification(`agent-update-${kind}`);
     }
   }, [updateAgent, updatingAgent]);
-  // persist the server-wide voice identity and feature gate
-  const updateDavo = useCallback(async (settings: Pick<DavoSettings, 'enabled' | 'name' | 'context'>): Promise<string | undefined> => {
-    const response = await request('/api/server/davo', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(settings) });
-    const payload = await response.json().catch(() => undefined) as { davo?: unknown; error?: unknown } | undefined;
-    // surface validation and persistence failures
-    if (!response.ok) return typeof payload?.error === 'string' ? payload.error : 'Unable to update Davo settings.';
-    // require the exact persisted settings
-    if (!isDavoSettings(payload?.davo)) return 'Unable to update Davo settings.';
-    const davo = payload.davo;
-    setSessionInfo(current => current === undefined ? current : { ...current, davo });
-    return undefined;
+  // refresh applied voice state only after the shared file transaction commits
+  const refreshDavo = useCallback(async () => {
+    try {
+      const response = await request('/api/auth/session', { cache: 'no-store' });
+      const payload = await response.json().catch(() => undefined) as { davo?: unknown } | undefined;
+      // retain known runtime state when a read is unavailable
+      if (!response.ok || !isDavoSettings(payload?.davo)) return;
+      const davo = payload.davo;
+      setSessionInfo(current => current === undefined ? current : { ...current, davo });
+    } catch {
+      // a failed runtime read must not turn a durable save into a failed write
+    }
   }, []);
+  // disable only the feature gate without resending stale session name or context
+  const disableDavo = useCallback(async (): Promise<string | undefined> => {
+    const response = await request('/api/settings', { cache: 'no-store' });
+    // refuse to invent a file revision when the catalog is unavailable
+    if (!response.ok) return await settingsResponseError(response, 'Unable to load voice settings.');
+    const snapshot: unknown = await response.json().catch(() => undefined);
+    // require the authoritative source capability before writing
+    if (!isSettingsSnapshot(snapshot)) return 'Unable to load voice settings.';
+    const source = snapshot.sources.find(candidate => candidate.id === 'app');
+    // invalid application JSON needs source repair not a destructive fallback
+    if (source === undefined || !source.writable || source.value === undefined) return 'Repair the application config before disabling voice.';
+    const path = ['integrations', 'realtime', 'enabled'];
+    const revisionId = source.pathRevisions?.[JSON.stringify(path)];
+    const saved = await request('/api/settings', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ changes: [{ sourceId: source.id, revisionId: source.revisionId, patches: [{ op: 'set', path, value: false, ...(revisionId === undefined ? {} : { revisionId }) }] }] }) });
+    // never retry a failed or ambiguous commit automatically
+    if (!saved.ok) return await settingsResponseError(saved, 'Unable to disable Davo.');
+    await refreshDavo();
+    return undefined;
+  }, [refreshDavo]);
   // open or restore one shared update review
   const openServerUpdate = useCallback(() => {
     setServerUpdateOpen(true);
@@ -10247,9 +10334,9 @@ function App() {
         const local = snapshot.servers.find(candidate => candidate.url === serverInfo.url);
         // refresh names and icons published by every server
         if (local !== undefined) {
-          const remotes = snapshot.servers.filter(candidate => candidate.url !== serverInfo.url).map(({ name, url, icon }) => ({ name, url, ...(icon === undefined ? {} : { icon }) }));
+          const remotes = snapshot.servers.filter(candidate => candidate.url !== serverInfo.url).map(({ name, url, icon, defaultName, defaultIcon }) => ({ name, url, ...(icon === undefined ? {} : { icon }), ...(defaultName === undefined ? {} : { defaultName }), ...(defaultIcon === undefined ? {} : { defaultIcon }) }));
           setServerInfo(current => {
-            const unchanged = current.name === local.name && current.url === local.url && current.icon === local.icon && current.remotes.length === remotes.length && remotes.every((remote, index) => current.remotes[index]?.name === remote.name && current.remotes[index]?.url === remote.url && current.remotes[index]?.icon === remote.icon);
+            const unchanged = current.name === local.name && current.url === local.url && current.icon === local.icon && current.remotes.length === remotes.length && remotes.every((remote, index) => current.remotes[index]?.name === remote.name && current.remotes[index]?.url === remote.url && current.remotes[index]?.icon === remote.icon && current.remotes[index]?.defaultName === remote.defaultName && current.remotes[index]?.defaultIcon === remote.defaultIcon);
             return unchanged ? current : { name: local.name, url: local.url, ...(local.icon === undefined ? {} : { icon: local.icon }), remotes };
           });
         }
@@ -10373,10 +10460,10 @@ function App() {
           ? <ControlScreen session={sessionInfo} claimed={applySession} />
           : <Login initialError={error} done={applySession} />;
   // expose settings without a manual server update bypass
-  const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, updateDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, startCodexAccountLogin, state, switchCodexAccount, updateDavo]);
+  const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
   // share the current launch settings with every flyout
   const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, updating: updatingAgent, errors: Array.from(new Set([defaultAgentError, versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), defaultAgent: sessionInfo?.defaultAgent, defaultPending: defaultAgentPending, setDefaultAgent: (kind: AgentKind) => { /* persist one default */ void selectDefaultAgent(kind); }, updateAgent: (kind: AgentKind) => { /* run one installer */ void runAgentUpdate(kind); } }), [agentUpdateStatuses, updatingAgent, versionCheckError, defaultAgentError, sessionInfo?.defaultAgent, defaultAgentPending, selectDefaultAgent, runAgentUpdate]);
-  return <ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}<ContextMenuHost /><ContextFlyoutEvents /><ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} />{reconnecting && <ReconnectingOverlay />}</AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider>;
+  return <SettingsRuntimeProvider request={request} enabled={sessionInfo !== undefined} canMutate={state === 'ready'}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <StandaloneSettingsRestartNotice />}<ContextMenuHost /><ContextFlyoutEvents /><ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} />{reconnecting && <ReconnectingOverlay />}</AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider>;
 }
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js');
 // Reflect the stored flavour before the first render, now that the stylesheet is

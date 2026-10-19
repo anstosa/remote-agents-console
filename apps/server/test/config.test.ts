@@ -419,10 +419,10 @@ describe('configuration safety', () => {
   it('rejects a non HTTPS origin', async () => {
     await expect(validateConfig({ ...scratch, publicOrigin: 'http://agents.example.com' })).rejects.toThrow('HTTPS');
   });
-  it('validates local identity and URL-only remote servers', async () => {
-    const config = await validateConfig({ ...scratch, name: 'X1 Carbon', publicOrigin: 'https://x1carbon.santosa.dev', remoteServers: [{ url: 'https://framework.santosa.dev' }] });
+  it('validates local identity and preserves optional remote identity overrides', async () => {
+    const config = await validateConfig({ ...scratch, name: 'X1 Carbon', publicOrigin: 'https://x1carbon.santosa.dev', remoteServers: [{ url: 'https://framework.santosa.dev', name: 'Workshop' }, { url: 'https://archive.santosa.dev', icon: 'potato' }] });
     expect(config.name).toBe('X1 Carbon');
-    expect(config.remoteServers).toEqual([{ url: new URL('https://framework.santosa.dev') }]);
+    expect(config.remoteServers).toEqual([{ url: new URL('https://framework.santosa.dev'), name: 'Workshop' }, { url: new URL('https://archive.santosa.dev'), icon: 'potato' }]);
     await expect(validateConfig({ ...scratch, remoteServers: [{ url: 'https://framework.santosa.dev' }, { url: 'https://framework.santosa.dev' }] })).rejects.toThrow('unique');
   });
 });

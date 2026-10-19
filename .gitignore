@@ -11,6 +11,7 @@ config/cloudflared.credentials.json
 config/host-tmux
 config/remote-agent-console.docker.json
 config/remote-agent-console.systemd.json
+config/remote-agent-console.installation.json
 config/instance-icons/
 *.pre-projects.bak
 coverage/

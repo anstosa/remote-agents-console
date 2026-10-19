@@ -17,6 +17,9 @@ const routeApi = (page: Page, options: { keys?: unknown; shells?: unknown[]; del
   const path = url.pathname;
   if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
   if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Working', attention: 'working', queuedPromptCount: 0 }], projects: [], ...(options.keys === undefined ? {} : { keys: options.keys }) } });
+  // expose the authoritative server source to the dedicated shortcut editor
+  if (path === '/api/settings/status') return route.fulfill({ json: { pending: false, targets: [], effective: 'known', restartAvailable: true } });
+  if (path === '/api/settings' && request.method() === 'GET') return route.fulfill({ json: { version: 1, revisionId: 'keyboard-snapshot', sources: [{ id: 'app', label: 'Application config', path: '/fixture/config/config.json', format: 'json', exists: true, writable: true, protected: false, tracked: false, revisionId: 'keyboard-app', apply: 'rac-restart', value: { keys: options.keys ?? {} }, schema: { type: 'object', properties: { keys: { type: 'json', label: 'Key tables', optional: true, apply: 'rac-restart' } } } }], status: { pending: false, targets: [], effective: 'known', restartAvailable: true } } });
   if (path === '/api/push/public-key') return route.fulfill({ json: {} });
   if (path === '/api/agents/agent-1/tickets' || path === '/api/worktrees/cora/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
   if (path === '/api/agents/agent-1/saved-prompts' || path === '/api/agents/agent-1/prompt-history' || path === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
@@ -47,6 +50,21 @@ const openWithTerminal = async (page: Page, options: Parameters<typeof routeApi>
   await terminal.locator('.xterm-screen').click();
   await expect(terminal).toHaveClass(/focused/u);
   return terminal;
+};
+
+// open the server keyboard section in either settings navigation layout
+const openKeyboardSettings = async (page: Page) => {
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  const selector = settings.getByRole('combobox', { name: 'Settings section', exact: true });
+  // use the custom selector when the resizable split is narrow
+  if (await selector.isVisible()) {
+    await selector.click();
+    await page.getByRole('listbox').getByRole('option', { name: 'Keyboard shortcuts', exact: true }).click();
+  } else await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Keyboard shortcuts', exact: true }).click();
+  // command-oriented scenarios use the exclusive command view
+  await settings.getByRole('combobox', { name: 'Keyboard editor view', exact: true }).click();
+  await page.getByRole('listbox', { name: 'Keyboard editor view options', exact: true }).getByRole('option', { name: 'Command shortcuts', exact: true }).click();
+  return settings;
 };
 
 const indicator = (page: Page) => page.locator('.key-indicator');
@@ -236,16 +254,12 @@ test('the bindings sheet opens from Ctrl+?, settings and the palette, and shows 
   await expect(prefixCommand.locator('s')).toHaveCount(0);
   await expect(sheet.locator('[data-shortcut-command="action:command-palette"]')).toContainText('Config, replaces the default');
   await expect(sheet.locator('[data-shortcut-command="terminal:git:l"]')).toContainText('Terminal running lazygit');
-  await sheet.getByRole('button', { name: 'Edit shortcuts' }).click();
-  const removedEditor = sheet.locator('[data-shortcut-command="action:font-reset"]');
-  await expect(removedEditor).toHaveAccessibleName('Reset terminal font size (disabled)');
-  await expect(removedEditor.locator('.shortcut-keys')).toHaveCount(0);
-  await expect(removedEditor.locator('.shortcut-setting-description s')).toHaveText('Reset terminal font size');
-  await expect(removedEditor.locator('.shortcut-change')).toHaveCount(0);
-  await expect(removedEditor.getByRole('button', { name: 'Add shortcut for Reset terminal font size' })).toHaveCount(0);
-  await expect(removedEditor.getByRole('button', { name: 'Enable', exact: true })).toBeDisabled();
-  await expect(removedEditor.getByRole('button', { name: 'Reset', exact: true })).toBeDisabled();
-  await sheet.getByRole('button', { name: 'Done editing' }).click();
+  // the quick reference remains read-only and identifies server-disabled commands
+  const removedReference = sheet.locator('[data-shortcut-command="action:font-reset"]');
+  await expect(removedReference.locator('.shortcut-keys')).toHaveCount(0);
+  await expect(removedReference.locator('s')).toHaveText('Reset terminal font size');
+  await expect(sheet.getByRole('button', { name: 'Edit shortcuts', exact: true })).toHaveCount(0);
+  await expect(sheet.getByRole('button', { name: 'Edit in Settings', exact: true })).toBeVisible();
   // C-? again closes it and hands focus back to the terminal
   await page.keyboard.press('Control+?');
   await expect(sheet).toHaveCount(0);
@@ -254,7 +268,8 @@ test('the bindings sheet opens from Ctrl+?, settings and the palette, and shows 
   // open the quick reference from settings instead of the workspace toolbar
   await expect(page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: 'Key bindings' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Global settings' }).click();
-  await page.getByRole('button', { name: 'View/Edit Shortcuts' }).click();
+  await openKeyboardSettings(page);
+  await page.getByRole('button', { name: 'View active shortcuts', exact: true }).click();
   await expect(sheet).toBeVisible();
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Close settings' }).click();
@@ -280,7 +295,8 @@ test('opening a keyboard overlay by mouse cancels a stale leader table', async (
   await expect(indicator(page)).toHaveAccessibleName('Key table Ctrl + B, binding matched');
 
   await page.getByRole('button', { name: 'Global settings' }).click();
-  await page.getByRole('button', { name: 'View/Edit Shortcuts' }).click();
+  await openKeyboardSettings(page);
+  await page.getByRole('button', { name: 'View active shortcuts', exact: true }).click();
   const sheet = page.getByRole('dialog', { name: 'Key bindings' });
   await expect(sheet).toBeVisible();
   await sheet.getByRole('button', { name: 'Close key bindings' }).click();
@@ -365,6 +381,34 @@ test('closing a panel asks first, and only y closes it', async ({ page }) => {
   expect(completedBox!.y).toBeGreaterThanOrEqual(0);
   expect(completedBox!.x + completedBox!.width).toBeLessThanOrEqual(1_400);
   expect(completedBox!.y + completedBox!.height).toBeLessThanOrEqual(900);
+});
+
+test('closing dirty Settings by keyboard uses its split confirmation', async ({ page }) => {
+  await openWithTerminal(page);
+  await page.getByRole('button', { name: 'Global settings', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await settings.getByRole('radio', { name: 'Light theme', exact: true }).click();
+
+  // Settings owns the dirty close instead of the generic y/n key prompt
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('x');
+  const confirmation = settings.getByRole('alertdialog', {
+    name: 'Close Settings with unsaved changes?',
+    exact: true,
+  });
+  await expect(confirmation).toBeVisible();
+  await expect(
+    confirmation.getByRole('button', { name: 'Cancel', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('y');
+  await expect(confirmation).toBeVisible();
+  await confirmation
+    .getByRole('button', { name: 'Cancel', exact: true })
+    .click();
+  await expect(settings).toBeVisible();
+  await expect(
+    settings.getByRole('radio', { name: 'Light theme', exact: true }),
+  ).toHaveAttribute('aria-checked', 'true');
 });
 
 test('shows transient mobile feedback above the focused split input', async ({ page }) => {
@@ -476,20 +520,18 @@ test('suppresses feedback for prompt, output, Terminal, notes, fields and modal 
   await password.press('q');
   await expect(badge).toHaveCount(0);
 
-  // modal controls and shortcut recorders never render global feedback
+  // modal controls and config-backed recorders never render global feedback
   await page.getByRole('button', { name: 'Global settings' }).click();
-  await page.getByRole('button', { name: 'View/Edit Shortcuts' }).click();
-  const sheet = page.getByRole('dialog', { name: 'Key bindings' });
-  await expect(sheet).toBeVisible();
-  await sheet.getByRole('button', { name: 'Edit shortcuts' }).click();
-  await sheet.getByRole('searchbox', { name: 'Find keyboard shortcuts' }).press('r');
+  const keyboardSettings = await openKeyboardSettings(page);
+  await keyboardSettings.getByRole('searchbox', { name: 'Find keyboard shortcuts' }).press('r');
   await expect(badge).toHaveCount(0);
-  await sheet.getByRole('searchbox', { name: 'Find keyboard shortcuts' }).fill('Switch to the prefix table');
-  await sheet.locator('[data-shortcut-command="table:prefix"] .shortcut-change').click();
-  const recorder = sheet.getByRole('textbox', { name: 'New shortcut for Switch to the prefix table' });
+  await keyboardSettings.getByRole('searchbox', { name: 'Find keyboard shortcuts' }).fill('Switch to the prefix table');
+  await keyboardSettings.locator('[data-shortcut-command="table:prefix"] .shortcut-change').click();
+  const recorder = keyboardSettings.getByRole('textbox', { name: 'New shortcut for Switch to the prefix table' });
   await recorder.press('Control+a');
   await expect(recorder).toHaveValue('Ctrl + A');
   await expect(badge).toHaveCount(0);
+
 });
 
 test('prefix keys move between panels and the Workspace picker lists them', async ({ page }) => {

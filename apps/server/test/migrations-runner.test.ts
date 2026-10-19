@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { run } from '../src/tmux/command.js';
 import { dryRunMigration, MigrationError, runMigration, type DataFilePaths, type MigrationDeps } from '../src/migrations/runner.js';
 import type { CommandResolution } from '../src/migrations/worktrees-to-projects.js';
@@ -27,9 +27,21 @@ async function workspace(): Promise<{ root: string; repo: string }> {
 }
 
 const codex: Record<string, CommandResolution> = { codex: { kind: 'absolute', path: '/usr/bin/codex' } };
-const deps = (configPath: string, dataFiles: DataFilePaths, commands = codex, extra: Partial<MigrationDeps> = {}): MigrationDeps => ({
-  configPath, dataFiles, resolveCommand: async name => commands[name] ?? { kind: 'missing' }, ...extra,
-});
+// isolate every implicit store from live process state
+const deps = (configPath: string, dataFiles: DataFilePaths, commands = codex, extra: Partial<MigrationDeps> = {}): MigrationDeps => {
+  const dataRoot = join(dirname(configPath), '.data');
+  const isolatedDataFiles: DataFilePaths = {
+    notes: join(dataRoot, 'notes.json'),
+    savedPrompts: join(dataRoot, 'saved-prompts.json'),
+    queued: join(dataRoot, 'queued-prompts.json'),
+    history: join(dataRoot, 'prompt-history.json'),
+    reviewTours: join(dataRoot, 'review-tours.json'),
+    worktrees: join(dataRoot, 'worktrees.json'),
+    ...dataFiles,
+    ...extra.dataFiles,
+  };
+  return { configPath, resolveCommand: async name => commands[name] ?? { kind: 'missing' }, ...extra, dataFiles: isolatedDataFiles };
+};
 const exists = (path: string) => readFile(path, 'utf8').then(() => true, () => false);
 const readJson = async (path: string) => JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
 
@@ -107,6 +119,24 @@ describe('runMigration', () => {
 
     await runMigration(deps(configPath, {}));
     expect(await readJson(configPath)).toHaveProperty('projects');
+  });
+
+  it('isolates unspecified data stores from process environment paths', async () => {
+    const { root, repo } = await workspace();
+    const configPath = join(root, 'config.json');
+    const poisonedHistory = join(root, 'poisoned-prompt-history.json');
+    await writeFile(configPath, JSON.stringify({ publicOrigin: 'https://x', worktrees: [{ id: 'a', path: repo, command: 'codex' }] }));
+    await writeFile(poisonedHistory, '{ not valid json');
+    vi.stubEnv('RAC_PROMPT_HISTORY_FILE', poisonedHistory);
+
+    try {
+      await runMigration(deps(configPath, {}));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(await readJson(configPath)).toHaveProperty('projects');
+    expect(await readFile(poisonedHistory, 'utf8')).toBe('{ not valid json');
   });
 
   it('refuses with nothing written on a corrupt data file', async () => {

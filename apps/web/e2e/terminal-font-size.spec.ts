@@ -51,7 +51,7 @@ const openSettings = async (page: Page) => {
   await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
 };
 
-test('the stepper enlarges the terminal, drops columns, and resets to the default', async ({ page }) => {
+test('the stepper stages a size, applies it on Save, and resets to the default', async ({ page }) => {
   test.setTimeout(60_000);
   await openConsole(page);
   await expect.poll(() => latestViewport(page), { timeout: 15_000 }).toBeTruthy();
@@ -61,14 +61,15 @@ test('the stepper enlarges the terminal, drops columns, and resets to the defaul
   await openSettings(page);
   const settingsPage = page.getByRole('dialog', { name: 'Settings' });
   const terminalSetting = settingsPage.getByRole('group', { name: 'Terminal font', exact: true });
-  const davoHeading = settingsPage.getByRole('heading', { name: 'Davo' });
+  // compare a following preference in the unified browser panel
+  const themeSetting = settingsPage.getByRole('group', { name: 'Theme', exact: true });
   const larger = page.getByRole('button', { name: 'Larger terminal font', exact: true });
   const smaller = page.getByRole('button', { name: 'Smaller terminal font', exact: true });
   const preview = page.getByLabel('Terminal font preview');
-  const [terminalBefore, davoBefore] = await Promise.all([terminalSetting.boundingBox(), davoHeading.boundingBox()]);
+  const [terminalBefore, themeBefore] = await Promise.all([terminalSetting.boundingBox(), themeSetting.boundingBox()]);
   // lock the terminal row and following settings in place
-  if (terminalBefore === null || davoBefore === null) throw new Error('Font settings have no layout bounds');
-  const controlOrder = await settingsPage.locator('.client-settings-terminal-control').evaluate(element => {
+  if (terminalBefore === null || themeBefore === null) throw new Error('Font settings have no layout bounds');
+  const controlOrder = await settingsPage.locator('.client-settings-terminal-font').evaluate(element => {
     const previewBounds = element.querySelector('.client-settings-terminal-preview')?.getBoundingClientRect();
     const resetBounds = element.querySelector('.client-settings-font-reset')?.getBoundingClientRect();
     const smallerBounds = element.querySelector('[aria-label="Smaller terminal font"]')?.getBoundingClientRect();
@@ -77,6 +78,8 @@ test('the stepper enlarges the terminal, drops columns, and resets to the defaul
   expect(controlOrder.previewRight).toBeLessThanOrEqual(controlOrder.resetLeft ?? -1);
   expect(controlOrder.resetRight).toBeLessThanOrEqual(controlOrder.smallerLeft ?? -1);
   await expect(preview).toHaveCSS('font-size', '11px');
+  await expect.poll(async () => (await latestViewport(page))?.cols ?? baseline.cols!).toBeLessThan(baseline.cols!);
+  const settingsBaseline = (await latestViewport(page))!;
   // Reset appears only once the size differs from the default.
   await expect(page.getByRole('button', { name: 'Reset terminal font', exact: true })).toHaveCount(0);
   await larger.click();
@@ -84,29 +87,34 @@ test('the stepper enlarges the terminal, drops columns, and resets to the defaul
   await larger.click();
   await expect(page.getByRole('dialog', { name: 'Settings' })).toContainText('14px');
   await expect(preview).toHaveCSS('font-size', '14px');
-  const [terminalAfter, davoAfter] = await Promise.all([terminalSetting.boundingBox(), davoHeading.boundingBox()]);
+  const [terminalAfter, themeAfter] = await Promise.all([terminalSetting.boundingBox(), themeSetting.boundingBox()]);
   // keep later settings fixed while the sample grows
-  if (terminalAfter === null || davoAfter === null) throw new Error('Font settings have no layout bounds');
+  if (terminalAfter === null || themeAfter === null) throw new Error('Font settings have no layout bounds');
   expect(Math.abs(terminalAfter.height - terminalBefore.height)).toBeLessThanOrEqual(1);
-  expect(Math.abs(davoAfter.y - davoBefore.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(themeAfter.y - themeBefore.y)).toBeLessThanOrEqual(1);
+  await expect.poll(async () => await terminalFontPx(page), { timeout: 5_000 }).toBe('11px');
+  expect((await latestViewport(page))?.cols).toBe(settingsBaseline.cols);
+  await settingsPage.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect.poll(async () => await terminalFontPx(page), { timeout: 5_000 }).toBe('14px');
-  await expect.poll(async () => (await latestViewport(page))?.cols ?? Infinity, { timeout: 10_000 }).toBeLessThan(baseline.cols!);
+  await expect.poll(async () => (await latestViewport(page))?.cols ?? Infinity, { timeout: 10_000 }).toBeLessThan(settingsBaseline.cols!);
 
   const reset = page.getByRole('button', { name: 'Reset terminal font', exact: true });
   await expect(reset).toBeVisible();
   await reset.click();
   await expect(page.getByRole('dialog', { name: 'Settings' })).toContainText('11px');
   await expect(preview).toHaveCSS('font-size', '11px');
+  await expect.poll(async () => await terminalFontPx(page), { timeout: 5_000 }).toBe('14px');
+  await settingsPage.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect.poll(async () => await terminalFontPx(page), { timeout: 5_000 }).toBe('11px');
   await expect(reset).toHaveCount(0);
   // Larger disables at the 24px ceiling (13 steps up from the 11px default).
   for (let step = 0; step < 13; step += 1) await larger.click();
   await expect(page.getByRole('dialog', { name: 'Settings' })).toContainText('24px');
   await expect(larger).toBeDisabled();
-  const davoAtMaximum = await davoHeading.boundingBox();
+  const themeAtMaximum = await themeSetting.boundingBox();
   // retain the same following-setting position at the largest preview
-  if (davoAtMaximum === null) throw new Error('Davo setting has no layout bounds');
-  expect(Math.abs(davoAtMaximum.y - davoBefore.y)).toBeLessThanOrEqual(1);
+  if (themeAtMaximum === null) throw new Error('Theme setting has no layout bounds');
+  expect(Math.abs(themeAtMaximum.y - themeBefore.y)).toBeLessThanOrEqual(1);
   await reset.click();
   // Smaller disables at the 8px floor (3 steps down from the default).
   for (let step = 0; step < 3; step += 1) await smaller.click();

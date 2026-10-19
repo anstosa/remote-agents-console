@@ -1,0 +1,5 @@
+.settings-remote-server-fields { display: grid; min-width: 0; gap: .7rem; }
+/* stack name and icon like the rest of the settings fields */
+.settings-remote-server-identity { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); align-items: start; gap: .7rem; }
+.settings-remote-server-fields .settings-field > strong { color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.settings-remote-server-fields .settings-field > small { color: var(--overlay-1); font: 500 .6rem/1.35 var(--font-mono); }
