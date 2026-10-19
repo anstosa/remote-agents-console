@@ -730,7 +730,7 @@ const processOutput = async (worktreeId: string, name: string): Promise<StackPro
 };
 // empty a Stack process's pane so its output starts fresh
 const clearProcessOutput = async (worktreeId: string, name: string): Promise<void> => {
-  const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/processes/${encodeURIComponent(name)}/output`, { method: 'DELETE' });
+  const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/processes/${encodeURIComponent(name)}/output`, emptyJsonMutation('DELETE'));
   if (!response.ok) throw new Error('process output not cleared');
 };
 // the route that starts, stops or restarts one Stack process of a Worktree
@@ -741,7 +741,8 @@ const startNoticeProcess = (target: StartableNoticeTarget) => sendUseAction(targ
 // start or stop a process another Worktree declares, as that Worktree's own stack menu would,
 // throwing the console's reason when it refuses (busy) or fails
 const sendUseAction = async (worktreeId: string, name: string, action: ProcessAction) => {
-  const response = await request(processActionUrl(worktreeId, name, action), { method: 'POST' });
+  const response = await request(processActionUrl(worktreeId, name, action), emptyJsonMutation('POST'));
+  // accept successful actions
   if (response.ok) return;
   const payload = await response.json().catch(() => undefined) as { error?: unknown } | undefined;
   throw new Error(typeof payload?.error === 'string' ? payload.error : `Unable to ${action} ${name}.`);
@@ -749,8 +750,8 @@ const sendUseAction = async (worktreeId: string, name: string, action: ProcessAc
 // the actions one Worktree's stack controls send: the whole stack, one of its processes, and a
 // process it uses in another Worktree
 const stackHandlers = (worktreeId: string): StackHandlers => ({
-  onStackAction: action => request(`/api/worktrees/${encodeURIComponent(worktreeId)}/commands/${action}`, { method: 'POST' }),
-  onProcessAction: (name, action) => request(processActionUrl(worktreeId, name, action), { method: 'POST' }),
+  onStackAction: action => request(`/api/worktrees/${encodeURIComponent(worktreeId)}/commands/${action}`, emptyJsonMutation('POST')),
+  onProcessAction: (name, action) => request(processActionUrl(worktreeId, name, action), emptyJsonMutation('POST')),
   onUseAction: sendUseAction
 });
 // The stack menu a notice's Open asked a Worktree's toolbar to show once it mounts, as switching
@@ -8858,10 +8859,11 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       }, retryDelay);
       retryDelay = Math.min(retryDelay * 2, 15_000);
     };
+    // open one authenticated dashboard stream
     const connect = async () => {
       if (closed) return;
       try {
-        const response = await request('/api/dashboard/ticket', { method: 'POST' }, false);
+        const response = await request('/api/dashboard/ticket', emptyJsonMutation('POST'), false);
         if (!response.ok) return reconnect();
         const payload = await response.json() as { ticket?: unknown };
         if (closed || typeof payload.ticket !== 'string') return reconnect();
