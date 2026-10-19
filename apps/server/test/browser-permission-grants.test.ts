@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { beginBrowserPermissionApproval, forgetBrowserPermission, forgetBrowserPermissions, hasSavedBrowserPermission, isCurrentBrowserPermissionApproval, saveBrowserPermission } from '../../web/src/browser-permission-grants.js';
+import { beginBrowserPermissionApproval, forgetBrowserPermission, forgetBrowserPermissions, hasSavedBrowserPermission, isCurrentBrowserPermissionApproval, saveBrowserPermission, type BrowserPermissionCapability } from '../../web/src/browser-permission-grants.js';
 
 const projectOrigin = 'https://project.example.com';
 const approvalKey = `rac.browser-permission:v1:${encodeURIComponent(projectOrigin)}:notifications`;
 
 // model an explicit synchronous always click followed by its granted result
-const remember = (origin: string, capability: 'geolocation' | 'notifications'): boolean => {
+const remember = (origin: string, capability: BrowserPermissionCapability): boolean => {
   const choice = beginBrowserPermissionApproval(origin, capability);
   return choice.status === 'ready' && saveBrowserPermission(origin, capability, choice.token);
 };
@@ -45,6 +45,11 @@ describe('remembered browser permissions', () => {
     expect(remember(projectOrigin, 'geolocation')).toBe(true);
     expect(hasSavedBrowserPermission(projectOrigin, 'geolocation')).toBe(true);
     expect(hasSavedBrowserPermission(projectOrigin, 'notifications')).toBe(false);
+    expect(hasSavedBrowserPermission(projectOrigin, 'clipboard-read')).toBe(false);
+    expect(hasSavedBrowserPermission(projectOrigin, 'clipboard-write')).toBe(false);
+    expect(remember(projectOrigin, 'clipboard-read')).toBe(true);
+    expect(hasSavedBrowserPermission(projectOrigin, 'clipboard-read')).toBe(true);
+    expect(hasSavedBrowserPermission(projectOrigin, 'clipboard-write')).toBe(false);
     expect(hasSavedBrowserPermission('https://other-project.example.com', 'geolocation')).toBe(false);
     expect(hasSavedBrowserPermission('https://project.example.com:8443', 'geolocation')).toBe(false);
     expect(hasSavedBrowserPermission('http://project.example.com', 'geolocation')).toBe(false);
@@ -86,20 +91,30 @@ describe('remembered browser permissions', () => {
   });
 
   // reset only the selected project's approvals without clearing unrelated preferences
-  it('clears both capabilities while preserving other origins and native preferences', () => {
+  it('clears every capability while preserving other origins and native preferences', () => {
     const { values } = installStorage();
     remember(projectOrigin, 'geolocation');
     remember(projectOrigin, 'notifications');
+    remember(projectOrigin, 'clipboard-read');
+    remember(projectOrigin, 'clipboard-write');
+    // capture durable grants without pinning the number or layout of choice pointers
+    const grantKeys = [...values].filter(([, value]) => value === 'allow').map(([key]) => key);
     remember('https://other-project.example.com', 'geolocation');
+    remember('https://other-project.example.com', 'clipboard-read');
     values.set('rac.color-theme', 'latte');
     expect(forgetBrowserPermissions(projectOrigin)).toBe(true);
     expect(hasSavedBrowserPermission(projectOrigin, 'geolocation')).toBe(false);
     expect(hasSavedBrowserPermission(projectOrigin, 'notifications')).toBe(false);
+    expect(hasSavedBrowserPermission(projectOrigin, 'clipboard-read')).toBe(false);
+    expect(hasSavedBrowserPermission(projectOrigin, 'clipboard-write')).toBe(false);
     expect(hasSavedBrowserPermission('https://other-project.example.com', 'geolocation')).toBe(true);
+    expect(hasSavedBrowserPermission('https://other-project.example.com', 'clipboard-read')).toBe(true);
     expect(values.get('rac.color-theme')).toBe('latte');
+    // remove every captured grant without disturbing other preferences
+    for (const key of grantKeys) expect(values.has(key)).toBe(false);
   });
 
-  // attempt both keys and report failure when any readable approval remains
+  // attempt every key and report failure when any readable approval remains
   it('does not report a successful reset after blocked or ineffective removal', () => {
     const { storage, values } = installStorage();
     remember(projectOrigin, 'geolocation');
@@ -124,7 +139,7 @@ describe('remembered browser permissions', () => {
     expect(hasSavedBrowserPermission(projectOrigin, 'notifications')).toBe(false);
     expect(forgetBrowserPermissions(projectOrigin)).toBe(true);
     expect(saveBrowserPermission(projectOrigin, 'notifications', token)).toBe(false);
-    expect(values.size).toBe(2);
+    expect(values.get(`${approvalKey}:${token}`)).toBeUndefined();
     expect(hasSavedBrowserPermission(projectOrigin, 'notifications')).toBe(false);
   });
 
@@ -172,7 +187,6 @@ describe('remembered browser permissions', () => {
     });
     expect(saveBrowserPermission(projectOrigin, 'notifications', token)).toBe(false);
     expect(hasSavedBrowserPermission(projectOrigin, 'notifications')).toBe(false);
-    expect(values.size).toBe(2);
     expect(values.get(`${approvalKey}:${token}`)).toBeUndefined();
   });
 

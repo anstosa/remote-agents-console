@@ -1,7 +1,7 @@
-export type BrowserPermissionCapability = 'geolocation' | 'notifications';
+export type BrowserPermissionCapability = 'geolocation' | 'notifications' | 'clipboard-read' | 'clipboard-write';
 type BrowserPermissionApproval = { status: 'ready'; token: string; cleared: boolean } | { status: 'superseded' } | { status: 'unavailable'; empty: boolean };
 
-const capabilities: readonly BrowserPermissionCapability[] = ['geolocation', 'notifications'];
+const capabilities: readonly BrowserPermissionCapability[] = ['geolocation', 'notifications', 'clipboard-read', 'clipboard-write'];
 const tokenPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 // scope each durable approval to one exact project origin and capability
@@ -29,14 +29,17 @@ export const isCurrentBrowserPermissionApproval = (origin: string, capability: B
   } catch { return false; }
 };
 
-// require both the current choice and its own explicit grant record
-export const hasSavedBrowserPermission = (origin: string, capability: BrowserPermissionCapability): boolean => {
+// capture the exact saved approval for deferred native completion checks
+export const savedBrowserPermissionToken = (origin: string, capability: BrowserPermissionCapability): string | undefined => {
   try {
     const key = approvalKey(origin, capability);
     const token = localStorage.getItem(key);
-    return isApprovalToken(token) && localStorage.getItem(`${key}:${token}`) === 'allow' && localStorage.getItem(key) === token;
-  } catch { return false; }
+    return isApprovalToken(token) && localStorage.getItem(`${key}:${token}`) === 'allow' && localStorage.getItem(key) === token ? token : undefined;
+  } catch { return undefined; }
 };
+
+// require both the current choice and its own explicit grant record
+export const hasSavedBrowserPermission = (origin: string, capability: BrowserPermissionCapability): boolean => savedBrowserPermissionToken(origin, capability) !== undefined;
 
 // rotate the shared choice before native work or revocation without deleting newer pointers
 export const beginBrowserPermissionApproval = (origin: string, capability: BrowserPermissionCapability): BrowserPermissionApproval => {
@@ -78,7 +81,7 @@ export const forgetBrowserPermission = (origin: string, capability: BrowserPermi
   return choice.status === 'unavailable' && choice.empty;
 };
 
-// attempt both removals even when storage rejects one capability
+// attempt every removal even when storage rejects one capability
 export const forgetBrowserPermissions = (origin: string): boolean => {
   let removed = true;
   // clear every supported capability for this origin

@@ -1,10 +1,12 @@
 import { useCallback, useLayoutEffect, useRef, useState, type ReactElement, type RefObject } from 'react';
-import { beginBrowserPermissionApproval, forgetBrowserPermission, forgetBrowserPermissions, hasSavedBrowserPermission, isCurrentBrowserPermissionApproval, saveBrowserPermission, type BrowserPermissionCapability } from './browser-permission-grants.js';
+import { beginBrowserPermissionApproval, forgetBrowserPermission, forgetBrowserPermissions, hasSavedBrowserPermission, isCurrentBrowserPermissionApproval, saveBrowserPermission, savedBrowserPermissionToken, type BrowserPermissionCapability } from './browser-permission-grants.js';
 
-type BrowserPermissionOperation = 'connect' | 'geolocation-get' | 'geolocation-watch' | 'geolocation-clear' | 'notification-permission' | 'notification-show' | 'notification-close';
+import { clipboardCapability, clipboardError, parseClipboardItems, performClipboard, validClipboardText, type ClipboardOperation, type ClipboardPayload } from './browser-clipboard.js';
+
+type BrowserPermissionOperation = ClipboardOperation | 'clipboard-cancel' | 'connect' | 'geolocation-get' | 'geolocation-watch' | 'geolocation-clear' | 'notification-permission' | 'notification-show' | 'notification-close';
 type BrowserPermissionStatus = 'ok' | 'denied' | 'error';
-type BrowserPermissionError = { code: 1 | 2 | 3; message: string };
-type BrowserPermissionRequest = {
+type BrowserPermissionError = { code: 1 | 2 | 3; message: string; name?: string };
+type BrowserPermissionRequest = ClipboardPayload & {
   type: 'rac-browser-permission-request';
   clientId: string;
   id: string;
@@ -13,6 +15,7 @@ type BrowserPermissionRequest = {
   watchId?: string;
   notificationId?: string;
   title?: string;
+  requestId?: string;
 };
 type BrowserPosition = {
   coords: {
@@ -26,7 +29,7 @@ type BrowserPosition = {
   };
   timestamp: number;
 };
-type BrowserPermissionResponse = {
+type BrowserPermissionResponse = ClipboardPayload & {
   type: 'rac-browser-permission-response';
   clientId: string;
   id: string;
@@ -76,11 +79,19 @@ const maxNotifications = 16;
 const maxRememberedRequestIds = 128;
 const parentCapabilityOwners = new Set<object>();
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const requestKeys = new Set(['type', 'clientId', 'id', 'operation', 'options', 'watchId', 'notificationId', 'title']);
+const requestKeys = new Set(['type', 'clientId', 'id', 'operation', 'options', 'watchId', 'notificationId', 'title', 'text', 'items', 'requestId']);
 const disconnectKeys = new Set(['type', 'clientId', 'id']);
-const operations = new Set<BrowserPermissionOperation>(['connect', 'geolocation-get', 'geolocation-watch', 'geolocation-clear', 'notification-permission', 'notification-show', 'notification-close']);
+const operations = new Set<BrowserPermissionOperation>(['connect', 'geolocation-get', 'geolocation-watch', 'geolocation-clear', 'notification-permission', 'notification-show', 'notification-close', 'clipboard-read-text', 'clipboard-write-text', 'clipboard-read', 'clipboard-write', 'clipboard-cancel']);
 const notificationOptionKeys = new Set(['body', 'tag', 'silent', 'requireInteraction']);
 const geolocationOptionKeys = new Set(['enableHighAccuracy', 'timeout', 'maximumAge']);
+const capabilityNames: Record<BrowserPermissionCapability, string> = { geolocation: 'location', notifications: 'notifications', 'clipboard-read': 'clipboard reading', 'clipboard-write': 'clipboard writing' };
+const capabilityDescriptions: Record<BrowserPermissionCapability, string> = {
+  geolocation: 'wants to use your location in this preview.',
+  notifications: 'wants Remote Agent Console to show notifications for this preview. Notifications identify this preview and are displayed by Remote Agent Console.',
+  'clipboard-read': 'wants to read your clipboard contents in this preview.',
+  'clipboard-write': 'wants to replace your clipboard contents from this preview.'
+};
+
 
 // read native notification permission with an unsupported-browser fallback
 const currentNotificationPermission = (): NotificationPermission => 'Notification' in window ? Notification.permission : 'denied';
@@ -171,6 +182,25 @@ const parseRequest = (value: unknown): ParsedRequest | undefined => {
     ...(value.notificationId === undefined ? {} : { notificationId: value.notificationId as string }),
     ...(value.title === undefined ? {} : { title: value.title as string })
   };
+  // clipboard messages carry only their own operation-specific payload
+  if (clipboardCapability(operation) !== undefined || operation === 'clipboard-cancel') {
+    // reject fields belonging to unrelated capability protocols
+    if (value.options !== undefined || value.watchId !== undefined || value.notificationId !== undefined || value.title !== undefined) return undefined;
+    // cancellation names exactly one owned clipboard request
+    if (operation === 'clipboard-cancel') return isUuid(value.requestId) && value.text === undefined && value.items === undefined ? { ...request, requestId: value.requestId } : undefined;
+    // clipboard operations cannot name other requests
+    if (value.requestId !== undefined) return undefined;
+    // text writes require an exact bounded string
+    if (operation === 'clipboard-write-text') return validClipboardText(value.text) && value.items === undefined ? { ...request, text: value.text } : undefined;
+    // rich writes retain only validated cloneable representations
+    if (operation === 'clipboard-write') {
+      const items = parseClipboardItems(value.items);
+      return items !== undefined && value.text === undefined ? { ...request, items } : undefined;
+    }
+    return value.text === undefined && value.items === undefined ? request : undefined;
+  }
+  // prevent clipboard payloads from hitchhiking on other capability requests
+  if (value.text !== undefined || value.items !== undefined || value.requestId !== undefined) return undefined;
   // connect carries no operation payload
   if (operation === 'connect') return value.options === undefined && value.watchId === undefined && value.notificationId === undefined && value.title === undefined ? request : undefined;
   // validate geolocation starts separately from clear
@@ -563,6 +593,59 @@ export function useBrowserPermissionBroker({ frameRef, homeOrigin, isManaged }: 
     }
   }, [isLiveDocument, previewOrigin, reconcileWorkerNotifications, respond]);
 
+  // retain native clipboard authority until completion without leaking stale reads
+  const executeClipboard = useCallback((document: ActiveDocument, request: ParsedRequest, mode: 'once' | 'always' | 'saved', approvalToken: string | undefined): void => {
+    const capability = clipboardCapability(request.operation);
+    // reject stale requests and revoked choices before any clipboard side effect
+    if (capability === undefined || !isLiveDocument(document) || cancelledRequestsRef.current.has(request.id)) return;
+    // preserve the latest local and cross-tab consent decision
+    if (document.deniedCapabilities.has(capability) || !isCurrentBrowserPermissionApproval(document.origin, capability, approvalToken)) {
+      respond(document, request, { status: 'denied', error: clipboardError(new DOMException('Clipboard approval changed', 'NotAllowedError')) });
+      return;
+    }
+    // share the native-work ceiling with the other brokered capabilities
+    const owners = inFlightRequestsRef.current.size < maxInFlightRequests ? reserveParentCapabilityOwners(1) : undefined;
+    // reject new work while outstanding native operations retain every slot
+    if (owners === undefined) { respond(document, request, { status: 'error', error: clipboardError(new DOMException('Too many active permission operations', 'QuotaExceededError')) }); return; }
+    inFlightRequestsRef.current.add(request.id);
+    // start the native call synchronously inside the originating click
+    const result = performClipboard(request.operation as ClipboardOperation, request);
+    // normalize native outcomes without retrying genuine browser denial
+    void result.then(
+      data => ({ data, error: undefined }),
+      (error: unknown) => ({ data: undefined, error: clipboardError(error) })
+    ).then(outcome => {
+      releaseParentCapabilityOwners(owners);
+      // never send clipboard data into a replacement document
+      if (!isLiveDocument(document)) return;
+      inFlightRequestsRef.current.delete(request.id);
+      // consume cancellation only after the underlying provider settles
+      if (cancelledRequestsRef.current.delete(request.id)) return;
+      // require the same explicit choice before returning data or persisting approval
+      if (document.deniedCapabilities.has(capability) || !isCurrentBrowserPermissionApproval(document.origin, capability, approvalToken)) {
+        respond(document, request, { status: 'denied', error: clipboardError(new DOMException('Clipboard approval changed', 'NotAllowedError')) });
+        return;
+      }
+      // propagate native permission and platform failures without guessing their cause
+      if (outcome.error !== undefined) { respond(document, request, { status: 'error', error: outcome.error }); return; }
+      const saved = mode === 'always' && approvalToken !== undefined && rememberGrant(document, capability, approvalToken);
+      // storage writes can observe a newer cross-tab revocation
+      if (!isCurrentBrowserPermissionApproval(document.origin, capability, approvalToken)) {
+        respond(document, request, { status: 'denied', error: clipboardError(new DOMException('Clipboard approval changed', 'NotAllowedError')) });
+        return;
+      }
+      respond(document, request, { status: 'ok', ...outcome.data });
+      // apply durable consent to queued siblings only while native activation remains
+      if (saved && navigator.userActivation?.isActive) {
+        const matching = queueRef.current.filter(item => item.document === document && item.capability === capability);
+        queueRef.current = queueRef.current.filter(item => !matching.includes(item));
+        // execute each previously queued request under the same current approval
+        for (const item of matching) executeClipboard(document, item.request, 'saved', approvalToken);
+      }
+      advancePrompt();
+    });
+  }, [advancePrompt, isLiveDocument, rememberGrant, respond]);
+
   // execute one request after custom consent has been established
   const executeGranted = useCallback((document: ActiveDocument, request: ParsedRequest): void => {
     // recheck source, origin, nonce, generation, and managed status before native access
@@ -583,15 +666,19 @@ export function useBrowserPermissionBroker({ frameRef, homeOrigin, isManaged }: 
   // request explicit consent or reuse a durable origin-scoped approval
   const requestCapability = useCallback((document: ActiveDocument, request: ParsedRequest, capability: BrowserPermissionCapability): void => {
     // deny every later request after an explicit document-scoped denial
-    if (document.deniedCapabilities.has(capability)) { respond(document, request, { status: 'denied', error: bridgeError(`${capability === 'geolocation' ? 'Location' : 'Notifications'} denied for this preview`, 1), ...(capability === 'notifications' ? { permission: 'denied' } : {}) }); return; }
-    const hasSavedApproval = hasSavedBrowserPermission(document.origin, capability);
+    if (document.deniedCapabilities.has(capability)) { respond(document, request, { status: 'denied', error: bridgeError(`${capabilityNames[capability]} denied for this preview`, 1), ...(capability === 'notifications' ? { permission: 'denied' } : {}) }); return; }
+    const savedToken = savedBrowserPermissionToken(document.origin, capability);
+    const isClipboard = capability === 'clipboard-read' || capability === 'clipboard-write';
+    // obtain a fresh parent click when a saved clipboard grant lacks transient activation
+    if (isClipboard && savedToken !== undefined && navigator.userActivation?.isActive) { executeClipboard(document, request, 'saved', savedToken); return; }
+    const hasSavedApproval = !isClipboard && savedToken !== undefined;
     // native notification access still requires a real click when its grant is missing
     if (hasSavedApproval && (capability !== 'notifications' || currentNotificationPermission() === 'granted')) { executeGranted(document, request); return; }
     // bound queued consent requests per document
     if (queueRef.current.length >= maxPendingRequests) { respond(document, request, { status: 'error', error: bridgeError('Too many pending permission requests') }); return; }
     queueRef.current.push({ capability, request, document });
     advancePrompt();
-  }, [advancePrompt, executeGranted, respond]);
+  }, [advancePrompt, executeClipboard, executeGranted, respond]);
 
   // resolve a notification consent click without losing native user activation
   const resolveNotificationConsent = useCallback((mode: 'once' | 'always', current: QueuedPermission, consentRevision: number, approvalToken: string | undefined): void => {
@@ -715,6 +802,13 @@ export function useBrowserPermissionBroker({ frameRef, homeOrigin, isManaged }: 
     // clear obsolete storage errors only after verified one-time revocation succeeds
     if (mode === 'once' && choice.status === 'ready') setError(undefined);
     const approvalToken = choice.status === 'ready' ? choice.token : undefined;
+    // clipboard consent covers native access and persists only after successful completion
+    if (current.capability === 'clipboard-read' || current.capability === 'clipboard-write') {
+      queueRef.current = queueRef.current.filter(item => item !== current);
+      executeClipboard(current.document, current.request, mode, approvalToken);
+      advancePrompt();
+      return;
+    }
     // notifications must open the native permission surface in this click handler
     if (current.capability === 'notifications') { resolveNotificationConsent(mode, current, consentRevision, approvalToken); return; }
     const matching = queueRef.current.filter(item => item.document === current.document && item.capability === current.capability);
@@ -725,7 +819,7 @@ export function useBrowserPermissionBroker({ frameRef, homeOrigin, isManaged }: 
     // invoke geolocation directly inside this activation
     for (const item of selected) executeGranted(current.document, item.request);
     advancePrompt();
-  }, [advancePrompt, executeGranted, isLiveDocument, rememberGrant, resolveNotificationConsent]);
+  }, [advancePrompt, executeClipboard, executeGranted, isLiveDocument, rememberGrant, resolveNotificationConsent]);
 
   // deny this capability for the rest of the current preview document
   const deny = useCallback((): void => {
@@ -741,7 +835,7 @@ export function useBrowserPermissionBroker({ frameRef, homeOrigin, isManaged }: 
     const denied = queueRef.current.filter(item => item.document === current.document && item.capability === current.capability);
     queueRef.current = queueRef.current.filter(item => !denied.includes(item));
     // deny every pending request for this document capability
-    for (const item of denied) respond(current.document, item.request, { status: 'denied', error: bridgeError(`${current.capability === 'geolocation' ? 'Location' : 'Notifications'} denied for this preview`, 1), ...(current.capability === 'notifications' ? { permission: 'denied' } : {}) });
+    for (const item of denied) respond(current.document, item.request, { status: 'denied', error: bridgeError(`${capabilityNames[current.capability]} denied for this preview`, 1), ...(current.capability === 'notifications' ? { permission: 'denied' } : {}) });
     advancePrompt();
   }, [advancePrompt, isLiveDocument, respond]);
 
@@ -857,6 +951,24 @@ export function useBrowserPermissionBroker({ frameRef, homeOrigin, isManaged }: 
         respond(document, request, { status: 'ok', notificationId: targetId });
         return;
       }
+      // cancel only queued or in-flight clipboard work owned by this document
+      if (request.operation === 'clipboard-cancel') {
+        const targetId = request.requestId;
+        const operation = targetId === undefined ? undefined : document.requests.get(targetId);
+        const queued = queueRef.current.some(item => item.document === document && item.request.id === targetId);
+        const inFlight = targetId !== undefined && inFlightRequestsRef.current.has(targetId);
+        // reject unrelated request ids rather than transferring cancellation authority
+        if (targetId === undefined || operation === undefined || clipboardCapability(operation) === undefined || !queued && !inFlight) { respond(document, request, { status: 'error', error: bridgeError('Unknown clipboard request') }); return; }
+        // native clipboard calls cannot be aborted but their results can be suppressed
+        if (inFlight) cancelledRequestsRef.current.add(targetId);
+        queueRef.current = queueRef.current.filter(item => item.document !== document || item.request.id !== targetId);
+        advancePrompt();
+        respond(document, request, { status: 'ok' });
+        return;
+      }
+      const clipboard = clipboardCapability(request.operation);
+      // keep clipboard read and write approvals distinct
+      if (clipboard !== undefined) { requestCapability(document, request, clipboard); return; }
       // gate every native location request behind custom consent
       if (request.operation === 'geolocation-get' || request.operation === 'geolocation-watch') { requestCapability(document, request, 'geolocation'); return; }
       // gate permission reads and notification display behind custom consent
@@ -876,14 +988,12 @@ export function useBrowserPermissionBroker({ frameRef, homeOrigin, isManaged }: 
   }, [prompt]);
 
   // name the queued capability in the visible decision heading
-  const capabilityName = prompt?.capability === 'geolocation' ? 'location' : 'notifications';
+  const capabilityName = prompt === undefined ? '' : capabilityNames[prompt.capability];
   // keep consent inside the browser pane while exposing a labelled keyboard surface
   const consent = prompt === undefined ? null : <section ref={consentRef} className="browser-permission-consent" role="dialog" aria-modal="false" aria-live="assertive" aria-labelledby="browser-permission-title" aria-describedby="browser-permission-description">
     <div className="browser-permission-copy">
       <strong id="browser-permission-title">Allow {capabilityName}?</strong>
-      <p id="browser-permission-description">{prompt.capability === 'geolocation'
-        ? <><b>{previewOrigin}</b> wants to use your location in this preview. Allow once covers this request. Always approval is remembered for this origin in this browser until you reset preview permissions.</>
-        : <><b>{previewOrigin}</b> wants Remote Agent Console to show notifications for this preview. Notifications identify this preview and are displayed by Remote Agent Console. Always approval is remembered for this origin in this browser until you reset preview permissions.</>}</p>
+      <p id="browser-permission-description"><b>{previewOrigin}</b> {capabilityDescriptions[prompt.capability]} Allow once covers this request. Always approval is remembered for this origin in this browser until you reset preview permissions.{(prompt.capability === 'clipboard-read' || prompt.capability === 'clipboard-write') && ' Your browser may still require another click or native permission.'}</p>
     </div>
     <div className="browser-permission-actions">
       <button type="button" onClick={() => { /* grant only the current request */ allow('once'); }}>Allow once</button>

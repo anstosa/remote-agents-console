@@ -105,7 +105,7 @@ describe('authenticated temporary preview proxy', () => {
     expect(page.headers['content-security-policy']).not.toContain('allow-same-origin');
     expect(page.headers['x-frame-options']).toBe('DENY');
     // keep temporary content outside the managed permission bridge
-    expect(page.headers['permissions-policy']).toBe('camera=(), microphone=(), geolocation=()');
+    expect(page.headers['permissions-policy']).toBe('camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=()');
     expect(page.headers['clear-site-data']).toBeUndefined();
     expect(page.headers['content-disposition']).toBe('inline; filename="preview.html"');
     const setCookies = Array.isArray(page.headers['set-cookie']) ? page.headers['set-cookie'] : [page.headers['set-cookie']];

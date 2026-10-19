@@ -33,7 +33,7 @@ const downstreamHeaders = (headers: IncomingHttpHeaders, accessCookie: string | 
   forwarded['content-security-policy'] = previewSandbox;
   forwarded['cross-origin-opener-policy'] = 'same-origin';
   forwarded['cross-origin-resource-policy'] = 'cross-origin';
-  forwarded['permissions-policy'] = 'camera=(), microphone=(), geolocation=()';
+  forwarded['permissions-policy'] = 'camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=()';
   forwarded['referrer-policy'] = 'no-referrer';
   forwarded['x-content-type-options'] = 'nosniff';
   forwarded['x-frame-options'] = 'DENY';

@@ -67,6 +67,25 @@ they share the output area; on narrow screens the layout adapts vertically.
 
 ![Live agent output beside a Markdown worktree note](docs/images/worktree-notes.png)
 
+### Clipboard access in project previews
+
+Managed project previews forward `navigator.clipboard.readText()`, `writeText()`,
+`read()`, and `write()` through the console, like location and notifications.
+The prompt identifies the requesting origin and separates clipboard reading
+from writing. Choose **Allow once**, **allow always**, or **deny**; **Reset preview
+permissions** removes the origin's saved approvals. Other previews and standalone
+pages retain their native clipboard APIs.
+
+Browser permission, focus, and activation requirements still apply. A saved
+approval can require another consent click when activation has expired, and
+native denials are returned without retrying. Reset or navigation suppresses late
+results but cannot undo a native write already started. Rich reads use the browser's
+default sanitization and return a snapshot; read options are not supported.
+Transfers are limited to 1,048,576 text characters, four items, eight formats per
+item, and 4 MiB of rich data. Native format and multi-item support still depend
+on the browser and operating system. See the [Clipboard API security
+requirements](https://developer.mozilla.org/en-US/docs/Web/API/Clipboard_API#security_considerations).
+
 ### Browse and manage files
 
 Open **Files** from the desktop Workspace toolbar or the mobile three-dot menu.

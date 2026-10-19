@@ -387,13 +387,13 @@ describe('server administration API', () => {
 });
 
 describe('project browser security boundary', () => {
-  // permit parent-owned location without granting embedded origins native access
-  it('limits brokered geolocation to the console origin', async () => {
+  // permit parent-owned capabilities without granting embedded origins native access
+  it('limits brokered geolocation and clipboard to the console origin', async () => {
     const app = await buildApp(config, { auth: new AuthService('$argon2id$unused', Buffer.alloc(32, 13).toString('base64url')) });
     try {
       const response = await app.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       expect(response.statusCode).toBe(200);
-      expect(response.headers['permissions-policy']).toBe('camera=(), microphone=(self), geolocation=(self)');
+      expect(response.headers['permissions-policy']).toBe('camera=(), microphone=(self), geolocation=(self), clipboard-read=(self), clipboard-write=(self)');
     } finally { await app.close(); }
   });
 

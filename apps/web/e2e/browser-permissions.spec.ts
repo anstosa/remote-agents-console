@@ -15,6 +15,10 @@ type ProviderState = {
   geolocationClears: number[];
   notificationRequests: Array<{ active: boolean }>;
   notifications: Array<{ title: string; body?: string; closed: boolean }>;
+  clipboardReads: Array<{ method: 'readText' | 'read'; active: boolean }>;
+  clipboardWrites: Array<{ method: 'writeText' | 'write'; active: boolean; text?: string; items?: Array<Array<{ type: string; text: string; size: number }>> }>;
+  clipboardText: string;
+  clipboardItems: Array<Array<{ type: string; text: string; size: number }>>;
 };
 
 // load the production bridge through its real proxy endpoint
@@ -55,7 +59,20 @@ const installParentProviders = async (context: BrowserContext) => {
   await context.addInitScript(parentOrigin => {
     // leave preview-native apis for the production bridge to replace
     if (location.origin !== parentOrigin) return;
-    const state: ProviderState = { geolocationGets: 0, geolocationWatches: 0, geolocationClears: [], notificationRequests: [], notifications: [] };
+    const state: ProviderState = {
+      geolocationGets: 0,
+      geolocationWatches: 0,
+      geolocationClears: [],
+      notificationRequests: [],
+      notifications: [],
+      clipboardReads: [],
+      clipboardWrites: [],
+      clipboardText: 'parent clipboard text',
+      clipboardItems: [[
+        { type: 'text/plain', text: 'parent plain text', size: 17 },
+        { type: 'text/html', text: '<b>parent html</b>', size: 18 }
+      ]]
+    };
     Object.defineProperty(window, '__permissionProviderState', { configurable: true, value: state });
     const geolocation = navigator.geolocation;
     const getCurrentPosition = geolocation.getCurrentPosition.bind(geolocation);
@@ -111,6 +128,61 @@ const installParentProviders = async (context: BrowserContext) => {
       }
     }
     Object.defineProperty(window, 'Notification', { configurable: true, value: ParentNotification });
+    type ClipboardMethod = 'readText' | 'writeText' | 'read' | 'write';
+    type ClipboardFailure = { method: ClipboardMethod; name: string; message: string };
+    // read one configured native failure
+    const failure = () => (window as typeof window & { __clipboardFailure?: ClipboardFailure }).__clipboardFailure;
+    // reject one configured native operation
+    const rejectConfigured = (method: ClipboardMethod) => {
+      const configured = failure();
+      // leave other native operations unchanged
+      if (configured?.method !== method) return;
+      Reflect.deleteProperty(window, '__clipboardFailure');
+      throw new DOMException(configured.message, configured.name);
+    };
+    // serialize one native clipboard item
+    const serializeClipboardItem = async (item: ClipboardItem) => {
+      const formats: Array<{ type: string; text: string; size: number }> = [];
+      // retain every advertised representation
+      for (const type of [...item.types].sort()) {
+        const blob = await item.getType(type);
+        formats.push({ type, text: await blob.text(), size: blob.size });
+      }
+      return formats;
+    };
+    // expose deterministic native clipboard methods
+    const clipboard = {
+      // read deterministic parent text
+      readText: async () => {
+        state.clipboardReads.push({ method: 'readText', active: navigator.userActivation.isActive });
+        rejectConfigured('readText');
+        return state.clipboardText;
+      },
+      // write deterministic parent text
+      writeText: async (text: string) => {
+        state.clipboardWrites.push({ method: 'writeText', active: navigator.userActivation.isActive, text });
+        rejectConfigured('writeText');
+        state.clipboardText = text;
+      },
+      // read deterministic rich parent items
+      read: async () => {
+        state.clipboardReads.push({ method: 'read', active: navigator.userActivation.isActive });
+        rejectConfigured('read');
+        // custom format keys keep their prefix while their blobs keep the underlying mime type
+        return state.clipboardItems.map(item => new ClipboardItem(Object.fromEntries(item.map(format => [format.type, new Blob([format.text], { type: format.type.startsWith('web ') ? format.type.slice(4) : format.type })]))));
+      },
+      // write and retain rich native items
+      write: async (items: ClipboardItem[]) => {
+        state.clipboardWrites.push({ method: 'write', active: navigator.userActivation.isActive });
+        rejectConfigured('write');
+        const serialized = [];
+        // serialize every item before committing the native result
+        for (const item of items) serialized.push(await serializeClipboardItem(item));
+        state.clipboardItems = serialized;
+        state.clipboardWrites.at(-1)!.items = serialized;
+      }
+    };
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard });
   }, consoleOrigin);
 };
 
@@ -119,9 +191,10 @@ const installUnsupportedParentProviders = async (context: BrowserContext) => {
   await context.addInitScript(parentOrigin => {
     // leave the managed child for the production bridge
     if (location.origin !== parentOrigin) return;
-    const state: ProviderState = { geolocationGets: 0, geolocationWatches: 0, geolocationClears: [], notificationRequests: [], notifications: [] };
+    const state: ProviderState = { geolocationGets: 0, geolocationWatches: 0, geolocationClears: [], notificationRequests: [], notifications: [], clipboardReads: [], clipboardWrites: [], clipboardText: '', clipboardItems: [] };
     Object.defineProperty(window, '__permissionProviderState', { configurable: true, value: state });
     Object.defineProperty(navigator, 'geolocation', { configurable: true, value: undefined });
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
     Reflect.deleteProperty(window, 'Notification');
   }, consoleOrigin);
 };
@@ -138,7 +211,13 @@ const installNativePermissionReferenceCapture = async (context: BrowserContext) 
       watchPosition: geolocation?.watchPosition,
       clearWatch: geolocation?.clearWatch,
       notification: window.Notification,
-      notificationRequestPermission: window.Notification?.requestPermission
+      notificationRequestPermission: window.Notification?.requestPermission,
+      clipboard: navigator.clipboard,
+      clipboardReadText: navigator.clipboard?.readText,
+      clipboardWriteText: navigator.clipboard?.writeText,
+      clipboardRead: navigator.clipboard?.read,
+      clipboardWrite: navigator.clipboard?.write,
+      clipboardItem: window.ClipboardItem
     } });
   }, managedOrigin);
 };
@@ -152,6 +231,12 @@ const nativePermissionApisPreserved = (frame: FrameLocator) => frame.locator('bo
     clearWatch: Geolocation['clearWatch'] | undefined;
     notification: typeof Notification | undefined;
     notificationRequestPermission: typeof Notification.requestPermission | undefined;
+    clipboard: Clipboard | undefined;
+    clipboardReadText: Clipboard['readText'] | undefined;
+    clipboardWriteText: Clipboard['writeText'] | undefined;
+    clipboardRead: Clipboard['read'] | undefined;
+    clipboardWrite: Clipboard['write'] | undefined;
+    clipboardItem: typeof ClipboardItem | undefined;
   } }).__nativePermissionApis;
   return {
     geolocation: native.geolocation === navigator.geolocation,
@@ -159,7 +244,13 @@ const nativePermissionApisPreserved = (frame: FrameLocator) => frame.locator('bo
     watchPosition: native.watchPosition === navigator.geolocation?.watchPosition,
     clearWatch: native.clearWatch === navigator.geolocation?.clearWatch,
     notification: native.notification === window.Notification,
-    notificationRequestPermission: native.notificationRequestPermission === window.Notification?.requestPermission
+    notificationRequestPermission: native.notificationRequestPermission === window.Notification?.requestPermission,
+    clipboard: native.clipboard === navigator.clipboard,
+    clipboardReadText: native.clipboardReadText === navigator.clipboard?.readText,
+    clipboardWriteText: native.clipboardWriteText === navigator.clipboard?.writeText,
+    clipboardRead: native.clipboardRead === navigator.clipboard?.read,
+    clipboardWrite: native.clipboardWrite === navigator.clipboard?.write,
+    clipboardItem: native.clipboardItem === window.ClipboardItem
   };
 });
 
@@ -168,7 +259,7 @@ const installServiceWorkerNotificationProvider = async (context: BrowserContext)
   await context.addInitScript(parentOrigin => {
     // leave the managed child for the production bridge
     if (location.origin !== parentOrigin) return;
-    const state: ProviderState = { geolocationGets: 0, geolocationWatches: 0, geolocationClears: [], notificationRequests: [], notifications: [] };
+    const state: ProviderState = { geolocationGets: 0, geolocationWatches: 0, geolocationClears: [], notificationRequests: [], notifications: [], clipboardReads: [], clipboardWrites: [], clipboardText: '', clipboardItems: [] };
     Object.defineProperty(window, '__permissionProviderState', { configurable: true, value: state });
     class ThrowingNotification {
       static permission: NotificationPermission = 'default';
@@ -199,7 +290,7 @@ const installReconcilingWorkerProvider = async (context: BrowserContext) => {
   await context.addInitScript(parentOrigin => {
     // leave the managed child for the production bridge
     if (location.origin !== parentOrigin) return;
-    const state: ProviderState = { geolocationGets: 0, geolocationWatches: 0, geolocationClears: [], notificationRequests: [], notifications: [] };
+    const state: ProviderState = { geolocationGets: 0, geolocationWatches: 0, geolocationClears: [], notificationRequests: [], notifications: [], clipboardReads: [], clipboardWrites: [], clipboardText: '', clipboardItems: [] };
     Object.defineProperty(window, '__permissionProviderState', { configurable: true, value: state });
     class ThrowingNotification {
       static permission: NotificationPermission = 'default';
@@ -259,20 +350,27 @@ const installReconcilingWorkerProvider = async (context: BrowserContext) => {
 // read parent-only provider calls
 const providerState = (page: Page) => page.evaluate(() => (window as typeof window & { __permissionProviderState: ProviderState }).__permissionProviderState);
 
+// reject the next selected parent clipboard operation
+const failNextClipboardOperation = (page: Page, method: 'readText' | 'writeText' | 'read' | 'write', name: string, message: string) => page.evaluate(failure => {
+  Object.defineProperty(window, '__clipboardFailure', { configurable: true, value: failure });
+}, { method, name, message });
+
 // snapshot RAC-owned browser storage without assuming one key layout
 const localStorageSnapshot = (page: Page) => page.evaluate(() => Object.fromEntries(Object.entries(localStorage).sort(([left], [right]) => left.localeCompare(right))));
 
 // address one versioned persistent approval by exact origin and capability
-const storedApprovalKey = (origin: string, capability: 'geolocation' | 'notifications') => `rac.browser-permission:v1:${encodeURIComponent(origin)}:${capability}`;
+type TestedPermissionCapability = 'geolocation' | 'notifications' | 'clipboard-read' | 'clipboard-write';
+
+const storedApprovalKey = (origin: string, capability: TestedPermissionCapability) => `rac.browser-permission:v1:${encodeURIComponent(origin)}:${capability}`;
 
 // read the canonical pointer and its token-scoped approval record
-const storedApproval = (page: Page, origin: string, capability: 'geolocation' | 'notifications') => page.evaluate(baseKey => {
+const storedApproval = (page: Page, origin: string, capability: TestedPermissionCapability) => page.evaluate(baseKey => {
   const token = localStorage.getItem(baseKey);
   return { token, grant: token === null ? null : localStorage.getItem(`${baseKey}:${token}`) };
 }, storedApprovalKey(origin, capability));
 
 // compare unrelated RAC preferences without treating inert ordering metadata as a grant
-const storageWithoutApproval = (snapshot: Record<string, string>, origin: string, capability: 'geolocation' | 'notifications') => {
+const storageWithoutApproval = (snapshot: Record<string, string>, origin: string, capability: TestedPermissionCapability) => {
   const baseKey = storedApprovalKey(origin, capability);
   return Object.fromEntries(Object.entries(snapshot).filter(([key]) => key !== baseKey && !key.startsWith(`${baseKey}:`)));
 };
@@ -286,6 +384,10 @@ const managedPreview = (path: string) => `<!doctype html><html><head><script src
   <button id="watch">Watch location</button><button id="clear">Clear watch</button><output id="watch-result">idle</output>
   <button id="permission">Request notifications</button><output id="permission-result">idle</output>
   <button id="show">Show notification</button><button id="close">Close notification</button><output id="notification-result">idle</output>
+  <button id="clipboard-read-text">Read clipboard text</button><output id="clipboard-read-text-result">idle</output>
+  <button id="clipboard-write-text">Write clipboard text</button><output id="clipboard-write-text-result">idle</output>
+  <button id="clipboard-read">Read rich clipboard</button><output id="clipboard-read-result">idle</output>
+  <button id="clipboard-write">Write rich clipboard</button><output id="clipboard-write-result">idle</output>
   <button id="navigate">Navigate preview</button>
   <script>
     let watchId;
@@ -319,12 +421,52 @@ const managedPreview = (path: string) => `<!doctype html><html><head><script src
       } catch (error) { document.querySelector('#notification-result').textContent = 'error:' + error.name; }
     };
     document.querySelector('#close').onclick = () => { notice?.close(); };
+    // exercise one standard text read
+    document.querySelector('#clipboard-read-text').onclick = async () => {
+      try { document.querySelector('#clipboard-read-text-result').textContent = 'ok:' + await navigator.clipboard.readText(); }
+      catch (error) { document.querySelector('#clipboard-read-text-result').textContent = 'error:' + error.name + ':' + error.message; }
+    };
+    // exercise one standard text write
+    document.querySelector('#clipboard-write-text').onclick = async () => {
+      try { await navigator.clipboard.writeText('managed clipboard text'); document.querySelector('#clipboard-write-text-result').textContent = 'ok'; }
+      catch (error) { document.querySelector('#clipboard-write-text-result').textContent = 'error:' + error.name + ':' + error.message; }
+    };
+    // exercise one standard rich read
+    document.querySelector('#clipboard-read').onclick = async () => {
+      try {
+        const items = await navigator.clipboard.read();
+        const serialized = [];
+        // serialize every returned item
+        for (const item of items) {
+          const formats = [];
+          // serialize every returned format
+          for (const type of [...item.types].sort()) formats.push(type + '=' + await (await item.getType(type)).text());
+          serialized.push(formats.join(','));
+        }
+        document.querySelector('#clipboard-read-result').textContent = 'ok:' + serialized.join('|');
+      } catch (error) { document.querySelector('#clipboard-read-result').textContent = 'error:' + error.name + ':' + error.message; }
+    };
+    // exercise one standard rich write
+    document.querySelector('#clipboard-write').onclick = async () => {
+      try {
+        const items = [
+          new ClipboardItem({ 'text/plain': new Blob(['first plain'], { type: 'text/plain' }), 'text/html': new Blob(['<b>first html</b>'], { type: 'text/html' }) }),
+          new ClipboardItem({ 'web application/json': new Blob(['{\"second\":true}'], { type: 'application/json' }), 'text/plain': new Blob(['second plain'], { type: 'text/plain' }) })
+        ];
+        await navigator.clipboard.write(items);
+        document.querySelector('#clipboard-write-result').textContent = 'ok';
+      } catch (error) { document.querySelector('#clipboard-write-result').textContent = 'error:' + error.name + ':' + error.message; }
+    };
     document.querySelector('#navigate').onclick = () => { location.assign(location.pathname === '/next' ? '/third' : '/next'); };
   </script>
 </body></html>`;
 
 // send one valid-looking request from a nested non-owner window
-const spoofPreview = `<script>window.top.postMessage({ type: 'rac-browser-permission-request', clientId: crypto.randomUUID(), id: crypto.randomUUID(), operation: 'geolocation-get', options: { enableHighAccuracy: false, timeout: 30000, maximumAge: 0 } }, '${consoleOrigin}')</script>`;
+const spoofPreview = `<script>
+  const clientId = crypto.randomUUID();
+  window.top.postMessage({ type: 'rac-browser-permission-request', clientId, id: crypto.randomUUID(), operation: 'geolocation-get', options: { enableHighAccuracy: false, timeout: 30000, maximumAge: 0 } }, '${consoleOrigin}');
+  window.top.postMessage({ type: 'rac-browser-permission-request', clientId, id: crypto.randomUUID(), operation: 'clipboard-read-text' }, '${consoleOrigin}');
+</script>`;
 
 // load the production bridge before retaining the forged nested request
 const nestedBridgeSpoofPreview = `<!doctype html><html><head><script src="/__rac/browser-bridge.js"></script></head><body>
@@ -429,7 +571,7 @@ const resetPreviewPermissions = async (page: Page, accept: boolean): Promise<str
   return message;
 };
 
-type PermissionProtocolResponse = { clientId?: string; id: string; status: string; error?: { code?: number; message?: string }; position?: unknown };
+type PermissionProtocolResponse = { clientId?: string; id: string; status: string; error?: { code?: number; name?: string; message?: string }; position?: unknown; text?: string; items?: unknown };
 
 // create one canonical deterministic protocol id
 const protocolId = (prefix: string, index: number) => `${prefix}-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
@@ -1626,6 +1768,312 @@ test('preserves a dismissed native notification prompt as default until explicit
   expect((await providerState(page)).notificationRequests).toHaveLength(1);
 });
 
+test('denies clipboard reads and writes without invoking parent providers', async ({ context, page }) => {
+  await installParentProviders(context);
+  const bridge = await projectBrowserBridge();
+  await setupDashboard(page, { bridge });
+  await openBrowser(page);
+  const preview = page.frameLocator('iframe[title="Project browser"]');
+
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  const readConsent = page.getByRole('dialog', { name: 'Allow clipboard reading?' });
+  await expect(readConsent).toContainText(managedOrigin);
+  await expect(readConsent.getByRole('button')).toHaveText(['Allow once', 'allow always', 'deny']);
+  expect((await providerState(page)).clipboardReads).toEqual([]);
+  await decide(page, 'Allow clipboard reading?', 'deny');
+  await expect(preview.locator('#clipboard-read-text-result')).toHaveText(/^error:NotAllowedError:/u);
+  expect((await providerState(page)).clipboardReads).toEqual([]);
+
+  await preview.getByRole('button', { name: 'Write clipboard text' }).click();
+  const writeConsent = page.getByRole('dialog', { name: 'Allow clipboard writing?' });
+  await expect(writeConsent).toContainText(managedOrigin);
+  await expect(writeConsent.getByRole('button')).toHaveText(['Allow once', 'allow always', 'deny']);
+  expect((await providerState(page)).clipboardWrites).toEqual([]);
+  await decide(page, 'Allow clipboard writing?', 'deny');
+  await expect(preview.locator('#clipboard-write-text-result')).toHaveText(/^error:NotAllowedError:/u);
+  expect((await providerState(page)).clipboardWrites).toEqual([]);
+});
+
+test('forwards one-time clipboard grants through active parent consent clicks', async ({ context, page }) => {
+  await installParentProviders(context);
+  const bridge = await projectBrowserBridge();
+  await setupDashboard(page, { bridge });
+  await openBrowser(page);
+  const preview = page.frameLocator('iframe[title="Project browser"]');
+
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await decide(page, 'Allow clipboard reading?', 'Allow once');
+  await expect(preview.locator('#clipboard-read-text-result')).toHaveText('ok:parent clipboard text');
+  expect((await providerState(page)).clipboardReads).toEqual([{ method: 'readText', active: true }]);
+  const readApproval = await storedApproval(page, managedOrigin, 'clipboard-read');
+  expect(readApproval.token).toMatch(uuidPattern);
+  expect(readApproval.grant).toBeNull();
+
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await expect(page.getByRole('dialog', { name: 'Allow clipboard reading?' })).toBeVisible();
+  expect((await providerState(page)).clipboardReads).toHaveLength(1);
+  await decide(page, 'Allow clipboard reading?', 'deny');
+
+  await preview.getByRole('button', { name: 'Write clipboard text' }).click();
+  await decide(page, 'Allow clipboard writing?', 'Allow once');
+  await expect(preview.locator('#clipboard-write-text-result')).toHaveText('ok');
+  expect((await providerState(page)).clipboardWrites).toEqual([{ method: 'writeText', active: true, text: 'managed clipboard text' }]);
+  const writeApproval = await storedApproval(page, managedOrigin, 'clipboard-write');
+  expect(writeApproval.token).toMatch(uuidPattern);
+  expect(writeApproval.grant).toBeNull();
+});
+
+test('persists successful clipboard scopes independently and resets both', async ({ context, page }) => {
+  await installParentProviders(context);
+  const bridge = await projectBrowserBridge();
+  await setupDashboard(page, { bridge });
+  await openBrowser(page);
+  const preview = page.frameLocator('iframe[title="Project browser"]');
+
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await decide(page, 'Allow clipboard reading?', 'allow always');
+  await expect(preview.locator('#clipboard-read-text-result')).toHaveText('ok:parent clipboard text');
+  expect((await storedApproval(page, managedOrigin, 'clipboard-read')).grant).toBe('allow');
+  expect(await storedApproval(page, managedOrigin, 'clipboard-write')).toEqual({ token: null, grant: null });
+
+  await preview.getByRole('button', { name: 'Write clipboard text' }).click();
+  await expect(page.getByRole('dialog', { name: 'Allow clipboard writing?' })).toBeVisible();
+  await decide(page, 'Allow clipboard writing?', 'allow always');
+  await expect(preview.locator('#clipboard-write-text-result')).toHaveText('ok');
+  expect((await storedApproval(page, managedOrigin, 'clipboard-read')).grant).toBe('allow');
+  expect((await storedApproval(page, managedOrigin, 'clipboard-write')).grant).toBe('allow');
+
+  await resetPreviewPermissions(page, true);
+  await expect(preview.getByRole('button', { name: 'Read clipboard text' })).toBeVisible();
+  expect((await storedApproval(page, managedOrigin, 'clipboard-read')).grant).toBeNull();
+  expect((await storedApproval(page, managedOrigin, 'clipboard-write')).grant).toBeNull();
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await expect(page.getByRole('dialog', { name: 'Allow clipboard reading?' })).toBeVisible();
+  expect((await providerState(page)).clipboardReads).toHaveLength(1);
+});
+
+test('roundtrips rich multi-format clipboard items through native ClipboardItem', async ({ context, page }) => {
+  await installParentProviders(context);
+  await installNativePermissionReferenceCapture(context);
+  const bridge = await projectBrowserBridge();
+  await setupDashboard(page, { bridge });
+  await openBrowser(page);
+  const preview = page.frameLocator('iframe[title="Project browser"]');
+
+  await preview.getByRole('button', { name: 'Write rich clipboard' }).click();
+  await decide(page, 'Allow clipboard writing?', 'Allow once');
+  await expect(preview.locator('#clipboard-write-result')).toHaveText('ok');
+  expect((await providerState(page)).clipboardWrites).toEqual([{
+    method: 'write',
+    active: true,
+    items: [
+      [{ type: 'text/html', text: '<b>first html</b>', size: 17 }, { type: 'text/plain', text: 'first plain', size: 11 }],
+      [{ type: 'text/plain', text: 'second plain', size: 12 }, { type: 'web application/json', text: '{"second":true}', size: 15 }]
+    ]
+  }]);
+
+  await preview.getByRole('button', { name: 'Read rich clipboard' }).click();
+  await decide(page, 'Allow clipboard reading?', 'Allow once');
+  await expect(preview.locator('#clipboard-read-result')).toHaveText('ok:text/html=<b>first html</b>,text/plain=first plain|text/plain=second plain,web application/json={"second":true}');
+  expect((await providerState(page)).clipboardReads).toEqual([{ method: 'read', active: true }]);
+  const identities = await nativePermissionApisPreserved(preview);
+  expect(identities.clipboardItem).toBe(true);
+  expect(identities.clipboard).toBe(false);
+});
+
+test('requires fresh parent activation for saved clipboard access and preserves native denial', async ({ context, page }) => {
+  test.setTimeout(45_000);
+  await installParentProviders(context);
+  const bridge = await projectBrowserBridge();
+  await setupDashboard(page, { bridge });
+  await openBrowser(page);
+  const preview = page.frameLocator('iframe[title="Project browser"]');
+
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await decide(page, 'Allow clipboard reading?', 'allow always');
+  await expect(preview.locator('#clipboard-read-text-result')).toHaveText('ok:parent clipboard text');
+  await failNextClipboardOperation(page, 'readText', 'NotAllowedError', 'native clipboard denied');
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await expect(preview.locator('#clipboard-read-text-result')).toHaveText('error:NotAllowedError:native clipboard denied');
+  await expect(page.getByRole('dialog', { name: 'Allow clipboard reading?' })).toBeHidden();
+  expect((await providerState(page)).clipboardReads).toHaveLength(2);
+
+  await page.evaluate(() => {
+    // isolate expired activation from the synthetic gestures granted by playwright evaluations
+    Object.defineProperty(navigator, 'userActivation', { configurable: true, value: { isActive: false, hasBeenActive: true } });
+  });
+  await preview.locator('body').evaluate(() => {
+    const result = document.querySelector('#clipboard-read-text-result')!;
+    result.textContent = 'pending';
+    // request saved access while the parent has no usable activation
+    void navigator.clipboard.readText().then(
+      text => { result.textContent = `ok:${text}`; },
+      error => { result.textContent = `error:${error.name}:${error.message}`; }
+    );
+  });
+  await expect(page.getByRole('dialog', { name: 'Allow clipboard reading?' })).toBeVisible();
+  expect((await providerState(page)).clipboardReads).toHaveLength(2);
+  // restore the real browser activation before testing the consent click
+  await page.evaluate(() => { Reflect.deleteProperty(navigator, 'userActivation'); });
+  await decide(page, 'Allow clipboard reading?', 'Allow once');
+  await expect(preview.locator('#clipboard-read-text-result')).toHaveText('ok:parent clipboard text');
+  expect((await providerState(page)).clipboardReads).toEqual([
+    { method: 'readText', active: true },
+    { method: 'readText', active: true },
+    { method: 'readText', active: true }
+  ]);
+});
+
+test('does not persist clipboard approval after native once or always failures', async ({ context, page }) => {
+  await installParentProviders(context);
+  const bridge = await projectBrowserBridge();
+  await setupDashboard(page, { bridge });
+  await openBrowser(page);
+  const preview = page.frameLocator('iframe[title="Project browser"]');
+
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await failNextClipboardOperation(page, 'readText', 'SecurityError', 'native read blocked');
+  await decide(page, 'Allow clipboard reading?', 'Allow once');
+  await expect(preview.locator('#clipboard-read-text-result')).toHaveText('error:SecurityError:native read blocked');
+  expect((await storedApproval(page, managedOrigin, 'clipboard-read')).grant).toBeNull();
+
+  await preview.getByRole('button', { name: 'Write clipboard text' }).click();
+  await failNextClipboardOperation(page, 'writeText', 'NotReadableError', 'native write failed');
+  await decide(page, 'Allow clipboard writing?', 'allow always');
+  await expect(preview.locator('#clipboard-write-text-result')).toHaveText('error:NotReadableError:native write failed');
+  expect((await storedApproval(page, managedOrigin, 'clipboard-write')).grant).toBeNull();
+  expect((await providerState(page)).clipboardWrites).toEqual([{ method: 'writeText', active: true, text: 'managed clipboard text' }]);
+
+  await preview.getByRole('button', { name: 'Write clipboard text' }).click();
+  await expect(page.getByRole('dialog', { name: 'Allow clipboard writing?' })).toBeVisible();
+  expect((await providerState(page)).clipboardWrites).toHaveLength(1);
+});
+
+test('rejects malformed and oversized clipboard protocol payloads before native work', async ({ context, page }) => {
+  const clientId = protocolId('51000000', 1);
+  await installParentProviders(context);
+  await installPermissionClientId(context, clientId);
+  const bridge = await projectBrowserBridge();
+  await setupDashboard(page, { bridge });
+  await openBrowser(page);
+  const preview = page.frameLocator('iframe[title="Project browser"]');
+  await startPermissionResponseCapture(preview);
+
+  await preview.locator('body').evaluate((_, { client, target }) => {
+    let index = 1;
+    // create one canonical request identifier
+    const id = () => `52000000-0000-4000-8000-${String(index++).padStart(12, '0')}`;
+    // deliver every invalid boundary case directly to the broker
+    const post = (message: Record<string, unknown>) => window.parent.postMessage({ type: 'rac-browser-permission-request', clientId: client, id: id(), ...message }, target);
+    post({ operation: 'clipboard-write-text', text: 42 });
+    post({ operation: 'clipboard-write-text', text: 'x'.repeat(1_048_577) });
+    post({ operation: 'clipboard-read-text', text: 'unexpected' });
+    post({ operation: 'clipboard-write', items: Array.from({ length: 5 }, () => ({ presentationStyle: 'unspecified', representations: [{ type: 'text/plain', blob: new Blob(['x'], { type: 'text/plain' }) }] })) });
+    post({ operation: 'clipboard-write', items: [{ presentationStyle: 'unspecified', representations: Array.from({ length: 9 }, (_value, typeIndex) => ({ type: `application/x-test-${typeIndex}`, blob: new Blob(['x'], { type: `application/x-test-${typeIndex}` }) })) }] });
+    post({ operation: 'clipboard-write', items: [{ presentationStyle: 'unspecified', representations: [{ type: 'application/octet-stream', blob: new Blob([new Uint8Array(4 * 1024 * 1024 + 1)], { type: 'application/octet-stream' }) }] }] });
+  }, { client: clientId, target: consoleOrigin });
+
+  // await every rejected request before asserting that consent and native work stayed idle
+  await expect.poll(async () => (await permissionResponses(preview))
+    .filter(response => response.clientId === clientId && response.status === 'error' && response.error?.code === 2)
+    .map(response => response.id).sort()).toEqual(Array.from({ length: 6 }, (_, index) => protocolId('52000000', index + 1)));
+  await expect(page.locator('.browser-permission-consent')).toHaveCount(0);
+  expect((await providerState(page)).clipboardReads).toEqual([]);
+  expect((await providerState(page)).clipboardWrites).toEqual([]);
+});
+
+test('cancels clipboard consent on timeout without invoking native work', async ({ context, page }) => {
+  test.setTimeout(45_000);
+  await page.clock.install();
+  await installParentProviders(context);
+  const bridge = await projectBrowserBridge();
+  await setupDashboard(page, { bridge });
+  await openBrowser(page);
+  const preview = page.frameLocator('iframe[title="Project browser"]');
+
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await expect(page.getByRole('dialog', { name: 'Allow clipboard reading?' })).toBeVisible();
+  await page.clock.fastForward(120_001);
+  await expect(page.getByRole('dialog', { name: 'Allow clipboard reading?' })).toBeHidden();
+  await expect(preview.locator('#clipboard-read-text-result')).toHaveText(/^error:AbortError:/u);
+  expect((await providerState(page)).clipboardReads).toEqual([]);
+});
+
+test('suppresses late clipboard results after navigation and reset', async ({ context, page }) => {
+  await installParentProviders(context);
+  const bridge = await projectBrowserBridge();
+  await setupDashboard(page, { bridge });
+  await openBrowser(page);
+  const preview = page.frameLocator('iframe[title="Project browser"]');
+  await page.evaluate(() => {
+    const releases: Array<(text: string) => void> = [];
+    const state = (window as typeof window & { __permissionProviderState: ProviderState }).__permissionProviderState;
+    Object.defineProperty(window, '__releaseClipboardRead', { configurable: true, value: (index: number, text: string) => releases[index]?.(text) });
+    Object.defineProperty(navigator.clipboard, 'readText', {
+      configurable: true,
+      // retain native results beyond preview replacement
+      value: () => {
+        state.clipboardReads.push({ method: 'readText', active: navigator.userActivation.isActive });
+        return new Promise<string>(resolve => { releases.push(resolve); });
+      }
+    });
+  });
+
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await decide(page, 'Allow clipboard reading?', 'Allow once');
+  await expect.poll(async () => (await providerState(page)).clipboardReads).toHaveLength(1);
+  await preview.getByRole('button', { name: 'Navigate preview' }).click();
+  await expect(preview.locator('#path')).toHaveText('/next');
+  await page.evaluate(() => (window as typeof window & { __releaseClipboardRead: (index: number, text: string) => void }).__releaseClipboardRead(0, 'stale navigation text'));
+  await page.waitForTimeout(100);
+  await expect(preview.locator('#clipboard-read-text-result')).toHaveText('idle');
+
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await decide(page, 'Allow clipboard reading?', 'Allow once');
+  await expect.poll(async () => (await providerState(page)).clipboardReads).toHaveLength(2);
+  await resetPreviewPermissions(page, true);
+  await expect(preview.getByRole('button', { name: 'Read clipboard text' })).toBeVisible();
+  await page.evaluate(() => (window as typeof window & { __releaseClipboardRead: (index: number, text: string) => void }).__releaseClipboardRead(1, 'stale reset text'));
+  await page.waitForTimeout(100);
+  await expect(preview.locator('#clipboard-read-text-result')).toHaveText('idle');
+});
+
+// suppress sensitive data when a later same-document decision revokes consent
+test('never returns pending clipboard data after a newer denial', async ({ context, page }) => {
+  await installParentProviders(context);
+  const bridge = await projectBrowserBridge();
+  await setupDashboard(page, { bridge });
+  await openBrowser(page);
+  const preview = page.frameLocator('iframe[title="Project browser"]');
+  await startPermissionResponseCapture(preview);
+  await page.evaluate(() => {
+    const state = (window as typeof window & { __permissionProviderState: ProviderState }).__permissionProviderState;
+    Object.defineProperty(navigator.clipboard, 'readText', {
+      configurable: true,
+      // delay sensitive data until after the user changes their decision
+      value: () => {
+        state.clipboardReads.push({ method: 'readText', active: navigator.userActivation.isActive });
+        return new Promise<string>(resolve => {
+          Object.defineProperty(window, '__releaseRevokedClipboardRead', { configurable: true, value: () => resolve('private clipboard contents') });
+        });
+      }
+    });
+  });
+
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await decide(page, 'Allow clipboard reading?', 'allow always');
+  await expect.poll(async () => (await providerState(page)).clipboardReads).toHaveLength(1);
+  expect((await storedApproval(page, managedOrigin, 'clipboard-read')).grant).toBeNull();
+  await preview.getByRole('button', { name: 'Read clipboard text' }).click();
+  await decide(page, 'Allow clipboard reading?', 'deny');
+  await page.evaluate(() => (window as typeof window & { __releaseRevokedClipboardRead: () => void }).__releaseRevokedClipboardRead());
+
+  await expect.poll(async () => (await permissionResponses(preview)).filter(response => response.status === 'denied')).toHaveLength(2);
+  expect((await permissionResponses(preview)).some(response => response.text !== undefined || response.items !== undefined)).toBe(false);
+  expect((await storedApproval(page, managedOrigin, 'clipboard-read')).grant).toBeNull();
+  expect((await providerState(page)).clipboardReads).toHaveLength(1);
+});
+
 test('rejects spoofed permission requests and leaves direct frames unbrokered', async ({ context, page }) => {
   await installParentProviders(context);
   const bridge = await projectBrowserBridge();
@@ -1644,6 +2092,8 @@ test('rejects spoofed permission requests and leaves direct frames unbrokered', 
   await expect(page.locator('.browser-permission-consent')).toHaveCount(0);
   expect((await providerState(page)).geolocationGets).toBe(0);
   expect((await providerState(page)).notificationRequests).toEqual([]);
+  expect((await providerState(page)).clipboardReads).toEqual([]);
+  expect((await providerState(page)).clipboardWrites).toEqual([]);
 });
 
 test('rejects correct-origin and foreign-origin requests from nested preview windows', async ({ context, page }) => {
@@ -1673,12 +2123,20 @@ test('rejects correct-origin and foreign-origin requests from nested preview win
     watchPosition: true,
     clearWatch: true,
     notification: true,
-    notificationRequestPermission: true
+    notificationRequestPermission: true,
+    clipboard: true,
+    clipboardReadText: true,
+    clipboardWriteText: true,
+    clipboardRead: true,
+    clipboardWrite: true,
+    clipboardItem: true
   });
   await page.waitForTimeout(200);
   await expect(page.locator('.browser-permission-consent')).toHaveCount(0);
   expect((await providerState(page)).geolocationGets).toBe(0);
   expect((await providerState(page)).notificationRequests).toEqual([]);
+  expect((await providerState(page)).clipboardReads).toEqual([]);
+  expect((await providerState(page)).clipboardWrites).toEqual([]);
 });
 
 test('preserves native apis in an unnamed proxied frame embedded outside RAC', async ({ context, page }) => {
@@ -1707,7 +2165,13 @@ test('preserves native apis in an unnamed proxied frame embedded outside RAC', a
     watchPosition: true,
     clearWatch: true,
     notification: true,
-    notificationRequestPermission: true
+    notificationRequestPermission: true,
+    clipboard: true,
+    clipboardReadText: true,
+    clipboardWriteText: true,
+    clipboardRead: true,
+    clipboardWrite: true,
+    clipboardItem: true
   });
   await page.waitForTimeout(100);
   expect(await page.evaluate(() => (window as typeof window & { __permissionMessages: unknown[] }).__permissionMessages)).toEqual([]);

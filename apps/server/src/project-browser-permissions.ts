@@ -13,6 +13,14 @@ export const projectBrowserPermissions = (parentOrigin: string) => `(() => {
   const maximumPendingConsent = 16;
   const maximumPendingOperations = 32;
   const maximumWatches = 8;
+  const maximumClipboardText = 1048576;
+  const maximumClipboardItems = 4;
+  const maximumClipboardRepresentations = 8;
+  const maximumClipboardBytes = 4194304;
+  const maximumClipboardTypeLength = 128;
+  const NativeBlob = window.Blob;
+  const NativeClipboardItem = window.ClipboardItem;
+  const NativeDOMException = window.DOMException;
   let notificationPermission = 'default';
   let disconnected = false;
   let pageHidden = false;
@@ -55,6 +63,8 @@ export const projectBrowserPermissions = (parentOrigin: string) => `(() => {
   });
   // create a browser-shaped location error
   const locationError = (code, message) => ({ code, message, PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 });
+  // identify capacity failures independently of their wording
+  const capacityError = (message) => ({ ...locationError(2, message), name: 'QuotaExceededError' });
   // validate one serialized broker error
   const serializedError = (value) => {
     // reject malformed error payloads
@@ -99,6 +109,11 @@ export const projectBrowserPermissions = (parentOrigin: string) => `(() => {
   // cancel one abandoned notification request
   const cancelNotification = (requestId) => {
     try { postRequest({ id: identifier(), operation: 'notification-close', notificationId: requestId }); }
+    catch { /* the parent is already unavailable */ }
+  };
+  // cancel one abandoned clipboard request
+  const cancelClipboard = (requestId) => {
+    try { postRequest({ id: identifier(), operation: 'clipboard-cancel', requestId }); }
     catch { /* the parent is already unavailable */ }
   };
   // synchronously revoke one document session
@@ -174,9 +189,9 @@ export const projectBrowserPermissions = (parentOrigin: string) => `(() => {
     // settle immediately when the parent is unavailable
     if (disconnected) { entry.fail(locationError(2, 'permission broker disconnected'), false); return false; }
     // enforce the total retained-operation bound
-    if (pending.size >= maximumPendingOperations) { entry.fail(locationError(2, 'permission broker operation limit reached'), false); return false; }
+    if (pending.size >= maximumPendingOperations) { entry.fail(capacityError('permission broker operation limit reached'), false); return false; }
     // enforce the parent consent-queue bound
-    if (entry.awaitingConsent === true && pendingCount(value => value.awaitingConsent === true) >= maximumPendingConsent) { entry.fail(locationError(2, 'permission broker consent limit reached'), false); return false; }
+    if (entry.awaitingConsent === true && pendingCount(value => value.awaitingConsent === true) >= maximumPendingConsent) { entry.fail(capacityError('permission broker consent limit reached'), false); return false; }
     entry.timer = window.setTimeout(() => {
       // ignore a request settled before its deadline
       if (pending.get(message.id) !== entry) return;
@@ -331,6 +346,299 @@ export const projectBrowserPermissions = (parentOrigin: string) => `(() => {
     exception.name = 'QuotaExceededError';
     return exception;
   };
+  // create one browser-shaped clipboard exception
+  const clipboardException = (message, name) => {
+    const boundedMessage = limitedText(message, 1000, 'clipboard operation failed');
+    // prefer the document's native dom exception
+    if (typeof NativeDOMException === 'function') {
+      try { return new NativeDOMException(boundedMessage, name); }
+      catch { /* fall back to an ordinary named error */ }
+    }
+    const exception = new Error(boundedMessage);
+    exception.name = name;
+    return exception;
+  };
+  // retain one bounded dom exception name
+  const clipboardErrorName = (value, fallback) => {
+    // reject names that cannot be safely exposed
+    if (typeof value !== 'string' || value.length === 0 || value.length > 64 || !/^[A-Za-z][A-Za-z0-9]*Error$/u.test(value)) return fallback;
+    return value;
+  };
+  // convert one local broker failure to a clipboard exception
+  const clipboardTransportException = (error) => {
+    const message = typeof error?.message === 'string' ? error.message : 'clipboard operation failed';
+    return clipboardException(message, clipboardErrorName(error?.name, 'AbortError'));
+  };
+  // validate one serialized clipboard failure
+  const serializedClipboardException = (value) => {
+    // reject malformed broker errors
+    if (value === null || typeof value !== 'object' || Array.isArray(value) || (value.code !== 1 && value.code !== 2 && value.code !== 3) || typeof value.message !== 'string' || value.name !== undefined && typeof value.name !== 'string') return undefined;
+    const fallback = value.code === 1 ? 'NotAllowedError' : 'AbortError';
+    return clipboardException(value.message, clipboardErrorName(value.name, fallback));
+  };
+  // reject one invalid clipboard input
+  const invalidClipboardInput = (message) => new TypeError(message);
+  // reject one oversized clipboard input
+  const oversizedClipboardInput = (message) => clipboardException(message, 'QuotaExceededError');
+  // retain one supported clipboard presentation style
+  const clipboardPresentationStyle = (value) => value === 'unspecified' || value === 'inline' || value === 'attachment' ? value : undefined;
+  // retain and time one rich clipboard write before serialization
+  const reserveClipboardRequest = (id, entry) => {
+    // settle immediately when the parent is unavailable
+    if (disconnected) { entry.fail(locationError(2, 'permission broker disconnected'), false); return false; }
+    // enforce the total retained-operation bound
+    if (pending.size >= maximumPendingOperations) { entry.fail(capacityError('permission broker operation limit reached'), false); return false; }
+    // enforce the parent consent-queue bound
+    if (pendingCount(value => value.awaitingConsent === true) >= maximumPendingConsent) { entry.fail(capacityError('permission broker consent limit reached'), false); return false; }
+    entry.timer = window.setTimeout(() => {
+      // ignore a request settled before its deadline
+      if (pending.get(id) !== entry) return;
+      pending.delete(id);
+      entry.timer = undefined;
+      entry.fail(locationError(3, 'permission broker timed out'));
+    }, consentTimeout);
+    pending.set(id, entry);
+    return true;
+  };
+  // validate rich clipboard write descriptors before awaiting data
+  const clipboardWriteDescriptors = (items) => {
+    // require a nonempty native item array
+    if (!Array.isArray(items) || items.length === 0) throw invalidClipboardInput('clipboard items must be a nonempty array');
+    // reject excess items without truncation
+    if (items.length > maximumClipboardItems) throw oversizedClipboardInput('clipboard item limit exceeded');
+    const descriptors = [];
+    // validate every item before reserving pending work
+    for (const item of items) {
+      // require the clipboard item interface
+      if (item === null || typeof item !== 'object') throw invalidClipboardInput('invalid clipboard item');
+      const presentationStyle = item.presentationStyle ?? 'unspecified';
+      // require one supported presentation style
+      if (clipboardPresentationStyle(presentationStyle) === undefined) throw invalidClipboardInput('invalid clipboard presentation style');
+      const getType = item.getType;
+      // require one stable representation getter
+      if (typeof getType !== 'function') throw invalidClipboardInput('invalid clipboard item');
+      const itemTypes = item.types;
+      // require a nonempty native type array
+      if (!Array.isArray(itemTypes) || itemTypes.length === 0) throw invalidClipboardInput('invalid clipboard item');
+      // reject excess representations without truncation
+      if (itemTypes.length > maximumClipboardRepresentations) throw oversizedClipboardInput('clipboard representation limit exceeded');
+      const types = [];
+      const uniqueTypes = new Set();
+      // validate every declared representation
+      for (const type of itemTypes) {
+        // require one bounded mime type
+        if (typeof type !== 'string' || type.length === 0 || type.length > maximumClipboardTypeLength) throw invalidClipboardInput('invalid clipboard representation type');
+        // reject duplicate representations
+        if (uniqueTypes.has(type)) throw invalidClipboardInput('duplicate clipboard representation type');
+        uniqueTypes.add(type);
+        types.push(type);
+      }
+      descriptors.push({ getType, item, presentationStyle, types });
+    }
+    return descriptors;
+  };
+  // create one pending clipboard promise entry
+  const clipboardRequestEntry = (id, resolve, reject, parse, posted = true) => {
+    let settled = false;
+    const entry = {
+      kind: 'clipboard',
+      timer: undefined,
+      awaitingConsent: true,
+      posted,
+      // reject one local or native clipboard failure
+      reject: (error) => {
+        // ignore duplicate settlement
+        if (settled) return;
+        settled = true;
+        reject(error);
+      },
+      // reject one unavailable clipboard request
+      fail: (error, cancel = true) => {
+        // ignore duplicate settlement
+        if (settled) return;
+        settled = true;
+        // cancel only a request already posted to the parent
+        if (cancel && entry.posted) cancelClipboard(id);
+        reject(clipboardTransportException(error));
+      },
+      // validate and settle one clipboard response
+      handle: (response) => {
+        // reject clipboard failures carrying successful payloads
+        if (response.status !== 'ok' && (response.text !== undefined || response.items !== undefined)) return;
+        // map explicit denials to the browser permission exception
+        if (response.status === 'denied') {
+          removePending(id);
+          settled = true;
+          const message = typeof response.error?.message === 'string' ? response.error.message : 'clipboard permission denied';
+          reject(clipboardException(message, 'NotAllowedError'));
+          return;
+        }
+        // validate one explicit broker failure
+        if (response.status === 'error') {
+          const exception = serializedClipboardException(response.error);
+          // ignore malformed broker failures until the deadline
+          if (exception === undefined) return;
+          removePending(id);
+          settled = true;
+          reject(exception);
+          return;
+        }
+        let parsed;
+        try { parsed = parse(response); }
+        catch (error) {
+          removePending(id);
+          settled = true;
+          reject(error);
+          return;
+        }
+        // ignore malformed successful payloads until the deadline
+        if (parsed === undefined) return;
+        removePending(id);
+        settled = true;
+        resolve(parsed.value);
+      }
+    };
+    return entry;
+  };
+  // start one immediately serializable clipboard operation
+  const startClipboardRequest = (operation, fields, parse) => new Promise((resolve, reject) => {
+    const id = identifier();
+    const entry = clipboardRequestEntry(id, resolve, reject, parse);
+    startRequest({ id, operation, ...fields }, entry);
+  });
+  // custom format keys retain their web prefix while blobs retain their mime type
+  const clipboardBlobType = (type) => type.startsWith('web ') ? type.slice(4) : type;
+  // validate one broker blob representation
+  const clipboardRepresentation = (value, uniqueTypes, byteState) => {
+    // require the exact representation shape
+    if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2 || typeof value.type !== 'string' || value.type.length === 0 || value.type.length > maximumClipboardTypeLength || !Object.prototype.hasOwnProperty.call(value, 'blob')) return undefined;
+    // require unique declared types
+    if (uniqueTypes.has(value.type)) return undefined;
+    // require a native blob with a matching type
+    if (typeof NativeBlob !== 'function' || !(value.blob instanceof NativeBlob) || value.blob.type !== clipboardBlobType(value.type) || typeof value.blob.size !== 'number' || !Number.isFinite(value.blob.size) || value.blob.size < 0) return undefined;
+    uniqueTypes.add(value.type);
+    byteState.total += value.blob.size;
+    // reject oversized aggregate data without truncation
+    if (byteState.total > maximumClipboardBytes) return undefined;
+    return { type: value.type, blob: value.blob };
+  };
+  // reconstruct one rich clipboard read response
+  const parseClipboardItems = (response) => {
+    // require only one bounded item array
+    if (!Array.isArray(response.items) || response.items.length > maximumClipboardItems || response.text !== undefined || response.error !== undefined || typeof NativeClipboardItem !== 'function') return undefined;
+    const normalizedItems = [];
+    const byteState = { total: 0 };
+    // validate every returned clipboard item
+    for (const item of response.items) {
+      // require the exact item envelope
+      if (item === null || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length !== 2 || !Object.prototype.hasOwnProperty.call(item, 'presentationStyle') || !Object.prototype.hasOwnProperty.call(item, 'representations')) return undefined;
+      const presentationStyle = clipboardPresentationStyle(item.presentationStyle);
+      // reject unknown presentation styles
+      if (presentationStyle === undefined) return undefined;
+      const itemRepresentations = item.representations;
+      // require a bounded nonempty representation array
+      if (!Array.isArray(itemRepresentations) || itemRepresentations.length === 0 || itemRepresentations.length > maximumClipboardRepresentations) return undefined;
+      const uniqueTypes = new Set();
+      const representations = Object.create(null);
+      // validate every returned representation
+      for (const value of itemRepresentations) {
+        const representation = clipboardRepresentation(value, uniqueTypes, byteState);
+        // reject malformed returned representations
+        if (representation === undefined) return undefined;
+        representations[representation.type] = representation.blob;
+      }
+      normalizedItems.push(new NativeClipboardItem(representations, { presentationStyle }));
+    }
+    return { value: normalizedItems };
+  };
+  // read plain text through the permission broker
+  const readClipboardText = () => startClipboardRequest('clipboard-read-text', {}, (response) => {
+    // require only one bounded text payload
+    if (typeof response.text !== 'string' || response.text.length > maximumClipboardText || response.items !== undefined || response.error !== undefined) return undefined;
+    return { value: response.text };
+  });
+  // write plain text through the permission broker
+  const writeClipboardText = function(text) {
+    const argumentCount = arguments.length;
+    return new Promise((resolve, reject) => {
+      // preserve required dom string conversion before asking for clipboard access
+      if (argumentCount === 0 || typeof text === 'symbol') { reject(invalidClipboardInput('clipboard text must be a supplied string-convertible value')); return; }
+      let normalized;
+      try { normalized = String(text); }
+      catch (error) { reject(error); return; }
+      // reject oversized text without truncation
+      if (normalized.length > maximumClipboardText) { reject(oversizedClipboardInput('clipboard text limit exceeded')); return; }
+      startClipboardRequest('clipboard-write-text', { text: normalized }, (response) => {
+        // require an empty successful write acknowledgement
+        if (response.text !== undefined || response.items !== undefined || response.error !== undefined) return undefined;
+        return { value: undefined };
+      }).then(resolve, reject);
+    });
+  };
+  // read rich data through the permission broker
+  const readClipboard = (options) => {
+    // reject unsupported read option bags explicitly
+    if (options !== undefined) return Promise.reject(invalidClipboardInput('clipboard read options are not supported'));
+    // fail rich reads when reconstruction is unavailable
+    if (typeof NativeClipboardItem !== 'function' || typeof NativeBlob !== 'function') return Promise.reject(clipboardException('rich clipboard reads are not supported', 'NotSupportedError'));
+    return startClipboardRequest('clipboard-read', {}, parseClipboardItems);
+  };
+  // write rich data through the permission broker
+  const writeClipboard = (items) => new Promise((resolve, reject) => {
+    let descriptors;
+    try { descriptors = clipboardWriteDescriptors(items); }
+    catch (error) { reject(error); return; }
+    // fail rich writes when blob validation is unavailable
+    if (typeof NativeBlob !== 'function') { reject(clipboardException('rich clipboard writes are not supported', 'NotSupportedError')); return; }
+    const id = identifier();
+    const entry = clipboardRequestEntry(id, resolve, reject, (response) => {
+      // require an empty successful write acknowledgement
+      if (response.text !== undefined || response.items !== undefined || response.error !== undefined) return undefined;
+      return { value: undefined };
+    }, false);
+    // stop before materialization when no pending capacity remains
+    if (!reserveClipboardRequest(id, entry)) return;
+    void (async () => {
+      const serializedItems = [];
+      let totalBytes = 0;
+      try {
+        // materialize every validated clipboard item
+        for (const descriptor of descriptors) {
+          const representations = [];
+          // await every declared native representation
+          for (const type of descriptor.types) {
+            const blob = await descriptor.getType.call(descriptor.item, type);
+            // stop late serialization after timeout or navigation
+            if (pending.get(id) !== entry) return;
+            // require native blobs with exact declared types
+            if (!(blob instanceof NativeBlob) || blob.type !== clipboardBlobType(type) || typeof blob.size !== 'number' || !Number.isFinite(blob.size) || blob.size < 0) throw invalidClipboardInput('clipboard blob type does not match its representation');
+            totalBytes += blob.size;
+            // reject oversized aggregate data without truncation
+            if (totalBytes > maximumClipboardBytes) throw oversizedClipboardInput('clipboard data limit exceeded');
+            representations.push({ type, blob });
+          }
+          serializedItems.push({ presentationStyle: descriptor.presentationStyle, representations });
+        }
+      }
+      catch (error) {
+        // ignore late native failures after another settlement
+        if (pending.get(id) !== entry) return;
+        removePending(id);
+        entry.reject(error);
+        return;
+      }
+      // stop late serialization after timeout or navigation
+      if (pending.get(id) !== entry) return;
+      try {
+        postRequest({ id, operation: 'clipboard-write', items: serializedItems });
+        entry.posted = true;
+      }
+      catch {
+        removePending(id);
+        entry.fail(locationError(2, 'permission broker unavailable'), false);
+      }
+    })();
+  });
   // request managed notification permission
   const requestNotificationPermission = (callback) => new Promise((resolve, reject) => {
     let settled = false;
@@ -501,6 +809,16 @@ export const projectBrowserPermissions = (parentOrigin: string) => `(() => {
       catch { /* retain the native surface when it is immutable */ }
     }
   };
+  // install the managed clipboard surface
+  const installClipboard = () => {
+    const clipboard = { readText: readClipboardText, writeText: writeClipboardText, read: readClipboard, write: writeClipboard };
+    try { Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: clipboard }); }
+    catch {
+      // fall back to ordinary assignment when permitted
+      try { window.navigator.clipboard = clipboard; }
+      catch { /* retain the native surface when it is immutable */ }
+    }
+  };
   // start one broker session
   const connect = () => {
     const id = identifier();
@@ -525,5 +843,6 @@ export const projectBrowserPermissions = (parentOrigin: string) => `(() => {
   window.addEventListener('pageshow', restoreDocument);
   installGeolocation();
   installNotification();
+  installClipboard();
   connect();
 })();`;
