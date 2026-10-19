@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 type VoiceSettings = { enabled: boolean; available: boolean; name: string; context: string };
 type SettingsPatch = { op: string; path: string[]; value?: unknown };
@@ -106,6 +106,38 @@ async function openSettings(page: import('@playwright/test').Page, adapters: unk
 async function openAgentMenu(page: import('@playwright/test').Page) {
   await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^Choose agent/u }).click();
   return page.getByRole('menu', { name: 'Choose agent' });
+}
+
+// sample the registered angle at deterministic points without relying on wall-clock timing
+async function sampleUpdateOrbit(ring: Locator) {
+  return ring.evaluate(element => {
+    const animation = element.getAnimations({ subtree: true })[0];
+    // require one live ring animation
+    if (animation === undefined) throw new Error('update progress ring is not orbiting');
+    const duration = animation.effect?.getComputedTiming().duration;
+    // require a finite cycle before sampling its quarter turn
+    if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0) throw new Error('update progress ring has no finite duration');
+    animation.pause();
+    animation.currentTime = 0;
+    const startAngle = Number.parseFloat(getComputedStyle(element, '::before').getPropertyValue('--update-orbit-angle'));
+    animation.currentTime = duration / 4;
+    const quarterAngle = Number.parseFloat(getComputedStyle(element, '::before').getPropertyValue('--update-orbit-angle'));
+    animation.play();
+    return { startAngle, quarterAngle };
+  });
+}
+
+// start one codex update that remains active for visual state checks
+async function startRunningCodexUpdate(page: Page) {
+  const adapters = { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } };
+  await openSettings(page, adapters, { open: false, agentUpdates: [{ kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true }] });
+  await page.route('**/api/agents/codex/update', route => route.fulfill({ status: 202, json: { update: { id: 'update-orbit', kind: 'codex', state: 'running' } } }));
+  await page.route('**/api/agents/codex/update/update-orbit', route => route.fulfill({ json: { update: { id: 'update-orbit', kind: 'codex', state: 'running' } } }));
+  const menu = await openAgentMenu(page);
+  await menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' }).click();
+  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+  await expect(toolbar.getByRole('button', { name: /Choose agent — update in progress$/u })).toBeVisible();
+  return { toolbar, ring: toolbar.locator('.update-progress-ring') };
 }
 
 test('moves Codex accounts from settings into the launcher submenu', async ({ page }) => {
@@ -504,6 +536,54 @@ test('opens the full settings workspace beside desktop output and above narrow s
   await expect(consoleView.locator('.log').first()).toHaveCSS('width', '800px');
 });
 
+// keep one active update orbiting through responsive launcher replacements
+test('keeps the agent update orbit visible across desktop and phone launcher states', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const { toolbar, ring } = await startRunningCodexUpdate(page);
+  await expect(ring).toBeVisible();
+  const ringParent = ring.locator('..');
+  await expect.poll(() => ringParent.evaluate(element => element.getAnimations().length)).toBe(0);
+  await expect.poll(() => ringParent.getByRole('button').evaluateAll(elements => elements.every(element => element.getAnimations().length === 0))).toBe(true);
+  await expect.poll(() => ringParent.getByRole('button').locator('[aria-hidden="true"]').evaluateAll(elements => elements.every(element => element.getAnimations().length === 0))).toBe(true);
+  await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
+
+  // keep the same orbit on the phone's single launch control
+  await page.setViewportSize({ width: 430, height: 932 });
+  await expect(toolbar.getByRole('button', { name: /Launch agent — update in progress$/u })).toBeVisible();
+  await expect(ring).toBeVisible();
+  await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
+
+  // preserve the orbit while minimizing and restoring the phone agent panel
+  await page.getByRole('button', { name: 'Minimize agent output' }).click();
+  await expect(page.locator('.log-output')).toHaveCount(0);
+  const showAgent = toolbar.getByRole('button', { name: /Show agent — update in progress$/u });
+  await expect(showAgent).toBeVisible();
+  await expect(ring).toBeVisible();
+  await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
+  await showAgent.click();
+  await expect(page.locator('.log-output')).toBeVisible();
+  await expect(toolbar.getByRole('button', { name: /Launch agent — update in progress$/u })).toBeVisible();
+  await expect(ring).toBeVisible();
+  await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
+});
+
+// retain a visible static update ring for both reduced-motion preferences
+test('keeps a visible static agent update ring when motion is reduced', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const { ring } = await startRunningCodexUpdate(page);
+  await expect(ring).toBeVisible();
+  await expect.poll(() => ring.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
+  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::before').backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+
+  // apply the in-app preference independently of the operating system
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
+  await expect(ring).toBeVisible();
+  await expect.poll(() => ring.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
+  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::before').backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+});
+
 // keep long-running codex and omx updates attached to one queued job
 test('polls queued Codex and OMX updates through completion', async ({ page }) => {
   const adapters = {
@@ -517,6 +597,9 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
     ]
   });
   const menu = await openAgentMenu(page);
+  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+  await expect(toolbar.getByRole('button', { name: /Choose agent — update available$/u })).toBeVisible();
+  await expect(toolbar.locator('.update-progress-ring')).toHaveCount(0);
   await page.clock.install();
   const posts: Record<string, number> = { codex: 0, omx: 0 };
   const polls: Record<string, number> = { codex: 0, omx: 0 };
@@ -560,6 +643,8 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
   await expect(codexUpdate).toContainText('Updating…');
   await expect(codexUpdate).toBeDisabled();
   await expect(omxUpdate).toBeDisabled();
+  await expect(toolbar.getByRole('button', { name: /Choose agent — update in progress$/u })).toBeVisible();
+  await expect(toolbar.locator('.update-progress-ring')).toBeVisible();
   const codexPolls = polls.codex;
   // outlast the former seven-minute browser deadline
   await page.clock.fastForward(8 * 60_000);
@@ -571,6 +656,8 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
   await page.clock.runFor(1_001);
   await expect(menu.getByRole('group', { name: 'Codex agent' }).getByText('v0.153.2', { exact: true })).toBeVisible();
   await expect(codexUpdate).toHaveCount(0);
+  await expect(toolbar.getByRole('button', { name: /Choose agent — update available$/u })).toBeVisible();
+  await expect(toolbar.locator('.update-progress-ring')).toHaveCount(0);
 
   await omxUpdate.click();
   await expect.poll(() => starts.omx).toMatchObject({ contentType: 'application/json', body: '{}' });
@@ -582,6 +669,8 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
   await expect(menu.getByRole('group', { name: 'OMX agent' }).getByText('v0.22.0', { exact: true })).toBeVisible();
   await expect(omxUpdate).toHaveCount(0);
   await expect(menu.getByRole('alert')).toHaveCount(0);
+  await expect(toolbar.getByRole('button', { name: 'Choose agent', exact: true })).toBeVisible();
+  await expect(toolbar.locator('.update-progress-ring')).toHaveCount(0);
   expect(posts).toEqual({ codex: 1, omx: 1 });
 });
 
@@ -628,6 +717,7 @@ test('shows a dismissible toast after a queued agent update fails with its menu 
   const adapters = { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } };
   await openSettings(page, adapters, { open: false, agentUpdates: [{ kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true }] });
   const menu = await openAgentMenu(page);
+  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
   let posts = 0;
   let failUpdate = true;
   // capture timers before the first failure creates its toast
@@ -652,12 +742,16 @@ test('shows a dismissible toast after a queued agent update fails with its menu 
   const update = menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
   await update.click();
   await expect(update).toContainText('Updating…');
-  await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^Choose agent/u }).click();
+  await expect(toolbar.getByRole('button', { name: /Choose agent — update in progress$/u })).toBeVisible();
+  await expect(toolbar.locator('.update-progress-ring')).toBeVisible();
+  await toolbar.getByRole('button', { name: /^Choose agent/u }).click();
   await expect(menu).toHaveCount(0);
   const toast = page.getByRole('alert', { name: 'Agent update failed' });
   await page.clock.runFor(1_001);
   await expect(toast).toContainText('Agent update failed after starting.');
   await expect(toast.locator('.toast-timer-bar')).toHaveCount(0);
+  await expect(toolbar.getByRole('button', { name: /Choose agent — update available$/u })).toBeVisible();
+  await expect(toolbar.locator('.update-progress-ring')).toHaveCount(0);
   // error notices must not expire before dismissal
   await page.clock.fastForward(60_000);
   await expect(toast).toBeVisible();

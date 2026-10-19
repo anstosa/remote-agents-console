@@ -149,11 +149,21 @@ test('opens the commit review before starting and retains update failures in the
   });
 
   await page.goto('/');
+  const selector = page.getByRole('button', { name: /^Switch server/u });
+  await expect(selector).toHaveAccessibleName(/update available$/u);
+  await expect(selector.locator(':scope > .update-progress-ring')).toHaveCount(0);
   await openUpstreamUpdate(page);
 
   const dialog = page.getByRole('dialog', { name: 'Review update' });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText('Add safer update review')).toBeVisible();
+  await expect(selector).toHaveAccessibleName(/update review open$/u);
+  const progressRing = selector.locator(':scope > .update-progress-ring');
+  await expect(progressRing).toBeVisible();
+  await expect.poll(() => selector.evaluate(element => element.getAnimations().length)).toBe(0);
+  const selectorGraphics = selector.locator(':scope > img, :scope > svg');
+  await expect(selectorGraphics).toHaveCount(2);
+  await expect.poll(() => selectorGraphics.evaluateAll(elements => elements.every(element => element.getAnimations().length === 0))).toBe(true);
   expect(advisorLaunches).toBe(0);
   expect(updateStarts).toBe(0);
   const update = dialog.getByRole('button', { name: 'Update', exact: true });
@@ -164,20 +174,26 @@ test('opens the commit review before starting and retains update failures in the
   await expect(dialog.getByRole('button', { name: 'Close server update' })).toBeDisabled();
   await dialog.getByRole('button', { name: 'Minimize server update' }).click();
   await expect(dialog).toBeHidden();
+  await expect(selector).toHaveAccessibleName(/update review minimized$/u);
+  await expect(progressRing).toBeVisible();
   const visibleStatusChecks = updateStatusChecks;
   await expect.poll(() => updateStatusChecks).toBeGreaterThan(visibleStatusChecks);
-  const selector = page.getByRole('button', { name: /^Switch server/u });
   await expect(selector).toBeFocused();
-  await expect(selector).toHaveAccessibleName(/update available/u);
+  await expect(selector).toHaveAccessibleName(/update review minimized$/u);
   await selector.click();
   const reopen = page.getByRole('group', { name: 'Current server details' }).getByRole('button', { name: 'Reopen server update' });
   await reopen.click();
   await expect(dialog).toBeVisible();
   await expect(dialog).toBeFocused();
+  await expect(selector).toHaveAccessibleName(/update review open$/u);
   await expect(dialog.getByRole('button', { name: 'Close server update' })).toBeDisabled();
   expect(updateStarts).toBe(1);
   updateState = 'failed';
   await expect(dialog.getByRole('status').filter({ hasText: 'Update failed. Check the server update log.' })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close server update' }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(selector.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(selector).toHaveAccessibleName(/update available$/u);
 });
 
 // embed migration advice and require explicit acknowledgement

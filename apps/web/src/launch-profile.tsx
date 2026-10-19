@@ -158,8 +158,12 @@ export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch
   const adapters = useContext(AdaptersContext);
   const accounts = useContext(AgentAccountsMenuContext);
   const settings = useContext(AgentLaunchSettingsContext);
+  // keep installer progress distinct from updates awaiting attention
+  const updateInProgress = showAgentSettings && settings?.updating !== undefined;
   // reserve update attention for the persistent toolbar Launch control
-  const updatesAvailable = showAgentSettings && settings?.statuses.some(status => status.updateAvailable) === true;
+  const updatesAvailable = updateInProgress || (showAgentSettings && settings?.statuses.some(status => status.updateAvailable) === true);
+  // announce the same active state conveyed by the moving border
+  const updateLabel = updateInProgress ? 'update in progress' : 'update available';
   const phone = usePhoneLayout();
   const [open, setOpen] = useState(false);
   const [accountsView, setAccountsView] = useState<AgentKind>();
@@ -207,18 +211,22 @@ export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch
   if (placeActions && entries.length === 0 && !alwaysShowMenu) return primaryButton ?? <button type="button" className={primaryClass} aria-label={`Launch ${label}`} disabled={disabled || launchDisabled || pending || (resolution !== undefined && resolution.kind === undefined)} onClick={() => launch(resolution?.kind === undefined ? undefined : { kind: resolution.kind, sandboxed: defaultSandboxed(adapters?.[resolution.kind]) })}>{pending ? <span className="spinner" /> : null}{verb}</button>;
   // launcher rows keep their split action even on a phone; the full-size Launch uses one chooser
   if (phone && !compact && primary === undefined) {
-    if (minimized !== undefined) return <span className={`launch-split launch-menu-only${quiet ? ' quiet' : ''}`}>
-      <button type="button" className="queue launch-menu-trigger" aria-label="Show agent" aria-description={minimizedTitle} title={minimizedTitle} onClick={minimized.onShow}>
+    // retain update feedback when the minimized panel replaces the phone chooser
+    if (minimized !== undefined) return <span className={`launch-split launch-menu-only${quiet ? ' quiet' : ''}${updatesAvailable ? ' updates-available' : ''}${updateInProgress ? ' updates-in-progress' : ''}`}>
+      <button type="button" className="queue launch-menu-trigger" aria-label={updatesAvailable ? `Show agent — ${updateLabel}` : 'Show agent'} aria-description={minimizedTitle} title={minimizedTitle} onClick={minimized.onShow}>
         {resolution?.kind === undefined ? <span className="launch-kind-mark" aria-hidden="true">+</span> : <KindMark kind={resolution.kind} />}
         <span className="launch-menu-trigger-label">Show agent</span>{minimizedBadge}
       </button>
+      {updateInProgress && <span className="update-progress-ring" aria-hidden="true" />}
+      {updatesAvailable && <span className="launch-update-dot" aria-hidden="true" />}
     </span>;
     return <>
-      <span className={`launch-split launch-menu-only${quiet ? ' quiet' : ''}${updatesAvailable ? ' updates-available' : ''}`} ref={anchorRef}>
-        <button type="button" className="queue launch-menu-trigger" aria-label={updatesAvailable ? `${verb} agent — update available` : `${verb} agent`} aria-haspopup="menu" data-context-flyout aria-expanded={open} disabled={disabled || pending} title={disabled ? disabledReason : undefined} onClick={() => { /* toggle the same menu on phone */ if (open) closeMenu(); else setOpen(true); }}>
+      <span className={`launch-split launch-menu-only${quiet ? ' quiet' : ''}${updatesAvailable ? ' updates-available' : ''}${updateInProgress ? ' updates-in-progress' : ''}`} ref={anchorRef}>
+        <button type="button" className="queue launch-menu-trigger" aria-label={updatesAvailable ? `${verb} agent — ${updateLabel}` : `${verb} agent`} aria-haspopup="menu" data-context-flyout aria-expanded={open} disabled={disabled || pending} title={disabled ? disabledReason : undefined} onClick={() => { /* toggle the same menu on phone */ if (open) closeMenu(); else setOpen(true); }}>
           {pending ? <span className="spinner" /> : resolution?.kind === undefined ? <span className="launch-kind-mark" aria-hidden="true">+</span> : <KindMark kind={resolution.kind} />}
           <span className="launch-menu-trigger-label">{verb} agent</span><span className="flyout-caret" aria-hidden="true" />
         </button>
+        {updateInProgress && <span className="update-progress-ring" aria-hidden="true" />}
         {updatesAvailable && <span className="launch-update-dot" aria-hidden="true" />}
       </span>
       {flyout}
@@ -238,13 +246,14 @@ export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch
   const primaryTitle = (disabled ? disabledReason : undefined) ?? hint ?? (placeActions || resolvedKind === undefined ? undefined : `${agentKindLabel[resolvedKind]} — ${originCopy(resolution?.origin)}${sandboxed ? ' — sandboxed' : ''}`);
   return <>
     {!compact && hint !== undefined && <small className="launch-hint">{hint}</small>}
-    <span className={`launch-split${compact ? ' compact' : ''}${quiet ? ' quiet' : ''}${updatesAvailable ? ' updates-available' : ''}`} role="group" data-context-dropdown aria-label={`${verb} agent`} ref={anchorRef}>
+    <span className={`launch-split${compact ? ' compact' : ''}${quiet ? ' quiet' : ''}${updatesAvailable ? ' updates-available' : ''}${updateInProgress ? ' updates-in-progress' : ''}`} role="group" data-context-dropdown aria-label={`${verb} agent`} ref={anchorRef}>
       {primaryButton ?? (minimized !== undefined ? <button type="button" className={`${primaryClass} launch-primary`} aria-description={minimizedTitle} title={minimizedTitle} onClick={() => { closeMenu(); minimized.onShow(); }}>
         {resolvedKind !== undefined && <KindMark kind={resolvedKind} />}<span className="launch-primary-label">Show agent</span>{minimizedBadge}
       </button> : <button type="button" className={`${primaryClass} launch-primary`} aria-label={placeActions ? `${verb} ${label}` : actionCopy(verb, resolvedKind)} disabled={(resolution !== undefined && resolvedKind === undefined) || disabled || launchDisabled || pending} title={primaryTitle} onClick={() => launch(resolvedKind === undefined ? undefined : { kind: resolvedKind, sandboxed })}>
         {/* identify resolved launches without adding management details */}{pending ? <span className="spinner" /> : resolvedKind !== undefined && <KindMark kind={resolvedKind} />}<span className="launch-primary-label">{visibleAction}</span>{!placeActions && sandboxed && <LockIcon />}
       </button>)}
-      <button type="button" className={`launch-chevron${compact ? ' compact' : ''}`} aria-label={updatesAvailable ? `${menuLabel} — update available` : menuLabel} aria-haspopup="menu" data-context-flyout aria-expanded={open} disabled={(none && entries.length === 0) || disabled || pending} onClick={() => { /* toggle the split flyout */ if (open) closeMenu(); else setOpen(true); }}><ChevronIcon /></button>
+      <button type="button" className={`launch-chevron${compact ? ' compact' : ''}`} aria-label={updatesAvailable ? `${menuLabel} — ${updateLabel}` : menuLabel} aria-haspopup="menu" data-context-flyout aria-expanded={open} disabled={(none && entries.length === 0) || disabled || pending} onClick={() => { /* toggle the split flyout */ if (open) closeMenu(); else setOpen(true); }}><ChevronIcon /></button>
+      {updateInProgress && <span className="update-progress-ring" aria-hidden="true" />}
       {updatesAvailable && <span className="launch-update-dot" aria-hidden="true" />}
     </span>
     {flyout}
