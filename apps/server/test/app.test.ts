@@ -1794,10 +1794,10 @@ describe('queued prompt API', () => {
       const attachmentPayload = await queuedApp.inject({ method: 'GET', url: `/api/worktrees/cora/notes/${saved.json().id}/attachments`, headers: { host: headers.host, cookie: headers.cookie } });
 
       expect(saved.statusCode).toBe(201);
-      expect(saved.json()).toMatchObject({ title: expect.stringMatching(/^Queued prompt in Renamed Cora · (?:1[0-2]|[1-9]):[0-5]\d (?:AM|PM)$/u), text: 'Save this prompt', source: 'queued-prompt', attachments: [{ name: 'context.txt', size: 7 }] });
+      expect(saved.json()).toMatchObject({ title: expect.stringMatching(/^\d{2}\/\d{2} (?:1[0-2]|[1-9]):[0-5]\d(?:am|pm) in Renamed Cora: 'Save this prompt'$/u), text: 'Save this prompt', source: 'queued-prompt', attachments: [{ name: 'context.txt', size: 7 }] });
       expect(JSON.stringify(saved.json())).not.toContain('Y29udGV4dA==');
       expect(remaining.json()).toEqual({ prompts: [] });
-      expect(worktreeNotes.json().notes).toMatchObject([{ title: expect.stringMatching(/^Queued prompt in Renamed Cora · (?:1[0-2]|[1-9]):[0-5]\d (?:AM|PM)$/u), text: 'Save this prompt', source: 'queued-prompt', attachments: [{ name: 'context.txt', size: 7 }] }]);
+      expect(worktreeNotes.json().notes).toMatchObject([{ title: expect.stringMatching(/^\d{2}\/\d{2} (?:1[0-2]|[1-9]):[0-5]\d(?:am|pm) in Renamed Cora: 'Save this prompt'$/u), text: 'Save this prompt', source: 'queued-prompt', attachments: [{ name: 'context.txt', size: 7 }] }]);
       expect(attachmentPayload.json()).toEqual({ attachments: [{ name: 'context.txt', data: 'Y29udGV4dA==' }] });
     } finally {
       await queuedApp.close();
@@ -1922,7 +1922,7 @@ describe('queued prompt API', () => {
       // one note per prompt, drained front-of-queue first (so the notes list, newest first, reverses them)
       expect(drained.map(note => note.text)).toEqual(['Second undelivered', 'First undelivered']);
       expect(drained[1]?.attachments).toEqual([{ name: 'context.txt', size: 7 }]);
-      expect(drained.every(note => /^Queued prompt in Release Lane · (?:1[0-2]|[1-9]):[0-5]\d (?:AM|PM)$/u.test(note.title))).toBe(true);
+      expect(drained.every(note => /^\d{2}\/\d{2} (?:1[0-2]|[1-9]):[0-5]\d(?:am|pm) in Release Lane: '(?:First|Second) undelivered'$/u.test(note.title))).toBe(true);
       expect(drained.every(note => note.source === 'queued-prompt')).toBe(true);
       expect(dashboard.json().notesRevision).toBe(2);
     } finally {
@@ -1961,7 +1961,7 @@ describe('queued prompt API', () => {
       const worktreeNotes = await departedApp.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/notes`, headers: { host: headers.host, cookie: headers.cookie } });
 
       expect(worktreeNotes.json().notes).toMatchObject([{ text: 'Left behind', source: 'queued-prompt' }]);
-      expect(worktreeNotes.json().notes[0].title).toMatch(/^Queued prompt in Release Lane/u);
+      expect(worktreeNotes.json().notes[0].title).toMatch(/^\d{2}\/\d{2} (?:1[0-2]|[1-9]):[0-5]\d(?:am|pm) in Release Lane: 'Left behind'$/u);
     } finally {
       vi.useRealTimers();
       await departedApp.close();
@@ -1995,9 +1995,9 @@ describe('queued prompt API', () => {
       const agentNotes = await queuedApp.inject({ method: 'GET', url: '/api/agents/agent-1/notes', headers: { host: headers.host, cookie: headers.cookie } });
 
       expect(saved.statusCode).toBe(201);
-      expect(saved.json()).toMatchObject({ title: expect.stringMatching(/^Queued prompt in scratch · (?:1[0-2]|[1-9]):[0-5]\d (?:AM|PM)$/u), text: 'Scratch prompt', source: 'queued-prompt' });
+      expect(saved.json()).toMatchObject({ title: expect.stringMatching(/^\d{2}\/\d{2} (?:1[0-2]|[1-9]):[0-5]\d(?:am|pm) in scratch: 'Scratch prompt'$/u), text: 'Scratch prompt', source: 'queued-prompt' });
       expect(remaining.json()).toEqual({ prompts: [] });
-      expect(agentNotes.json().notes).toMatchObject([{ title: expect.stringMatching(/^Queued prompt in scratch · (?:1[0-2]|[1-9]):[0-5]\d (?:AM|PM)$/u), text: 'Scratch prompt', source: 'queued-prompt' }]);
+      expect(agentNotes.json().notes).toMatchObject([{ title: expect.stringMatching(/^\d{2}\/\d{2} (?:1[0-2]|[1-9]):[0-5]\d(?:am|pm) in scratch: 'Scratch prompt'$/u), text: 'Scratch prompt', source: 'queued-prompt' }]);
     } finally {
       await queuedApp.close();
       await rm(directory, { recursive: true, force: true });
@@ -2032,7 +2032,7 @@ describe('queued prompt API', () => {
       const agentNotes = await drainApp.inject({ method: 'GET', url: '/api/agents/agent-1/notes', headers: { host: headers.host, cookie: headers.cookie } });
 
       expect(remaining.json()).toEqual({ prompts: [] });
-      expect(agentNotes.json().notes).toMatchObject([{ title: expect.stringMatching(/^Queued prompt in scratch · (?:1[0-2]|[1-9]):[0-5]\d (?:AM|PM)$/u), text: 'Scratch undelivered', source: 'queued-prompt' }]);
+      expect(agentNotes.json().notes).toMatchObject([{ title: expect.stringMatching(/^\d{2}\/\d{2} (?:1[0-2]|[1-9]):[0-5]\d(?:am|pm) in scratch: 'Scratch undelivered'$/u), text: 'Scratch undelivered', source: 'queued-prompt' }]);
     } finally {
       await drainApp.close();
       await rm(directory, { recursive: true, force: true });

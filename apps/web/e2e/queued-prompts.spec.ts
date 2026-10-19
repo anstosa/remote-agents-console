@@ -42,7 +42,7 @@ test('manages waiting prompts from the queue-add control connected to Queue', as
       const index = queued.findIndex(prompt => prompt.id === saveMatch[1]);
       if (index < 0) return route.fulfill({ status: 404, json: { error: 'missing' } });
       const [prompt] = queued.splice(index, 1);
-      const note = { id: `note-${prompt!.id}`, title: 'Queued prompt in Cora · 9:41 AM', text: prompt!.text, source: 'queued-prompt' };
+      const note = { id: `note-${prompt!.id}`, title: "10/18 7:37pm in 🥔 Flowchart: 'Edited queued prompt'", text: prompt!.text, source: 'queued-prompt' };
       notes.unshift(note);
       return route.fulfill({ status: 201, json: note });
     }
@@ -122,7 +122,7 @@ test('manages waiting prompts from the queue-add control connected to Queue', as
   await expect(notesBadge).toHaveClass(/unread/u);
   await expect(notesBadge).toHaveCSS('background-color', 'rgb(243, 139, 168)');
   await page.getByRole('button', { name: /^Notes \(/u }).click();
-  await expect(page.getByLabel('Worktree notes')).toContainText('Queued prompt in Cora · 9:41 AM');
+  await expect(page.getByLabel('Worktree notes')).toContainText("10/18 7:37pm in 🥔 Flowchart: 'Edited queued prompt'");
   await expect(notesBadge).not.toHaveClass(/unread/u);
 
   await page.locator('.flyout-backdrop').click({ position: { x: 4, y: 4 } });
