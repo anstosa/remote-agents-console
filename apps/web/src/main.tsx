@@ -5,7 +5,7 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { pollWhileVisible } from './client-scheduling.js';
 import { closeOnMiddleClick, preserveMiddleClickPress } from './middle-click.js';
-import { outputUrlMatchesHost } from './output-links.js';
+import { currentOutputLinkUrl, outputUrlMatchesHost } from './output-links.js';
 import { mountStreamedTerminal } from './streamed-terminal.js';
 import { attachTerminalSelection, type TerminalSelection, type TerminalSelectionController } from './terminal-selection.js';
 import { createAgentPaneConnector, createWorktreePaneConnector } from './pane-socket-client.js';
@@ -58,11 +58,6 @@ const preserveWorkspacePress = (event: React.MouseEvent | React.PointerEvent) =>
   preserveMiddleClickPress(event);
   preserveContextMenuPress(event);
 };
-
-// read a detected http link from one output menu target
-const outputContextMenuUrl = (target: EventTarget | null) => target instanceof Element
-  ? target.closest<HTMLAnchorElement>('a.output-link-overlay:not([data-output-file-path])')?.href
-  : undefined;
 
 // reuse the sticky-note edit and delete glyphs across app controls
 const actionIconPaths = {
@@ -5790,7 +5785,7 @@ function useWorktreeTerminals(worktreeId: string | undefined) {
 type WorktreeTerminals = ReturnType<typeof useWorktreeTerminals>;
 
 // render a live terminal with fullscreen, minimize and managed-shell delete actions
-function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, onDelete, selectionActions, mobileActive = false }: { worktreeId: string; paneId: string; name: string; onMinimize: () => void; onExit: () => void; onRename?: (name: string) => Promise<boolean>; onDelete?: () => Promise<boolean | undefined> } & TerminalColumnProps) {
+function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, onDelete, onOpenFile, selectionActions, mobileActive = false }: { worktreeId: string; paneId: string; name: string; onMinimize: () => void; onExit: () => void; onRename?: (name: string) => Promise<boolean>; onDelete?: () => Promise<boolean | undefined>; onOpenFile?: (path: string) => void } & TerminalColumnProps) {
   const canvas = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState(false);
   const [selection, setSelection] = useState<TerminalSelection>();
@@ -5811,6 +5806,9 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
   const [deleteError, setDeleteError] = useState(false);
   // the stream's status until its seed lands (Connecting, Reconnecting…); undefined while live
   const [connection, setConnection] = useState<string | undefined>('Connecting');
+  // retain the Place file opener across terminal renders
+  const openTerminalFileRef = useRef(onOpenFile);
+  openTerminalFileRef.current = onOpenFile;
   // preserve the panel when deletion fails or confirmation is cancelled
   const deleteShell = async () => {
     // ignore duplicate deletion or non-managed panes
@@ -5852,7 +5850,9 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
       connect: createWorktreePaneConnector(worktreeId, paneId, request),
       transformInput: data => applyStickyModifiers(paneId, data),
       onExit: () => onExitRef.current(),
-      onStatus: setConnection
+      onStatus: setConnection,
+      // expose file links only when the owning Place supplied a destination
+      ...(onOpenFile === undefined ? {} : { onOpenFile: (path: string) => openTerminalFileRef.current?.(path) })
     });
     const selection = attachTerminalSelection(container, handle, {
       onSelection: setSelection,
@@ -5895,7 +5895,7 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
   const openTerminalContextMenu = (event: React.MouseEvent<HTMLElement>) => {
     const controller = selectionControllerRef.current;
     const selectedText = controller?.getSelectedText() ?? '';
-    const linkUrl = outputContextMenuUrl(event.target);
+    const linkUrl = currentOutputLinkUrl(event.target);
     openSelectionContextMenu(event, {
       label: `Terminal ${name} actions`,
       modes: [
@@ -6047,7 +6047,7 @@ function EditorButton({ worktreeId, terminals, onOperationFeedback }: { worktree
 // The split columns and the toolbar's Terminal (and, with an `editor` configured, Editor) buttons
 // for a Place's Terminals, shared by the Agent tab and the agentless Worktree and Place tabs. A
 // target the dashboard placed nowhere gets neither.
-function useTerminalViews(worktreeId: string | undefined, onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void): { columns?: TerminalColumn[]; control?: ReactNode; closeAll: () => void; openFocused: (binding?: { table: string; key: string }) => Promise<string | undefined>; end: (paneId: string) => void } {
+function useTerminalViews(worktreeId: string | undefined, onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void, onOpenFile?: (path: string) => void): { columns?: TerminalColumn[]; control?: ReactNode; closeAll: () => void; openFocused: (binding?: { table: string; key: string }) => Promise<string | undefined>; end: (paneId: string) => void } {
   const terminals = useWorktreeTerminals(worktreeId);
   const editorConfigured = useContext(EditorConfiguredContext);
   // minimize every visible shell without ending its process
@@ -6073,7 +6073,7 @@ function useTerminalViews(worktreeId: string | undefined, onOperationFeedback?: 
   const columns = terminals.open.map(terminal => {
     const pane = terminals.panes.find(pane => pane.paneId === terminal.paneId);
     const managedShell = pane?.role === 'shell' && !pane.agent;
-    return { key: terminal.paneId, label: terminal.name, node: <TerminalPane key={terminal.paneId} worktreeId={worktreeId} paneId={terminal.paneId} name={terminal.name} onMinimize={() => { /* keep the shell running */ terminals.closePane(terminal.paneId); }} onExit={() => { /* remove ended shells from the count */ terminals.forgetPane(terminal.paneId); }} onRename={managedShell ? (name => terminals.renamePane(terminal.paneId, name)) : undefined} onDelete={managedShell ? (() => terminals.endPane(pane)) : undefined} /> };
+    return { key: terminal.paneId, label: terminal.name, node: <TerminalPane key={terminal.paneId} worktreeId={worktreeId} paneId={terminal.paneId} name={terminal.name} onMinimize={() => { /* keep the shell running */ terminals.closePane(terminal.paneId); }} onExit={() => { /* remove ended shells from the count */ terminals.forgetPane(terminal.paneId); }} onRename={managedShell ? (name => terminals.renamePane(terminal.paneId, name)) : undefined} onDelete={managedShell ? (() => terminals.endPane(pane)) : undefined} {...(onOpenFile === undefined ? {} : { onOpenFile })} /> };
   });
   return { columns, control: <><TerminalPicker worktreeId={worktreeId} terminals={terminals} />{editorConfigured && <EditorButton worktreeId={worktreeId} terminals={terminals} onOperationFeedback={onOperationFeedback} />}</>, closeAll, openFocused, end };
 }
@@ -6488,13 +6488,23 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   const code = useCodePanel(place.worktreeId, request, comparisonChangeSignal(place.gitStatus, place.gitPrStatus, place.attention));
   const files = useFilesController(place.id, request);
   const stackPanel = useStackPanel(place.worktreeId);
-  const terminals = useTerminalViews(place.id, onOperationFeedback);
   // keep the toolbar dots aligned with the visible phone panel
   const [carousel, setCarousel] = useState<PanelCarousel>();
   const settingsSplit = useContext(ClientSettingsSplitContext);
   const conversations = useWorktreeConversations(place.worktreeId, agentId, { onNavigateWorktree, onOperationFeedback });
   // the panel filling the Workspace; the notes restore theirs, so they share it
   const expansion = usePanelExpansion();
+  const terminalPlaceId = place.id;
+  // open ordinary Terminal file mentions through the owning Place's preview route
+  const openTerminalFile = terminalPlaceId === undefined ? undefined : (path: string) => {
+    expansion.restore();
+    const mounted = code.open;
+    code.openFilePreview(path, `/api/worktrees/${encodeURIComponent(terminalPlaceId)}/file-preview`);
+    // reveal the existing split immediately or after its first mount
+    if (mounted) carousel?.show('code');
+    else window.requestAnimationFrame(() => carousel?.show('code'));
+  };
+  const terminals = useTerminalViews(terminalPlaceId, onOperationFeedback, openTerminalFile);
   // keep note capture available even when the agent panel is minimized
   const promptDraftId = agentId ?? (place.worktreeId === undefined ? undefined : worktreePromptId(place.worktreeId));
   const promptNote = promptDraftId === undefined ? undefined : { id: promptDraftId, placeId: place.id, worktreeId: place.worktreeId, onOperationFeedback };
@@ -6759,7 +6769,8 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
       // Typed keys pass through the panel's sticky mobile modifiers before reaching the pane.
       transformInput: data => applyStickyModifiers(id, data),
       onOpenUrl: url => openOutputUrlRef.current?.(url) ?? false,
-      onOpenFile: path => { openOutputFileRef.current?.(path); },
+      // preserve absent file-preview capability in embedded output
+      ...(onOpenFile === undefined ? {} : { onOpenFile: (path: string) => openOutputFileRef.current?.(path) }),
       onQuestion: question => { latestQuestion = (question ?? undefined) as InlineQuestion | undefined; applyQuestion(); },
       onMetadata: metadata => {
         if (disposed) return;
@@ -6819,7 +6830,7 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
   const openOutputContextMenu = (event: MouseEvent) => {
     const controller = selectionControllerRef.current;
     const selectedText = controller?.getSelectedText() ?? '';
-    const linkUrl = outputContextMenuUrl(event.target);
+    const linkUrl = currentOutputLinkUrl(event.target);
     const promptInput = Array.from(document.querySelectorAll<HTMLTextAreaElement>('textarea[data-prompt-id]')).find(input => input.dataset.promptId === id);
     const hasPrompt = !embedded && promptInput !== undefined;
     openSelectionContextMenu(event, {

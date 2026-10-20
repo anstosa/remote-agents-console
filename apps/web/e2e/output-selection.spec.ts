@@ -838,21 +838,17 @@ test('ordinary Windows drag selects Codex output starting on a file link', async
 // keep xterm's custom-label hyperlinks clickable through the owned selection surface
 test('plain click opens a custom-label OSC 8 link in mouse-reporting Agent output', async ({ page }, testInfo) => {
   test.setTimeout(45_000);
-  // capture navigation without leaving the fixture
-  await page.addInitScript(() => {
-    Object.defineProperty(window, 'open', {
-      configurable: true,
-      value: (url: string | URL | undefined) => {
-        (window as typeof window & { __openedOsc8?: string }).__openedOsc8 = String(url ?? '');
-        return null;
-      }
-    });
-  });
+  const targetUrl = 'https://example.com/docs';
+  // keep the real new-page navigation inside the browser fixture
+  await page.context().route(targetUrl, route => route.fulfill({
+    contentType: 'text/html',
+    body: '<!doctype html><title>OSC 8 destination</title>'
+  }));
   await installPaneMock(page);
   await routeSelectionApi(page);
   await page.goto('/');
   await seedPaneSize(page, 'agent-1', 80, 24);
-  await pushBytes(page, 'agent-1', '\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[2J\x1b[H\x1b]8;;https://example.com/docs\x07Open docs\x1b]8;;\x07');
+  await pushBytes(page, 'agent-1', `\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[2J\x1b[H\x1b]8;;${targetUrl}\x07Open docs\x1b]8;;\x07`);
 
   const row = page.locator('.log-canvas .xterm-rows > div', { hasText: 'Open docs' });
   await expect(row).toBeVisible();
@@ -862,11 +858,15 @@ test('plain click opens a custom-label OSC 8 link in mouse-reporting Agent outpu
   ]);
   // require visible link geometry for the real click
   if (bounds === null) throw new Error('OSC 8 output has no row bounds');
+  const openedPagePromise = page.context().waitForEvent('page');
   await page.mouse.click(bounds.x + cellWidth * 4, bounds.y + bounds.height / 2);
-  await expect.poll(() => page.evaluate(() => (window as typeof window & { __openedOsc8?: string }).__openedOsc8 ?? '')).toBe('https://example.com/docs');
+  const openedPage = await openedPagePromise;
+  await openedPage.waitForLoadState('domcontentloaded');
+  expect(openedPage.url()).toBe(targetUrl);
+  await openedPage.close();
 
-  // reset click evidence before dragging within the custom label
-  await page.evaluate(() => { (window as typeof window & { __openedOsc8?: string }).__openedOsc8 = ''; });
+  // retain the browser-page count to prove the drag does not navigate
+  const pagesBeforeDrag = page.context().pages().length;
   await clearNativeSelection(page);
   const y = bounds.y + bounds.height / 2;
   await page.mouse.move(bounds.x + cellWidth, y);
@@ -879,7 +879,7 @@ test('plain click opens a custom-label OSC 8 link in mouse-reporting Agent outpu
   expect(selectedLabel.rectCount).toBeGreaterThan(0);
   expect(selectedLabel.owned).toBe(true);
   await expect(page.getByRole('toolbar', { name: 'Output selection actions' })).toBeVisible();
-  await expect.poll(() => page.evaluate(() => (window as typeof window & { __openedOsc8?: string }).__openedOsc8 ?? '')).toBe('');
+  expect(page.context().pages()).toHaveLength(pagesBeforeDrag);
   await page.screenshot({ path: testInfo.outputPath('osc8-native-selection.png'), fullPage: true });
 });
 

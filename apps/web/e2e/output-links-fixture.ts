@@ -17,7 +17,7 @@ const mountOutputLinkTerminal = (container: HTMLElement, columns: number, width:
   host.style.inset = '0';
   container.append(host);
   const nextTerminal = new XTerm({ cols: columns, rows: 8, convertEol: true, fontSize: 14 });
-  const nextOverlays = createOutputLinkOverlays(container, () => { document.body.dataset.opened = 'true'; });
+  const nextOverlays = createOutputLinkOverlays(container, () => { document.body.dataset.opened = 'true'; }, path => { document.body.dataset.openedFile = path; });
   nextTerminal.open(host);
   return { terminal: nextTerminal, overlays: nextOverlays };
 };

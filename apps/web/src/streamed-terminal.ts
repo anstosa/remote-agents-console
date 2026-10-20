@@ -8,6 +8,7 @@ import { createTerminalSelectionSurface } from './terminal-selection-surface.js'
 import { readTerminalFontSize, subscribeTerminalFontSize } from './terminal-font-size.js';
 import { subscribeColorTheme } from './color-theme.js';
 import { createOutputLinkOverlays } from './output-links.js';
+import { safeHttpTarget } from './terminal-link-metadata.js';
 import { preserveOutputLongPressSelection } from './output-touch.js';
 import { encodeInputBytes, maxInputFrameBytes, type PaneConnection, type PaneConnector, type PaneMetadata, type PaneServerFrame } from './pane-stream.js';
 
@@ -107,10 +108,16 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   terminal.loadAddon(fit);
   // Enforce the pane-stream safety table before any byte is parsed.
   installPaneStreamSafety(terminal);
-  // OSC 8 hyperlinks go through the console's URL opener, never a bare navigation.
+  // retain a safe native OSC fallback when semantic metadata cannot be resolved
   terminal.options.linkHandler = {
-    activate: (_event, uri) => {
-      if (!(options.onOpenUrl?.(uri) ?? false)) window.open(uri, '_blank', 'noopener,noreferrer');
+    activate: (event, uri) => {
+      // allow only primary and middle-button activation
+      if (event.button !== 0 && event.button !== 1) return;
+      // explicit metadata never enables a non-http navigation
+      if (!safeHttpTarget(uri)) return;
+      const plain = event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+      // modified activations stay external just like semantic anchors
+      if (!plain || !(options.onOpenUrl?.(uri) ?? false)) window.open(uri, '_blank', 'noopener,noreferrer');
     }
   };
   terminal.open(host);
@@ -128,8 +135,8 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   const overlays = createOutputLinkOverlays(
     container,
     () => { suppressFocusUntil = performance.now() + 250; },
-    path => options.onOpenFile?.(path),
-    url => options.onOpenUrl?.(url) ?? false
+    options.onOpenFile,
+    options.onOpenUrl
   );
 
   let disposed = false;

@@ -16,6 +16,7 @@ let root: HTMLElement | undefined;
 let connectCount = 0;
 const sent: PaneClientFrame[] = [];
 const questions: unknown[] = [];
+const openedUrls: string[] = [];
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
   const started = performance.now();
@@ -28,13 +29,14 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
 // mount the scripted pane with optional codex transcript controls
 export const renderStreamedTerminal = async (
   container: HTMLElement,
-  options: { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean } = {}
+  options: { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean } = {}
 ): Promise<void> => {
   container.style.width = options.width ?? '640px';
   container.style.height = options.height ?? '320px';
   root = container;
   sent.length = 0;
   questions.length = 0;
+  openedUrls.length = 0;
   connectCount = 0;
   handle = mountStreamedTerminal(container, {
     scrollback: options.scrollback,
@@ -43,6 +45,8 @@ export const renderStreamedTerminal = async (
     reconnectDelayMs: options.reconnectDelayMs ?? 60_000,
     // Stands in for the panel's sticky mobile modifiers so the transform seam is testable.
     transformInput: options.upperCaseInput ? data => data.toUpperCase() : undefined,
+    // capture plain-link routing while leaving modified activations on their native path
+    onOpenUrl: options.captureOpenUrls ? url => { openedUrls.push(url); return true; } : undefined,
     onQuestion: question => questions.push(question),
     connect: next => {
       handlers = next;
@@ -52,6 +56,26 @@ export const renderStreamedTerminal = async (
       return { send: frame => { sent.push(frame); }, close: () => { /* scripted */ } };
     }
   });
+  // emulate an incompatible public-cell metadata interface without changing xterm internals
+  if (options.missingCellMetadata) {
+    const buffer = handle.terminal.buffer.active;
+    const originalGetLine = buffer.getLine.bind(buffer);
+    Object.defineProperty(buffer, 'getLine', { configurable: true, value: (line: number) => {
+      const row = originalGetLine(line);
+      // preserve absent rows
+      if (row === undefined) return undefined;
+      return new Proxy(row, {
+        get: (target, property) => {
+          // hide only the pinned metadata method
+          if (property === 'getCell') return (column: number) => {
+            const cell = target.getCell(column);
+            return cell === undefined ? undefined : new Proxy(cell, { get: (next, name) => name === 'hasExtendedAttrs' ? undefined : Reflect.get(next, name, next) });
+          };
+          return Reflect.get(target, property, target);
+        }
+      });
+    } });
+  }
   host = container.querySelector<HTMLElement>('.streamed-terminal-host') ?? undefined;
   await waitFor(() => sent.some(frame => frame.type === 'viewport'));
   container.dataset.ready = 'true';
@@ -77,6 +101,8 @@ const decodeInput = (data: string) => new TextDecoder().decode(Uint8Array.from(a
 export const inputData = () => sent.filter((frame): frame is Extract<PaneClientFrame, { type: 'input' }> => frame.type === 'input').map(frame => decodeInput(frame.data)).join('');
 export const connectCalls = () => connectCount;
 export const questionsSeen = () => questions;
+// report app-owned plain link openings
+export const openedUrlList = () => [...openedUrls];
 export const sendInputRaw = (text: string) => handle!.sendInput(text);
 export const requestMetadata = () => handle!.requestMetadata();
 // mirror the app's selection-mode signal without replacing the terminal renderer

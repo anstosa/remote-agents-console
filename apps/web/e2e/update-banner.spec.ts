@@ -286,6 +286,10 @@ test('opens an advisor for flagged update paths before enabling Update', async (
   await expect(selectionToolbar.getByRole('button', { name: 'Add to prompt' })).toHaveCount(0);
   await output.getByLabel('Live log').click({ position: { x: 180, y: 80 } });
   await expect(selectionToolbar).toHaveCount(0);
+  await pushBytes(page, 'update-advisor', 'src/host-update.ts\r\nhttps://example.com/advisor\r\n');
+  // embedded advisor output keeps web links but does not invent a file-opening capability
+  await expect(output.getByRole('link', { name: 'Open https://example.com/advisor', exact: true })).toHaveCount(1);
+  await expect(output.getByRole('link', { name: 'Preview src/host-update.ts', exact: true })).toHaveCount(0);
   await expect(output.locator('.log-output')).toHaveClass(/input-active/u);
   await expect(output.getByLabel('Terminal keys')).toBeVisible();
   // keep the embedded keys on a solid control palette instead of the base gradient

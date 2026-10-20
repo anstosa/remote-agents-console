@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
-import { installPaneMock, seedPaneSize } from './pane-stream-mock.js';
+import { installPaneMock, pushBytes, seedPaneSize } from './pane-stream-mock.js';
 
 type Attention = 'working' | 'finished' | 'question';
 type Agent = {
@@ -43,6 +43,7 @@ type Scenario = {
 type ConsoleHarness = {
   lifecycle: LifecycleRequest[];
   destructive: LifecycleRequest[];
+  previews: LifecycleRequest[];
   paneAttempts: Map<string, number>;
   agentAttempts: Map<string, number>;
   operationAttempts: Map<string, number>;
@@ -100,12 +101,14 @@ const routeCapture = (match: RegExpExecArray, index: number) => {
 const routeApi = async (page: Page, scenario: Scenario): Promise<ConsoleHarness> => {
   const lifecycle: LifecycleRequest[] = [];
   const destructive: LifecycleRequest[] = [];
+  const previews: LifecycleRequest[] = [];
   const paneAttempts = new Map<string, number>();
   const agentAttempts = new Map<string, number>();
   const operationAttempts = new Map<string, number>();
   const shellAttempts = new Map<string, number>();
   const noteRunAttempts = new Map<string, number>();
   await page.route('https://preview.example/**', route => route.fulfill({ contentType: 'text/html', body: '<main>project preview</main>' }));
+  await page.context().route('https://example.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main>external output link</main>' }));
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -187,6 +190,21 @@ const routeApi = async (page: Page, scenario: Scenario): Promise<ConsoleHarness>
       return route.fulfill({ status, json: { agentId: 'launched-agent' } });
     }
 
+    const filePreview = /^\/api\/worktrees\/(.+)\/file-preview$/u.exec(path);
+    // serve Place-scoped Terminal file links
+    if (filePreview !== null && request.method() === 'POST') {
+      const body = request.postDataJSON() as { path?: unknown } | null;
+      const capture = { method: request.method(), path: `${path}${url.search}`, contentType: request.headers()['content-type'], body: request.postData() };
+      previews.push(capture);
+      // require the file path contract
+      if (typeof body?.path !== 'string') return route.fulfill({ status: 400, json: { error: 'invalid path' } });
+      return route.fulfill({ json: { path: body.path, size: 27, binary: false, truncated: false, content: 'export const terminal = true;\n' } });
+    }
+
+    const comparison = /^\/api\/worktrees\/(.+)\/comparison$/u.exec(path);
+    // let the Code controller finish its background comparison load
+    if (comparison !== null && request.method() === 'POST') return route.fulfill({ json: { kind: 'working', base: 'HEAD', gitBase: 'HEAD', files: [], fingerprint: '', truncated: false } });
+
     const paneList = /^\/api\/worktrees\/(.+)\/panes$/u.exec(path);
     // list every pane at the exact place
     if (paneList !== null && request.method() === 'GET') {
@@ -257,7 +275,7 @@ const routeApi = async (page: Page, scenario: Scenario): Promise<ConsoleHarness>
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
-  return { lifecycle, destructive, paneAttempts, agentAttempts, operationAttempts, shellAttempts, noteRunAttempts };
+  return { lifecycle, destructive, previews, paneAttempts, agentAttempts, operationAttempts, shellAttempts, noteRunAttempts };
 };
 
 // mount the dashboard with deterministic pane streams
@@ -365,6 +383,55 @@ test('middle-clicking browser chrome closes its split while iframe clicks stay i
   await expect(browser).toBeVisible();
   await page.frameLocator('iframe[title="Project browser"]').getByText('project preview', { exact: true }).click({ button: 'middle' });
   await expect(browser).toBeVisible();
+});
+
+test('middle-clicking output links navigates without closing Agent or Terminal panels, and Terminal files open in Code', async ({ page }) => {
+  // allow the cold main bundle transform before exercising both panels
+  test.setTimeout(120_000);
+  const scenario: Scenario = {
+    agents: [worktreeAgent('cora-1', cora)],
+    projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [cora] }],
+    panes: { cora: [{ paneId: '%5', session: '$1', window: '@1', role: 'shell', name: 'build', command: 'zsh', path: cora.path, title: '', agent: false, busy: false }] }
+  };
+  const harness = await mountConsole(page, scenario, '#agent=cora-1');
+  await seedPaneSize(page, 'cora-1', 80, 24);
+  const terminal = await openShell(page, 'build', '%5');
+  await seedPaneSize(page, '%5', 80, 24);
+  const uri = 'https://example.com/output-target';
+  await pushBytes(page, 'cora-1', `${'\r\n'.repeat(20)}Agent link ${uri}\r\n`);
+  await pushBytes(page, '%5', `Terminal link ${uri}\r\nsrc/terminal.ts:12\r\n`);
+
+  const agentLink = page.locator('.agent-panel').getByRole('link', { name: `Open ${uri}`, exact: true });
+  const terminalLink = terminal.getByRole('link', { name: `Open ${uri}`, exact: true });
+  // preserve native middle-click navigation from the Agent output
+  const agentPagePromise = page.context().waitForEvent('page');
+  await agentLink.click({ button: 'middle' });
+  const agentPage = await agentPagePromise;
+  await expect(agentPage).toHaveURL(uri);
+  await expect(agentPage.getByText('external output link', { exact: true })).toBeVisible();
+  await agentPage.close();
+  // preserve the ordinary Terminal's external navigation policy
+  const terminalPagePromise = page.context().waitForEvent('page');
+  await terminalLink.click({ button: 'middle' });
+  const terminalPage = await terminalPagePromise;
+  await expect(terminalPage).toHaveURL(uri);
+  await expect(terminalPage.getByText('external output link', { exact: true })).toBeVisible();
+  await terminalPage.close();
+
+  expect(mutations(harness)).toEqual([]);
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  await expect(terminal).toBeVisible();
+  await expect(page.locator('.browser-pane')).toHaveCount(0);
+
+  await terminal.getByRole('link', { name: 'Preview src/terminal.ts', exact: true }).click();
+  await expect.poll(() => harness.previews.map(request => ({ path: request.path, body: request.body }))).toEqual([
+    { path: '/api/worktrees/cora/file-preview', body: JSON.stringify({ path: 'src/terminal.ts' }) }
+  ]);
+  const code = page.getByRole('region', { name: 'Code changes' });
+  await expect(code).toBeVisible();
+  await expect(code.getByText('export const terminal = true;')).toBeVisible();
+  await expect(terminal).toBeVisible();
+  expect(mutations(harness)).toEqual([]);
 });
 
 test('middle-clicking an inactive worktree shuts it down without changing the active tab', async ({ page }) => {

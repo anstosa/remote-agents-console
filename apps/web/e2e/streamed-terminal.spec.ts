@@ -320,6 +320,45 @@ test('OSC 52 cannot type into the pane and does not read the clipboard', async (
   expect(await page.evaluate(() => (window as unknown as { __clipReads: number }).__clipReads)).toBe(0);
 });
 
+// native OSC fallback preserves navigation buttons without treating context click as activation
+test('native OSC fallback ignores right click when cell metadata is unavailable', async ({ page }) => {
+  const target = 'https://example.com/native-osc-fallback';
+  await page.context().route(target, route => route.fulfill({ contentType: 'text/html', body: '<main>controlled native OSC target</main>' }));
+  await setup(page, { missingCellMetadata: true, captureOpenUrls: true });
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', `\x1b]8;;${target}\x07Open docs\x1b]8;;\x07`);
+  await expect.poll(() => drive<string>(page, 'screenText')).toContain('Open docs');
+  await expect(page.locator('#term .output-link-overlay')).toHaveCount(0);
+
+  const row = page.locator('#term .xterm-rows > div', { hasText: 'Open docs' });
+  const [rowBounds, screenBounds] = await Promise.all([
+    row.boundingBox(),
+    page.locator('#term .xterm-screen').boundingBox()
+  ]);
+  // require real native-link geometry
+  if (rowBounds === null || screenBounds === null) throw new Error('native OSC link has no visible geometry');
+  const point = { x: screenBounds.x + screenBounds.width / 40 * 4.5, y: rowBounds.y + rowBounds.height / 2 };
+  await page.mouse.move(point.x, point.y);
+  await expect(page.locator('#term .xterm-screen')).toHaveClass(/xterm-cursor-pointer/u);
+  const pagesBeforeContextClick = page.context().pages().length;
+  await page.mouse.click(point.x, point.y, { button: 'right' });
+  await page.waitForTimeout(100);
+  expect(page.context().pages()).toHaveLength(pagesBeforeContextClick);
+  expect(await drive<string[]>(page, 'openedUrlList')).toEqual([]);
+
+  // plain left click stays on the app-owned URL seam
+  await page.mouse.click(point.x, point.y);
+  await expect.poll(() => drive<string[]>(page, 'openedUrlList')).toEqual([target]);
+
+  // native middle click opens the same controlled external destination
+  const middlePagePromise = page.context().waitForEvent('page');
+  await page.mouse.click(point.x, point.y, { button: 'middle' });
+  const middlePage = await middlePagePromise;
+  await expect(middlePage).toHaveURL(target);
+  await expect(middlePage.getByText('controlled native OSC target', { exact: true })).toBeVisible();
+  await middlePage.close();
+});
+
 test('OSC 10/11/12 sets leave the terminal theme alone', async ({ page }) => {
   await setup(page);
   await drive(page, 'pushSize', 40, 10);
