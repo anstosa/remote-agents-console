@@ -38,7 +38,9 @@ export type PaneServerFrame =
   // The Agent pane's current Inline question, or null when there is none.
   | { type: 'question'; question: unknown }
   // The Agent pane's latest Turn.
-  | { type: 'metadata'; metadata: PaneMetadata };
+  | { type: 'metadata'; metadata: PaneMetadata }
+  // Text copied in a pane of the session (OSC 52 or a tmux copy-mode yank).
+  | { type: 'clipboard'; text: string };
 
 export interface PaneConnectionHandlers {
   onOpen: () => void;

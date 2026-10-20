@@ -107,6 +107,10 @@ describe('ControlProtocolParser', () => {
     ]);
   });
 
+  it('surfaces a %paste-buffer-changed by the buffer name', () => {
+    expect(collect(['%paste-buffer-changed buffer0\n'])).toEqual([{ type: 'paste-buffer', name: 'buffer0' }]);
+  });
+
   it('ignores notifications it does not act on', () => {
     expect(collect(['%window-add @2\n', '%client-detached other\n', '%output %1 x\n'])).toEqual([
       { type: 'output', pane: '%1', data: 'x' }

@@ -62,7 +62,8 @@ function fakePaneStream() {
     output: (bytes: Buffer) => subscriber?.onOutput?.(bytes),
     fire: (event: 'onReseed' | 'onResize') => subscriber?.[event]?.(),
     exit: (reason: string) => subscriber?.onExit?.(reason),
-    activity: () => subscriber?.onActivity?.()
+    activity: () => subscriber?.onActivity?.(),
+    clipboard: (text: string) => subscriber?.onClipboard?.(text)
   };
 }
 
@@ -245,6 +246,17 @@ describe('/ws/pane seed and size', () => {
     const conn = await connect(stream.provider, { tmux, query: '?pane=%99' });
     await waitFor(() => conn.closeCode() !== undefined);
     expect(conn.closeCode()).toBe(1008);
+  });
+});
+
+describe('/ws/pane clipboard', () => {
+  it('forwards a pane copy to the browser as a clipboard frame', async () => {
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    stream.clipboard('yanked line\n');
+    await waitFor(() => conn.frames.some(frame => frame.type === 'clipboard'));
+    expect(conn.frames.find(frame => frame.type === 'clipboard')).toEqual({ type: 'clipboard', text: 'yanked line\n' });
   });
 });
 

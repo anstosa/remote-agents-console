@@ -392,6 +392,9 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       case 'exit': if (options.onExit) options.onExit(frame.reason); else handleDisconnect(frame.reason); break;
       case 'question': options.onQuestion?.(frame.question); break;
       case 'metadata': options.onMetadata?.(frame.metadata); break;
+      // the browser allows the write only shortly after a keypress in this tab (the yank), so
+      // other open tabs and devices fail quietly
+      case 'clipboard': navigator.clipboard?.writeText(frame.text).catch(() => {}); break;
     }
   };
 

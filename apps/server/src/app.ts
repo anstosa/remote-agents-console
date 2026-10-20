@@ -3461,6 +3461,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         onOutput: forward,
         onReseed: () => { sendFrame({ type: 'reseed' }); void reseed(); },
         onResize: () => { void reclamp(); },
+        onClipboard: (text: string) => sendFrame({ type: 'clipboard', text }),
         // the session ended or the control client was lost; forward the reason and let the browser reconnect
         onExit: (reason: string) => { sendFrame({ type: 'exit', reason }); socket.close(1011); }
       });

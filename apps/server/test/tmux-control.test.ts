@@ -375,6 +375,27 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
     }
   });
 
+  // a copy in the pane (OSC 52 under `set-clipboard on`) reaches the viewer byte-exact; the
+  // console's own `rac-*` prompt buffers never do
+  it('forwards a pane copy to onClipboard but not the console\'s prompt buffers', async () => {
+    const { ref, socket, pane } = await fixtureSession();
+    expect((await run(tmux, ['-S', socket, 'set-option', '-s', 'set-clipboard', 'on'])).code).toBe(0);
+    const client = new TmuxControlClient(tmux, ref.path, 'fixture', () => {});
+    try {
+      await client.ready;
+      const copies: string[] = [];
+      client.subscribe(pane, { onClipboard: text => { copies.push(text); }, onReseed: () => {}, onResize: () => {}, onExit: () => {} });
+      expect((await run(tmux, ['-S', socket, 'load-buffer', '-b', 'rac-prompt', '-'], 'prompt text')).code).toBe(0);
+      // `cat` writes the typed line back raw, so the pane itself emits the OSC 52
+      const osc = `\x1b]52;c;${Buffer.from('yanked line\n').toString('base64')}\x07\r`;
+      expect(await client.sendInput(pane, Buffer.from(osc))).toBe(true);
+      await eventually(() => copies.length > 0);
+      expect(copies).toEqual(['yanked line\n']);
+    } finally {
+      client.dispose();
+    }
+  });
+
   // leave shared history modes before forwarding terminal input
   it('exits copy mode before forwarding one raw Enter', async () => {
     const { ref, socket, pane } = await fixtureSession();

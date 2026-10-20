@@ -24,6 +24,8 @@ export type ControlEvent =
   // the viewer re-clamps. Only the name routes the change — the value is a signal, never read —
   // and tmux reports it at most once a second.
   | { type: 'subscription'; name: string }
+  // a paste buffer was created or replaced (a copy in a pane, or a load-buffer/set-buffer)
+  | { type: 'paste-buffer'; name: string }
   | { type: 'exit'; reason: string };
 
 const beginPattern = /^%begin \d+ (\d+)/u;
@@ -131,6 +133,7 @@ export class ControlProtocolParser {
     if (line.startsWith('%window-close ')) return this.emitLayout(line.slice('%window-close '.length));
     if (line.startsWith('%unlinked-window-close ')) return this.emitLayout(line.slice('%unlinked-window-close '.length));
     if (line.startsWith('%subscription-changed ')) return this.emitSubscription(line.slice('%subscription-changed '.length));
+    if (line.startsWith('%paste-buffer-changed ')) return this.emit({ type: 'paste-buffer', name: line.slice('%paste-buffer-changed '.length).trim() });
     if (line === '%exit' || line.startsWith('%exit ')) {
       return this.emit({ type: 'exit', reason: line.slice('%exit'.length).trim() || 'server exited' });
     }

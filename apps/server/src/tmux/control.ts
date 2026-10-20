@@ -7,7 +7,7 @@
 // uses `%output` only as a "this pane changed" signal; a later ticket streams them.
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import type { SocketRef } from '../domain/models.js';
-import { capturePaneArgs, paneIdPattern as paneId, safeEnv, sessionIdPattern as sessionId, tmuxBinary } from './command.js';
+import { capturePaneArgs, paneIdPattern as paneId, run, safeEnv, sessionIdPattern as sessionId, tmuxBinary } from './command.js';
 import { ControlProtocolParser, decodeControlOutput, type CommandReply, type ControlEvent } from './control-protocol.js';
 
 const maxCaptureDepth = 5_000;
@@ -41,6 +41,9 @@ export type PaneActivitySubscriber = {
   // a window layout changed or an attached terminal attached, detached or resized; the
   // viewer re-asserts and re-clamps its Size claim (Sizing, ADR 0008)
   onResize: () => void;
+  // text copied in any pane of the session (OSC 52 under `set-clipboard on`, or a copy-mode
+  // yank); the Pane stream hands it to the browser's clipboard
+  onClipboard?: (text: string) => void;
   // the session or control client ended; `reason` is the Pane stream's exit reason
   // ('session ended' when tmux told us via %exit, 'control client lost' when our client
   // process died). The viewer forwards it and reconnects.
@@ -84,7 +87,7 @@ export class TmuxControlClient implements PaneClient {
   readonly ready: Promise<void>;
 
   // command clients suppress output and have server-owned lifetimes
-  constructor(binary: string, socketPath: string, session: string | undefined, private readonly onGone: () => void, private readonly options: { commandOnly?: boolean; timeoutMs?: number } = {}) {
+  constructor(private readonly binary: string, private readonly socketPath: string, session: string | undefined, private readonly onGone: () => void, private readonly options: { commandOnly?: boolean; timeoutMs?: number } = {}) {
     this.parser = new ControlProtocolParser(event => this.onEvent(event));
     // `-C` over pipes (never `-CC`), `-f ignore-size` so the client does not affect any
     // window's size; default stdio is 'pipe' for all three fds. Never `read-only`: a command-line
@@ -133,6 +136,7 @@ export class TmuxControlClient implements PaneClient {
       // Both are session-wide, so broadcast; a re-clamp on an unaffected pane is a no-op.
       case 'layout': this.notifyResize(); return;
       case 'subscription': if (event.name === clientSizeSubscription) this.notifyResize(); return;
+      case 'paste-buffer': void this.forwardCopy(event.name); return;
       case 'exit': this.fail('session ended'); return;
     }
   }
@@ -213,6 +217,17 @@ export class TmuxControlClient implements PaneClient {
   // a layout or attached-client change reaches every viewer of this session
   private notifyResize(): void {
     for (const set of [...this.subscribers.values()]) for (const subscriber of [...set]) subscriber.onResize();
+  }
+
+  // A copy makes an automatic `bufferN`; the console's own prompt buffers are named `rac-*` and
+  // never reach the clipboard. Read with a spawn because a reply block over the connection
+  // loses the buffer's trailing newline (a linewise yank).
+  private async forwardCopy(name: string): Promise<void> {
+    if (!/^buffer\d+$/u.test(name) || this.subscriberCount() === 0) return;
+    const result = await run(this.binary, ['-S', this.socketPath, 'show-buffer', '-b', name]).catch(() => undefined);
+    // run() keeps only the last 1,000,000 chars, so a copy that large is skipped, never truncated
+    if (result?.code !== 0 || result.stdout === '' || result.stdout.length >= 1_000_000) return;
+    for (const set of [...this.subscribers.values()]) for (const subscriber of [...set]) subscriber.onClipboard?.(result.stdout);
   }
 
   // the id of the pane's window (`@N`), read over the control connection so the Size claim
