@@ -88,7 +88,8 @@ export class TmuxControlClient implements PaneClient {
     this.parser = new ControlProtocolParser(event => this.onEvent(event));
     // `-C` over pipes (never `-CC`), `-f ignore-size` so the client does not affect any
     // window's size; default stdio is 'pipe' for all three fds
-    const flags = options.commandOnly ? 'ignore-size,no-output,no-detach-on-destroy,read-only' : 'ignore-size';
+    // tmux borrows this client for spawned send-keys, so read-only would block launches
+    const flags = options.commandOnly ? 'ignore-size,no-output,no-detach-on-destroy' : 'ignore-size';
     this.child = spawn(binary, ['-S', socketPath, ...(options.commandOnly ? ['-N'] : []), '-C', 'attach-session', ...(options.commandOnly ? ['-E'] : []), ...(session === undefined ? [] : ['-t', session]), '-f', flags], { env: safeEnv() });
     this.ready = new Promise<void>((resolve, reject) => this.blockWaiters.push({ resolve: reply => {
       // failed attaches are not usable connections

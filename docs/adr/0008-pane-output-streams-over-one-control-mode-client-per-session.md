@@ -40,11 +40,13 @@ launch or removal protection. The command surface permits pane listings only;
 mutations are never retried through this transport.
 
 The observer attaches with `-N` (never start a server), `-E` (preserve the session
-environment), and `ignore-size,no-output,no-detach-on-destroy,read-only`. It neither
+environment), and `ignore-size,no-output,no-detach-on-destroy`. It neither
 streams pane output nor changes viewport sizing. It is still an attached tmux
 client: `session_attached`, attach/detach hooks, and `destroy-unattached` can observe
-its presence. `read-only` is not a command authorization boundary; the narrow
-server-owned listing method is.
+its presence. It deliberately omits `read-only`: when this observer is the only
+attached client, tmux can select it as the context for a separate spawned
+`send-keys` command and reject launch or prompt submission with “client is
+read-only”. The narrow server-owned listing method is the authorization boundary.
 
 An attach or command failure disposes the connection. The same read falls back to
 the existing spawned listing, with persistent reconnect attempts separated by

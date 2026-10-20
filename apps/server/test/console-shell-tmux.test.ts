@@ -12,7 +12,7 @@ import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { PaneStreamRegistry } from '../src/tmux/control.js';
 import { LaunchService } from '../src/launch/service.js';
 import { run } from '../src/tmux/command.js';
-import { interactiveShellPath } from '../src/tmux/interactive-shell.js';
+import { interactiveShellName, interactiveShellPath } from '../src/tmux/interactive-shell.js';
 import type { SocketRef, Worktree } from '../src/domain/models.js';
 import { testConfig, testProject, testWorktree } from './helpers/config.js';
 import { worktreePlace } from '../src/places/places.js';
@@ -40,10 +40,9 @@ const tmuxSocketsWork = (() => {
   }
 })();
 
-// A login shell that exists on this host: the configured interactive shell, else zsh, else bash. A
-// missing one (the zsh default on a fish or bash host) dies the moment its pane starts, so every
-// Console shell here would be a dead pane.
-const loginShell = [process.env.RAC_INTERACTIVE_SHELL?.trim(), '/usr/bin/zsh', '/bin/bash'].find((path): path is string => path !== undefined && path !== '' && existsSync(path));
+// choose a supported login shell: configured, current, then common system paths
+// a missing shell dies immediately and leaves every Console shell dead
+const loginShell = [process.env.RAC_INTERACTIVE_SHELL?.trim(), process.env.SHELL?.trim(), '/usr/bin/zsh', '/bin/bash'].find((path): path is string => path !== undefined && ['zsh', 'bash', 'fish'].includes(interactiveShellName(path)) && existsSync(path));
 
 const auth = { unsign: () => 'session', get: () => ({ id: 'session', csrf: 'csrf' }), csrf: () => true } as never;
 const control = { connect: () => true, active: () => true } as never;
@@ -71,6 +70,11 @@ async function fixtureSession(): Promise<{ socket: SocketRef; socketPath: string
   fixtures.push({ root, socket: socketPath });
   expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'fixture', '-x', '80', '-y', '24', '-c', root, 'cat'])).code).toBe(0);
   return { socket: { fingerprint: 'fixture', path: socketPath, device: 0, inode: 0 }, socketPath, session: 'fixture', worktreeDir: root };
+}
+
+// mirror production's Place membership marker
+async function markFixturePlace(fixture: { socketPath: string; session: string }, placeId: string): Promise<void> {
+  expect((await run(tmux, ['-S', fixture.socketPath, 'set-option', '-t', fixture.session, '@rac_place', placeId])).code).toBe(0);
 }
 
 async function freePort(): Promise<number> {
@@ -137,6 +141,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('Console shells (r
   it('opens a Console shell beside a session with both markers, renames it, and reads the busy state', async () => {
     const fixture = await fixtureSession();
     const worktree = testWorktree({ id: 'proj:wt', projectId: 'proj', path: fixture.worktreeDir, identity: fixture.worktreeDir, main: false });
+    await markFixturePlace(fixture, worktree.id);
     const launch = new LaunchService(testConfig() as never, { find: async () => [fixture.socket] }, new TmuxAdapter(), undefined, undefined, () => [worktree], () => new Set(), async () => ({ socket: fixture.socket, session: fixture.session }));
 
     // created beside the fixture session, it is a login shell in the Worktree, marked and named
@@ -211,6 +216,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('Console shells (r
   it('joins the session holding the Console shells when a later Launch finds no idle shell', async () => {
     const fixture = await fixtureSession();
     const worktree = testWorktree({ id: 'proj:wt', projectId: 'proj', path: fixture.worktreeDir, identity: fixture.worktreeDir, main: false });
+    await markFixturePlace(fixture, worktree.id);
     // a marked Console shell in the fixture session, and no adoptable idle shell (the fixture's
     // own pane runs `cat`, not the login shell), so the launch must join this session
     const shell = await new TmuxAdapter().createConsoleShellWindow(fixture.socket, fixture.session, fixture.worktreeDir, [interactiveShellPath(), '-l'], '');
@@ -236,6 +242,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('Console shells (r
     it(`joins the session holding a ${kind} Place's Console shells and labels the launched pane`, async () => {
       const fixture = await fixtureSession();
       const home = await realpath(fixture.worktreeDir);
+      await markFixturePlace(fixture, `${kind === 'directory' ? 'notes' : 'scratch'}:${home}`);
       expect(await new TmuxAdapter().createConsoleShellWindow(fixture.socket, fixture.session, home, [interactiveShellPath(), '-l'], '')).toMatch(/^%\d+$/);
       const windowIds = async () => (await run(tmux, ['-S', fixture.socketPath, 'list-windows', '-t', fixture.session, '-F', '#{window_id}'])).stdout.trim().split('\n').filter(Boolean);
       const before = await windowIds();

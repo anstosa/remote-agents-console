@@ -15,6 +15,11 @@
 .settings-search input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .52rem .62rem; background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); color: var(--text); font: 600 .7rem var(--font-mono); }
 .settings-search input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .settings-center-layout { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: minmax(10rem, 13rem) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; border: 1px solid var(--surface-1); border-radius: .65rem; background: color-mix(in srgb, var(--mantle) 88%, var(--crust)); }
+/* keep a usable tab scroller below persistent notices on short screens */
+@media (max-height: 480px) {
+  .settings-center-page > .client-settings-page-content { overflow-y: auto; }
+  .settings-center-layout { min-height: 12rem; }
+}
 /* keep custom mobile navigation out of the desktop layout and accessibility tree */
 .settings-source-select { display: none; min-width: 0; gap: .35rem; border-bottom: 1px solid var(--surface-1); padding: .65rem; background: color-mix(in srgb, var(--crust) 88%, var(--mantle)); color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
 .settings-source-select small { font: 500 .62rem var(--font-mono); }

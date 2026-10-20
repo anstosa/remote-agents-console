@@ -511,10 +511,22 @@ export class LaunchService {
   // send a composed launch into an adopted idle shell, marking it console-managed (and Sandboxed)
   private async launchInShell(existing: { socket: SocketRef; pane: Pane }, command: string, id: string, sandboxed: boolean): Promise<boolean> {
     const buffer = `rac-launch-${id}`;
-    return await this.panes.pastePrompt(existing.socket, existing.pane.paneId, buffer, command)
-      && await this.panes.enter(existing.socket, existing.pane.paneId)
-      && await this.markConsoleManaged(existing.socket.path, existing.pane.paneId)
-      && await this.markSandboxed(existing.socket.path, existing.pane.paneId, sandboxed);
+    // retain the exact failed stage without exposing the launch command
+    if (!await this.panes.pastePrompt(existing.socket, existing.pane.paneId, buffer, command)) {
+      console.error(`[launch] shell ${existing.pane.paneId}: paste failed`);
+      return false;
+    }
+    // never repeat a partially submitted launch in another pane
+    if (!await this.panes.enter(existing.socket, existing.pane.paneId)) {
+      console.error(`[launch] shell ${existing.pane.paneId}: submit failed`);
+      return false;
+    }
+    // distinguish ownership marking from input delivery
+    if (!await this.markConsoleManaged(existing.socket.path, existing.pane.paneId)) {
+      console.error(`[launch] shell ${existing.pane.paneId}: mark failed`);
+      return false;
+    }
+    return await this.markSandboxed(existing.socket.path, existing.pane.paneId, sandboxed);
   }
 
   // launch a fresh agent in a worktree, resolving the kind (or using the requested one)

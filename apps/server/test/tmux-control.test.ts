@@ -110,6 +110,24 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
     }
   });
 
+  // a dashboard-only observer must not block spawned launch or prompt submission
+  it('submits pasted input when the dashboard connection is the only attached client', async () => {
+    const { ref, socket, pane } = await fixtureSession();
+    const adapter = new TmuxAdapter(new TmuxCommandRegistry());
+    try {
+      await adapter.listPanes(ref);
+      const clients = (await run(tmux, ['-S', socket, 'list-clients', '-F', '#{client_flags}'])).stdout.trim().split('\n');
+      expect(clients).toHaveLength(1);
+      expect(clients[0]).toContain('no-output');
+      expect(await adapter.pastePrompt(ref, pane, 'rac-launch-client-test', 'launch submission')).toBe(true);
+      expect(await adapter.enter(ref, pane)).toBe(true);
+      // cat echoes the line only after receiving Enter
+      await expect.poll(async () => (await run(tmux, ['-S', socket, 'capture-pane', '-p', '-t', pane])).stdout.match(/launch submission/gu)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    } finally {
+      adapter.closeCommands();
+    }
+  });
+
   // socket loss falls back on the same call, then a later tick reconnects
   it('falls back after client loss and reconnects without a browser', async () => {
     const { ref, socket } = await fixtureSession();

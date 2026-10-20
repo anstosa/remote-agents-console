@@ -2192,13 +2192,14 @@ function Login({ done, initialError }: { done: (session: SessionInfo) => void; i
   return <main className="auth-screen"><div className="auth-glow" /><form className="auth-card" onSubmit={login}><div className="auth-mark" aria-hidden="true"><span>&gt;_</span></div><div className="auth-heading"><ServerSwitcher className="auth-server-switcher" /><p>REMOTE // AGENTS</p><h1>Console access</h1></div><label className="sr-only">Username<input type="text" name="username" autoComplete="username" tabIndex={-1} /></label><label>Password<input autoFocus type="password" name="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" /></label>{error && <p className="auth-error" role="alert">{error}</p>}<button className="auth-submit">Authenticate <span aria-hidden="true">↗</span></button></form></main>;
 }
 
+// frame full-screen loading with the shared clockwise progress border
 function LoadingScreen({ label = 'Restoring secure session' }: { label?: string }) {
-  return <main className="auth-screen loading-screen" aria-live="polite"><div className="auth-glow" /><div className="loading-console"><div className="loading-line"><span className="spinner" />{label}</div><div className="loading-bars" aria-hidden="true"><i /><i /><i /><i /><i /></div></div></main>;
+  return <main className="auth-screen loading-screen" aria-live="polite"><div className="auth-glow" /><div className="loading-console progress-border" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" /><div className="loading-line"><span className="spinner" />{label}</div></div></main>;
 }
 
 // restore the full-screen status treatment without unmounting the console
 function ReconnectingOverlay() {
-  return <div className="reconnecting-overlay" role="alert" aria-label="Reconnecting to console"><div className="auth-glow" aria-hidden="true" /><div className="loading-console"><div className="loading-line"><span className="spinner" aria-hidden="true" />Reconnecting to console</div><div className="loading-bars" aria-hidden="true"><i /><i /><i /><i /><i /></div></div></div>;
+  return <div className="reconnecting-overlay" role="alert" aria-label="Reconnecting to console"><div className="auth-glow" aria-hidden="true" /><div className="loading-console progress-border" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" /><div className="loading-line"><span className="spinner" aria-hidden="true" />Reconnecting to console</div></div></div>;
 }
 
 function ControlScreen({ session, claimed }: { session: SessionInfo; claimed: (next: SessionInfo) => void }) {
@@ -8206,6 +8207,19 @@ function NoteFeedbackProvider({ children }: { children: ReactNode }) {
 function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDismissUpdateError, launchErrorMessage, launchErrorExpires }: { children?: ReactNode; feedback?: OperationFeedback; onDismissFeedback: () => void; updateError?: string; onDismissUpdateError: () => void; launchErrorMessage?: string; launchErrorExpires?: number }) {
   const clientSettings = useContext(ClientSettingsContext);
   const noteFeedback = useContext(NoteFeedbackContext);
+  const [reloadingClient, setReloadingClient] = useState(false);
+  const reloadClient = clientSettings?.reloadClient;
+  // paint the committed progress border before replacing the document
+  useEffect(() => {
+    // schedule navigation only after the reload button is clicked
+    if (!reloadingClient || reloadClient === undefined) return;
+    let frame = window.requestAnimationFrame(() => {
+      // leave one rendered frame before navigation can suspend painting
+      frame = window.requestAnimationFrame(reloadClient);
+    });
+    // cancel navigation if this toast host unmounts before the next frame
+    return () => window.cancelAnimationFrame(frame);
+  }, [reloadClient, reloadingClient]);
   const showSettingsRestart = useSettingsRestartNoticeVisible();
   // keep stale-client guidance visible until the browser reloads
   const showClientUpdate = clientSettings?.clientUpdateAvailable === true;
@@ -8235,7 +8249,11 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
   if (children == null && feedback === undefined && !updateError && !showLaunchError && !showClientUpdate && !showSettingsRestart && !noteFeedback?.toasts.length) return null;
   return createPortal(<div className="toast-region" ref={reserveToastSpace}>
     {noteFeedback?.toasts}
-    {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>Reload to use the latest version.</span></div><button type="button" onClick={clientSettings.reloadClient}>Reload UI</button></section>}
+    {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>Reload to use the latest version.</span></div><button type="button" className="progress-border progress-blue" disabled={reloadingClient} aria-busy={reloadingClient} onClick={() => {
+      // keep reload feedback visible while the replacement document is loading
+      if (reloadingClient) return;
+      setReloadingClient(true);
+    }}>{reloadingClient && <span className="update-progress-ring" aria-hidden="true" />}Reload UI</button></section>}
     <SettingsRestartNotice />
     {feedback && <OperationFeedbackToast key={feedback.id} feedback={feedback} onDismiss={onDismissFeedback} />}
     {/* keep update failures independent from other operation feedback */}

@@ -605,6 +605,35 @@ describe('LaunchService', () => {
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['/usr/bin/zsh', '-lc', expect.stringContaining('source "$HOME/.zshrc"')]));
   });
 
+  // identify the rejected shell handoff without retrying an uncertain launch
+  it.each(['paste', 'submit', 'mark'])('reports the %s stage of a failed reused-shell launch', async stage => {
+    const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
+    const worktree = cora();
+    const panes = {
+      // expose one reusable worktree shell
+      listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }],
+      // reject the selected handoff stage
+      pastePrompt: vi.fn(async () => stage !== 'paste'),
+      // reject the selected submission stage
+      enter: vi.fn(async () => stage !== 'submit')
+    };
+    // reject the selected ownership marker
+    run.mockResolvedValue({ code: stage === 'mark' ? 1 : 0, stdout: '', stderr: '' });
+    // silence the expected launch diagnostics
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // discover only the reusable worktree shell
+    const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree]);
+    try {
+      await expect(service.launch(worktree.id)).resolves.toBe(false);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining(`shell %4: ${stage} failed`));
+      expect(panes.enter).toHaveBeenCalledTimes(stage === 'paste' ? 0 : 1);
+      // exclude a duplicate fallback launch
+      expect(run.mock.calls.some(call => (call[1] as string[]).includes('new-window'))).toBe(false);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it('reuses an existing pane for the configured host shell', async () => {
     process.env.RAC_HOST_INTERACTIVE_SHELL = '/bin/bash';
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };

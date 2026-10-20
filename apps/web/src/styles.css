@@ -243,9 +243,6 @@ main { max-width: 1100px; margin: auto; padding: var(--edge); }
 body:has(.reconnecting-overlay) :is(.streamed-terminal-status, .log-output > .log-loading, .log-output > .log-stale-overlay, .agent-output > .log-loading, .agent-output > .log-stale-overlay) { visibility: hidden; }
 .loading-console { display: grid; gap: .8rem; min-width: min(20rem, calc(100vw - 2rem)); padding: 1rem 1.2rem; border: 1px solid color-mix(in srgb, var(--surface-1) 85%, transparent); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 72%, transparent); box-shadow: 0 1rem 3rem color-mix(in srgb, var(--crust) 65%, transparent); }
 .loading-line { display: flex; align-items: center; gap: .65rem; color: var(--text); font: 600 .75rem var(--font-mono); letter-spacing: .06em; }
-.loading-bars { display: flex; gap: .22rem; height: .2rem; overflow: hidden; border-radius: var(--control-radius); }
-.loading-bars i { flex: 1; background: linear-gradient(90deg, var(--mauve), var(--blue)); animation: loading-pulse 1.2s ease-in-out infinite alternate; }
-.loading-bars i:nth-child(2) { animation-delay: .15s; }.loading-bars i:nth-child(3) { animation-delay: .3s; }.loading-bars i:nth-child(4) { animation-delay: .45s; }.loading-bars i:nth-child(5) { animation-delay: .6s; }
 label { display: grid; gap: .4rem; color: var(--subtext-0); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 input, textarea { background: var(--mantle); border: 1px solid var(--surface-1); color: var(--text); border-radius: var(--control-radius); padding: .7rem; }
@@ -1636,7 +1633,6 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .spinner { width: .8rem; height: .8rem; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; display: inline-block; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(1turn); } }
 @keyframes auth-orbit { to { transform: rotate(1turn); } }
-@keyframes loading-pulse { from { opacity: .18; transform: scaleX(.45); } to { opacity: 1; transform: scaleX(1); } }
 @keyframes voice-listening { from { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 30%, transparent); } to { box-shadow: inset 0 0 0 1px var(--red), 0 0 .75rem color-mix(in srgb, var(--red) 48%, transparent); } }
 @keyframes voice-soundwave-bar { 0% { transform: scaleX(.12); } 45% { transform: scaleX(.82); } 100% { transform: scaleX(.34); } }
 @keyframes tab-working-sweep { to { transform: translateX(400%); } }
@@ -1699,12 +1695,19 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .workspace-toolbar-actions .launch-split.updates-in-progress { outline-color: color-mix(in srgb, var(--mauve) 30%, transparent); }
 /* keep keyboard focus inside the progress ring, including its reduced-motion outline */
 .tabs .tab-row-lead .server-selector.updates-in-progress:focus-visible, .workspace-toolbar-actions .launch-split.updates-in-progress > button:focus-visible { outline-offset: -4px; }
+/* reuse the same orbit for loaders and color-matched pending actions */
+.progress-border { position: relative; }
+.progress-border[aria-busy='true'] { opacity: 1; }
+.progress-border:focus-visible { outline-offset: -4px; }
+.progress-blue { --progress-ring-color: var(--blue); --progress-ring-highlight: var(--sapphire); }
+.progress-yellow { --progress-ring-color: var(--yellow); --progress-ring-highlight: var(--rosewater); }
+.progress-red { --progress-ring-color: var(--red); --progress-ring-highlight: var(--flamingo); }
 /* apply the glow outside the masked child so it follows the same moving highlight */
-.updates-in-progress > .update-progress-ring { position: absolute; inset: -1px; z-index: 1; overflow: visible; border-radius: inherit; pointer-events: none; filter: drop-shadow(0 0 .3rem var(--mauve)); }
-.update-progress-ring::before { content: ''; position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--mauve) 35%, transparent) 285deg, var(--mauve) 325deg, var(--lavender) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: update-border-orbit 2s linear infinite; }
-/* retain a static purple outline for either reduced-motion preference */
-@media (prefers-reduced-motion: reduce) { .update-progress-ring::before { animation: none; background: var(--mauve); } }
-:root[data-motion="reduced"] .update-progress-ring::before { animation: none; background: var(--mauve); }
+.updates-in-progress > .update-progress-ring, .progress-border > .update-progress-ring { position: absolute; inset: -1px; z-index: 1; overflow: visible; border-radius: inherit; pointer-events: none; filter: drop-shadow(0 0 .3rem var(--progress-ring-color, var(--mauve))); }
+.update-progress-ring::before { content: ''; position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 35%, transparent) 285deg, var(--progress-ring-color, var(--mauve)) 325deg, var(--progress-ring-highlight, var(--lavender)) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: update-border-orbit 2s linear infinite; }
+/* retain the action's color as a static outline for either reduced-motion preference */
+@media (prefers-reduced-motion: reduce) { .update-progress-ring::before { animation: none; background: var(--progress-ring-color, var(--mauve)); } }
+:root[data-motion="reduced"] .update-progress-ring::before { animation: none; background: var(--progress-ring-color, var(--mauve)); }
 .launch-update-dot { position: absolute; top: .25rem; right: .25rem; width: var(--status-dot-size); min-width: var(--status-dot-size); height: var(--status-dot-size); border-radius: 50%; background: var(--mauve); box-shadow: 0 0 .5rem color-mix(in srgb, var(--mauve) 75%, transparent); pointer-events: none; }
 .tabs .new-agent-tab:not(:disabled):hover { border-color: var(--lavender); background: color-mix(in srgb, var(--lavender) 13%, var(--mantle)); color: var(--text); filter: none; }
 .tabs .launcher,.tabs .tab-spacer{flex:0 0 var(--standard-control-size);height:var(--standard-control-size);min-height:var(--standard-control-size)}.tabs .launcher{position:relative;display:block}.tabs .launcher .new-agent-tab{width:100%;height:100%}.launcher-menu{z-index:var(--layer-popover)}.launcher-menu button{justify-content:flex-start!important;border:0!important;padding:.55rem!important;text-align:left}

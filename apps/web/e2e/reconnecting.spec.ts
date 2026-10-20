@@ -54,7 +54,10 @@ test('blocks the console with a reconnecting overlay until the tunnel recovers',
   await expect(overlay.locator('.auth-glow')).toBeVisible();
   const message = overlay.locator('.loading-line');
   await expect(message).toHaveText('Reconnecting to console');
-  await expect(overlay.locator('.loading-bars')).toBeVisible();
+  const progress = overlay.locator('.loading-console.progress-border');
+  await expect(progress).toHaveAttribute('aria-busy', 'true');
+  await expect(progress.locator(':scope > .update-progress-ring')).toBeVisible();
+  await expect(overlay.locator('.loading-bars')).toHaveCount(0);
   // inspect the restored full-client grid treatment
   const grid = await overlay.evaluate(element => {
     const before = getComputedStyle(element, '::before');
