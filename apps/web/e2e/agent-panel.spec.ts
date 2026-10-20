@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { installPaneMock, pushBytes, seedPaneSize } from './pane-stream-mock.js';
+import { expectSplitProgressBorder } from './progress-border-assertions.js';
 
 type MockAgent = { attention?: 'working' | 'finished' | 'question'; kind?: 'claude' | 'codex' };
 type MockOptions = { conversationName?: string; notes?: Array<{ id: string; text: string }> };
@@ -148,6 +149,7 @@ test('the title names the current conversation and the header shows the connecti
   await expect(title.locator('.agent-state-pill')).toHaveText('Idle');
 });
 
+// startup frames the whole split without blocking its draft composer
 test('a starting launch shows the agent panel with its notice and the composer holding the draft', async ({ page }) => {
   await mockConsole(page, undefined);
   // hold the launch open so the Worktree stays starting
@@ -158,8 +160,11 @@ test('a starting launch shows the agent panel with its notice and the composer h
   const panel = agentPanel(page);
   await expect(panel.locator('.panel-header-title .agent-panel-title')).toHaveText('Cora');
   await expect(panel.locator('.panel-header-title .agent-state-pill')).toHaveText('Starting');
-  await expect(panel.locator('.agent-output')).toContainText('Starting agent at Cora…');
-  await expect(panel.locator('.agent-output')).toContainText('Your prompt waits in the composer');
+  const notice = panel.locator(':scope > .log-loading');
+  await expect(notice).toContainText('Starting agent at Cora…');
+  await expect(notice).toContainText('Your prompt waits in the composer');
+  await expect(panel.locator('.agent-output')).toBeEmpty();
+  await expectSplitProgressBorder(panel, 'blue');
   const prompt = panel.getByRole('region', { name: 'Prompt composer' }).getByRole('textbox', { name: 'Prompt' });
   await prompt.fill('Run the tests');
   await expect(prompt).toHaveValue('Run the tests');

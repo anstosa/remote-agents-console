@@ -1,9 +1,8 @@
 import { useSyncExternalStore } from 'react';
 
-// per-browser opt-in that stills attention and progress-border animations
-// for this browser, on top of the os-level
-// `prefers-reduced-motion` query the stylesheet already honours. The CSS keys off
-// `[data-motion="reduced"]` on the document, so flipping it needs no reload.
+// still attention effects and replace progress borders with compact spinners
+// for this browser, alongside the os-level prefers-reduced-motion query
+// css follows data-motion on the document without a reload
 const reducedMotionKey = 'rac.reduced-motion';
 
 // read the opt-in while keeping full motion by default

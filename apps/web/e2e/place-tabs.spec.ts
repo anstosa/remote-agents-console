@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { expectProgressBorder, expectStationaryStatus } from './progress-border-assertions';
 
 type MockAgent = { id: string; kind: 'claude' | 'codex'; attention?: 'working' | 'finished' | 'question'; hasMessageQuestion?: true; unread?: boolean; conversation?: string | null; history?: string[] };
 type Console = { agents: MockAgent[]; dismissed: string[] };
@@ -104,11 +105,16 @@ test('the tab rolls up the most urgent state and viewing an Agent through the sw
   const cora = page.getByRole('tab', { name: /^Cora — / });
   // unread outranks working, and another Agent here has news
   await expect(cora).toHaveClass(/unread/u);
+  await expectStationaryStatus(cora);
   await expect(switcher(page).locator('.agent-switcher-attention')).toBeVisible();
 
   const dismissedBefore = state.dismissed.length;
   await switcher(page).click();
-  await page.getByRole('menu', { name: 'Agents at Cora' }).getByRole('menuitemradio', { name: /Conversation agent-2/u }).click();
+  const menu = page.getByRole('menu', { name: 'Agents at Cora' });
+  const done = menu.getByRole('menuitemradio', { name: /Conversation agent-2/u });
+  await expectStationaryStatus(done);
+  await expectProgressBorder(menu.getByRole('menuitemradio', { name: /Conversation agent-1/u }), 'peach');
+  await done.click();
   await expect(cora).not.toHaveClass(/unread/u);
   await expect(cora).toHaveClass(/status-working/u);
   await expect(switcher(page).locator('.agent-switcher-attention')).toHaveCount(0);
@@ -119,6 +125,21 @@ test('the tab rolls up the most urgent state and viewing an Agent through the sw
   state.agents = [{ id: 'agent-1', kind: 'claude', attention: 'question' }, { id: 'agent-2', kind: 'codex', attention: 'working', unread: true }];
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await expect(cora).toHaveClass(/status-action-required/u, { timeout: 10_000 });
+  await expectStationaryStatus(cora);
+  await switcher(page).click();
+  const question = menu.getByRole('menuitemradio', { name: /Conversation agent-1/u });
+  await expectStationaryStatus(question);
+  await question.click();
+  const questionStatus = agentPanel(page).locator('.panel-header-title > .agent-state-pill');
+  await expect(questionStatus).toHaveText('Needs answer');
+  await expectStationaryStatus(questionStatus);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const phoneTab = page.getByRole('tab', { name: 'Cora — Action required' });
+  // wait for the phone chooser instead of racing the desktop tab replacement
+  await expect(phoneTab).toHaveAttribute('aria-haspopup', 'dialog');
+  await expectStationaryStatus(phoneTab);
+  await phoneTab.click();
+  await expectStationaryStatus(page.locator('.workspace-sheet-row').filter({ hasText: 'Cora' }));
 });
 
 test('an #agent= link opens its Place and selects it in the switcher; #worktree= opens the Place', async ({ page }) => {

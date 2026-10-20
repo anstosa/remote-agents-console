@@ -365,9 +365,12 @@ html.software-keyboard-open .tabs { display: none; }
 .output-selection-toolbar.embedded { z-index: calc(var(--layer-dialog) + 1); }
 .log-canvas { position: relative; height: 100%; padding-left: var(--edge); }
 .inactive-log { background: color-mix(in srgb, var(--crust) 90%, var(--mantle)); }
-.log-loading { position: absolute; inset: 0; z-index: 15; display: grid; place-content: center; justify-items: center; gap: .6rem; max-width: 34rem; margin: auto; padding: 1.25rem; color: var(--subtext-0); font: 600 .75rem var(--font-mono); letter-spacing: .05em; text-align: center; pointer-events: none; }
-.log-loading strong { color: var(--text); font: 700 .78rem var(--font-mono); }
+/* fill the split while keeping its status copy comfortably bounded */
+.log-loading { position: absolute; inset: 0; z-index: 15; display: grid; place-content: center; justify-items: center; gap: .6rem; padding: 1.25rem; color: var(--subtext-0); font: 600 .75rem var(--font-mono); letter-spacing: .05em; text-align: center; pointer-events: none; }
+.log-loading strong { max-width: 31rem; color: var(--text); font: 700 .78rem var(--font-mono); }
 .log-loading > span:not(.update-progress-ring) { max-width: 31rem; color: var(--overlay-2); font: 500 .68rem/1.5 var(--font-mono); letter-spacing: .01em; }
+/* keep loading borders inside their output or full-split boundary */
+:is(.log-output, .agent-output) > .log-loading > .update-progress-ring { inset: var(--progress-inline-inset, 0); }
 .log-loading.inactive { color: var(--overlay-0); }
 .log-stale-overlay { position: absolute; inset: 0; z-index: 14; overflow: hidden; pointer-events: none; background: linear-gradient(120deg, color-mix(in srgb, var(--crust) 50%, transparent), color-mix(in srgb, var(--mantle) 26%, transparent)), repeating-linear-gradient(0deg, color-mix(in srgb, var(--crust) 10%, transparent) 0 1px, transparent 1px 5px); box-shadow: inset 0 0 5rem color-mix(in srgb, var(--crust) 72%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--surface-2) 42%, transparent); backdrop-filter: blur(1.75px) saturate(.72) brightness(.82); }
 .log-stale-overlay::after { position: absolute; inset: -20%; content: ''; background: radial-gradient(ellipse at 50% 48%, transparent 25%, color-mix(in srgb, var(--crust) 36%, transparent) 76%); filter: blur(1rem); }
@@ -1669,7 +1672,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* dim each existing track without overriding the server button's keyboard focus outline */
 .tabs .tab-row-lead .server-selector.updates-in-progress { border-color: color-mix(in srgb, var(--mauve) 30%, transparent); }
 .workspace-toolbar-actions .launch-split.updates-in-progress { outline-color: color-mix(in srgb, var(--mauve) 30%, transparent); }
-/* keep keyboard focus inside the progress ring, including its reduced-motion outline */
+/* keep keyboard focus inside busy controls */
 .tabs .tab-row-lead .server-selector.updates-in-progress:focus-visible, .workspace-toolbar-actions .launch-split.updates-in-progress > button:focus-visible { outline-offset: -4px; }
 /* reuse the same orbit for loaders and color-matched pending actions */
 /* preserve explicit absolute and fixed positioning on loading overlays */
@@ -1690,11 +1693,21 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* loading replaces attention pulses without moving the host or its contents */
 .cleanup-toggle.progress-border, .notes-toggle.unread-queued-prompts.progress-border { animation: none; filter: none; }
 /* apply the glow outside the masked child so it follows the same moving highlight */
-.updates-in-progress > .update-progress-ring, .progress-border > .update-progress-ring { position: absolute; inset: -1px; z-index: 1; display: block; width: auto; height: auto; min-width: 0; max-width: none; margin: 0; padding: 0; overflow: visible; border-radius: inherit; pointer-events: none; filter: drop-shadow(0 0 .3rem var(--progress-ring-color, var(--mauve))); }
-.update-progress-ring::before { content: ''; position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 35%, transparent) 285deg, var(--progress-ring-color, var(--mauve)) 325deg, var(--progress-ring-highlight, var(--lavender)) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: update-border-orbit 2s linear infinite; }
-/* retain the action's color as a static outline for either reduced-motion preference */
-@media (prefers-reduced-motion: reduce) { .update-progress-ring::before { animation: none; background: var(--progress-ring-color, var(--mauve)); } }
-:root[data-motion="reduced"] .update-progress-ring::before { animation: none; background: var(--progress-ring-color, var(--mauve)); }
+.updates-in-progress > .update-progress-ring, .progress-border > .update-progress-ring { position: absolute; inset: -1px; z-index: 1; display: block; width: auto; height: auto; min-width: 0; max-width: none; margin: 0; padding: 0; overflow: visible; border-radius: inherit; pointer-events: none; filter: var(--progress-indicator-filter, drop-shadow(0 0 .3rem var(--progress-ring-color, var(--mauve)))); }
+.update-progress-ring::before { content: ''; display: var(--progress-border-display, block); position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 35%, transparent) 285deg, var(--progress-ring-color, var(--mauve)) 325deg, var(--progress-ring-highlight, var(--lavender)) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: var(--progress-border-animation, update-border-orbit 2s linear infinite); }
+/* keep reduced-motion feedback compact without shifting button contents */
+@keyframes progress-spinner { to { transform: rotate(360deg); } }
+.update-progress-ring::after { content: ''; display: var(--progress-spinner-display, none); position: absolute; top: .1rem; left: .1rem; box-sizing: border-box; width: .65rem; height: .65rem; border: 2px solid var(--progress-ring-color, var(--mauve)); border-left-color: transparent; border-radius: 50%; animation: var(--progress-spinner-animation, none); }
+/* loaders and small status pills have room for an inline spinner instead of a corner badge */
+:is(.loading-console, .log-loading, .agent-state-pill, .stack-process-state) > .update-progress-ring { position: var(--progress-inline-position, absolute); inset: var(--progress-inline-inset, -1px); width: var(--progress-inline-size, auto); height: var(--progress-inline-size, auto); flex: none; }
+:is(.loading-console, .log-loading) > .update-progress-ring { width: var(--progress-loader-size, auto); height: var(--progress-loader-size, auto); margin: 0 auto; }
+:is(.loading-console, .log-loading, .agent-state-pill, .stack-process-state) > .update-progress-ring::after { inset: 0; width: 100%; height: 100%; }
+.agent-state-pill.progress-border::before { display: var(--progress-border-display, block); }
+/* reset hidden animations so live preference changes restart the visible treatment */
+@media (prefers-reduced-motion: reduce) {
+  :root { --progress-border-display: none; --progress-border-animation: none; --progress-spinner-display: block; --progress-spinner-animation: progress-spinner 1s linear infinite; --progress-indicator-filter: none; --progress-inline-position: relative; --progress-inline-inset: auto; --progress-inline-size: .75rem; --progress-loader-size: 1.25rem; }
+}
+:root[data-motion="reduced"] { --progress-border-display: none; --progress-border-animation: none; --progress-spinner-display: block; --progress-spinner-animation: progress-spinner 1s linear infinite; --progress-indicator-filter: none; --progress-inline-position: relative; --progress-inline-inset: auto; --progress-inline-size: .75rem; --progress-loader-size: 1.25rem; }
 .launch-update-dot { position: absolute; top: .25rem; right: .25rem; width: var(--status-dot-size); min-width: var(--status-dot-size); height: var(--status-dot-size); border-radius: 50%; background: var(--mauve); box-shadow: 0 0 .5rem color-mix(in srgb, var(--mauve) 75%, transparent); pointer-events: none; }
 .tabs .new-agent-tab:not(:disabled):hover { border-color: var(--lavender); background: color-mix(in srgb, var(--lavender) 13%, var(--mantle)); color: var(--text); filter: none; }
 .tabs .launcher,.tabs .tab-spacer{flex:0 0 var(--standard-control-size);height:var(--standard-control-size);min-height:var(--standard-control-size)}.tabs .launcher{position:relative;display:block}.tabs .launcher .new-agent-tab{width:100%;height:100%}.launcher-menu{z-index:var(--layer-popover)}.launcher-menu button{justify-content:flex-start!important;border:0!important;padding:.55rem!important;text-align:left}

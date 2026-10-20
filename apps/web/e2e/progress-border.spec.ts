@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder } from './progress-border-assertions';
+import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions';
+
+test.describe.configure({ timeout: 60_000 });
 
 type RestartStatus = {
   pending: boolean;
@@ -35,43 +37,6 @@ async function expectProgressTheme(parent: Locator, themeVariable: string) {
   })).toBe(expected);
 }
 
-// resolve one theme token to the browser's normalized color
-async function resolveThemeColor(parent: Locator, themeVariable: string) {
-  return parent.evaluate((element, variable) => {
-    const token = getComputedStyle(element).getPropertyValue(variable).trim();
-    const sample = document.createElement('span');
-    sample.style.color = token;
-    element.append(sample);
-    const color = getComputedStyle(sample).color;
-    sample.remove();
-    return color;
-  }, themeVariable);
-}
-
-// require reduced motion to retain the selected static border color
-async function expectStaticProgress(parent: Locator, themeVariable: string) {
-  const ring = parent.locator(':scope > .update-progress-ring');
-  const expectedToken = await parent.evaluate((element, variable) => getComputedStyle(element).getPropertyValue(variable).trim(), themeVariable);
-  const expectedColor = await resolveThemeColor(parent, themeVariable);
-  await expect(ring).toBeVisible();
-  await expect.poll(() => ring.evaluate(element => {
-    const parent = element.parentElement;
-    // identify detached progress fixtures directly
-    if (parent === null) throw new Error('progress border has no parent');
-    const style = getComputedStyle(parent);
-    const token = style.getPropertyValue('--progress-ring-color').trim() || style.getPropertyValue('--mauve').trim();
-    return {
-      animations: element.getAnimations({ subtree: true }).length,
-      background: getComputedStyle(element, '::before').backgroundColor,
-      token
-    };
-  })).toEqual({
-    animations: 0,
-    background: expectedColor,
-    token: expectedToken
-  });
-}
-
 // mount one authenticated console with only settings mutations mocked
 async function mountRestartFixture(page: Page, fixture: RestartFixture, restart: (route: Route, fixture: RestartFixture) => Promise<void>) {
   await page.route('**/api/**', async route => {
@@ -101,8 +66,8 @@ async function mountRestartFixture(page: Page, fixture: RestartFixture, restart:
   await page.goto('/');
 }
 
-// replace the startup line bars with one clockwise purple border
-test('frames startup with a purple clockwise border that respects both motion preferences', async ({ page }) => {
+// swap the startup border for a compact spinner under either reduced-motion preference
+test('frames startup with a clockwise border or reduced-motion spinner', async ({ page }) => {
   const sessionGate = createGate();
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   // hold authentication on the initial loading screen
@@ -122,10 +87,15 @@ test('frames startup with a purple clockwise border that respects both motion pr
     await expect.poll(() => loader.locator('.loading-line').evaluate(element => ({ animations: element.getAnimations().length, transform: getComputedStyle(element).transform }))).toEqual({ animations: 0, transform: 'none' });
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    await expectStaticProgress(loader, '--mauve');
+    await expectReducedMotionSpinner(loader, 'mauve');
     await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await expectProgressBorder(loader, 'mauve');
+    await expectClockwiseProgressBorder(loader);
     await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
-    await expectStaticProgress(loader, '--mauve');
+    await expectReducedMotionSpinner(loader, 'mauve');
+    await page.evaluate(() => { delete document.documentElement.dataset.motion; });
+    await expectProgressBorder(loader, 'mauve');
+    await expectClockwiseProgressBorder(loader);
   } finally {
     // release authentication during failed assertions too
     sessionGate.release();
@@ -260,7 +230,7 @@ test('keeps restart yellow while pending and removes progress after the operatio
 });
 
 // keep a failed retry red only while its repeated request is pending
-test('shows a static red retry border during reduced motion and stops it after failure', async ({ page }) => {
+test('shows a red reduced-motion retry spinner and stops it after failure', async ({ page }) => {
   const restartGate = createGate();
   const fixture: RestartFixture = {
     status: { pending: true, targets: ['rac'], effective: 'known', restartAvailable: true, operation: { id: 'restart-1', state: 'failed', error: 'First restart failed.' } },
@@ -285,13 +255,16 @@ test('shows a static red retry border during reduced motion and stops it after f
     await expect.poll(() => fixture.restartRequests).toBe(1);
     await expect(pending).toBeDisabled();
     await expect(pending).toHaveAttribute('aria-busy', 'true');
-    await expectStaticProgress(pending, '--red');
+    await expectReducedMotionSpinner(pending, 'red');
     await expect(notice.locator('.settings-restart-icon')).toHaveText('!');
     await expect(notice.locator('.spinner')).toHaveCount(0);
 
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
-    await expectStaticProgress(pending, '--red');
+    await expectReducedMotionSpinner(pending, 'red');
+    await page.evaluate(() => { delete document.documentElement.dataset.motion; });
+    await expectProgressBorder(pending, 'red');
+    await expectClockwiseProgressBorder(pending);
   } finally {
     // release the mocked retry during failed assertions too
     restartGate.release();

@@ -577,11 +577,11 @@ const tabStateLabels: Record<AgentState, string> = { working: 'Working', 'prompt
 const tabStatus = (entry: DashboardItem) => {
   const transition = dashboardOperationLabel(entry.operation);
   const label = `${transition ?? tabStateLabels[entry.state]}${entry.unread ? ' — Unread' : ''}`;
+  // waiting states retain their colors without advertising active work
   const progress: ProgressColor | undefined = entry.operation === 'restarting' ? 'yellow'
     : entry.operation === 'clearing' || entry.operation === 'deactivating' ? 'red'
       : entry.operation === 'launching' || entry.operation === 'new-task' ? 'blue'
-        : entry.state === 'working' ? 'peach'
-          : entry.state === 'prompt-done' && entry.unread ? 'green' : undefined;
+        : entry.state === 'working' ? 'peach' : undefined;
   const busy = entry.operation !== undefined || entry.state === 'working';
   return { transition, label, progress, busy, className: `${transition === undefined ? `status-${entry.state}` : 'status-transitioning'}${entry.unread ? ' unread' : ''}${progress === undefined ? '' : ` progress-border progress-${progress}`}` };
 };
@@ -6915,11 +6915,11 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
   </div>, document.body);
   const stale = (status !== 'Live' && !hasRendered) || processing;
   const loadingOverlay = loading && <div className={`log-loading progress-border progress-${processing ? 'peach' : 'blue'}`} role={processing ? 'status' : undefined} aria-busy="true" aria-label={processing ? processingLabel : undefined}><ProgressRing busy /><strong>{loadingLabel}</strong>{processingDetail && <span>{processingDetail}</span>}</div>;
-  const outputBody = <><div className="log-canvas" ref={canvas} aria-label="Live log" />{stale && <div className="log-stale-overlay" aria-hidden="true" />}{loadingOverlay}</>;
+  const outputBody = <><div className="log-canvas" ref={canvas} aria-label="Live log" />{stale && <div className="log-stale-overlay" aria-hidden="true" />}</>;
   // the embedded advisor floats its status over the output; the agent panel's header shows it
-  if (header === undefined) return <><div className={`log-output${inputActive ? ' input-active' : ''}${selectionActive ? ' selection-active' : ''}`}>{outputBody}<span className={`status log-status ${visibleStatus.toLowerCase()}`}>{visibleStatus}</span></div>{selectionActions}</>;
-  // keep the output keys beside the composer in the agent split
-  return <><AgentPanelFrame onTurnOff={onTurnOff} className={`${inputActive ? ' input-active' : ''}${selectionActive ? ' selection-active' : ''}`} header={header(visibleStatus)} composer={composer} mobileKeys={<MobileTerminalKeys id={id} />}>{outputBody}</AgentPanelFrame>{selectionActions}</>;
+  if (header === undefined) return <><div className={`log-output${inputActive ? ' input-active' : ''}${selectionActive ? ' selection-active' : ''}`}>{outputBody}{loadingOverlay}<span className={`status log-status ${visibleStatus.toLowerCase()}`}>{visibleStatus}</span></div>{selectionActions}</>;
+  // confine connecting to output while task transitions still cover the whole split
+  return <><AgentPanelFrame onTurnOff={onTurnOff} className={`${inputActive ? ' input-active' : ''}${selectionActive ? ' selection-active' : ''}`} header={header(visibleStatus)} composer={composer} mobileKeys={<MobileTerminalKeys id={id} />} overlay={processing && loadingOverlay}>{outputBody}{!processing && loadingOverlay}</AgentPanelFrame>{selectionActions}</>;
 }
 
 // The composer's prompt-history button and flyout for one Agent. The open state is the caller's,
@@ -7647,8 +7647,8 @@ function AgentSwitcherRow({ agent, current, onChoose }: { agent: Agent; current:
 // The agent panel's state pill: its words and the tone that colours it.
 type AgentPanelState = { label: string; tone: 'working' | 'starting' | 'restarting' | 'stopping' | 'needs-answer' | 'done' | 'idle' | 'off' | 'failed' };
 
-// map agent lifecycle and completion attention to shared border colors
-const agentStateProgress = (state: AgentPanelState): ProgressColor | undefined => state.tone === 'working' ? 'peach' : state.tone === 'starting' ? 'blue' : state.tone === 'restarting' ? 'yellow' : state.tone === 'stopping' ? 'red' : state.tone === 'done' ? 'green' : undefined;
+// reserve progress borders for active work and lifecycle transitions
+const agentStateProgress = (state: AgentPanelState): ProgressColor | undefined => state.tone === 'working' ? 'peach' : state.tone === 'starting' ? 'blue' : state.tone === 'restarting' ? 'yellow' : state.tone === 'stopping' ? 'red' : undefined;
 const agentStateBusy = (state: AgentPanelState): boolean => state.tone === 'working' || state.tone === 'starting' || state.tone === 'restarting' || state.tone === 'stopping';
 
 // A live Agent's state pill, from its attention and whether its finished turn is unread.
@@ -7690,12 +7690,11 @@ function AgentPanelTitle({ kind, sandboxed, title, switcher, state, connection =
   </>;
 }
 
-// The agent panel's frame: the floating header, the output (or a startup notice) and the composer
-// at its foot. It fills the split's agent column, and the expansion promotes it by `.expanded`.
-function AgentPanelFrame({ header, composer, mobileKeys, className = '', children, onTurnOff }: { header: ReactNode; composer?: ReactNode; mobileKeys?: ReactNode; className?: string; children: ReactNode; onTurnOff?: () => void }) {
+// fill one agent split with a header, output, footer and full-frame overlay
+function AgentPanelFrame({ header, composer, mobileKeys, overlay, className = '', children, onTurnOff }: { header: ReactNode; composer?: ReactNode; mobileKeys?: ReactNode; overlay?: ReactNode; className?: string; children?: ReactNode; onTurnOff?: () => void }) {
   const expanded = usePanelExpand('agent')?.expanded === true;
-  // keep alternate phone controls at the same split foot as the composer
-  return <div className={`log-output agent-panel${expanded ? ' expanded' : ''}${className}`} onAuxClickCapture={onTurnOff === undefined ? undefined : event => closeOnMiddleClick(event, onTurnOff)}>{header}<div className="agent-output">{children}</div>{composer}{mobileKeys}</div>;
+  // keep whole-split transitions outside the output cell and preserve footer controls
+  return <div className={`log-output agent-panel${expanded ? ' expanded' : ''}${className}`} onAuxClickCapture={onTurnOff === undefined ? undefined : event => closeOnMiddleClick(event, onTurnOff)}>{header}<div className="agent-output">{children}</div>{composer}{mobileKeys}{overlay}</div>;
 }
 
 // How the toolbar launches an Agent at its Place: the kind the Place resolves (its last-used one),
@@ -7960,11 +7959,9 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
   return <article className="agent-view"><Workspace workspace={workspace} output={agentPanel} empty={empty} git={gitActions} onAddToPrompt={addToPrompt} onOpenWorktreeStack={onOpenWorktreeStack} />{tabBar}{renderNotifications(<UpstreamRebaseNotification key={upstreamNotificationKey} notificationKey={upstreamNotificationKey} summary={worktree.gitUpstream} />)}{error && <p className="launch-error" role="alert">{error}</p>}<WorkspaceToolbar workspace={workspace} launch={launch} onOpenWorktreeStack={onOpenWorktreeStack} conversations={workspace.conversations.control} git={gitActions} cleanupControl={cleanupControl} menu={{ worktreeId: worktree.id, git: true, onRemoveWorktree: onRemove, removeDisabledReason: processing ? 'An agent is starting or stopping here' : removeDisabledReason }} /></article>;
 }
 
-// The agent panel before its Agent exists: the kind, the Place and a state pill in the header,
-// the startup (or failure) notice over the output, and the composer holding the prompt for the
-// Agent once it is ready. `close` is the panel's trailing action, when it has one.
+// keep startup and failure notices across the whole split
 function PendingAgentPanel({ kind, title, state, loading, composer, close }: { kind?: AgentKind; title: string; state: AgentPanelState; loading: ReactNode; composer?: ReactNode; close?: PanelAction }) {
-  return <AgentPanelFrame header={<PanelHeader panelKey="agent" label="agent output" close={close} title={<AgentPanelTitle kind={kind} title={title} state={state} />} />} composer={composer}>{loading}</AgentPanelFrame>;
+  return <AgentPanelFrame header={<PanelHeader panelKey="agent" label="agent output" close={close} title={<AgentPanelTitle kind={kind} title={title} state={state} />} />} composer={composer} overlay={loading} />;
 }
 
 // A startup, failure or idle notice centred in a panel or an empty Workspace.

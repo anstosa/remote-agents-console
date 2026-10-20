@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
-import { expectProgressBorder } from './progress-border-assertions';
+import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner, expectSplitProgressBorder } from './progress-border-assertions';
+import { installPaneMock, seedPaneSize, pushBytes } from './pane-stream-mock';
 
 // allow the shared host's first dashboard transform before exercising task transport
 test.setTimeout(90_000);
@@ -13,6 +14,7 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   let finishNewTask!: () => void;
   const newTaskFinished = new Promise<void>(resolve => { finishNewTask = resolve; });
 
+  await installPaneMock(page);
   await page.addInitScript(() => {
     const nativeSetTimeout = window.setTimeout;
     // accelerate handoff recovery
@@ -45,6 +47,24 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   });
 
   await page.goto('/');
+  const panel = page.locator('.log-output.agent-panel');
+  const output = panel.locator(':scope > .agent-output');
+  // connecting belongs to output only, leaving the header and composer outside
+  await expectSplitProgressBorder(output, 'blue');
+  await expect(panel.locator(':scope > .log-loading')).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectSplitProgressBorder(output, 'blue');
+  // reduced motion keeps its compact spinner within the same output surface
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expectReducedMotionSpinner(output.locator('.log-loading'), 'blue');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await expectSplitProgressBorder(output, 'blue');
+  await expectClockwiseProgressBorder(output.locator('.log-loading'));
+  await page.setViewportSize({ width: 1280, height: 720 });
+  // first output clears connecting progress without remounting the split
+  await seedPaneSize(page, 'agent-1');
+  await pushBytes(page, 'agent-1', 'Ready for a prompt\r\n');
+  await expect(panel.locator('.log-loading')).toHaveCount(0);
   await page.getByRole('button', { name: 'Agent power options' }).click();
   await page.getByRole('menu', { name: 'Agent power options' }).getByRole('menuitem', { name: 'New Task', exact: true }).click();
 
@@ -52,11 +72,13 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   const processing = page.locator('.log-loading[role="status"]');
   await expect(processing).toBeVisible();
   await expect(processing).toContainText('preparing a fresh agent');
+  await expectSplitProgressBorder(panel, 'peach');
   await expect(page.getByRole('status').filter({ hasText: 'Starting a new task' })).toContainText('You can keep using other tabs');
   const startingTab = page.getByRole('tab', { name: 'Cora — Starting new task' });
   await expectProgressBorder(startingTab, 'blue');
   await expect(startingTab.locator('.tab-kind-stack')).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
+  await expectSplitProgressBorder(panel, 'peach');
   const phoneStartingTab = page.getByRole('tab', { name: 'Cora — Starting new task' });
   await expectProgressBorder(phoneStartingTab, 'blue');
   await expect(phoneStartingTab.locator('.tab-kind-stack')).toBeVisible();
@@ -77,6 +99,7 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   await expect.poll(() => dashboardRequests, { timeout: 10_000 }).toBeGreaterThan(requestsBeforeRemoval);
   await expect(page.getByRole('tab', { name: 'Cora — Starting new task' })).toBeVisible();
   await expect(processing).toBeVisible();
+  await expectSplitProgressBorder(panel, 'blue');
 
   finishNewTask();
   await expect(page.getByRole('alert').filter({ hasText: 'New task is taking longer than expected' })).toBeVisible();
@@ -85,6 +108,11 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   await expect(page.getByRole('tab', { name: 'Cora — Prompt done' })).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 });
   await expect(processing).toHaveCount(0);
   await expect(page.getByRole('status').filter({ hasText: 'New task is ready' })).toContainText('ready for a fresh prompt');
+  // the replacement connects at the same boundary and clears after its first output
+  await expectSplitProgressBorder(output, 'blue');
+  await seedPaneSize(page, 'agent-2');
+  await pushBytes(page, 'agent-2', 'Replacement ready\r\n');
+  await expect(panel.locator('.log-loading')).toHaveCount(0);
 });
 
 // keep accepted task feedback scoped to the source worktree
