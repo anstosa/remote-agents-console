@@ -10,6 +10,7 @@ export type SettingsSelectOption = {
   icon?: ReactNode;
   group?: string;
   disabled?: boolean;
+  busy?: boolean;
 };
 
 type IndexedOption = { option: SettingsSelectOption; index: number };
@@ -75,7 +76,8 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
   const listboxId = `settings-select-${generatedId}`;
   const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(open, { align: 'start', matchAnchorWidth: true });
   const selected = options.find(option => option.value === value);
-  const shown = selected ?? { value, label: value };
+  const shown: SettingsSelectOption = selected ?? { value, label: value };
+  const busy = shown.busy === true;
   const hasIcons = options.some(option => option.icon !== undefined);
   const segments = optionSegments(options);
 
@@ -236,8 +238,9 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
       ref={anchorRef}
       type="button"
       role="combobox"
-      className="settings-select-trigger"
+      className={`settings-select-trigger${busy ? ' progress-border progress-blue' : ''}`}
       aria-label={label}
+      aria-busy={busy || undefined}
       aria-expanded={open}
       aria-haspopup="listbox"
       aria-controls={listboxId}
@@ -247,6 +250,7 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
       onClick={toggleMenu}
       onKeyDown={handleKeyDown}
     >
+      {busy && <span className="update-progress-ring" aria-hidden="true" />}
       {shown.icon !== undefined && <span className="settings-select-current-icon" aria-hidden="true">{shown.icon}</span>}
       <span className="settings-select-current-label">{shown.label}</span>
       <svg className="settings-select-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
@@ -262,9 +266,10 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
             return <div
               key={`${option.value}:${index}`}
               id={`${listboxId}-option-${index}`}
-              className="settings-select-option"
+              className={`settings-select-option${option.busy === true ? ' progress-border progress-blue' : ''}`}
               role="option"
               aria-selected={chosen}
+              aria-busy={option.busy || undefined}
               aria-disabled={option.disabled || undefined}
               data-active={active || undefined}
               data-value={option.value}
@@ -272,6 +277,7 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
               onPointerMove={() => { /* follow enabled pointer choices */ if (option.disabled !== true) setActiveIndex(index); }}
               onClick={() => { /* commit one pointer choice */ commitOption(index); }}
             >
+              {option.busy === true && <span className="update-progress-ring" aria-hidden="true" />}
               {hasIcons && <span className="settings-select-option-icon" aria-hidden="true">{option.icon}</span>}
               <span className="settings-select-option-label">{option.label}</span>
               <span className="settings-select-option-check" aria-hidden="true">{chosen && <PanelIcon path={panelIcons.check} />}</span>

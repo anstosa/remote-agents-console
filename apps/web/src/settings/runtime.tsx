@@ -140,7 +140,7 @@ export function SettingsRestartNotice() {
   // describe the RAC watchdog only for operations that replace RAC
   const recoveryGuidance = status.targets.includes('rac') ? 'Host recovery starts automatically if RAC does not return within 3 minutes. Manual recovery: ' : 'Manual recovery on the RAC host: ';
   return <section className={`toast settings-restart-notice${failed ? ' failed' : ''}`} role={failed ? 'alert' : 'status'} aria-label="Restart pending" aria-live={failed ? 'assertive' : 'polite'}>
-    <span className="settings-restart-icon" aria-hidden="true">{running ? <span className="spinner" /> : failed ? '!' : '↻'}</span>
+    <span className="settings-restart-icon" aria-hidden="true">{failed ? '!' : '↻'}</span>
     <span className="settings-restart-copy"><strong>Restart pending</strong><span>{detail}</span>{status.reconnectOrigin && <a href={status.reconnectOrigin}>Open {status.reconnectOrigin}</a>}{status.recoveryCommand && <small>{recoveryGuidance}<code>{status.recoveryCommand}</code>. Recovery keeps saved settings.</small>}{runtime.statusError && <small>{runtime.statusError}</small>}</span>
     <button type="button" className={`progress-border ${failed ? 'progress-red' : 'progress-yellow'}`} aria-busy={running} disabled={running || !status.restartAvailable || !runtime.canMutate} title={!runtime.canMutate ? 'Take control to restart' : undefined} onClick={() => { /* start only the fixed restart */ void runtime.restart(); }}>{running && <span className="update-progress-ring" aria-hidden="true" />}{running ? 'Restarting…' : failed ? 'Retry restart' : 'Restart'}</button>
   </section>;

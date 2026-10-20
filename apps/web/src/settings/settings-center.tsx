@@ -47,13 +47,14 @@ export function useSettingsSession() {
   useEffect(() => () => { saveCancelled.current = true; }, []);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [settingsAction, setSettingsAction] = useState<'validate' | 'save'>();
   const loadGeneration = useRef(0);
   const [issues, setIssues] = useState<SettingsIssue[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [rawSourceIds, setRawSourceIds] = useState(() => new Set<string>());
-  return { snapshot, setSnapshot, sources, setSources, drafts, setDrafts, browserDraft, operationPending, saveCancelled, loading, setLoading, saving, setSaving, loadGeneration, issues, setIssues, warnings, setWarnings, message, setMessage, error, setError, rawSourceIds, setRawSourceIds };
+  return { snapshot, setSnapshot, sources, setSources, drafts, setDrafts, browserDraft, operationPending, saveCancelled, loading, setLoading, saving, setSaving, settingsAction, setSettingsAction, loadGeneration, issues, setIssues, warnings, setWarnings, message, setMessage, error, setError, rawSourceIds, setRawSourceIds };
 }
 
 const rawFormats = new Set<SettingsSource['format']>(['compose', 'cloudflared', 'credentials', 'wrapper', 'svg']);
@@ -412,7 +413,7 @@ function PasswordReplacement({ disabled, onHash }: { disabled: boolean; onHash: 
     <label>New password<input type="password" autoComplete="new-password" value={password} disabled={disabled || pending} onChange={event => setPassword(event.target.value)} /></label>
     <label>Confirm password<input type="password" autoComplete="new-password" value={confirm} disabled={disabled || pending} onChange={event => setConfirm(event.target.value)} /></label>
     {error && <span className="settings-field-error" role="alert">{error}</span>}
-    <span className="settings-inline-actions"><button type="button" disabled={disabled || pending} onClick={() => { setPassword(''); setConfirm(''); setError(''); setOpen(false); }}>Cancel</button><button type="button" disabled={disabled || pending} onClick={() => { /* hash this replacement */ void submit(); }}>{pending ? 'Preparing…' : 'Use password'}</button></span>
+    <span className="settings-inline-actions"><button type="button" disabled={disabled || pending} onClick={() => { setPassword(''); setConfirm(''); setError(''); setOpen(false); }}>Cancel</button><button type="button" className={pending ? 'progress-border progress-blue' : undefined} aria-busy={pending || undefined} disabled={disabled || pending} onClick={() => { /* hash this replacement */ void submit(); }}>{pending && <span className="update-progress-ring" aria-hidden="true" />}{pending ? 'Preparing…' : 'Use password'}</button></span>
   </div>;
 }
 
@@ -1076,7 +1077,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSavedNotice,
   const runtime = useSettingsRuntime();
   const workspaceEditor = useSettingsTerminalEditor();
   const headerActionsTarget = useContext(SettingsHeaderActionsContext);
-  const { snapshot, setSnapshot, sources, setSources, drafts, setDrafts, browserDraft: browserDraftState, operationPending, saveCancelled, loading, setLoading, saving, setSaving, loadGeneration, issues, setIssues, warnings, setWarnings, message, setMessage, error, setError, rawSourceIds, setRawSourceIds } = session;
+  const { snapshot, setSnapshot, sources, setSources, drafts, setDrafts, browserDraft: browserDraftState, operationPending, saveCancelled, loading, setLoading, saving, setSaving, settingsAction, setSettingsAction, loadGeneration, issues, setIssues, warnings, setWarnings, message, setMessage, error, setError, rawSourceIds, setRawSourceIds } = session;
   const [catalogEditorEpoch, setCatalogEditorEpoch] = useState(0);
   const [selectedId, setSelectedId] = useState('browser');
   const sourcePanel = useRef<HTMLDivElement>(null);
@@ -1452,6 +1453,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSavedNotice,
     operationPending.current = true;
     saveCancelled.current = false;
     loadGeneration.current += 1;
+    setSettingsAction('save');
     setSaving(true);
     let filesSaved = false;
     let prompted = false;
@@ -1523,6 +1525,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSavedNotice,
     } finally {
       operationPending.current = false;
       setSaving(false);
+      setSettingsAction(undefined);
       // restore the save action only after the paused transaction unlocks it
       if (prompted && returnFocus !== undefined) window.requestAnimationFrame(() => {
         const focused = document.activeElement;
@@ -1548,9 +1551,10 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSavedNotice,
     if (operationPending.current || loading || !runtime.canMutate) return;
     operationPending.current = true;
     loadGeneration.current += 1;
+    setSettingsAction('validate');
     setSaving(true);
     try { await validate(); } catch { setError('Settings could not be validated. Your drafts remain.'); }
-    finally { operationPending.current = false; setSaving(false); }
+    finally { operationPending.current = false; setSaving(false); setSettingsAction(undefined); }
   };
 
   // keep advanced voice configuration beside its existing live controls
@@ -1631,10 +1635,10 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSavedNotice,
   const sectionDisabled = (id: string): boolean => sectionLoading(id) || snapshot === undefined && (id === 'tmux' || id === 'projects' || !preferences.some(preference => preference.id === id));
   // preserve grouping, artwork and active state in the custom mobile menu
   const navigationOptions: SettingsSelectOption[] = [
-    ...(selectedOutsideSearch ? [{ value: selectedId, label: `${selectedLabel}${changedSourceIds.has(selectedId) ? ' · Unsaved changes' : ''} (outside search results)`, group: 'Current section', disabled: sectionDisabled(selectedId), icon: sectionLoading(selectedId) ? <span className="spinner" /> : sectionIcon(selectedId, selected?.format) }] : []),
+    ...(selectedOutsideSearch ? [{ value: selectedId, label: `${selectedLabel}${changedSourceIds.has(selectedId) ? ' · Unsaved changes' : ''} (outside search results)`, group: 'Current section', disabled: sectionDisabled(selectedId), busy: sectionLoading(selectedId), icon: sectionIcon(selectedId, selected?.format) }] : []),
     ...groups.flatMap(group => [
-      ...visibleSources.filter(source => sourceGroup(source) === group).map(source => ({ value: source.id, label: `${source.label}${changedSourceIds.has(source.id) ? ' · Unsaved changes' : ''}`, group, disabled: sectionDisabled(source.id), icon: sectionLoading(source.id) ? <span className="spinner" /> : sectionIcon(source.id, source.format) })),
-      ...visiblePreferences.filter(preference => preference.group === group).map(preference => ({ value: preference.id, label: `${preference.label}${changedSourceIds.has(preference.id) ? ' · Unsaved changes' : ''}`, group, disabled: sectionDisabled(preference.id), icon: sectionLoading(preference.id) ? <span className="spinner" /> : sectionIcon(preference.id) }))
+      ...visibleSources.filter(source => sourceGroup(source) === group).map(source => ({ /* retain source identity while its border shows loading */ value: source.id, label: `${source.label}${changedSourceIds.has(source.id) ? ' · Unsaved changes' : ''}`, group, disabled: sectionDisabled(source.id), busy: sectionLoading(source.id), icon: sectionIcon(source.id, source.format) })),
+      ...visiblePreferences.filter(preference => preference.group === group).map(preference => ({ /* retain preference identity while its border shows loading */ value: preference.id, label: `${preference.label}${changedSourceIds.has(preference.id) ? ' · Unsaved changes' : ''}`, group, disabled: sectionDisabled(preference.id), busy: sectionLoading(preference.id), icon: sectionIcon(preference.id) }))
     ])
   ];
   // share draft retention and disclosure revocation across both navigation layouts
@@ -1676,15 +1680,15 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSavedNotice,
   // retain transaction status without a redundant page introduction
   return <section className="settings-center" aria-label="Settings center" aria-busy={saving}>
     <header className="settings-center-header"><span className="settings-center-summary"><span className="settings-dirty-summary" aria-live="polite">{dirtyCount === 0 ? 'No unsaved changes' : [browserDraft.dirty ? 'Browser preferences changed' : undefined, changes.length > 0 ? `${changes.length} file source${changes.length === 1 ? '' : 's'} changed` : undefined].filter(Boolean).join(' · ')}</span></span></header>
-    {snapshot === undefined && <div className="settings-catalog-state" role={loading ? 'status' : 'alert'}>{loading ? <><span className="spinner" />Loading installation files…</> : <><span>Installation files are unavailable. Browser settings remain available; voice settings are read-only.</span><button type="button" onClick={() => { /* retry without discarding browser preferences */ void reloadFiles(); }}>Retry files</button></>}</div>}
+    {snapshot === undefined && <div className={`settings-catalog-state${loading ? ' progress-border progress-blue' : ''}`} role={loading ? 'status' : 'alert'} aria-busy={loading || undefined}>{loading ? <><span className="update-progress-ring" aria-hidden="true" />Loading installation files…</> : <><span>Installation files are unavailable. Browser settings remain available; voice settings are read-only.</span><button type="button" onClick={() => { /* retry without discarding browser preferences */ void reloadFiles(); }}>Retry files</button></>}</div>}
     <label className="settings-search"><span>Search settings</span><input type="search" value={query} placeholder="Search browser, voice, application, deployment…" onChange={event => { /* filter both preference pages and file sources */ setQuery(event.target.value); }} /></label>
     <div className="settings-center-layout">
       <div className="settings-source-select"><span>Settings section</span><SettingsSelect label="Settings section" value={selectedId} options={navigationOptions} onChange={selectSection} />{visiblePreferences.length === 0 && visibleSources.length === 0 && <small role="status">No matching sections.</small>}</div>
       {/* share mobile glyphs without replacing desktop loading and dirty indicators */}
       <nav className="settings-source-nav" aria-label="Settings sources">{groups.map(group => <Fragment key={group}>
         <h3>{group}</h3>
-        {visibleSources.filter(source => sourceGroup(source) === group).map(source => <button type="button" key={source.id} className={selectedId === source.id ? 'active' : undefined} aria-current={selectedId === source.id ? 'page' : undefined} aria-busy={sectionLoading(source.id) || undefined} disabled={sectionDisabled(source.id)} title={snapshot === undefined && !loading ? 'Installation files are unavailable' : undefined} onClick={() => { /* use the same secure navigation as the mobile selector */ selectSection(source.id); }}><span className="settings-source-nav-icon" aria-hidden="true">{sectionIcon(source.id, source.format)}</span><span className="settings-source-nav-label">{source.label}</span>{sectionLoading(source.id) ? <span className="spinner" aria-hidden="true" /> : changedSourceIds.has(source.id) && <i aria-label="Unsaved changes" />}</button>)}
-        {visiblePreferences.filter(preference => preference.group === group).map(preference => <button type="button" key={preference.id} className={selectedId === preference.id ? 'active' : undefined} aria-current={selectedId === preference.id ? 'page' : undefined} aria-busy={sectionLoading(preference.id) || undefined} disabled={sectionDisabled(preference.id)} onClick={() => { /* use the same secure navigation as the mobile selector */ selectSection(preference.id); }}><span className="settings-source-nav-icon" aria-hidden="true">{sectionIcon(preference.id)}</span><span className="settings-source-nav-label">{preference.label}</span>{sectionLoading(preference.id) ? <span className="spinner" aria-hidden="true" /> : changedSourceIds.has(preference.id) && <i aria-label="Unsaved changes" />}</button>)}
+        {visibleSources.filter(source => sourceGroup(source) === group).map(source => { /* keep the source glyph stable while loading */ const busy = sectionLoading(source.id); return <button type="button" key={source.id} className={`${selectedId === source.id ? 'active ' : ''}${busy ? 'progress-border progress-blue' : ''}`.trim() || undefined} aria-current={selectedId === source.id ? 'page' : undefined} aria-busy={busy || undefined} disabled={sectionDisabled(source.id)} title={snapshot === undefined && !loading ? 'Installation files are unavailable' : undefined} onClick={() => { /* use the same secure navigation as the mobile selector */ selectSection(source.id); }}>{busy && <span className="update-progress-ring" aria-hidden="true" />}<span className="settings-source-nav-icon" aria-hidden="true">{sectionIcon(source.id, source.format)}</span><span className="settings-source-nav-label">{source.label}</span>{changedSourceIds.has(source.id) && <i aria-label="Unsaved changes" />}</button>; })}
+        {visiblePreferences.filter(preference => preference.group === group).map(preference => { /* keep the preference glyph stable while loading */ const busy = sectionLoading(preference.id); return <button type="button" key={preference.id} className={`${selectedId === preference.id ? 'active ' : ''}${busy ? 'progress-border progress-blue' : ''}`.trim() || undefined} aria-current={selectedId === preference.id ? 'page' : undefined} aria-busy={busy || undefined} disabled={sectionDisabled(preference.id)} onClick={() => { /* use the same secure navigation as the mobile selector */ selectSection(preference.id); }}>{busy && <span className="update-progress-ring" aria-hidden="true" />}<span className="settings-source-nav-icon" aria-hidden="true">{sectionIcon(preference.id)}</span><span className="settings-source-nav-label">{preference.label}</span>{changedSourceIds.has(preference.id) && <i aria-label="Unsaved changes" />}</button>; })}
       </Fragment>)}</nav>
       <div ref={sourcePanel} className="settings-source-panel" role="region" aria-label={`${selectedLabel} settings content`} tabIndex={0}>{selectedPreference !== undefined ? <><header className="settings-source-header"><div><span className="settings-source-kicker">{selectedPreference.kicker}</span><h2>{selectedPreference.label}</h2>{selectedPreference.description && <p className="settings-preference-description">{selectedPreference.description}</p>}</div></header><div className="settings-preferences">{selectedPreference.content}{selectedPreference.id === 'voice' && voiceSource !== undefined && advancedVoice.length > 0 && <section className="settings-voice-advanced"><header><h3>Advanced voice configuration</h3><p>Save these preferences together with the other voice settings.</p></header>{voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing these fields.</p>}{advancedVoice.map(([key, schema]) => <SchemaField key={`${key}:${catalogEditorEpoch}`} source={voiceSource} schema={schema} value={valueAt(voiceSource.value, ['integrations', 'realtime', key])} path={['integrations', 'realtime', key]} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={disabled || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} navigationDisabled={loading || saving} />)}</section>}</div></> : selected !== undefined && <>
         {/* source identity alone does not establish a conflict winner */}
@@ -1700,12 +1704,12 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSavedNotice,
     {headerActionsTarget !== null && createPortal(<>
       {/* show commit actions only while drafts remain unsaved */}
       {dirtyCount > 0 && <>
-        <button type="button" className="panel-header-action settings-header-labelled-action settings-header-validate" disabled={loading || saving || !runtime.canMutate} onClick={() => { /* validate the same captured global transaction */ void validateDrafts(); }}><PanelIcon path={panelIcons.check} /><span>Validate</span></button>
+        <button type="button" className={`panel-header-action settings-header-labelled-action settings-header-validate${settingsAction === 'validate' ? ' progress-border progress-blue' : ''}`} aria-busy={settingsAction === 'validate' || undefined} disabled={loading || saving || !runtime.canMutate} onClick={() => { /* validate the same captured global transaction */ void validateDrafts(); }}>{settingsAction === 'validate' && <span className="update-progress-ring" aria-hidden="true" />}<PanelIcon path={panelIcons.check} /><span>{settingsAction === 'validate' ? 'Validating…' : 'Validate'}</span></button>
         <button type="button" className="panel-header-action settings-header-discard" aria-label="Discard changes" title="Discard changes" disabled={loading || saving || !runtime.canMutate} onClick={() => { /* confirm before discarding any staged settings */ setConfirmation('discard'); }}><PanelIcon path={panelIcons.trash} /></button>
-        <button type="button" className="panel-header-action settings-header-labelled-action settings-header-save" disabled={loading || saving || !runtime.canMutate || voiceNameInvalid || browserDraft.validate() !== undefined} onClick={() => { /* apply browser preferences and persist files without an implicit restart */ void save(); }}><PanelIcon path={panelIcons.save} /><span>{saving ? 'Saving…' : 'Save changes'}</span></button>
+        <button type="button" className={`panel-header-action settings-header-labelled-action settings-header-save${settingsAction === 'save' ? ' progress-border progress-blue' : ''}`} aria-busy={settingsAction === 'save' || undefined} disabled={loading || saving || !runtime.canMutate || voiceNameInvalid || browserDraft.validate() !== undefined} onClick={() => { /* apply browser preferences and persist files without an implicit restart */ void save(); }}>{settingsAction === 'save' && <span className="update-progress-ring" aria-hidden="true" />}<PanelIcon path={panelIcons.save} /><span>{settingsAction === 'save' ? 'Saving…' : 'Save changes'}</span></button>
       </>}
       {/* retain refresh in the shared toolbar across every settings section */}
-      <button type="button" className="panel-header-action settings-header-refresh" aria-label="Refresh files" aria-busy={loading} disabled={loading || saving || dirtyCount > 0} title={dirtyCount > 0 ? 'Discard or save local changes before refreshing files' : loading ? 'Refreshing files…' : 'Refresh files'} onClick={() => { /* revoke old plaintext before accepting new source revisions */ void reloadFiles(); }}><PanelIcon path={panelIcons.refresh} /></button>
+      <button type="button" className={`panel-header-action settings-header-refresh${loading ? ' progress-border progress-blue' : ''}`} aria-label="Refresh files" aria-busy={loading || undefined} disabled={loading || saving || dirtyCount > 0} title={dirtyCount > 0 ? 'Discard or save local changes before refreshing files' : loading ? 'Refreshing files…' : 'Refresh files'} onClick={() => { /* revoke old plaintext before accepting new source revisions */ void reloadFiles(); }}>{loading && <span className="update-progress-ring" aria-hidden="true" />}<PanelIcon path={panelIcons.refresh} /></button>
     </>, headerActionsTarget)}
     {confirmation !== undefined && confirmationTarget != null && <SplitConfirmation target={confirmationTarget} title={confirmation === 'close' ? 'Close Settings with unsaved changes?' : 'Discard unsaved changes?'} description={confirmation === 'close' ? 'Your unsaved settings changes will be discarded. Nothing will be saved.' : 'Discard all unsaved browser, server and file changes? Nothing will be saved.'} confirmLabel={confirmation === 'close' ? 'Discard and close' : 'Discard changes'} pending={loading || saving} onCancel={cancelConfirmation} onConfirm={confirmDiscard} />}
     {handoverSources !== undefined && confirmationTarget != null && <SettingsSourceHandover target={confirmationTarget} sources={handoverSources} onConfirm={confirmHandover} onCancel={cancelHandover} />}

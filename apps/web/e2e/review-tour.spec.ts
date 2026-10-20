@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { expectClockwiseProgressBorder, expectProgressBorder } from './progress-border-assertions';
 import { installPaneMock } from './pane-stream-mock';
 
 // install the shared streamed-pane fixture so the review console's agent panel mounts
@@ -128,19 +129,20 @@ test('guides a human through active-scope implementation changes and sends conso
   await expect(loadingDialog).toBeHidden();
   await expect(page.getByRole('button', { name: /Open (generating |out-of-date )?guided review/u })).toHaveCount(0);
   await expect(branchButton).toHaveAttribute('aria-busy', 'true');
-  await expect(branchButton).not.toHaveCSS('animation-name', 'none');
-  // the branch icon gives way to a spinner, which still shows when reduced motion stills the glow
-  await expect(branchButton.locator('.git-review-spinner')).toBeVisible();
-  await expect(branchButton.locator('.git-branch-icon')).toHaveCount(0);
+  await expectProgressBorder(branchButton, 'peach');
+  await expectClockwiseProgressBorder(branchButton);
+  // keep the branch icon steady while the border communicates progress
+  await expect(branchButton.locator('.git-branch-icon')).toBeVisible();
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expect(branchButton).toHaveCSS('animation-name', 'none');
-  await expect(branchButton.locator('.git-review-spinner')).toBeVisible();
+  expect(await branchButton.locator(':scope > .update-progress-ring').evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
+  await expect(branchButton.locator(':scope > .update-progress-ring')).toBeVisible();
+  await expect(branchButton.locator('.git-branch-icon')).toBeVisible();
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await branchButton.click();
   // the flyout's review button says it is generating, yet still opens the progress dialog
   const generatingButton = statusPanel.getByRole('button', { name: 'Generating…' });
   await expect(generatingButton).toBeEnabled();
-  await expect(generatingButton).toHaveAttribute('aria-busy', 'true');
+  await expectProgressBorder(generatingButton, 'peach');
   await generatingButton.click();
   await expect(loadingDialog).toBeVisible();
   expect(jobRequests).toHaveLength(1);

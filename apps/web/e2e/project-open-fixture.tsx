@@ -169,12 +169,11 @@ export const renderSeveralProcessStatuses = (root: HTMLElement) => {
 };
 
 // the process actions the stack menu asked for, for a spec to read back
-type ProcessActions = { processActions?: { name: string; action: StackAction }[] };
+type ProcessActions = { processActions?: { name: string; action: StackAction }[]; releaseProcessAction?: () => void };
 
-// render a stack of several Stack processes whose menu acts on each one: every action is held
-// briefly, as the console holds the request until it is done, then lands in the process's state.
-// `api` needs `sync`, and `web` needs `api`; `docs` needs nothing and nothing needs it.
+// hold process operations until the spec has observed their pending state
 export const renderProcessSectionControls = (root: HTMLElement) => {
+  // model independent process outcomes
   const Controls = () => {
     const [processes, setProcesses] = useState<StackProcessState[]>([{ name: 'sync', state: 'running' }, { name: 'api', state: 'running', dependsOn: ['sync'] }, { name: 'web', state: 'exited', exitCode: 1, dependsOn: ['api'] }, { name: 'docs', state: 'stopped' }]);
     return createElement(ProjectOpen, {
@@ -183,10 +182,14 @@ export const renderProcessSectionControls = (root: HTMLElement) => {
       onStackAction: () => {},
       onStackLog: async () => undefined,
       onOpenStackPanel: recordOpenedPanel,
+      // record the action before waiting for its simulated response
       onProcessAction: async (name: string, action: StackAction) => {
         const record = window as unknown as ProcessActions;
         record.processActions = [...record.processActions ?? [], { name, action }];
-        await new Promise(resolve => window.setTimeout(resolve, 300));
+        // let the spec settle the boundary without a timing race
+        await new Promise<void>(resolve => { record.releaseProcessAction = resolve; });
+        delete record.releaseProcessAction;
+        // publish the process outcome
         setProcesses(current => current.map(process => process.name === name ? { name, state: action === 'stop' ? 'stopped' : 'running', ...(process.dependsOn === undefined ? {} : { dependsOn: process.dependsOn }) } : process));
       }
     });

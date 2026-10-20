@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { closeOnMiddleClick } from './middle-click.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand, type PanelAction } from './panel-header.js';
-import { actionGlyphs, ProcessNotices, RelationChips, StackIcon, stackGlyphs, StateDot, StateText, UsedFailure, useStackControls, WarningIcon, wholeStackActions, type ProcessAction, type ProjectStack, type StackControls, type StackHandlers } from './stack-controls.js';
-import { dependantsOf, processActionLabel, processActions, processesSummary, processWarns, stackOperationLabel, usedProcessDown, usedProcesses, type StackProcessOutput, type StackProcessState, type StackSelection, type UsedProcess } from './stack-operations.js';
+import { actionGlyphs, ProcessNotices, RelationChips, StackIcon, stackGlyphs, stackProgressColor, StateDot, StateText, UsedFailure, useStackControls, WarningIcon, wholeStackActions, type ProcessAction, type ProjectStack, type StackControls, type StackHandlers } from './stack-controls.js';
+import { dependantsOf, processActionLabel, processActions, processesSummary, processWarns, stackOperationLabel, usedProcessDown, usedProcesses, type StackAction, type StackProcessOutput, type StackProcessState, type StackSelection, type UsedProcess } from './stack-operations.js';
 
 // how often the shown output is read again, as the log dialog read it
 const outputRefreshMs = 750;
@@ -92,7 +92,7 @@ function ProcessDetail({ process, processes, controls, output, onSelect, onOpenT
   return <div className="stack-pane-detail" role="group" aria-label={`${process.name} process`}>
     <div className="stack-pane-detail-head">
       <span className="stack-pane-detail-title"><StateDot state={process.state} busy={inFlight !== undefined} /><strong>{process.name}</strong><StateText process={process} inFlight={inFlight} /></span>
-      <span className="stack-pane-buttons">{processActions.map(action => <button key={action} type="button" className="stack-text-button" disabled={!controls.processAllowed(process, action)} aria-label={`${processActionLabel(action)} ${process.name}`} onClick={() => void controls.runProcess(process, action)}><StackIcon path={actionGlyphs[action]} />{processActionLabel(action)}</button>)}</span>
+      <span className="stack-pane-buttons">{processActions.map(action => { /* mark only the action currently running */ const busy = inFlight === action; return <button key={action} type="button" className={`stack-text-button${busy ? ` progress-border progress-${stackProgressColor(action)}` : ''}`} aria-busy={busy || undefined} disabled={!controls.processAllowed(process, action)} aria-label={`${processActionLabel(action)} ${process.name}`} onClick={() => void controls.runProcess(process, action)}>{busy && <span className="update-progress-ring" aria-hidden="true" />}<StackIcon path={actionGlyphs[action]} />{processActionLabel(action)}</button>; })}</span>
     </div>
     <ProcessNotices name={process.name} notices={process.notices} />
     <div className="stack-pane-relations">
@@ -111,7 +111,11 @@ function UseDetail({ used, processes, controls, output, onSelect, onOpenWorktree
   const { use } = used;
   const pending = controls.usedInFlight(used.key);
   const worktreeId = use.worktreeId;
-  const button = (action: ProcessAction, text: string) => <button type="button" className="stack-text-button" disabled={!controls.usedAllowed(used, action)} aria-label={`${processActionLabel(action)} ${use.process} in ${use.label}`} onClick={() => void controls.runUsed(used, action)}><StackIcon path={actionGlyphs[action]} />{pending === action ? `${stackOperationLabel(action)}…` : text}</button>;
+  // keep the remote action glyph and label stable during progress
+  const button = (action: ProcessAction, text: string) => {
+    const busy = pending === action;
+    return <button type="button" className={`stack-text-button${busy ? ` progress-border progress-${stackProgressColor(action)}` : ''}`} aria-busy={busy || undefined} disabled={!controls.usedAllowed(used, action)} aria-label={`${processActionLabel(action)} ${use.process} in ${use.label}`} onClick={() => void controls.runUsed(used, action)}>{busy && <span className="update-progress-ring" aria-hidden="true" />}<StackIcon path={actionGlyphs[action]} />{busy ? `${stackOperationLabel(action)}…` : text}</button>;
+  };
   return <div className="stack-pane-detail" role="group" aria-label={`${use.process} in ${use.label}`}>
     <div className="stack-pane-detail-head">
       <span className="stack-pane-detail-title"><StateDot state={use.state} busy={pending !== undefined} /><strong>{use.process}</strong><StateText process={use} inFlight={pending} /></span>
@@ -156,11 +160,14 @@ export function StackPanel({ worktreeId, title, stack, selection, onSelect, onCl
     title: controls.operation === action ? `${stackOperationLabel(action)}…` : `${processActionLabel(action)} all`,
     className: 'stack-pane-stack-action',
     disabled: !controls.allowed(action),
+    ...(controls.operation === action ? { progress: stackProgressColor(action) } : {}),
     icon: <StackIcon path={actionGlyphs[action]} className="panel-header-icon" />,
     onSelect: () => void controls.run(action)
   }));
-  const item = (key: string, selected: boolean, onClick: () => void, dot: { state?: 'running'|'exited'|'stopped'; busy?: boolean }, name: string, state: { state?: 'running'|'exited'|'stopped'; exitCode?: number }, warn: boolean, where?: string) =>
-    <button key={key} type="button" className="stack-pane-item" aria-current={selected || undefined} onClick={onClick}>
+  // put process progress around the complete selectable row
+  const item = (key: string, selected: boolean, onClick: () => void, dot: { state?: 'running'|'exited'|'stopped'; busy?: boolean; operation?: StackAction }, name: string, state: { state?: 'running'|'exited'|'stopped'; exitCode?: number }, warn: boolean, where?: string) =>
+    <button key={key} type="button" className={`stack-pane-item${dot.operation === undefined ? '' : ` progress-border progress-${stackProgressColor(dot.operation)}`}`} aria-current={selected || undefined} aria-busy={dot.operation !== undefined || undefined} onClick={onClick}>
+      {dot.operation !== undefined && <span className="update-progress-ring" aria-hidden="true" />}
       <StateDot state={dot.state} busy={dot.busy} /><span className="stack-pane-item-name">{name}</span>{warn && <WarningIcon className="stack-row-warning" />}<StateText process={state} warn={warn && where !== undefined} />
       {where !== undefined && <span className="stack-pane-item-where" title={where}>{where}</span>}
     </button>;
@@ -169,9 +176,9 @@ export function StackPanel({ worktreeId, title, stack, selection, onSelect, onCl
     <div className="stack-pane-body">
       <nav className="stack-pane-list" aria-label="Stack processes">
         {used.length > 0 && <div className="stack-pane-section">This worktree</div>}
-        {processes.map(process => item(`process:${process.name}`, process === selectedProcess, () => onSelect({ kind: 'process', name: process.name }), { state: process.state, busy: controls.inFlight(process.name) !== undefined || process.operation !== undefined }, process.name, process, processWarns(process)))}
+        {processes.map(process => { /* carry the exact process operation to its row */ const operation = controls.inFlight(process.name) ?? process.operation; return item(`process:${process.name}`, process === selectedProcess, () => onSelect({ kind: 'process', name: process.name }), { state: process.state, busy: operation !== undefined, operation }, process.name, process, processWarns(process)); })}
         {used.length > 0 && <div className="stack-pane-section">Other worktrees</div>}
-        {used.map(entry => item(`use:${entry.key}`, entry === selectedUse, () => onSelect({ kind: 'use', key: entry.key }), { state: entry.use.state, busy: controls.usedInFlight(entry.key) !== undefined }, entry.use.process, entry.use, usedProcessDown(entry, processes), entry.use.label))}
+        {used.map(entry => { /* carry the remote process operation to its row */ const operation = controls.usedInFlight(entry.key); return item(`use:${entry.key}`, entry === selectedUse, () => onSelect({ kind: 'use', key: entry.key }), { state: entry.use.state, busy: operation !== undefined, operation }, entry.use.process, entry.use, usedProcessDown(entry, processes), entry.use.label); })}
       </nav>
       {selectedUse !== undefined
         ? <UseDetail used={selectedUse} processes={processes} controls={controls} output={output} onSelect={onSelect} onOpenWorktree={onOpenWorktree} />

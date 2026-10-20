@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { expectProgressBorder } from './progress-border-assertions';
 
 // the projects[] wire: the "+" launcher groups idle Worktrees under one section per Project
 // — a header, one row per Worktree (name, Pin, Rename, Remove, Launch), then New worktree…
@@ -105,11 +106,8 @@ test('launcher lists per-project sections and pins a worktree', async ({ page })
   const save = dialog.locator('button[type="submit"]');
   await expect(save).toHaveText('Save');
   await save.click();
-  const spinner = save.locator('.spinner');
-  await expect(spinner).toBeVisible();
-  // keep the pending glyph circular instead of allowing flexbox to squash it
-  const spinnerSize = await spinner.evaluate(element => ({ width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height }));
-  expect(spinnerSize.width).toBe(spinnerSize.height);
+  await expect(save).toHaveText('Saving…');
+  await expectProgressBorder(save, 'blue');
   releaseLabelRequest();
   await expect.poll(() => labels).toContainEqual({ id: 'repo:/repo/feature', label: '🥔 David' });
   // the dialog and visible row update without waiting for dashboard polling

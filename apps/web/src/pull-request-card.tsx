@@ -86,5 +86,5 @@ export function PullRequestFixup({ pullRequest, onFixup, pending = false }: { pu
       setQueueing(false);
     }
   };
-  return <button className={`pull-request-fixup${queued ? ' queued' : ''}`} type="button" disabled={submitting} aria-label="Queue $fixup" title="Queue $fixup" onClick={() => { /* submit the standalone action */ void queueFixup(); }}>{submitting ? <span className="spinner" /> : queued ? <><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>Queued</> : '$fixup'}</button>;
+  return <button className={`pull-request-fixup${queued ? ' queued' : ''}${queueing ? ' progress-border progress-peach' : ''}`} type="button" aria-busy={queueing || undefined} disabled={submitting} aria-label="Queue $fixup" title="Queue $fixup" onClick={() => { /* submit the standalone action */ void queueFixup(); }}>{queueing && <span className="update-progress-ring" aria-hidden="true" />}{queued ? <><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>Queued</> : '$fixup'}</button>;
 }

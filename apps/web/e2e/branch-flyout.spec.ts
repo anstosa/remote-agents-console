@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { expectClockwiseProgressBorder, expectProgressBorder } from './progress-border-assertions';
 
 // open one branch flyout tab
 async function openBranchTab(page: Page, name: 'PRs' | 'Branches') {
@@ -58,11 +59,12 @@ test('prefetches shared repository choices and refreshes them when reopened', as
   await expect(workingTab).toHaveCSS('box-shadow', selectionEffect.shadow);
   await expect.poll(() => pullRequestRequests).toBe(1);
   await expect(panel).toHaveAttribute('aria-busy', 'false');
-  await expect(workingTab.locator('.spinner')).toHaveCount(0);
+  await expect(workingTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
   await expect(pullRequestsTab).toHaveAttribute('aria-busy', 'true');
   await expect(branchesTab).toHaveAttribute('aria-busy', 'true');
-  await expect(pullRequestsTab.locator('.spinner')).toBeVisible();
-  await expect(branchesTab.locator('.spinner')).toBeVisible();
+  await expectProgressBorder(pullRequestsTab, 'blue');
+  await expectProgressBorder(branchesTab, 'blue');
+  await expectClockwiseProgressBorder(pullRequestsTab);
   const [panelBox, tabsBox] = await Promise.all([panel.boundingBox(), tabs.boundingBox()]);
   expect(panelBox).not.toBeNull();
   expect(tabsBox).not.toBeNull();
@@ -86,12 +88,12 @@ test('prefetches shared repository choices and refreshes them when reopened', as
   expect(pullRequestRequests).toBe(1);
   await workingTab.click();
   await expect(panel).toHaveAttribute('aria-busy', 'false');
-  await expect(pullRequestsTab.locator('.spinner')).toBeVisible();
+  await expectProgressBorder(pullRequestsTab, 'blue');
   finishPullRequests();
-  await expect(pullRequestsTab).toHaveAttribute('aria-busy', 'false');
-  await expect(branchesTab).toHaveAttribute('aria-busy', 'false');
-  await expect(pullRequestsTab.locator('.spinner')).toHaveCount(0);
-  await expect(branchesTab.locator('.spinner')).toHaveCount(0);
+  await expect(pullRequestsTab).not.toHaveAttribute('aria-busy');
+  await expect(branchesTab).not.toHaveAttribute('aria-busy');
+  await expect(pullRequestsTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(branchesTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
   await pullRequestsTab.click();
 
   const pullRequestOption = panel.getByRole('group', { name: '#2567: Make prompt actions fit; Open', exact: true });
@@ -109,15 +111,15 @@ test('prefetches shared repository choices and refreshes them when reopened', as
   await page.mouse.click(4, 4);
   await branchButton.click();
   await expect.poll(() => pullRequestRequests).toBe(2);
-  await expect(pullRequestsTab.locator('.spinner')).toBeVisible();
-  await expect(branchesTab.locator('.spinner')).toBeVisible();
+  await expectProgressBorder(pullRequestsTab, 'blue');
+  await expectProgressBorder(branchesTab, 'blue');
   await pullRequestsTab.click();
   await expect(pullRequest).toBeVisible();
   await expect(checkout).toBeDisabled();
   finishPullRequestRefresh();
   await expect(checkout).toBeEnabled();
-  await expect(pullRequestsTab.locator('.spinner')).toHaveCount(0);
-  await expect(branchesTab.locator('.spinner')).toHaveCount(0);
+  await expect(pullRequestsTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(branchesTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
   const [github] = await Promise.all([page.waitForEvent('popup'), pullRequest.click()]);
   await expect(github).toHaveURL('https://github.example.com/pull/2567');
   await github.close();
@@ -474,13 +476,13 @@ test('shows the workspace pull request cache while refreshing after a tab remoun
   await expect.poll(() => pullRequestRequests).toBe(2);
   await expect(menu.getByRole('tab', { name: 'PRs', exact: true })).toHaveAttribute('aria-busy', 'true');
   await expect(menu.getByRole('tab', { name: 'Branches', exact: true })).toHaveAttribute('aria-busy', 'true');
-  await expect(menu.getByRole('tab', { name: 'PRs', exact: true }).locator('.spinner')).toBeVisible();
+  await expectProgressBorder(menu.getByRole('tab', { name: 'PRs', exact: true }), 'blue');
   await expect(menu.getByRole('link', { name: '#401: Cached PR' })).toBeVisible();
   finishRefresh();
   await expect(menu.getByRole('link', { name: '#402: Refreshed PR' })).toBeVisible();
   await expect(menu.getByRole('link', { name: '#401: Cached PR' })).toHaveCount(0);
-  await expect(menu.getByRole('tab', { name: 'PRs', exact: true }).locator('.spinner')).toHaveCount(0);
-  await expect(menu.getByRole('tab', { name: 'Branches', exact: true }).locator('.spinner')).toHaveCount(0);
+  await expect(menu.getByRole('tab', { name: 'PRs', exact: true }).locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(menu.getByRole('tab', { name: 'Branches', exact: true }).locator(':scope > .update-progress-ring')).toHaveCount(0);
 });
 
 // protect cached actions after refresh failures
@@ -557,7 +559,7 @@ test('shows the empty pull request state in the PRs tab', async ({ page }) => {
 // expose failed pull request lookups
 test('shows the GitHub error instead of an empty pull request state', async ({ page }) => {
   let finishFailure!: () => void;
-  // hold the shared failure through spinner assertions
+  // hold the shared failure through border assertions
   const failureFinished = new Promise<void>(resolve => {
     // expose failure completion to the test
     finishFailure = resolve;
@@ -592,19 +594,19 @@ test('shows the GitHub error instead of an empty pull request state', async ({ p
   await expect(workingTab).toHaveAccessibleName('Working');
   await expect(pullRequestsTab).toHaveAccessibleName('PRs');
   await expect(branchesTab).toHaveAccessibleName('Branches');
-  await expect(workingTab.locator('.spinner')).toHaveCount(0);
-  await expect(pullRequestsTab.locator('.spinner')).toBeVisible();
-  await expect(branchesTab.locator('.spinner')).toBeVisible();
+  await expect(workingTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expectProgressBorder(pullRequestsTab, 'blue');
+  await expectProgressBorder(branchesTab, 'blue');
   await pullRequestsTab.click();
   await expect(menu).toHaveAttribute('aria-busy', 'true');
   finishFailure();
   await expect(menu.getByRole('alert', { name: 'GitHub could not load pull requests (503): temporary outage.' })).toBeVisible();
   await expect(menu.getByRole('status', { name: 'No open pull requests.' })).toHaveCount(0);
   await expect(menu).toHaveAttribute('aria-busy', 'false');
-  await expect(pullRequestsTab).toHaveAttribute('aria-busy', 'false');
-  await expect(branchesTab).toHaveAttribute('aria-busy', 'false');
-  await expect(pullRequestsTab.locator('.spinner')).toHaveCount(0);
-  await expect(branchesTab.locator('.spinner')).toHaveCount(0);
+  await expect(pullRequestsTab).not.toHaveAttribute('aria-busy');
+  await expect(branchesTab).not.toHaveAttribute('aria-busy');
+  await expect(pullRequestsTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(branchesTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
 });
 
 // expose shared lookup failures in the branches tab
@@ -710,8 +712,8 @@ test('keeps repository loading across inner tabs and ignores a dismissed respons
   expect(repositoryRequests).toBe(1);
   await workingTab.click();
   await expect(panel).toHaveAttribute('aria-busy', 'false');
-  await expect(pullRequestsTab.locator('.spinner')).toBeVisible();
-  await expect(branchesTab.locator('.spinner')).toBeVisible();
+  await expectProgressBorder(pullRequestsTab, 'blue');
+  await expectProgressBorder(branchesTab, 'blue');
 
   // dismiss the whole flyout to cancel its request
   await page.mouse.click(4, 4);
@@ -719,15 +721,15 @@ test('keeps repository loading across inner tabs and ignores a dismissed respons
   await branchButton.click();
   await expect.poll(() => repositoryRequests).toBe(2);
   await expect(workingTab).toHaveAttribute('aria-selected', 'true');
-  await expect(pullRequestsTab.locator('.spinner')).toBeVisible();
+  await expectProgressBorder(pullRequestsTab, 'blue');
   finishDismissedRequest();
   await pullRequestsTab.click();
   await expect(panel.getByRole('link', { name: '#501: Dismissed response' })).toHaveCount(0);
-  await expect(pullRequestsTab.locator('.spinner')).toBeVisible();
+  await expectProgressBorder(pullRequestsTab, 'blue');
   finishCurrentRequest();
   await expect(panel.getByRole('link', { name: '#502: Current response' })).toBeVisible();
-  await expect(pullRequestsTab.locator('.spinner')).toHaveCount(0);
-  await expect(branchesTab.locator('.spinner')).toHaveCount(0);
+  await expect(pullRequestsTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(branchesTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
 });
 
 // check out an open-nowhere local branch, and refuse one detached in an unknown worktree

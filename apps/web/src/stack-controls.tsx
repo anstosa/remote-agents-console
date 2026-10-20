@@ -32,19 +32,22 @@ export const stackGlyphs = {
 } as const;
 export const actionGlyphs: Record<ProcessAction, string> = { start: stackGlyphs.start, stop: stackGlyphs.stop, restart: stackGlyphs.restart };
 
+// match each process transition to its shared progress color
+export const stackProgressColor = (action: StackAction): 'green' | 'red' | 'yellow' | 'peach' => action === 'start' ? 'green' : action === 'stop' ? 'red' : action === 'restart' ? 'yellow' : 'peach';
+
 export const StackIcon = ({ path, className = 'stack-icon' }: { path: string; className?: string }) => <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d={path} /></svg>;
 
 // the mark of a warning, on a Process notice, a process's row and the stack badge
 export const WarningIcon = ({ className }: { className: string }) => <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20zM12 10v4M12 17h.01" /></svg>;
 
-// A process's status dot: green running, red exited, grey stopped or unknown, pulsing while an
+// a process's status dot: green running, red exited, grey stopped or unknown and peach while an
 // action on it is under way
 export const StateDot = ({ state, busy = false, title }: { state?: 'running'|'exited'|'stopped'; busy?: boolean; title?: string }) =>
   <i className={`stack-process-dot state-${state ?? 'unknown'}${busy ? ' busy' : ''}`} title={title} aria-hidden="true" />;
 
-// a process's state in a word, or the action under way on it with a spinner
+// a process's state in a word, or the action under way on its stable status
 export const StateText = ({ process, inFlight, warn = false }: { process: { state?: 'running'|'exited'|'stopped'; exitCode?: number }; inFlight?: StackAction; warn?: boolean }) =>
-  <span className={`stack-process-state${warn ? ' warn' : ''}`}>{inFlight === undefined ? processStateText(process) : <><span className="spinner" aria-hidden="true" />{stackOperationLabel(inFlight)}…</>}</span>;
+  <span className={`stack-process-state${warn ? ' warn' : ''}${inFlight === undefined ? '' : ` progress-border progress-${stackProgressColor(inFlight)}`}`} aria-busy={inFlight !== undefined || undefined}>{inFlight !== undefined && <span className="update-progress-ring" aria-hidden="true" />}{inFlight === undefined ? processStateText(process) : `${stackOperationLabel(inFlight)}…`}</span>;
 
 // a process's Process notices, each marked with its level and followed by its `controls`, or
 // nothing when it has none

@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { expectProgressBorder } from './progress-border-assertions';
 
 test('keeps attachments and repository choices out of the more menu', async ({ page }) => {
   let finishGithubActions!: () => void;
@@ -38,7 +39,9 @@ test('keeps attachments and repository choices out of the more menu', async ({ p
   await expect(menu.getByRole('button', { name: 'Attach files', exact: true })).toHaveCount(0);
   await expect(menu.getByText('Pull requests', { exact: true })).toHaveCount(0);
   await expect(menu.getByText('Branches', { exact: true })).toHaveCount(0);
-  await expect(menu.getByRole('button', { name: 'GitHub Actions', exact: true }).locator('.spinner')).toBeVisible();
+  const loadingActions = menu.getByRole('button', { name: 'GitHub Actions', exact: true });
+  await expectProgressBorder(loadingActions, 'blue');
+  await expect(loadingActions.locator('.more-menu-icon')).toBeVisible();
   finishGithubActions();
   await expect(menu.getByRole('link', { name: 'GitHub Actions', exact: true })).toHaveAttribute('href', 'https://github.com/octo/repo/actions');
   await page.keyboard.press('Escape');
@@ -46,7 +49,9 @@ test('keeps attachments and repository choices out of the more menu', async ({ p
   // new task now waits in the agent power flyout
   await page.getByRole('button', { name: 'Agent power options' }).click();
   const powerMenu = page.getByRole('menu', { name: 'Agent power options' });
-  await expect(powerMenu.getByRole('menuitem', { name: 'New Task', exact: true }).locator('.spinner')).toBeVisible();
+  const loadingNewTask = powerMenu.getByRole('menuitem', { name: 'New Task', exact: true });
+  await expectProgressBorder(loadingNewTask, 'blue');
+  await expect(loadingNewTask.locator('.more-menu-icon')).toBeVisible();
   finishNewTask();
   await expect(powerMenu.locator('.new-task-option .more-menu-reason')).toHaveText('Start a fresh task for this worktree.');
   await page.keyboard.press('Escape');

@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mockAccountSocket } from "./account-fixture.js";
 import { confirmSettingsDiscard } from "./settings-confirmation-helpers.js";
+import { expectProgressBorder } from "./progress-border-assertions.js";
 
 type SettingsPatch = {
   op: "set" | "remove" | "insert" | "move";
@@ -936,7 +937,10 @@ test("locks header actions through validation and saving, retains failures, then
   state.validationGate = validation.promise;
   await fileActions(settings).validate.click();
   await expect.poll(() => state.validations.length).toBe(1);
-  await expect(fileActions(settings).validate).toBeDisabled();
+  const validating = settings.getByRole("button", { name: "Validating…", exact: true });
+  await expect(validating).toBeDisabled();
+  await expectProgressBorder(validating, "blue");
+  await expect(validating.locator("svg")).toBeVisible();
   await expect(fileActions(settings).discard).toBeDisabled();
   await expect(fileActions(settings).save).toBeDisabled();
   await expect(fileActions(settings).refresh).toBeDisabled();
@@ -956,6 +960,8 @@ test("locks header actions through validation and saving, retains failures, then
   await expect.poll(() => state.saves.length).toBe(1);
   const saving = settings.getByRole("button", { name: "Saving…", exact: true });
   await expect(saving).toBeDisabled();
+  await expectProgressBorder(saving, "blue");
+  await expect(saving.locator("svg")).toBeVisible();
   await expect(fileActions(settings).validate).toBeDisabled();
   await expect(fileActions(settings).discard).toBeDisabled();
   await expect(fileActions(settings).refresh).toBeDisabled();

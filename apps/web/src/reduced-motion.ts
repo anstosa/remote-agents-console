@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 
-// Per-browser opt-in that stills the attention animations (working shimmer,
-// update pulse, …) for this browser, on top of the OS-level
+// per-browser opt-in that stills attention and progress-border animations
+// for this browser, on top of the os-level
 // `prefers-reduced-motion` query the stylesheet already honours. The CSS keys off
 // `[data-motion="reduced"]` on the document, so flipping it needs no reload.
 const reducedMotionKey = 'rac.reduced-motion';

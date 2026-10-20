@@ -149,7 +149,7 @@ export function SplitConfirmation({ target, title, description, children, confir
         {children}
         <div className="split-confirmation-actions">
           <button ref={cancelRef} type="button" disabled={busy} onClick={cancel}>{cancelLabel}</button>
-          <button className={`${tone === 'danger' ? 'danger ' : ''}split-confirmation-confirm`} type="button" disabled={busy || confirmDisabled} onClick={() => { /* act only on explicit confirmation */ void confirm(); }}>{busy && <span className="spinner" />}{confirmLabel}</button>
+          <button className={`${tone === 'danger' ? 'danger ' : ''}split-confirmation-confirm${busy ? ` progress-border progress-${tone === 'danger' ? 'red' : 'blue'}` : ''}`} type="button" aria-busy={busy || undefined} disabled={busy || confirmDisabled} onClick={() => { /* act only on explicit confirmation */ void confirm(); }}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{confirmLabel}</button>
         </div>
       </div>
     </div>,

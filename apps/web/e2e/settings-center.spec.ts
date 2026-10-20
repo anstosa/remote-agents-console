@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expectProgressBorder } from "./progress-border-assertions";
 import { mockAccountSocket } from "./account-fixture";
 import {
   confirmSettingsClose,
@@ -4110,11 +4111,10 @@ for (const width of [390, 1440]) {
       name: "Search settings",
     });
     await expect.poll(() => state.settingsReads).toBe(1);
-    await expect(
-      settings.getByRole("status").filter({
-        hasText: "Loading installation files",
-      }),
-    ).toBeVisible();
+    const catalogLoading = settings.getByRole("status").filter({
+      hasText: "Loading installation files",
+    });
+    await expectProgressBorder(catalogLoading, "blue");
     // inspect the navigation presentation for this breakpoint
     if (width === 390) {
       const selector = settings.getByRole("combobox", {
@@ -4129,7 +4129,7 @@ for (const width of [390, 1440]) {
       await expect(listbox.getByRole("option")).toHaveCount(11);
       const browser = listbox.locator('[role="option"][data-value="browser"]');
       await expect(browser).not.toHaveAttribute("aria-disabled", "true");
-      await expect(browser.locator(".spinner")).toHaveCount(0);
+      await expect(browser.locator(":scope > .update-progress-ring")).toHaveCount(0);
       for (const id of [
         "voice",
         "keyboard",
@@ -4139,7 +4139,7 @@ for (const width of [390, 1440]) {
           `[role="option"][data-value=${JSON.stringify(id)}]`,
         );
         await expect(option).toHaveAttribute("aria-disabled", "true");
-        await expect(option.locator(".spinner")).toBeVisible();
+        await expectProgressBorder(option, "blue");
       }
       await selector.focus();
       await page.keyboard.press("ArrowDown");
@@ -4163,9 +4163,12 @@ for (const width of [390, 1440]) {
         const button = nav.getByRole("button", { name: label, exact: true });
         await expect(button).toBeDisabled();
         await expect(button).toHaveAttribute("aria-busy", "true");
-        await expect(button.locator(".spinner")).toBeVisible();
+        await expectProgressBorder(button, "blue");
       }
     }
+    await settings.screenshot({
+      path: `/tmp/remoteagents-loading-borders-settings-${width}.png`,
+    });
 
     // search filters placeholders without removing the current mobile section
     await search.fill("cloudflare");
@@ -4219,7 +4222,7 @@ for (const width of [390, 1440]) {
         );
         await expect(option).toHaveAttribute("aria-disabled", "true");
         await expect(option).not.toHaveAttribute("aria-busy", "true");
-        await expect(option.locator(".spinner")).toHaveCount(0);
+        await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
       }
       for (const id of ["voice", "keyboard"]) {
         await expect(
@@ -4240,7 +4243,7 @@ for (const width of [390, 1440]) {
         });
         await expect(button).toBeDisabled();
         await expect(button).not.toHaveAttribute("aria-busy", "true");
-        await expect(button.locator(".spinner")).toHaveCount(0);
+        await expect(button.locator(":scope > .update-progress-ring")).toHaveCount(0);
       }
       await expect(
         nav.getByRole("button", { name: "Voice", exact: true }),
@@ -4281,7 +4284,7 @@ for (const width of [390, 1440]) {
           `[role="option"][data-value=${JSON.stringify(id)}]`,
         );
         await expect(option).not.toHaveAttribute("aria-disabled", "true");
-        await expect(option.locator(".spinner")).toHaveCount(0);
+        await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
       }
       await expect(
         listbox.locator('[role="option"][data-value="cloudflared"]'),
@@ -4304,7 +4307,7 @@ for (const width of [390, 1440]) {
       ]) {
         const button = nav.getByRole("button", { name: label, exact: true });
         await expect(button).toBeEnabled();
-        await expect(button.locator(".spinner")).toHaveCount(0);
+        await expect(button.locator(":scope > .update-progress-ring")).toHaveCount(0);
       }
       await expect(
         nav.getByRole("button", {
@@ -4363,7 +4366,7 @@ for (const width of [390, 1440]) {
           `[role="option"][data-value=${JSON.stringify(id)}]`,
         );
         await expect(option).toHaveAttribute("aria-disabled", "true");
-        await expect(option.locator(".spinner")).toBeVisible();
+        await expectProgressBorder(option, "blue");
       }
       await selector.focus();
       await page.keyboard.press("ArrowDown");
@@ -4389,7 +4392,7 @@ for (const width of [390, 1440]) {
         const button = nav.getByRole("button", { name: label, exact: true });
         await expect(button).toBeDisabled();
         await expect(button).toHaveAttribute("aria-busy", "true");
-        await expect(button.locator(".spinner")).toBeVisible();
+        await expectProgressBorder(button, "blue");
       }
     }
 
@@ -4409,7 +4412,7 @@ for (const width of [390, 1440]) {
         '[role="option"][data-value="compose-override"]',
       );
       await expect(compose).toHaveAttribute("aria-disabled", "true");
-      await expect(compose.locator(".spinner")).toBeVisible();
+      await expectProgressBorder(compose, "blue");
       await page.keyboard.press("Escape");
     } else {
       const nav = settings.getByRole("navigation", {
@@ -4421,7 +4424,7 @@ for (const width of [390, 1440]) {
       });
       await expect(nav.getByRole("button")).toHaveCount(1);
       await expect(compose).toBeDisabled();
-      await expect(compose.locator(".spinner")).toBeVisible();
+      await expectProgressBorder(compose, "blue");
     }
 
     await search.fill("");
@@ -4446,7 +4449,7 @@ for (const width of [390, 1440]) {
         );
         await expect(option).not.toHaveAttribute("aria-disabled", "true");
         await expect(option).not.toHaveAttribute("aria-busy", "true");
-        await expect(option.locator(".spinner")).toHaveCount(0);
+        await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
       }
       await page.keyboard.press("Escape");
     } else {
@@ -4466,7 +4469,7 @@ for (const width of [390, 1440]) {
         const button = nav.getByRole("button", { name: label, exact: true });
         await expect(button).toBeEnabled();
         await expect(button).not.toHaveAttribute("aria-busy", "true");
-        await expect(button.locator(".spinner")).toHaveCount(0);
+        await expect(button.locator(":scope > .update-progress-ring")).toHaveCount(0);
       }
     }
   });
@@ -4591,7 +4594,7 @@ test("matches desktop settings icons to mobile navigation without changing names
   await expect(
     pendingApplication.locator(".settings-source-nav-icon"),
   ).toBeVisible();
-  await expect(pendingApplication.locator(":scope > .spinner")).toBeVisible();
+  await expectProgressBorder(pendingApplication, "blue");
   refresh.resolve();
   await expect(refreshButton).toBeEnabled();
 
@@ -6816,7 +6819,7 @@ test("keeps browser and voice settings available when the file catalog fails", a
       `[role="option"][data-value=${JSON.stringify(source.id)}]`,
     );
     await expect(option).toHaveAttribute("aria-disabled", "true");
-    await expect(option.locator(".spinner")).toHaveCount(0);
+    await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
   }
   await page.keyboard.press("Escape");
   await chooseSettingsOption(selector, "browser");

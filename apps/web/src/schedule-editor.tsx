@@ -323,7 +323,7 @@ export function ScheduleEditor({ schedule, nextRun, prefill, runsOnText, adapter
         <p className={`schedule-last${lastRunNeedsAttention(lastRun) ? ' bad' : ''}`}>{lastRun === undefined ? 'Not run yet' : <>Last run {relativeAge(lastRun.at, now())} · <b>{lastRun.status}</b>{lastRun.detail ? `, ${lastRun.detail}` : ''}{openAgentId !== undefined && <> · <a className="schedule-open-agent" href={`#agent=${encodeURIComponent(openAgentId)}`}>Open agent</a></>}</>}</p>
       </div>
       <div className="schedule-foot">
-        {onRunNow !== undefined && <button type="button" className="schedule-run-now" disabled={busy || running || gone || invalid} onClick={() => void onRunNow()}>{running ? <span className="spinner" /> : '▷ Run now'}</button>}
+        {onRunNow !== undefined && <button type="button" className={`schedule-run-now${running ? ' progress-border progress-green' : ''}`} aria-busy={running || undefined} disabled={busy || running || gone || invalid} onClick={() => void onRunNow()}>{running && <span className="update-progress-ring" aria-hidden="true" />}▷ Run now</button>}
         <button type="button" className="schedule-remove" disabled={busy || running} onClick={() => void onRemove()}>Remove schedule</button>
       </div>
       {openSlot === 'cadence' && (

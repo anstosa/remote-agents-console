@@ -130,6 +130,8 @@ export function usePanelExpand(key: string) {
   return { expanded: context.expanded === key, anyExpanded: context.expanded !== undefined, toggle: () => context.toggle(key), restore: context.restore };
 }
 
+export type ProgressColor = 'blue' | 'yellow' | 'red' | 'peach' | 'green' | 'teal' | 'pink' | 'mauve';
+
 // One header action. Inline it is an icon button labelled by `label`; folded into the ⋮ it is a
 // row showing the icon and the label.
 export type PanelAction = {
@@ -141,12 +143,17 @@ export type PanelAction = {
   className?: string;
   disabled?: boolean;
   pressed?: boolean;
+  progress?: ProgressColor;
   // aria-expanded, for an action that opens a popup of its own
   popupOpen?: boolean;
 };
 
 // mark compact actions that open a secondary flyout
-const actionButton = (action: PanelAction, row = false) => <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}`} disabled={action.disabled} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onClick={action.onSelect}>{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{row && <span>{action.label}</span>}</button>;
+const actionButton = (action: PanelAction, row = false) => {
+  // keep the action glyph stable while its border reports progress
+  const busy = action.progress !== undefined;
+  return <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}${busy ? ` progress-border progress-${action.progress}` : ''}`} disabled={action.disabled} aria-busy={busy || undefined} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onClick={action.onSelect}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{row && <span>{action.label}</span>}</button>;
+};
 
 export function PanelIcon({ path }: { path: string }) {
   return <svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><path d={path} /></svg>;

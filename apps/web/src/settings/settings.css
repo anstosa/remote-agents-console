@@ -34,7 +34,6 @@
 .settings-source-nav button:not(:disabled):hover { border-color: var(--surface-2); background: var(--surface-0); color: var(--text); }
 /* keep pending destinations visible without implying they are interactive */
 .settings-source-nav button:disabled { color: var(--overlay-0); cursor: default; opacity: .65; }
-.settings-source-nav button > .spinner { box-sizing: border-box; width: .75rem; height: .75rem; flex: 0 0 .75rem; border-width: 1.5px; }
 .settings-source-nav button.active { border-color: color-mix(in srgb, var(--mauve) 62%, var(--surface-2)); background: color-mix(in srgb, var(--mauve) 14%, var(--surface-0)); color: var(--text); }
 .settings-source-nav button i { width: .42rem; height: .42rem; flex: none; border-radius: 50%; background: var(--yellow); box-shadow: 0 0 .5rem color-mix(in srgb, var(--yellow) 50%, transparent); }
 /* contain wheel and touch scrolling within the selected tab */
@@ -51,7 +50,7 @@
 .settings-preferences .client-settings-davo-form { grid-template-columns: minmax(0, 1fr); }
 .settings-preference-description { margin: 0; color: var(--subtext-0); font-size: .7rem; line-height: 1.45; }
 .settings-catalog-state { display: flex; min-width: 0; align-items: center; gap: .65rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); padding: .65rem; color: var(--subtext-0); font: 600 .65rem/1.4 var(--font-mono); }
-.settings-catalog-state > span:not(.spinner) { flex: 1; }
+.settings-catalog-state > span:not(.update-progress-ring) { flex: 1; }
 .settings-catalog-state button { width: max-content; flex: none; padding: .3rem .5rem; font: 700 .62rem var(--font-mono); }
 .settings-source-header { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 1rem; padding-bottom: .85rem; border-bottom: 1px solid var(--surface-1); }
 .settings-source-header > div { display: grid; min-width: 0; gap: .2rem; }
@@ -307,7 +306,6 @@ button.settings-installation-file-link:disabled { background: transparent; color
 .settings-restart-notice.failed { border-color: color-mix(in srgb, var(--red) 68%, var(--surface-1)); background: color-mix(in srgb, var(--mantle) 90%, var(--red)); }
 .settings-restart-icon { display: grid; width: 1.4rem; height: 1.4rem; place-items: center; border: 1px solid currentColor; border-radius: 50%; color: var(--yellow); font: 900 .78rem var(--font-mono); }
 .settings-restart-notice.failed .settings-restart-icon { color: var(--red); }
-.settings-restart-icon .spinner { width: .72rem; height: .72rem; border-width: 1.5px; }
 .settings-restart-copy { display: grid; min-width: 0; gap: .14rem; }
 .settings-restart-copy strong { color: var(--text); font: 800 .73rem var(--font-mono); }
 .settings-restart-copy span,

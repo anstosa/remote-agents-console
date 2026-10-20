@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { expectProgressBorder } from './progress-border-assertions';
 
 // verify lifecycle feedback names the chosen launch agent
 test('keeps agent on/off progress visible across lifecycle transitions', async ({ page }) => {
@@ -51,7 +52,19 @@ test('keeps agent on/off progress visible across lifecycle transitions', async (
   const pendingOff = page.getByRole('status').filter({ hasText: 'Turning off Cora' });
   await expect(pendingOff).toContainText('Stopping the agent while keeping the worktree available');
   await expect(pendingOff.locator('.toast-timer-bar')).toHaveCount(0);
-  await expect(page.getByRole('tab', { name: 'Cora — Turning off' })).toHaveAttribute('aria-busy', 'true');
+  const turningOffTab = page.getByRole('tab', { name: 'Cora — Turning off' });
+  await expectProgressBorder(turningOffTab, 'red');
+  await expect(turningOffTab.locator('.tab-kind-stack')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const phoneTurningOff = page.getByRole('tab', { name: 'Cora — Turning off' });
+  await expectProgressBorder(phoneTurningOff, 'red');
+  await phoneTurningOff.click();
+  const phoneTurningOffRow = page.locator('.workspace-sheet-row').filter({ hasText: 'Cora' });
+  await expectProgressBorder(phoneTurningOffRow, 'red');
+  await expect(phoneTurningOffRow.locator('.tab-kind-stack')).toBeVisible();
+  await page.screenshot({ path: '/tmp/remoteagents-loading-border-turning-off-sheet-phone.png' });
+  await page.keyboard.press('Escape');
+  await page.setViewportSize({ width: 1280, height: 720 });
   await expect(page.getByRole('button', { name: 'Agent power options' })).toBeDisabled();
   await page.getByRole('tab', { name: 'Delta — Agent closed' }).click();
   await expect(pendingOff).toHaveCount(0);
@@ -73,7 +86,9 @@ test('keeps agent on/off progress visible across lifecycle transitions', async (
   const pendingLaunch = page.getByRole('status').filter({ hasText: 'Starting Cora' });
   await expect(pendingLaunch).toContainText('waiting for the agent session to become ready');
   await expect(pendingLaunch.locator('.toast-timer-bar')).toHaveCount(0);
-  await expect(page.getByRole('tab', { name: 'Cora — Starting agent' })).toHaveAttribute('aria-busy', 'true');
+  const startingTab = page.getByRole('tab', { name: 'Cora — Starting agent' });
+  await expectProgressBorder(startingTab, 'blue');
+  await expect(startingTab.locator('.tab-kind-stack')).toBeVisible();
   await expect(page.getByText('Starting OMX at Cora…', { exact: true })).toBeVisible();
   await page.getByRole('tab', { name: 'Delta — Agent closed' }).click();
   await expect(pendingLaunch).toHaveCount(0);
@@ -170,7 +185,7 @@ test('clears and restarts an idle agent from the power menu', async ({ page }) =
 
   await expect.poll(() => clearPrompt).toEqual({ prompt: '/clear', attachments: [] });
   await expect(page.getByRole('status').filter({ hasText: 'Clearing Cora' })).toContainText('Sending /clear');
-  await expect(page.getByRole('tab', { name: 'Cora — Clearing' })).toHaveAttribute('aria-busy', 'true');
+  await expectProgressBorder(page.getByRole('tab', { name: 'Cora — Clearing' }), 'red');
   await expect(page.getByRole('button', { name: 'Agent power options' })).toBeDisabled();
 
   finishClear();
@@ -182,7 +197,7 @@ test('clears and restarts an idle agent from the power menu', async ({ page }) =
 
   await expect.poll(() => restartRequests).toBe(1);
   await expect(page.getByRole('status').filter({ hasText: 'Restarting Cora' })).toContainText('running the resume alias');
-  await expect(page.getByRole('tab', { name: 'Cora — Restarting' })).toHaveAttribute('aria-busy', 'true');
+  await expectProgressBorder(page.getByRole('tab', { name: 'Cora — Restarting' }), 'yellow');
   await expect(page.getByRole('button', { name: 'Agent power options' })).toBeDisabled();
 
   finishRestart();

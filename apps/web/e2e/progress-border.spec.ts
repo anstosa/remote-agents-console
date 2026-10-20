@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
+import { expectClockwiseProgressBorder, expectProgressBorder } from './progress-border-assertions';
 
 type RestartStatus = {
   pending: boolean;
@@ -32,25 +33,6 @@ async function expectProgressTheme(parent: Locator, themeVariable: string) {
     const style = getComputedStyle(element);
     return style.getPropertyValue('--progress-ring-color').trim() || style.getPropertyValue('--mauve').trim();
   })).toBe(expected);
-}
-
-// sample one deterministic quarter turn from the border pseudo-element
-async function sampleClockwiseOrbit(ring: Locator) {
-  return ring.evaluate(element => {
-    const animation = element.getAnimations({ subtree: true })[0];
-    // require one live border orbit
-    if (animation === undefined) throw new Error('progress border is not orbiting');
-    const duration = animation.effect?.getComputedTiming().duration;
-    // require one finite cycle
-    if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0) throw new Error('progress border has no finite duration');
-    animation.pause();
-    animation.currentTime = 0;
-    const startAngle = Number.parseFloat(getComputedStyle(element, '::before').getPropertyValue('--update-orbit-angle'));
-    animation.currentTime = duration / 4;
-    const quarterAngle = Number.parseFloat(getComputedStyle(element, '::before').getPropertyValue('--update-orbit-angle'));
-    animation.play();
-    return { startAngle, quarterAngle };
-  });
 }
 
 // resolve one theme token to the browser's normalized color
@@ -133,12 +115,10 @@ test('frames startup with a purple clockwise border that respects both motion pr
   const loader = page.locator('main.loading-screen .loading-console.progress-border');
   const ring = loader.locator(':scope > .update-progress-ring');
   try {
-    await expect(loader).toHaveAttribute('aria-busy', 'true');
     await expect(loader).toContainText('Restoring secure session');
     await expect(loader.locator('.loading-bars')).toHaveCount(0);
-    await expect(ring).toBeVisible();
-    await expectProgressTheme(loader, '--mauve');
-    await expect.poll(() => sampleClockwiseOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
+    await expectProgressBorder(loader, 'mauve');
+    await expectClockwiseProgressBorder(loader);
     await expect.poll(() => loader.locator('.loading-line').evaluate(element => ({ animations: element.getAnimations().length, transform: getComputedStyle(element).transform }))).toEqual({ animations: 0, transform: 'none' });
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -175,6 +155,7 @@ test('paints reload progress before navigating to the fresh client', async ({ pa
   await expect(reload).toBeVisible();
   await expect(reload).toHaveAttribute('aria-busy', 'false');
   await expect(reload.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(reload.locator('.spinner')).toHaveCount(0);
   // compare the action with the current theme rather than one fixed palette
   const expectedBlue = await reload.evaluate(element => getComputedStyle(element).getPropertyValue('--blue').trim());
 
@@ -257,6 +238,8 @@ test('keeps restart yellow while pending and removes progress after the operatio
     await expect(pending).toBeDisabled();
     await expect(pending).toHaveAttribute('aria-busy', 'true');
     await expect(ring).toBeVisible();
+    await expect(notice.locator('.settings-restart-icon')).toHaveText('↻');
+    await expect(notice.locator('.spinner')).toHaveCount(0);
     await expectProgressTheme(pending, '--yellow');
     await expect.poll(() => pending.evaluate(element => ({ animations: element.getAnimations().length, transform: getComputedStyle(element).transform }))).toEqual({ animations: 0, transform: 'none' });
   } finally {
@@ -303,6 +286,8 @@ test('shows a static red retry border during reduced motion and stops it after f
     await expect(pending).toBeDisabled();
     await expect(pending).toHaveAttribute('aria-busy', 'true');
     await expectStaticProgress(pending, '--red');
+    await expect(notice.locator('.settings-restart-icon')).toHaveText('!');
+    await expect(notice.locator('.spinner')).toHaveCount(0);
 
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });

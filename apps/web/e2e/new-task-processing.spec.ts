@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { expectProgressBorder } from './progress-border-assertions';
 
 // allow the shared host's first dashboard transform before exercising task transport
 test.setTimeout(90_000);
@@ -23,9 +24,9 @@ test('keeps a new-task processing indicator visible until the replacement agent 
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') {
       dashboardRequests += 1;
-      if (replacementReady) return route.fulfill({ json: { generation: dashboardRequests, agents: [{ id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, newTaskConfigured: true, title: 'Ready' }], projects: [] } });
+      if (replacementReady) return route.fulfill({ json: { generation: dashboardRequests, agents: [{ id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, newTaskConfigured: true, title: 'Ready', kind: 'codex' }], projects: [] } });
       if (oldAgentGone) return route.fulfill({ json: { generation: dashboardRequests, agents: [], projects: [] } });
-      return route.fulfill({ json: { generation: dashboardRequests, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, newTaskConfigured: true, title: 'Ready' }], projects: [] } });
+      return route.fulfill({ json: { generation: dashboardRequests, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, newTaskConfigured: true, title: 'Ready', kind: 'codex' }], projects: [] } });
     }
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
@@ -52,7 +53,25 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   await expect(processing).toBeVisible();
   await expect(processing).toContainText('preparing a fresh agent');
   await expect(page.getByRole('status').filter({ hasText: 'Starting a new task' })).toContainText('You can keep using other tabs');
-  await expect(page.getByRole('tab', { name: 'Cora — Starting new task' })).toHaveAttribute('aria-busy', 'true');
+  const startingTab = page.getByRole('tab', { name: 'Cora — Starting new task' });
+  await expectProgressBorder(startingTab, 'blue');
+  await expect(startingTab.locator('.tab-kind-stack')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const phoneStartingTab = page.getByRole('tab', { name: 'Cora — Starting new task' });
+  await expectProgressBorder(phoneStartingTab, 'blue');
+  await expect(phoneStartingTab.locator('.tab-kind-stack')).toBeVisible();
+  // keep the workspace name and transition on distinct readable rows
+  const phoneName = phoneStartingTab.locator('.workspace-dropdown-label > span');
+  const phoneStatus = phoneStartingTab.locator('.workspace-dropdown-label > small');
+  await expect(phoneName).toBeVisible();
+  await expect(phoneStatus).toBeVisible();
+  const nameBox = await phoneName.boundingBox();
+  const statusBox = await phoneStatus.boundingBox();
+  expect(nameBox).not.toBeNull();
+  expect(statusBox).not.toBeNull();
+  expect(nameBox!.y + nameBox!.height).toBeLessThanOrEqual(statusBox!.y);
+  await page.screenshot({ path: '/tmp/remoteagents-loading-border-starting-tab-phone.png' });
+  await page.setViewportSize({ width: 1280, height: 720 });
   oldAgentGone = true;
   const requestsBeforeRemoval = dashboardRequests;
   await expect.poll(() => dashboardRequests, { timeout: 10_000 }).toBeGreaterThan(requestsBeforeRemoval);

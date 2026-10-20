@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { stackActionLabel, stackOperationLabel } from '../src/stack-operations';
+import { expectProgressBorder } from './progress-border-assertions';
 
 test('uses action-specific stack operation labels', () => {
   expect(stackActionLabel('build')).toBe('Build stack');
@@ -21,9 +22,12 @@ test('keeps the stack flyout available during an operation', async ({ page }) =>
   await expect(toggle).toBeEnabled();
   await expect(toggle.locator('.project-stack-server-icon')).toBeVisible();
   await expect(toggle.locator('.project-stack-status-dot.status-working')).toBeVisible();
+  await expectProgressBorder(toggle, 'peach');
   await toggle.click();
   const link = page.getByRole('link', { name: 'Open', exact: true });
-  await expect(link).toHaveAttribute('aria-busy', 'true');
+  await expect(link).not.toHaveAttribute('aria-busy');
+  await expect(link.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(link.locator('svg')).toBeVisible();
   await expect(link).not.toHaveAttribute('aria-disabled', 'true');
   await expect(page.getByRole('button', { name: 'Split', exact: true })).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Building…' })).toBeDisabled();
@@ -175,7 +179,11 @@ test('offers Stop and Restart while the stack is Starting', async ({ page }) => 
   await page.getByRole('button', { name: 'Stop stack', exact: true }).click();
   // the Stop in flight locks the menu and names itself
   await toggle.click();
-  await expect(page.getByRole('button', { name: 'Stopping…' })).toBeDisabled();
+  await expectProgressBorder(toggle, 'red');
+  await expect(toggle.locator('.project-stack-server-icon')).toBeVisible();
+  const stopping = page.getByRole('button', { name: 'Stopping…' });
+  await expect(stopping).toBeDisabled();
+  await expectProgressBorder(stopping, 'red');
   await expect(page.getByRole('button', { name: 'Restart stack', exact: true })).toBeDisabled();
 });
 
@@ -330,18 +338,29 @@ test('lists several Stack processes as rows that expand one at a time, each with
 
   // the action in flight shows on its own row, holds every other action, and keeps the menu open
   await row('api').click();
-  await api.getByRole('button', { name: 'Restart api', exact: true }).click();
-  await expect(row('api').locator('.stack-process-state')).toHaveText('Restarting…');
+  const restartApi = api.getByRole('button', { name: 'Restart api', exact: true });
+  await restartApi.click();
+  const restartState = row('api').locator('.stack-process-state');
+  await expect(restartState).toHaveText('Restarting…');
+  await expectProgressBorder(restartState, 'yellow');
+  await expectProgressBorder(restartApi, 'yellow');
+  await expect(restartApi.locator('svg')).toBeVisible();
   await expect(api).toHaveAttribute('aria-busy', 'true');
   await expect(api.getByRole('button', { name: 'Restart api', exact: true })).toBeDisabled();
   await expect(menu.getByRole('button', { name: 'Stop stack', exact: true })).toBeDisabled();
+  // settle the mocked operation only after pending assertions finish
+  await page.evaluate(() => (window as unknown as { releaseProcessAction: () => void }).releaseProcessAction());
   await expect(row('api').locator('.stack-process-state')).toHaveText('running');
   await expect(api.getByRole('button', { name: 'Restart api', exact: true })).toBeEnabled();
   await expect(menu).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as { processActions?: unknown }).processActions)).toEqual([{ name: 'api', action: 'restart' }]);
 
   // one process's Stop leaves the rest running
-  await api.getByRole('button', { name: 'Stop api', exact: true }).click();
+  const stopApi = api.getByRole('button', { name: 'Stop api', exact: true });
+  await stopApi.click();
+  await expectProgressBorder(stopApi, 'red');
+  // complete the separately held stop response
+  await page.evaluate(() => (window as unknown as { releaseProcessAction: () => void }).releaseProcessAction());
   await expect(row('api').locator('.stack-process-state')).toHaveText('stopped');
   await expect(api.getByRole('button', { name: 'Stop api', exact: true })).toBeDisabled();
   await expect(rows.locator('.stack-process-state')).toHaveText(['running', 'stopped', 'exited 1', 'stopped']);
@@ -361,7 +380,9 @@ test("shows a process action in flight elsewhere on that process's row", async (
 
   await page.getByRole('button', { name: 'Stack controls: running', exact: true }).click();
   const api = page.getByRole('group', { name: 'api process' });
-  await expect(api.locator('.stack-row .stack-process-state')).toHaveText('Restarting…');
+  const restarting = api.locator('.stack-row .stack-process-state');
+  await expect(restarting).toHaveText('Restarting…');
+  await expectProgressBorder(restarting, 'yellow');
   await api.locator('.stack-row').click();
   await expect(api.getByRole('button', { name: 'Restart api', exact: true })).toBeDisabled();
   const sync = page.getByRole('group', { name: 'sync process' });
@@ -372,8 +393,12 @@ test("shows a process action in flight elsewhere on that process's row", async (
 
   // a lone process's action shows as the stack's own
   await page.getByRole('button', { name: 'Stack controls: working', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Stopping…', exact: true })).toBeDisabled();
-  await expect(page.getByRole('group', { name: 'dev process' }).locator('.stack-row .stack-process-state')).toHaveText('Stopping…');
+  const stopping = page.getByRole('button', { name: 'Stopping…', exact: true });
+  await expect(stopping).toBeDisabled();
+  await expectProgressBorder(stopping, 'red');
+  const stoppingState = page.getByRole('group', { name: 'dev process' }).locator('.stack-row .stack-process-state');
+  await expect(stoppingState).toHaveText('Stopping…');
+  await expectProgressBorder(stoppingState, 'red');
 });
 
 // a single process is the whole stack: its row shows already expanded, with nothing to relate to
@@ -457,6 +482,7 @@ test("starts a notice's process in another Worktree from the stack menu, showing
   // a failed Start shows its error on the notice and offers Start again
   await page.evaluate(() => { (window as unknown as { noticeStartError?: string }).noticeStartError = 'stack operation already running'; });
   await down.getByRole('button', { name: 'Start static in Static · master', exact: true }).click();
+  await expectProgressBorder(down.getByRole('status'), 'green');
   await expect(down.getByRole('status')).toHaveText('Starting static…');
   await expect(down.getByRole('button')).toHaveCount(0);
   await expect(down.getByRole('alert')).toHaveText('Start failed: stack operation already running');
@@ -466,6 +492,7 @@ test("starts a notice's process in another Worktree from the stack menu, showing
   // a Start sends the other Worktree's request, shows Starting with the menu open, and the
   // notice hides once the next state shows the process running
   await down.getByRole('button', { name: 'Start static in Static · master', exact: true }).click();
+  await expectProgressBorder(down.getByRole('status'), 'green');
   await expect(down.getByRole('status')).toHaveText('Starting static…');
   await expect(down.getByRole('alert')).toHaveCount(0);
   // the request returned, but the state still reads stopped: the notice keeps showing Starting

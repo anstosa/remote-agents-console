@@ -1,7 +1,8 @@
 import { expect, test } from '@playwright/test';
+import { expectClockwiseProgressBorder, expectProgressBorder } from './progress-border-assertions';
 
-// keep one composited background movement per working tab
-test('uses one background animation per working tab without animated label DOM', async ({ page }) => {
+// keep one composited border orbit per working tab
+test('uses one border animation per working tab without animated content', async ({ page }) => {
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -10,9 +11,9 @@ test('uses one background animation per working tab without animated label DOM',
       json: {
         generation: 1,
         agents: [
-          { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: '⠋ Working in Cora', attention: 'working' },
-          { id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/delta', title: '⠙ Working in Delta', attention: 'working' },
-          { id: 'agent-3', sessionId: 'socket:$3', home: '/worktrees/echo', title: '⠹ Working in Echo', attention: 'working' }
+          { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: '⠋ Working in Cora', attention: 'working', kind: 'codex' },
+          { id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/delta', title: '⠙ Working in Delta', attention: 'working', kind: 'codex' },
+          { id: 'agent-3', sessionId: 'socket:$3', home: '/worktrees/echo', title: '⠹ Working in Echo', attention: 'working', kind: 'codex' }
         ],
         projects: []
       }
@@ -27,12 +28,11 @@ test('uses one background animation per working tab without animated label DOM',
   await expect(page.getByRole('tab')).toHaveCount(3);
   await expect(page.locator('.tab-label')).toHaveCount(3);
   await expect(page.locator('.tab-label-letter')).toHaveCount(0);
-
-  const animations = await page.getByRole('tab').evaluateAll(tabs => tabs.map(tab => tab.getAnimations({ subtree: true }).map(animation => {
-    const effect = animation.effect as KeyframeEffect;
-    return effect.target === tab && effect.pseudoElement === '::before' ? 'background' : 'content-or-dot';
-  })));
-  expect(animations).toHaveLength(3);
-  expect(animations).toEqual([['background'], ['background'], ['background']]);
+  // verify each visible work state
+  for (const tab of await page.getByRole('tab').all()) {
+    await expectProgressBorder(tab, 'peach');
+    await expectClockwiseProgressBorder(tab);
+  }
+  await expect(page.locator('.tab-kind-stack')).toHaveCount(3);
   expect(await page.locator('.tab-label').evaluateAll(labels => labels.flatMap(label => label.getAnimations()))).toHaveLength(0);
 });

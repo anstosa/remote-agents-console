@@ -4,6 +4,7 @@ import { ProjectProxy } from '../../server/src/project-proxy.js';
 import { installPaneMock, seedPaneSize, pushBytes } from './pane-stream-mock.js';
 import { clickPanelAction, expectPanelAction } from './panel-header';
 import { chooseSplit, openSplitMenu } from './split-menu.js';
+import { expectProgressBorder } from './progress-border-assertions';
 
 // load the production browser bridge through its real proxy endpoint
 const projectBrowserBridge = async () => {
@@ -610,8 +611,7 @@ test('opens the configured project in desktop and mobile split views', async ({ 
   const stopLoading = browser.getByRole('button', { name: 'Stop loading browser' });
   await expect(stopLoading).toBeVisible();
   await expect(stopLoading).toHaveClass(/loading/u);
-  await expect(stopLoading).toHaveAttribute('aria-busy', 'true');
-  await expect(stopLoading).toHaveCSS('animation-name', 'review-generating-glow');
+  await expectProgressBorder(stopLoading, 'blue');
   await expect(stopLoading.locator('path')).toHaveAttribute('d', 'm6 6 12 12M18 6 6 18');
   await expect.poll(() => previewLoads).toBeGreaterThan(loadsBeforeStop);
   await stopLoading.click();
