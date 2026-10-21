@@ -1265,6 +1265,7 @@ test("compose fresh RAC proof clears the watchdog before Cloudflare replacement"
   const cloudAfter = "c".repeat(64);
   let cloudQueries = 0;
   let racProved = false;
+  let racHealthProofs = 0;
   const sources = currentSourceManifest(current.descriptor);
   const hashes = Object.fromEntries(sources.map((source) => [source.id, source.contentHash]));
   const result = await processOperation(current.descriptor, {
@@ -1276,15 +1277,40 @@ test("compose fresh RAC proof clears the watchdog before Cloudflare replacement"
     targets: ["rac", "cloudflared"]
   }, {
     restartWatchdogClock: clock,
+    expectedEnvironmentHashes: {},
     runner: async (_command, args, commandOptions = {}) => {
       // provide the normalized graph for validation and environment proof
-      if (args.includes("--format")) return { code: 0, stdout: Buffer.from(JSON.stringify(model)), stderr: Buffer.alloc(0) };
+      if (args.includes("config") && args.includes("--format")) return { code: 0, stdout: Buffer.from(JSON.stringify(model)), stderr: Buffer.alloc(0) };
       if (args.includes("ps") && args.at(-1) === "remote-agent-console") {
         return { code: 0, stdout: Buffer.from(racContainer), stderr: Buffer.alloc(0) };
       }
       if (args.includes("ps") && args.at(-1) === "cloudflared") {
         cloudQueries += 1;
         return { code: 0, stdout: Buffer.from(cloudQueries === 1 ? cloudBefore : cloudAfter), stderr: Buffer.alloc(0) };
+      }
+      // publish the fresh boot from the replacement Compose service
+      if (args.includes("up") && args.at(-1) === "remote-agent-console") {
+        atomicWriteFile(resolve(current.controlRoot, "boot.json"), `${JSON.stringify({
+          version: 1,
+          generation: 1,
+          bootNonce: "fresh-compose-rac",
+          hashes: { app: hashes.app },
+          environmentHashes: {},
+          listen: { host: "127.0.0.1", port: 8787 }
+        })}\n`, 0o600);
+      }
+      // prove the exact running Compose service before entering its namespace
+      if (args[0] === "inspect") {
+        return { code: 0, stdout: Buffer.from(`true\nhealthy\nwatchdog-test\nremote-agent-console\n[]\n`), stderr: Buffer.alloc(0) };
+      }
+      // resolve health only through the selected container loopback
+      if (args[0] === "exec") {
+        assert.equal(args[1], racContainer);
+        assert.equal(args[2], "/usr/local/bin/node");
+        assert.equal(args.includes("http://127.0.0.1:8787/healthz"), true);
+        racHealthProofs += 1;
+        racProved = true;
+        return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
       }
       // prove later Cloudflare work is outside the cleared RAC deadline
       if (args.includes("up") && args.at(-1) === "cloudflared") {
@@ -1295,10 +1321,6 @@ test("compose fresh RAC proof clears the watchdog before Cloudflare replacement"
       }
       return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
     },
-    prove: async () => {
-      racProved = true;
-      return { bootNonce: "fresh-compose-rac" };
-    },
     postApplyProve: async () => ({
       hashes,
       targetProofs: { cloudflared: { containerId: cloudAfter } }
@@ -1307,6 +1329,7 @@ test("compose fresh RAC proof clears the watchdog before Cloudflare replacement"
 
   assert.equal(result.phase, "effective");
   assert.equal(racProved, true);
+  assert.equal(racHealthProofs >= 2, true);
   assert.equal(clock.pending(), false);
 });
 

@@ -36,7 +36,7 @@ import {
 } from "./migrations.mjs";
 import { inspectSource } from "./inspection.mjs";
 import { verifyComposeDependencies } from "./dependencies.mjs";
-import { proveInitialTargetBaseline, retargetNativeCloudflaredCommand } from "./baseline.mjs";
+import { probeRacHealth, proveInitialTargetBaseline, retargetNativeCloudflaredCommand } from "./baseline.mjs";
 import { handoverControlPlane, recoverControlPlaneHandover, validateCheckoutHandover } from "./checkout-handover.mjs";
 import { withRestartWatchdog } from "./restart-watchdog.mjs";
 import { processCloudflareRequest } from "./cloudflare.mjs";
@@ -965,7 +965,11 @@ async function waitForProof(descriptor, request, previousBoot, expectedEnvironme
       boot.bootNonce !== previousBoot?.bootNonce &&
       proofHashesMatch(descriptor, boot.hashes, request.sources ?? []) &&
       environmentHashesMatch(boot.environmentHashes, expectedEnvironment) &&
-      await probeHealth(boot.listen, options.signal, deadline - clock.now())
+      await probeRacHealth(descriptor, boot.listen, {
+        runner: options.runner ?? runBounded,
+        signal: options.signal,
+        remainingMs: deadline - clock.now()
+      })
     ) {
       return boot;
     }
@@ -1056,22 +1060,6 @@ function hashEnvironment(values, composeRendered = false) {
     }
   }
   return hashes;
-}
-
-// probe only a local listener
-async function probeHealth(listen, signal, remainingMs = 2_000) {
-  if (!listen || !["127.0.0.1", "::1", "localhost"].includes(listen.host) || !Number.isInteger(listen.port)) {
-    return false;
-  }
-  try {
-    const host = listen.host === "::1" ? "[::1]" : listen.host;
-    const timeoutSignal = AbortSignal.timeout(Math.max(1, Math.min(2_000, remainingMs)));
-    const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-    const response = await fetch(`http://${host}:${listen.port}/healthz`, { signal: requestSignal });
-    return response.ok;
-  } catch {
-    return false;
-  }
 }
 
 // reconcile a boot without deploying

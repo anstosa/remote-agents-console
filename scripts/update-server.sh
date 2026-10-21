@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# keep refreshed checkout sources within the installer ownership boundary
+umask 022
+
 operation_id="${1:-}"
 target_sha="${2:-}"
 

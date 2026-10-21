@@ -424,11 +424,25 @@ async function proveContainerUid(repository, files, envFiles, profiles, options,
   const inspect = await runner("docker", ["inspect", "--format", "{{json .Config.Labels}} {{.State.Pid}}", container], { maxBytes: 64 * 1024 });
   const inspected = /^(\{.*\})\s+(\d+)\s*$/s.exec(inspect.stdout.toString("utf8"));
   const pid = Number(inspected?.[2]);
-  if (inspect.code !== 0 || !Number.isInteger(pid) || pid < 2) {
+  // require one concrete daemon process identity
+  if (inspect.code !== 0 || !Number.isSafeInteger(pid) || pid < 2) {
     throw safeError("container-uid-unavailable");
   }
-  const status = readFileSync(`/proc/${pid}/status`, "utf8");
-  const uid = Number(/^Uid:\s+(\d+)/m.exec(status)?.[1]);
+  // docker desktop process ids belong to the daemon rather than the local proc namespace
+  const processes = await runner("docker", ["top", container, "-eo", "pid,ruid"], { maxBytes: 64 * 1024 });
+  const [header, ...lines] = processes.stdout.toString("utf8").trim().split(/\r?\n/u);
+  const rows = lines.map((line) => /^\s*(\d+)\s+(\d+)\s*$/u.exec(line));
+  // reject malformed or incomplete daemon evidence before selecting the init process
+  if (processes.code !== 0 || !/^\s*PID\s+RUID\s*$/u.test(header ?? "") || rows.some((row) => !row || !Number.isSafeInteger(Number(row[1])) || Number(row[1]) < 2 || !Number.isSafeInteger(Number(row[2])))) {
+    throw safeError("container-uid-unavailable");
+  }
+  const initRows = rows.filter((row) => Number(row[1]) === pid);
+  // require an unambiguous match to the inspected container init pid
+  if (initRows.length !== 1) {
+    throw safeError("container-uid-unavailable");
+  }
+  const uid = Number(initRows[0][2]);
+  // retain the installing account ownership boundary
   if (uid !== process.getuid()) {
     throw safeError("container-uid-mismatch");
   }

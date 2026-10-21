@@ -16,6 +16,7 @@ const ENVIRONMENT_KEYS = [
   "COMPOSE_COMPATIBILITY",
   "RAC_INSTALLATION_ID"
 ];
+const FOREIGN_PID = 2147483000;
 
 // preserve process settings around the isolated installer
 function preserveEnvironment() {
@@ -95,7 +96,11 @@ test("installer refuses unsupported Compose graphs before publishing capability"
         "com.docker.compose.project.working_dir": repository,
         "com.docker.compose.project.config_files": `${compose},${override}`
       };
-      return result(`${JSON.stringify(labels)} ${process.pid}\n`);
+      return result(`${JSON.stringify(labels)} ${FOREIGN_PID}\n`);
+    }
+    // return the daemon process identity
+    if (command === "docker" && args[0] === "top") {
+      return result(`PID RUID\n${FOREIGN_PID} ${process.getuid()}\n`);
     }
     return result("");
   };
@@ -117,6 +122,100 @@ test("installer refuses unsupported Compose graphs before publishing capability"
   } finally {
     restoreEnvironment(saved);
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// reject untrusted daemon identity before publishing installation capability
+test("installer rejects unavailable or mismatched container uid evidence before publishing", async (context) => {
+  const uid = process.getuid();
+  // choose one distinct valid uid
+  const wrongUid = uid === 0 ? 1 : 0;
+  const container = "0123456789abcdef0123456789abcdef";
+  const cases = [
+    { name: "top command failure", code: 1, stdout: `PID RUID\n${FOREIGN_PID} ${uid}\n`, error: "container-uid-unavailable" },
+    { name: "malformed header", code: 0, stdout: `PID UID\n${FOREIGN_PID} ${uid}\n`, error: "container-uid-unavailable" },
+    { name: "malformed body", code: 0, stdout: "PID RUID\nnot-a-process-row\n", error: "container-uid-unavailable" },
+    { name: "missing init pid", code: 0, stdout: `PID RUID\n${FOREIGN_PID - 1} ${uid}\n`, error: "container-uid-unavailable" },
+    { name: "duplicate init pid", code: 0, stdout: `PID RUID\n${FOREIGN_PID} ${uid}\n${FOREIGN_PID} ${uid}\n`, error: "container-uid-unavailable" },
+    { name: "unsafe integer", code: 0, stdout: `PID RUID\n${FOREIGN_PID} ${uid}\n9007199254740992 ${uid}\n`, error: "container-uid-unavailable" },
+    { name: "wrong uid", code: 0, stdout: `PID RUID\n${FOREIGN_PID} ${wrongUid}\n`, error: "container-uid-mismatch" }
+  ];
+  // exercise every invalid daemon response independently
+  for (const [index, identity] of cases.entries()) {
+    await context.test(identity.name, async () => {
+      const saved = preserveEnvironment();
+      const root = mkdtempSync(resolve(tmpdir(), "rac-install-identity-"));
+      const repository = resolve(root, "repository");
+      const state = resolve(root, "state");
+      const userConfig = resolve(root, "user-config");
+      const config = resolve(repository, "config");
+      const compose = resolve(repository, "compose.yaml");
+      const override = resolve(repository, "compose.override.yaml");
+      const originalOverride = "services:\n  remote-agent-console:\n    volumes: []\n";
+      mkdirSync(config, { recursive: true, mode: 0o700 });
+      writeFileSync(resolve(repository, ".env"), "RAC_CONFIG=/workspace/config/app.json\n", { mode: 0o600 });
+      writeFileSync(resolve(config, "app.json"), "{}\n", { mode: 0o600 });
+      writeFileSync(compose, "services:\n  remote-agent-console:\n    image: remote-agent-console\n", { mode: 0o600 });
+      writeFileSync(override, originalOverride, { mode: 0o600 });
+      process.env.XDG_STATE_HOME = state;
+      process.env.XDG_CONFIG_HOME = userConfig;
+      // clear host compose selectors
+      for (const key of ENVIRONMENT_KEYS.slice(2)) {
+        delete process.env[key];
+      }
+      const calls = [];
+      // emulate fixed prerequisite and identity commands
+      const runner = async (command, args) => {
+        calls.push({ command, args });
+        // satisfy lingering discovery
+        if (command === "loginctl") {
+          return result("yes\n");
+        }
+        // satisfy compose discovery
+        if (command === "docker" && args[0] === "compose" && args.includes("version")) {
+          return result("Docker Compose version fixture\n");
+        }
+        // expose one exact running container
+        if (command === "docker" && args[0] === "compose" && args.includes("ps")) {
+          return result(`${container}\n`);
+        }
+        // expose its daemon init pid
+        if (command === "docker" && args[0] === "inspect") {
+          const labels = {
+            "com.docker.compose.project": "identity-test",
+            "com.docker.compose.project.working_dir": repository,
+            "com.docker.compose.project.config_files": `${compose},${override}`
+          };
+          return result(`${JSON.stringify(labels)} ${FOREIGN_PID}\n`);
+        }
+        // return the selected invalid process proof
+        if (command === "docker" && args[0] === "top") {
+          return result(identity.stdout, identity.code);
+        }
+        return result("");
+      };
+      const installationId = `identity-proof-${String(index).padStart(4, "0")}`;
+      try {
+        await assert.rejects(
+          () => installSettingsApplier({ repository, kind: "compose", installationId, runner }),
+          { code: identity.error }
+        );
+        assert.deepEqual(
+          calls.find(({ command, args }) => command === "docker" && args[0] === "top"),
+          { command: "docker", args: ["top", container, "-eo", "pid,ruid"] }
+        );
+        const control = resolve(state, "remote-agent-console/installations", installationId);
+        assert.equal(existsSync(resolve(control, "installation.json")), false);
+        assert.equal(existsSync(resolve(repository, "config/remote-agent-console.installation.json")), false);
+        assert.equal(readFileSync(override, "utf8"), originalOverride);
+        assert.equal(existsSync(resolve(userConfig, "systemd/user/remote-agent-settings-apply.path")), false);
+        assert.equal(existsSync(resolve(userConfig, "systemd/user/remote-agent-settings-apply.service")), false);
+        assert.equal(calls.some(({ command, args }) => command === "systemctl" && args.includes("enable")), false);
+      } finally {
+        restoreEnvironment(saved);
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   }
 });
 
@@ -189,6 +288,6 @@ test("installer repair refuses unsupported graphs before promotion or activation
 });
 
 // return one bounded fake command result
-function result(stdout) {
-  return { code: 0, stdout: Buffer.from(stdout), stderr: Buffer.alloc(0) };
+function result(stdout, code = 0) {
+  return { code, stdout: Buffer.from(stdout), stderr: Buffer.alloc(0) };
 }

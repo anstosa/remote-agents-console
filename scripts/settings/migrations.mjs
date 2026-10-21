@@ -73,7 +73,8 @@ export function preflightMigrationPublisher() {
     throw safeError("migration-publisher-unavailable");
   }
   const help = spawnSync(MIGRATION_PUBLISHER, ["--help"], { encoding: "utf8", maxBuffer: 256 * 1024 });
-  if (help.status !== 0 || !help.stdout.includes("none-fail") || !help.stdout.includes("--no-copy")) {
+  // coreutils 9.4 has no-clobber and no-copy but not update=none-fail
+  if (help.status !== 0 || !help.stdout.includes("--no-clobber") || !help.stdout.includes("--no-copy")) {
     throw safeError("migration-publisher-unavailable");
   }
   migrationPublisherVerified = true;
@@ -488,11 +489,12 @@ function publishMigration(temporary, target, directory, options) {
   const record = { path: target, identity, directory, digest };
   // journal the known staged inode before it can become visible
   options.onPublishing?.(record);
-  const moved = spawnSync(MIGRATION_PUBLISHER, ["--update=none-fail", "--no-copy", "-T", "--", temporary, target], {
+  const moved = spawnSync(MIGRATION_PUBLISHER, ["--no-clobber", "--no-copy", "-T", "--", temporary, target], {
     stdio: "ignore"
   });
-  if (moved.status !== 0) {
-    const stageRemains = existsSync(temporary);
+  const stageRemains = existsSync(temporary);
+  // treat a retained stage as an aborted no-clobber publication
+  if (moved.status !== 0 || stageRemains) {
     const targetExists = existsSync(target);
     // accept a completed rename even if the publisher died before exit
     if (targetExists && !stageRemains) {
@@ -518,13 +520,15 @@ function publishMigration(temporary, target, directory, options) {
     }
     throw safeError("manual-recovery-required");
   }
-  // simulate termination before the postpublication callback in tests
-  options.afterPublish?.(record);
-  options.onPublished?.(record);
+  // prove ownership before recording successful publication
   assertMigrationIdentity(target, identity, directory);
+  // retain the complete staged content as part of the publication proof
   if (treeDigest(target) !== digest) {
     throw safeError("manual-recovery-required");
   }
+  // simulate termination before the postpublication callback in tests
+  options.afterPublish?.(record);
+  options.onPublished?.(record);
   return record;
 }
 

@@ -9,6 +9,7 @@ import { composePrefix, renderedEnvironmentValue, validateCloudflareCredentialSe
 
 const CONTAINER_ID = /^[0-9a-f]{12,64}$/u;
 const INSPECT_FORMAT = "{{.State.Running}}\n{{if .State.Health}}{{.State.Health.Status}}{{end}}\n{{index .Config.Labels \"com.docker.compose.project\"}}\n{{index .Config.Labels \"com.docker.compose.service\"}}\n{{json .Mounts}}";
+const RAC_HEALTH_SCRIPT = "const timeout=Number(process.argv[2]);fetch(process.argv[1],{signal:AbortSignal.timeout(timeout)}).then((response)=>process.exit(response.ok?0:1),()=>process.exit(1));";
 const CLOUD_PATHS = new Map([
   ["cloudflared", "/etc/cloudflared/config.yml"],
   ["cloudflared-credentials", "/etc/cloudflared/credentials.json"]
@@ -37,7 +38,8 @@ export async function proveInitialTargetBaseline(descriptor, target, options = {
 
 // prove the running RAC boot against every locally visible source
 async function proveRacBaseline(descriptor, hashes, options) {
-  await proveRacService(descriptor, options.runner ?? runBounded);
+  const runner = options.runner ?? runBounded;
+  const containerId = await proveRacService(descriptor, runner);
   const boot = readJsonFile(resolve(descriptor.controlRoot, "boot.json"), 2 * MAX_SOURCE_BYTES);
   // require the active installation identity
   if (
@@ -58,7 +60,7 @@ async function proveRacBaseline(descriptor, hashes, options) {
   const environmentProof = await proveEnvironment(descriptor, boot, options);
   const healthy = options.healthProbe
     ? await options.healthProbe(boot.listen)
-    : await probeLocalHealth(boot.listen);
+    : await probeRacHealth(descriptor, boot.listen, { runner, containerId });
   // require the exact boot to answer locally
   if (!healthy) {
     throw safeError("baseline-required");
@@ -80,9 +82,9 @@ async function proveRacService(descriptor, runner) {
     if (files.code !== 0 || !files.stdout.toString("utf8").includes(descriptor.native.environmentFile)) {
       throw safeError("baseline-required");
     }
-    return;
+    return undefined;
   }
-  await inspectComposeContainer(descriptor, "remote-agent-console", runner, true);
+  return await inspectComposeContainer(descriptor, "remote-agent-console", runner, true);
 }
 
 // prove file-owned and winning environment values
@@ -590,14 +592,49 @@ function hashSubset(actual, expected) {
   return Object.entries(expected).every(([key, hash]) => actual[key] === hash);
 }
 
-// probe only the attested loopback listener
-async function probeLocalHealth(listen) {
-  if (!listen || !["127.0.0.1", "::1", "localhost"].includes(listen.host) || !Number.isInteger(listen.port)) {
+// probe the attested listener in its deployment network namespace
+export async function probeRacHealth(descriptor, listen, options = {}) {
+  if (!listen || !["127.0.0.1", "::1", "localhost"].includes(listen.host) || !Number.isInteger(listen.port) || listen.port < 1 || listen.port > 65_535) {
     return false;
   }
+  const remainingMs = Number.isFinite(options.remainingMs) ? Math.max(1, Math.floor(options.remainingMs)) : 30_000;
+  const commandTimeoutMs = Math.min(30_000, remainingMs);
+  const requestTimeoutMs = Math.min(2_000, commandTimeoutMs);
+  const host = listen.host === "::1" ? "[::1]" : listen.host;
+  const url = `http://${host}:${listen.port}/healthz`;
+  // enter only the exact inspected Compose service namespace
+  if (descriptor.kind === "compose") {
+    try {
+      const runner = options.runner ?? runBounded;
+      const deadlineSignal = AbortSignal.timeout(commandTimeoutMs);
+      const signal = options.signal ? AbortSignal.any([options.signal, deadlineSignal]) : deadlineSignal;
+      // share one cancellation deadline across discovery, inspection, and execution
+      const probeRunner = (command, args, commandOptions = {}) => runner(command, args, {
+        ...commandOptions,
+        timeoutMs: Math.max(1, Math.min(commandOptions.timeoutMs ?? commandTimeoutMs, commandTimeoutMs)),
+        signal: commandOptions.signal ? AbortSignal.any([commandOptions.signal, signal]) : signal
+      });
+      const containerId = options.containerId ?? await inspectComposeContainer(descriptor, "remote-agent-console", probeRunner, true);
+      const result = await probeRunner("docker", [
+        "exec",
+        containerId,
+        "/usr/local/bin/node",
+        "-e",
+        RAC_HEALTH_SCRIPT,
+        url,
+        String(requestTimeoutMs)
+      ], {
+        maxBytes: 1024
+      });
+      return result.code === 0;
+    } catch {
+      return false;
+    }
+  }
   try {
-    const host = listen.host === "::1" ? "[::1]" : listen.host;
-    const response = await fetch(`http://${host}:${listen.port}/healthz`, { signal: AbortSignal.timeout(2_000) });
+    const timeoutSignal = AbortSignal.timeout(requestTimeoutMs);
+    const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+    const response = await fetch(url, { signal });
     return response.ok;
   } catch {
     return false;

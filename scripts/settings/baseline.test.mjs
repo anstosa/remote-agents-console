@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
-import { extractDockerCopyPayload, proveInitialTargetBaseline } from "./baseline.mjs";
+import { extractDockerCopyPayload, probeRacHealth, proveInitialTargetBaseline } from "./baseline.mjs";
 import { sha256 } from "./crypto.mjs";
 import { atomicWriteFile } from "./fs.mjs";
 
@@ -122,6 +122,8 @@ test("Compose RAC bootstrap canonicalizes escaped dollar environment values", as
     compose: { projectDirectory: current.root, projectName: "rac", files: [], envFiles: [], profiles: [], options: {} }
   };
   const containerId = "1234567890abcdef";
+  const healthCalls = [];
+  let healthy = true;
   const runner = async (_command, args) => {
     // return the selected RAC container
     if (args.includes("ps")) {
@@ -130,6 +132,11 @@ test("Compose RAC bootstrap canonicalizes escaped dollar environment values", as
     // return its fixed Compose identity
     if (args[0] === "inspect") {
       return { code: 0, stdout: Buffer.from("true\nhealthy\nrac\nremote-agent-console\n[]\n"), stderr: Buffer.alloc(0) };
+    }
+    // probe the attested listener inside the exact Compose container
+    if (args[0] === "exec") {
+      healthCalls.push(args);
+      return { code: healthy ? 0 : 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
     }
     // preserve Compose dollar escaping in the resolved model
     if (args.includes("--format")) {
@@ -140,8 +147,38 @@ test("Compose RAC bootstrap canonicalizes escaped dollar environment values", as
     }
     return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
   };
-  const proof = await proveInitialTargetBaseline(descriptor, "rac", { runner, healthProbe: async () => true });
+  const proof = await proveInitialTargetBaseline(descriptor, "rac", { runner });
   assert.deepEqual(proof.environmentHashes, envHashes);
+  assert.equal(healthCalls.length, 1);
+  assert.equal(healthCalls[0][1], containerId);
+  assert.equal(healthCalls[0][2], "/usr/local/bin/node");
+  assert.equal(healthCalls[0].includes("http://127.0.0.1:8787/healthz"), true);
+  healthy = false;
+  await assert.rejects(() => proveInitialTargetBaseline(descriptor, "rac", { runner }), { code: "baseline-required" });
+});
+
+test("Compose RAC health discovery shares the bounded probe deadline", async () => {
+  const current = rootFixture("rac-baseline-compose-health-deadline-");
+  const descriptor = {
+    kind: "compose",
+    compose: { projectDirectory: current.root, projectName: "rac", files: [], envFiles: [], profiles: [], options: {} }
+  };
+  const controller = new AbortController();
+  let discoveryOptions;
+  const healthy = await probeRacHealth(descriptor, { host: "127.0.0.1", port: 8787 }, {
+    remainingMs: 123,
+    signal: controller.signal,
+    runner: async (_command, _args, options) => {
+      // cancel while Compose discovery owns the shared probe signal
+      discoveryOptions = options;
+      controller.abort();
+      throw new Error("cancelled");
+    }
+  });
+
+  assert.equal(healthy, false);
+  assert.equal(discoveryOptions.timeoutMs, 123);
+  assert.equal(discoveryOptions.signal.aborted, true);
 });
 
 test("Cloudflare bootstrap proves direct bind bytes through Docker copy", async () => {

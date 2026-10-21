@@ -330,6 +330,7 @@ test("merged Compose handovers reject ambiguous noncanonical owners", () => {
   );
 });
 
+// preserve raced files without reporting them as published migrations
 test("migration publication never overwrites a raced destination", () => {
   const root = mkdtempSync(resolve(tmpdir(), "rac-migration-race-"));
   chmodSync(root, 0o700);
@@ -338,13 +339,60 @@ test("migration publication never overwrites a raced destination", () => {
   atomicWriteFile(from, "{\"source\":true}\n", 0o600);
   const descriptor = { allowedRoots: [root] };
   const plan = { key: "test", from, to, kind: "json", mode: "copy" };
+  const aborted = [];
   assert.throws(
     () => executeMigrationPlans(descriptor, [plan], "migration_publish_race1", {
-      beforePublish: () => atomicWriteFile(to, "human bytes\n", 0o600)
+      // insert an unrelated target at the publication boundary
+      beforePublish: () => atomicWriteFile(to, "human bytes\n", 0o600),
+      // retire only the unfulfilled publication intent
+      onPublishAborted: (record) => aborted.push(record),
+      // a skipped rename must never invoke success callbacks
+      afterPublish: () => assert.fail("skipped migration was reported as published"),
+      // retain the same boundary for durable publication records
+      onPublished: () => assert.fail("skipped migration was journaled as published")
     }),
     { code: "migration-target-exists" }
   );
   assert.equal(readFileSync(to, "utf8"), "human bytes\n");
+  assert.equal(aborted.length, 1);
+  assert.equal(aborted[0].path, to);
+  assert.equal(existsSync(resolve(root, ".migration_publish_race1.migration")), false);
+});
+
+// preserve raced directories as well as ordinary file destinations
+test("migration publication aborts when a destination directory appears", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "rac-migration-directory-race-"));
+  const from = resolve(root, "from");
+  const to = resolve(root, "to");
+  const aborted = [];
+  try {
+    mkdirSync(from, { mode: 0o700 });
+    atomicWriteFile(resolve(from, "source.txt"), "source bytes\n", 0o600);
+    const plan = { key: "test", from, to, directory: true, mode: "copy" };
+    assert.throws(
+      () => executeMigrationPlans({ allowedRoots: [root] }, [plan], "migration_directory_race1", {
+        // publish an unrelated directory immediately before the atomic rename
+        beforePublish: () => {
+          mkdirSync(to, { mode: 0o700 });
+          atomicWriteFile(resolve(to, "human.txt"), "human bytes\n", 0o600);
+        },
+        // retire only the unfulfilled publication intent
+        onPublishAborted: (record) => aborted.push(record),
+        // a skipped rename must never invoke success callbacks
+        afterPublish: () => assert.fail("skipped migration was reported as published"),
+        // retain the same boundary for durable publication records
+        onPublished: () => assert.fail("skipped migration was journaled as published")
+      }),
+      { code: "migration-target-exists" }
+    );
+    assert.equal(readFileSync(resolve(to, "human.txt"), "utf8"), "human bytes\n");
+    assert.equal(existsSync(resolve(to, "source.txt")), false);
+    assert.equal(aborted.length, 1);
+    assert.equal(aborted[0].path, to);
+    assert.equal(existsSync(resolve(root, ".migration_directory_race1.migration")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("rollback refuses a replaced migration target", () => {
