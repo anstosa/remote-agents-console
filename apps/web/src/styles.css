@@ -1220,6 +1220,8 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 .agent-composer-column button:disabled { opacity: .45; }
 .agent-composer-column .icon-button svg { display: block; width: 1rem; height: 1rem; }
 .agent-composer-column .queue { border-color: color-mix(in srgb, var(--lavender) 54%, transparent); background: linear-gradient(135deg, var(--mauve), var(--blue)); color: var(--crust); filter: none; }
+/* outline the pending submit button without changing its progress indicator */
+.agent-composer-column .queue[aria-busy='true'] { border-color: var(--blue); background: transparent; color: var(--blue); }
 .agent-composer-column .queue:not(:disabled):hover { filter: brightness(1.08); }
 .agent-composer-column .queue svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
 .agent-composer .prompt-composer textarea { min-height: calc(var(--standard-control-size) + var(--standard-control-size) + .375rem); }
