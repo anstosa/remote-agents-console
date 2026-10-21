@@ -56,31 +56,100 @@ export function queuedCodexQuestion(capture: string): { key?: TmuxKey } | undefi
 // one numbered (or checkbox) choice row: leading selection caret, optional
 // `[ ]`/`[x]` box, the displayed number, then the label
 const questionChoiceLine = /^([›❯>]\s*)?(?:\[([ xX])\]\s*)?(\d+)[.)]\s+(.+)$/u;
-// normalise one agent message into visible rows
-const agentMessageLines = (message: string) => message.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, '').split('\n').map(line => line.trim()).filter(Boolean);
+// preserve paragraph boundaries and indentation while removing terminal styling
+const agentMessageLines = (message: string) => message.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, '').split('\n');
+// native question boundaries must never become question or answer content
+const questionHeader = /^(?:• Queued follow-up inputs|question \d+(?: of |\/)\d+(?: \(\d+ unanswered\))?)$/iu;
+const questionChrome = /^(?:[•■─]|[›❯>](?:\s|$))/u;
+// allow wrapped native shortcuts after a choice list, never later agent output
+const questionFooter = /^(?:tab to add notes\b|enter (?:submit|to submit answer|to select)\b|esc to (?:interrupt|cancel)\b|press enter to confirm\b|ctrl\s*\+\s*\] skip\b|(?:alt|⌥|shift)\s*\+\s*[↑↓←→] (?:main prompt|prev question|next question|queued messages)\b|←\/→ to navigate questions\b|[↑↓←→](?:\s|$)|[›❯>]\s*$)/iu;
+
+type ChoiceBlock = { labelColumn: number; rows: string[] };
+
+// read aligned label and description columns separately instead of interleaving their wraps
+function choiceLabels(blocks: ChoiceBlock[]): string[] {
+  const columns = new Map<number, number>();
+  // native two-column rows share a description start after at least two padding spaces
+  for (const block of blocks) {
+    // continuation rows also identify a column when only one option has a description
+    for (const row of block.rows) {
+      // exclude the option number and label indentation from column candidates
+      for (const gap of row.slice(block.labelColumn).matchAll(/ {2,}(?=\S)/gu)) {
+        const column = block.labelColumn + gap.index + gap[0].length;
+        columns.set(column, (columns.get(column) ?? 0) + 1);
+      }
+    }
+  }
+  const descriptionColumn = [...columns].filter(([, count]) => count > 1).sort(([left, leftCount], [right, rightCount]) => rightCount - leftCount || left - right)[0]?.[0];
+  // keep each option's complete label before its complete description
+  return blocks.map(block => {
+    const first = block.rows[0]!;
+    const twoColumns = descriptionColumn !== undefined && first.slice(0, descriptionColumn).endsWith('  ') && /^\S/u.test(first.slice(descriptionColumn));
+    const labels = block.rows.map(row => row.slice(block.labelColumn, twoColumns ? descriptionColumn : undefined).trim());
+    const descriptions = twoColumns ? block.rows.map(row => row.slice(descriptionColumn).trim()) : [];
+    // rendered rows cannot distinguish hard token wraps from authored whitespace
+    return [...labels, ...descriptions].join(' ').replace(/\s+/gu, ' ').trim();
+  });
+}
+
+// read the whole native question or the adjacent prose paragraph for ordinary menus
+function choiceQuestionText(lines: string[], start: number, interactive: boolean): string | undefined {
+  let end = start;
+  // omit the blank gap above the options
+  while (end > 0 && !lines[end - 1]!.trim()) end -= 1;
+  let begin = end;
+  let paragraphStart: number | undefined;
+  // native headers allow paragraph breaks inside a question
+  while (begin > 0) {
+    const line = lines[begin - 1]!.trim();
+    // keep all paragraphs after an explicit question header
+    if (questionHeader.test(line)) {
+      paragraphStart = undefined;
+      break;
+    }
+    // do not absorb earlier menus, progress messages, or prompt chrome
+    if (questionChoiceLine.test(line) || questionChrome.test(line) || questionFooter.test(line)) break;
+    // without a native header, use only the paragraph nearest the options
+    if (!line && paragraphStart === undefined) paragraphStart = begin;
+    begin -= 1;
+  }
+  const context = lines.slice(paragraphStart ?? begin, end).map(line => line.trim()).filter(Boolean);
+  // preserve the existing question cue requirement for noninteractive lists
+  if (!interactive && !context.some(line => /[?]$|^(?:question|select|choose)\b/iu.test(line))) return undefined;
+  return context.join(' ').replace(/^[›❯>]\s*/u, '') || undefined;
+}
 
 /**
  * detect a numbered choice list the agent drew on its pane, adapted from
  * the web's `questionFromAgentMessage`: scan the latest output for a run of two
  * or more sequential numbered choices and the question that introduced them.
- * `choices` are the labels only; the console renders position + 1 as the number
+ * `choices` retain labels and descriptions; the console renders position + 1 as the number
  * and answers by position relative to the freshly captured selection caret.
  */
 export function parseChoiceQuestion(message: string): InlineQuestion | undefined {
   const lines = agentMessageLines(message);
+  let lastContent = lines.length - 1;
+  // find the live content boundary once rather than rescanning every rejected suffix
+  while (lastContent >= 0 && (!lines[lastContent]!.trim() || questionFooter.test(lines[lastContent]!.trim()))) lastContent -= 1;
   let detected: { text: string; choices: string[]; selectedIndex?: number } | undefined;
-  // inspect the latest output
-  for (let start = Math.max(0, lines.length - 40); start < lines.length; start += 1) {
-    const choices: string[] = [];
+  // inspect complete choice blocks even when narrow panes wrap them over many rows
+  for (let start = 0; start < lines.length; start += 1) {
+    // skip prose without rescanning it as an option block
+    if (!questionChoiceLine.test(lines[start]!.trim())) continue;
+    const choiceStart = start;
+    const blocks: ChoiceBlock[] = [];
     let interactive = false;
     let selectedIndex: number | undefined;
     let caretCount = 0;
     let end = start;
     let expectedNumber: number | undefined;
-    let wrappedLines = 0;
-    // bridge wrapped descriptions
-    while (end < lines.length && end - start < 32) {
-      const match = questionChoiceLine.exec(lines[end]!);
+    let labelColumn = 0;
+    let separated = false;
+    // retain every wrapped label and description in its owning answer
+    while (end < lines.length) {
+      const raw = lines[end]!;
+      const line = raw.trim();
+      const match = questionChoiceLine.exec(line);
       // retain sequential choices
       if (match) {
         const number = Number(match[3]);
@@ -91,32 +160,31 @@ export function parseChoiceQuestion(message: string): InlineQuestion | undefined
         interactive ||= match[1] !== undefined || match[2] !== undefined;
         // track the keyboard cursor separately from checked or current values
         if (match[1] !== undefined) {
-          selectedIndex = choices.length;
+          selectedIndex = blocks.length;
           caretCount += 1;
         }
-        choices.push(match[4]!);
         expectedNumber = number + 1;
-        wrappedLines = 0;
-      } else {
-        wrappedLines += 1;
-        // bound continuation scanning
-        if (choices.length === 0 || wrappedLines > 8 || /^(?:tab|enter|esc|[↑↓←→])/iu.test(lines[end]!)) break;
-      }
+        labelColumn = raw.indexOf(line) + match[0].length - match[4]!.length;
+        blocks.push({ labelColumn, rows: [raw] });
+        separated = false;
+      } else if (line) {
+        // continuation rows align with answer text and stay inside the option paragraph
+        if (blocks.length === 0 || separated || questionChrome.test(line) || questionFooter.test(line) || raw.length - raw.trimStart().length < labelColumn) break;
+        blocks[blocks.length - 1]!.rows.push(raw);
+      } else separated = true;
       end += 1;
     }
+    // skip consumed rows even when an old or incomplete menu is rejected
+    start = Math.max(start, end - 1);
     // require real choices
-    if (choices.length < 2) continue;
+    if (blocks.length < 2) continue;
+    // keep old menus out of answer mode without truncating a long active menu
+    if (end <= lastContent) continue;
     // quoted or malformed lists must not invent a unique keyboard cursor
     if (caretCount !== 1) selectedIndex = undefined;
-    // skip starts inside this choice block
-    const choiceEnd = end;
-    const context = lines.slice(Math.max(0, start - 4), start).reverse();
-    const question = interactive
-      ? context.find(line => !/^question \d+ of \d+$/iu.test(line))
-      : context.find(line => /[?]$|^(?:question|select|choose)\b/iu.test(line));
+    const question = choiceQuestionText(lines, choiceStart, interactive);
     // retain the latest question
-    if (question) detected = { text: question.replace(/^[›❯>]\s*/u, ''), choices, ...(selectedIndex === undefined ? {} : { selectedIndex }) };
-    start = Math.max(start, choiceEnd - 1);
+    if (question) detected = { text: question, choices: choiceLabels(blocks), ...(selectedIndex === undefined ? {} : { selectedIndex }) };
   }
   return detected === undefined
     ? undefined
