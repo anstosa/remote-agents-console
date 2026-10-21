@@ -3,7 +3,7 @@ import { type ReactNode, useCallback, useEffect, useState } from 'react';
 export type PullRequestComment = { id: string; author: string; bot: boolean; body: string; createdAt: string; url: string };
 export type PullRequestReviewThread = { id: string; path: string; line?: number; startLine?: number; resolved: boolean; outdated: boolean; diffHunk: string; comments: PullRequestComment[] };
 export type PullRequestReviewSummary = PullRequestComment & { state: string };
-export type PullRequestComments = { number: number; url: string; threads: PullRequestReviewThread[]; reviews: PullRequestReviewSummary[]; comments: PullRequestComment[] };
+export type PullRequestComments = { number: number; url: string; description?: PullRequestComment; threads: PullRequestReviewThread[]; reviews: PullRequestReviewSummary[]; comments: PullRequestComment[] };
 
 type Item = { kind: 'thread'; id: string; thread: PullRequestReviewThread } | { kind: 'review'; id: string; review: PullRequestReviewSummary } | { kind: 'comment'; id: string; comment: PullRequestComment };
 type Section = Item['kind'];

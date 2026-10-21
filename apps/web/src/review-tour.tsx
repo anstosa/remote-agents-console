@@ -416,6 +416,9 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
   const [limitNotice, setLimitNotice] = useState(false);
   // the general note just kept, focused once it renders
   const [focusedNote, setFocusedNote] = useState<string>();
+  // the pull request's own description, by its author, which an All PR tour's overview shows
+  const [pullRequestDescription, setPullRequestDescription] = useState<{ author: string; body: string; url: string }>();
+  const pullRequestNumber = launch.scope === 'pr' ? pullRequest?.number : undefined;
   const agentName = reviewAgentLabel(tourAgent);
   const generation = useRef(0);
   const dispatchError = useRef<HTMLParagraphElement | null>(null);
@@ -431,6 +434,21 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
 
   // retain the latest notification callback
   useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
+
+  // read the pull request's description from GitHub; without one the overview is only the tour's
+  useEffect(() => {
+    if (pullRequestNumber === undefined) return;
+    let active = true;
+    void (async () => {
+      const response = await request(`/api/worktrees/${encodeURIComponent(launch.worktreeId)}/pull-request/comments`, undefined, false);
+      const description = (await responseBody(response)).description as { author?: unknown; body?: unknown; url?: unknown } | undefined;
+      if (!active || !response.ok || typeof description?.author !== 'string' || typeof description.body !== 'string' || typeof description.url !== 'string') return;
+      // a pull request template's HTML comments are hidden on GitHub too
+      const body = description.body.replace(/<!--[\s\S]*?-->/gu, '').trim();
+      if (body !== '') setPullRequestDescription({ author: description.author, body, url: description.url });
+    })();
+    return () => { active = false; };
+  }, [launch.worktreeId, pullRequestNumber, request]);
 
   // fold the step's notes into the drawer by the panel's own width; a hidden panel keeps its layout
   useLayoutEffect(() => {
@@ -1001,7 +1019,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     {state === 'loading' && <div className="review-tour-message progress-border progress-peach" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />{tourRun?.needsInput === true ? <><strong>The tour needs input</strong><p>{agentName} asked a question in its pane. Answer it there to continue.</p></> : <><strong>Building the narrated tour…</strong><p>The AI is organizing the selected implementation changes into logical steps.</p></>}{tourRun !== undefined && onOpenAgent !== undefined && <button type="button" onClick={() => openRun(tourRun)}>Open pane</button>}<button type="button" onClick={() => { generation.current += 1; if (job !== undefined) void request(`/api/review-tour/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' }, false); cancelCodeReview(); setState('cancelled'); }}>Cancel</button></div>}
     {state === 'empty' && <div className="review-tour-message" role="status"><strong>No included changes</strong><p>Implementation changes are empty for this scope. Start again with Tests or Docs included if those are the only changed files.</p></div>}
     {(state === 'error' || state === 'cancelled') && <div className="review-tour-message error" role="alert"><strong>{state === 'cancelled' ? 'Tour cancelled' : 'Unable to build tour'}</strong><p>{error || 'Generate again when you are ready.'}</p><button type="button" onClick={() => { setRetry(value => value + 1); setState('loading'); }}>Try again</button></div>}
-    {tour && state === 'overview' && <><div className="review-tour-progress"><span>Overview</span><span>{tour.steps.length} {tour.steps.length === 1 ? 'step' : 'steps'}</span></div><main className="review-tour-overview-page"><h3>{title}</h3><div className="note-markdown review-tour-overview"><MarkdownBlocks text={tour.overview} /></div><ol aria-label="Tour steps">{tour.steps.map(candidate => <li key={candidate.id}>{candidate.title}</li>)}</ol></main><footer className="review-tour-actions"><span /><button type="button" onClick={() => { setCurrent(0); setState('tour'); }}>Start tour</button></footer></>}
+    {tour && state === 'overview' && <><div className="review-tour-progress"><span>Overview</span><span>{tour.steps.length} {tour.steps.length === 1 ? 'step' : 'steps'}</span></div><main className="review-tour-overview-page"><h3>{title}</h3><div className="note-markdown review-tour-overview"><MarkdownBlocks text={tour.overview} /></div>{pullRequestDescription !== undefined && <details className="review-tour-pr-description" open><summary>Pull request description <span>by @{pullRequestDescription.author}</span></summary><div className="note-markdown review-tour-overview"><MarkdownBlocks text={pullRequestDescription.body} /></div><a href={pullRequestDescription.url} target="_blank" rel="noreferrer">View on GitHub</a></details>}<ol aria-label="Tour steps">{tour.steps.map(candidate => <li key={candidate.id}>{candidate.title}</li>)}</ol></main><footer className="review-tour-actions"><span /><button type="button" onClick={() => { setCurrent(0); setState('tour'); }}>Start tour</button></footer></>}
     {tour && state === 'tour' && step && <><div className="review-tour-progress"><span>Step {current + 1} of {tour.steps.length}{stepUntriaged > 0 && <span className="review-tour-finding-count" title="AI review findings not yet kept or dismissed">{stepUntriaged} {stepUntriaged === 1 ? 'finding' : 'findings'}</span>}</span><span>{Object.values(statuses).filter(value => value === 'visited').length} visited · {Object.values(statuses).filter(value => value === 'skipped').length} skipped</span></div><main className="review-tour-step">{compact
       ? <><button ref={notesBar} type="button" className="review-tour-notes-bar" aria-label="Show step notes" aria-expanded={notesOpen} onClick={() => setNotesOpen(true)}><span><strong>{step.title}</strong><span>{step.explanation}</span></span>{current === 0 && untriagedGeneral > 0 ? <small className="has-feedback">{untriagedGeneral} general</small> : <small className={stepFeedback.trim() === '' ? undefined : 'has-feedback'}>{stepFeedback.trim() === '' ? 'Notes' : 'Feedback'}</small>}</button>
         {notesOpen && <><button type="button" className="review-tour-notes-backdrop" aria-label="Close step notes" onClick={closeNotes} /><section ref={notesDrawer} className="review-tour-narration review-tour-notes-drawer" onScroll={keepNarrationScroll} role="dialog" aria-label="Step notes" tabIndex={-1}><div className="review-tour-notes-head"><span>Step notes</span><button type="button" aria-label="Close step notes" title="Close" onClick={closeNotes}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></div>{narration}</section></>}</>

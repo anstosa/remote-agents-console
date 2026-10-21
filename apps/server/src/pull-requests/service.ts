@@ -13,6 +13,7 @@ export type OpenPullRequestChoices = { own: PullRequestChoice[]; others: PullReq
 const cacheTtlMs = 60_000;
 const repositoryCacheTtlMs = 30_000;
 const commentsQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){
+  id author{login __typename} body createdAt url
   reviewThreads(first:100){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine comments(first:50){nodes{id author{login __typename} body createdAt url diffHunk}}}}
   reviews(last:100){nodes{id author{login __typename} state body submittedAt url}}
   comments(last:100){nodes{id author{login __typename} body createdAt url}}
@@ -116,7 +117,7 @@ export class PullRequestService {
     })), others };
   }
 
-  // the review threads, review summaries and conversation of the branch's open pull request, read fresh
+  // the description, review threads, review summaries and conversation of the branch's open pull request, read fresh
   async comments(workspace: string, branch: string | undefined): Promise<PullRequestComments> {
     const repository = await this.cachedRepository(workspace);
     if (repository === undefined) throw new GithubRequestError('The worktree does not have a supported GitHub origin.', 404);
@@ -148,7 +149,9 @@ export class PullRequestService {
       if (typeof state !== 'string' || state === 'PENDING') return [];
       return prComment({ ...review as object, createdAt: at(review, 'submittedAt') }).filter(comment => comment.body.trim() !== '').map(comment => ({ ...comment, state }));
     });
-    return { number: pullRequest.number, url: pullRequest.url, threads, reviews, comments: nodes(at(node, 'comments')).flatMap(prComment) };
+    // the submitter's opening comment, left out when they wrote none
+    const [description] = prComment(node).filter(comment => comment.body.trim() !== '');
+    return { number: pullRequest.number, url: pullRequest.url, ...(description === undefined ? {} : { description }), threads, reviews, comments: nodes(at(node, 'comments')).flatMap(prComment) };
   }
 
   async supports(workspace: string): Promise<boolean> { return await this.repository(workspace) !== undefined; }

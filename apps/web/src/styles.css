@@ -2181,6 +2181,10 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-overview-page h3 { color: var(--text); font: 800 1rem/1.35 var(--font-mono); }
 .review-tour-overview-page ol { display: grid; max-width: 48rem; gap: .3rem; margin: 0; padding-left: 1.6rem; color: var(--subtext-1); font: 700 .74rem/1.4 var(--font-mono); }
 .review-tour-overview :is(p, ul, ol, blockquote, pre), .review-tour-explanation :is(p, ul, ol, blockquote, pre) { margin-bottom: .55em; }
+.review-tour-pr-description { display: grid; max-width: 48rem; gap: .5rem; padding: .6rem .8rem; border-left: 2px solid var(--surface-1); }
+.review-tour-pr-description summary { color: var(--subtext-1); cursor: pointer; font: 700 .74rem/1.4 var(--font-mono); }
+.review-tour-pr-description summary span { color: var(--overlay-1); font-weight: 400; }
+.review-tour-pr-description a { justify-self: start; color: var(--blue); font-size: .74rem; }
 .review-tour-comparison { display: flex; min-width: 0; align-items: center; gap: .6rem; padding: .3rem .4rem .3rem 1.1rem; border-top: 1px solid var(--surface-1); background: var(--mantle); color: var(--overlay-1); font: 700 .65rem var(--font-mono); }
 .review-tour-comparison > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-tour-ai { display: inline-flex; min-width: 0; flex: none; align-items: center; align-self: center; gap: .4rem; margin-left: auto; padding: .25rem .6rem; border: 1px solid var(--surface-2); border-radius: 999px; color: var(--subtext-0); font: 750 .64rem var(--font-mono); white-space: nowrap; }

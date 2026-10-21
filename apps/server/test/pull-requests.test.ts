@@ -217,6 +217,7 @@ describe('GitHub pull request comments', () => {
   const openPull = [{ number: 9, title: 'Retries', state: 'open', draft: false, merged_at: null, html_url: 'https://github.com/octo/repo/pull/9' }];
   const author = (login: string, typename = 'User') => ({ login, __typename: typename });
   const commentsPayload = { data: { repository: { pullRequest: {
+    id: 'PR9', author: author('octocat'), body: 'Retry with backoff', createdAt: '2026-09-30T00:00:00Z', url: 'https://github.com/octo/repo/pull/9',
     reviewThreads: { nodes: [
       { id: 'T1', isResolved: false, isOutdated: false, path: 'src/a.ts', line: 12, startLine: 10, originalLine: 11, originalStartLine: 9, comments: { nodes: [
         { id: 'C1', author: author('mona'), body: 'Back off first', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_r1', diffHunk: '@@ -1 +1 @@\n+retry' },
@@ -247,6 +248,7 @@ describe('GitHub pull request comments', () => {
   it('reads threads, review summaries and conversation of the open pull request', async () => {
     const comments = await service().comments('/workspace', 'feature/retries');
     expect(comments.number).toBe(9);
+    expect(comments.description).toEqual({ id: 'PR9', author: 'octocat', bot: false, body: 'Retry with backoff', createdAt: '2026-09-30T00:00:00Z', url: 'https://github.com/octo/repo/pull/9' });
     expect(comments.threads).toEqual([
       { id: 'T1', path: 'src/a.ts', line: 12, startLine: 10, resolved: false, outdated: false, diffHunk: '@@ -1 +1 @@\n+retry', comments: [
         { id: 'C1', author: 'mona', bot: false, body: 'Back off first', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_r1' },

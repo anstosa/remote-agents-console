@@ -24,7 +24,8 @@ export type PullRequestComment = { id: string; author: string; bot: boolean; bod
 // original lines once the thread is outdated, and `diffHunk` is the code the first comment was on
 export type PullRequestReviewThread = { id: string; path: string; line?: number; startLine?: number; resolved: boolean; outdated: boolean; diffHunk: string; comments: PullRequestComment[] };
 export type PullRequestReviewSummary = PullRequestComment & { state: string };
-export type PullRequestComments = { number: number; url: string; threads: PullRequestReviewThread[]; reviews: PullRequestReviewSummary[]; comments: PullRequestComment[] };
+// `description` is the pull request's own body, the comment its author opened it with
+export type PullRequestComments = { number: number; url: string; description?: PullRequestComment; threads: PullRequestReviewThread[]; reviews: PullRequestReviewSummary[]; comments: PullRequestComment[] };
 export const stackActions = ['start', 'stop', 'build', 'restart', 'migrate'] as const;
 export type StackAction = typeof stackActions[number];
 // `status` (a health probe) and `setup` (a run-once, worktree-creation hook) are commands
