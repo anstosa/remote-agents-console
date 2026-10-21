@@ -38,7 +38,7 @@ test('opens a changed file in the Code panel from the git flyout while new outpu
 
   // the Code panel opens filtered to that one file (a diff, not the old modal dialog)
   const panel = page.getByRole('region', { name: 'Code changes' });
-  await expect(panel.getByRole('button', { name: '‹ All files' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'All files', exact: true })).toBeVisible();
   await expect(page.locator('.code-pane diffs-container [data-title]')).toHaveText([/app\.ts/u]);
 
   // new pane output keeps arriving (and renders) while the panel stays open beside it

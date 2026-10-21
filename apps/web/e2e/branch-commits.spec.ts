@@ -111,7 +111,7 @@ test('groups the All PR files by commit and remembers the choice', async ({ page
   // send only the comparison kind rather than a hardcoded base
   await expect.poll(() => comparisons.at(-1)).toEqual({ kind: 'pr' });
   const code = page.getByRole('region', { name: 'Code changes' });
-  await expect(code.getByRole('group', { name: 'Comparison' }).getByRole('button', { name: 'All PR' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(code.locator('.code-pane-title')).toHaveText('All PR changes');
   await expect(code.getByRole('button', { name: 'src/log.ts', exact: false }).first()).toBeVisible();
   await page.getByRole('button', { name: /^Git status: feature\/commits/u }).click();
   await expect(page.getByRole('region', { name: 'Changed files' }).getByRole('group', { name: 'Group files by' }).getByRole('button', { name: 'By commit' })).toHaveAttribute('aria-pressed', 'true');
@@ -150,20 +150,30 @@ test('opens one commit\'s own changes in the Code panel', async ({ page }) => {
   await expect(panel).toHaveCount(0);
   const code = page.getByRole('region', { name: 'Code changes' });
   await expect(code.locator('.code-pane-title')).toHaveText('Add commit log endpoint');
-  await expect(code.locator('.code-pane-branch')).toHaveText(' · c40bf6c');
+  await expect(code.locator('.code-pane-branch')).toHaveText('c40bf6c');
   await expect(code.getByRole('button', { name: 'src/log.ts', exact: false }).first()).toBeVisible();
   expect(comparisons.at(-1)).toEqual({ kind: 'commit', commit: commits.commits[2]!.sha });
-  // neither Comparison is selected, and a guided review does not cover a single commit
-  const toggle = code.getByRole('group', { name: 'Comparison' });
-  await expect(toggle.getByRole('button', { name: 'Working' })).toHaveAttribute('aria-pressed', 'false');
-  await expect(toggle.getByRole('button', { name: 'All PR' })).toHaveAttribute('aria-pressed', 'false');
+  // a guided review does not cover a single commit
   await expect(code.getByRole('button', { name: /Review/u })).toHaveCount(0);
+  // the picker marks the commit, not either Comparison, and lists only commits with changes
+  await code.locator('.code-pane-picker').click();
+  const picker = page.getByRole('menu', { name: 'Comparison' });
+  await expect(picker.getByRole('menuitemradio', { name: 'Working changes' })).toHaveAttribute('aria-checked', 'false');
+  await expect(picker.getByRole('menuitemradio', { name: 'All PR changes' })).toHaveAttribute('aria-checked', 'false');
+  await expect(picker.locator('.code-pane-picker-commit')).toHaveCount(2);
+  await expect(picker.getByRole('menuitemradio', { name: /Add commit log endpoint/u })).toHaveAttribute('aria-checked', 'true');
   if (process.env.SHOT_COMMIT_VIEW) await page.screenshot({ path: process.env.SHOT_COMMIT_VIEW });
 
   // picking a Comparison leaves the commit
-  await toggle.getByRole('button', { name: 'Working' }).click();
+  await picker.getByRole('menuitemradio', { name: 'Working changes' }).click();
   await expect(code.locator('.code-pane-title')).toHaveText('Working changes');
   expect(comparisons.at(-1)).toEqual({ kind: 'working' });
+
+  // and picking a commit returns to it
+  await code.locator('.code-pane-picker').click();
+  await picker.getByRole('menuitemradio', { name: /Add commit log endpoint/u }).click();
+  await expect(code.locator('.code-pane-title')).toHaveText('Add commit log endpoint');
+  expect(comparisons.at(-1)).toEqual({ kind: 'commit', commit: commits.commits[2]!.sha });
 });
 
 test('shows a failure in place of the commit sections', async ({ page }) => {

@@ -5346,7 +5346,7 @@ function CodePane({ controller, prAvailable, branch, review, onOpenInEditor, onR
     if (fromSettings) onReturnToSettings?.();
   };
   return <Suspense fallback={<section className="code-pane" role="region" aria-label="Code changes"><p className="code-pane-status">Loading changes…</p></section>}>
-    <CodePanel mode={controller.mode} commit={controller.commit} state={controller.state} patch={controller.patch} selectedPath={controller.selectedPath} filePreview={controller.filePreview} prAvailable={prAvailable} branch={branch} review={review} loadFile={controller.loadFile} onSelectFile={controller.selectFile} onClearFile={controller.clearFile} onSetMode={controller.setMode} onCloseFile={closeFile} onClose={controller.close} onRetry={controller.refresh} savedView={controller.savedView} onSaveView={controller.saveView} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} />
+    <CodePanel mode={controller.mode} commit={controller.commit} state={controller.state} patch={controller.patch} selectedPath={controller.selectedPath} filePreview={controller.filePreview} prAvailable={prAvailable} branch={branch} review={review} loadFile={controller.loadFile} onSelectFile={controller.selectFile} onClearFile={controller.clearFile} onSetMode={controller.setMode} loadCommits={controller.loadCommits} onSelectCommit={controller.openCommit} onCloseFile={closeFile} onClose={controller.close} onRetry={controller.refresh} savedView={controller.savedView} onSaveView={controller.saveView} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} />
   </Suspense>;
 }
 // render every ordered resizable panel

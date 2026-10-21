@@ -60,6 +60,11 @@ const isComparisonFileContents = (value: unknown): value is ComparisonFileConten
   && ((value as ComparisonFileContents).base === null || isRevisionFile((value as ComparisonFileContents).base))
   && ((value as ComparisonFileContents).working === null || isRevisionFile((value as ComparisonFileContents).working));
 
+const isLoggedCommit = (value: unknown): value is CodePanelCommit & { changes: unknown[] } =>
+  value !== null && typeof value === 'object'
+  && typeof (value as CodePanelCommit).sha === 'string' && typeof (value as CodePanelCommit).subject === 'string'
+  && Array.isArray((value as { changes?: unknown }).changes);
+
 // Fetch one file's two sides in a Worktree's Comparison; undefined when it is unavailable.
 export const fetchComparisonFile = async (request: Requester, worktreeId: string, comparison: { kind: CodePanelMode; path: string } | { kind: 'commit'; commit: string; path: string }): Promise<ComparisonFileContents | undefined> => {
   try {
@@ -156,7 +161,7 @@ export type CodePanelController = {
   openContentPreview(path: string, content: string): void;
   // leave the File view, revealing the Comparison the panel would otherwise show
   closeFilePreview(): void;
-  // switch the Comparison in place (the panel-header Working / All PR toggle), leaving any commit; refetches
+  // switch the Comparison in place (the panel-header Comparison picker), leaving any commit; refetches
   setMode(mode: CodePanelMode): void;
   // filter the open panel to one Change, or return to all files
   selectFile(path: string): void;
@@ -165,6 +170,8 @@ export type CodePanelController = {
   refresh(): void;
   // fetch one changed file's two sides, for the "Load anyway" placeholder and single-file modes
   loadFile(path: string): Promise<ComparisonFileContents | undefined>;
+  // the branch's commits that changed files, newest first, for the Comparison picker
+  loadCommits(): Promise<CodePanelCommit[] | undefined>;
   close(): void;
   // the panel view's own state as it was when this Place's Workspace was last switched away from,
   // and how the view hands it back as it unmounts
@@ -403,7 +410,7 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
     setFilePreview(undefined);
   }, [filePreview?.source, worktreeId]);
 
-  // the panel-header Working / All PR toggle; keep any selected file so the reviewer stays on it
+  // the panel-header Comparison picker; keep any selected file so the reviewer stays on it
   const setMode = useCallback((next: CodePanelMode) => { setModeState(next); setCommit(undefined); }, []);
   const selectFile = useCallback((path: string) => setSelectedPath(path), []);
   const clearFile = useCallback(() => setSelectedPath(undefined), []);
@@ -424,9 +431,23 @@ export const useCodePanel = (worktreeId: string | undefined, request: Requester,
   const loadFile = useCallback(async (path: string): Promise<ComparisonFileContents | undefined> =>
     worktreeId === undefined ? undefined : await fetchComparisonFile(request, worktreeId, commitSha === undefined ? { kind: mode, path } : { kind: 'commit', commit: commitSha, path }), [worktreeId, mode, commitSha, request]);
 
+  // the same log the branch fly-out's By commit grouping reads; a commit without Changes (an empty
+  // merge) has nothing to show
+  const loadCommits = useCallback(async (): Promise<CodePanelCommit[] | undefined> => {
+    if (worktreeId === undefined) return undefined;
+    try {
+      const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/commits`);
+      if (!response.ok) return undefined;
+      const payload: unknown = await response.json();
+      const commits = payload !== null && typeof payload === 'object' ? (payload as { commits?: unknown }).commits : undefined;
+      if (!Array.isArray(commits) || !commits.every(isLoggedCommit)) return undefined;
+      return commits.filter(commit => commit.changes.length > 0).map(({ sha, subject }) => ({ sha, subject }));
+    } catch { return undefined; }
+  }, [worktreeId, request]);
+
   // The Comparison needs a Worktree to scope its endpoints, but a File preview rides the agent-keyed
   // file-preview endpoint, so it can show even for an agent with no Worktree — keep the panel visible
   // whenever a File is open, or when Changes are open on a real Worktree.
   const panelVisible = filePreview !== undefined || (open && worktreeId !== undefined);
-  return { open: panelVisible, mode, commit, state, patch, selectedPath, filePreview, openChanges, openCommit, openFilePreview, openContentPreview, closeFilePreview, setMode, selectFile, clearFile, refresh, loadFile, close, savedView: view.current, saveView };
+  return { open: panelVisible, mode, commit, state, patch, selectedPath, filePreview, openChanges, openCommit, openFilePreview, openContentPreview, closeFilePreview, setMode, selectFile, clearFile, refresh, loadFile, loadCommits, close, savedView: view.current, saveView };
 };

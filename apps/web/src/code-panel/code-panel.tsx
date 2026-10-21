@@ -8,6 +8,8 @@
 // the changed-file rail/drawer.
 import { type MouseEvent as ReactMouseEvent, type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { closeOnMiddleClick } from '../middle-click.js';
+import { FlyoutPortal } from '../flyout-portal.js';
+import { useViewportFlyout } from '../viewport-flyout.js';
 import type { CodeViewLineSelection } from '@pierre/diffs';
 import { CodeView, type CodeViewHandle, type CodeViewItem, type CodeViewReactOptions, type FileDiffMetadata } from '@pierre/diffs/react';
 import { openSelectionContextMenu, preserveContextMenuPress, useSelectionActions, type SelectionActions, type SelectionContextMode } from '../selection-context-menu.js';
@@ -29,7 +31,7 @@ type PanelHandle = CodeViewHandle<undefined, undefined>;
 // "narrow panels auto-collapse" both come down to.
 const RAIL_BREAKPOINT = SPLIT_MIN_WIDTH;
 
-// Below this (narrower) width the title pill drops its file count and branch so the title reads.
+// Below this (narrower) width the title pill drops the branch so the title reads.
 const COMPACT_BREAKPOINT = 480;
 
 
@@ -45,9 +47,9 @@ export type CodePanelProps = {
   // the File the panel is showing (a response file or terminal link), or undefined for a Comparison;
   // when set the panel renders the File view instead of the Changes layout
   filePreview?: FilePreviewView;
-  // whether an All PR Comparison exists to toggle to (disables the header toggle when it does not)
+  // whether an All PR Comparison (and so its commits) exists to pick
   prAvailable: boolean;
-  // the Place's branch, shown beside the file count
+  // the Place's branch, shown beside the Comparison picker
   branch?: string;
   // the guided review of the shown Comparison, where an Agent can run one
   review?: CodePanelReview;
@@ -55,6 +57,10 @@ export type CodePanelProps = {
   onSelectFile: (path: string) => void;
   onClearFile: () => void;
   onSetMode: (mode: CodePanelMode) => void;
+  // the branch's commits for the Comparison picker, and picking one; the picker offers only Working
+  // and All PR without them
+  loadCommits?: () => Promise<CodePanelCommit[] | undefined>;
+  onSelectCommit?: (commit: CodePanelCommit) => void;
   // leave the File view, returning to the Comparison the panel would otherwise show
   onCloseFile: () => void;
   onClose: () => void;
@@ -158,7 +164,7 @@ function codeContextMenu(event: ReactMouseEvent<HTMLElement>, actions: Selection
   });
 }
 
-export default function CodePanel({ mode, commit, state, patch, selectedPath, filePreview, prAvailable, branch, review, loadFile, onSelectFile, onClearFile, onSetMode, onCloseFile, onClose, onRetry, onOpenInEditor, savedView, onSaveView }: CodePanelProps) {
+export default function CodePanel({ mode, commit, state, patch, selectedPath, filePreview, prAvailable, branch, review, loadFile, onSelectFile, onClearFile, onSetMode, loadCommits, onSelectCommit, onCloseFile, onClose, onRetry, onOpenInEditor, savedView, onSaveView }: CodePanelProps) {
   const selectionActions = useSelectionActions();
   const theme = useColorTheme();
   const fontSize = useTerminalFontSize();
@@ -244,7 +250,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   // returning from a File detour remounts this section — a `[]`-effect would never see either.
   const [panelRef, panelWidth] = useObservedWidth();
   // `narrow` folds the file list into a drawer and forces unified; `compact` (narrower still) drops
-  // the header's file count and branch.
+  // the header's branch.
   const narrow = panelWidth < RAIL_BREAKPOINT;
   const compact = panelWidth < COMPACT_BREAKPOINT;
 
@@ -527,26 +533,20 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h10l3 3v1M4 4v15h3M7 8h10l3 3v10H7zM17 8v3h3" /></svg>
       </button>
     )}
+    {/* the picker stays reachable with one file open, so switching keeps the reviewer on that file */}
     <nav className="code-pane-crumbs" aria-label="Location">
-      {selectedPath === undefined
-        ? <span className="code-pane-crumb-current code-pane-title" title={commit?.subject}>{commit !== undefined ? commit.subject : mode === 'working' ? 'Working changes' : 'All PR changes'}</span>
-        : <>
-            <button type="button" className="code-pane-crumb-back" onClick={backToAll}>‹ All files</button>
-            <span className="code-pane-crumb-sep" aria-hidden="true">/</span>
-            <span className="code-pane-crumb-current" title={selectedPath}>{basename(selectedPath)}</span>
-          </>}
+      {selectedPath !== undefined && <button type="button" className="code-pane-crumb-back" aria-label="All files" title="All files" onClick={backToAll}>‹</button>}
+      <ComparisonPicker mode={mode} commit={commit} prAvailable={prAvailable} onSetMode={onSetMode} {...(loadCommits === undefined || onSelectCommit === undefined ? {} : { loadCommits, onSelectCommit })} />
+      {selectedPath !== undefined && <>
+        <span className="code-pane-crumb-sep" aria-hidden="true">/</span>
+        <span className="code-pane-crumb-current" title={selectedPath}>{basename(selectedPath)}</span>
+      </>}
     </nav>
-    {!compact && state === 'ready' && selectedPath === undefined && <span className="panel-header-sub"><span className="code-pane-count">{fileCount === 1 ? '1 file' : `${fileCount} files`}</span>{commit !== undefined ? <span className="code-pane-branch" title={commit.sha}> · {commit.sha.slice(0, 7)}</span> : branch !== undefined && <span className="code-pane-branch" title={branch}> · {branch}</span>}</span>}
+    {!compact && selectedPath === undefined && (commit !== undefined
+      ? <span className="panel-header-sub code-pane-branch" title={commit.sha}>{commit.sha.slice(0, 7)}</span>
+      : branch !== undefined && <span className="panel-header-sub code-pane-branch" title={branch}>{branch}</span>)}
   </>;
-  // The Working / All PR toggle stays available whenever the Comparison has settled — including when
-  // it resolved empty — so switching to an empty Comparison never strands the reviewer.
   const actions = <>
-    {state !== 'loading' && (
-      <span className="code-pane-segment" role="group" aria-label="Comparison">
-        <button type="button" aria-pressed={commit === undefined && mode === 'working'} onClick={() => onSetMode('working')}>Working</button>
-        <button type="button" aria-pressed={commit === undefined && mode === 'pr'} disabled={!prAvailable} title={prAvailable ? 'Compare the whole PR' : 'Merge target unavailable'} onClick={() => onSetMode('pr')}>All PR</button>
-      </span>
-    )}
     {/* a guided review covers Working or All PR, never a single commit */}
     {review !== undefined && commit === undefined && <button type="button" className={`code-pane-review${review.generating ? ' progress-border progress-peach' : ''}`} aria-busy={review.generating || undefined} disabled={review.onReview === undefined || (!review.open && (review.unavailable !== undefined || !hasDiffs))} title={review.unavailable ?? (review.generating ? 'Generating the guided review — open it to watch progress or cancel' : review.open ? 'Open the guided review' : 'Start a guided review of these changes')} onClick={() => review.onReview?.(mode)}>{review.generating && <span className="update-progress-ring" aria-hidden="true" />}{review.generating ? 'Generating…' : review.open ? 'Open Review' : 'Review'}</button>}
   </>;
@@ -561,7 +561,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
         {state === 'ready' && fileCount > 0 && railVisible && (
           <aside className="code-pane-rail">
             <div className="code-pane-rail-head">
-              <span>Files</span>
+              <span>Files<span className="code-pane-count">{fileCount}</span></span>
               <button type="button" className="code-pane-rail-collapse" aria-label="Hide changed files" title="Hide files" onClick={() => setRailCollapsed(true)}>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6" /></svg>
               </button>
@@ -607,7 +607,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
           <button type="button" className="code-pane-drawer-backdrop" aria-label="Close changed files" onClick={() => setDrawerOpen(false)} />
           <div className="code-pane-drawer" role="dialog" aria-label="Changed files" onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setDrawerOpen(false); } }}>
             <div className="code-pane-drawer-head">
-              <span>Files</span>
+              <span>Files<span className="code-pane-count">{fileCount}</span></span>
               <button type="button" className="code-pane-close" aria-label="Close changed files" title="Close" onClick={() => setDrawerOpen(false)}>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
               </button>
@@ -619,6 +619,39 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
       </div>
     </section>
   );
+}
+
+// The header's Comparison picker: the shown Comparison's name ▾, whose menu switches between Working,
+// All PR, and any one commit of the branch (listed fresh each time the menu opens).
+function ComparisonPicker({ mode, commit, prAvailable, onSetMode, loadCommits, onSelectCommit }: { mode: CodePanelMode; commit: CodePanelCommit | undefined; prAvailable: boolean; onSetMode: (mode: CodePanelMode) => void; loadCommits?: () => Promise<CodePanelCommit[] | undefined>; onSelectCommit?: (commit: CodePanelCommit) => void }) {
+  const [open, setOpen] = useState(false);
+  const [commits, setCommits] = useState<CodePanelCommit[] | 'loading' | 'error'>('loading');
+  const { anchorRef, flyoutRef, style } = useViewportFlyout(open, { align: 'start' });
+  // commits exist only relative to a merge target
+  const listCommits = prAvailable && loadCommits !== undefined && onSelectCommit !== undefined;
+  useEffect(() => {
+    if (!open || !listCommits) return;
+    let cancelled = false;
+    setCommits('loading');
+    void loadCommits().then(next => { if (!cancelled) setCommits(next ?? 'error'); });
+    return () => { cancelled = true; };
+  }, [open, listCommits, loadCommits]);
+  const choose = (select: () => void) => { setOpen(false); select(); };
+  const label = commit !== undefined ? commit.subject : mode === 'working' ? 'Working changes' : 'All PR changes';
+  return <><span className="code-pane-picker-wrap" ref={anchorRef}><button type="button" className="code-pane-picker" aria-haspopup="menu" data-context-flyout aria-expanded={open} title={label} onClick={() => setOpen(value => !value)}>
+    <span className="code-pane-title">{label}</span>
+    <svg className="agent-switcher-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+  </button></span>{open && <FlyoutPortal onDismiss={() => setOpen(false)}><div className="more-menu flyout-menu code-pane-picker-menu" ref={flyoutRef} style={style} role="menu" aria-label="Comparison">
+    <button type="button" role="menuitemradio" aria-checked={commit === undefined && mode === 'working'} onClick={() => choose(() => onSetMode('working'))}>Working changes</button>
+    <button type="button" role="menuitemradio" aria-checked={commit === undefined && mode === 'pr'} disabled={!prAvailable} title={prAvailable ? 'Compare the whole PR' : 'Merge target unavailable'} onClick={() => choose(() => onSetMode('pr'))}>All PR changes</button>
+    {listCommits && <>
+      <p className="code-pane-picker-label">Commits</p>
+      {commits === 'loading' && <p className="code-pane-picker-note" role="status">Loading commits…</p>}
+      {commits === 'error' && <p className="code-pane-picker-note" role="alert">Commits unavailable</p>}
+      {Array.isArray(commits) && commits.length === 0 && <p className="code-pane-picker-note">No commits yet</p>}
+      {Array.isArray(commits) && commits.map(entry => <button key={entry.sha} type="button" role="menuitemradio" aria-checked={entry.sha === commit?.sha} className="code-pane-picker-commit" title={entry.subject} onClick={() => choose(() => onSelectCommit(entry))}><span>{entry.subject}</span><code>{entry.sha.slice(0, 7)}</code></button>)}
+    </>}
+  </div></FlyoutPortal>}</>;
 }
 
 // The panel's File view: one file opened from a response-file row or a terminal link, filling the

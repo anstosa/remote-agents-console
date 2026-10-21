@@ -38,7 +38,7 @@ test('promotes a panel to full screen in a running split and restores it', async
   await expect(agentOutput(page)).toBeVisible();
   // the header names the Comparison, its file count and the branch, and offers the Agent's review
   await expect(codePanel(page).getByText('Working changes')).toBeVisible();
-  await expect(codePanel(page).locator('.code-pane-branch')).toHaveText(' · feature/fullscreen');
+  await expect(codePanel(page).locator('.code-pane-branch')).toHaveText('feature/fullscreen');
   await expect(codePanel(page).getByRole('button', { name: 'Review', exact: true })).toBeVisible();
 
   // promote the Code panel: it fills the workspace and the agent output is hidden

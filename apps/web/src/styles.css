@@ -319,9 +319,9 @@ html.software-keyboard-open .tabs { display: none; }
 .agent-panel .agent-panel-title { flex: 0 1 auto; min-width: 0; overflow: hidden; padding: 0 .2rem; color: var(--text); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 /* the Agent switcher: the title as a button, with the Place's Agent count and an "another Agent
    needs you" dot */
-.agent-switcher-wrap { display: inline-flex; min-width: 0; }
-.agent-switcher { display: inline-flex; min-width: 0; max-width: 100%; min-height: 0; align-items: center; gap: .35rem; padding: .1rem .3rem; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: var(--text); box-shadow: none; font: inherit; }
-.agent-switcher:hover, .agent-switcher[aria-expanded='true'] { border-color: var(--surface-1); background: color-mix(in srgb, var(--surface-0) 55%, transparent); }
+.agent-switcher-wrap, .code-pane-picker-wrap { display: inline-flex; min-width: 0; }
+.agent-switcher, .code-pane-picker { display: inline-flex; min-width: 0; max-width: 100%; min-height: 0; align-items: center; gap: .35rem; padding: .1rem .3rem; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: var(--text); box-shadow: none; font: inherit; }
+.agent-switcher:hover, .agent-switcher[aria-expanded='true'], .code-pane-picker:hover, .code-pane-picker[aria-expanded='true'] { border-color: var(--surface-1); background: color-mix(in srgb, var(--surface-0) 55%, transparent); }
 .agent-switcher .agent-panel-title { padding: 0; }
 .agent-switcher-count { flex: none; padding: 0 .35rem; border-radius: 999px; background: var(--surface-1); color: var(--subtext-1); font: 800 .62rem var(--font-mono); }
 .agent-switcher-attention { flex: none; width: var(--status-dot-size); height: var(--status-dot-size); border-radius: 50%; background: var(--red); box-shadow: 0 0 .4rem var(--red); }
@@ -690,7 +690,6 @@ html.software-keyboard-open .tabs { display: none; }
 .note-picker-menu button[aria-current='true'] { color: var(--yellow); }
 .note-picker-menu .note-picker-scheduled { flex: none; width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 2; }
 .note-picker-menu .note-picker-new { color: var(--green); }
-.code-pane-branch { color: var(--overlay-1); }
 /* a note's content scrolls under the pills, unless a lock error, Schedule or attachments sit above it */
 .note-pane-head:has(> :not(.attachment-input)) { padding-top: var(--panel-header-clearance); }
 .note-pane:not(:has(.note-pane-head > :not(.attachment-input))) :is(.note-markdown, textarea) { padding-top: calc(var(--panel-header-clearance) + .2rem); }
@@ -958,23 +957,28 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 .code-pane-crumb-back { flex: 0 0 auto; padding: .15rem .35rem; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--mauve); font: inherit; font-size: .78rem; }
 .code-pane-crumb-back:hover { color: var(--text); text-decoration: underline; }
 .code-pane-crumb-sep { flex: 0 0 auto; color: var(--surface-2); }
-.code-pane-crumb-current { min-width: 0; overflow: hidden; color: var(--text); font-family: var(--font-mono); font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
-/* the Diff mode / Diff layout / Comparison segmented controls */
+.code-pane-crumb-current, .code-pane-title { min-width: 0; overflow: hidden; color: var(--text); font-family: var(--font-mono); font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
+/* the Diff mode / Diff layout segmented controls */
 .code-pane-segment { display: inline-flex; flex: 0 0 auto; align-items: stretch; border: 1px solid var(--surface-1); border-radius: var(--control-radius); overflow: hidden; }
 .code-pane-segment button { height: 1.9rem; padding: 0 .5rem; border: 0; border-left: 1px solid var(--surface-1); background: transparent; color: var(--subtext-0); font: inherit; font-size: .7rem; white-space: nowrap; }
 .code-pane-segment button:first-child { border-left: 0; }
 .code-pane-segment button:hover:not(:disabled) { color: var(--text); }
 .code-pane-segment button[aria-pressed='true'] { background: color-mix(in srgb, var(--mauve) 22%, transparent); color: var(--text); }
 .code-pane-segment button:disabled { opacity: .45; }
-/* only the active comparison choice needs an outline */
-.code-pane-segment[aria-label='Comparison'] { border: 0; }
-.code-pane-segment[aria-label='Comparison'] button { border: 1px solid transparent; border-radius: var(--control-radius); }
-.code-pane-segment[aria-label='Comparison'] button[aria-pressed='true'] { border-color: var(--surface-1); }
+/* the title's Working / All PR / commit menu */
+.code-pane-picker-menu.more-menu { width: min(24rem, calc(100vw - 1rem)); padding: .35rem; }
+.code-pane-picker-menu button { display: flex; align-items: center; gap: .55rem; text-align: left; }
+.code-pane-picker-menu button[aria-checked='true'] { background: color-mix(in srgb, var(--surface-0) 80%, transparent); }
+.code-pane-picker-commit span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.code-pane-picker-commit code { flex: none; color: var(--overlay-1); font-size: .66rem; }
+.code-pane-picker-label { margin: .45rem .45rem .2rem; color: var(--subtext-0); font-size: .62rem; letter-spacing: .05em; text-transform: uppercase; }
+.code-pane-picker-note { margin: .2rem .45rem; color: var(--overlay-1); font-size: .66rem; }
 .code-pane-main { position: relative; display: flex; min-width: 0; min-height: 0; }
 .code-pane-body { display: flex; min-width: 0; min-height: 0; flex: 1 1 auto; flex-direction: column; }
 /* the changed-file rail (wide panel) and drawer (narrow panel) share one file list */
 .code-pane-rail { display: flex; flex: 0 0 13rem; min-height: 0; flex-direction: column; border-right: 1px solid var(--surface-1); background: color-mix(in srgb, var(--mantle) 70%, var(--crust)); }
 .code-pane-rail-head { display: flex; align-items: center; justify-content: space-between; padding: .35rem .3rem .35rem .6rem; color: var(--subtext-0); font-size: .68rem; letter-spacing: .04em; text-transform: uppercase; }
+.code-pane-count { margin-left: .4rem; padding: 0 .35rem; border-radius: 999px; background: var(--surface-1); color: var(--subtext-1); font: 800 .62rem var(--font-mono); letter-spacing: 0; }
 .code-pane-rail-collapse { display: grid; width: 1.6rem; height: 1.6rem; padding: 0; place-items: center; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--subtext-0); }
 .code-pane-rail-collapse:hover { color: var(--text); }
 .code-pane-rail-collapse svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }

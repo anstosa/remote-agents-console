@@ -173,12 +173,12 @@ test('maps a diff line to the working-tree line the editor opens', async ({ page
 test('renders implementation changes and exposes View docs as an unchecked checkbox', async ({ page }) => {
   await mountPanel(page, patchOf([trackedFile('src/app.ts'), trackedFile('src/widget.ts'), trackedFile('src/app.test.ts')]));
 
-  // the panel header carries the Working / All PR comparison toggle, seeded to Working
-  await expect(panel(page).getByRole('button', { name: 'Working', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  // the inactive comparison choice has no visible outline or divider
-  const inactiveBorder = await panel(page).getByRole('button', { name: 'All PR' }).evaluate(button => getComputedStyle(button).borderLeftColor);
-  expect(inactiveBorder).toBe('rgba(0, 0, 0, 0)');
-  await expect(panel(page).getByText('3 files')).toBeVisible();
+  // the panel title is the Comparison picker, seeded to Working
+  await panel(page).locator('.code-pane-picker').click();
+  await expect(page.getByRole('menu', { name: 'Comparison' }).getByRole('menuitemradio', { name: 'Working changes' })).toHaveAttribute('aria-checked', 'true');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu', { name: 'Comparison' })).toHaveCount(0);
+  await expect(panel(page).locator('.code-pane-count')).toHaveText('3');
   // only the two implementation files render; the test file is behind the collapsed group
   await expect(diffHeaders(page)).toHaveCount(2);
 
@@ -190,15 +190,15 @@ test('renders implementation changes and exposes View docs as an unchecked check
   await expect(diffHeaders(page)).toHaveCount(3);
 });
 
-test('keeps the Working / All PR toggle when a Comparison resolves with no files', async ({ page }) => {
+test('keeps the Comparison picker when a Comparison resolves with no files', async ({ page }) => {
   // an empty Comparison (e.g. switching to Working when everything is committed) must not strand the
-  // reviewer: the mode/layout controls hide with no files, but the Working / All PR toggle stays so
-  // they can switch back to the Comparison that had changes
+  // reviewer: the mode/layout controls hide with no files, but the Comparison picker stays so they
+  // can switch back to the Comparison that had changes
   await mountPanel(page, patchOf([]));
 
   await expect(panel(page).getByText('No changes to show.')).toBeVisible();
-  await expect(panel(page).getByRole('button', { name: 'Working', exact: true })).toBeVisible();
-  await expect(panel(page).getByRole('button', { name: 'All PR' })).toBeVisible();
+  await panel(page).locator('.code-pane-picker').click();
+  await expect(page.getByRole('menu', { name: 'Comparison' }).getByRole('menuitemradio', { name: 'All PR changes' })).toBeEnabled();
   // the file-dependent controls are correctly absent
   await expect(panel(page).getByRole('button', { name: 'Hunks' })).toHaveCount(0);
 });
@@ -231,8 +231,8 @@ test('keeps view controls directly in the top-level header flyout on a narrow pa
   // the diff modes are never inline or behind a second View options action
   await expect(panel(page).getByRole('button', { name: 'Hunks' })).toHaveCount(0);
   await expect(panel(page).getByRole('button', { name: 'View options' })).toHaveCount(0);
-  // the Working / All PR toggle stays in the header
-  await expect(panel(page).getByRole('button', { name: 'Working', exact: true })).toBeVisible();
+  // the Comparison picker stays in the header
+  await expect(panel(page).locator('.code-pane-title')).toHaveText('Working changes');
   const flyout = await openCodeViewMenu(panel(page));
   await expect(flyout.getByRole('button', { name: 'Hunks' })).toHaveAttribute('aria-pressed', 'true');
   // the shared flyout row styles must not erase segmented-control dividers
@@ -311,7 +311,7 @@ test('filters to one file from the rail and restores scroll on the way back', as
   await mountPanel(page, patchOf(files));
   // the rail lists every changed file (it is not virtualized like the diff scroll)
   await expect(panel(page).locator('.code-pane-file-row')).toHaveCount(8);
-  await expect(panel(page).getByText('8 files')).toBeVisible();
+  await expect(panel(page).locator('.code-pane-count')).toHaveText('8');
   await expect(diffHeaders(page).first()).toBeVisible();
 
   // scroll the all-files list down, then leave it for one file
@@ -321,13 +321,13 @@ test('filters to one file from the rail and restores scroll on the way back', as
   const before = await view.evaluate(element => element.scrollTop);
 
   await panel(page).getByTitle('src/mod4.ts').click();
-  await expect(panel(page).getByRole('button', { name: '‹ All files' })).toBeVisible();
+  await expect(panel(page).getByRole('button', { name: 'All files', exact: true })).toBeVisible();
   await expect(diffHeaders(page)).toHaveCount(1);
 
   // the breadcrumb returns to every file and lands back at the captured (item, offset) anchor: close
   // to where we left off, not the top and not overshooting
-  await panel(page).getByRole('button', { name: '‹ All files' }).click();
-  await expect(panel(page).getByText('8 files')).toBeVisible();
+  await panel(page).getByRole('button', { name: 'All files', exact: true }).click();
+  await expect(panel(page).locator('.code-pane-count')).toHaveText('8');
   await expect.poll(() => view.evaluate((element, left) => Math.abs(element.scrollTop - left), before)).toBeLessThan(24);
 });
 
@@ -439,7 +439,7 @@ test('switches a file between hunks, plain, and full-context modes', async ({ pa
   await panel(page).getByRole('button', { name: 'More code panel actions' }).press('Escape');
 
   await panel(page).getByTitle('src/app.ts').click();
-  await expect(panel(page).getByRole('button', { name: '‹ All files' })).toBeVisible();
+  await expect(panel(page).getByRole('button', { name: 'All files', exact: true })).toBeVisible();
 
   // Hunks (default): only the patched lines render, so a line past the hunk stays hidden
   await expect(diffHeaders(page)).toHaveCount(1);
@@ -573,13 +573,13 @@ test('opens a Code panel of the Working changes from the Git flyout', async ({ p
   await page.getByRole('button', { name: 'View changes', exact: true }).click();
 
   // the panel opens on the Working Comparison the flyout was showing
-  await expect(panel(page).getByRole('button', { name: 'Working', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(panel(page).locator('.code-pane-title')).toHaveText('Working changes');
   // the implementation file renders; the test file stays behind the collapsed supporting group
   await expect(diffHeaders(page)).toHaveCount(1);
   await expect((await openCodeViewMenu(panel(page))).getByRole('checkbox', { name: /View docs \(1\)/iu })).not.toBeChecked();
 });
 
-test('deep-links a flyout file row into the panel and toggles Working / All PR', async ({ page }) => {
+test('deep-links a flyout file row into the panel and picks Working / All PR', async ({ page }) => {
   await installPaneMock(page);
   const prFile = (path: string): ComparisonFile => ({ ...trackedFile(path), change: { code: 'M ', path, additions: 2, deletions: 0 } });
   await page.route('**/api/**', async route => {
@@ -608,18 +608,19 @@ test('deep-links a flyout file row into the panel and toggles Working / All PR',
   await page.getByRole('button', { name: /^Git status:/u }).click();
   // a changed-file row deep-links the panel straight to that file's diff, in the flyout's Comparison
   await page.getByRole('button', { name: 'View changes to src/pr-only.ts' }).click();
-  await expect(panel(page).getByRole('button', { name: '‹ All files' })).toBeVisible();
-  await expect(panel(page).getByRole('button', { name: 'All PR', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(panel(page).getByRole('button', { name: 'All files', exact: true })).toBeVisible();
+  await expect(panel(page).locator('.code-pane-title')).toHaveText('All PR changes');
   await expect(diffHeaders(page)).toHaveText([/pr-only\.ts/u]);
 
-  // the header toggle switches the whole Comparison to Working, keeping the selected file — which
+  // the header picker switches the whole Comparison to Working, keeping the selected file — which
   // the Working Comparison doesn't contain, so the panel reports it is not in these changes
-  await panel(page).getByRole('button', { name: 'Working', exact: true }).click();
-  await expect(panel(page).getByRole('button', { name: 'Working', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await panel(page).locator('.code-pane-picker').click();
+  await page.getByRole('menu', { name: 'Comparison' }).getByRole('menuitemradio', { name: 'Working changes' }).click();
+  await expect(panel(page).locator('.code-pane-title')).toHaveText('Working changes');
   await expect(panel(page).getByText(/isn't part of the current changes/u)).toBeVisible();
 
   // back to every file shows the Working Comparison's own file
-  await panel(page).getByRole('button', { name: '‹ All files' }).click();
+  await panel(page).getByRole('button', { name: 'All files', exact: true }).click();
   await expect(diffHeaders(page)).toHaveText([/app\.ts/u]);
 });
 
@@ -797,14 +798,14 @@ test('restores the commit and file being read after a Workspace switch', async (
   await expect.poll(() => view.evaluate(element => element.scrollTop)).toBeGreaterThan(100);
   const listTop = await view.evaluate(element => element.scrollTop);
   await region.getByTitle('src/mod4.ts').click();
-  await expect(region.getByRole('button', { name: '‹ All files' })).toBeVisible();
+  await expect(region.getByRole('button', { name: 'All files', exact: true })).toBeVisible();
 
   await remount(page);
 
   await expect(region.locator('.code-pane-crumb-current')).toHaveText('mod4.ts');
   await expect(diffHeaders(page)).toHaveText([/mod4\.ts/u]);
   // the breadcrumb still returns to where the all-files scroll was left
-  await region.getByRole('button', { name: '‹ All files' }).click();
+  await region.getByRole('button', { name: 'All files', exact: true }).click();
   await expect(region.locator('.code-pane-title')).toHaveText('Fix the widget');
   await expect.poll(() => view.evaluate((element, left) => Math.abs(element.scrollTop - left), listTop)).toBeLessThan(24);
 });
@@ -914,7 +915,7 @@ test('a card swapped in the same commit does not restore an older snapshot', asy
   // launching an Agent replaces the Worktree's card with an Agent card in one commit
   await page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.swap());
 
-  await expect(region.getByText('8 files')).toBeVisible();
+  await expect(region.locator('.code-pane-count')).toHaveText('8');
   await expect(region.locator('.code-pane-crumb-current')).not.toHaveText('mod4.ts');
 });
 
@@ -923,7 +924,8 @@ test('falls back to Working changes when the restored commit is gone', async ({ 
   await openController(page);
   const region = panel(page);
   // a commit opened from All PR still falls back to Working
-  await region.getByRole('button', { name: 'All PR' }).click();
+  await region.locator('.code-pane-picker').click();
+  await page.getByRole('menu', { name: 'Comparison' }).getByRole('menuitemradio', { name: 'All PR changes' }).click();
   await expect(region.locator('.code-pane-title')).toHaveText('All PR changes');
   await page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.openCommit('abc1234', 'Fix the widget'));
   await expect(region.locator('.code-pane-title')).toHaveText('Fix the widget');
@@ -933,7 +935,7 @@ test('falls back to Working changes when the restored commit is gone', async ({ 
   await remount(page);
 
   await expect(region.locator('.code-pane-title')).toHaveText('Working changes');
-  await expect(region.getByText('8 files')).toBeVisible();
+  await expect(region.locator('.code-pane-count')).toHaveText('8');
   await expect(region.getByRole('alert')).toHaveCount(0);
 });
 
@@ -942,13 +944,13 @@ test('falls back to all files when the restored file left the Comparison', async
   await openController(page);
   const region = panel(page);
   await region.getByTitle('src/mod4.ts').click();
-  await expect(region.getByRole('button', { name: '‹ All files' })).toBeVisible();
+  await expect(region.getByRole('button', { name: 'All files', exact: true })).toBeVisible();
 
   // the file's change was reverted while the Workspace was out of view
   await page.evaluate(patch => (window as unknown as { __ctrl: Ctrl }).__ctrl.setNext(patch), patchOf(eightFiles.filter(file => file.change.path !== 'src/mod4.ts')));
   await remount(page);
 
-  await expect(region.getByText('7 files')).toBeVisible();
+  await expect(region.locator('.code-pane-count')).toHaveText('7');
   await expect(region.locator('.code-pane-title')).toHaveText('Working changes');
   await expect(region.getByRole('alert')).toHaveCount(0);
 });
@@ -961,20 +963,20 @@ test('closing the Code panel forgets its view state', async ({ page }) => {
   const close = () => page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.close());
   await wrap();
   await region.getByTitle('src/mod4.ts').click();
-  await expect(region.getByRole('button', { name: '‹ All files' })).toBeVisible();
+  await expect(region.getByRole('button', { name: 'All files', exact: true })).toBeVisible();
   // a restored panel closed and reopened in place starts fresh
   await remount(page);
   await expect(region).toHaveAttribute('data-wrap-lines', 'true');
   await close();
   await expect(region).toHaveCount(0);
   await openController(page);
-  await expect(region.getByText('8 files')).toBeVisible();
+  await expect(region.locator('.code-pane-count')).toHaveText('8');
   await expect(region).not.toHaveAttribute('data-wrap-lines', 'true');
 
   // turning a Workspace off closes its panels and its tab in one batch; the switch back starts fresh
   await wrap();
   await page.evaluate(() => { const c = (window as unknown as { __ctrl: Ctrl }).__ctrl; c.close(); return c.remount(); });
   await openController(page);
-  await expect(region.getByText('8 files')).toBeVisible();
+  await expect(region.locator('.code-pane-count')).toHaveText('8');
   await expect(region).not.toHaveAttribute('data-wrap-lines', 'true');
 });
