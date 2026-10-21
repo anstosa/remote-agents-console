@@ -210,9 +210,7 @@ async function buildComposeInstallation(repository, controlRoot, existingDesired
   // block mutation before publishing unsupported graphs
   preflightComposeDependencyGraph(files);
   projectName = active.projectName;
-  if (active.cloudflaredRunning && !profiles.includes("tunnel")) {
-    profiles = [...profiles, "tunnel"];
-  }
+  profiles = installationProfilesForRunningTunnels(profiles, active);
   const overridePath = files[1] ?? resolve(repository, "compose.override.yaml");
   await installControlMount(repository, overridePath, controlRoot, {
     projectDirectory: repository,
@@ -279,6 +277,20 @@ export function discoverComposeOptions(env) {
     options.compatibility = true;
   }
   return options;
+}
+
+// preserve only profiles proved by their running Compose services
+export function installationProfilesForRunningTunnels(profiles, active) {
+  const selected = [...profiles];
+  // retain an active locally managed connector
+  if (active.cloudflaredRunning && !selected.includes("tunnel")) {
+    selected.push("tunnel");
+  }
+  // retain an active token-managed connector independently
+  if (active.cloudflaredTokenRunning && !selected.includes("tunnel-token")) {
+    selected.push("tunnel-token");
+  }
+  return selected;
 }
 
 // add the invariant writable control bind to the real ignored override
@@ -446,10 +458,19 @@ async function proveContainerUid(repository, files, envFiles, profiles, options,
     "--filter",
     "label=com.docker.compose.service=cloudflared"
   ], { maxBytes: 1024 });
+  const cloudToken = await runner("docker", [
+    "ps",
+    "-q",
+    "--filter",
+    `label=com.docker.compose.project=${projectName}`,
+    "--filter",
+    "label=com.docker.compose.service=cloudflared-token"
+  ], { maxBytes: 1024 });
   return {
     projectName,
     files: activeFiles,
-    cloudflaredRunning: cloud.code === 0 && /^[0-9a-f]{12,64}$/m.test(cloud.stdout.toString("utf8"))
+    cloudflaredRunning: cloud.code === 0 && /^[0-9a-f]{12,64}$/m.test(cloud.stdout.toString("utf8")),
+    cloudflaredTokenRunning: cloudToken.code === 0 && /^[0-9a-f]{12,64}$/m.test(cloudToken.stdout.toString("utf8"))
   };
 }
 

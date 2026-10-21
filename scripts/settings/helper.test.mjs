@@ -120,6 +120,70 @@ test("migration-required statuses expose only requested source identities", asyn
   assert.equal(Object.hasOwn(latest, "errorMetadata"), false);
 });
 
+test("restart status persists the watchdog deadline through terminal success", async () => {
+  const current = fixture();
+  const id = "restart_status_success01";
+  const clock = restartClock(30_000);
+  const claimed = resolve(current.controlRoot, "claimed", `${id}.json`);
+  atomicWriteFile(claimed, `${JSON.stringify({
+    version: 1,
+    id,
+    kind: "restart",
+    generation: 1,
+    sources: currentSourceManifest(current.descriptor),
+    targets: ["rac"]
+  })}\n`, 0o600);
+  await processClaim(claimed, current.descriptor, {
+    restartWatchdogClock: clock,
+    nativeUnitDirectory: resolve(current.root, "systemd"),
+    expectedEnvironmentHashes: {},
+    runner: async (_command, args) => {
+      // require durable progress before the mutating restart command
+      if (args.includes("restart")) {
+        const running = JSON.parse(readFileSync(resolve(current.controlRoot, "status", `${id}.json`), "utf8"));
+        assert.deepEqual(running.restart, { recoveryDeadline: 30_000 + RESTART_WATCHDOG_TIMEOUT_MS, state: "restarting" });
+      }
+      return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    },
+    prove: async () => ({ bootNonce: "fresh-boot" })
+  });
+
+  const status = JSON.parse(readFileSync(resolve(current.controlRoot, "status", `${id}.json`), "utf8"));
+  const latest = JSON.parse(readFileSync(resolve(current.controlRoot, "latest.json"), "utf8"));
+  assert.deepEqual(status.restart, { recoveryDeadline: 30_000 + RESTART_WATCHDOG_TIMEOUT_MS, state: "restarted" });
+  assert.deepEqual(latest.restart, status.restart);
+});
+
+test("claimed restart replay preserves prior progress through failure", async () => {
+  const current = fixture();
+  const id = "restart_status_replay001";
+  const restart = { recoveryDeadline: 123_456, state: "restarting" };
+  const request = {
+    version: 1,
+    id,
+    kind: "restart",
+    generation: 1,
+    sources: currentSourceManifest(current.descriptor),
+    targets: ["rac"]
+  };
+  const claimed = resolve(current.controlRoot, "claimed", `${id}.json`);
+  atomicWriteFile(claimed, `${JSON.stringify(request)}\n`, 0o600);
+  atomicWriteFile(resolve(current.controlRoot, "status", `${id}.json`), `${JSON.stringify({ version: 1, id, kind: "restart", state: "running", restart })}\n`, 0o600);
+  await processClaim(claimed, current.descriptor, {
+    withMutation: async () => {
+      const running = JSON.parse(readFileSync(resolve(current.controlRoot, "status", `${id}.json`), "utf8"));
+      assert.deepEqual(running.restart, restart);
+      throw safeError("replay-failed");
+    }
+  });
+
+  const status = JSON.parse(readFileSync(resolve(current.controlRoot, "status", `${id}.json`), "utf8"));
+  const latest = JSON.parse(readFileSync(resolve(current.controlRoot, "latest.json"), "utf8"));
+  assert.equal(status.state, "failed");
+  assert.deepEqual(status.restart, restart);
+  assert.deepEqual(latest.restart, restart);
+});
+
 // create one private isolated installation
 function fixture(options = {}) {
   const root = mkdtempSync(resolve(tmpdir(), "rac-settings-"));
@@ -951,6 +1015,7 @@ test("restart watchdog aborts a hung RAC apply before recovering every requested
   let applyStarted;
   const started = new Promise((resolvePromise) => { applyStarted = resolvePromise; });
   let desiredSettled = false;
+  const restartProgress = [];
   const runner = async (_command, args, commandOptions = {}) => {
     // record only service replacement attempts
     if (!args.includes("restart")) return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
@@ -990,14 +1055,116 @@ test("restart watchdog aborts a hung RAC apply before recovering every requested
     recoveryTargetProve: async () => ({
       hashes: { cloudflared: sha256(cloud.configBytes), "cloudflared-credentials": sha256(cloud.credentialBytes) },
       targetProofs: { cloudflared: { unit: "cloudflared.service" } }
-    })
+    }),
+    onRestartProgress: (progress) => restartProgress.push(progress)
   });
   await started;
   clock.advance(RESTART_WATCHDOG_TIMEOUT_MS);
 
   await assert.rejects(operation, { code: "restart-watchdog-expired" });
   assert.deepEqual(restarts, ["cloudflared.service", "remote-agent-console.service", "remote-agent-console.service", "cloudflared.service"]);
+  assert.deepEqual(restartProgress, [
+    { recoveryDeadline: 20_000 + RESTART_WATCHDOG_TIMEOUT_MS, state: "restarting" },
+    { recoveryDeadline: 20_000 + RESTART_WATCHDOG_TIMEOUT_MS, state: "recovering" },
+    { recoveryDeadline: 20_000 + RESTART_WATCHDOG_TIMEOUT_MS, state: "recovered" }
+  ]);
   assert.equal(clock.pending(), false);
+});
+
+test("restart preflight failure publishes no recovery progress", async () => {
+  const current = fixture();
+  const restartProgress = [];
+  await assert.rejects(() => processOperation(current.descriptor, {
+    version: 1,
+    id: "restart_preflight_fail01",
+    kind: "restart",
+    generation: 1,
+    sources: [{ id: "app", existed: true, contentHash: "0".repeat(64) }],
+    targets: ["rac"]
+  }, {
+    onRestartProgress: (progress) => restartProgress.push(progress)
+  }), { code: "source-conflict" });
+  assert.deepEqual(restartProgress, []);
+});
+
+test("restart progress publication fails closed before RAC mutation", async () => {
+  const current = fixture();
+  let restartCommands = 0;
+  let desiredProofs = 0;
+  let recoveryProofs = 0;
+  const restartProgress = [];
+  await assert.rejects(() => processOperation(current.descriptor, {
+    version: 1,
+    id: "restart_publish_failure01",
+    kind: "restart",
+    generation: 1,
+    sources: currentSourceManifest(current.descriptor),
+    targets: ["rac"]
+  }, {
+    nativeUnitDirectory: resolve(current.root, "systemd"),
+    expectedEnvironmentHashes: {},
+    runner: async (_command, args) => {
+      if (args.includes("restart")) restartCommands += 1;
+      return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    },
+    prove: async () => { desiredProofs += 1; return { bootNonce: "unexpected" }; },
+    recoveryProve: async () => { recoveryProofs += 1; },
+    onRestartProgress: (progress) => {
+      restartProgress.push(progress.state);
+      throw safeError("status-write-failed");
+    }
+  }), { code: "status-write-failed" });
+  assert.deepEqual(restartProgress, ["restarting"]);
+  assert.equal(restartCommands, 0);
+  assert.equal(desiredProofs, 0);
+  assert.equal(recoveryProofs, 0);
+});
+
+test("post-boundary progress failures cannot change restart or recovery outcomes", async () => {
+  // exercise success plus both recovery progress publications
+  for (const throwState of ["restarted", "recovering", "recovered"]) {
+    const current = fixture();
+    let restartCommands = 0;
+    let recoveryProofs = 0;
+    const restartProgress = [];
+    const operation = processOperation(current.descriptor, {
+      version: 1,
+      id: `restart_report_${throwState.replace("-", "_")}01`,
+      kind: "restart",
+      generation: 1,
+      sources: currentSourceManifest(current.descriptor),
+      targets: ["rac"]
+    }, {
+      nativeUnitDirectory: resolve(current.root, "systemd"),
+      expectedEnvironmentHashes: {},
+      runner: async (_command, args) => {
+        if (args.includes("restart")) restartCommands += 1;
+        return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+      prove: async () => {
+        // fail only the cases that must recover
+        if (throwState !== "restarted") throw safeError("health-proof-failed");
+        return { bootNonce: "fresh-boot" };
+      },
+      recoveryProve: async () => { recoveryProofs += 1; },
+      onRestartProgress: (progress) => {
+        restartProgress.push(progress.state);
+        if (progress.state === throwState) throw safeError("status-write-failed");
+      }
+    });
+    if (throwState === "restarted") {
+      assert.equal((await operation).phase, "effective");
+      assert.equal(restartCommands, 1);
+      assert.equal(recoveryProofs, 0);
+      assert.deepEqual(restartProgress, ["restarting", "restarted"]);
+    } else {
+      await assert.rejects(operation, { code: "health-proof-failed" });
+      assert.equal(restartCommands, 2);
+      assert.equal(recoveryProofs, 1);
+      assert.deepEqual(restartProgress, ["restarting", "recovering", "recovered"]);
+    }
+    assert.equal(restartProgress.includes("recovery-failed"), false);
+  }
 });
 
 test("native Cloudflare applies before the RAC watchdog arms", async () => {
@@ -1366,6 +1533,7 @@ test("restart watchdog surfaces a bounded recovery failure after the hung apply 
   let applyStarted;
   const started = new Promise((resolvePromise) => { applyStarted = resolvePromise; });
   let restarts = 0;
+  const restartProgress = [];
   const operation = processOperation(current.descriptor, {
     version: 1,
     id: "restart_watchdog_recover1",
@@ -1388,13 +1556,19 @@ test("restart watchdog surfaces a bounded recovery failure after the hung apply 
         return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
       }
       return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
-    }
+    },
+    onRestartProgress: (progress) => restartProgress.push(progress)
   });
   await started;
   clock.advance(RESTART_WATCHDOG_TIMEOUT_MS);
 
   await assert.rejects(operation, { code: "apply-failed" });
   assert.equal(restarts, 2);
+  assert.deepEqual(restartProgress, [
+    { recoveryDeadline: 20_000 + RESTART_WATCHDOG_TIMEOUT_MS, state: "restarting" },
+    { recoveryDeadline: 20_000 + RESTART_WATCHDOG_TIMEOUT_MS, state: "recovering" },
+    { recoveryDeadline: 20_000 + RESTART_WATCHDOG_TIMEOUT_MS, state: "recovery-failed" }
+  ]);
   assert.equal(readFileSync(current.app, "utf8"), '{"name":"before"}\n');
   assert.equal(clock.pending(), false);
 });

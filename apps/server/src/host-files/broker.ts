@@ -27,6 +27,7 @@ export type HostBrokerControllerOptions = {
   serverCheckout: string;
   hostCheckout: string;
   hostNodeBin: string;
+  hostPath?: string;
   hostUid: number;
   operationJournalPath: string;
   fileFavoritesPath: string;
@@ -142,6 +143,24 @@ function absolutePath(value: string, name: string): string {
   // fail before filesystem mutation on missing prerequisites
   if (!isAbsolute(value) || /[\0\r\n]/u.test(value)) throw new HostFilesTransportError('bridge_unavailable', `invalid ${name}`);
   return value;
+}
+
+// resolve the configured executable or inspect the host tmux environment
+export async function resolveHostNodeBin(options: Pick<HostBrokerControllerOptions, 'hostNodeBin' | 'hostPath' | 'tmuxBinary' | 'hostTmuxSocket' | 'startupTimeoutMs' | 'commandRunner'>): Promise<string> {
+  // explicit absolute overrides never consult tmux
+  if (options.hostNodeBin.trim() !== '') return absolutePath(options.hostNodeBin, 'host Node path');
+  absolutePath(options.tmuxBinary, 'tmux binary');
+  absolutePath(options.hostTmuxSocket, 'host tmux socket');
+  const path = options.hostPath?.trim();
+  const pathExport = path ? `export PATH=${posixShellLiteral(path)}\n` : '';
+  const command = options.commandRunner ?? run;
+  const resolved = await command(options.tmuxBinary, [
+    '-S', options.hostTmuxSocket, 'run-shell',
+    tmuxFormatLiteral(`${pathExport}exec node -p 'process.execPath'`)
+  ], undefined, options.startupTimeoutMs ?? 5_000);
+  // never substitute the server executable when host node cannot be found
+  if (resolved.code !== 0) throw new HostFilesTransportError('bridge_unavailable', 'node is unavailable on the host PATH');
+  return absolutePath(resolved.stdout.trim(), 'resolved host Node path');
 }
 
 // render the fixed two-exec launcher without operation data
@@ -416,7 +435,8 @@ export class LazyHostBrokerBackend implements HostFilesBackend {
     absolutePath(this.options.tmuxBinary, 'tmux binary');
     absolutePath(this.options.hostTmuxSocket, 'host tmux socket');
     absolutePath(this.options.hostProcRoot, 'host proc root');
-    absolutePath(this.options.hostNodeBin, 'host Node path');
+    // retain strict validation for a deliberately configured executable
+    if (this.options.hostNodeBin.trim() !== '') absolutePath(this.options.hostNodeBin, 'host Node path');
     absolutePath(this.options.operationJournalPath, 'operation journal path');
     absolutePath(this.options.fileFavoritesPath, 'favorites file path');
     this.dataDirectory = join(absolutePath(this.options.serverCheckout, 'server checkout'), '.data', 'host-files');
@@ -428,6 +448,9 @@ export class LazyHostBrokerBackend implements HostFilesBackend {
     const currentUid = process.getuid?.();
     // require numeric uid parity before writing shared launch state
     if (currentUid === undefined || currentUid !== this.options.hostUid) throw new HostFilesTransportError('bridge_unavailable', 'host uid does not match server uid');
+    const hostNodeBin = await resolveHostNodeBin(this.options);
+    // the host lookup already returns its canonical executable path
+    const expectedNodeBin = this.options.hostNodeBin.trim() === '' ? hostNodeBin : await realpath(hostNodeBin).catch(() => hostNodeBin);
     await mkdir(this.dataDirectory, { recursive: true, mode: 0o700 });
     await chmod(this.dataDirectory, 0o700);
     await mkdir(join(this.dataDirectory, 'run'), { recursive: true, mode: 0o700 });
@@ -454,7 +477,7 @@ export class LazyHostBrokerBackend implements HostFilesBackend {
     if (Buffer.byteLength(socketHostPath) > 107) throw new HostFilesTransportError('bridge_unavailable', 'host files socket path is too long');
     const descriptorContainerPath = join(this.dataDirectory, `descriptor-${this.generationId}.json`);
     const descriptorHostPath = join(this.hostDataDirectory, `descriptor-${this.generationId}.json`);
-    const launcher = renderHostBrokerLauncher(this.options.hostNodeBin, snapshot.entryHostPath, descriptorHostPath);
+    const launcher = renderHostBrokerLauncher(hostNodeBin, snapshot.entryHostPath, descriptorHostPath);
     const launcherDigest = digest(launcher);
     const launcherContainerPath = join(this.dataDirectory, `launcher-${launcherDigest}.sh`);
     const launcherHostPath = join(this.hostDataDirectory, `launcher-${launcherDigest}.sh`);
@@ -551,7 +574,7 @@ export class LazyHostBrokerBackend implements HostFilesBackend {
           readFile(join(this.options.hostProcRoot, String(pane.pid), 'cmdline'))
         ]);
         // require exact host uid and executable
-        if (uid !== currentUid || executable !== await realpath(this.options.hostNodeBin).catch(() => this.options.hostNodeBin)) return false;
+        if (uid !== currentUid || executable !== expectedNodeBin) return false;
         const runtimePath = procRootPath(this.options.hostProcRoot, pane.pid, runtimeHostPath);
         const socketPath = procRootPath(this.options.hostProcRoot, pane.pid, socketHostPath);
         const [runtimeIdentity, socketIdentity] = await Promise.all([fileIdentity(runtimePath), fileIdentity(socketPath)]);

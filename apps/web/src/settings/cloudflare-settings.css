@@ -1,0 +1,29 @@
+/* keep setup steps inside the existing single-column content scroller */
+.settings-cloudflare { display: grid; min-width: 0; gap: 1rem; }
+.settings-cloudflare-status { display: grid; min-width: 0; gap: .45rem; padding-bottom: 1rem; border-bottom: 1px solid var(--surface-1); font-size: .75rem; }
+/* keep the existing endpoint and process status compact without hiding either */
+.settings-cloudflare-tunnel-summary { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .65rem; }
+.settings-cloudflare-tunnel-summary > a { min-width: 0; font: 600 .75rem/1.5 var(--font-mono); }
+.settings-cloudflare-tunnel-state { flex: none; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .2rem .4rem; font: 600 .68rem var(--font-mono); }
+.settings-cloudflare-tunnel-state.up { color: var(--green); }
+.settings-cloudflare-tunnel-state.down { color: var(--red); }
+.settings-cloudflare-tunnel-state.unknown { color: var(--subtext-0); }
+.settings-cloudflare a { color: var(--blue); overflow-wrap: anywhere; }
+.settings-cloudflare button { width: fit-content; min-height: 2rem; padding: .4rem .65rem; border: 1px solid var(--surface-2); border-radius: var(--control-radius); background: transparent; box-shadow: none; font: 600 .68rem var(--font-mono); }
+.settings-cloudflare .settings-cloudflare-primary { border-color: var(--mauve); background: var(--mauve); color: var(--crust); }
+.settings-cloudflare button:focus-visible, .settings-cloudflare summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.settings-cloudflare-field { display: grid; min-width: 0; gap: .35rem; color: var(--subtext-0); font: 600 .7rem var(--font-mono); }
+.settings-cloudflare-field input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .45rem .6rem; background: transparent; color: var(--text); font: inherit; }
+.settings-cloudflare-token { display: flex; min-width: 0; gap: .4rem; }
+.settings-cloudflare-token input { flex: 1; }
+.settings-cloudflare-token .settings-reveal-button { flex: none; }
+.settings-cloudflare-copy-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .5rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); padding: .5rem; }
+.settings-cloudflare-copy-row > span { display: grid; min-width: 0; gap: .3rem; }
+.settings-cloudflare-copy-row code { min-width: 0; overflow-wrap: anywhere; font-size: .72rem; }
+.settings-cloudflare-copy-row button { flex: none; }
+.settings-cloudflare-copy-row small { color: var(--subtext-0); font-size: .65rem; }
+.settings-cloudflare summary { cursor: pointer; font-size: .75rem; }
+.settings-cloudflare-instructions { box-sizing: border-box; max-width: 100%; padding: .75rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--subtext-0); font: 500 .68rem/1.65 var(--font-mono); }
+.settings-cloudflare-advanced { display: grid; min-width: 0; }
+.settings-cloudflare-advanced > summary { margin-bottom: .75rem; }
+.settings-cloudflare-advanced > section { display: grid; min-width: 0; gap: .5rem; margin-bottom: 1rem; }

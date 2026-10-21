@@ -2,7 +2,12 @@
 .codex
 .omx
 .env
+.data
+**/.data
 compose.override.yaml
+config/cloudflared.yml
+config/cloudflared.credentials.json
+config/cloudflared.token
 config/instance-icons
 node_modules
 **/node_modules

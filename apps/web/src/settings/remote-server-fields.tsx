@@ -16,13 +16,19 @@ const parsedRemoteUrl = (value: unknown): URL | undefined => {
   catch { return undefined; }
 };
 
+// pair one inherited identity with the field that supplied it
+const sourcedPlaceholder = (value: string, source: string): string => `${value} (from ${source})`;
+
 // keep inherited identity controls present even when optional overrides are absent
 export function RemoteServerFields({ value, path, defaults, disabled, onPatch, renderIssues, renderProtected }: { value: unknown; path: string[]; defaults: readonly RemoteServerDefaults[]; disabled: boolean; onPatch: (patch: SettingsPatch) => void; renderIssues: (path: string[]) => ReactNode; renderProtected: (key: RemoteField) => ReactNode }) {
   const id = useId();
   const record = value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const url = parsedRemoteUrl(record.url);
   const peer = defaults.find(candidate => url !== undefined && parsedRemoteUrl(candidate.url)?.origin === url.origin);
-  const defaultName = peer?.defaultName ?? peer?.name ?? url?.hostname ?? 'Server name';
+  const peerName = [peer?.defaultName, peer?.name].find(candidate => candidate?.trim());
+  const defaultName = peerName !== undefined
+    ? sourcedPlaceholder(peerName, 'Remote server identity')
+    : url === undefined ? 'Server name' : sourcedPlaceholder(url.hostname, 'URL hostname');
   const inheritedIcon = peer?.defaultIcon ?? peer?.icon;
   const defaultIcon = isInstanceIconName(inheritedIcon) ? inheritedIcon : 'terminal';
   const icon = isInstanceIconName(record.icon) ? record.icon : 'server-default';
@@ -38,11 +44,11 @@ export function RemoteServerFields({ value, path, defaults, disabled, onPatch, r
     if (key === 'name' && !next.trim() || key === 'icon' && next === 'server-default') onPatch({ op: 'remove', path: fieldPath });
     else onPatch({ op: 'set', path: fieldPath, value: next });
   };
-  return <div className="settings-remote-server-fields" data-settings-path={path.join('.')}>
-    {protectedUrl ?? <div className="settings-field settings-remote-server-url" data-settings-path={[...path, 'url'].join('.')}><label htmlFor={`${id}-url`}><strong>URL</strong></label><input id={`${id}-url`} type="text" value={typeof record.url === 'string' ? record.url : ''} disabled={disabled} autoCapitalize="off" spellCheck={false} onChange={event => { /* stage the canonical server address for shared validation */ stage('url', event.target.value); }} />{renderIssues([...path, 'url'])}</div>}
+  return <div className="settings-remote-server-fields" data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}>
+    {protectedUrl ?? <div className="settings-field settings-remote-server-url" data-settings-path={[...path, 'url'].join('.')} data-settings-search-path={JSON.stringify([...path, 'url'])}><label htmlFor={`${id}-url`}><strong>URL</strong></label><input id={`${id}-url`} type="text" value={typeof record.url === 'string' ? record.url : ''} placeholder="Required; no default" disabled={disabled} autoCapitalize="off" spellCheck={false} onChange={event => { /* stage the canonical server address for shared validation */ stage('url', event.target.value); }} />{renderIssues([...path, 'url'])}</div>}
     <div className="settings-remote-server-identity">
-      {protectedName ?? <div className="settings-field" data-settings-path={[...path, 'name'].join('.')}><label htmlFor={`${id}-name`}><strong>Name</strong></label><input id={`${id}-name`} type="text" value={typeof record.name === 'string' ? record.name : ''} placeholder={defaultName} maxLength={80} disabled={disabled} onChange={event => { /* retain only an explicitly authored local name */ stage('name', event.target.value); }} /><small>Leave blank to use the other server’s name.</small>{renderIssues([...path, 'name'])}</div>}
-      {protectedIcon ?? <div className="settings-field" data-settings-path={[...path, 'icon'].join('.')}><strong>Icon</strong><SettingsSelect label="Icon" value={icon} disabled={disabled} options={[{ value: 'server-default', label: 'Server Default', icon: <InstanceIconPreview name={defaultIcon} /> }, ...instanceIcons.map(name => ({ value: name, label: name[0]!.toUpperCase() + name.slice(1), icon: <InstanceIconPreview name={name} /> }))]} onChange={next => { /* explicit default selection removes only the local override */ stage('icon', next); }} /><small>Server Default uses the other server’s icon.</small>{renderIssues([...path, 'icon'])}</div>}
+      {protectedName ?? <div className="settings-field" data-settings-path={[...path, 'name'].join('.')} data-settings-search-path={JSON.stringify([...path, 'name'])}><label htmlFor={`${id}-name`}><strong>Name</strong></label><input id={`${id}-name`} type="text" value={typeof record.name === 'string' ? record.name : ''} placeholder={defaultName} maxLength={80} disabled={disabled} onChange={event => { /* retain only an explicitly authored local name */ stage('name', event.target.value); }} />{renderIssues([...path, 'name'])}</div>}
+      {protectedIcon ?? <div className="settings-field" data-settings-path={[...path, 'icon'].join('.')} data-settings-search-path={JSON.stringify([...path, 'icon'])}><strong>Icon</strong><SettingsSelect label="Icon" value={icon} disabled={disabled} options={[{ value: 'server-default', label: 'Server Default', icon: <InstanceIconPreview name={defaultIcon} /> }, ...instanceIcons.map(name => ({ value: name, label: name[0]!.toUpperCase() + name.slice(1), icon: <InstanceIconPreview name={name} /> }))]} onChange={next => { /* explicit default selection removes only the local override */ stage('icon', next); }} />{renderIssues([...path, 'icon'])}</div>}
     </div>
     {renderIssues(path)}
   </div>;

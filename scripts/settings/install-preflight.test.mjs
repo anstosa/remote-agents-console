@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
-import { discoverComposeOptions, installSettingsApplier } from "./install.mjs";
+import { discoverComposeOptions, installationProfilesForRunningTunnels, installSettingsApplier } from "./install.mjs";
 
 const ENVIRONMENT_KEYS = [
   "XDG_STATE_HOME",
@@ -47,6 +47,12 @@ test("Compose option discovery preserves unlimited parallelism", () => {
   } finally {
     restoreEnvironment(saved);
   }
+});
+
+test("installer recovers only the profile belonging to each running tunnel mode", () => {
+  assert.deepEqual(installationProfilesForRunningTunnels([], { cloudflaredRunning: false, cloudflaredTokenRunning: true }), ["tunnel-token"]);
+  assert.deepEqual(installationProfilesForRunningTunnels([], { cloudflaredRunning: true, cloudflaredTokenRunning: false }), ["tunnel"]);
+  assert.deepEqual(installationProfilesForRunningTunnels(["custom"], { cloudflaredRunning: true, cloudflaredTokenRunning: true }), ["custom", "tunnel", "tunnel-token"]);
 });
 
 test("installer refuses unsupported Compose graphs before publishing capability", async () => {

@@ -123,7 +123,7 @@ test('keeps a stale UI reload toast visible in the shared upper-right stack', as
   expect(phoneBounds.y + phoneBounds.height).toBeLessThanOrEqual(844);
   await page.screenshot({ path: '/tmp/client-update-toast-mobile.png', fullPage: true });
 
-  // displaced stacks still reserve their full top inset
+  // retain the toast safe-area offset without reserving settings content
   const insetStyle = await page.addStyleTag({ content: '.toast-region { top: calc(var(--panel-header-clearance) + .5rem + 44px) !important; }' });
   await page.evaluate(() => window.dispatchEvent(new Event('resize')));
   const settingsButton = page.getByRole('button', { name: /Global settings/u });
@@ -162,7 +162,12 @@ test('keeps a stale UI reload toast visible in the shared upper-right stack', as
   const shortSettingsTriggerActionable = await isPointerActionable(settingsButton);
   await settingsButton.click();
   settings = page.getByRole('dialog', { name: 'Settings' });
-  const shortRenameClientActionable = await isPointerActionable(settings.getByRole('button', { name: 'Rename browser name' }));
+  // notices may cover content while the settings toolbar remains reachable
+  const shortSettingsContentOverlapped = await settings.evaluate(panel => {
+    const content = panel.querySelector('.client-settings-page-content')!.getBoundingClientRect();
+    const toast = document.querySelector('.toast-region')!.getBoundingClientRect();
+    return toast.top < content.bottom && toast.bottom > content.top && toast.left < content.right && toast.right > content.left;
+  });
   await expect(notification).toBeVisible();
   await page.screenshot({ path: '/tmp/client-update-toast-settings-landscape.png', fullPage: true });
   await settings.getByRole('button', { name: 'Close settings' }).click();
@@ -178,7 +183,7 @@ test('keeps a stale UI reload toast visible in the shared upper-right stack', as
     scrolledReloadVisible,
     scrolledReloadActionable,
     shortSettingsTriggerActionable,
-    shortRenameClientActionable
+    shortSettingsContentOverlapped
   }).toEqual({
     insetRenameClientActionable: true,
     shortStackBounded: true,
@@ -189,7 +194,7 @@ test('keeps a stale UI reload toast visible in the shared upper-right stack', as
     scrolledReloadVisible: true,
     scrolledReloadActionable: true,
     shortSettingsTriggerActionable: true,
-    shortRenameClientActionable: true
+    shortSettingsContentOverlapped: true
   });
 
   // desktop rename stays actionable beneath the toast
@@ -201,9 +206,57 @@ test('keeps a stale UI reload toast visible in the shared upper-right stack', as
   await page.screenshot({ path: '/tmp/client-update-toast-settings-desktop.png', fullPage: true });
   await settings.getByRole('button', { name: 'Close settings' }).click();
 
-  // reload navigates without starting a server update
+  // prove the ordinary fade path independently of the test host preference
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  // hold the reload request so the outgoing document can prove its final cover
+  let releaseReloadRequest: (() => void) | undefined;
+  let observeReloadRequest: (() => void) | undefined;
+  let reloadRequests = 0;
+  let reloadFrame: { opacity: string; overlays: number; rootInert: boolean; toastInert: boolean; backgroundFocusBlocked: boolean } | undefined;
+  const reloadRequested = new Promise<void>(resolve => { observeReloadRequest = resolve; });
+  await page.exposeFunction('captureReloadFrame', (frame: typeof reloadFrame) => { reloadFrame = frame; });
+  await page.evaluate(() => {
+    // snapshot the outgoing page when css reports the completed fade
+    const capture = (event: TransitionEvent) => {
+      const overlay = event.target instanceof HTMLElement ? event.target : undefined;
+      // ignore every transition except the fullscreen opacity entry
+      if (!overlay?.classList.contains('fullscreen-loader') || event.propertyName !== 'opacity') return;
+      const backgroundButton = document.querySelector<HTMLElement>('[aria-label="UI update available"] button');
+      backgroundButton?.focus();
+      void (window as unknown as { captureReloadFrame: (frame: unknown) => Promise<void> }).captureReloadFrame({
+        opacity: getComputedStyle(overlay).opacity,
+        overlays: document.querySelectorAll('.fullscreen-loader').length,
+        rootInert: document.getElementById('root')?.inert === true,
+        toastInert: document.querySelector<HTMLElement>('.toast-region')?.inert === true,
+        backgroundFocusBlocked: document.activeElement !== backgroundButton
+      });
+      window.removeEventListener('transitionend', capture, true);
+    };
+    window.addEventListener('transitionend', capture, true);
+  });
+  await page.route('**/', async route => {
+    // pass through any non-navigation request that happens to share the root pattern
+    if (!route.request().isNavigationRequest()) return route.continue();
+    reloadRequests += 1;
+    observeReloadRequest?.();
+    await new Promise<void>(resolve => { releaseReloadRequest = resolve; });
+    await route.continue();
+  });
+
+  // repeated reload clicks enter one opaque cover before one navigation
   const initialNavigations = navigations;
-  await reload.click();
+  await page.clock.resume();
+  await reload.evaluate(button => { button.click(); button.click(); });
+  const loader = page.locator('.fullscreen-loader');
+  await expect(loader).toBeAttached();
+  await page.waitForTimeout(100);
+  expect(reloadRequests).toBe(0);
+  await reloadRequested;
+  expect(reloadRequests).toBe(1);
+  expect(reloadFrame).toEqual({ opacity: '1', overlays: 1, rootInert: true, toastInert: true, backgroundFocusBlocked: true });
+  // allow the single covered navigation to complete
+  if (releaseReloadRequest === undefined) throw new Error('Reload request was not held');
+  releaseReloadRequest();
   await expect.poll(() => navigations).toBeGreaterThan(initialNavigations);
   expect(updateStarts).toBe(0);
   expect(browserErrors).toEqual([]);

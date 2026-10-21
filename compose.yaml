@@ -12,8 +12,6 @@ services:
     env_file:
       - .env
     environment:
-      # keep server-local schedules and generated timestamps explicit and portable
-      TZ: ${TZ:-Etc/UTC}
       RAC_CONFIG: /workspace/config/remote-agent-console.docker.json
       RAC_CONFIG_WRITE_PATH: /workspace/config/remote-agent-console.docker.json
       # the packaged image runs from /app, so the server's own checkout is the mount
@@ -24,6 +22,8 @@ services:
       RAC_SAVED_PROMPTS_FILE: /workspace/.data/saved-prompts.json
       RAC_PROMPT_HISTORY_FILE: /workspace/.data/prompt-history.json
       RAC_QUEUED_PROMPTS_FILE: /workspace/.data/queued-prompts.json
+      # persist browser registrations and their automatically managed signing identity
+      RAC_PUSH_SUBSCRIPTIONS_FILE: /workspace/.data/push-subscriptions.json
       RAC_TEMP_PREVIEWS_DIR: /workspace/.data/temp-previews
       RAC_NOTES_FILE: /workspace/.data/notes.json
       # persist exact-place favorites and identity-bound operation recovery
@@ -38,6 +38,13 @@ services:
     volumes:
       - ./:/workspace:rw
       - codex-home:/home/node/.codex
+      # inherit the host zone unless .env explicitly sets TZ
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 15s
@@ -69,6 +76,28 @@ services:
       - type: bind
         source: ${CLOUDFLARED_CREDENTIALS_FILE:-./config/cloudflared.credentials.json}
         target: /etc/cloudflared/credentials.json
+        read_only: true
+        bind:
+          create_host_path: false
+
+  # keep dashboard-managed connector tokens out of argv and Compose environment
+  cloudflared-token:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel-token"]
+    user: "0:0"
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    network_mode: host
+    depends_on:
+      remote-agent-console:
+        condition: service_healthy
+    command: tunnel --no-autoupdate run --token-file /run/secrets/cloudflared-token
+    volumes:
+      - type: bind
+        source: ./config/cloudflared.token
+        target: /run/secrets/cloudflared-token
         read_only: true
         bind:
           create_host_path: false

@@ -649,6 +649,10 @@ export async function deriveDesiredDescriptor(descriptor, options = {}) {
   validateInstallationSettings(settingsBytes);
   const settings = JSON.parse(settingsBytes.toString("utf8"));
   const hostCheckout = hostPath(descriptor, settings.host?.checkout ?? descriptor.hostCheckout);
+  // fail closed until the private token has a proved checkout handover
+  if (descriptor.kind === "compose" && descriptor.compose.profiles.includes("tunnel-token") && hostCheckout !== descriptor.hostCheckout) {
+    throw safeError("cloudflare-token-checkout-handover-unsupported");
+  }
   const next = {
     ...descriptor,
     hostCheckout,
@@ -662,7 +666,7 @@ export async function deriveDesiredDescriptor(descriptor, options = {}) {
       projectName: composeSettings.projectName ?? descriptor.compose.projectName,
       files: (composeSettings.files ?? descriptor.compose.files).map((path) => hostPath(descriptor, path)),
       envFiles: (composeSettings.envFiles ?? descriptor.compose.envFiles).map((path) => hostPath(descriptor, path)),
-      profiles: composeSettings.profiles ?? descriptor.compose.profiles,
+      profiles: preserveManagedComposeProfiles(descriptor, composeSettings.profiles ?? descriptor.compose.profiles),
       options: composeSettings.options ?? descriptor.compose.options ?? {}
     };
     next.serverCheckout = "/workspace";
@@ -735,6 +739,16 @@ export async function deriveDesiredDescriptor(descriptor, options = {}) {
   next.generation = changed ? descriptor.generation + 1 : descriptor.generation;
   delete next.controlRoot;
   return validateDescriptor(next, resolve(descriptor.controlRoot, "installation.json"));
+}
+
+// preserve host-managed token activation across authored installation saves
+function preserveManagedComposeProfiles(descriptor, profiles) {
+  const selected = [...profiles];
+  // retain only an already-active managed token profile
+  if (descriptor.compose.profiles.includes("tunnel-token") && !selected.includes("tunnel-token")) {
+    selected.push("tunnel-token");
+  }
+  return selected;
 }
 
 // resolve paired native selectors against one desired checkout

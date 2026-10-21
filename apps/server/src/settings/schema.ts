@@ -3,18 +3,36 @@ import type { SettingsSchema } from './contracts.js';
 import { keyActions } from '../config/keys.js';
 import { appApply, composeOptionSettings, protectedPath } from './catalog.js';
 import { sourceSchema } from '../config/schema.js';
+import { builtInTourPrompt } from '../review-runs/config.js';
+
+type ApplicationSettingsPresentation = { scratchDirectory?: string };
+
+// pair one concrete fallback with its authoritative source
+const sourcedPlaceholder = (value: string | number | boolean, source: string): string => `${value === '' ? 'Empty' : String(value)} (from ${source})`;
 
 // describe the dependency-free keyboard parser's exact existing vocabulary
-export function keyboardSettingsSchema(): SettingsSchema { return { type: 'record', optional: true, label: 'Key tables', items: { type: 'record', label: 'Bindings', items: { type: 'union', nullable: true, variants: [{ type: 'enum', options: Object.keys(keyActions), label: 'Built-in action' }, { type: 'object', label: 'Switch table', properties: { table: { type: 'string' } } }, { type: 'object', label: 'Terminal command', properties: { terminal: { type: 'string' }, reuse: { type: 'boolean', optional: true, default: false } } }] } } }; }
+export function keyboardSettingsSchema(): SettingsSchema { return { type: 'record', optional: true, label: 'Key tables', items: { type: 'record', label: 'Bindings', items: { type: 'union', nullable: true, variants: [{ type: 'enum', options: Object.keys(keyActions), label: 'Built-in action' }, { type: 'object', label: 'Switch table', properties: { table: { type: 'string' } } }, { type: 'object', label: 'Terminal command', properties: { terminal: { type: 'string', editor: 'shell', singleLine: true }, reuse: { type: 'boolean', optional: true, default: false } } }] } } }; }
 // attach protection and apply semantics without creating new validation rules
-export function applicationSettingsSchema(): SettingsSchema {
+export function applicationSettingsSchema(presentation: ApplicationSettingsPresentation = {}): SettingsSchema {
   const schema = settingsSchema(sourceSchema);
   schema.properties!.keys = keyboardSettingsSchema();
+  // keep legacy source compatibility without publishing an obsolete control
+  delete schema.properties!.integrations!.properties!.multiInstance;
+  // capitalize product acronyms only in presentation metadata
+  schema.properties!.integrations!.properties!.mcp!.label = 'MCP';
+  schema.properties!.adapters!.properties!.omx!.label = 'OMX';
+  describeApplicationPlaceholders(schema, presentation);
+  describeApplicationCommands(schema);
   describeProjectSettings(schema);
   // annotate each declared object and collection control
   const visit = (node: SettingsSchema, path: string[]): void => {
     node.protected = node.protected === true || protectedPath(path); node.apply = appApply(path);
-    if (node.protected) delete node.default;
+    // remove defaults before protected metadata crosses the API boundary
+    if (node.protected) {
+      delete node.default;
+      // remove only generated scalar guidance
+      if (node.placeholder?.endsWith(' (from built-in default)') === true) delete node.placeholder;
+    }
     if (node.properties !== undefined) for (const [key, child] of Object.entries(node.properties)) visit(child, [...path, key]);
     if (node.items !== undefined) visit(node.items, [...path, node.type === 'array' ? '0' : '*']);
     if (node.variants !== undefined) for (const child of node.variants) visit(child, path);
@@ -22,12 +40,70 @@ export function applicationSettingsSchema(): SettingsSchema {
   visit(schema, []); return schema;
 }
 
+// mark application-level shell command controls
+function describeApplicationCommands(schema: SettingsSchema): void {
+  Object.assign(schema.properties!.editor!, { editor: 'shell' as const, singleLine: true });
+  const adapters = schema.properties!.adapters!.properties!;
+  // annotate every supported adapter's lifecycle and update commands
+  for (const adapter of Object.values(adapters)) {
+    Object.assign(adapter.properties!.args!, { default: [] });
+    Object.assign(adapter.properties!.env!, { label: 'Environment & keys' });
+    Object.assign(adapter.properties!.setup!, { editor: 'shell' as const, default: '', placeholder: 'Disabled (when blank)' });
+    Object.assign(adapter.properties!.teardown!, { editor: 'shell' as const, default: '', placeholder: 'Disabled (when blank)' });
+    Object.assign(adapter.properties!.updates!, {
+      default: {},
+      description: 'Set all three commands to enable agent updates. Leave all three blank to disable updates.'
+    });
+    const updates = adapter.properties!.updates!.properties!;
+    Object.assign(updates.current!, { label: 'Get current version command', editor: 'shell' as const });
+    Object.assign(updates.latest!, { label: 'Get latest version command', editor: 'shell' as const });
+    Object.assign(updates.run!, { label: 'Update command', editor: 'shell' as const });
+  }
+}
+
+// attach omission guidance without changing parsed defaults
+function describeApplicationPlaceholders(schema: SettingsSchema, presentation: ApplicationSettingsPresentation): void {
+  const application = schema.properties!;
+  application.listen!.properties!.host!.placeholder = sourcedPlaceholder('127.0.0.1', 'built-in default');
+  application.listen!.properties!.port!.placeholder = sourcedPlaceholder(8787, 'built-in default');
+  application.scratchDirectory!.placeholder = presentation.scratchDirectory === undefined
+    ? 'Unavailable (from host home)'
+    : sourcedPlaceholder(presentation.scratchDirectory, 'host home');
+  application.editor!.placeholder = 'Disabled when unset';
+  application.publicOrigin!.placeholder = 'Required; no default';
+  const project = application.projects!.items!.properties!;
+  project.id!.placeholder = 'Required; no default';
+  project.path!.placeholder = 'Required; no default';
+  project.externalUrl!.placeholder = 'No preview when unset';
+  project.newTask!.placeholder = 'No New Task action when unset';
+  const review = application.review!.properties!;
+  // name the dedicated review page without changing its optional source contract
+  application.review!.label = 'Reviews';
+  review.agents!.label = 'Review agents';
+  review.agents!.properties!.codex!.label = 'Codex';
+  review.agents!.properties!.claude!.label = 'Claude';
+  review.tour!.label = 'Review tour';
+  review.presets!.label = 'Review presets';
+  review.presets!.items!.label = 'Review preset';
+  review.presets!.description = 'When no custom presets are configured, the built-in Correctness preset is used. Custom presets replace the built-in list.';
+  review.defaultPreset!.label = 'Default preset';
+  const tour = review.tour!.properties!;
+  tour.model!.placeholder = 'Not specified (from agent default)';
+  tour.effort!.placeholder = 'Not specified (from agent default)';
+  tour.prompt!.placeholder = sourcedPlaceholder(builtInTourPrompt, 'built-in Review Tour prompt');
+  review.presets!.placeholder = sourcedPlaceholder('Correctness', 'built-in Review preset');
+  const preset = review.presets!.items!.properties!;
+  preset.model!.placeholder = 'Not specified (from agent default)';
+  preset.effort!.placeholder = 'Not specified (from agent default)';
+  review.defaultPreset!.placeholder = sourcedPlaceholder('correctness', 'first Review preset');
+}
+
 // attach descriptions to the declared project command controls
 function describeProjectCommands(commands: SettingsSchema | undefined, context: 'project' | 'override'): void {
   if (commands === undefined) return;
   commands.description = context === 'project'
-    ? 'Default trusted shell commands for this Project’s Worktrees.'
-    : 'Complete command set for this checkout. Blank inherits Project commands; an explicit empty object disables inherited controls.';
+    ? 'Trusted shell commands shared by this Project’s Worktrees.'
+    : 'Complete command set for this checkout. An explicit empty object disables inherited controls.';
   const descriptions: Record<string, string> = {
     start: 'Trusted one-shot shell command used to start this stack.',
     stop: 'Trusted one-shot shell command used to stop this stack.',
@@ -43,6 +119,8 @@ function describeProjectCommands(commands: SettingsSchema | undefined, context: 
     const field = commands.properties?.[key];
     if (field !== undefined) field.description = description;
   }
+  // mark only executable stack command leaves
+  for (const key of ['start', 'stop', 'build', 'restart', 'migrate', 'status', 'setup']) commands.properties![key]!.editor = 'shell';
   const process = commands.properties?.processes?.items;
   if (process === undefined) return;
   process.description = 'One named foreground process, declared as a shell command or as a command with startup dependencies.';
@@ -51,8 +129,10 @@ function describeProjectCommands(commands: SettingsSchema | undefined, context: 
     variant.description = variant.type === 'object'
       ? 'Foreground process command plus optional startup dependencies.'
       : 'Trusted foreground shell command for this process.';
+    // mark the scalar process command directly
+    if (variant.type === 'string') variant.editor = 'shell';
     if (variant.type !== 'object') continue;
-    if (variant.properties?.command !== undefined) variant.properties.command.description = 'Trusted foreground shell command for this process.';
+    if (variant.properties?.command !== undefined) Object.assign(variant.properties.command, { description: 'Trusted foreground shell command for this process.', editor: 'shell' as const });
     // describe both the dependency list and each name
     if (variant.properties?.dependsOn !== undefined) {
       variant.properties.dependsOn.description = 'Processes that must start first. Names must exist in this map; dependencies cannot cycle.';
@@ -68,27 +148,34 @@ function describeProjectSettings(schema: SettingsSchema): void {
   if (projects === undefined || project?.properties === undefined) return;
   projects.description = 'Repositories and directories RAC exposes as Projects and discovers Worktrees for.';
   project.description = 'One repository, bare repository, or plain directory managed as a Project.';
+  // keep proxy fields available only through raw source editing
+  delete project.properties.hostname;
+  delete project.properties.port;
   const descriptions: Record<string, string> = {
     id: 'Stable Project key used for saved state and Worktree IDs. Use 1–80 letters, numbers, underscores, or dashes.',
-    label: 'Display name for this Project. Leave blank to use the Project ID.',
-    defaultBranch: 'Fallback comparison branch used when RAC cannot discover a pull-request base or branch-creation source. Leave blank to fall back to main.',
+    label: 'Display name for this Project.',
+    defaultBranch: 'Comparison branch for Worktree changes.',
     path: 'Path to any checkout, bare repository, or plain directory to manage. Missing paths load unavailable; non-Git directories launch in place.',
-    hostPath: 'Host path for the Main checkout when RAC runs in Docker. Leave blank when the host and RAC use the same path.',
-    worktreeOrder: 'Checkout paths to show first, in this order. Relative paths resolve from the Project path; unlisted Worktrees keep the default order.',
+    hostPath: 'Host path for the Main checkout when RAC runs in Docker.',
+    worktreeOrder: 'Checkout paths to show first, in this order. Relative paths resolve from the Project path.',
     worktreeOverrides: 'Per-checkout commands and preview settings. Entries select discovered checkouts; they do not create Worktrees.',
-    worktreesDirectory: 'Directory where RAC creates Worktrees. Relative paths resolve from the Main checkout; blank uses the default sibling directory.',
-    externalUrl: 'Existing HTTPS origin to open directly. Use this instead of Hostname and Port.',
-    hostname: 'Public hostname for RAC’s proxied preview. Set it together with Port.',
-    port: 'Local project service port for RAC’s proxied preview. Set it together with Hostname.',
-    commands: 'Default trusted shell commands for this Project’s Worktrees.',
+    worktreesDirectory: 'Directory where RAC creates Worktrees. Relative paths resolve from the Main checkout.',
+    externalUrl: 'Existing HTTPS origin to open directly.',
+    commands: 'Trusted shell commands shared by this Project’s Worktrees.',
     newTask: 'Trusted shell command for New Task. It is available only for clean, pushed Worktrees; {taskId} inserts a random task ID.',
-    push: 'Label and prompt for the commit-and-push action. Omit this setting to use the default action.'
+    push: 'Label and prompt for the commit-and-push action.'
   };
   // describe every declared project field
   for (const [key, description] of Object.entries(descriptions)) {
     const field = project.properties[key];
     if (field !== undefined) field.description = description;
   }
+  Object.assign(project.properties.label!, { placeholder: 'Unavailable (from Project ID)' });
+  Object.assign(project.properties.defaultBranch!, { placeholder: 'Unavailable (from resolved branch)' });
+  Object.assign(project.properties.hostPath!, { placeholder: 'Unavailable (from Project Path)' });
+  Object.assign(project.properties.worktreeOrder!, { placeholder: 'Unavailable (from discovered Worktree order)' });
+  Object.assign(project.properties.worktreesDirectory!, { placeholder: 'Unavailable (from resolved Worktrees directory)' });
+  project.properties.newTask!.editor = 'shell';
   describeProjectCommands(project.properties.commands, 'project');
   // describe each preferred checkout path
   if (project.properties.worktreeOrder?.items !== undefined) project.properties.worktreeOrder.items.description = 'One checkout path to place ahead of unlisted Worktrees.';
@@ -96,21 +183,27 @@ function describeProjectSettings(schema: SettingsSchema): void {
   if (override?.properties !== undefined) {
     override.description = 'Settings for one discovered checkout selected by its path.';
     override.properties.path!.description = 'Checkout to override. Relative paths resolve from the Project path; each resolved checkout can appear once.';
-    override.properties.externalUrl!.description = 'Direct HTTPS preview for this checkout. Null disables the inherited preview.';
-    override.properties.hostname!.description = 'Proxied preview hostname for this checkout. Set it with Port; set both to null to disable the inherited preview.';
-    override.properties.port!.description = 'Local preview port for this checkout. Set it with Hostname; set both to null to disable the inherited preview.';
+    Object.assign(override.properties.externalUrl!, { description: 'Direct HTTPS preview for this checkout. Set null to disable preview.', placeholder: 'No preview when unset' });
+    // keep proxy fields available only through raw source editing
+    delete override.properties.hostname;
+    delete override.properties.port;
     describeProjectCommands(override.properties.commands, 'override');
   }
   const push = project.properties.push;
   if (push?.properties !== undefined) {
-    push.properties.label!.description = 'Button text shown for the commit-and-push action.';
-    push.properties.prompt!.description = 'Prompt queued to the active agent when the action is selected.';
+    Object.assign(push.properties.label!, { description: 'Button text shown for the commit-and-push action.', placeholder: sourcedPlaceholder('Commit/Push', 'built-in default') });
+    Object.assign(push.properties.prompt!, { description: 'Prompt queued to the active agent when the action is selected.', placeholder: sourcedPlaceholder('review, commit, and push', 'built-in default') });
   }
 }
 
 // add editor defaults without changing parsed source bytes
-export function installationSettingsPresentationSchema(input: z.ZodTypeAny): SettingsSchema {
+export function installationSettingsPresentationSchema(input: z.ZodTypeAny, hostCheckout?: string): SettingsSchema {
   const schema = settingsSchema(input);
+  const checkout = schema.properties?.host?.properties?.checkout;
+  // describe the installed value only when the expected host block exists
+  if (checkout !== undefined) checkout.placeholder = hostCheckout === undefined
+    ? 'Unavailable (from installed checkout)'
+    : sourcedPlaceholder(hostCheckout, 'installed checkout');
   const options = schema.properties?.compose?.properties?.options;
   // keep the permanent option controls visible for sparse installation files
   if (options?.properties?.parallel !== undefined && options.properties.compatibility !== undefined) {
@@ -129,7 +222,12 @@ export function settingsSchema(input: z.ZodTypeAny): SettingsSchema {
     const inner = input instanceof z.ZodEffects ? input.innerType() : definition.innerType as z.ZodTypeAny;
     const result = settingsSchema(inner);
     // expose default controls from code-defined values only
-    if (input instanceof z.ZodDefault) result.default = definition.defaultValue();
+    if (input instanceof z.ZodDefault) {
+      const defaultValue = definition.defaultValue();
+      result.default = defaultValue;
+      // expose concrete scalar defaults without turning them into authored values
+      if (typeof defaultValue === 'string' || typeof defaultValue === 'number' || typeof defaultValue === 'boolean') result.placeholder = sourcedPlaceholder(defaultValue, 'built-in default');
+    }
     // preserve optional and inherited settings
     if (input instanceof z.ZodOptional || input instanceof z.ZodDefault) result.optional = true;
     // keep explicit preview disablement

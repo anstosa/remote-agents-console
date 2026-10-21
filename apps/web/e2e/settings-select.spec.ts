@@ -165,6 +165,19 @@ async function setupSelectFixture(page: Page) {
           restartAvailable: true,
         },
       });
+    // keep conditional tunnel fields out of this selector fixture
+    if (path === "/api/settings/cloudflare" && request.method() === "GET")
+      return route.fulfill({
+        json: {
+          supported: true,
+          mode: "token",
+          enabled: true,
+          connected: true,
+          tokenPresent: true,
+          endpoint: "https://fixture.example.test",
+          hostname: "fixture.example.test",
+        },
+      });
     // return only synthetic sources
     if (path === "/api/settings" && request.method() === "GET")
       return route.fulfill({
@@ -286,7 +299,7 @@ for (const width of [320, 390, 1440]) {
         Math.abs(searchBox!.height - sectionBox!.height),
       ).toBeLessThanOrEqual(1);
     }
-    await selectSource(settings, "app", "Application config");
+    await selectSource(settings, "app", "Application");
     const title = settings.getByRole("textbox", { name: "Title", exact: true });
     const mode = settings.getByRole("combobox", { name: "Mode", exact: true });
     const icon = settings.getByRole("combobox", {
@@ -311,7 +324,7 @@ test("uses custom enum, union, and icon selectors with exact staged patches", as
 }) => {
   await page.setViewportSize({ width: 1280, height: 860 });
   const { settings, state } = await setupSelectFixture(page);
-  await selectDesktopSource(settings, "Application config");
+  await selectDesktopSource(settings, "Application");
   await expect(settings.locator("select")).toHaveCount(0);
 
   const mode = settings.getByRole("combobox", { name: "Mode", exact: true });
@@ -393,7 +406,7 @@ test("supports keyboard navigation and commits only on Enter or Space", async ({
 }) => {
   await page.setViewportSize({ width: 1280, height: 860 });
   const { settings, state } = await setupSelectFixture(page);
-  await selectDesktopSource(settings, "Application config");
+  await selectDesktopSource(settings, "Application");
   const mode = settings.getByRole("combobox", { name: "Mode", exact: true });
 
   await mode.focus();
@@ -457,7 +470,7 @@ test("dismisses with Escape or an outside click without mutating Settings", asyn
 }) => {
   await page.setViewportSize({ width: 1280, height: 860 });
   const { settings, state } = await setupSelectFixture(page);
-  await selectDesktopSource(settings, "Application config");
+  await selectDesktopSource(settings, "Application");
   const mode = settings.getByRole("combobox", { name: "Mode", exact: true });
   await mode.click();
   await mode.press("ArrowDown");
@@ -510,7 +523,7 @@ test("closes mobile navigation without selection when resize hides its trigger",
   await expect(sections).toHaveAttribute("data-value", "browser");
   await sections.click();
   const popup = page.getByRole("listbox", { name: "Settings section options" });
-  await expect(popup.getByRole("group")).toHaveCount(3);
+  await expect(popup.getByRole("group")).toHaveCount(4);
   await expect(popup).toHaveAttribute("data-has-icons", "true");
   await sections.press("End");
   await expect(sections).toHaveAttribute("data-value", "browser");

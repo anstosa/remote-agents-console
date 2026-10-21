@@ -210,6 +210,8 @@ async function setupCodeEditors(
     if (path === '/api/server/update-available') return route.fulfill({ json: { available: false } });
     // report stable runtime settings
     if (path === '/api/settings/status') return route.fulfill({ json: { pending: false, targets: [], effective: 'known', restartAvailable: true } });
+    // expose the file-managed tunnel without opening its setup guide
+    if (path === '/api/settings/cloudflare' && request.method() === 'GET') return route.fulfill({ json: { supported: true, mode: 'local', enabled: true, connected: true, tokenPresent: false, endpoint: 'https://console.example.test', hostname: 'console.example.test', serviceUrl: 'http://127.0.0.1:9876' } });
     // publish the editor sources
     if (path === '/api/settings' && request.method() === 'GET') return route.fulfill({ json: { version: 1, revisionId: 'editor-snapshot-r1', sources, status: { pending: false, targets: [], effective: 'known', restartAvailable: true } } });
     // disclose one whole source only after the explicit editor action
@@ -230,14 +232,21 @@ async function setupCodeEditors(
   await page.goto('/');
   await page.getByRole('button', { name: 'Global settings' }).first().click();
   const settings = page.getByRole('dialog', { name: 'Settings' });
-  await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Application config', exact: true }).click();
-  await settings.getByRole('button', { name: 'Edit whole source' }).click();
+  await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Application', exact: true }).click();
+  await settings.getByRole('button', { name: 'Edit base file' }).click();
   return { settings, state };
 }
 
 // select one file-backed source from the shared Settings navigation
 async function selectSource(settings: Locator, label: string) {
-  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  // cloudflare files now live in the page's advanced editor
+  if (label === 'Cloudflare tunnel') {
+    await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Cloudflare', exact: true }).click();
+    await settings.getByText('Configuration files', { exact: true }).click();
+    return;
+  }
+  const visibleLabel = label === 'Application config' ? 'Application' : label;
+  const escapedLabel = visibleLabel.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: new RegExp(`^${escapedLabel}(?: Unsaved changes)?$`, 'u') }).click();
 }
 
@@ -289,6 +298,116 @@ async function editorGeometry(editor: Locator) {
       textareaScrollTop: textarea.scrollTop,
       presentationScrollTop: presentation.scrollTop
     };
+  });
+}
+
+// compare the content rows with their editing surface and full-height gutter
+async function naturalEditorGeometry(editor: Locator) {
+  return editor.evaluate(element => {
+    const surface = element.querySelector<HTMLElement>('.settings-code-editor-surface');
+    const textarea = element.querySelector('textarea');
+    const presentation = element.querySelector<HTMLElement>('.syntax-highlight-presentation');
+    const number = element.querySelector<HTMLElement>('.syntax-line-number');
+    // require every layer before measuring content and unnumbered padding
+    if (surface === null || textarea === null || presentation === null || number === null) throw new Error('Editor geometry is incomplete');
+    const surfaceStyle = getComputedStyle(surface);
+    const textareaStyle = getComputedStyle(textarea);
+    const gutter = getComputedStyle(surface, '::before');
+    const lineHeight = Number.parseFloat(textareaStyle.lineHeight);
+    const lineCount = element.querySelectorAll('.syntax-line').length;
+    const border = Number.parseFloat(surfaceStyle.borderTopWidth) + Number.parseFloat(surfaceStyle.borderBottomWidth);
+    const padding = Number.parseFloat(textareaStyle.paddingTop) + Number.parseFloat(textareaStyle.paddingBottom);
+    const scrollbar = textarea.offsetHeight - textarea.clientHeight;
+    return {
+      surfaceHeight: surface.getBoundingClientRect().height,
+      naturalHeight: lineCount * lineHeight + padding + border + scrollbar,
+      clientHeight: textarea.clientHeight,
+      scrollHeight: textarea.scrollHeight,
+      lineHeight,
+      lineCount,
+      gutterContent: gutter.content,
+      gutterHeight: Number.parseFloat(gutter.height),
+      gutterWidth: Number.parseFloat(gutter.width),
+      gutterRight: surface.getBoundingClientRect().left + Number.parseFloat(surfaceStyle.borderLeftWidth) + Number.parseFloat(gutter.width),
+      gutterTop: gutter.top,
+      gutterBottom: gutter.bottom,
+      gutterBackground: gutter.backgroundColor,
+      gutterBorder: gutter.borderRightWidth,
+      numberBackground: getComputedStyle(number).backgroundColor,
+      numberWidth: number.getBoundingClientRect().width,
+      numberRight: number.getBoundingClientRect().right,
+      numberLeft: number.getBoundingClientRect().left - surface.getBoundingClientRect().left,
+      surfaceClientHeight: surface.clientHeight
+    };
+  });
+}
+
+// fit saved sources to their actual rows at both desktop and phone widths
+for (const width of [1440, 390]) {
+  test(`uses natural code height and a continuous gutter at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const { settings, state } = await setupCodeEditors(page);
+    await page.setViewportSize({ width, height: 900 });
+    const editor = settings.locator('.settings-code-editor');
+    const input = editor.getByRole('textbox', { name: 'Application config source content' });
+    const initial = await naturalEditorGeometry(editor);
+    expect(initial.lineCount).toBe(1);
+    expect(Math.abs(initial.surfaceHeight - initial.naturalHeight)).toBeLessThanOrEqual(2);
+    // align the full-height background with the number cells' right border
+    expect(Math.abs(initial.gutterRight - initial.numberRight)).toBeLessThanOrEqual(1);
+
+    await page.setViewportSize({ width, height: 1400 });
+    const tallerViewport = await naturalEditorGeometry(editor);
+    expect(Math.abs(tallerViewport.surfaceHeight - initial.surfaceHeight)).toBeLessThanOrEqual(1);
+    await input.fill('first\n\nthird');
+    const multiline = await naturalEditorGeometry(editor);
+    expect(multiline.lineCount).toBe(3);
+    expect(Math.abs(multiline.surfaceHeight - multiline.naturalHeight)).toBeLessThanOrEqual(2);
+    expect(Math.abs(multiline.surfaceHeight - initial.surfaceHeight - initial.lineHeight * 2)).toBeLessThanOrEqual(2);
+    await input.fill('');
+    const empty = await naturalEditorGeometry(editor);
+    expect(empty.lineCount).toBe(1);
+    expect(Math.abs(empty.surfaceHeight - initial.surfaceHeight)).toBeLessThanOrEqual(1);
+
+    // reserve scrollbar space only when a source actually overflows horizontally
+    await input.fill('horizontal-value-'.repeat(100));
+    const horizontal = await naturalEditorGeometry(editor);
+    expect(Math.abs(horizontal.surfaceHeight - horizontal.naturalHeight)).toBeLessThanOrEqual(2);
+    expect(horizontal.scrollHeight).toBeLessThanOrEqual(horizontal.clientHeight + 1);
+    await input.evaluate(textarea => { textarea.scrollLeft = 180; textarea.dispatchEvent(new Event('scroll')); });
+    const scrolled = await naturalEditorGeometry(editor);
+    expect(scrolled.numberLeft).toBeGreaterThanOrEqual(0);
+    expect(scrolled.numberLeft).toBeLessThanOrEqual(2);
+    const aligned = await editorGeometry(editor);
+    expect(Math.abs(aligned.presentationLeft - aligned.textareaLeft)).toBeLessThanOrEqual(1);
+
+    // keep the ruler aligned when larger line counts widen the number column
+    await input.fill(Array.from({ length: 100 }, (_, index) => `line ${index + 1}`).join('\n'));
+    const threeDigits = await naturalEditorGeometry(editor);
+    expect(threeDigits.lineCount).toBe(100);
+    expect(threeDigits.numberWidth).toBeGreaterThan(initial.numberWidth);
+    expect(Math.abs(threeDigits.gutterRight - threeDigits.numberRight)).toBeLessThanOrEqual(1);
+
+    // extend the ruler through padding and extra blank space after manual resizing
+    await input.fill(jsonContent);
+    await editor.locator('.settings-code-editor-surface').evaluate(surface => { (surface as HTMLElement).style.height = '180px'; });
+    const resized = await naturalEditorGeometry(editor);
+    expect(resized.gutterContent).not.toBe('none');
+    expect(Math.abs(resized.gutterHeight - resized.surfaceClientHeight)).toBeLessThanOrEqual(1);
+    expect(resized.gutterTop).toBe('0px');
+    expect(resized.gutterBottom).toBe('0px');
+    expect(resized.gutterBackground).toBe(resized.numberBackground);
+    expect(resized.gutterBorder).toBe('1px');
+    expect(Math.abs(resized.gutterRight - resized.numberRight)).toBeLessThanOrEqual(1);
+    await editor.scrollIntoViewIfNeeded();
+    await editor.screenshot({ path: `/tmp/remoteagents-settings-natural-editor-gutter-${width}.png` });
+
+    await editor.locator('.settings-code-editor-surface').evaluate(surface => { (surface as HTMLElement).style.removeProperty('height'); });
+    const restored = await naturalEditorGeometry(editor);
+    expect(Math.abs(restored.surfaceHeight - initial.surfaceHeight)).toBeLessThanOrEqual(1);
+    await editor.screenshot({ path: `/tmp/remoteagents-settings-natural-editor-one-line-${width}.png` });
+    expect(state.saves).toBe(0);
+    expect(state.validations).toBe(0);
   });
 }
 
@@ -825,7 +944,9 @@ test('fails closed instead of normalizing CRLF shell source', async ({ page }) =
   await expect(editor.getByRole('button', { name: 'Format' })).toBeEnabled();
   await expect(input).toHaveValue(displayedSource);
   await expect(editor.getByRole('alert')).toHaveText('Unable to format shell. Check its syntax and try again. The editor was not changed.');
-  await expect(settings.getByText('No unsaved changes', { exact: true })).toBeVisible();
+  await expect(
+    settings.getByRole('button', { name: 'Save changes', exact: true }),
+  ).toHaveCount(0);
   expect(state.saves).toBe(0);
   expect(state.validations).toBe(0);
 });

@@ -7,7 +7,7 @@ services:
       RAC_HOST_TMUX_DIR: /host-tmux
       RAC_HOST_TMUX_SOURCE: ${HOST_TMUX_DIR:-${HOME}/.local/state/tmux/tmux-${HOST_UID:-1000}}
       RAC_HOST_UID: ${HOST_UID:-1000}
-      # required absolute host node executable for full-host Files access
+      # optionally pin host node for Files access; blank uses node from host PATH
       # the container and host tmux account must have matching numeric uids
       RAC_HOST_NODE_BIN: ${RAC_HOST_NODE_BIN:-}
       RAC_TMUX_BIN: /host-tools/tmux

@@ -2,7 +2,7 @@ import { createDecipheriv, createHash, createPublicKey, diffieHellman, generateK
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { rm } from 'node:fs/promises';
-import { SettingsError, type HostReply, type HostRequest, type Installation, type RevealContext, type SettingsIssue } from './contracts.js';
+import { SettingsError, settingsRestartProgress, type HostReply, type HostRequest, type Installation, type RevealContext, type SettingsIssue } from './contracts.js';
 import { readBounded, writePrivate } from './files.js';
 
 export type SettingsTransport = { installation(): Promise<Installation | undefined>; request(request: HostRequest, wait?: boolean, published?: () => void): Promise<HostReply>; read(sourceId: string, context?: RevealContext): Promise<string | undefined>; inspect?(sourceId: string): Promise<NonNullable<HostReply['sourceMetadata']>> };
@@ -80,7 +80,11 @@ export class HostSettingsTransport implements SettingsTransport {
         if (result.errorMetadata !== undefined && (result.state !== 'failed' || !migrationRequired)) throw new SettingsError('settings_helper_invalid', 503);
         if (result.state === 'failed' && migrationRequired) throw new SettingsError('migration_required', 400, migrationIssues(request, result.errorMetadata));
         if (result.state === 'failed') throw new SettingsError(/^[a-z0-9_-]{1,80}$/u.test(result.error ?? '') ? result.error!.replaceAll('-', '_') : 'settings_helper_failed', 503);
-        if (result.state === 'complete') return { ...result, receipt: result.receipt ?? (result as HostReply & { privateRecord?: HostReply['receipt'] }).privateRecord };
+        if (result.state === 'complete') {
+          const { restart: untrustedRestart, ...safeResult } = result;
+          const restart = settingsRestartProgress(untrustedRestart);
+          return { ...safeResult, ...(restart ? { restart } : {}), receipt: result.receipt ?? (result as HostReply & { privateRecord?: HostReply['receipt'] }).privateRecord };
+        }
       }
       await new Promise(resolve => setTimeout(resolve, 100));
     }

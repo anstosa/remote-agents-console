@@ -385,7 +385,7 @@ async function setupDefaults(page: Page, options: { writable?: boolean } = {}) {
   await expect(
     settings.getByRole("searchbox", { name: "Search settings", exact: true }),
   ).toBeVisible();
-  await selectSection(settings, "app", "Application configuration");
+  await selectSection(settings, "app", "Application");
   return { settings, state };
 }
 
@@ -471,12 +471,21 @@ for (const width of [320, 390, 1440]) {
     await expect(defaultOn.getByRole("switch")).toBeChecked();
     await expectRightAlignedSwitch(nestedActive, "Nested active");
     await expect(nestedActive.getByRole("switch")).toBeChecked();
-    await expect(
-      settings.getByRole("spinbutton", { name: "Default zero", exact: true }),
-    ).toHaveValue("0");
-    await expect(
-      settings.getByRole("textbox", { name: "Default empty", exact: true }),
-    ).toHaveValue("");
+    const defaultZero = settings.getByRole("spinbutton", { name: "Default zero", exact: true });
+    await expect(defaultZero).toHaveValue("");
+    await expect(defaultZero).toHaveAttribute(
+      "placeholder",
+      "0 (from built-in default)",
+    );
+    const defaultEmpty = settings.getByRole("textbox", {
+      name: "Default empty",
+      exact: true,
+    });
+    await expect(defaultEmpty).toHaveValue("");
+    await expect(defaultEmpty).toHaveAttribute(
+      "placeholder",
+      "Empty (from built-in default)",
+    );
     await expect(
       settings.getByRole("button", { name: "+ Add Empty item", exact: true }),
     ).toBeVisible();

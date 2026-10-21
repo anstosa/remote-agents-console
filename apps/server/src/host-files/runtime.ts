@@ -30,6 +30,7 @@ export function createRuntimeHostFiles(config: ValidatedConfig): HostFilesServic
     serverCheckout: checkout,
     hostCheckout,
     hostNodeBin: process.env.RAC_HOST_NODE_BIN ?? '',
+    hostPath: process.env.RAC_HOST_PATH,
     hostUid: Number(process.env.RAC_HOST_UID ?? 'NaN'),
     operationJournalPath: hostJournal,
     fileFavoritesPath: hostFavorites

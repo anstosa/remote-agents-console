@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { HostBrokerBackend } from '../src/host-files/backend.js';
-import { LazyHostBrokerBackend, posixShellLiteral, renderHostBrokerLauncher } from '../src/host-files/broker.js';
+import { LazyHostBrokerBackend, posixShellLiteral, renderHostBrokerLauncher, resolveHostNodeBin } from '../src/host-files/broker.js';
 import { runHostBroker } from '../src/host-files/broker-main.js';
 import type {
   HostFileIdentity,
@@ -599,7 +599,163 @@ describe('host files broker protocol', () => {
   });
 });
 
+describe('host node resolver', () => {
+  // return a configured executable without consulting tmux
+  it('uses an explicit absolute override directly', async () => {
+    let calls = 0;
+    const resolved = await resolveHostNodeBin({
+      hostNodeBin: '/host/node/bin/node',
+      hostPath: '/host/bin',
+      tmuxBinary: '/usr/bin/tmux',
+      hostTmuxSocket: '/tmp/tmux.sock',
+      // detect any unexpected host command
+      commandRunner: async () => {
+        calls += 1;
+        return { code: 0, stdout: '/unexpected/node\n', stderr: '' };
+      }
+    });
+    expect(resolved).toBe('/host/node/bin/node');
+    expect(calls).toBe(0);
+  });
+
+  // preserve the fixed host lookup command and configured timeout
+  it('resolves a blank override through the host tmux environment', async () => {
+    const commands: Array<{ command: string; args: string[]; input?: string; timeoutMs?: number }> = [];
+    const resolved = await resolveHostNodeBin({
+      hostNodeBin: '   ',
+      hostPath: `/host/bin ' #() ; $HOME`,
+      tmuxBinary: '/usr/bin/tmux',
+      hostTmuxSocket: '/tmp/tmux.sock',
+      startupTimeoutMs: 3210,
+      // capture the exact fixed argv resolver
+      commandRunner: async (command, args, input, timeoutMs) => {
+        commands.push({ command, args, input, timeoutMs });
+        return { code: 0, stdout: '/host-only/node/bin/node\n', stderr: '' };
+      }
+    });
+    expect(resolved).toBe('/host-only/node/bin/node');
+    expect(commands).toEqual([{
+      command: '/usr/bin/tmux',
+      args: ['-S', '/tmp/tmux.sock', 'run-shell', `export PATH='/host/bin '"'"' ##() ; $HOME'\nexec node -p 'process.execPath'`],
+      input: undefined,
+      timeoutMs: 3210
+    }]);
+  });
+
+  // retain the bounded default timeout without exporting the container path
+  it('uses the default timeout for the inherited host PATH', async () => {
+    const commands: Array<{ args: string[]; timeoutMs?: number }> = [];
+    await resolveHostNodeBin({
+      hostNodeBin: '',
+      tmuxBinary: '/usr/bin/tmux',
+      hostTmuxSocket: '/tmp/tmux.sock',
+      // capture the resolver defaults
+      commandRunner: async (_command, args, _input, timeoutMs) => {
+        commands.push({ args, timeoutMs });
+        return { code: 0, stdout: '/usr/local/bin/node\n', stderr: '' };
+      }
+    });
+    expect(commands).toEqual([{
+      args: ['-S', '/tmp/tmux.sock', 'run-shell', "exec node -p 'process.execPath'"],
+      timeoutMs: 5_000
+    }]);
+  });
+
+  // reject lookup failure and malformed executable output
+  it.each([
+    { result: { code: 127, stdout: '', stderr: 'node: not found' } },
+    { result: { code: 0, stdout: 'node\n', stderr: '' } }
+  ])('rejects an unusable host lookup result %#', async ({ result }) => {
+    await expect(resolveHostNodeBin({
+      hostNodeBin: '',
+      tmuxBinary: '/usr/bin/tmux',
+      hostTmuxSocket: '/tmp/tmux.sock',
+      // expose only the selected failure result
+      commandRunner: async () => result
+    })).rejects.toMatchObject({ code: 'bridge_unavailable' });
+  });
+});
+
 describe('lazy host broker lifecycle', () => {
+  // resolve the default in the host environment before pinning the launcher
+  it.each(['', '   '])('resolves host PATH node for a blank override %j', async hostNodeBin => {
+    const root = await fixture();
+    const compiledModuleDirectory = join(root, 'compiled');
+    await mkdir(compiledModuleDirectory, { mode: 0o700 });
+    await writeFile(join(compiledModuleDirectory, 'broker-main.js'), 'export {};\n', { mode: 0o600 });
+    const commands: string[][] = [];
+    const backend = new LazyHostBrokerBackend({
+      tmuxBinary: '/usr/bin/tmux', hostTmuxSocket: join(root, 'tmux.sock'), hostProcRoot: '/proc',
+      serverCheckout: root, hostCheckout: root, hostNodeBin, hostPath: `/host/bin ' #() ; $HOME`,
+      hostUid: process.getuid?.() ?? 0, operationJournalPath: join(root, 'journal.json'), fileFavoritesPath: join(root, 'favorites.json'),
+      compiledModuleDirectory,
+      // stop after recording the launcher instead of creating a host session
+      commandRunner: async (_command, args) => {
+        commands.push(args);
+        // return a host-only executable that cannot be resolved inside the container
+        if (args[2] === 'run-shell') return { code: 0, stdout: '/host-only/node/bin/node\n', stderr: '' };
+        return { code: 1, stdout: '', stderr: `can't find session: fixture\n` };
+      }
+    });
+    await expect(backend.request({ kind: 'inspect', path: '/tmp' })).rejects.toMatchObject({ code: 'broker_busy' });
+    expect(commands[0]).toEqual(['-S', join(root, 'tmux.sock'), 'run-shell', `export PATH='/host/bin '"'"' ##() ; $HOME'\nexec node -p 'process.execPath'`]);
+    const directory = join(root, '.data', 'host-files');
+    const launcher = (await readdir(directory)).find(name => name.startsWith('launcher-'))!;
+    expect(await readFile(join(directory, launcher), 'utf8')).toContain("exec '/host-only/node/bin/node' ");
+    // retain ambiguous launch ownership just like an interrupted real launch
+    await expect(backend.close()).rejects.toMatchObject({ code: 'broker_busy' });
+  });
+
+  // inherit the host tmux path when no explicit host path is configured
+  it('does not export the container PATH for default host node lookup', async () => {
+    const root = await fixture();
+    const commands: string[][] = [];
+    const backend = new LazyHostBrokerBackend({
+      tmuxBinary: '/usr/bin/tmux', hostTmuxSocket: join(root, 'tmux.sock'), hostProcRoot: '/proc',
+      serverCheckout: root, hostCheckout: root, hostNodeBin: '', hostUid: process.getuid?.() ?? 0,
+      operationJournalPath: join(root, 'journal.json'), fileFavoritesPath: join(root, 'favorites.json'),
+      // report missing node without ever starting a broker
+      commandRunner: async (_command, args) => { commands.push(args); return { code: 127, stdout: '', stderr: 'node: not found' }; }
+    });
+    await expect(backend.request({ kind: 'inspect', path: '/tmp' })).rejects.toMatchObject({ code: 'bridge_unavailable' });
+    expect(commands).toEqual([['-S', join(root, 'tmux.sock'), 'run-shell', "exec node -p 'process.execPath'"]]);
+    expect(await lstat(join(root, '.data')).catch(() => undefined)).toBeUndefined();
+    await backend.close();
+  });
+
+  // reject unexpected host output before creating shared launch state
+  it.each(['', 'node', '/host/node\nother', '/host/node\0extra'])('rejects invalid host node resolution %j', async output => {
+    const root = await fixture();
+    const backend = new LazyHostBrokerBackend({
+      tmuxBinary: '/usr/bin/tmux', hostTmuxSocket: join(root, 'tmux.sock'), hostProcRoot: '/proc',
+      serverCheckout: root, hostCheckout: root, hostNodeBin: '', hostUid: process.getuid?.() ?? 0,
+      operationJournalPath: join(root, 'journal.json'), fileFavoritesPath: join(root, 'favorites.json'),
+      // expose only the malformed resolver output
+      commandRunner: async () => ({ code: 0, stdout: output, stderr: '' })
+    });
+    await expect(backend.request({ kind: 'inspect', path: '/tmp' })).rejects.toMatchObject({ code: 'bridge_unavailable' });
+    expect(await lstat(join(root, '.data')).catch(() => undefined)).toBeUndefined();
+    await backend.close();
+  });
+
+  // fail closed rather than accepting malformed resolution or a relative override
+  it.each(['relative/node', 'node', '/host/node\nother'])('rejects invalid explicit host node path %j', async hostNodeBin => {
+    const root = await fixture();
+    let calls = 0;
+    const backend = new LazyHostBrokerBackend({
+      tmuxBinary: '/usr/bin/tmux', hostTmuxSocket: join(root, 'tmux.sock'), hostProcRoot: '/proc',
+      serverCheckout: root, hostCheckout: root, hostNodeBin, hostUid: process.getuid?.() ?? 0,
+      operationJournalPath: join(root, 'journal.json'), fileFavoritesPath: join(root, 'favorites.json'),
+      // reject any attempt to fall back from a bad explicit override
+      commandRunner: async () => { calls += 1; return { code: 0, stdout: process.execPath, stderr: '' }; }
+    });
+    await expect(backend.request({ kind: 'inspect', path: '/tmp' })).rejects.toMatchObject({ code: 'bridge_unavailable' });
+    expect(calls).toBe(0);
+    expect(await lstat(join(root, '.data')).catch(() => undefined)).toBeUndefined();
+    await backend.close();
+  });
+
+
   // keep construction side-effect free for existing server startup
   it('does not launch tmux until the first filesystem request', async () => {
     const root = await fixture();

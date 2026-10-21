@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,9 +8,11 @@ import { applyListenOverrides, validateConfig } from '../src/config/schema.js';
 import { builtInCorrectnessPrompt, builtInTourPrompt } from '../src/review-runs/config.js';
 import { defaultDavoContext } from '../src/integrations/realtime/settings.js';
 import { run } from '../src/tmux/command.js';
+import { accountHome } from '../src/places/places.js';
 
 const dirs: string[] = [];
-afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
+// restore configuration overrides and temporary repositories
+afterEach(async () => { vi.unstubAllEnvs(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 const git = async (cwd: string, ...args: string[]) => { const r = await run('/usr/bin/git', ['-C', cwd, ...args]); if (r.code !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`); return r.stdout.trim(); };
 
 // a temp git repository with one commit; the returned path is realpath'd so it equals discovery's
@@ -31,6 +33,39 @@ async function gitRepo(name = 'work'): Promise<string> {
 const withProject = async (path: string, extra: Record<string, unknown> = {}) => ({ publicOrigin: 'https://agents.example.com', projects: [{ id: 'a', path, ...extra }] });
 
 describe('project configuration', () => {
+  // inherited host paths must not export the container account home
+  it('inherits each project path on the host bridge for project and scratch launches', async () => {
+    vi.stubEnv('RAC_HOST_TMUX_DIR', '/host-tmux');
+    vi.stubEnv('HOME', '/home/node');
+    const repo = await gitRepo();
+    const folder = join(repo, '..', 'notes');
+    await mkdir(folder);
+    const missing = join(repo, '..', 'missing');
+    const input = { publicOrigin: 'https://agents.example.com', projects: [
+      { id: 'repo', path: repo },
+      { id: 'notes', path: folder },
+      { id: 'missing', path: missing },
+      { id: 'mapped', path: '/not-mounted', hostPath: '/host/operator/mapped' }
+    ] };
+    const config = await validateConfig(input);
+
+    expect(config.projects.map(project => project.hostPath)).toEqual([repo, folder, missing, '/host/operator/mapped']);
+    expect(accountHome(config.projects)).toBe(join(repo, '..'));
+    expect(accountHome(config.projects, 'notes')).toBe(join(folder, '..'));
+    expect(accountHome(config.projects, 'mapped')).toBe('/host/operator');
+    expect(input.projects[0]).not.toHaveProperty('hostPath');
+  });
+
+  // native projects retain their own account instead of deriving one from checkout paths
+  it('leaves omitted host paths absent outside the host bridge', async () => {
+    vi.stubEnv('RAC_HOST_TMUX_DIR', undefined);
+    vi.stubEnv('HOME', '/native/account');
+    const config = await validateConfig(await withProject(await gitRepo()));
+
+    expect(config.projects[0]).not.toHaveProperty('hostPath');
+    expect(accountHome(config.projects)).toBe('/native/account');
+  });
+
   // retain an optional comparison default without changing unconfigured projects
   it('accepts a project default branch and leaves it absent when unset', async () => {
     const repo = await gitRepo();
@@ -412,9 +447,18 @@ describe('configuration safety', () => {
   });
   it('accepts explicit integration feature gates', async () => {
     const config = await validateConfig({ ...scratch, integrations: { enabled: true, mcp: { writeEnabled: true }, realtime: { enabled: true, name: 'Riley', context: 'Dry and direct.', writeToolsEnabled: true }, multiInstance: { enabled: true } } });
-    expect(config.integrations).toMatchObject({ enabled: true, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: false }, realtime: { enabled: true, name: 'Riley', context: 'Dry and direct.', writeToolsEnabled: true }, multiInstance: { enabled: true } });
+    expect(config.integrations).toMatchObject({ enabled: true, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: false }, realtime: { enabled: true, name: 'Riley', context: 'Dry and direct.', writeToolsEnabled: true }, multiInstance: { enabled: false } });
     await expect(validateConfig({ ...scratch, integrations: { realtime: { name: '   ' } } })).rejects.toThrow();
     await expect(validateConfig({ ...scratch, integrations: { realtime: { context: 'x'.repeat(16_001) } } })).rejects.toThrow();
+  });
+  it('derives multi-instance federation only from configured remote servers', async () => {
+    const none = await validateConfig({ ...scratch, integrations: { multiInstance: { enabled: true } } });
+    const one = await validateConfig({ ...scratch, remoteServers: [{ url: 'https://peer.example.com' }], integrations: { multiInstance: { enabled: false } } });
+    const many = await validateConfig({ ...scratch, remoteServers: [{ url: 'https://peer.example.com' }, { url: 'https://archive.example.com' }] });
+
+    expect(none.integrations?.multiInstance.enabled).toBe(false);
+    expect(one.integrations?.multiInstance.enabled).toBe(true);
+    expect(many.integrations?.multiInstance.enabled).toBe(true);
   });
   it('rejects a non HTTPS origin', async () => {
     await expect(validateConfig({ ...scratch, publicOrigin: 'http://agents.example.com' })).rejects.toThrow('HTTPS');
@@ -465,8 +509,30 @@ describe('adapter configuration', () => {
     const updates = { current: 'codex --version', latest: 'npm view @openai/codex version', run: 'codex update' };
     const config = await validateConfig({ ...scratch, adapters: { codex: { program: process.execPath, updates } } });
     expect(config.adapters?.codex?.updates).toEqual(updates);
-    await expect(validateConfig({ ...scratch, adapters: { codex: { program: process.execPath, updates: { current: 'codex --version', latest: 'latest' } } } })).rejects.toThrow();
     await expect(validateConfig({ ...scratch, adapters: { codex: { program: process.execPath, updates: { ...updates, extra: 'no' } } } })).rejects.toThrow(/[Uu]nrecognized/);
+  });
+
+  // reject each incomplete or blank update command position
+  it.each([
+    ['missing current', { latest: 'npm view @openai/codex version', run: 'codex update' }],
+    ['missing latest', { current: 'codex --version', run: 'codex update' }],
+    ['missing update', { current: 'codex --version', latest: 'npm view @openai/codex version' }],
+    ['empty current', { current: '', latest: 'npm view @openai/codex version', run: 'codex update' }],
+    ['empty latest', { current: 'codex --version', latest: '', run: 'codex update' }],
+    ['empty update', { current: 'codex --version', latest: 'npm view @openai/codex version', run: '' }],
+    ['blank current', { current: ' \t ', latest: 'npm view @openai/codex version', run: 'codex update' }],
+    ['blank latest', { current: 'codex --version', latest: '\n ', run: 'codex update' }],
+    ['blank update', { current: 'codex --version', latest: 'npm view @openai/codex version', run: '   ' }]
+  ])('rejects %s in an authored agent update contract', async (_name, updates) => {
+    await expect(validateConfig({ ...scratch, adapters: { codex: { program: process.execPath, updates } } })).rejects.toThrow();
+  });
+
+  // preserve meaningful command bytes without trimming
+  it('preserves surrounding whitespace in complete agent update commands', async () => {
+    const updates = { current: ' codex --version ', latest: '\tnpm view @openai/codex version', run: 'codex update\n' };
+    const config = await validateConfig({ ...scratch, adapters: { codex: { program: process.execPath, updates } } });
+
+    expect(config.adapters?.codex?.updates).toEqual(updates);
   });
 });
 

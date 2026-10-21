@@ -11,7 +11,8 @@ export const REQUEST_KINDS = new Set([
   "restart",
   "reveal",
   "reconcile",
-  "recover"
+  "recover",
+  "cloudflare"
 ]);
 export const TARGETS = new Set(["rac", "cloudflared"]);
 export const SOURCE_KINDS = new Set([

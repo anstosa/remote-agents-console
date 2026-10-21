@@ -11,8 +11,11 @@ const webpush = vi.hoisted(() => ({
   setVapidDetails: vi.fn()
 }));
 
-// replace only the external delivery boundary
-vi.mock('web-push', () => ({ default: webpush }));
+// retain real local key generation while replacing external delivery
+vi.mock('web-push', async importOriginal => {
+  const original = await importOriginal<typeof import('web-push')>();
+  return { default: { ...original.default, ...webpush } };
+});
 
 import { PushService } from '../src/push-service.js';
 
@@ -35,9 +38,9 @@ const enabledService = async () => {
   fixtureDirectories.push(directory);
   const file = join(directory, 'subscriptions.json');
   process.env.RAC_PUSH_SUBSCRIPTIONS_FILE = file;
-  process.env.RAC_VAPID_PUBLIC_KEY = 'public-key';
-  process.env.RAC_VAPID_PRIVATE_KEY = 'private-key';
-  return { file, service: new PushService() };
+  const service = new PushService();
+  await service.initialize();
+  return { file, service };
 };
 
 // build one provider-shaped failure
@@ -96,17 +99,33 @@ describe('PushService', () => {
       [valid.endpoint]: valid,
       'https://push.example.test/missing': { endpoint: 'https://push.example.test/missing', keys: { auth: '', p256dh: 'key' } }
     });
-    expect(webpush.setVapidDetails).toHaveBeenCalledWith('mailto:admin@localhost', 'public-key', 'private-key');
+    expect(webpush.setVapidDetails).not.toHaveBeenCalled();
   });
 
-  // avoid storage and provider calls without complete credentials
-  it('keeps subscription and notification delivery disabled without both VAPID keys', async () => {
-    process.env.RAC_VAPID_PUBLIC_KEY = 'public-key';
+  // initialize and reuse a managed identity without any environment credentials
+  it('automatically enables push and reuses its identity across service instances', async () => {
+    const { service: first } = await enabledService();
     const service = new PushService();
     expect(service.enabled).toBe(false);
-    expect(await service.subscribe(subscription('disabled'))).toBe(false);
+    await Promise.all([service.initialize(), service.initialize()]);
+    expect(service.enabled).toBe(true);
+    expect(service.publicKey).toBe(first.publicKey);
     await service.notify({ kind: 'cleanup', title: 'Cleanup', body: 'Removed stale state', tag: 'runtime-cleanup', url: '/#cleanup' });
     expect(webpush.sendNotification).not.toHaveBeenCalled();
+  });
+
+  // avoid signing one instance's subscriptions with another instance's identity
+  it('passes its own persisted credentials on every delivery without changing global sender state', async () => {
+    const { service: first } = await enabledService();
+    const { service: second } = await enabledService();
+    expect(first.publicKey).not.toBe(second.publicKey);
+    await first.subscribe(subscription('first-instance'));
+    await second.subscribe(subscription('second-instance'));
+    const message = { kind: 'cleanup' as const, title: 'Cleanup', body: 'Removed', tag: 'isolated-identity', url: '/' };
+    await first.notify(message);
+    await second.notify(message);
+    expect(webpush.sendNotification.mock.calls.map(call => call[2]?.vapidDetails?.publicKey)).toEqual([first.publicKey, second.publicKey]);
+    expect(webpush.setVapidDetails).not.toHaveBeenCalled();
   });
 
   // add timing metadata and explicit Android delivery options
@@ -126,7 +145,8 @@ describe('PushService', () => {
       TTL: 3_600,
       timeout: 10_000,
       topic: createHash('sha256').update(message.tag).digest('base64url').slice(0, 32),
-      urgency: 'high'
+      urgency: 'high',
+      vapidDetails: { subject: 'mailto:admin@localhost', publicKey: service.publicKey, privateKey: expect.any(String) }
     };
     expect(webpush.sendNotification).toHaveBeenNthCalledWith(1, first, expectedPayload, expectedOptions);
     expect(webpush.sendNotification).toHaveBeenNthCalledWith(2, second, expectedPayload, expectedOptions);

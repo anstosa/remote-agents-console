@@ -74,6 +74,11 @@ other items. Boolean switches sit to the right of their label and description.
 Restart guidance appears in the non-dismissable **Restart pending** toast after
 saving, rather than on individual settings or pages. Successful saves show a
 temporary **Saved** toast that dismisses after five seconds.
+Recovery details appear only after the host begins restarting RAC. The live
+countdown uses the host watchdog deadline and continues while RAC is offline.
+Completion shows a dismissible **Server restarted successfully** toast, or a
+warning when RAC had to recover after a failed restart. Dismissing that outcome
+does not dismiss any saved changes that still require a restart.
 
 Restarting RAC arms a temporary three-minute watchdog in the host settings
 worker, independent of the RAC process and browser. The watchdog requires a new
@@ -83,6 +88,55 @@ the worker stops the forward restart commands and automatically runs the same
 last-known-healthy recovery used by the host recovery command. Recovery retains
 the saved settings so they can be corrected and retried. Cloudflare-only
 operations do not arm the RAC watchdog.
+
+### Add Cloudflare remote access from Settings
+
+Start RAC locally first, then open **Settings → Cloudflare**. Token onboarding is
+available for Docker installations with the host settings applier installed.
+It uses a remotely managed tunnel; no Cloudflare account API token is needed.
+Native installations retain management of an already installed tunnel service.
+
+1. Open the [Cloudflare dashboard](https://one.dash.cloudflare.com/), go to
+   **Networking → Tunnels → Create Tunnel**, choose **Cloudflared** if asked,
+   and name the tunnel.
+2. In **Setup Environment / Install and Run**, copy **only the tunnel token**
+   from the installation command. Do not execute the command: RAC runs its own
+   connector. Paste the token into Settings and select **Start connector**.
+   This leaves RAC at its existing address and does not remove a legacy tunnel.
+3. After Cloudflare shows the connector online, select **Continue**. Add a
+   **Published application** route under **Routes → Add route** (called
+   **Public Hostname** in older dashboards).
+4. Choose a hostname under your Cloudflare-managed domain. Copy the **Service
+   URL** shown in RAC Settings; the default is `http://127.0.0.1:8787`. If the
+   dashboard splits the fields, choose **HTTP** and enter `127.0.0.1:8787` in
+   **URL**, using your configured RAC port. This loopback address works because
+   the managed connector uses host networking. Save the route.
+5. Enter the same hostname in RAC and select **Verify and use hostname**.
+   Confirm the address change. RAC compares a fresh local and public health
+   proof before changing `publicOrigin` or restarting itself. Verification
+   failure leaves the existing public origin unchanged so the route can be
+   corrected and retried.
+6. Open the verified HTTPS address and sign in again. Keep the original page
+   open until setup succeeds; the restart watchdog provides host recovery.
+
+The panel includes **Copy setup instructions**, **Copy service URL**, and
+**Copy hostname** buttons. Saved tokens are never sent back to the browser and
+are mounted into the connector as private, read-only token files rather than
+command-line arguments. Leave the token field blank to reuse a saved token.
+Existing tunnels show their configured endpoint, connector **Up/Down** status,
+and expandable **Configuration files**. Select **Replace tunnel** to reopen the
+setup guide; opening it does not change the running tunnel. Existing file-managed
+tunnel sources remain editable in that disclosure. Remotely managed routes stay
+in Cloudflare rather than an invented local configuration file.
+Installation checkout handover is blocked while a managed token connector is
+active, rather than risk leaving its private credential in the old checkout.
+
+Cloudflare Access must allow the unauthenticated `/healthz` route during this
+verification; a redirect or Access login page is not a healthy RAC response.
+Published application routes are Internet-facing, so retain RAC authentication
+and configure any additional Access policy deliberately. See Cloudflare's
+[setup guide](https://developers.cloudflare.com/tunnel/get-started/) and
+[token-file documentation](https://developers.cloudflare.com/tunnel/reference/run-parameters/#token-file).
 
 ### Keyboard shortcuts
 
@@ -934,6 +988,18 @@ sent through server push, so they can arrive while the console is suspended.
 Agent and Remote Agent Console update alerts depend on the browser's periodic
 authenticated checks. For iOS, install the console to the Home Screen and use
 iOS 16.4 or later before enabling alerts.
+
+RAC automatically generates its Web Push (VAPID) signing keys on first startup.
+The private key is stored with owner-only permissions in `push-vapid.json`,
+next to `RAC_PUSH_SUBSCRIPTIONS_FILE` (by default `.data/push-subscriptions.json`).
+Compose keeps both files in the mounted checkout's `.data` directory so restarts
+and image rebuilds retain the same identity. Back up both files together; losing
+the signing keys requires recreating browser push subscriptions. No external key
+generator or account is required, and these keys are not configurable in Settings.
+An existing complete `RAC_VAPID_PUBLIC_KEY` / `RAC_VAPID_PRIVATE_KEY` pair is
+imported once to preserve subscriptions; after that the stored identity wins.
+An invalid stored identity or incomplete legacy pair disables push rather than
+silently replacing keys. Fix the stored file or legacy pair and retry.
 
 If a worktree has a GitHub `origin` remote and the host has GitHub CLI
 credentials (or `RAC_GITHUB_TOKEN`), the console can show a link to its open

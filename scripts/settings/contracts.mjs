@@ -170,7 +170,7 @@ function validateNativeDescriptor(value, roots) {
 // parse and validate a strict queued request
 export function readRequest(path, descriptor) {
   const request = assertRecord(readJsonFile(path, MAX_REQUEST_BYTES));
-  assertKeys(request, new Set(["version", "id", "kind", "generation", "sources", "targets", "reveal", "inspect"]));
+  assertKeys(request, new Set(["version", "id", "kind", "generation", "sources", "targets", "reveal", "inspect", "cloudflare"]));
   if (
     request.version !== PROTOCOL_VERSION ||
     !ID_PATTERN.test(request.id ?? "") ||
@@ -239,7 +239,41 @@ export function readRequest(path, descriptor) {
   if (request.kind === "restart" && !request.targets?.length) {
     throw safeError("invalid-request");
   }
+  // validate the fixed Cloudflare control union
+  if (request.kind === "cloudflare") {
+    validateCloudflareRequest(request, descriptor);
+  } else if (request.cloudflare !== undefined) {
+    throw safeError("invalid-request");
+  }
   return request;
+}
+
+// constrain Cloudflare setup to its private stage and fixed CAS sources
+function validateCloudflareRequest(request, descriptor) {
+  const cloudflare = assertRecord(request.cloudflare);
+  assertKeys(cloudflare, new Set(["action", "candidate"]));
+  // status is read-only and carries no candidate authority
+  if (cloudflare.action === "status") {
+    if (cloudflare.candidate !== undefined || request.sources !== undefined || request.targets !== undefined) {
+      throw safeError("invalid-request");
+    }
+    return;
+  }
+  // require one exact private candidate for mutating actions
+  if (!["connect", "activate"].includes(cloudflare.action) || cloudflare.candidate !== "cloudflare-connect" || request.targets !== undefined) {
+    throw safeError("invalid-request");
+  }
+  const ids = request.sources?.map((source) => source.id).sort();
+  // bind mutations to current app and installation revisions only
+  if (JSON.stringify(ids) !== JSON.stringify(["app", "installation"]) || !descriptor.sources.app || !descriptor.sources.installation) {
+    throw safeError("invalid-request");
+  }
+  // reject candidate or migration authority on CAS-only source records
+  for (const source of request.sources) {
+    if (typeof source.existed !== "boolean" || source.candidate !== undefined || source.remove !== undefined || source.migration !== undefined) {
+      throw safeError("invalid-request");
+    }
+  }
 }
 
 // validate bounded recipient material

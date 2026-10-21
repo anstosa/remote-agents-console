@@ -22,7 +22,7 @@ export const settingsCodeFormatFailure = (format?: SettingsCodeFormat): string =
 };
 
 // isolate the shell runtime's globals and retire its memory after each draft operation
-async function prettyFormatShell(value: string, signal?: AbortSignal): Promise<string> {
+async function prettyFormatShell(value: string, signal?: AbortSignal, singleLine = false): Promise<string> {
   signal?.throwIfAborted();
   const worker = new Worker(new URL('./shell-format-worker.ts', import.meta.url), { type: 'module' });
   let removeAbortListener = () => {};
@@ -40,7 +40,7 @@ async function prettyFormatShell(value: string, signal?: AbortSignal): Promise<s
       // do not forward runtime diagnostics or source snippets to the editor
       worker.onerror = event => { event.preventDefault(); reject(new Error('Shell formatter unavailable')); };
       worker.onmessageerror = () => reject(new Error('Shell formatter unavailable'));
-      worker.postMessage(value);
+      worker.postMessage({ value, singleLine });
     });
   } finally {
     removeAbortListener();
@@ -63,7 +63,7 @@ function preserveProtectedMarkers(original: string, formatted: string, format: S
 }
 
 // select lazy browser parsers and apply only stable, reversible draft formatting
-export async function prettyFormatSettingsCode(value: string, format: SettingsCodeFormat, signal?: AbortSignal): Promise<string> {
+export async function prettyFormatSettingsCode(value: string, format: SettingsCodeFormat, signal?: AbortSignal, singleLine = false): Promise<string> {
   signal?.throwIfAborted();
   // leave unsupported source contracts untouched
   if (!canPrettyFormatSettingsCode(format)) return value;
@@ -84,7 +84,7 @@ export async function prettyFormatSettingsCode(value: string, format: SettingsCo
     const [prettier, xml] = await Promise.all([import('prettier/standalone'), import('@prettier/plugin-xml')]);
     formatSource = source => prettier.format(source, { parser: 'xml', plugins: [xml.default], tabWidth: 2, useTabs: false, xmlWhitespaceSensitivity: 'strict', xmlQuoteAttributes: 'preserve', xmlSortAttributesByKey: false, endOfLine: 'auto', embeddedLanguageFormatting: 'off' });
   } else {
-    const formatted = await prettyFormatShell(value, signal);
+    const formatted = await prettyFormatShell(value, signal, singleLine);
     preserveProtectedMarkers(value, formatted, format);
     // the isolated worker already reparses and verifies its own stable output
     return formatted;

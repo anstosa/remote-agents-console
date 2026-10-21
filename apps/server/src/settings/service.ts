@@ -1,13 +1,18 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { mkdir, open, rm } from 'node:fs/promises';
+import { isIP } from 'node:net';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import type { AgentKind } from '../adapters/types.js';
 import { defaultIntegrationConfig, sourceSchema, type DavoSettings, type ValidatedConfig } from '../config/schema.js';
-import { appApply, environmentDescription, environmentFallback, envApply, knownEnvironmentKeys, labels, protectedEnvironment, protectedPath } from './catalog.js';
-import { SettingsError, type HostReceipt, type HostRequest, type Installation, type InstallationSource, type SettingsFallback, type SettingsInput, type SettingsIssue, type SettingsOperation, type SettingsSnapshot, type SettingsSource, type SettingsStatus, type SettingsTarget, type SettingsValidation } from './contracts.js';
+import { appApply, environmentDescription, envApply, knownEnvironmentKeys, labels, managedEnvironment, managedEnvironmentKeys, protectedEnvironment, protectedPath } from './catalog.js';
+import { scratchHome } from '../places/places.js';
+import { serverCheckout } from '../workspaces/server-checkout.js';
+import { readPlaceholderRuntime, resolvedEnvironmentFallback, type EnvironmentFallbackContext, type PlaceholderRuntime } from './fallbacks.js';
+import { SettingsError, settingsRestartProgress, type CloudflareStatus, type HostReceipt, type HostRequest, type Installation, type InstallationSource, type SettingsFallback, type SettingsInput, type SettingsIssue, type SettingsOperation, type SettingsSnapshot, type SettingsSource, type SettingsStatus, type SettingsTarget, type SettingsValidation } from './contracts.js';
 import { credentialValues, hasEditorMarker, redactEditorSource, restoreEditorSource } from './editor-source.js';
-import { environment, patchEnvironment } from './env.js';
+import { environment, partitionEnvironment, patchEnvironment, restoreManagedEnvironment } from './env.js';
 import { readBounded, writePrivate } from './files.js';
 import { applyPatch, atPath, safePath, validPatchValue } from './patches.js';
 import { applicationHash, contentHash, environmentProjection } from './proof.js';
@@ -17,10 +22,21 @@ import { HostSettingsTransport, revealBinding, settingsControlRoot, validateInst
 import { installationSettingsSchema, validateApplication, validateEnvironment, validateSvg } from './validation.js';
 
 type Live = { name?: (name: string) => Promise<void> | void; defaultAgent?: (kind: AgentKind | undefined) => Promise<void> | void; davo?: (settings: DavoSettings) => Promise<void> | void };
-type Options = { controlRoot?: string; transport?: SettingsTransport; configPath?: string; checkout?: string; live?: Live };
+type Options = { controlRoot?: string; transport?: SettingsTransport; configPath?: string; checkout?: string; live?: Live; placeholderRuntime?: () => Promise<PlaceholderRuntime> };
 type Document = { source: InstallationSource; content?: string; value?: unknown; revisionId: string; hash: string; existed: boolean };
+// retain helper operation kinds independently of the narrower browser contract
+type StoredOperation = Omit<SettingsOperation, 'kind'> & { kind?: HostRequest['kind'] };
 const patchSchema = z.object({ op: z.enum(['set', 'remove', 'insert', 'move']), path: z.array(z.string()).max(16), value: z.unknown().optional(), index: z.number().int().optional(), from: z.number().int().optional(), to: z.number().int().optional(), revisionId: z.string().max(128).optional() }).strict();
 const inputSchema = z.object({ changes: z.array(z.object({ sourceId: z.string().max(64), revisionId: z.string().min(1).max(128), patches: z.array(patchSchema).max(512).optional(), content: z.string().max(1_048_576).optional(), remove: z.boolean().optional(), migration: z.object({ mode: z.enum(['copy', 'adopt', 'empty']) }).strict().optional() }).strict()).min(1).max(10) }).strict();
+const hostnameSchema = z.string().min(1).max(253).refine(value => value === value.trim() && value === value.toLowerCase() && isIP(value) === 0 && !/(?:^|\.)(?:localhost|local|internal|home|lan|test|invalid|example)$/u.test(value) && value.includes('.') && value.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label)), 'invalid hostname');
+const connectorTokenSchema = z.string().trim().min(1).max(8192).refine(value => !/[\s\u0000-\u001f\u007f]/u.test(value) && !/^(?:docker|cloudflared|sudo|curl|wget)$/iu.test(value));
+const cloudflareInputSchema = z.discriminatedUnion('action', [z.object({ action: z.literal('connect'), token: connectorTokenSchema.optional() }).strict(), z.object({ action: z.literal('activate'), hostname: hostnameSchema }).strict()]);
+const hostKindSchema = z.enum(['inspect', 'read', 'validate', 'commit', 'restart', 'reveal', 'reconcile', 'recover', 'cloudflare']);
+// accept only noncredentialed http service identities
+function safeServiceUrl(value: string): boolean { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && url.username === '' && url.password === '' && url.pathname === '/' && url.search === '' && url.hash === ''; } catch { return false; } }
+// accept only one canonical public https origin
+function safeReconnectOrigin(value: unknown): value is string { try { if (typeof value !== 'string') return false; const url = new URL(value); return url.protocol === 'https:' && url.origin === value && url.pathname === '/' && hostnameSchema.safeParse(url.hostname).success; } catch { return false; } }
+const cloudflareStatusSchema = z.object({ supported: z.boolean(), reason: z.string().regex(/^[a-z0-9_-]{1,80}$/u).optional(), mode: z.enum(['unconfigured', 'token', 'local']), enabled: z.boolean(), hostname: hostnameSchema.optional(), endpoint: z.string().max(512).refine(safeReconnectOrigin).optional(), tokenPresent: z.boolean(), serviceUrl: z.string().max(512).refine(safeServiceUrl), connected: z.boolean().optional(), verifiedAt: z.string().datetime().optional() }).strict();
 // redact protected leaves without changing collection shape
 function redact(value: unknown, path: string[] = [], protectedValues: readonly string[] = []): unknown {
   // protect credential-bearing structured leaves
@@ -36,24 +52,25 @@ function redact(value: unknown, path: string[] = [], protectedValues: readonly s
   if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, redact(child, [...path, key], protectedValues)]));
   return value;
 }
-// expose only catalogued symbolic guidance or independently proved safe Compose values
-function safeEnvironmentFallback(key: string, protectedValue: boolean, protectedValues: readonly string[], composeOwned: boolean): SettingsFallback | undefined {
+// expose resolved defaults only after controller authorization and credential filtering
+function safeEnvironmentFallback(key: string, protectedValue: boolean, protectedValues: readonly string[], composeOwned: boolean, context: EnvironmentFallbackContext): SettingsFallback | undefined {
   // custom variables have no RAC-owned omission contract
   if (!knownEnvironmentKeys.some(known => known === key)) return undefined;
-  const catalogued = environmentFallback(key);
-  // confirmed Compose ownership is decisive even when its value is unusable
-  if (composeOwned) {
+  const catalogued = resolvedEnvironmentFallback(key, context);
+  // protected fields may describe omission but never carry concrete bytes
+  if (protectedValue) return !protectedEnvironment(key) ? undefined : composeOwned ? { value: 'Hidden (from Compose environment)', kind: 'derived' } : catalogued?.kind === 'derived' ? catalogued : undefined;
+  let fallback = catalogued;
+  // preserve confirmed Compose ownership except for explicit runtime blank fallbacks
+  if (composeOwned && !(key === 'RAC_HOST_NODE_BIN' && (process.env[key] === undefined || process.env[key]!.trim() === ''))) {
     const running = process.env[key];
-    // protected, missing, empty, and oversized values expose no substitute default
-    if (protectedValue || running === undefined || running.trim().length === 0 || running.length > 4_096) return undefined;
-    const runtimeSecrets = knownEnvironmentKeys.filter(protectedEnvironment).map(protectedKey => process.env[protectedKey]).filter((secret): secret is string => secret !== undefined && secret.length > 0);
-    // suppress running values that repeat any known credential
-    if ([...protectedValues, ...runtimeSecrets].some(secret => secret.length > 0 && running.includes(secret))) return undefined;
-    return { value: running, kind: 'compose' };
+    // missing, empty, and oversized values expose no substitute default
+    if (running === undefined || running.trim().length === 0 || running.length > 4_096) return undefined;
+    fallback = { value: `${running} (from Compose environment)`, kind: 'compose' };
   }
-  // protected fields may describe inheritance but never carry concrete bytes
-  if (protectedValue) return protectedEnvironment(key) && catalogued?.kind === 'derived' ? catalogued : undefined;
-  return catalogued;
+  const runtimeSecrets = [...knownEnvironmentKeys, ...managedEnvironmentKeys].filter(protectedEnvironment).map(protectedKey => process.env[protectedKey]).filter((secret): secret is string => secret !== undefined && secret.length > 0);
+  // derived paths and application defaults can repeat credentials across sources too
+  if (fallback !== undefined && (fallback.value.length > 4_096 || [...protectedValues, ...runtimeSecrets].some(secret => secret.length > 0 && fallback.value.includes(secret)))) return undefined;
+  return fallback;
 }
 // compare only the narrowly supported live runtime values
 function liveProjection(value: { name: string; defaultAgent?: AgentKind; integrations?: ValidatedConfig['integrations'] }): string {
@@ -70,12 +87,17 @@ function environmentMatches(content: string, receipt: HostReceipt): boolean {
 // retain tunnel activation without exposing profiles as a separate installation control
 function automaticInstallationProfiles(content: string, installation: Installation): string {
   const active = ['cloudflared', 'cloudflared-credentials'].some(id => installation.sources[id]?.apply === 'cloudflared-recreate');
+  const managedToken = installation.compose?.profiles.includes('tunnel-token') === true;
   // file presence alone never enables a tunnel or changes a native installation
-  if (installation.kind !== 'compose' || !active) return content;
+  if (installation.kind !== 'compose' || !active && !managedToken) return content;
   try {
     const value = JSON.parse(content) as { compose?: { profiles: string[] } };
     // leave invalid or sparse input to existing validation rather than inventing deployment data
-    if (!installationSettingsSchema.safeParse(value).success || value.compose === undefined || value.compose.profiles.includes('tunnel')) return content;
+    if (!installationSettingsSchema.safeParse(value).success || value.compose === undefined) return content;
+    // preserve the helper-managed token profile without enabling the legacy local tunnel
+    if (managedToken && !value.compose.profiles.includes('tunnel-token')) return `${JSON.stringify({ ...value, compose: { ...value.compose, profiles: [...value.compose.profiles, 'tunnel-token'] } }, null, 2)}\n`;
+    // retain an existing managed or legacy activation profile unchanged
+    if (managedToken || value.compose.profiles.includes('tunnel')) return content;
     return `${JSON.stringify({ ...value, compose: { ...value.compose, profiles: [...value.compose.profiles, 'tunnel'] } }, null, 2)}\n`;
   } catch {
     // keep malformed source bytes intact for the existing safe validation error
@@ -95,8 +117,18 @@ export class SettingsService {
   private revisionIdentity = ['uninstalled', '0'];
   private sourceIdentities = new Map<string, string[]>();
   private desiredInstallation?: Installation;
+  private placeholderCache?: { key: string; expires: number; value: Promise<PlaceholderRuntime> };
   // bind installation identity without an editable environment locator
   constructor(private readonly config: ValidatedConfig, options: Options = {}) { this.options = options; this.controlRoot = options.controlRoot ?? settingsControlRoot(); this.transport = options.transport ?? new HostSettingsTransport(this.controlRoot); this.liveState = liveProjection(config); }
+  // share bounded read-only runtime lookups without letting draft values execute commands
+  private placeholderRuntime(): Promise<PlaceholderRuntime> {
+    const key = JSON.stringify([process.env.RAC_TMUX_BIN, process.env.RAC_HOST_TMUX_DIR, process.env.RAC_HOST_PATH, process.env.PATH]);
+    // refresh inherited tmux PATH facts while deduplicating simultaneous snapshots
+    if (this.placeholderCache?.key === key && this.placeholderCache.expires > Date.now()) return this.placeholderCache.value;
+    const value = (this.options.placeholderRuntime ?? readPlaceholderRuntime)().catch(() => ({}));
+    this.placeholderCache = { key, expires: Date.now() + 10_000, value };
+    return value;
+  }
   // persist opaque revision framing without storing source values
   private async initializeKey(): Promise<void> {
     // initialize once per process
@@ -204,6 +236,12 @@ export class SettingsService {
       if (content !== undefined) contents.set(id, content);
     }
     const protectedValues = [...contents].flatMap(([id, content]) => credentialValues(content, documents.get(id)!.source.kind));
+    let application: unknown;
+    try { application = JSON.parse(contents.get('app') ?? 'null'); } catch { /* invalid sources have no provable dependent defaults */ }
+    const fallbackContext: EnvironmentFallbackContext = { application, environment: environment(contents.get('env') ?? ''), installation, configPath: this.options.configPath, checkout: this.options.checkout ?? serverCheckout(), home: process.env.HOME ?? homedir(), ...(controller ? { runtime: await this.placeholderRuntime() } : {}) };
+    // dynamic schema guidance must obey the same cross-source credential boundary
+    const safePlaceholderPath = (value: string | undefined): string | undefined => value !== undefined && protectedValues.some(secret => secret.length > 0 && value.includes(secret)) ? undefined : value;
+    const scratchDirectory = controller ? safePlaceholderPath(await scratchHome(undefined, this.config.projects)) : undefined;
     const sources: SettingsSource[] = [];
     // describe each current authoritative source
     for (const [id, doc] of documents) {
@@ -213,26 +251,30 @@ export class SettingsService {
       if (currentValue === undefined && currentContent !== undefined && ['json', 'installation'].includes(doc.source.kind)) {
         try { currentValue = JSON.parse(currentContent); } catch { currentValue = undefined; }
       }
-      const editor = currentContent === undefined ? undefined : redactEditorSource(currentContent, doc.source.kind, doc.revisionId, protectedValues);
+      const editorContent = currentContent !== undefined && doc.source.kind === 'env' ? partitionEnvironment(currentContent, managedEnvironmentKeys).visible : currentContent;
+      const editor = editorContent === undefined ? undefined : redactEditorSource(editorContent, doc.source.kind, doc.revisionId, protectedValues);
       const hasProtectedContent = editor?.hasProtectedContent ?? (doc.source.serverPath === undefined && doc.existed);
       const source: SettingsSource = { id, label: labels[id] ?? id, ...(controller ? { path: doc.source.path } : {}), format: doc.source.kind, exists: doc.existed, writable: controller && installation !== undefined, protected: hasProtectedContent, tracked: id === 'compose', revisionId: doc.revisionId, apply: id === 'installation' ? 'source-migration' : doc.source.apply, ...(controller && editor !== undefined ? { content: editor.content } : {}), hasProtectedContent, origin: 'Current installation file' };
       // derive strict recursive controls from the actual source schema
       if (doc.source.kind === 'json' || doc.source.kind === 'installation') {
         if (controller) source.value = redact(currentValue, [], protectedValues);
-        source.schema = doc.source.kind === 'installation' ? installationSettingsPresentationSchema(installationSettingsSchema) : applicationSettingsSchema();
+        source.schema = doc.source.kind === 'installation' ? installationSettingsPresentationSchema(installationSettingsSchema, controller ? safePlaceholderPath(installation?.hostCheckout) : undefined) : applicationSettingsSchema({ scratchDirectory });
         if (controller) source.pathRevisions = this.pathRevisions(id, currentValue);
       }
       // enumerate known and unknown dotenv entries without adjacent disclosure
       if (doc.source.kind === 'env') {
         const values = environment(currentContent ?? '');
-        source.fields = [...new Set([...knownEnvironmentKeys, ...Object.keys(values)])].map(key => {
+        source.fields = [...new Set([...knownEnvironmentKeys, ...Object.keys(values).filter(key => !managedEnvironment(key))])].map(key => {
           const value = values[key];
           const present = Object.hasOwn(values, key);
           const protectedValue = protectedEnvironment(key) || value !== undefined && protectedValues.some(secret => secret.length > 0 && value.includes(secret));
           // distinguish confirmed conflicts from equal values or pending file edits
-          const winningSource = confirmedComposeOwnership && present && shadowedEnvironment.has(key) && process.env[key] !== undefined && value !== process.env[key] ? 'Compose environment' : undefined;
-          const fallback = controller ? safeEnvironmentFallback(key, protectedValue, protectedValues, confirmedComposeOwnership && shadowedEnvironment.has(key)) : undefined;
-          return { key, description: environmentDescription(key), protected: protectedValue, present, ...(protectedValue && present && value === '' ? { hasValue: false } : {}), apply: shadowedEnvironment.has(key) ? 'saved-only' : envApply(key), ...(controller && !protectedValue && value !== undefined ? { value } : {}), ...(fallback === undefined ? {} : { fallback }), origin: 'Environment file', ...(winningSource === undefined ? {} : { winningSource }), ...(shadowedEnvironment.has(key) ? { overriddenBy: 'Compose owns this value. Editing this environment entry has no current effect; edit its Compose source instead.' } : present && process.env[key] !== undefined && values[key] !== process.env[key] ? { overriddenBy: 'The running process differs: this file may be pending or overridden by Compose/inherited environment.' } : {}) };
+          const composeOwned = confirmedComposeOwnership && shadowedEnvironment.has(key);
+          const winningSource = composeOwned && present && process.env[key] !== undefined && value !== process.env[key] ? 'Compose environment' : undefined;
+          const fallback = controller ? safeEnvironmentFallback(key, protectedValue, protectedValues, composeOwned, fallbackContext) : undefined;
+          // retain configured-empty semantics separately from the omitted-value hint
+          const emptyValueHint = controller && !composeOwned && present && value === '' && key !== 'RAC_HOST_NODE_BIN' ? 'Empty (from explicit environment assignment)' : undefined;
+          return { key, ...(emptyValueHint === undefined ? {} : { emptyValueHint }), description: environmentDescription(key), protected: protectedValue, present, ...(protectedValue && present && value === '' ? { hasValue: false } : {}), apply: shadowedEnvironment.has(key) ? 'saved-only' : envApply(key), ...(controller && !protectedValue && value !== undefined ? { value } : {}), ...(fallback === undefined ? {} : { fallback }), origin: 'Environment file', ...(winningSource === undefined ? {} : { winningSource }), ...(shadowedEnvironment.has(key) ? { overriddenBy: 'Compose owns this value. Editing this environment entry has no current effect; edit its Compose source instead.' } : present && process.env[key] !== undefined && values[key] !== process.env[key] ? { overriddenBy: 'The running process differs: this file may be pending or overridden by Compose/inherited environment.' } : {}) };
         });
       }
       // retain the legacy structured icon value for controller previews
@@ -244,6 +286,41 @@ export class SettingsService {
   }
   // read private proof records without returning their hashes
   private async metadata<T>(name: string): Promise<T | undefined> { const raw = await readBounded(join(this.controlRoot, name), true, true, 2_097_152); try { return raw === undefined ? undefined : JSON.parse(raw) as T; } catch { throw new SettingsError('settings_metadata_invalid', 503); } }
+  // retain only bounded public operation fields
+  private publicOperation(value: unknown): SettingsOperation | undefined {
+    const operation = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{20,64}$/u), state: z.enum(['queued', 'running', 'complete', 'failed']), kind: hostKindSchema.optional(), phase: z.string().regex(/^[a-z0-9_-]{1,80}$/u).optional(), error: z.string().regex(/^[a-z0-9_-]{1,80}$/u).optional() }).passthrough().safeParse(value);
+    // ignore malformed pointers without granting them authority
+    if (!operation.success) return undefined;
+    const restart = settingsRestartProgress(operation.data.restart);
+    return { id: operation.data.id, state: operation.data.state, ...(operation.data.kind === 'cloudflare' ? { kind: operation.data.kind } : {}), ...(operation.data.phase ? { phase: operation.data.phase } : {}), ...(operation.data.error ? { error: operation.data.error } : {}), ...(restart ? { restart } : {}) };
+  }
+  // follow one durable deployment pointer without trusting arbitrary metadata
+  private async deployment(kind?: HostRequest['kind']): Promise<{ operation: SettingsOperation; kind?: HostRequest['kind']; cloudflare?: Omit<CloudflareStatus, 'operation' | 'reconnectOrigin'>; reconnectOrigin?: string } | undefined> {
+    const pointer = await this.metadata<Record<string, unknown>>('latest-deploy.json');
+    const pointed = this.publicOperation(pointer);
+    // retain an honestly absent deployment pointer
+    if (pointer === undefined) return undefined;
+    const pointerKind = hostKindSchema.safeParse(pointer.kind);
+    // fail closed on a substituted deployment pointer
+    if (pointed === undefined || !pointerKind.success) throw new SettingsError('settings_metadata_invalid', 503);
+    // ignore a valid unrelated deployment
+    if (kind !== undefined && pointerKind.data !== kind) return undefined;
+    const status = await this.metadata<Record<string, unknown>>(`status/${pointed.id}.json`);
+    const current = status === undefined ? pointed : this.publicOperation(status);
+    // bind terminal status to the exact pointed operation
+    if (current === undefined || status !== undefined && (status.id !== pointed.id || status.kind !== pointer.kind)) throw new SettingsError('settings_metadata_invalid', 503);
+    const parsedCloudflare = status?.cloudflare === undefined ? undefined : cloudflareStatusSchema.safeParse(status.cloudflare);
+    // reject substituted host status data rather than passing it to browsers
+    if (parsedCloudflare !== undefined && !parsedCloudflare.success) throw new SettingsError('settings_metadata_invalid', 503);
+    const reconnectOrigin = safeReconnectOrigin(pointer.reconnectOrigin) ? pointer.reconnectOrigin : undefined;
+    return { operation: current, kind: pointerKind.data, ...(parsedCloudflare?.success ? { cloudflare: parsedCloudflare.data } : {}), ...(reconnectOrigin ? { reconnectOrigin } : {}) };
+  }
+  // refuse overlapping host mutations while one deployment owns the helper lock
+  private async ensureNoDeployment(): Promise<void> {
+    const current = await this.deployment();
+    // keep all staged writes behind the active deployment
+    if (current !== undefined && ['queued', 'running'].includes(current.operation.state)) throw new SettingsError('settings_operation_in_progress', 409);
+  }
   // compare saved files with independently proved effective targets
   private async computeStatus(installation: Installation | undefined, documents: Map<string, Document>): Promise<SettingsStatus> {
     // fail closed when bootstrap capability is absent
@@ -267,10 +344,17 @@ export class SettingsService {
     const savedApplication = sourceSchema.safeParse(documents.get('app')?.value);
     // external live-field edits are not effective until a callback or boot consumes them
     if (savedApplication.success && liveProjection(savedApplication.data) !== this.liveState) targets.add('rac');
-    let latest = await this.metadata<SettingsOperation & { kind?: string }>('latest-deploy.json') ?? await this.metadata<SettingsOperation & { kind?: string }>('latest.json');
+    let latest = await this.metadata<StoredOperation>('latest-deploy.json');
+    // legacy restart discovery must not promote read-only connector inspections
+    if (latest === undefined) {
+      const legacy = await this.metadata<StoredOperation>('latest.json');
+      // only the deployment pointer grants Cloudflare mutation ownership
+      if (legacy?.kind === 'restart' || legacy?.kind === 'reconcile') latest = legacy;
+    }
     // follow the persisted deployment identity instead of transient read operations
-    if (latest !== undefined) latest = await this.metadata<SettingsOperation & { kind?: string }>(`status/${latest.id}.json`) ?? latest;
-    const operation = latest !== undefined && ['restart', 'reconcile'].includes(latest.kind ?? '') ? { id: latest.id, state: latest.state, ...(latest.phase ? { phase: latest.phase } : {}), ...(latest.error ? { error: /^[a-z0-9_-]{1,80}$/u.test(latest.error) ? latest.error : 'Settings apply failed.' } : {}) } : undefined;
+    if (latest !== undefined) latest = await this.metadata<StoredOperation>(`status/${latest.id}.json`) ?? latest;
+    const restart = settingsRestartProgress(latest?.restart);
+    const operation = latest !== undefined && ['restart', 'reconcile', 'cloudflare'].includes(latest.kind ?? '') ? { id: latest.id, state: latest.state, ...(latest.kind === 'cloudflare' ? { kind: 'cloudflare' as const } : {}), ...(latest.phase ? { phase: latest.phase } : {}), ...(latest.error ? { error: /^[a-z0-9_-]{1,80}$/u.test(latest.error) ? latest.error : 'Settings apply failed.' } : {}), ...(restart ? { restart } : {}) } : undefined;
     const env = environment(documents.get('env')?.content ?? '');
     const reloginRequired = ['RAC_SESSION_SECRET', 'RAC_PASSWORD_HASH'].some(key => env[key] !== undefined && env[key] !== process.env[key]);
     const publicOrigin = atPath(documents.get('app')?.value, ['publicOrigin']);
@@ -278,6 +362,91 @@ export class SettingsService {
   }
   // refresh durable status for every authenticated browser
   async status(): Promise<SettingsStatus> { const installation = await this.installation(); return await this.computeStatus(installation, await this.documents(installation)); }
+  // cache only validated noncredential Cloudflare status
+  private async cacheCloudflare(value: unknown): Promise<Omit<CloudflareStatus, 'operation' | 'reconnectOrigin'>> {
+    const parsed = cloudflareStatusSchema.safeParse(value);
+    // refuse malformed helper data instead of partially exposing it
+    if (!parsed.success) throw new SettingsError('settings_helper_invalid', 503);
+    await writePrivate(join(this.controlRoot, 'cloudflare-status.json'), JSON.stringify(parsed.data));
+    return parsed.data;
+  }
+  // read only the redacted server-owned Cloudflare cache
+  private async cachedCloudflare(): Promise<Omit<CloudflareStatus, 'operation' | 'reconnectOrigin'> | undefined> {
+    const value = await this.metadata<unknown>('cloudflare-status.json');
+    // retain an honestly absent cache
+    if (value === undefined) return undefined;
+    const parsed = cloudflareStatusSchema.safeParse(value);
+    // reject a substituted cache
+    if (!parsed.success) throw new SettingsError('settings_metadata_invalid', 503);
+    return parsed.data;
+  }
+  // request one bounded helper status outside active deployment windows
+  private async queryCloudflare(installation: Installation): Promise<Omit<CloudflareStatus, 'operation' | 'reconnectOrigin'>> {
+    const id = randomBytes(24).toString('base64url');
+    try {
+      const result = await this.transport.request({ version: 1, id, kind: 'cloudflare', generation: installation.generation, cloudflare: { action: 'status' } });
+      return await this.cacheCloudflare(result.cloudflare);
+    } finally { await rm(join(this.controlRoot, 'status', `${id}.json`), { force: true }); }
+  }
+  // expose current connector state without disclosing its token or host paths
+  async cloudflareStatus(): Promise<CloudflareStatus> { return await this.serialized(async () => {
+    const installation = await this.installation();
+    // describe unavailable setup without inventing installed host state
+    if (installation === undefined) return { supported: false, reason: 'settings_applier_unavailable', mode: 'unconfigured', enabled: false, tokenPresent: false, serviceUrl: `http://127.0.0.1:${this.config.listen.port}` };
+    const latestDeployment = await this.deployment();
+    // never queue a status request behind a long-running host operation
+    if (latestDeployment !== undefined && ['queued', 'running'].includes(latestDeployment.operation.state)) {
+      const cached = await this.cachedCloudflare();
+      // report an honest temporary failure before the first cache exists
+      if (cached === undefined) throw new SettingsError('cloudflare_status_pending', 503);
+      return { ...cached, ...(latestDeployment.kind === 'cloudflare' ? { operation: latestDeployment.operation } : {}) };
+    }
+    const deployment = latestDeployment?.kind === 'cloudflare' ? latestDeployment : undefined;
+    // consume terminal host proof before making another status request
+    if (deployment?.cloudflare !== undefined) {
+      await this.cacheCloudflare(deployment.cloudflare);
+      // refresh idle liveness so terminal proof never freezes future connector state
+      const current = await this.queryCloudflare(installation);
+      const activated = deployment.operation.state === 'complete' && deployment.operation.phase === 'activated';
+      return { ...current, operation: deployment.operation, ...(activated && deployment.reconnectOrigin ? { reconnectOrigin: deployment.reconnectOrigin } : {}) };
+    }
+    const current = await this.queryCloudflare(installation);
+    return { ...current, ...(deployment ? { operation: deployment.operation } : {}) };
+  }); }
+  // stage one private connector action and publish only its operation identity
+  async configureCloudflare(input: unknown): Promise<{ operation: SettingsOperation; reconnectOrigin?: string }> { return await this.serialized(async () => {
+    const parsed = cloudflareInputSchema.safeParse(input);
+    // reject malformed or cross-action fields before staging credentials
+    if (!parsed.success) throw new SettingsError('invalid_cloudflare_request');
+    const installation = await this.installation();
+    // require installed helper authority before host setup
+    if (installation === undefined) throw new SettingsError('settings_applier_unavailable', 503);
+    await this.ensureNoDeployment();
+    const current = await this.queryCloudflare(installation);
+    // allow setup only through the supported Compose helper
+    if (!current.supported || installation.kind !== 'compose') throw new SettingsError('cloudflare_setup_unsupported', 409);
+    // require the connector phase before public route verification
+    if (parsed.data.action === 'activate' && (current.mode !== 'token' || !current.enabled || !current.tokenPresent || current.connected !== true)) throw new SettingsError('cloudflare_connector_not_ready', 409);
+    const documents = await this.documents(installation);
+    const app = documents.get('app'); const installationDocument = documents.get('installation');
+    // require both source identities for host compare-and-swap
+    if (app === undefined || installationDocument === undefined) throw new SettingsError('cloudflare_setup_unsupported', 409);
+    // avoid applying unrelated saved changes during the activating RAC restart
+    if (parsed.data.action === 'activate') {
+      const settingsStatus = await this.computeStatus(installation, documents);
+      // keep unrelated pending files out of the activation restart
+      if (settingsStatus.pending) throw new SettingsError('settings_changes_pending', 409);
+    }
+    const id = randomBytes(24).toString('base64url'); const operation: SettingsOperation = { id, state: 'queued', kind: 'cloudflare' }; let published = false;
+    const reconnectOrigin = parsed.data.action === 'activate' ? `https://${parsed.data.hostname}` : undefined;
+    try {
+      await writePrivate(join(this.controlRoot, 'staging', id, 'cloudflare-connect'), JSON.stringify(parsed.data));
+      await this.transport.request({ version: 1, id, kind: 'cloudflare', generation: installation.generation, sources: [{ id: 'app', contentHash: app.hash, existed: app.existed }, { id: 'installation', contentHash: installationDocument.hash, existed: installationDocument.existed }], cloudflare: { action: parsed.data.action, candidate: 'cloudflare-connect' } }, false, () => { published = true; });
+      await writePrivate(join(this.controlRoot, 'latest-deploy.json'), JSON.stringify({ ...operation, kind: 'cloudflare', cloudflareAction: parsed.data.action, ...(reconnectOrigin ? { reconnectOrigin } : {}) }));
+      this.leases.clear();
+      return { operation, ...(reconnectOrigin ? { reconnectOrigin } : {}) };
+    } finally { await this.cleanupStage(id, published); }
+  }); }
   // resolve one current installed source without accepting a browser-selected path
   async editorFile(sourceId: string, revisionId: string): Promise<string> {
     const installation = await this.installation();
@@ -299,6 +468,7 @@ export class SettingsService {
     if (!parsed.success) throw new SettingsError('invalid_settings_request');
     const installation = await this.installation();
     if (installation === undefined) throw new SettingsError('settings_applier_unavailable', 503);
+    await this.ensureNoDeployment();
     const documents = await this.documents(installation); const candidates = new Map<string, string | undefined>(); const sources: NonNullable<HostRequest['sources']> = [];
     const sourceContents = new Map<string, string>();
     // retain already-local bytes as validation baselines
@@ -352,11 +522,20 @@ export class SettingsService {
         // rehydrate only unchanged revision-bound markers unless this session revealed the whole source
         if (change.content !== undefined) {
           const original = sourceContents.get(change.sourceId);
-          if (original !== undefined && this.wholeSourceDisclosed(sessionId, change.sourceId, doc.revisionId)) {
+          const submitted = doc.source.kind === 'env' ? partitionEnvironment(change.content, managedEnvironmentKeys) : undefined;
+          // reject attempts to reintroduce server-managed assignments through the raw editor
+          if (submitted !== undefined && submitted.hidden.length > 0) throw new SettingsError('invalid_environment_patch');
+          const originalEnvironment = original !== undefined && doc.source.kind === 'env' ? partitionEnvironment(original, managedEnvironmentKeys) : undefined;
+          const originalEditorContent = originalEnvironment?.visible ?? original;
+          const submittedEditorContent = submitted?.visible ?? change.content;
+          if (originalEditorContent !== undefined && this.wholeSourceDisclosed(sessionId, change.sourceId, doc.revisionId)) {
             // never persist editor protocol text from a revealed document
-            if (hasEditorMarker(change.content)) throw new SettingsError('settings_protected_content_changed');
-          } else if (original !== undefined) content = restoreEditorSource(change.content, original, doc.source.kind, doc.revisionId, editorProtectedValues);
+            if (hasEditorMarker(submittedEditorContent)) throw new SettingsError('settings_protected_content_changed');
+            content = submittedEditorContent;
+          } else if (originalEditorContent !== undefined) content = restoreEditorSource(submittedEditorContent, originalEditorContent, doc.source.kind, doc.revisionId, editorProtectedValues);
           else if (doc.existed) throw new SettingsError('settings_reveal_required', 403);
+          // reattach only the original managed records after validating the editable projection
+          if (originalEnvironment !== undefined) content = restoreManagedEnvironment(content, originalEnvironment.hidden);
         }
         // preserve unchanged protected values in typed dotenv edits
         if (change.patches !== undefined && doc.source.kind === 'env') {
@@ -364,8 +543,11 @@ export class SettingsService {
           for (const patch of change.patches) {
             // accept only one keyed string edit or removal
             if (patch.path.length !== 1 || !['set', 'remove'].includes(patch.op) || patch.op === 'set' && typeof patch.value !== 'string') throw new SettingsError('invalid_environment_patch');
+            const key = patch.path[0]!;
+            // keep generated VAPID material outside direct settings mutations
+            if (managedEnvironment(key)) throw new SettingsError('invalid_environment_patch');
             const value = patch.op === 'remove' || patch.value === '' ? undefined : patch.value as string;
-            content = patchEnvironment(content, patch.path[0]!, value);
+            content = patchEnvironment(content, key, value);
           }
         } else if (change.patches !== undefined && ['json', 'installation'].includes(doc.source.kind)) {
           // require valid structured truth instead of replacing an unreadable host file
@@ -464,6 +646,8 @@ export class SettingsService {
     if (doc === undefined || input.revisionId !== doc.revisionId) throw new SettingsError('settings_conflict', 409);
     const path = input.path ?? [];
     if (!safePath(path)) throw new SettingsError('invalid_settings_path');
+    // keep generated VAPID material outside direct settings disclosures
+    if (doc.source.kind === 'env' && path.length === 1 && managedEnvironment(path[0]!)) throw new SettingsError('invalid_settings_path');
     // disclose host-only bytes only for this explicit controller-bound request
     const boot = await this.metadata<{ bootNonce: string }>('boot.json');
     const content = doc.source.serverPath === undefined && installation !== undefined ? await this.transport.read(input.sourceId, { bootNonce: boot?.bootNonce ?? '', sessionBinding: this.revision('controller', sessionId), revisionId: doc.revisionId, contentHash: doc.hash, existed: doc.existed }) : doc.content;
@@ -472,7 +656,7 @@ export class SettingsService {
     if (path.length > 0 && content !== undefined && ['json', 'installation', 'credentials'].includes(doc.source.kind)) {
       try { structuredValue = JSON.parse(content); } catch { throw new SettingsError('invalid_settings_value'); }
     }
-    const value = path.length === 0 ? content : doc.source.kind === 'env' && path.length === 1 ? environment(content ?? '')[path[0]!] : atPath(structuredValue, path);
+    const value = path.length === 0 ? doc.source.kind === 'env' ? partitionEnvironment(content ?? '', managedEnvironmentKeys).visible : content : doc.source.kind === 'env' && path.length === 1 ? environment(content ?? '')[path[0]!] : atPath(structuredValue, path);
     // re-read selected bytes before publishing a disclosure
     let current: { contentHash: string; existed: boolean } | undefined;
     // host metadata and local bytes both retain absent-versus-empty identity
@@ -494,5 +678,5 @@ export class SettingsService {
   // queue an explicit fixed restart that survives this process
   async restart(): Promise<SettingsOperation> { return await this.serialized(async () => { const installation = await this.installation(); if (installation === undefined) throw new SettingsError('settings_applier_unavailable', 503); const documents = await this.documents(installation); const status = await this.computeStatus(installation, documents); if (status.operation !== undefined && ['queued', 'running'].includes(status.operation.state)) return status.operation; if (!status.pending) throw new SettingsError('settings_restart_not_pending', 409); const id = randomBytes(24).toString('base64url'); const operation: SettingsOperation = { id, state: 'queued' }; await this.transport.request({ version: 1, id, kind: 'restart', generation: installation.generation, targets: status.targets, sources: [...documents].map(([id, doc]) => ({ id, contentHash: doc.hash, existed: doc.existed })) }, false); await writePrivate(join(this.controlRoot, 'latest-deploy.json'), JSON.stringify({ ...operation, kind: 'restart' })); this.leases.clear(); return operation; }); }
   // return bounded redacted durable operation progress
-  async operation(id: string): Promise<SettingsOperation | undefined> { if (!/^[A-Za-z0-9_-]{20,64}$/u.test(id)) throw new SettingsError('invalid_settings_operation'); const result = await this.metadata<SettingsOperation>(`status/${id}.json`); return result === undefined ? undefined : { id: result.id, state: result.state, ...(result.phase ? { phase: result.phase } : {}), ...(result.error && /^[a-z0-9_-]{1,80}$/u.test(result.error) ? { error: result.error } : {}) }; }
+  async operation(id: string): Promise<SettingsOperation | undefined> { if (!/^[A-Za-z0-9_-]{20,64}$/u.test(id)) throw new SettingsError('invalid_settings_operation'); const result = await this.metadata<SettingsOperation>(`status/${id}.json`); const restart = settingsRestartProgress(result?.restart); return result === undefined ? undefined : { id: result.id, state: result.state, ...(result.kind === 'cloudflare' ? { kind: result.kind } : {}), ...(result.phase ? { phase: result.phase } : {}), ...(result.error && /^[a-z0-9_-]{1,80}$/u.test(result.error) ? { error: result.error } : {}), ...(restart ? { restart } : {}) }; }
 }

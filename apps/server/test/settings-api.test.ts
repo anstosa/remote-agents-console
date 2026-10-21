@@ -26,6 +26,8 @@ function settingsDouble() {
     reveal: vi.fn(async () => ({ value: 'selected secret', revisionId: 'opaque-app', leaseId: 'opaque-disclosure-lease', expiresAt: '2026-10-10T20:00:00.000Z' })),
     remask: vi.fn(async () => ({ ok: true as const })),
     restart: vi.fn(async () => ({ id: 'settings_restart_operation', state: 'queued' as const })),
+    cloudflareStatus: vi.fn(async () => ({ supported: true, mode: 'unconfigured' as const, enabled: false, tokenPresent: false, serviceUrl: 'http://remote-agent-console:8787' })),
+    configureCloudflare: vi.fn(async () => ({ operation: { id: 'cloudflare_setup_operation', state: 'queued' as const, kind: 'cloudflare' as const } })),
     operation: vi.fn(async () => undefined),
     updateApplication: vi.fn(async () => undefined)
   };
@@ -138,6 +140,31 @@ describe('settings browser API authorization', () => {
     expect(service.restart).not.toHaveBeenCalled();
     expect(service.reveal).not.toHaveBeenCalled();
   }, 15_000);
+
+  // require controller and csrf authority for connector setup without returning credentials
+  it('protects the Cloudflare setup API and never echoes connector tokens', async () => {
+    const service = settingsDouble();
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const app = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 44).toString('base64url')), settings: service as never });
+    apps.push(app);
+    const first = await login(app);
+    const observer = await login(app);
+    const token = 'private-cloudflare-connector-token';
+
+    const read = await app.inject({ method: 'GET', url: '/api/settings/cloudflare', headers: { host: 'agents.example.com', cookie: observer.cookie } });
+    const anonymous = await app.inject({ method: 'POST', url: '/api/settings/cloudflare', headers: { host: 'agents.example.com', origin: 'https://agents.example.com' }, payload: { action: 'connect', token } });
+    const inactive = await app.inject({ method: 'POST', url: '/api/settings/cloudflare', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: observer.cookie, 'x-csrf-token': observer.csrf }, payload: { action: 'connect', token } });
+    const accepted = await app.inject({ method: 'POST', url: '/api/settings/cloudflare', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: first.cookie, 'x-csrf-token': first.csrf }, payload: { action: 'connect', token } });
+    const unknown = await app.inject({ method: 'POST', url: '/api/settings/cloudflare', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: first.cookie, 'x-csrf-token': first.csrf }, payload: { action: 'connect', token, command: 'docker compose down' } });
+
+    expect(read).toMatchObject({ statusCode: 200, headers: { 'cache-control': 'no-store' } });
+    expect(anonymous.statusCode).toBe(401);
+    expect(inactive).toMatchObject({ statusCode: 423 });
+    expect(accepted).toMatchObject({ statusCode: 202, headers: { 'cache-control': 'no-store' } });
+    expect(accepted.body).not.toContain(token);
+    expect(unknown.statusCode).toBe(400);
+    expect(service.configureCloudflare).toHaveBeenCalledExactlyOnceWith({ action: 'connect', token });
+  }, 15_000);
 });
 
 describe('settings reveal takeover boundary', () => {
@@ -191,6 +218,27 @@ describe('settings reveal takeover boundary', () => {
     expect(response.json()).toEqual({ error: 'another client is active' });
     expect(response.body).not.toContain('must not escape');
     expect(remask).toHaveBeenCalledExactlyOnceWith('takeover-lease', 'session-one');
+  });
+
+  // suppress setup operation details when controller ownership changes mid-request
+  it('returns only a bounded error after a Cloudflare setup takeover', async () => {
+    const app = Fastify();
+    apps.push(app);
+    const token = 'A'.repeat(100);
+    const service = settingsDouble();
+    await registerSettingsRoutes(app, {
+      service: service as never,
+      session: () => ({ id: 'session-one' }) as never,
+      controlled: () => ({ id: 'session-one' }) as never,
+      isController: () => false
+    });
+
+    const response = await app.inject({ method: 'POST', url: '/api/settings/cloudflare', payload: { action: 'connect', token } });
+
+    expect(response).toMatchObject({ statusCode: 423, headers: { 'cache-control': 'no-store' } });
+    expect(response.json()).toEqual({ error: 'another client is active' });
+    expect(response.body).not.toContain(token);
+    expect(service.configureCloudflare).toHaveBeenCalledExactlyOnceWith({ action: 'connect', token });
   });
 
   // map unexpected service failures to one secret-free availability error

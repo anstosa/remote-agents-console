@@ -5,8 +5,16 @@ import {
   confirmSettingsClose,
   confirmSettingsDiscard,
 } from "./settings-confirmation-helpers.js";
-import { isProtectedValue } from "../src/settings/contracts.js";
+import {
+  isProtectedValue,
+  type SettingsEnvField,
+  type SettingsPatch,
+  type SettingsSchema,
+} from "../src/settings/contracts.js";
 import { applicationSettingsSchema } from "../../server/src/settings/schema.js";
+import { environmentFallback } from "../../server/src/settings/catalog.js";
+import { applyPatch } from "../../server/src/settings/patches.js";
+import { applyAuthoredProjectPatch } from "../../server/src/settings/project-normalization.js";
 
 const authoritativeProjectsSchema =
   applicationSettingsSchema().properties!.projects!;
@@ -16,7 +24,7 @@ async function chooseSettingsOption(selector: Locator, value: string) {
   await selector.click();
   await selector
     .page()
-    .getByRole("listbox")
+    .getByRole("listbox", { name: "Settings section options", exact: true })
     .locator(`[role="option"][data-value=${JSON.stringify(value)}]`)
     .click();
 }
@@ -28,7 +36,10 @@ async function expectSettingsOptions(
   groups?: number,
 ) {
   await selector.click();
-  const popup = selector.page().getByRole("listbox");
+  const popup = selector.page().getByRole("listbox", {
+    name: "Settings section options",
+    exact: true,
+  });
   await expect(popup.getByRole("option")).toHaveCount(count);
   // inspect labelled groups when the case specifies them
   if (groups !== undefined)
@@ -50,7 +61,8 @@ async function selectSettingsSection(
   if (await selector.isVisible()) await chooseSettingsOption(selector, id);
   else {
     // retain precise navigation when a source has an unsaved indicator
-    const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const visibleLabel = id === "app" ? "Application" : label;
+    const escaped = visibleLabel.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
     await settings
       .getByRole("navigation", { name: "Settings sources" })
       .getByRole("button", {
@@ -58,6 +70,176 @@ async function selectSettingsSection(
       })
       .click();
   }
+}
+
+type SettingsPageHeaderExpectation = {
+  id: string;
+  title: string;
+  eyebrow: "Browser settings" | "Server settings" | "Deployment settings";
+  sourcePath?: string;
+};
+
+const settingsPageHeaderExpectations: SettingsPageHeaderExpectation[] = [
+  { id: "browser", title: "This browser", eyebrow: "Browser settings" },
+  { id: "voice", title: "Voice", eyebrow: "Server settings" },
+  {
+    id: "keyboard",
+    title: "Keyboard shortcuts",
+    eyebrow: "Server settings",
+  },
+  {
+    id: "app",
+    title: "Application",
+    eyebrow: "Server settings",
+    sourcePath: "/checkout/config/config.json",
+  },
+  { id: "agents", title: "Agents", eyebrow: "Server settings" },
+  { id: "projects", title: "Projects", eyebrow: "Server settings" },
+  { id: "reviews", title: "Reviews", eyebrow: "Server settings" },
+  { id: "tmux", title: "TMUX", eyebrow: "Server settings" },
+  { id: "storage", title: "Storage", eyebrow: "Server settings" },
+  {
+    id: "env",
+    title: "Environment & keys",
+    eyebrow: "Deployment settings",
+    sourcePath: "/checkout/.env",
+  },
+  {
+    id: "installation",
+    title: "Installation",
+    eyebrow: "Deployment settings",
+    sourcePath: "/checkout/config/settings-installation.json",
+  },
+  {
+    id: "compose-override",
+    title: "Docker",
+    eyebrow: "Deployment settings",
+    sourcePath: "/checkout/compose.override.yaml",
+  },
+  {
+    id: "cloudflare",
+    title: "Cloudflare",
+    eyebrow: "Deployment settings",
+  },
+];
+
+// require one complete shared page header without matching nested section copy
+async function expectStandardSettingsHeader(
+  settings: Locator,
+  expected: SettingsPageHeaderExpectation,
+) {
+  const panel = settings.getByRole("region", {
+    name: `${expected.title} settings content`,
+    exact: true,
+  });
+  const header = panel.locator(":scope > .settings-source-header");
+  await expect(header).toHaveCount(1);
+  await expect(header.locator(".settings-source-kicker")).toHaveText(
+    expected.eyebrow,
+  );
+  await expect(
+    header.getByRole("heading", {
+      name: expected.title,
+      exact: true,
+      level: 2,
+    }),
+  ).toHaveCount(1);
+  const description = header.locator(".settings-preference-description");
+  await expect(description).toHaveCount(1);
+  await expect(description).toHaveText(/\S/u);
+  const metadata = header.locator(".settings-source-metadata");
+  await expect(metadata).toHaveCount(expected.sourcePath === undefined ? 0 : 1);
+  // source-backed pages retain subordinate file identity
+  if (expected.sourcePath !== undefined)
+    await expect(metadata).toContainText(expected.sourcePath);
+  return { description, header, panel };
+}
+
+// measure one editor against its owning settings scroller
+async function settingsEditorGeometry(editor: Locator) {
+  return editor.locator(".settings-code-editor-surface").evaluate((surface) => {
+    const panel = surface.closest(".settings-source-panel");
+    const textarea = surface.querySelector("textarea");
+    // reject detached editor geometry
+    if (panel === null || textarea === null)
+      throw new Error("Settings editor is missing its source panel");
+    const surfaceBox = surface.getBoundingClientRect();
+    const surfaceStyle = getComputedStyle(surface);
+    const textareaStyle = getComputedStyle(textarea);
+    const presentation = surface.querySelector<HTMLElement>(
+      ".syntax-highlight-presentation",
+    );
+    // reject incomplete editor composition
+    if (presentation === null)
+      throw new Error("Settings editor is missing its presentation layer");
+    const textareaBorderHeight =
+      Number.parseFloat(textareaStyle.borderTopWidth) +
+      Number.parseFloat(textareaStyle.borderBottomWidth);
+    const textareaScrollbarHeight = Math.max(
+      0,
+      textarea.offsetHeight - textarea.clientHeight - textareaBorderHeight,
+    );
+    const naturalHeight =
+      presentation.querySelectorAll(".syntax-line").length *
+        Number.parseFloat(textareaStyle.lineHeight) +
+      Number.parseFloat(textareaStyle.paddingTop) +
+      Number.parseFloat(textareaStyle.paddingBottom) +
+      Number.parseFloat(surfaceStyle.borderTopWidth) +
+      Number.parseFloat(surfaceStyle.borderBottomWidth) +
+      textareaScrollbarHeight;
+    return {
+      documentScrollTop: document.scrollingElement?.scrollTop ?? 0,
+      naturalHeight,
+      panelClientHeight: panel.clientHeight,
+      panelScrollHeight: panel.scrollHeight,
+      panelScrollTop: panel.scrollTop,
+      surfaceHeight: surfaceBox.height,
+    };
+  });
+}
+
+// measure vertical containment while preserving horizontal code overflow
+async function settingsEditorContentGeometry(input: Locator) {
+  return input.evaluate((textarea) => {
+    const surface = textarea.closest(".settings-code-editor-surface");
+    const panel = textarea.closest(".settings-source-panel");
+    const presentation = surface?.querySelector<HTMLElement>(
+      ".syntax-highlight-presentation",
+    );
+    const lastLine = presentation?.querySelector<HTMLElement>(
+      ".syntax-line:last-child",
+    );
+    // reject incomplete editor composition
+    if (
+      surface === null ||
+      panel === null ||
+      presentation === undefined ||
+      presentation === null
+    )
+      throw new Error("Settings editor content is missing its layout owner");
+    const panelBox = panel.getBoundingClientRect();
+    const lastLineBox = lastLine?.getBoundingClientRect();
+    return {
+      clientHeight: textarea.clientHeight,
+      clientWidth: textarea.clientWidth,
+      documentScrollTop: document.scrollingElement?.scrollTop ?? 0,
+      lastLineBottom: lastLineBox?.bottom,
+      lastLineTop: lastLineBox?.top,
+      panelBottom: panelBox.bottom,
+      panelClientHeight: panel.clientHeight,
+      panelScrollHeight: panel.scrollHeight,
+      panelScrollTop: panel.scrollTop,
+      panelTop: panelBox.top,
+      presentationClientHeight: presentation.clientHeight,
+      presentationScrollHeight: presentation.scrollHeight,
+      presentationScrollTop: presentation.scrollTop,
+      scrollHeight: textarea.scrollHeight,
+      scrollLeft: textarea.scrollLeft,
+      scrollTop: textarea.scrollTop,
+      scrollWidth: textarea.scrollWidth,
+      surfaceHeight: surface.getBoundingClientRect().height,
+    };
+  });
 }
 
 // stage an Installation migration through its supported whole-file editor
@@ -96,17 +278,48 @@ type SettingsReadPlan = {
   status?: number;
 };
 
-const settingsSourcePlaceholders = [
-  { id: "app", label: "Application configuration" },
+const settingsUnavailableSections = [
+  { id: "app", label: "Application" },
+  { id: "agents", label: "Agents" },
   { id: "projects", label: "Projects" },
+  { id: "reviews", label: "Reviews" },
   { id: "tmux", label: "TMUX" },
+  { id: "storage", label: "Storage" },
   { id: "env", label: "Environment & keys" },
   { id: "installation", label: "Installation" },
   { id: "compose-override", label: "Docker" },
-  { id: "cloudflared", label: "Cloudflare tunnel" },
-  { id: "cloudflared-credentials", label: "Cloudflare credentials" },
+  { id: "cloudflare", label: "Cloudflare" },
 ] as const;
 const protectedSourceMarker = `__RAC_PROTECTED_${"A".repeat(43)}__`;
+const agentEnvironmentKeys = [
+  "RAC_CODEX_BIN",
+  "RAC_CLAUDE_BIN",
+  "RAC_CLAUDE_CONFIG_DIR",
+  "RAC_HOST_CODEX_BIN",
+  "RAC_OPENAI_ADMIN_KEY",
+  "RAC_OPENAI_API_KEY_IDS",
+  "CODEX_VERSION",
+] as const;
+const storageEnvironmentKeys = [
+  "RAC_ADAPTER_FILES_DIR",
+  "RAC_SERVER_ADMIN_STATUS_DIR",
+  "RAC_TEMP_PREVIEWS_DIR",
+  "RAC_DEVICE_NAMES_FILE",
+  "RAC_CONSOLE_NAMED_FILE",
+  "RAC_WORKTREES_FILE",
+  "RAC_SAVED_PROMPTS_FILE",
+  "RAC_PROMPT_HISTORY_FILE",
+  "RAC_QUEUED_PROMPTS_FILE",
+  "RAC_NOTES_FILE",
+  "RAC_REVIEW_TOURS_FILE",
+  "RAC_PUSH_SUBSCRIPTIONS_FILE",
+  "RAC_FILE_FAVORITES_FILE",
+  "RAC_FILE_OPERATION_JOURNAL",
+  "RAC_INTEGRATION_AUTH_FILE",
+  "RAC_INTEGRATION_STATE_FILE",
+  "RAC_INTEGRATION_AUDIT_FILE",
+  "RAC_BOOKMARKS_FILE",
+] as const;
 
 // control one delayed fixture response
 function deferredResponse() {
@@ -299,88 +512,94 @@ async function setupSettings(
               },
             },
           },
-          projects: useAuthoritativeProjectsSchema ? authoritativeProjectsSchema : {
-            type: "array",
-            label: "Projects",
-            items: {
-              type: "object",
-              label: "Project",
-              default: { id: "new-project", label: "New project", path: "" },
-              properties: {
-                id: {
-                  type: "string",
-                  description: "Stable Project key.",
-                },
-                label: {
-                  type: "string",
-                  optional: true,
-                  description: "Friendly project name.",
-                },
-                path: {
-                  type: "string",
-                  description: "Repository or directory path.",
-                },
-                hostPath: {
-                  type: "string",
-                  optional: true,
-                  description: "Host-visible repository path.",
-                },
-                port: {
-                  type: "number",
-                  optional: true,
-                  description: "Preview port override.",
-                },
-                hostname: {
-                  type: "string",
-                  optional: true,
-                  description: "Preview hostname override.",
-                },
-                worktreeOrder: {
-                  type: "array",
-                  optional: true,
-                  label: "Worktree order",
-                  description: "Checkout paths to show first.",
-                  items: { type: "string", label: "Worktree path" },
-                },
-                worktreeOverrides: {
-                  type: "array",
-                  optional: true,
-                  label: "Worktree overrides",
-                  description: "Per-checkout settings.",
-                  items: {
-                    type: "object",
-                    label: "Worktree override",
-                    properties: {
-                      path: {
-                        type: "string",
-                        description: "Checkout to override.",
+          projects: useAuthoritativeProjectsSchema
+            ? authoritativeProjectsSchema
+            : {
+                type: "array",
+                label: "Projects",
+                items: {
+                  type: "object",
+                  label: "Project",
+                  default: {
+                    id: "new-project",
+                    label: "New project",
+                    path: "",
+                  },
+                  properties: {
+                    id: {
+                      type: "string",
+                      description: "Stable Project key.",
+                    },
+                    label: {
+                      type: "string",
+                      optional: true,
+                      description: "Friendly project name.",
+                    },
+                    path: {
+                      type: "string",
+                      description: "Repository or directory path.",
+                    },
+                    hostPath: {
+                      type: "string",
+                      optional: true,
+                      description: "Host-visible repository path.",
+                    },
+                    port: {
+                      type: "number",
+                      optional: true,
+                      description: "Preview port override.",
+                    },
+                    hostname: {
+                      type: "string",
+                      optional: true,
+                      description: "Preview hostname override.",
+                    },
+                    worktreeOrder: {
+                      type: "array",
+                      optional: true,
+                      label: "Worktree order",
+                      description: "Checkout paths to show first.",
+                      items: { type: "string", label: "Worktree path" },
+                    },
+                    worktreeOverrides: {
+                      type: "array",
+                      optional: true,
+                      label: "Worktree overrides",
+                      description: "Per-checkout settings.",
+                      items: {
+                        type: "object",
+                        label: "Worktree override",
+                        properties: {
+                          path: {
+                            type: "string",
+                            description: "Checkout to override.",
+                          },
+                        },
+                      },
+                    },
+                    commands: {
+                      type: "object",
+                      optional: true,
+                      label: "Commands",
+                      description: "Default trusted shell commands.",
+                      properties: {
+                        start: {
+                          type: "string",
+                          optional: true,
+                          description: "Trusted Start command.",
+                        },
+                        processes: {
+                          type: "record",
+                          optional: true,
+                          label: "Processes",
+                          description: "Named foreground processes.",
+                          items: { type: "string", label: "Process command" },
+                        },
                       },
                     },
                   },
                 },
-                commands: {
-                  type: "object",
-                  optional: true,
-                  label: "Commands",
-                  description: "Default trusted shell commands.",
-                  properties: {
-                    start: {
-                      type: "string",
-                      optional: true,
-                      description: "Trusted Start command.",
-                    },
-                    processes: {
-                      type: "record",
-                      optional: true,
-                      label: "Processes",
-                      description: "Named foreground processes.",
-                      items: { type: "string", label: "Process command" },
-                    },
-                  },
-                },
               },
-            },
-          },
         },
       },
     },
@@ -532,6 +751,15 @@ async function setupSettings(
           present: true,
           apply: "rac-restart",
           description: "Host interactive shell.",
+        },
+        {
+          key: "RAC_HOST_NODE_BIN",
+          protected: false,
+          present: false,
+          apply: "rac-restart",
+          description:
+            "Host-visible Node.js executable used to run the host Files broker.",
+          fallback: { value: "node from host PATH", kind: "derived" },
         },
         {
           key: "RAC_HOST_PATH",
@@ -724,6 +952,18 @@ async function setupSettings(
       return route.fulfill({ json: { available: false } });
     if (path === "/api/settings/status")
       return route.fulfill({ json: state.status });
+    // expose safe tunnel metadata before its page first opens
+    if (path === "/api/settings/cloudflare" && request.method() === "GET")
+      return route.fulfill({
+        json: {
+          supported: true,
+          mode: "unconfigured",
+          enabled: false,
+          connected: false,
+          tokenPresent: false,
+          serviceUrl: "http://127.0.0.1:9876",
+        },
+      });
     // retain the existing immediate voice write boundary
     if (path === "/api/server/davo" && request.method() === "PATCH") {
       const davo = request.postDataJSON() as {
@@ -810,20 +1050,14 @@ async function setupSettings(
           rawSource.content = change.content;
           rawSource.exists = true;
         }
+        // preserve the backend's remove and ordered-patch semantics in saved responses
         for (const patch of change.patches ?? []) {
-          if (patch.op !== "set" || source.value === undefined) continue;
-          let target = source.value as Record<string, unknown>;
-          for (const key of patch.path.slice(0, -1)) {
-            // let synthetic writes create the same missing object containers as the host
-            if (
-              typeof target[key] !== "object" ||
-              target[key] === null ||
-              Array.isArray(target[key])
-            )
-              target[key] = {};
-            target = target[key] as Record<string, unknown>;
-          }
-          target[patch.path.at(-1)] = patch.value;
+          // sources without a structured value retain their existing content-only behavior
+          if (source.value === undefined) continue;
+          source.value =
+            source.id === "app"
+              ? applyAuthoredProjectPatch(source.value, patch)
+              : applyPatch(source.value, patch);
         }
       }
       // icon and basic voice saves do not require a service restart
@@ -935,6 +1169,84 @@ type MutableInstallationFixtureSource = {
   fields?: Array<Record<string, unknown>>;
   writable?: boolean;
 };
+
+type LegacyFederationSchemaMode = "declared" | "inferred";
+
+// expose legacy federation metadata beside current remote and integration controls
+function configureLegacyFederationFixture(
+  sources: MutableInstallationFixtureSource[],
+  mode: LegacyFederationSchemaMode,
+  enabled: boolean,
+  remoteCount: 0 | 1,
+) {
+  const application = sources.find((source) => source.id === "app")!;
+  const value = application.value as Record<string, unknown>;
+  const integrations = value.integrations as Record<string, unknown>;
+  application.value = {
+    ...value,
+    integrations: {
+      ...integrations,
+      multiInstance: { enabled },
+      mcp: { endpoint: "https://mcp.example.test" },
+    },
+    remoteServers:
+      remoteCount === 0 ? [] : [{ url: "https://remote.example.test/" }],
+  };
+  application.content = `${JSON.stringify(application.value)}\n`;
+  // cover catalogs that omit all presentation metadata
+  if (mode === "inferred") {
+    delete application.schema;
+    return;
+  }
+  const schema = application.schema as {
+    type: string;
+    properties: Record<string, unknown>;
+  };
+  const integrationSchema = schema.properties.integrations as {
+    type: string;
+    properties: Record<string, unknown>;
+  };
+  schema.properties.integrations = {
+    ...integrationSchema,
+    label: "Integrations",
+    properties: {
+      ...integrationSchema.properties,
+      multiInstance: {
+        type: "object",
+        label: "Multi instance",
+        description: "Legacy federation setting from generated metadata.",
+        properties: {
+          enabled: { type: "boolean", label: "Enable multi instance" },
+        },
+      },
+      mcp: {
+        type: "object",
+        label: "Mcp",
+        properties: {
+          endpoint: { type: "string", label: "Mcp endpoint" },
+        },
+      },
+    },
+  };
+  schema.properties.remoteServers = {
+    type: "array",
+    label: "Remote servers",
+    items: {
+      type: "object",
+      label: "Remote server",
+      properties: {
+        url: { type: "string", label: "URL" },
+        name: { type: "string", label: "Name", optional: true },
+        icon: {
+          type: "enum",
+          label: "Icon",
+          optional: true,
+          options: ["terminal", "potato", "heart"],
+        },
+      },
+    },
+  };
+}
 
 // expose every installation branch without changing its persisted source identity
 function configureInstallationFixture(
@@ -1057,6 +1369,9 @@ function configureDuplicateEnvironmentFixture(
     type: string;
     properties: Record<string, unknown>;
   };
+  const adapterEnvironmentSchema =
+    applicationSettingsSchema().properties!.adapters!.properties!.codex!
+      .properties!.env!;
   app.value = {
     ...appValue,
     listen: { host: "127.0.0.1", port: 8787 },
@@ -1088,6 +1403,7 @@ function configureDuplicateEnvironmentFixture(
             optional: true,
             properties: {
               program: { type: "string", label: "Codex program" },
+              env: adapterEnvironmentSchema,
             },
           },
           claude: {
@@ -1096,6 +1412,7 @@ function configureDuplicateEnvironmentFixture(
             optional: true,
             properties: {
               program: { type: "string", label: "Claude program" },
+              env: adapterEnvironmentSchema,
             },
           },
         },
@@ -1109,6 +1426,11 @@ function configureDuplicateEnvironmentFixture(
     RAC_LISTEN_PORT: "9999",
     RAC_CODEX_BIN: "/override/codex",
     RAC_CLAUDE_BIN: "/override/claude",
+    RAC_CLAUDE_CONFIG_DIR: "/override/claude-config",
+    RAC_ADAPTER_FILES_DIR: "/override/adapter-files",
+    RAC_OPENAI_ADMIN_KEY: protectedSourceMarker,
+    RAC_OPENAI_API_KEY_IDS: '{"atlas":"key-id"}',
+    CODEX_VERSION: "0.144.5",
     COMPOSE_FILE: "/override/compose.yaml",
     COMPOSE_ENV_FILES: "/override/.env",
     COMPOSE_PROJECT_NAME: "override-project",
@@ -1123,7 +1445,9 @@ function configureDuplicateEnvironmentFixture(
     NODE_BIN: "/usr/bin/node",
     CUSTOM_VISIBLE_SETTING: "custom-value",
   };
-  const existing = new Map((env.fields ?? []).map((field) => [field.key, field]));
+  const existing = new Map(
+    (env.fields ?? []).map((field) => [field.key, field]),
+  );
   env.fields = [
     ...existing.values(),
     ...Object.keys(values)
@@ -1140,10 +1464,93 @@ function configureDuplicateEnvironmentFixture(
       ? { ...field, value: values[field.key], present: true }
       : field,
   );
+  const adminKey = env.fields.find(
+    (field) => field.key === "RAC_OPENAI_ADMIN_KEY",
+  )!;
+  // preserve the protected contract without returning synthetic plaintext
+  Object.assign(adminKey, { protected: true, hasValue: true });
+  delete adminKey.value;
   env.content = `${env.content ?? ""}${Object.entries(values)
     .map(([key, value]) => `${key}=${value}\n`)
     .join("")}`;
+  env.hasProtectedContent = true;
   return { app, env };
+}
+
+// expose Storage fields without authoring omission defaults into either source
+function configureStorageFixture(sources: MutableInstallationFixtureSource[]) {
+  const app = sources.find((source) => source.id === "app")!;
+  const appValue = app.value as Record<string, unknown>;
+  delete appValue.scratchDirectory;
+  const appSchema = app.schema as {
+    properties: Record<string, unknown>;
+  };
+  appSchema.properties.scratchDirectory = {
+    type: "string",
+    optional: true,
+    label: "Scratch directory",
+    placeholder: "/home/test (from host home)",
+    apply: "rac-restart",
+  };
+  const env = sources.find((source) => source.id === "env")!;
+  const retained = (env.fields ?? []).filter(
+    (field) =>
+      typeof field.key !== "string" ||
+      !storageEnvironmentKeys.includes(
+        field.key as (typeof storageEnvironmentKeys)[number],
+      ),
+  );
+  env.fields = [
+    ...retained,
+    ...storageEnvironmentKeys.map((key) => ({
+      key,
+      protected: false,
+      present: false,
+      apply: key === "RAC_BOOKMARKS_FILE" ? "saved-only" : "source-migration",
+      description: `${key} fixture path.`,
+      fallback: environmentFallback(key),
+    })),
+  ];
+  return { app, env };
+}
+
+// expose voice credentials beside unrelated OpenAI billing configuration without real secret bytes
+function addVoiceEnvironmentFixture(
+  sources: MutableInstallationFixtureSource[],
+) {
+  const application = sources.find((source) => source.id === "app")!;
+  const applicationValue = application.value as Record<string, unknown>;
+  const applicationSchema = application.schema as {
+    type: string;
+    properties: Record<string, unknown>;
+  };
+  application.value = {
+    ...applicationValue,
+    adapters: { codex: { program: "/usr/bin/codex" } },
+  };
+  application.schema = {
+    ...applicationSchema,
+    properties: {
+      ...applicationSchema.properties,
+      adapters: applicationSettingsSchema().properties!.adapters!,
+    },
+  };
+  const environment = sources.find((source) => source.id === "env")!;
+  environment.fields!.push(
+    ...[
+      "RAC_OPENAI_API_KEY",
+      "RAC_REALTIME_MCP_TOKEN",
+      "RAC_OPENAI_ADMIN_KEY",
+      "RAC_OPENAI_API_KEY_IDS",
+    ].map((key) => ({
+      key,
+      protected: true,
+      present: key === "RAC_OPENAI_API_KEY",
+      hasValue: key === "RAC_OPENAI_API_KEY",
+      apply: "rac-restart" as const,
+      fallback: environmentFallback(key),
+    })),
+  );
 }
 
 // add the same Cloudflare source while varying only its runtime apply authority
@@ -1187,7 +1594,9 @@ test.describe.configure({ timeout: 180_000 });
 
 // retain useful settings chrome without a redundant page introduction
 for (const width of [390, 1440]) {
-  test(`omits the main Settings introduction without removing controls at ${width}px`, async ({ page }) => {
+  test(`omits the main Settings introduction without removing controls at ${width}px`, async ({
+    page,
+  }) => {
     await page.setViewportSize({ width, height: 900 });
     const consoleErrors: string[] = [];
     // capture browser failures while checking navigation and transaction controls
@@ -1195,29 +1604,502 @@ for (const width of [390, 1440]) {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
     const { settings, state } = await setupSettings(page);
-    const header = settings.locator(".settings-center-header");
-    await expect(settings.getByText("CONSOLE, SERVER AND INSTALLATION", { exact: true })).toHaveCount(0);
-    await expect(settings.getByRole("heading", { name: "Preferences and configuration", exact: true })).toHaveCount(0);
-    await expect(settings.getByText("Save changes applies browser preferences and saves server and file edits.", { exact: true })).toHaveCount(0);
-    await expect(header.locator("small, h2, p")).toHaveCount(0);
-    await expect(header.getByText("No unsaved changes", { exact: true })).toBeVisible();
+    await expect(
+      settings.getByText("CONSOLE, SERVER AND INSTALLATION", { exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      settings.getByRole("heading", {
+        name: "Preferences and configuration",
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    await expect(
+      settings.getByText(
+        "Save changes applies browser preferences and saves server and file edits.",
+        { exact: true },
+      ),
+    ).toHaveCount(0);
+    await expect(settings.locator(".settings-center-header")).toHaveCount(0);
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toHaveCount(0);
 
     // keep search, per-tab identity and source navigation available
-    const search = settings.getByRole("searchbox", { name: "Search settings", exact: true });
-    await search.fill("environment");
+    const search = settings.getByRole("searchbox", {
+      name: "Search settings",
+      exact: true,
+    });
+    await expect(search).toHaveAttribute("placeholder", "Search all settings");
+    await expect(
+      settings.getByText("Search settings", { exact: true }),
+    ).toHaveCount(0);
     await selectSettingsSection(settings, "env", "Environment & keys");
-    await expect(settings.getByRole("heading", { name: "Environment & keys", exact: true })).toBeVisible();
-    await search.fill("");
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await settings.screenshot({ path: `/tmp/remoteagents-settings-no-main-intro-${width}.png` });
+    await expect(
+      settings.getByRole("heading", {
+        name: "Environment & keys",
+        exact: true,
+      }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await settings.screenshot({
+      path: `/tmp/remoteagents-settings-no-main-intro-${width}.png`,
+    });
 
-    // preserve the status and save action after a normal field edit
-    await settings.getByRole("textbox", { name: "RAC_HOST_PROC", exact: true }).fill("/host/updated-proc");
-    await expect(header.getByText("1 file source changed", { exact: true })).toBeVisible();
-    await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+    // expose save only while a normal field edit remains dirty
+    await settings
+      .getByRole("textbox", { name: "RAC_HOST_PROC", exact: true })
+      .fill("/host/updated-proc");
+    const save = settings.getByRole("button", {
+      name: "Save changes",
+      exact: true,
+    });
+    await expect(save).toBeEnabled();
+    await save.click();
     await expect.poll(() => state.saves.length).toBe(1);
-    await expect(header.getByText("No unsaved changes", { exact: true })).toBeVisible();
+    await expect(save).toHaveCount(0);
     expect(consoleErrors).toEqual([]);
+  });
+}
+
+// keep application source repair compact without changing its secure draft boundary
+for (const width of [320, 390, 1440]) {
+  test(`keeps the Application base-file action compact and source-safe at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { settings, sources, state } = await setupSettings(page);
+    const application = sources.find((source) => source.id === "app")!;
+    application.value = {
+      ...application.value,
+      credential: {
+        __racProtected: true,
+        present: true,
+        hasValue: true,
+      },
+      mcp: { endpoint: "https://mcp.example.test" },
+    };
+    application.content = `{"identity":{"name":"Framework"},"credential":"${protectedSourceMarker}","mcp":{"endpoint":"https://mcp.example.test"}}\n`;
+    application.hasProtectedContent = true;
+    application.schema!.properties = {
+      ...application.schema!.properties,
+      credential: {
+        type: "string",
+        label: "Application credential",
+        protected: true,
+      },
+      mcp: {
+        type: "object",
+        label: "Mcp",
+        properties: {
+          endpoint: { type: "string", label: "Mcp endpoint" },
+        },
+      },
+    };
+    await settings
+      .getByRole("button", { name: "Refresh files", exact: true })
+      .click();
+
+    // desktop and mobile navigation expose only the product page name
+    const selector = settings.getByRole("combobox", {
+      name: "Settings section",
+      exact: true,
+    });
+    if (await selector.isVisible()) {
+      await expect(selector).toContainText("Application");
+      await expect(selector).not.toContainText("Application config");
+      await selector.click();
+      const options = page.getByRole("listbox", {
+        name: "Settings section options",
+        exact: true,
+      });
+      await expect(
+        options.getByRole("option", { name: "Application", exact: true }),
+      ).toBeVisible();
+      await expect(
+        options.getByRole("option", {
+          name: "Application config",
+          exact: true,
+        }),
+      ).toHaveCount(0);
+      await page.keyboard.press("Escape");
+    } else {
+      const navigation = settings.getByRole("navigation", {
+        name: "Settings sources",
+        exact: true,
+      });
+      await expect(
+        navigation.getByRole("button", {
+          name: "Application",
+          exact: true,
+        }),
+      ).toBeVisible();
+      await expect(
+        navigation.getByRole("button", {
+          name: "Application config",
+          exact: true,
+        }),
+      ).toHaveCount(0);
+    }
+
+    const panel = settings.getByRole("region", {
+      name: "Application settings content",
+      exact: true,
+    });
+    await expect(
+      panel.getByRole("heading", {
+        name: "Application",
+        exact: true,
+        level: 2,
+      }),
+    ).toBeVisible();
+    await expect(
+      panel.getByRole("heading", {
+        name: /Application config(?:uration)?/u,
+        level: 3,
+      }),
+    ).toHaveCount(0);
+    await expect(panel.locator(".settings-raw-mode")).toHaveCount(0);
+    const edit = panel.getByRole("button", {
+      name: "Edit base file",
+      exact: true,
+    });
+    const alignment = await edit.evaluate((button) => {
+      const header = button.closest(".settings-source-header");
+      const title = header?.querySelector("h2");
+      // fail loudly when the action escapes its page header
+      if (header === null || title === null)
+        throw new Error("Application base-file action is missing its header");
+      const headerBox = header.getBoundingClientRect();
+      const buttonBox = button.getBoundingClientRect();
+      const titleBox = title.getBoundingClientRect();
+      return {
+        buttonRight: headerBox.right - buttonBox.right,
+        buttonWidth: buttonBox.width,
+        headerWidth: headerBox.width,
+        rightOfTitle: buttonBox.left > titleBox.left,
+      };
+    });
+    expect(alignment.buttonRight).toBeLessThanOrEqual(1);
+    expect(alignment.buttonWidth).toBeLessThan(alignment.headerWidth / 2);
+    expect(alignment.rightOfTitle).toBe(true);
+
+    // section titles use the light purple token without recoloring field labels
+    const sectionTitles = [
+      panel.getByRole("heading", {
+        name: "Integrations",
+        exact: true,
+        level: 3,
+      }),
+      panel.getByRole("heading", { name: "Mcp", exact: true, level: 3 }),
+    ];
+    const lightPurple = await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--lavender)";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    });
+    for (const title of sectionTitles) {
+      await expect(title).toBeVisible();
+      expect(await title.evaluate((element) => getComputedStyle(element).color)).toBe(
+        lightPurple,
+      );
+    }
+    const fieldLabel = panel
+      .locator('[data-settings-path="mcp.endpoint"] .settings-field-copy > label')
+      .first();
+    await expect(fieldLabel).toHaveText("Mcp endpoint");
+    expect(
+      await fieldLabel.evaluate((element) => getComputedStyle(element).color),
+    ).not.toBe(lightPurple);
+    await settings.screenshot({
+      path: `/tmp/remoteagents-application-structured-${width}.png`,
+    });
+
+    // raw editing stays masked and does not bypass the shared save transaction
+    await page.route("**/api/settings/reveal", async (route) => {
+      const body = route.request().postDataJSON() as {
+        sourceId: string;
+        path?: string[];
+        revisionId: string;
+      };
+      // override only the whole Application source disclosure
+      if (body.sourceId !== "app" || (body.path?.length ?? 0) !== 0)
+        return route.fallback();
+      state.reveals.push(body);
+      return route.fulfill({
+        json: {
+          value:
+            '{"identity":{"name":"Framework"},"credential":"synthetic-app-secret","mcp":{"endpoint":"https://mcp.example.test"}}\n',
+          revisionId: body.revisionId,
+          leaseId: "application-source-lease",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      });
+    });
+    await edit.click();
+    const raw = panel.getByLabel("Application config source content", {
+      exact: true,
+    });
+    await expect(raw).toBeVisible();
+    await expect(raw).toHaveAttribute("readonly", "");
+    await expect(raw).not.toHaveValue(/synthetic-app-secret/u);
+    await expect(panel.locator(".settings-raw-mode")).toHaveCount(0);
+    await expect(
+      panel.getByRole("button", {
+        name: "Use structured editor",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toHaveCount(0);
+    expect(state.validations).toEqual([]);
+    expect(state.saves).toEqual([]);
+    await panel
+      .getByRole("button", { name: "Reveal keys", exact: true })
+      .click();
+    await expect(raw).toHaveValue(/synthetic-app-secret/u);
+    await raw.fill('{"identity":{"name":"Raw-only draft"}}\n');
+    await settings.screenshot({
+      path: `/tmp/remoteagents-application-base-file-${width}.png`,
+    });
+    await panel
+      .getByRole("button", {
+        name: "Use structured editor",
+        exact: true,
+      })
+      .click();
+    await expect(panel.getByLabel("Server name", { exact: true })).toHaveValue(
+      "Framework",
+    );
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toHaveCount(0);
+    await expect.poll(() => state.remasks).toContainEqual({
+      leaseId: "application-source-lease",
+    });
+    expect(state.saves).toEqual([]);
+
+    // Docker keeps its existing base preview and editor contract
+    await selectSettingsSection(settings, "compose-override", "Docker");
+    await expect(
+      settings.getByRole("heading", {
+        name: "Docker",
+        exact: true,
+        level: 2,
+      }),
+    ).toBeVisible();
+    await expect(
+      settings.getByRole("button", {
+        name: "View base compose.yaml",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      settings.getByRole("button", { name: "Edit base file", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      settings.getByLabel("Docker source content", { exact: true }),
+    ).toBeEditable();
+  });
+}
+
+for (const width of [390, 1440]) {
+  test(`standardizes every Settings page header at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { settings, state } = await setupSettings(page, false);
+    const screenshotPages = new Set([
+      "browser",
+      "app",
+      "compose-override",
+      "cloudflare",
+    ]);
+
+    // visit each destination through its rendered responsive navigation
+    for (const expected of settingsPageHeaderExpectations) {
+      await selectSettingsSection(settings, expected.id, expected.title);
+      const { description, header, panel } =
+        await expectStandardSettingsHeader(settings, expected);
+      const metadata = header.locator(".settings-source-metadata");
+      const ordering = await header.evaluate((element) => {
+        const copy = element.querySelector(".settings-preference-description")!;
+        const source = element.querySelector(".settings-source-metadata");
+        return {
+          descriptionBeforeMetadata:
+            source === null ||
+            Boolean(copy.compareDocumentPosition(source) & Node.DOCUMENT_POSITION_FOLLOWING),
+          overflow: element.scrollWidth - element.clientWidth,
+        };
+      });
+      expect(ordering.descriptionBeforeMetadata).toBe(true);
+      expect(ordering.overflow).toBeLessThanOrEqual(0);
+
+      const actionName =
+        expected.id === "app"
+          ? "Edit base file"
+          : expected.id === "compose-override"
+            ? "View base compose.yaml"
+            : undefined;
+      const directActions = header.locator(":scope > button");
+      await expect(directActions).toHaveCount(actionName === undefined ? 0 : 1);
+      // title actions stay on their row while description spans beneath them
+      if (actionName !== undefined) {
+        const action = header.getByRole("button", {
+          name: actionName,
+          exact: true,
+        });
+        await expect(action).toBeVisible();
+        const geometry = await header.evaluate((element) => {
+          const title = element.querySelector("h2")!.getBoundingClientRect();
+          const action = element.querySelector("button")!.getBoundingClientRect();
+          const description = element
+            .querySelector(".settings-preference-description")!
+            .getBoundingClientRect();
+          const header = element.getBoundingClientRect();
+          return {
+            actionAfterTitle: action.left >= title.right,
+            actionInside: action.right <= header.right + 1,
+            descriptionBelow:
+              description.top >= Math.max(title.bottom, action.bottom),
+            descriptionSpansAction: description.right >= action.right - 1,
+            descriptionStartsWithTitle: description.left <= title.left + 1,
+          };
+        });
+        expect(geometry).toEqual({
+          actionAfterTitle: true,
+          actionInside: true,
+          descriptionBelow: true,
+          descriptionSpansAction: true,
+          descriptionStartsWithTitle: true,
+        });
+      }
+      await expect(description).toBeVisible();
+      // capture the representative browser, server and deployment headers
+      if (screenshotPages.has(expected.id))
+        await settings.screenshot({
+          path: `/tmp/remoteagents-settings-page-header-${expected.id}-${width}.png`,
+        });
+      // metadata never replaces the human-readable header description
+      if (expected.sourcePath !== undefined) await expect(metadata).toBeVisible();
+      expect(await panel.evaluate((element) => element.scrollTop)).toBe(0);
+    }
+    expect(state.saves).toEqual([]);
+    expect(state.validations).toEqual([]);
+    expect(state.restarts).toBe(0);
+  });
+}
+
+for (const scenario of [
+  { width: 390, mode: "declared", enabled: false, remoteCount: 0 },
+  { width: 1440, mode: "inferred", enabled: true, remoteCount: 1 },
+] as const) {
+  test(`hides legacy Multi instance metadata with ${scenario.mode} schema at ${scenario.width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: scenario.width, height: 900 });
+    const { settings, sources, state } = await setupSettings(page);
+    configureLegacyFederationFixture(
+      sources,
+      scenario.mode,
+      scenario.enabled,
+      scenario.remoteCount,
+    );
+    await settings
+      .getByRole("button", { name: "Refresh files", exact: true })
+      .click();
+
+    const application = settings.getByRole("region", {
+      name: "Application settings content",
+      exact: true,
+    });
+    await expect(
+      application.getByRole("heading", {
+        name: "Application",
+        exact: true,
+        level: 2,
+      }),
+    ).toBeVisible();
+    await expect(
+      application.locator('[data-settings-path="integrations.multiInstance"]'),
+    ).toHaveCount(0);
+    await expect(
+      application.getByRole("heading", { name: "Multi instance", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      application.getByRole("button", { name: /Add Multi instance/u }),
+    ).toHaveCount(0);
+    await expect(
+      application.getByRole("switch", { name: /multi instance/iu }),
+    ).toHaveCount(0);
+    await expect(
+      application.getByRole("heading", { name: "Mcp", exact: true }),
+    ).toBeVisible();
+    await expect(
+      application
+        .locator('[data-settings-path="integrations.mcp.endpoint"]')
+        .getByRole("textbox"),
+    ).toBeEditable();
+
+    const addRemote = application.getByRole("button", {
+      name: "+ Add Remote server",
+      exact: true,
+    });
+    await expect(addRemote).toBeEnabled();
+    // inspect the inherited remote row without authoring a network change
+    if (scenario.remoteCount === 1) {
+      const row = application.getByRole("group", {
+        name: "Remote server 1",
+        exact: true,
+      });
+      await row
+        .getByRole("button", { name: "Edit Remote server 1", exact: true })
+        .click();
+      await expect(
+        row.getByRole("textbox", { name: "URL", exact: true }),
+      ).toBeEditable();
+    } else {
+      await expect(
+        application.getByRole("group", { name: /^Remote server \d+$/u }),
+      ).toHaveCount(0);
+    }
+    await settings.screenshot({
+      path: `/tmp/remoteagents-settings-auto-federation-application-${scenario.width}.png`,
+    });
+
+    const search = settings.getByRole("searchbox", {
+      name: "Search settings",
+      exact: true,
+    });
+    await search.fill("multi instance");
+    const results = page.getByRole("listbox", {
+      name: "Settings search results",
+      exact: true,
+    });
+    await expect(results.getByRole("option")).toHaveCount(0);
+    await expect(
+      results.getByText("No matching settings.", { exact: true }),
+    ).toBeVisible();
+    await settings.screenshot({
+      path: `/tmp/remoteagents-settings-auto-federation-search-${scenario.width}.png`,
+    });
+    await search.fill("federation");
+    await expect(results.getByRole("option")).toHaveCount(0);
+    await search.fill("");
+
+    await selectSettingsSection(settings, "voice", "Voice");
+    await expect(
+      settings.getByRole("switch", { name: "Enable Davo", exact: true }),
+    ).toBeVisible();
+    expect(state.saves).toEqual([]);
+    expect(state.validations).toEqual([]);
   });
 }
 
@@ -1226,13 +2108,9 @@ test("advertises only Docker while Compose sources are still loading", async ({
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const initial = deferredResponse();
-  const { settings, state } = await setupSettings(
-    page,
-    false,
-    false,
-    false,
-    [{ wait: initial.promise }],
-  );
+  const { settings, state } = await setupSettings(page, false, false, false, [
+    { wait: initial.promise },
+  ]);
   try {
     await expect.poll(() => state.settingsReads).toBe(1);
     const nav = settings.getByRole("navigation", {
@@ -1251,6 +2129,433 @@ test("advertises only Docker while Compose sources are still loading", async ({
   } finally {
     initial.resolve();
   }
+});
+
+// keep one-line raw editors intrinsic across split sizes
+for (const width of [1440, 390]) {
+  test(`keeps a one-line Docker editor at natural height at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1200 });
+    const { settings, state } = await setupSettings(page, false);
+    await settings
+      .getByRole("button", { name: "Expand settings", exact: true })
+      .click();
+    await selectSettingsSection(settings, "compose-override", "Docker");
+    const input = settings.getByLabel("Docker source content", { exact: true });
+    const editor = input.locator("..").locator("..");
+    await input.fill("services: {}");
+    await expect
+      .poll(async () => {
+        const geometry = await settingsEditorGeometry(editor);
+        return Math.abs(geometry.surfaceHeight - geometry.naturalHeight);
+      })
+      .toBeLessThanOrEqual(1);
+    const shorter = await settingsEditorGeometry(editor);
+    expect(shorter.documentScrollTop).toBe(0);
+    await page.setViewportSize({ width, height: 1400 });
+    await expect
+      .poll(
+        async () => (await settingsEditorGeometry(editor)).panelClientHeight,
+      )
+      .toBeGreaterThan(shorter.panelClientHeight);
+    const taller = await settingsEditorGeometry(editor);
+    expect(
+      Math.abs(taller.surfaceHeight - taller.naturalHeight),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(taller.surfaceHeight - shorter.surfaceHeight),
+    ).toBeLessThanOrEqual(1);
+    await settings.screenshot({
+      path: `/tmp/remoteagents-settings-editor-docker-${width}.png`,
+    });
+
+    await page.setViewportSize({ width, height: 700 });
+    await expect
+      .poll(
+        async () => (await settingsEditorGeometry(editor)).panelClientHeight,
+      )
+      .toBeLessThan(taller.panelClientHeight);
+    const compact = await settingsEditorGeometry(editor);
+    expect(
+      Math.abs(compact.surfaceHeight - compact.naturalHeight),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(compact.surfaceHeight - shorter.surfaceHeight),
+    ).toBeLessThanOrEqual(1);
+    const panel = settings.locator(".settings-source-panel");
+    await panel.evaluate((element) =>
+      element.scrollTo({ top: element.scrollHeight }),
+    );
+    await expect(input).toBeVisible();
+    expect((await settingsEditorGeometry(editor)).documentScrollTop).toBe(0);
+    expect(state.saves).toEqual([]);
+  });
+}
+
+// move long source height into the parent panel instead of nesting vertical scroll
+for (const width of [1440, 390]) {
+  test(`uses natural Docker content height at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 700 });
+    const { settings, state } = await setupSettings(page, false);
+    await settings
+      .getByRole("button", { name: "Expand settings", exact: true })
+      .click();
+    await selectSettingsSection(settings, "compose-override", "Docker");
+    const input = settings.getByLabel("Docker source content", { exact: true });
+    const editor = input.locator("..").locator("..");
+    const initial = await settingsEditorContentGeometry(input);
+    const longContent = `${Array.from(
+      { length: 64 },
+      (_, index) => `# fixture line ${index + 1}`,
+    ).join("\n")}\nLONG_VALUE: "${"x".repeat(600)}"\n`;
+    await input.fill(longContent);
+    await expect
+      .poll(
+        async () => (await settingsEditorContentGeometry(input)).surfaceHeight,
+      )
+      .toBeGreaterThan(initial.surfaceHeight);
+    const long = await settingsEditorContentGeometry(input);
+    expect(long.scrollHeight).toBeLessThanOrEqual(long.clientHeight + 1);
+    expect(long.presentationScrollHeight).toBeLessThanOrEqual(
+      long.presentationClientHeight + 1,
+    );
+    expect(long.scrollTop).toBe(0);
+    expect(long.presentationScrollTop).toBe(0);
+    expect(long.scrollWidth).toBeGreaterThan(long.clientWidth);
+
+    await input.evaluate((textarea) => {
+      textarea.scrollLeft = textarea.scrollWidth;
+      textarea.dispatchEvent(new Event("scroll"));
+    });
+    const horizontal = await settingsEditorContentGeometry(input);
+    expect(horizontal.scrollLeft).toBeGreaterThan(0);
+    expect(horizontal.scrollTop).toBe(0);
+
+    const expandedContent = `${longContent}${Array.from(
+      { length: 12 },
+      (_, index) => `# added line ${index + 1}`,
+    ).join("\n")}\n`;
+    await input.fill(expandedContent);
+    await expect
+      .poll(
+        async () => (await settingsEditorContentGeometry(input)).surfaceHeight,
+      )
+      .toBeGreaterThan(long.surfaceHeight);
+    const expanded = await settingsEditorContentGeometry(input);
+    expect(expanded.scrollHeight).toBeLessThanOrEqual(
+      expanded.clientHeight + 1,
+    );
+    expect(expanded.scrollTop).toBe(0);
+
+    await input.fill(longContent);
+    await expect
+      .poll(
+        async () => (await settingsEditorContentGeometry(input)).surfaceHeight,
+      )
+      .toBeLessThan(expanded.surfaceHeight);
+    const panel = settings.locator(".settings-source-panel");
+    await panel.evaluate((element) =>
+      element.scrollTo({ top: element.scrollHeight }),
+    );
+    const bottom = await settingsEditorContentGeometry(input);
+    expect(bottom.panelScrollHeight).toBeGreaterThan(bottom.panelClientHeight);
+    expect(bottom.panelScrollTop).toBeGreaterThan(0);
+    expect(bottom.scrollTop).toBe(0);
+    expect(bottom.documentScrollTop).toBe(0);
+    expect(bottom.lastLineTop).toBeGreaterThanOrEqual(bottom.panelTop - 1);
+    expect(bottom.lastLineBottom).toBeLessThanOrEqual(bottom.panelBottom + 1);
+    await settings.screenshot({
+      path: `/tmp/remoteagents-settings-editor-natural-docker-${width}.png`,
+    });
+
+    await input.fill("services:\n  fixture:\n    image: local\n");
+    await expect
+      .poll(
+        async () => (await settingsEditorContentGeometry(input)).surfaceHeight,
+      )
+      .toBeLessThan(long.surfaceHeight);
+    expect((await settingsEditorContentGeometry(input)).scrollTop).toBe(0);
+    expect(state.saves).toEqual([]);
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toBeVisible();
+    await expect(editor).toBeVisible();
+  });
+}
+
+// apply the same natural height to a nested structured JSON editor
+test("expands nested structured JSON without internal vertical scrolling", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 700 });
+  const { settings, sources, state } = await setupSettings(page, false);
+  await settings
+    .getByRole("button", { name: "Expand settings", exact: true })
+    .click();
+  const application = sources.find((source) => source.id === "app")!;
+  application.value = { fixture: { debugPayload: { ready: true } } };
+  application.content = '{"fixture":{"debugPayload":{"ready":true}}}\n';
+  application.schema = {
+    type: "object",
+    label: "Application config",
+    properties: {
+      fixture: {
+        type: "object",
+        label: "Fixture",
+        properties: {
+          debugPayload: { type: "json", label: "Debug payload" },
+        },
+      },
+    },
+  };
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "app", "Application config");
+  const input = settings.getByLabel("Debug payload", { exact: true });
+  const initial = await settingsEditorContentGeometry(input);
+  const longJson = JSON.stringify(
+    Object.fromEntries(
+      Array.from({ length: 70 }, (_, index) => [`fixture_${index + 1}`, index]),
+    ),
+    null,
+    2,
+  );
+  await input.fill(`${longJson}\n`);
+  await expect
+    .poll(
+      async () => (await settingsEditorContentGeometry(input)).surfaceHeight,
+    )
+    .toBeGreaterThan(initial.surfaceHeight);
+  const long = await settingsEditorContentGeometry(input);
+  expect(long.scrollHeight).toBeLessThanOrEqual(long.clientHeight + 1);
+  expect(long.presentationScrollHeight).toBeLessThanOrEqual(
+    long.presentationClientHeight + 1,
+  );
+  expect(long.scrollTop).toBe(0);
+  const panel = settings.locator(".settings-source-panel");
+  await panel.evaluate((element) =>
+    element.scrollTo({ top: element.scrollHeight }),
+  );
+  await expect(
+    settings.getByText(
+      "Custom artwork sources are unavailable in this installation.",
+      {
+        exact: true,
+      },
+    ),
+  ).toBeVisible();
+  expect((await settingsEditorContentGeometry(input)).documentScrollTop).toBe(
+    0,
+  );
+
+  await input.fill('{\n  "ready": true\n}');
+  await expect
+    .poll(
+      async () => (await settingsEditorContentGeometry(input)).surfaceHeight,
+    )
+    .toBeLessThan(long.surfaceHeight);
+  expect(state.saves).toEqual([]);
+});
+
+// keep a second artwork editor reachable after the application whole-source editor
+test("keeps multiple application editors and collapsed artwork reachable", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 2400 });
+  const { settings, state } = await setupSettings(page, true, true);
+  await settings
+    .getByRole("button", { name: "Expand settings", exact: true })
+    .click();
+  await settings
+    .getByRole("button", { name: "Edit base file", exact: true })
+    .click();
+  const applicationInput = settings.getByLabel(
+    "Application config source content",
+    { exact: true },
+  );
+  const applicationEditor = applicationInput.locator("..").locator("..");
+  const artwork = settings
+    .locator(".settings-icon-source")
+    .filter({ hasText: "View / edit Heart icon" });
+  const nextArtwork = settings
+    .locator(".settings-icon-source")
+    .filter({ hasText: "View / edit Potato icon" });
+  const summary = artwork.locator("summary");
+  const [collapsedArtwork, collapsedSummary] = await Promise.all([
+    artwork.boundingBox(),
+    summary.boundingBox(),
+  ]);
+  expect(collapsedArtwork).not.toBeNull();
+  expect(collapsedSummary).not.toBeNull();
+  expect(
+    collapsedArtwork!.height - collapsedSummary!.height,
+  ).toBeLessThanOrEqual(2);
+  await summary.click();
+  const artworkInput = artwork.getByLabel("Heart icon source content", {
+    exact: true,
+  });
+  const artworkEditor = artworkInput.locator("..").locator("..");
+  await expect(artworkInput).toBeVisible();
+  await expect(settings.locator(".settings-code-editor")).toHaveCount(2);
+  const [collapsedNextArtwork, collapsedNextSummary] = await Promise.all([
+    nextArtwork.boundingBox(),
+    nextArtwork.locator("summary").boundingBox(),
+  ]);
+  expect(collapsedNextArtwork).not.toBeNull();
+  expect(collapsedNextSummary).not.toBeNull();
+  expect(
+    collapsedNextArtwork!.height - collapsedNextSummary!.height,
+  ).toBeLessThanOrEqual(2);
+  const tallPanelHeight = (await settingsEditorGeometry(applicationEditor))
+    .panelClientHeight;
+  // keep both open surfaces intrinsic
+  for (const editor of [applicationEditor, artworkEditor]) {
+    const geometry = await settingsEditorGeometry(editor);
+    expect(
+      Math.abs(geometry.surfaceHeight - geometry.naturalHeight),
+    ).toBeLessThanOrEqual(1);
+    expect(geometry.documentScrollTop).toBe(0);
+  }
+  const panel = settings.locator(".settings-source-panel");
+  await panel.evaluate((element) =>
+    element.scrollTo({ top: element.scrollHeight }),
+  );
+  await expect(nextArtwork.locator("summary")).toBeVisible();
+  const scrolled = await settingsEditorGeometry(artworkEditor);
+  expect(scrolled.documentScrollTop).toBe(0);
+  await settings.screenshot({
+    path: "/tmp/remoteagents-settings-editors-artwork-tall.png",
+  });
+
+  await page.setViewportSize({ width: 1440, height: 700 });
+  await expect
+    .poll(
+      async () =>
+        (await settingsEditorGeometry(applicationEditor)).panelClientHeight,
+    )
+    .toBeLessThan(tallPanelHeight);
+  await panel.evaluate((element) =>
+    element.scrollTo({ top: element.scrollHeight }),
+  );
+  await expect(nextArtwork.locator("summary")).toBeVisible();
+  expect(
+    (await settingsEditorGeometry(artworkEditor)).panelScrollTop,
+  ).toBeGreaterThan(0);
+  // keep both surfaces intrinsic in a short split
+  for (const editor of [applicationEditor, artworkEditor]) {
+    const geometry = await settingsEditorGeometry(editor);
+    expect(
+      Math.abs(geometry.surfaceHeight - geometry.naturalHeight),
+    ).toBeLessThanOrEqual(1);
+    expect(geometry.documentScrollTop).toBe(0);
+  }
+  await settings.screenshot({
+    path: "/tmp/remoteagents-settings-editors-artwork-short.png",
+  });
+  await summary.click();
+  const [closedArtwork, closedSummary] = await Promise.all([
+    artwork.boundingBox(),
+    summary.boundingBox(),
+  ]);
+  expect(closedArtwork).not.toBeNull();
+  expect(closedSummary).not.toBeNull();
+  expect(closedArtwork!.height - closedSummary!.height).toBeLessThanOrEqual(2);
+  expect(state.saves).toEqual([]);
+});
+
+// keep Installation and wrapper editors intrinsic inside the tab scroller
+test("keeps Installation and TMUX source editors intrinsic and reachable", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1400 });
+  const { settings, sources, state } = await setupSettings(
+    page,
+    false,
+    false,
+    false,
+    [],
+    "missing",
+  );
+  await settings
+    .getByRole("button", { name: "Expand settings", exact: true })
+    .click();
+  await selectSettingsSection(settings, "installation", "Installation");
+  await settings
+    .getByRole("button", { name: "Edit whole source", exact: true })
+    .click();
+  const installationInput = settings.getByLabel("Installation source content", {
+    exact: true,
+  });
+  const installationEditor = installationInput.locator("..").locator("..");
+  const installationGeometry = await settingsEditorGeometry(installationEditor);
+  expect(
+    Math.abs(
+      installationGeometry.surfaceHeight - installationGeometry.naturalHeight,
+    ),
+  ).toBeLessThanOrEqual(1);
+
+  await selectSettingsSection(settings, "tmux", "TMUX");
+  const wrapperInput = settings.getByLabel(
+    "Installation wrapper source content",
+    { exact: true },
+  );
+  const wrapperEditor = wrapperInput.locator("..").locator("..");
+  const wrapperGeometry = await settingsEditorGeometry(wrapperEditor);
+  expect(
+    Math.abs(wrapperGeometry.surfaceHeight - wrapperGeometry.naturalHeight),
+  ).toBeLessThanOrEqual(1);
+  await wrapperInput.scrollIntoViewIfNeeded();
+  await expect(wrapperInput).toBeVisible();
+  const visibleWrapper = await settingsEditorGeometry(wrapperEditor);
+  expect(visibleWrapper.documentScrollTop).toBe(0);
+  expect(state.saves).toEqual([]);
+});
+
+// keep a short structured JSON field intrinsic beside following content
+test("keeps a structured JSON editor intrinsic and following content reachable", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1400 });
+  const { settings, sources, state } = await setupSettings(page, false);
+  await settings
+    .getByRole("button", { name: "Expand settings", exact: true })
+    .click();
+  const application = sources.find((source) => source.id === "app")!;
+  application.value = { debugPayload: { ready: true } };
+  application.content = '{"debugPayload":{"ready":true}}\n';
+  application.schema = {
+    type: "object",
+    label: "Application config",
+    properties: {
+      debugPayload: { type: "json", label: "Debug payload" },
+    },
+  };
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "app", "Application config");
+  const input = settings.getByLabel("Debug payload", { exact: true });
+  const editor = input.locator("..").locator("..");
+  const geometry = await settingsEditorGeometry(editor);
+  expect(
+    Math.abs(geometry.surfaceHeight - geometry.naturalHeight),
+  ).toBeLessThanOrEqual(1);
+  const panel = settings.locator(".settings-source-panel");
+  await panel.evaluate((element) =>
+    element.scrollTo({ top: element.scrollHeight }),
+  );
+  await expect(
+    settings.getByText(
+      "Custom artwork sources are unavailable in this installation.",
+      {
+        exact: true,
+      },
+    ),
+  ).toBeVisible();
+  expect((await settingsEditorGeometry(editor)).documentScrollTop).toBe(0);
+  expect(state.saves).toEqual([]);
 });
 
 test("previews the redacted base Compose beside an unsaved Docker draft", async ({
@@ -1291,6 +2596,8 @@ test("previews the redacted base Compose beside an unsaved Docker draft", async 
   // the title action stays separate from the editable override
   const heading = header.getByRole("heading", { name: "Docker", exact: true });
   const docker = settings.getByLabel("Docker source content");
+  const description = header.locator(".settings-preference-description");
+  await expect(description).toHaveText(/\S/u);
   const draft =
     "services:\n  remote-agent-console:\n    environment:\n      LOCAL_ONLY: unsaved-docker-draft\n";
   await docker.fill(draft);
@@ -1305,7 +2612,9 @@ test("previews the redacted base Compose beside an unsaved Docker draft", async 
   ).toHaveCount(0);
   await expect(docker).toHaveAccessibleName("Docker source content");
   await expect(
-    settings.getByText(/Restart .* applies it together with the base Compose file\./u),
+    settings.getByText(
+      /Restart .* applies it together with the base Compose file\./u,
+    ),
   ).toHaveCount(0);
   await expect(
     settings.getByText(
@@ -1324,6 +2633,16 @@ test("previews the redacted base Compose beside an unsaved Docker draft", async 
     await settings
       .locator(".settings-source-panel")
       .evaluate((element) => element.scrollTo({ top: 0 }));
+    await expect(description).toBeVisible();
+    const descriptionBox = await description.boundingBox();
+    const editorBox = await settings
+      .locator(".settings-raw-editor")
+      .boundingBox();
+    expect(descriptionBox).not.toBeNull();
+    expect(editorBox).not.toBeNull();
+    expect(descriptionBox!.y + descriptionBox!.height).toBeLessThanOrEqual(
+      editorBox!.y,
+    );
     const [headingBox, headerBox, previewBox, appearance, overflow] =
       await Promise.all([
         heading.boundingBox(),
@@ -1422,7 +2741,7 @@ test("previews the redacted base Compose beside an unsaved Docker draft", async 
   // generic raw sources retain their ordinary title and removal action
   await selectSettingsSection(settings, "app", "Application config");
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   await expect(
     settings.getByText("Source content", { exact: true }),
@@ -1466,9 +2785,9 @@ test("saves Docker changes as restart pending without executing code", async ({
   });
   await expect(notice).toHaveCount(0);
   await selectSettingsSection(settings, "compose-override", "Docker");
-  await expect(
-    settings.getByText("Trusted code", { exact: true }),
-  ).toHaveCount(0);
+  await expect(settings.getByText("Trusted code", { exact: true })).toHaveCount(
+    0,
+  );
   await expect(
     settings.getByText("Tracked file", { exact: true }),
   ).toBeVisible();
@@ -1557,22 +2876,33 @@ test("keeps TMUX controls removal-free and uses only the installed wrapper sourc
   );
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   const tmuxNav = nav.getByRole("button", { name: "TMUX", exact: true });
-  await expect.soft(tmuxNav.locator("svg path")).toHaveAttribute(
-    "d",
-    "M3 4h18v16H3zm9 0v16M3 12h9",
-  );
+  await expect
+    .soft(tmuxNav.locator("svg path"))
+    .toHaveAttribute("d", "M3 4h18v16H3zm9 0v16M3 12h9");
   await tmuxNav.click();
   const tmux = settings.locator(".settings-tmux");
 
   await expect.soft(tmux.locator(".settings-remove-button")).toHaveCount(0);
-  await expect.soft(tmux.locator('[data-settings-path="sources.wrapper"]')).toHaveCount(0);
-  await expect.soft(tmux.getByLabel("Wrapper path", { exact: true })).toHaveCount(0);
+  await expect
+    .soft(tmux.locator('[data-settings-path="sources.wrapper"]'))
+    .toHaveCount(0);
+  await expect
+    .soft(tmux.getByLabel("Wrapper path", { exact: true }))
+    .toHaveCount(0);
   await expect.soft(tmux.locator(".settings-tmux-path")).toHaveCount(0);
-  await expect.soft(
-    tmux.getByText("/checkout/config/installation-wrapper.sh", { exact: true }),
-  ).toHaveCount(0);
-  await expect(tmux.getByLabel("Installation wrapper source content")).toHaveValue("");
-  await expect(tmux.getByLabel("Installation wrapper source content")).toBeEditable();
+  await expect
+    .soft(
+      tmux.getByText("/checkout/config/installation-wrapper.sh", {
+        exact: true,
+      }),
+    )
+    .toHaveCount(0);
+  await expect(
+    tmux.getByLabel("Installation wrapper source content"),
+  ).toHaveValue("");
+  await expect(
+    tmux.getByLabel("Installation wrapper source content"),
+  ).toBeEditable();
 });
 
 // prove an absent wrapper is an ordinary clean blank editor
@@ -1593,7 +2923,7 @@ test("creates a missing Installation wrapper directly from its blank editor", as
     if (path === "/api/settings/restart" || path.endsWith("/execute"))
       sideEffects.push(path);
   });
-  const { settings, state } = await setupSettings(
+  const { settings, sources, state } = await setupSettings(
     page,
     false,
     false,
@@ -1603,6 +2933,13 @@ test("creates a missing Installation wrapper directly from its blank editor", as
   );
   await selectSettingsSection(settings, "tmux", "TMUX");
   const input = settings.getByLabel("Installation wrapper source content");
+  const description = settings
+    .getByRole("region", { name: "TMUX wrapper", exact: true })
+    .locator("header p");
+  // describe wrapper selection and the save-only execution boundary
+  await expect(description).toHaveText(
+    "Optional shell script used by RAC_TMUX_BIN to launch tmux with installation-specific paths or shared libraries, for example when connecting Docker to host tmux. Saving changes does not run the script.",
+  );
   const save = settings.getByRole("button", {
     name: "Save changes",
     exact: true,
@@ -1613,9 +2950,9 @@ test("creates a missing Installation wrapper directly from its blank editor", as
   await expect(settings.getByText("Trusted code", { exact: true })).toHaveCount(
     0,
   );
-  await expect(settings.getByText("Source content", { exact: true })).toHaveCount(
-    0,
-  );
+  await expect(
+    settings.getByText("Source content", { exact: true }),
+  ).toHaveCount(0);
   await expect(
     settings.getByText("Source does not exist", { exact: true }),
   ).toHaveCount(0);
@@ -1625,13 +2962,19 @@ test("creates a missing Installation wrapper directly from its blank editor", as
   await expect(
     settings.getByRole("button", { name: "Remove source", exact: true }),
   ).toHaveCount(0);
+  // include the wrapper guidance in responsive visual evidence
+  await description.scrollIntoViewIfNeeded();
   await settings.screenshot({
     path: "/tmp/remoteagents-settings-wrapper-narrow.png",
   });
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect(description).toBeVisible();
+  await description.scrollIntoViewIfNeeded();
   await expect(input).toBeVisible();
   const overflow = await settings.evaluate((element) => ({
-    page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    page:
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
     settings: element.scrollWidth - element.clientWidth,
   }));
   expect(overflow).toEqual({ page: 0, settings: 0 });
@@ -1739,10 +3082,12 @@ test("moves structured TMUX settings into one Application tab and saves original
   );
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   const labels = await nav.getByRole("button").allTextContents();
-  expect(labels.indexOf("Projects")).toBe(
-    labels.indexOf("Application config") + 1,
+  expect(labels.indexOf("Agents")).toBe(
+    labels.indexOf("Application") + 1,
   );
-  expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Projects") + 1);
+  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Agents") + 1);
+  expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
+  expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Reviews") + 1);
   await expect(
     nav.getByRole("button", { name: "Installation wrapper", exact: true }),
   ).toHaveCount(0);
@@ -1753,11 +3098,11 @@ test("moves structured TMUX settings into one Application tab and saves original
     settings.locator('[data-settings-path="tmux.pollIntervalMs"]'),
   ).toHaveCount(0);
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
-  await expect(settings.getByLabel("Application config source content")).toHaveValue(
-    /"tmux":\{"pollIntervalMs":500\}/u,
-  );
+  await expect(
+    settings.getByLabel("Application config source content"),
+  ).toHaveValue(/"tmux":\{"pollIntervalMs":500\}/u);
   await selectSettingsSection(settings, "env", "Environment & keys");
   for (const key of [
     "RAC_TMUX_BIN",
@@ -1810,7 +3155,7 @@ test("moves structured TMUX settings into one Application tab and saves original
     await expect(settings.getByLabel(key, { exact: true })).toHaveCount(0);
   await poll.fill("650");
   await tmuxBinary.fill("/opt/tmux/bin/tmux");
-  const wrapperContent = "#!/usr/bin/env bash\nexec /opt/tmux/bin/tmux \"$@\"\n";
+  const wrapperContent = '#!/usr/bin/env bash\nexec /opt/tmux/bin/tmux "$@"\n';
   await wrapper.fill(wrapperContent);
   await expect(
     nav.getByRole("button", { name: /^TMUX.*Unsaved changes$/u }),
@@ -1846,9 +3191,7 @@ test("moves structured TMUX settings into one Application tab and saves original
       {
         sourceId: "app",
         revisionId: "app-r1",
-        patches: [
-          { op: "set", path: ["tmux", "pollIntervalMs"], value: 650 },
-        ],
+        patches: [{ op: "set", path: ["tmux", "pollIntervalMs"], value: 650 }],
       },
       {
         sourceId: "env",
@@ -1883,14 +3226,24 @@ test("shows Environment and TMUX fallback values without staging defaults", asyn
     // retain browser runtime errors as explicit evidence
     if (message.type() === "error") consoleErrors.push(message.text());
   });
-  const { settings, state } = await setupSettings(page);
+  const { settings, state, sources } = await setupSettings(page);
+  const env = sources.find((source) => source.id === "env")!;
+  // mirror the backend's resolved metadata without authoring either value
+  const hostNodeField = env.fields!.find((field) => field.key === "RAC_HOST_NODE_BIN")!;
+  hostNodeField.fallback = { value: "/host/bin/node (from host PATH)", kind: "derived" };
+  env.fields!.push({
+    key: "RAC_TEMP_PREVIEW_ORIGIN",
+    protected: false,
+    present: false,
+    apply: "rac-restart",
+    fallback: { value: "https://agents.example.com (from Application Public Origin)", kind: "derived" },
+  });
+  await settings.getByRole("button", { name: "Refresh files", exact: true }).click();
   await selectSettingsSection(settings, "env", "Environment & keys");
-  const listenHost = settings.locator(
-    '[data-settings-path="RAC_LISTEN_HOST"]',
-  );
-  await expect(listenHost.getByLabel("RAC_LISTEN_HOST", { exact: true })).toHaveValue(
-    "",
-  );
+  const listenHost = settings.locator('[data-settings-path="RAC_LISTEN_HOST"]');
+  await expect(
+    listenHost.getByLabel("RAC_LISTEN_HOST", { exact: true }),
+  ).toHaveValue("");
   await expect(
     listenHost.getByLabel("RAC_LISTEN_HOST", { exact: true }),
   ).toHaveAttribute("placeholder", "127.0.0.1");
@@ -1909,22 +3262,31 @@ test("shows Environment and TMUX fallback values without staging defaults", asyn
       .locator('[data-settings-path="EDITOR_COMMAND"]')
       .getByText(/when omitted|Running Docker supplies/u),
   ).toHaveCount(0);
+  const hostNode = settings.getByLabel("RAC_HOST_NODE_BIN", { exact: true });
+  await hostNode.scrollIntoViewIfNeeded();
+  await expect(hostNode).toHaveValue("");
+  await expect(hostNode).toHaveAttribute("placeholder", "/host/bin/node (from host PATH)");
+  const previewOrigin = settings.getByLabel("RAC_TEMP_PREVIEW_ORIGIN", { exact: true });
+  await expect(previewOrigin).toHaveValue("");
+  await expect(previewOrigin).toHaveAttribute("placeholder", "https://agents.example.com (from Application Public Origin)");
+  await settings.screenshot({
+    path: "/tmp/remoteagents-settings-host-node-placeholder-desktop.png",
+  });
   await settings.screenshot({
     path: "/tmp/remoteagents-settings-env-defaults-desktop.png",
   });
 
   await selectSettingsSection(settings, "tmux", "TMUX");
   const tmuxBinary = settings.locator('[data-settings-path="RAC_TMUX_BIN"]');
-  await expect(tmuxBinary.getByLabel("RAC_TMUX_BIN", { exact: true })).toHaveValue(
-    "/usr/bin/tmux",
-  );
+  await expect(
+    tmuxBinary.getByLabel("RAC_TMUX_BIN", { exact: true }),
+  ).toHaveValue("/usr/bin/tmux");
   await expect(
     tmuxBinary.getByLabel("RAC_TMUX_BIN", { exact: true }),
   ).toHaveAttribute("placeholder", "/usr/local/bin/tmux");
   await expect(
     settings.getByText(/Default when omitted|Running Docker supplies/u),
   ).toHaveCount(0);
-  await expect(settings.getByText("No unsaved changes", { exact: true })).toBeVisible();
   await expect(
     settings.getByRole("button", { name: "Save changes", exact: true }),
   ).toHaveCount(0);
@@ -1935,7 +3297,9 @@ test("shows Environment and TMUX fallback values without staging defaults", asyn
 
   await page.setViewportSize({ width: 375, height: 812 });
   expect(
-    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
   ).toBe(true);
   await settings.screenshot({
     path: "/tmp/remoteagents-settings-tmux-defaults-mobile.png",
@@ -1944,12 +3308,141 @@ test("shows Environment and TMUX fallback values without staging defaults", asyn
   await expect(page.getByRole("listbox")).toHaveCount(0);
   await listenHost.scrollIntoViewIfNeeded();
   expect(
-    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
   ).toBe(true);
   await settings.screenshot({
     path: "/tmp/remoteagents-settings-env-defaults-mobile.png",
   });
+  await hostNode.scrollIntoViewIfNeeded();
+  await expect(hostNode).toHaveValue("");
+  await expect(hostNode).toHaveAttribute("placeholder", "/host/bin/node (from host PATH)");
+  await expect(previewOrigin).toHaveValue("");
+  await expect(previewOrigin).toHaveAttribute("placeholder", "https://agents.example.com (from Application Public Origin)");
+  await settings.screenshot({
+    path: "/tmp/remoteagents-settings-host-node-placeholder-mobile.png",
+  });
   expect(consoleErrors).toEqual([]);
+});
+
+// keep bridge defaults visible without creating environment assignments
+for (const kind of ["compose", "systemd"] as const) {
+  test(`shows all TMUX omission placeholders for ${kind} without drafting values`, async ({
+    page,
+  }) => {
+    const { settings, sources, state } = await setupSettings(
+      page,
+      false,
+      false,
+      false,
+      [],
+      "none",
+      kind,
+    );
+    const env = sources.find((source) => source.id === "env") as {
+      fields: Array<{
+        key: string;
+        value?: string;
+        present: boolean;
+        fallback?: { value: string; kind: string };
+      }>;
+    };
+    // consume the same public omission metadata returned by the settings service
+    for (const field of env.fields) {
+      if (
+        ["RAC_HOST_TMUX_DIR", "HOST_TMUX_DIR", "HOST_TMUX_BIN"].includes(
+          field.key,
+        )
+      ) {
+        delete field.value;
+        field.present = false;
+        field.fallback = environmentFallback(field.key, kind);
+      }
+    }
+    await settings
+      .getByRole("button", { name: "Refresh files", exact: true })
+      .click();
+    await selectSettingsSection(settings, "tmux", "TMUX");
+    const expectedKeys =
+      kind === "compose"
+        ? ["RAC_HOST_TMUX_DIR", "HOST_TMUX_DIR", "HOST_TMUX_BIN"]
+        : ["RAC_HOST_TMUX_DIR"];
+    // check only fields consumed by this installation mode
+    for (const key of expectedKeys) {
+      const input = settings.getByRole("textbox", { name: key, exact: true });
+      await expect(input).toHaveValue("");
+      await expect(input).toHaveAttribute(
+        "placeholder",
+        environmentFallback(key, kind)!.value,
+      );
+    }
+    expect(
+      await settings
+        .locator(".settings-env-fields input")
+        .evaluateAll((inputs) =>
+          inputs.every((input) =>
+            Boolean(input.getAttribute("placeholder")?.trim()),
+          ),
+        ),
+    ).toBe(true);
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toHaveCount(0);
+    await settings.screenshot({
+      path: `/tmp/rac-all-placeholders-${kind}-desktop.png`,
+    });
+    await page.setViewportSize({ width: 375, height: 812 });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await settings.screenshot({
+      path: `/tmp/rac-all-placeholders-${kind}-mobile.png`,
+    });
+    expect(state.saves).toEqual([]);
+  });
+}
+
+// keep inherited voice configuration visible without authoring its defaults
+test("shows omitted voice defaults as placeholders without staging file changes", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(
+    page,
+    false,
+    false,
+    true,
+  );
+  const application = sources.find((source) => source.id === "app") as {
+    value: { integrations: { realtime: Record<string, unknown> } };
+  };
+  delete application.value.integrations.realtime.name;
+  delete application.value.integrations.realtime.context;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "voice", "Voice");
+  await expect(
+    settings.getByRole("textbox", { name: "Davo name", exact: true }),
+  ).toHaveValue("");
+  await expect(
+    settings.getByRole("textbox", { name: "Davo name", exact: true }),
+  ).toHaveAttribute("placeholder", "Davo (from active Voice settings)");
+  await expect(
+    settings.getByRole("textbox", { name: "Davo context", exact: true }),
+  ).toHaveValue("");
+  await expect(
+    settings.getByRole("textbox", { name: "Davo context", exact: true }),
+  ).toHaveAttribute(
+    "placeholder",
+    "Speak plainly. (from active Voice settings)",
+  );
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
+  expect(state.saves).toEqual([]);
 });
 
 // removing an explicit assignment must leave its fallback as display-only guidance
@@ -1962,9 +3455,7 @@ test("keeps a fallback visible after clearing an explicit TMUX value", async ({
   const input = tmuxBinary.getByLabel("RAC_TMUX_BIN", { exact: true });
   await input.fill("");
   await expect(input).toHaveValue("");
-  await expect(
-    input,
-  ).toHaveAttribute("placeholder", "/usr/local/bin/tmux");
+  await expect(input).toHaveAttribute("placeholder", "/usr/local/bin/tmux");
   await expect(
     settings.getByText(/Default when omitted|Running Docker supplies/u),
   ).toHaveCount(0);
@@ -1972,15 +3463,17 @@ test("keeps a fallback visible after clearing an explicit TMUX value", async ({
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   await expect.poll(() => state.saves.length).toBe(1);
-  const changes = (state.saves[0] as {
-    body: {
-      changes: Array<{
-        sourceId: string;
-        revisionId: string;
-        patches?: Array<{ op: string; path: string[]; value?: unknown }>;
-      }>;
-    };
-  }).body.changes;
+  const changes = (
+    state.saves[0] as {
+      body: {
+        changes: Array<{
+          sourceId: string;
+          revisionId: string;
+          patches?: Array<{ op: string; path: string[]; value?: unknown }>;
+        }>;
+      };
+    }
+  ).body.changes;
   expect(changes).toEqual([
     {
       sourceId: "env",
@@ -1989,6 +3482,130 @@ test("keeps a fallback visible after clearing an explicit TMUX value", async ({
     },
   ]);
 });
+
+// hide installer inputs while retaining runtime edits and original source assignments
+for (const installationKind of ["compose", "systemd"] as const) {
+  test(`hides installer-only inputs without rewriting ${installationKind} environment files`, async ({
+    page,
+  }) => {
+    const { settings, sources, state } = await setupSettings(
+      page,
+      true,
+      false,
+      false,
+      [],
+      "none",
+      installationKind,
+    );
+    const { env } = configureDuplicateEnvironmentFixture(sources);
+    const installerKeys = [
+      "NODE_BIN",
+      "RAC_ENV_FILE",
+      "COMPOSE_FILE",
+      "COMPOSE_ENV_FILES",
+      "COMPOSE_PROJECT_NAME",
+      "COMPOSE_PROFILES",
+      "COMPOSE_PARALLEL_LIMIT",
+      "COMPOSE_COMPATIBILITY",
+    ];
+    await settings
+      .getByRole("button", { name: "Refresh files", exact: true })
+      .click();
+    await selectSettingsSection(settings, "env", "Environment & keys");
+    const search = settings.getByRole("searchbox", {
+      name: "Search settings",
+      exact: true,
+    });
+    // omit ineffective rows and exact-key search targets in either deployment mode
+    for (const key of installerKeys) {
+      await expect(
+        settings.getByRole("textbox", { name: key, exact: true }),
+      ).toHaveCount(0);
+      await search.fill(key);
+      await expect(
+        page
+          .getByRole("listbox", {
+            name: "Settings search results",
+            exact: true,
+          })
+          .locator(".settings-search-result-title > strong")
+          .filter({ hasText: new RegExp(`^${key}$`, "u") }),
+      ).toHaveCount(0);
+    }
+    await search.fill("RAC_HOST_NODE_BIN");
+    await expect(
+      page
+        .getByRole("listbox", { name: "Settings search results", exact: true })
+        .getByText("RAC_HOST_NODE_BIN", { exact: true }),
+    ).toBeVisible();
+    await search.fill("");
+    // preserve host and custom runtime inputs independently of installation aliases
+    for (const key of [
+      "RAC_HOST_NODE_BIN",
+      "RAC_HOST_PATH",
+      "CUSTOM_VISIBLE_SETTING",
+    ]) {
+      await expect(
+        settings.getByRole("textbox", { name: key, exact: true }),
+      ).toBeEditable();
+    }
+    await settings
+      .getByRole("button", { name: "Edit whole source", exact: true })
+      .click();
+    const raw = settings.getByLabel("Environment & keys source content", {
+      exact: true,
+    });
+    const content = await raw.inputValue();
+    // leave installer assignments available for file-level administration
+    for (const key of installerKeys)
+      expect(content).toContain(
+        `${key}=${env.fields?.find((field) => field.key === key)?.value}\n`,
+      );
+    await settings
+      .getByRole("button", { name: "Use structured editor", exact: true })
+      .click();
+    expect(state.saves).toEqual([]);
+
+    // reserve installer names even if an older server omits them from its catalog
+    env.fields = env.fields?.filter(
+      (field) => !installerKeys.includes(String(field.key)),
+    );
+    await settings
+      .getByRole("button", { name: "Refresh files", exact: true })
+      .click();
+    await settings
+      .getByRole("button", { name: "Add environment variable", exact: true })
+      .click();
+    await settings.getByLabel("Value", { exact: true }).fill("installer-only");
+    // reject every ineffective alias rather than silently creating a hidden draft
+    for (const key of installerKeys) {
+      await settings.getByLabel("Variable", { exact: true }).fill(key);
+      await expect(
+        settings.getByRole("button", { name: "Add variable", exact: true }),
+      ).toBeDisabled();
+    }
+    await settings.getByRole("button", { name: "Cancel", exact: true }).click();
+    await settings
+      .getByLabel("EDITOR_COMMAND", { exact: true })
+      .fill("nano --wait");
+    await settings
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    await expect.poll(() => state.saves.length).toBe(1);
+    expect(state.saves[0]).toMatchObject({
+      body: {
+        changes: [
+          {
+            sourceId: "env",
+            patches: [
+              { op: "set", path: ["EDITOR_COMMAND"], value: "nano --wait" },
+            ],
+          },
+        ],
+      },
+    });
+  });
+}
 
 // keep duplicate assignments in raw source while structured owners provide their controls
 test("hides Environment rows represented by active structured settings", async ({
@@ -2005,13 +3622,30 @@ test("hides Environment rows represented by active structured settings", async (
   await settings.getByRole("button", { name: "Refresh files" }).click();
 
   await selectSettingsSection(settings, "app", "Application config");
-  for (const path of [
-    "listen.host",
-    "listen.port",
-    "adapters.codex.program",
-    "adapters.claude.program",
-  ])
-    await expect(settings.locator(`[data-settings-path="${path}"]`)).toBeVisible();
+  for (const path of ["listen.host", "listen.port"])
+    await expect(
+      settings.locator(`[data-settings-path="${path}"]`),
+    ).toBeVisible();
+  for (const path of ["adapters.codex.program", "adapters.claude.program"])
+    await expect(
+      settings.locator(`[data-settings-path="${path}"]`),
+    ).toHaveCount(0);
+  await selectSettingsSection(settings, "agents", "Agents");
+  for (const path of ["adapters.codex.program", "adapters.claude.program"])
+    await expect(
+      settings.locator(`[data-settings-path="${path}"]`),
+    ).toBeVisible();
+  for (const key of agentEnvironmentKeys)
+    await expect(
+      settings.locator(`[data-settings-path="${key}"]`),
+    ).toBeVisible();
+  await expect(
+    settings.locator('[data-settings-path="RAC_ADAPTER_FILES_DIR"]'),
+  ).toHaveCount(0);
+  await selectSettingsSection(settings, "storage", "Storage");
+  await expect(
+    settings.locator('[data-settings-path="RAC_ADAPTER_FILES_DIR"]'),
+  ).toBeVisible();
   await selectSettingsSection(settings, "installation", "Installation");
   for (const path of [
     "compose.files",
@@ -2020,37 +3654,44 @@ test("hides Environment rows represented by active structured settings", async (
     "compose.options.parallel",
     "compose.options.compatibility",
   ])
-    await expect(settings.locator(`[data-settings-path="${path}"]`)).toBeVisible();
+    await expect(
+      settings.locator(`[data-settings-path="${path}"]`),
+    ).toBeVisible();
 
   await selectSettingsSection(settings, "env", "Environment & keys");
   for (const key of [
     "RAC_LISTEN_HOST",
     "RAC_LISTEN_PORT",
-    "RAC_CODEX_BIN",
-    "RAC_CLAUDE_BIN",
+    ...agentEnvironmentKeys,
+    ...storageEnvironmentKeys,
     "COMPOSE_FILE",
     "COMPOSE_ENV_FILES",
     "COMPOSE_PROJECT_NAME",
     "COMPOSE_PARALLEL_LIMIT",
     "COMPOSE_COMPATIBILITY",
-  ])
-    await expect(settings.locator(`[data-settings-path="${key}"]`)).toHaveCount(0);
-  for (const key of [
     "RAC_ENV_FILE",
-    "RAC_HOST_CODEX_BIN",
     "COMPOSE_PROFILES",
+    "NODE_BIN",
+  ])
+    await expect(settings.locator(`[data-settings-path="${key}"]`)).toHaveCount(
+      0,
+    );
+  for (const key of [
     "CLOUDFLARED_CREDENTIALS_FILE",
     "RAC_CONFIG",
     "RAC_CONFIG_WRITE_PATH",
-    "NODE_BIN",
     "CUSTOM_VISIBLE_SETTING",
     "RAC_SESSION_SECRET",
   ])
-    await expect(settings.locator(`[data-settings-path="${key}"]`)).toBeVisible();
+    await expect(
+      settings.locator(`[data-settings-path="${key}"]`),
+    ).toBeVisible();
   await settings
     .getByRole("button", { name: "Add environment variable", exact: true })
     .click();
-  await settings.getByLabel("Variable", { exact: true }).fill("RAC_LISTEN_HOST");
+  await settings
+    .getByLabel("Variable", { exact: true })
+    .fill("RAC_LISTEN_HOST");
   await settings.getByLabel("Value", { exact: true }).fill("duplicate");
   await expect(
     settings.getByRole("button", { name: "Add variable", exact: true }),
@@ -2064,7 +3705,9 @@ test("hides Environment rows represented by active structured settings", async (
     .evaluate((panel) => panel.scrollTo({ top: 0 }));
   await page.setViewportSize({ width: 375, height: 812 });
   expect(
-    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
   ).toBe(true);
   await settings.screenshot({
     path: "/tmp/remoteagents-settings-env-deduplicated-mobile.png",
@@ -2083,35 +3726,163 @@ test("hides Environment rows represented by active structured settings", async (
   await settings
     .getByRole("button", { name: "Use structured editor", exact: true })
     .click();
-  await settings.getByLabel("EDITOR_COMMAND", { exact: true }).fill("nano --wait");
+  await settings
+    .getByLabel("EDITOR_COMMAND", { exact: true })
+    .fill("nano --wait");
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   await expect.poll(() => state.saves.length).toBe(1);
   expect(
-    (state.saves[0] as {
-      body: {
-        changes: Array<{
-          sourceId: string;
-          revisionId: string;
-          patches?: Array<{ op: string; path: string[]; value?: unknown }>;
-        }>;
-      };
-    }).body.changes,
+    (
+      state.saves[0] as {
+        body: {
+          changes: Array<{
+            sourceId: string;
+            revisionId: string;
+            patches?: Array<{ op: string; path: string[]; value?: unknown }>;
+          }>;
+        };
+      }
+    ).body.changes,
   ).toEqual([
     {
       sourceId: "env",
       revisionId: "env-r1",
-      patches: [
-        { op: "set", path: ["EDITOR_COMMAND"], value: "nano --wait" },
-      ],
+      patches: [{ op: "set", path: ["EDITOR_COMMAND"], value: "nano --wait" }],
     },
   ]);
   expect(consoleErrors).toEqual([]);
 });
 
-// retain rows whose structured owner is missing, inactive, or in whole-source mode
-test("keeps Environment rows when their structured alternative is unavailable", async ({
+// combine adapter configuration and its environment overrides without changing source ownership
+test("moves adapter settings into Agents and saves both backing sources together", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const { settings, sources, state } = await setupSettings(page);
+  configureDuplicateEnvironmentFixture(sources);
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  const nav = settings.getByRole("navigation", { name: "Settings sources" });
+  const labels = await nav.getByRole("button").allTextContents();
+  expect(labels.indexOf("Agents")).toBe(
+    labels.indexOf("Application") + 1,
+  );
+  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Agents") + 1);
+
+  await selectSettingsSection(settings, "app", "Application config");
+  await expect(settings.locator('[data-settings-path="adapters"]')).toHaveCount(
+    0,
+  );
+  await selectSettingsSection(settings, "env", "Environment & keys");
+  for (const key of agentEnvironmentKeys)
+    await expect(settings.locator(`[data-settings-path="${key}"]`)).toHaveCount(
+      0,
+    );
+
+  await selectSettingsSection(settings, "agents", "Agents");
+  await expect(
+    settings.getByRole("heading", { name: "Agents", exact: true, level: 2 }),
+  ).toBeVisible();
+  await expect(
+    settings.getByRole("textbox", { name: "Codex program", exact: true }),
+  ).toHaveValue("/usr/bin/codex");
+  for (const key of agentEnvironmentKeys)
+    await expect(
+      settings.locator(`[data-settings-path="${key}"]`),
+    ).toBeVisible();
+  await expect(
+    settings.locator('[data-settings-path="RAC_ADAPTER_FILES_DIR"]'),
+  ).toHaveCount(0);
+  await expect(
+    settings.getByLabel("RAC_OPENAI_ADMIN_KEY masked"),
+  ).toBeVisible();
+  await settings.screenshot({
+    path: "/tmp/remoteagents-settings-agents-desktop.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(
+    settings.getByRole("combobox", { name: "Settings section", exact: true }),
+  ).toHaveAttribute("data-value", "agents");
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await settings.screenshot({
+    path: "/tmp/remoteagents-settings-agents-mobile.png",
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await settings
+    .getByRole("textbox", { name: "Codex program", exact: true })
+    .fill("/opt/codex");
+  await settings
+    .getByRole("textbox", { name: "RAC_CLAUDE_CONFIG_DIR", exact: true })
+    .fill("/config/claude-next");
+  const adminKey = settings.locator(
+    '[data-settings-path="RAC_OPENAI_ADMIN_KEY"]',
+  );
+  await adminKey
+    .getByRole("button", { name: "Reveal RAC_OPENAI_ADMIN_KEY", exact: true })
+    .click();
+  await adminKey
+    .getByRole("textbox", { name: "RAC_OPENAI_ADMIN_KEY", exact: true })
+    .fill("synthetic-admin-key");
+  await expect(
+    nav.getByRole("button", { name: "Agents Unsaved changes", exact: true }),
+  ).toBeVisible();
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  const transaction = state.saves[0] as {
+    body: {
+      changes: Array<{
+        sourceId: string;
+        patches?: Array<{ op: string; path: string[]; value?: unknown }>;
+      }>;
+    };
+  };
+  expect(transaction.body.changes).toHaveLength(2);
+  expect(
+    transaction.body.changes.find((change) => change.sourceId === "app")
+      ?.patches,
+  ).toEqual([
+    {
+      op: "set",
+      path: ["adapters", "codex", "program"],
+      value: "/opt/codex",
+    },
+  ]);
+  expect(
+    transaction.body.changes.find((change) => change.sourceId === "env")
+      ?.patches,
+  ).toEqual(
+    expect.arrayContaining([
+      {
+        op: "set",
+        path: ["RAC_CLAUDE_CONFIG_DIR"],
+        value: "/config/claude-next",
+      },
+      {
+        op: "set",
+        path: ["RAC_OPENAI_ADMIN_KEY"],
+        value: "synthetic-admin-key",
+      },
+    ]),
+  );
+  await expect(
+    page.getByRole("status", { name: "Restart pending", exact: true }),
+  ).toBeVisible();
+  expect(state.status.pending).toBe(true);
+  expect(state.restarts).toBe(0);
+});
+
+// hide agent overrides when their owning adapter is unavailable
+test("hides Agents environment controls without a renderable owning adapter", async ({
   page,
 }) => {
   const { settings, sources, state } = await setupSettings(page);
@@ -2139,36 +3910,57 @@ test("keeps Environment rows when their structured alternative is unavailable", 
   delete installationSchema.properties.compose.properties.projectName;
   await settings.getByRole("button", { name: "Refresh files" }).click();
   await selectSettingsSection(settings, "env", "Environment & keys");
+  // keep runtime fallbacks when their structured metadata is unavailable
+  for (const key of ["RAC_LISTEN_HOST", "RAC_LISTEN_PORT"])
+    await expect(
+      settings.locator(`[data-settings-path="${key}"]`),
+    ).toBeVisible();
+  // never restore installer aliases as fallback controls
   for (const key of [
-    "RAC_LISTEN_HOST",
-    "RAC_LISTEN_PORT",
-    "RAC_CODEX_BIN",
-    "COMPOSE_PROJECT_NAME",
-    "RAC_ENV_FILE",
-  ])
-    await expect(settings.locator(`[data-settings-path="${key}"]`)).toBeVisible();
-  for (const key of [
-    "RAC_CLAUDE_BIN",
+    ...agentEnvironmentKeys,
     "COMPOSE_FILE",
     "COMPOSE_ENV_FILES",
+    "COMPOSE_PROJECT_NAME",
     "COMPOSE_PARALLEL_LIMIT",
     "COMPOSE_COMPATIBILITY",
+    "COMPOSE_PROFILES",
+    "RAC_ENV_FILE",
+    "NODE_BIN",
   ])
-    await expect(settings.locator(`[data-settings-path="${key}"]`)).toHaveCount(0);
+    await expect(settings.locator(`[data-settings-path="${key}"]`)).toHaveCount(
+      0,
+    );
 
+  await selectSettingsSection(settings, "agents", "Agents");
+  await expect(
+    settings.locator('[data-settings-path="adapters.codex.program"]'),
+  ).toHaveCount(0);
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_CODEX_BIN", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    settings.locator('[data-settings-path="adapters.claude.program"]'),
+  ).toBeVisible();
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_CLAUDE_BIN", exact: true }),
+  ).toBeEditable();
   await selectSettingsSection(settings, "app", "Application config");
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
+  await selectSettingsSection(settings, "agents", "Agents");
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_CLAUDE_BIN", exact: true }),
+  ).toBeEditable();
   await selectSettingsSection(settings, "env", "Environment & keys");
   await expect(
     settings.locator('[data-settings-path="RAC_CLAUDE_BIN"]'),
-  ).toBeVisible();
+  ).toHaveCount(0);
   expect(state.saves).toEqual([]);
 });
 
-// readonly peers cannot replace an editable environment assignment
-test("keeps Environment rows when their structured owners are read-only", async ({
+// preserve independent source authority on the combined Agents page
+test("keeps Agents environment controls editable when application adapters are read-only", async ({
   page,
 }) => {
   const { settings, sources, state } = await setupSettings(page);
@@ -2178,18 +3970,90 @@ test("keeps Environment rows when their structured owners are read-only", async 
   installation.writable = false;
   await settings.getByRole("button", { name: "Refresh files" }).click();
   await selectSettingsSection(settings, "env", "Environment & keys");
+  // read-only peers still leave effective runtime overrides editable
+  for (const key of ["RAC_LISTEN_HOST", "RAC_LISTEN_PORT"])
+    await expect(
+      settings.locator(`[data-settings-path="${key}"]`),
+    ).toBeVisible();
+  // installer-only aliases remain hidden independently of peer authority
   for (const key of [
-    "RAC_LISTEN_HOST",
-    "RAC_LISTEN_PORT",
-    "RAC_CODEX_BIN",
-    "RAC_CLAUDE_BIN",
+    ...agentEnvironmentKeys,
     "COMPOSE_FILE",
     "COMPOSE_ENV_FILES",
     "COMPOSE_PROJECT_NAME",
     "COMPOSE_PARALLEL_LIMIT",
     "COMPOSE_COMPATIBILITY",
+    "COMPOSE_PROFILES",
+    "RAC_ENV_FILE",
+    "NODE_BIN",
   ])
-    await expect(settings.locator(`[data-settings-path="${key}"]`)).toBeVisible();
+    await expect(settings.locator(`[data-settings-path="${key}"]`)).toHaveCount(
+      0,
+    );
+  await selectSettingsSection(settings, "agents", "Agents");
+  await expect(
+    settings.getByRole("textbox", { name: "Codex program", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_CODEX_BIN", exact: true }),
+  ).toBeEditable();
+  expect(state.saves).toEqual([]);
+});
+
+// lock each Agents source independently when its whole-file editor owns changes
+test("keeps Agents source locks independent across raw and read-only states", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(page);
+  const { app, env } = configureDuplicateEnvironmentFixture(sources);
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+
+  await selectSettingsSection(settings, "app", "Application config");
+  await settings
+    .getByRole("button", { name: "Edit base file", exact: true })
+    .click();
+  await selectSettingsSection(settings, "agents", "Agents");
+  await expect(
+    settings.getByRole("textbox", { name: "Codex program", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_CODEX_BIN", exact: true }),
+  ).toBeEditable();
+
+  await selectSettingsSection(settings, "app", "Application config");
+  await settings
+    .getByRole("button", { name: "Use structured editor", exact: true })
+    .click();
+  await selectSettingsSection(settings, "env", "Environment & keys");
+  await settings
+    .getByRole("button", { name: "Edit whole source", exact: true })
+    .click();
+  await selectSettingsSection(settings, "agents", "Agents");
+  await expect(
+    settings.getByRole("textbox", { name: "Codex program", exact: true }),
+  ).toBeEditable();
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_CODEX_BIN", exact: true }),
+  ).toBeDisabled();
+
+  await selectSettingsSection(settings, "env", "Environment & keys");
+  await settings
+    .getByRole("button", { name: "Use structured editor", exact: true })
+    .click();
+  app.writable = true;
+  env.writable = false;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "agents", "Agents");
+  await expect(
+    settings.getByRole("textbox", { name: "Codex program", exact: true }),
+  ).toBeEditable();
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_CODEX_BIN", exact: true }),
+  ).toBeDisabled();
   expect(state.saves).toEqual([]);
 });
 
@@ -2212,19 +4076,468 @@ test("uses the active installation mode when hiding Environment rows", async ({
   await expect(
     settings.locator('[data-settings-path="native.environmentFile"]'),
   ).toBeVisible();
-  await expect(settings.locator('[data-settings-path="compose.files"]')).toHaveCount(
-    0,
-  );
+  await expect(
+    settings.locator('[data-settings-path="compose.files"]'),
+  ).toHaveCount(0);
   await selectSettingsSection(settings, "env", "Environment & keys");
-  await expect(settings.locator('[data-settings-path="RAC_ENV_FILE"]')).toHaveCount(0);
+  await expect(
+    settings.locator('[data-settings-path="RAC_ENV_FILE"]'),
+  ).toHaveCount(0);
+  // installer aliases stay hidden independently of the active installation mode
   for (const key of [
     "COMPOSE_FILE",
     "COMPOSE_ENV_FILES",
     "COMPOSE_PROJECT_NAME",
     "COMPOSE_PARALLEL_LIMIT",
     "COMPOSE_COMPATIBILITY",
+    "COMPOSE_PROFILES",
+    "NODE_BIN",
   ])
-    await expect(settings.locator(`[data-settings-path="${key}"]`)).toBeVisible();
+    await expect(
+      settings.locator(`[data-settings-path="${key}"]`),
+    ).toHaveCount(0);
+  await selectSettingsSection(settings, "agents", "Agents");
+  for (const key of agentEnvironmentKeys.filter(
+    (candidate) => candidate !== "CODEX_VERSION",
+  ))
+    await expect(
+      settings.locator(`[data-settings-path="${key}"]`),
+    ).toBeVisible();
+  await expect(
+    settings.locator('[data-settings-path="CODEX_VERSION"]'),
+  ).toHaveCount(0);
+  await expect(
+    settings.locator('[data-settings-path="RAC_ADAPTER_FILES_DIR"]'),
+  ).toHaveCount(0);
+  expect(state.saves).toEqual([]);
+});
+
+// combine scratch and data-file paths without changing either persisted source
+for (const width of [1440, 390]) {
+  test(`moves scratch and data paths into Storage at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { settings, sources, state } = await setupSettings(page);
+    configureStorageFixture(sources);
+    state.migrationRequiredSourceIds = ["env"];
+    await settings
+      .getByRole("button", { name: "Refresh files", exact: true })
+      .click();
+
+    const nav = settings.getByRole("navigation", { name: "Settings sources" });
+    // desktop exposes the complete ordered sidebar
+    if (width === 1440) {
+      const labels = await nav.getByRole("button").allTextContents();
+      expect(labels.indexOf("Storage")).toBe(labels.indexOf("TMUX") + 1);
+    }
+    await selectSettingsSection(settings, "app", "Application config");
+    await expect(
+      settings.locator('[data-settings-path="scratchDirectory"]'),
+    ).toHaveCount(0);
+    await selectSettingsSection(settings, "agents", "Agents");
+    for (const key of storageEnvironmentKeys)
+      await expect(
+        settings.locator(`[data-settings-path="${key}"]`),
+      ).toHaveCount(0);
+    await selectSettingsSection(settings, "env", "Environment & keys");
+    for (const key of storageEnvironmentKeys)
+      await expect(
+        settings.locator(`[data-settings-path="${key}"]`),
+      ).toHaveCount(0);
+
+    await selectSettingsSection(settings, "storage", "Storage");
+    await expect(
+      settings.getByRole("heading", { name: "Storage", exact: true, level: 2 }),
+    ).toBeVisible();
+    const scratch = settings.getByRole("textbox", {
+      name: "Scratch directory",
+      exact: true,
+    });
+    await expect(scratch).toBeEditable();
+    await expect(scratch).toHaveValue("");
+    await expect(scratch).toHaveAttribute(
+      "placeholder",
+      "/home/test (from host home)",
+    );
+    await expect(
+      settings.getByRole("button", {
+        name: /^(?:Add|Remove) Scratch directory$/u,
+      }),
+    ).toHaveCount(0);
+    const storageEnvironment = settings.getByRole("region", {
+      name: "Storage environment settings",
+      exact: true,
+    });
+    await expect(
+      storageEnvironment.getByRole("heading", {
+        name: "Environment",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      storageEnvironment.getByRole("heading", {
+        name: "Environment & keys",
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    const spacing = await settings.evaluate(() => {
+      const scratchField = document.querySelector<HTMLElement>(
+        '[data-settings-path="scratchDirectory"]',
+      )!;
+      const environmentHeading = document
+        .querySelector<HTMLElement>(
+          '[aria-label="Storage environment settings"]',
+        )!
+        .querySelector<HTMLElement>("h3")!;
+      return (
+        environmentHeading.getBoundingClientRect().top -
+        scratchField.getBoundingClientRect().bottom
+      );
+    });
+    expect(spacing).toBeGreaterThanOrEqual(16);
+    for (const key of storageEnvironmentKeys) {
+      const input = storageEnvironment.getByRole("textbox", {
+        name: key,
+        exact: true,
+      });
+      await expect(input).toHaveValue("");
+      await expect(input).toHaveAttribute(
+        "placeholder",
+        environmentFallback(key)!.value,
+      );
+    }
+    await expect(
+      storageEnvironment.getByRole("textbox", {
+        name: "RAC_ADAPTER_FILES_DIR",
+        exact: true,
+      }),
+    ).toHaveAttribute("placeholder", ".data/adapters");
+    await expect(
+      storageEnvironment.getByRole("textbox", {
+        name: "RAC_SERVER_ADMIN_STATUS_DIR",
+        exact: true,
+      }),
+    ).toHaveAttribute("placeholder", ".data");
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toHaveCount(0);
+    expect(state.saves).toEqual([]);
+    await settings.screenshot({
+      path: `/tmp/remoteagents-settings-storage-${width}.png`,
+    });
+    // mobile stops before staging a shared-source transaction
+    if (width === 390) return;
+
+    await scratch.fill("/var/tmp/rac");
+    await storageEnvironment
+      .getByRole("textbox", { name: "RAC_NOTES_FILE", exact: true })
+      .fill("/data/notes-next.json");
+    await expect(
+      nav.getByRole("button", { name: "Storage Unsaved changes", exact: true }),
+    ).toBeVisible();
+    await settings
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    const dialog = page.getByRole("alertdialog", {
+      name: "Choose source handover",
+      exact: true,
+    });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(scratch).toHaveValue("/var/tmp/rac");
+    await expect(
+      storageEnvironment.getByRole("textbox", {
+        name: "RAC_NOTES_FILE",
+        exact: true,
+      }),
+    ).toHaveValue("/data/notes-next.json");
+    expect(state.saves).toEqual([]);
+
+    await settings
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    await dialog
+      .getByRole("radio", { name: "Adopt existing", exact: true })
+      .check();
+    await dialog
+      .getByRole("button", { name: "Continue and save", exact: true })
+      .click();
+    await expect.poll(() => state.saves.length).toBe(1);
+    const transaction = state.saves[0] as {
+      body: {
+        changes: Array<{
+          sourceId: string;
+          migration?: { mode: string };
+          patches?: Array<{ op: string; path: string[]; value?: unknown }>;
+        }>;
+      };
+    };
+    expect(
+      transaction.body.changes.find((change) => change.sourceId === "app")
+        ?.patches,
+    ).toEqual([
+      {
+        op: "set",
+        path: ["scratchDirectory"],
+        value: "/var/tmp/rac",
+      },
+    ]);
+    const environmentChange = transaction.body.changes.find(
+      (change) => change.sourceId === "env",
+    );
+    expect(environmentChange?.patches).toEqual([
+      {
+        op: "set",
+        path: ["RAC_NOTES_FILE"],
+        value: "/data/notes-next.json",
+      },
+    ]);
+    expect(environmentChange?.migration).toEqual({ mode: "adopt" });
+    await expect(
+      page.getByRole("status", { name: "Restart pending", exact: true }),
+    ).toBeVisible();
+    expect(state.restarts).toBe(0);
+  });
+}
+
+// keep Editor permanent while an empty command means omission
+for (const width of [1440, 390]) {
+  // cover saved and omitted Editor commands
+  for (const configured of [false, true]) {
+    test(`keeps Editor visible and resets by clearing at ${width}px with configured=${configured}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      const { settings, sources, state } = await setupSettings(page);
+      const app = sources.find((source) => source.id === "app")!;
+      const value = app.value as Record<string, unknown>;
+      const schema = app.schema as { properties: Record<string, unknown> };
+      schema.properties.editor = applicationSettingsSchema().properties!.editor!;
+      // cover both saved commands and an initially omitted Editor
+      if (configured) value.editor = "nvim --wait";
+      else delete value.editor;
+      await settings.getByRole("button", { name: "Refresh files", exact: true }).click();
+      const editor = settings.getByRole("textbox", { name: "Editor", exact: true });
+      await expect(editor).toBeEditable();
+      await expect(editor).toHaveValue(configured ? "nvim --wait" : "");
+      await expect(settings.getByRole("button", { name: /^(?:Add|Remove) Editor$/u })).toHaveCount(0);
+      // clearing a temporary omitted command must leave no draft behind
+      if (!configured) await editor.fill("nvim --temporary");
+      await editor.fill("");
+      await expect(editor).toHaveValue("");
+      await expect(editor).toHaveAttribute("placeholder", "Disabled when unset");
+      await expect(settings.getByRole("button", { name: /^(?:Add|Remove) Editor$/u })).toHaveCount(0);
+      // an authored command clears by removing its source key rather than saving empty text
+      if (configured) {
+        await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+        await expect.poll(() => state.saves.length).toBe(1);
+        expect((state.saves[0] as { body: unknown }).body).toEqual({ changes: [{ sourceId: "app", revisionId: "app-r1", patches: [{ op: "remove", path: ["editor"] }] }] });
+        await expect(editor).toBeEditable();
+        await expect(editor).toHaveValue("");
+      } else {
+        await expect(settings.getByRole("button", { name: "Save changes", exact: true })).toHaveCount(0);
+        expect(state.saves).toEqual([]);
+      }
+      // resetting the field must not hide it or prevent a replacement command
+      await editor.fill("code --wait");
+      await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+      await expect.poll(() => state.saves.length).toBe(configured ? 2 : 1);
+      const changes = (state.saves.at(-1) as { body: { changes: Array<{ sourceId: string; patches: SettingsPatch[] }> } }).body.changes;
+      expect(changes).toHaveLength(1);
+      expect(changes[0]!.sourceId).toBe("app");
+      const patches = changes[0]!.patches;
+      // ordered drafts may retain prior reset boundaries but persist only the final command
+      expect(patches.every((patch) => JSON.stringify(patch.path) === '["editor"]')).toBe(true);
+      expect(patches.at(-1)).toEqual({ op: "set", path: ["editor"], value: "code --wait" });
+      expect(patches.reduce<unknown>((current, patch) => applyPatch(current, patch), {})).toEqual({ editor: "code --wait" });
+      await expect(editor).toHaveValue("code --wait");
+      await expect(settings.getByRole("button", { name: /^(?:Add|Remove) Editor$/u })).toHaveCount(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    });
+  }
+}
+
+// clear an authored scratch path back to the omitted host-home default
+test("removes an authored Scratch directory without hiding its field", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(page);
+  const { app } = configureStorageFixture(sources);
+  (app.value as Record<string, unknown>).scratchDirectory = "/var/tmp/authored";
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "storage", "Storage");
+  const scratch = settings.getByRole("textbox", {
+    name: "Scratch directory",
+    exact: true,
+  });
+  await expect(scratch).toHaveValue("/var/tmp/authored");
+  await scratch.fill("");
+  await expect(scratch).toHaveValue("");
+  await expect(scratch).toHaveAttribute(
+    "placeholder",
+    "/home/test (from host home)",
+  );
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  expect(
+    (
+      state.saves[0] as {
+        body: {
+          changes: Array<{
+            sourceId: string;
+            patches?: Array<{ op: string; path: string[]; value?: unknown }>;
+          }>;
+        };
+      }
+    ).body.changes,
+  ).toEqual([
+    {
+      sourceId: "app",
+      revisionId: "app-r1",
+      patches: [{ op: "remove", path: ["scratchDirectory"] }],
+    },
+  ]);
+  await expect(
+    settings.getByRole("textbox", { name: "Scratch directory", exact: true }),
+  ).toBeVisible();
+  expect(state.restarts).toBe(0);
+});
+
+// cancel a temporary omitted-value edit without retaining an ineffective remove
+test("treats typing then clearing an omitted Scratch directory as a no-op", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(page);
+  configureStorageFixture(sources);
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "storage", "Storage");
+  const scratch = settings.getByRole("textbox", {
+    name: "Scratch directory",
+    exact: true,
+  });
+  await scratch.fill("/var/tmp/temporary");
+  await scratch.fill("");
+  await expect(scratch).toHaveValue("");
+  await expect(scratch).toHaveAttribute(
+    "placeholder",
+    "/home/test (from host home)",
+  );
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
+  expect(state.validations).toEqual([]);
+  expect(state.saves).toEqual([]);
+});
+
+// lock the two Storage sources independently across representation and availability changes
+test("keeps Storage source locks independent", async ({ page }) => {
+  const { settings, sources, state } = await setupSettings(page);
+  const { app, env } = configureStorageFixture(sources);
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+
+  await selectSettingsSection(settings, "app", "Application config");
+  await settings
+    .getByRole("button", { name: "Edit base file", exact: true })
+    .click();
+  await selectSettingsSection(settings, "storage", "Storage");
+  await expect(
+    settings.getByRole("textbox", {
+      name: "Scratch directory",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_NOTES_FILE", exact: true }),
+  ).toBeEditable();
+
+  await selectSettingsSection(settings, "app", "Application config");
+  await settings
+    .getByRole("button", { name: "Use structured editor", exact: true })
+    .click();
+  await selectSettingsSection(settings, "env", "Environment & keys");
+  await settings
+    .getByRole("button", { name: "Edit whole source", exact: true })
+    .click();
+  await selectSettingsSection(settings, "storage", "Storage");
+  await expect(
+    settings.getByRole("textbox", {
+      name: "Scratch directory",
+      exact: true,
+    }),
+  ).toBeEnabled();
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_NOTES_FILE", exact: true }),
+  ).toBeDisabled();
+
+  await selectSettingsSection(settings, "env", "Environment & keys");
+  await settings
+    .getByRole("button", { name: "Use structured editor", exact: true })
+    .click();
+  app.writable = false;
+  env.writable = true;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "storage", "Storage");
+  await expect(
+    settings.getByRole("textbox", {
+      name: "Scratch directory",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_NOTES_FILE", exact: true }),
+  ).toBeEditable();
+
+  app.writable = true;
+  env.writable = false;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await expect(
+    settings.getByRole("textbox", {
+      name: "Scratch directory",
+      exact: true,
+    }),
+  ).toBeEnabled();
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_NOTES_FILE", exact: true }),
+  ).toBeDisabled();
+
+  sources.splice(sources.indexOf(env), 1);
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await expect(
+    settings.getByRole("textbox", {
+      name: "Scratch directory",
+      exact: true,
+    }),
+  ).toBeEnabled();
+  await expect(
+    settings.locator('[data-settings-path="RAC_NOTES_FILE"]'),
+  ).toHaveCount(0);
+
+  sources.push(env);
+  sources.splice(sources.indexOf(app), 1);
+  env.writable = true;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await expect(
+    settings.locator('[data-settings-path="scratchDirectory"]'),
+  ).toHaveCount(0);
+  await expect(
+    settings.getByRole("textbox", { name: "RAC_NOTES_FILE", exact: true }),
+  ).toBeEditable();
   expect(state.saves).toEqual([]);
 });
 
@@ -2236,17 +4549,21 @@ test("moves Projects into its own Application section on desktop and mobile", as
   const { settings, state } = await setupSettings(page);
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   const labels = await nav.getByRole("button").allTextContents();
-  expect(labels.indexOf("Projects")).toBe(
-    labels.indexOf("Application config") + 1,
+  expect(labels.indexOf("Agents")).toBe(
+    labels.indexOf("Application") + 1,
   );
-  expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Projects") + 1);
+  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Agents") + 1);
+  expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
+  expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Reviews") + 1);
 
   await selectSettingsSection(settings, "app", "Application config");
   await expect(settings.locator('[data-settings-path="projects"]')).toHaveCount(
     0,
   );
   await selectSettingsSection(settings, "projects", "Projects");
-  await expect(settings.locator('[data-settings-path="projects"]')).toBeVisible();
+  await expect(
+    settings.locator('[data-settings-path="projects"]'),
+  ).toBeVisible();
   await settings
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
@@ -2367,20 +4684,22 @@ test("saves Project edits, additions, moves, and confirmed removal through app",
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   await expect.poll(() => state.saves.length).toBe(1);
-  const changes = (state.saves[0] as {
-    body: {
-      changes: Array<{
-        sourceId: string;
-        patches?: Array<{
-          op: string;
-          path: string[];
-          index?: number;
-          from?: number;
-          to?: number;
+  const changes = (
+    state.saves[0] as {
+      body: {
+        changes: Array<{
+          sourceId: string;
+          patches?: Array<{
+            op: string;
+            path: string[];
+            index?: number;
+            from?: number;
+            to?: number;
+          }>;
         }>;
-      }>;
-    };
-  }).body.changes;
+      };
+    }
+  ).body.changes;
   expect(changes.map((change) => change.sourceId)).toEqual(["app"]);
   expect(changes[0]?.patches).toEqual(
     expect.arrayContaining([
@@ -2447,8 +4766,7 @@ test("shows reserved Project ID errors only after save validation", async ({
       .find((change) => change.sourceId === "app")
       ?.patches?.find(
         (patch) =>
-          patch.op === "set" &&
-          patch.path.join(".") === "projects.0.id",
+          patch.op === "set" && patch.path.join(".") === "projects.0.id",
       )?.value;
     const reserved = id === "agent" || id === "scratch";
     await route.fulfill({
@@ -2479,9 +4797,9 @@ test("shows reserved Project ID errors only after save validation", async ({
   const id = idField.getByLabel("Id", { exact: true });
   await expect(idField).not.toContainText(/reserved/iu);
   await id.fill("agent");
-  await expect(settings.getByText(reservedMessage, { exact: true })).toHaveCount(
-    0,
-  );
+  await expect(
+    settings.getByText(reservedMessage, { exact: true }),
+  ).toHaveCount(0);
 
   const save = settings.getByRole("button", {
     name: "Save changes",
@@ -2502,9 +4820,9 @@ test("shows reserved Project ID errors only after save validation", async ({
   await id.fill("atlas-valid");
   await save.click();
   await expect.poll(() => state.saves.length).toBe(1);
-  await expect(settings.getByText(reservedMessage, { exact: true })).toHaveCount(
-    0,
-  );
+  await expect(
+    settings.getByText(reservedMessage, { exact: true }),
+  ).toHaveCount(0);
   expect(state.validations).toHaveLength(3);
   expect(consoleErrors).toEqual([]);
 });
@@ -2580,6 +4898,7 @@ test("hides unused application fields and marks unsupported adapters unimplement
 
   const panel = settings.locator(".settings-source-panel");
   await expect(panel.locator('[data-settings-path="proxy"]')).toHaveCount(0);
+  await selectSettingsSection(settings, "agents", "Agents");
   for (const [path, label] of [
     ["adapters.pi", "Pi"],
     ["adapters.opencode", "OpenCode"],
@@ -2590,37 +4909,52 @@ test("hides unused application fields and marks unsupported adapters unimplement
     await expect(adapter).toBeVisible();
     await expect(adapter).toHaveAttribute("aria-disabled", "true");
     await expect(adapter.getByText(label, { exact: true })).toBeVisible();
-    await expect(adapter.getByText("Unimplemented", { exact: true })).toBeVisible();
-    for (const control of await adapter.locator("input, textarea, button").all())
+    await expect(
+      adapter.getByText("Unimplemented", { exact: true }),
+    ).toBeVisible();
+    for (const control of await adapter
+      .locator("input, textarea, button")
+      .all())
       await expect(control).toBeDisabled();
   }
-  await panel.locator('[data-settings-path="adapters.pi"]').scrollIntoViewIfNeeded();
+  await panel
+    .locator('[data-settings-path="adapters.pi"]')
+    .scrollIntoViewIfNeeded();
   await settings.screenshot({
     path: "/tmp/remoteagents-settings-unimplemented-adapters-desktop.png",
   });
   await page.setViewportSize({ width: 375, height: 812 });
-  await panel.locator('[data-settings-path="adapters.pi"]').scrollIntoViewIfNeeded();
+  await panel
+    .locator('[data-settings-path="adapters.pi"]')
+    .scrollIntoViewIfNeeded();
   expect(
-    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
   ).toBe(true);
   await settings.screenshot({
     path: "/tmp/remoteagents-settings-unimplemented-adapters-mobile.png",
   });
   await page.setViewportSize({ width: 1440, height: 900 });
 
-  await panel.getByLabel("Shell command", { exact: true }).fill("/usr/bin/agent");
+  await selectSettingsSection(settings, "app", "Application config");
+  await panel
+    .getByLabel("Shell command", { exact: true })
+    .fill("/usr/bin/agent");
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   await expect.poll(() => state.saves.length).toBe(1);
-  const appChange = (state.saves[0] as {
-    body: {
-      changes: Array<{
-        sourceId: string;
-        patches?: Array<{ path: string[]; value?: unknown }>;
-      }>;
-    };
-  }).body.changes.find((change) => change.sourceId === "app");
+  const appChange = (
+    state.saves[0] as {
+      body: {
+        changes: Array<{
+          sourceId: string;
+          patches?: Array<{ path: string[]; value?: unknown }>;
+        }>;
+      };
+    }
+  ).body.changes.find((change) => change.sourceId === "app");
   expect(appChange?.patches).toEqual([
     { op: "set", path: ["adapter", "command"], value: "/usr/bin/agent" },
   ]);
@@ -2628,7 +4962,7 @@ test("hides unused application fields and marks unsupported adapters unimplement
     false,
   );
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   await expect(
     panel.getByLabel("Application config source content", { exact: true }),
@@ -2654,7 +4988,9 @@ test("hides unused application fields and marks unsupported adapters unimplement
   });
   await page.setViewportSize({ width: 375, height: 812 });
   expect(
-    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
   ).toBe(true);
   await settings.screenshot({
     path: "/tmp/remoteagents-settings-unused-fields-mobile.png",
@@ -2662,12 +4998,12 @@ test("hides unused application fields and marks unsupported adapters unimplement
   expect(consoleErrors).toEqual([]);
 });
 
-// show sparse project settings directly without authoring their blank defaults
-test("shows every Project field and omits untouched optional blanks on save", async ({
+// inherit each project's live path without authoring a host override
+test("uses live Project path placeholders for Docker Host path overrides", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  const { settings, state } = await setupSettings(
+  const { settings, sources, state } = await setupSettings(
     page,
     true,
     false,
@@ -2677,6 +5013,202 @@ test("shows every Project field and omits untouched optional blanks on save", as
     "compose",
     true,
   );
+  const app = sources.find((source) => source.id === "app")!;
+  const value = app.value as { projects: Array<{ hostPath?: string }> };
+  value.projects[1]!.hostPath = "/host/beacon";
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "projects", "Projects");
+  const atlas = settings.getByRole("group", { name: "Project 1", exact: true });
+  const beacon = settings.getByRole("group", {
+    name: "Project 2",
+    exact: true,
+  });
+  await atlas
+    .getByRole("button", { name: "Edit Project 1", exact: true })
+    .click();
+  await beacon
+    .getByRole("button", { name: "Edit Project 2", exact: true })
+    .click();
+  const atlasPath = atlas.getByLabel("Path", { exact: true });
+  const atlasHost = atlas.getByLabel("Host Path", { exact: true });
+  const beaconHost = beacon.getByLabel("Host Path", { exact: true });
+  await expect(atlasHost).toHaveValue("");
+  await expect(atlasHost).toHaveAttribute(
+    "placeholder",
+    "/code/atlas (from Project Path)",
+  );
+  await expect(beaconHost).toHaveValue("/host/beacon");
+  await expect(beaconHost).toHaveAttribute(
+    "placeholder",
+    "/code/beacon (from Project Path)",
+  );
+  expect(state.saves).toEqual([]);
+  await atlasPath.fill("");
+  await expect(atlasHost).toHaveAttribute(
+    "placeholder",
+    "Unavailable (from Project Path)",
+  );
+  await atlasPath.fill("/code/atlas-renamed");
+  await expect(atlasHost).toHaveAttribute(
+    "placeholder",
+    "/code/atlas-renamed (from Project Path)",
+  );
+  await expect(atlasHost).toHaveValue("");
+  await expect(beaconHost).toHaveValue("/host/beacon");
+  await expect(beaconHost).toHaveAttribute(
+    "placeholder",
+    "/code/beacon (from Project Path)",
+  );
+  await beacon.getByLabel("Path", { exact: true }).fill("/code/beacon-renamed");
+  await expect(beaconHost).toHaveValue("/host/beacon");
+  await expect(beaconHost).toHaveAttribute(
+    "placeholder",
+    "/code/beacon-renamed (from Project Path)",
+  );
+  await atlasHost.scrollIntoViewIfNeeded();
+  await settings.screenshot({
+    path: "/tmp/remoteagents-project-host-path-desktop.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await atlasHost.scrollIntoViewIfNeeded();
+  await expect(atlasHost).toHaveAttribute(
+    "placeholder",
+    "/code/atlas-renamed (from Project Path)",
+  );
+  await settings.screenshot({
+    path: "/tmp/remoteagents-project-host-path-mobile.png",
+  });
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  expect(state.saves[0]).toMatchObject({
+    body: {
+      changes: [
+        {
+          sourceId: "app",
+          patches: [
+            {
+              op: "set",
+              path: ["projects", "0", "path"],
+              value: "/code/atlas-renamed",
+            },
+            {
+              op: "set",
+              path: ["projects", "1", "path"],
+              value: "/code/beacon-renamed",
+            },
+          ],
+        },
+      ],
+    },
+  });
+});
+
+// hide Docker-only controls without deleting existing native source values
+test("hides native Project Host path controls and preserves saved overrides", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(
+    page,
+    true,
+    false,
+    false,
+    [],
+    "none",
+    "systemd",
+    true,
+  );
+  const app = sources.find((source) => source.id === "app")!;
+  const value = app.value as { projects: Array<{ hostPath?: string }> };
+  value.projects[0]!.hostPath = "/host/atlas";
+  app.content = JSON.stringify(value);
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "projects", "Projects");
+  const project = settings.getByRole("group", {
+    name: "Project 1",
+    exact: true,
+  });
+  await project
+    .getByRole("button", { name: "Edit Project 1", exact: true })
+    .click();
+  await expect(
+    project.locator('[data-settings-path="projects.0.hostPath"]'),
+  ).toHaveCount(0);
+  await expect(project.getByLabel("Path", { exact: true })).toHaveValue(
+    "/code/atlas",
+  );
+  const search = settings.getByRole("searchbox", {
+    name: "Search settings",
+    exact: true,
+  });
+  await search.fill("Host path");
+  await expect(
+    page
+      .getByRole("listbox", { name: "Settings search results", exact: true })
+      .locator(".settings-search-result-title > strong")
+      .filter({ hasText: /^Host Path$/u }),
+  ).toHaveCount(0);
+  await search.fill("");
+  await project
+    .locator('[data-settings-path="projects.0.label"]')
+    .getByLabel("Label", { exact: true })
+    .fill("Atlas renamed");
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  expect(state.saves[0]).toMatchObject({
+    body: {
+      changes: [
+        {
+          sourceId: "app",
+          patches: [
+            {
+              op: "set",
+              path: ["projects", "0", "label"],
+              value: "Atlas renamed",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  await selectSettingsSection(settings, "app", "Application config");
+  await settings
+    .getByRole("button", { name: "Edit base file", exact: true })
+    .click();
+  await expect(
+    settings.getByLabel("Application config source content", { exact: true }),
+  ).toHaveValue(/"hostPath":"\/host\/atlas"/u);
+});
+
+// keep file-only preview settings out of the project editor
+test("shows Project placeholders and omits untouched optional blanks on save", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const { settings, sources, state } = await setupSettings(
+    page,
+    true,
+    false,
+    false,
+    [],
+    "none",
+    "compose",
+    true,
+  );
+  const application = sources.find((source) => source.id === "app") as {
+    value: { projects: Array<{ label?: string }> };
+  };
+  delete application.value.projects[0]!.label;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
   await selectSettingsSection(settings, "projects", "Projects");
   const project = settings
     .getByRole("group", { name: "Project 1", exact: true })
@@ -2691,37 +5223,80 @@ test("shows every Project field and omits untouched optional blanks on save", as
   const hostPath = project
     .locator('[data-settings-path="projects.0.hostPath"]')
     .getByLabel("Host Path", { exact: true });
-  await expect(label).toHaveValue("Atlas");
-  await expect(
-    project
-      .locator('[data-settings-path="projects.0.id"]')
-      .getByLabel("Id", { exact: true }),
-  ).toHaveValue("atlas");
+  const id = project
+    .locator('[data-settings-path="projects.0.id"]')
+    .getByLabel("Id", { exact: true });
+  await expect(label).toHaveValue("");
+  await expect(label).toHaveAttribute(
+    "placeholder",
+    "atlas (from Project ID)",
+  );
+  await expect(id).toHaveValue("atlas");
+  await id.fill("atlas-live");
+  await expect(label).toHaveAttribute(
+    "placeholder",
+    "atlas-live (from Project ID)",
+  );
+  await id.fill("atlas");
   await expect(
     project
       .locator('[data-settings-path="projects.0.path"]')
       .getByLabel("Path", { exact: true }),
   ).toHaveValue("/code/atlas");
   await expect(hostPath).toHaveValue("");
+  await expect(hostPath).toHaveAttribute(
+    "placeholder",
+    "/code/atlas (from Project Path)",
+  );
+  await expect(
+    project.locator('[data-settings-path="projects.0.port"]'),
+  ).toHaveCount(0);
+  await expect(
+    project.locator('[data-settings-path="projects.0.hostname"]'),
+  ).toHaveCount(0);
+  await expect(
+    project.locator('[data-settings-path="projects.0.defaultBranch"] input'),
+  ).toHaveAttribute(
+    "placeholder",
+    "Unavailable (from resolved branch)",
+  );
+  // keep omitted nested defaults as placeholders rather than authored values
+  const pushLabel = project.locator(
+    '[data-settings-path="projects.0.push.label"] input',
+  );
+  const pushPrompt = project.locator(
+    '[data-settings-path="projects.0.push.prompt"] input',
+  );
+  await expect(pushLabel).toHaveValue("");
+  await expect(pushLabel).toHaveAttribute(
+    "placeholder",
+    "Commit/Push (from built-in default)",
+  );
+  await expect(pushPrompt).toHaveValue("");
+  await expect(pushPrompt).toHaveAttribute(
+    "placeholder",
+    "review, commit, and push (from built-in default)",
+  );
   await expect(
     project
-      .locator('[data-settings-path="projects.0.port"]')
-      .getByLabel("Port", { exact: true }),
-  ).toHaveValue("4173");
-  await expect(
-    project
-      .locator('[data-settings-path="projects.0.hostname"]')
-      .getByLabel("Hostname", { exact: true }),
-  ).toHaveValue("");
+      .locator("small, p")
+      .filter({ hasText: /leave blank|blank uses|omit this|default action/iu }),
+  ).toHaveCount(0);
   const projectProperties = authoritativeProjectsSchema.items!.properties!;
+  // require every remaining declared project control
   for (const key of Object.keys(projectProperties))
     await expect(
       project.locator(`[data-settings-path="projects.0.${key}"]`),
     ).toBeVisible();
-  for (const description of Object.values(projectProperties)
-    .map((schema) => schema.description)
+  // compare static copy separately from the file-managed preview state
+  for (const description of Object.entries(projectProperties)
+    .filter(([key]) => key !== "externalUrl")
+    .map(([, schema]) => schema.description)
     .filter((value): value is string => value !== undefined))
     await expect(project.getByText(description, { exact: true })).toBeVisible();
+  await expect(
+    project.locator('[data-settings-path="projects.0.externalUrl"]'),
+  ).toContainText("Use Application’s Edit base file action to change it.");
   for (const description of Object.values(
     projectProperties.commands!.properties!,
   )
@@ -2732,7 +5307,9 @@ test("shows every Project field and omits untouched optional blanks on save", as
   const worktreeOrder = project.locator(
     '[data-settings-path="projects.0.worktreeOrder"]',
   );
-  await expect(worktreeOrder.locator(".settings-collection-add-button")).toBeVisible();
+  await expect(
+    worktreeOrder.locator(".settings-collection-add-button"),
+  ).toBeVisible();
   await expect(
     project
       .locator('[data-settings-path="projects.0.worktreeOverrides"]')
@@ -2741,8 +5318,12 @@ test("shows every Project field and omits untouched optional blanks on save", as
   const processes = project.locator(
     '[data-settings-path="projects.0.commands.processes"]',
   );
-  await expect(processes.getByRole("textbox", { name: "New key" })).toBeVisible();
-  await expect(processes.getByRole("button", { name: "Add entry" })).toBeDisabled();
+  await expect(
+    processes.getByRole("textbox", { name: "New key" }),
+  ).toBeVisible();
+  await expect(
+    processes.getByRole("button", { name: "Add entry" }),
+  ).toBeDisabled();
   await expect(
     project.getByRole("button", { name: "Remove Projects 1", exact: true }),
   ).toBeVisible();
@@ -2777,14 +5358,16 @@ test("shows every Project field and omits untouched optional blanks on save", as
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   await expect.poll(() => state.saves.length).toBe(1);
-  const patches = (state.saves[0] as {
-    body: {
-      changes: Array<{
-        sourceId: string;
-        patches?: Array<{ op: string; path: string[]; value?: unknown }>;
-      }>;
-    };
-  }).body.changes.find((change) => change.sourceId === "app")?.patches;
+  const patches = (
+    state.saves[0] as {
+      body: {
+        changes: Array<{
+          sourceId: string;
+          patches?: Array<{ op: string; path: string[]; value?: unknown }>;
+        }>;
+      };
+    }
+  ).body.changes.find((change) => change.sourceId === "app")?.patches;
   expect(patches).toEqual([
     {
       op: "set",
@@ -2792,6 +5375,185 @@ test("shows every Project field and omits untouched optional blanks on save", as
       value: "Atlas renamed",
     },
   ]);
+});
+
+// show inheritance only while a complete checkout command override is absent
+test("keeps inherited command placeholders out of authored Worktree overrides", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(
+    page,
+    true,
+    false,
+    false,
+    [],
+    "none",
+    "compose",
+    true,
+  );
+  const application = sources.find((source) => source.id === "app") as {
+    value: { projects: Array<Record<string, unknown>> };
+  };
+  application.value.projects[0]!.commands = {
+    start: "pnpm start",
+    stop: "pnpm stop",
+  };
+  delete application.value.projects[0]!.port;
+  application.value.projects[0]!.externalUrl = "https://atlas.example.test";
+  application.value.projects[0]!.worktreeOverrides = [
+    { path: "feature" },
+    { path: "explicit-empty", commands: {} },
+  ];
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "projects", "Projects");
+  await settings
+    .getByRole("button", { name: "Edit Project 1", exact: true })
+    .click();
+  const overrides = settings.locator(
+    '[data-settings-path="projects.0.worktreeOverrides"]',
+  );
+  await overrides.locator(".settings-collection-edit").first().click();
+  const prefix = "projects.0.worktreeOverrides.0";
+  await expect(
+    settings.locator(`[data-settings-path="${prefix}.hostname"]`),
+  ).toHaveCount(0);
+  await expect(
+    settings.locator(`[data-settings-path="${prefix}.port"]`),
+  ).toHaveCount(0);
+  // find command textboxes independently of the code editor's native element
+  const start = settings
+    .locator(`[data-settings-path="${prefix}.commands.start"]`)
+    .getByRole("textbox", { name: "Start", exact: true });
+  const stop = settings
+    .locator(`[data-settings-path="${prefix}.commands.stop"]`)
+    .getByRole("textbox", { name: "Stop", exact: true });
+  await expect(start).toHaveValue("");
+  await expect(start).toHaveAttribute(
+    "placeholder",
+    "pnpm start (from Project Start command)",
+  );
+  await expect(stop).toHaveAttribute(
+    "placeholder",
+    "pnpm stop (from Project Stop command)",
+  );
+  const overridePreview = settings.locator(
+    `[data-settings-path="${prefix}.externalUrl"] input`,
+  );
+  await expect(overridePreview).toHaveAttribute(
+    "placeholder",
+    "https://atlas.example.test (from Project External URL)",
+  );
+  const projectPreview = settings.locator(
+    '[data-settings-path="projects.0.externalUrl"] input',
+  );
+  await projectPreview.fill("https://draft.example.test");
+  await expect(overridePreview).toHaveAttribute(
+    "placeholder",
+    "https://draft.example.test (from Project External URL)",
+  );
+  await projectPreview.fill("https://atlas.example.test");
+  // inheritance is not a suggested process key
+  await expect(
+    settings.locator(
+      `[data-settings-path="${prefix}.commands.processes"] input`,
+    ),
+  ).not.toHaveAttribute("placeholder", /Project/u);
+  await start.fill("pnpm dev");
+  await expect(stop).toHaveAttribute(
+    "placeholder",
+    "Not configured when unset",
+  );
+  await overrides.locator(".settings-collection-edit").nth(1).click();
+  const explicitEmptyStart = settings
+    .locator(
+      '[data-settings-path="projects.0.worktreeOverrides.1.commands.start"]',
+    )
+    .getByRole("textbox", { name: "Start", exact: true });
+  await expect(explicitEmptyStart).toHaveAttribute(
+    "placeholder",
+    "Not configured when unset",
+  );
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  expect(
+    (state.saves[0] as { body: { changes: Array<{ patches: unknown[] }> } })
+      .body.changes[0]!.patches,
+  ).toEqual([
+    {
+      op: "set",
+      path: ["projects", "0", "worktreeOverrides", "0", "commands", "start"],
+      value: "pnpm dev",
+    },
+  ]);
+});
+
+// preserve existing file-managed previews without exposing their proxy selectors
+test("keeps existing Project and Worktree proxy previews file-only", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(
+    page,
+    true,
+    false,
+    false,
+    [],
+    "none",
+    "compose",
+    true,
+  );
+  const application = sources.find((source) => source.id === "app") as {
+    value: { projects: Array<Record<string, unknown>> };
+  };
+  application.value.projects[0]!.hostname = "atlas.example.test";
+  application.value.projects[0]!.worktreeOverrides = [
+    { path: "feature", hostname: "feature.example.test", port: 3001 },
+  ];
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "projects", "Projects");
+  await settings
+    .getByRole("button", { name: "Edit Project 1", exact: true })
+    .click();
+  const externalUrl = settings.locator(
+    '[data-settings-path="projects.0.externalUrl"] input',
+  );
+  await expect(externalUrl).toBeDisabled();
+  await expect(externalUrl).toHaveAttribute(
+    "placeholder",
+    "Managed in application file",
+  );
+  await expect(
+    settings.locator('[data-settings-path="projects.0.externalUrl"]'),
+  ).toContainText("Use Application’s Edit base file action to change it.");
+  const overrides = settings.locator(
+    '[data-settings-path="projects.0.worktreeOverrides"]',
+  );
+  await overrides.locator(".settings-collection-edit").click();
+  const override = settings.locator(
+    '[data-settings-path="projects.0.worktreeOverrides.0.externalUrl"]',
+  );
+  await expect(override.locator("input")).toBeDisabled();
+  await expect(
+    override.getByRole("button", {
+      name: "Set External URL to null",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
+  await settings
+    .getByRole("button", { name: "Edit Project 2", exact: true })
+    .click();
+  await expect(
+    settings.locator('[data-settings-path="projects.1.externalUrl"] input'),
+  ).toBeEditable();
+  expect(state.saves).toEqual([]);
 });
 
 // retain required collection entries until their structural action is reversed
@@ -2829,7 +5591,6 @@ test("keeps required Project collection items explicit and omits an emptied Proc
   await worktreeOrder
     .getByRole("button", { name: "Remove Worktree Order 1", exact: true })
     .click();
-  await expect(settings.getByText("No unsaved changes", { exact: true })).toBeVisible();
   await expect(
     settings.getByRole("button", { name: "Save changes", exact: true }),
   ).toHaveCount(0);
@@ -2838,19 +5599,23 @@ test("keeps required Project collection items explicit and omits an emptied Proc
   const processes = project.locator(
     '[data-settings-path="projects.0.commands.processes"]',
   );
-  await processes.getByRole("button", { name: "Remove web", exact: true }).click();
+  await processes
+    .getByRole("button", { name: "Remove web", exact: true })
+    .click();
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   await expect.poll(() => state.saves.length).toBe(1);
-  const patches = (state.saves[0] as {
-    body: {
-      changes: Array<{
-        sourceId: string;
-        patches?: Array<{ op: string; path: string[]; value?: unknown }>;
-      }>;
-    };
-  }).body.changes.find((change) => change.sourceId === "app")?.patches;
+  const patches = (
+    state.saves[0] as {
+      body: {
+        changes: Array<{
+          sourceId: string;
+          patches?: Array<{ op: string; path: string[]; value?: unknown }>;
+        }>;
+      };
+    }
+  ).body.changes.find((change) => change.sourceId === "app")?.patches;
   expect(patches).toEqual(
     expect.arrayContaining([
       {
@@ -2892,13 +5657,17 @@ test("keeps Installation version and icon metadata raw while an absent Host stay
   const panel = settings.locator(".settings-source-panel");
 
   await expect(panel.locator('[data-settings-path="version"]')).toHaveCount(0);
-  await expect(panel.getByRole("heading", { name: "Host", exact: true })).toHaveCount(
-    0,
-  );
+  await expect(
+    panel.getByRole("heading", { name: "Host", exact: true }),
+  ).toHaveCount(0);
   await expect(panel.getByLabel("Checkout", { exact: true })).toHaveValue("");
   await expect(panel.getByRole("button", { name: "Add Host" })).toHaveCount(0);
-  await expect(panel.getByRole("button", { name: "Remove Host" })).toHaveCount(0);
-  await expect(panel.locator('[data-settings-path="sources.icons"]')).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Remove Host" })).toHaveCount(
+    0,
+  );
+  await expect(
+    panel.locator('[data-settings-path="sources.icons"]'),
+  ).toHaveCount(0);
   await expect(panel.getByLabel("Heart icon", { exact: true })).toHaveCount(0);
   await expect(panel.getByLabel("Potato icon", { exact: true })).toHaveCount(0);
 
@@ -2910,7 +5679,13 @@ test("keeps Installation version and icon metadata raw while an absent Host stay
   await expect(raw).toHaveValue(/"icons":\{"heart":/u);
 });
 
-for (const [installationKind, selectedPath, otherPath, selectedLabel, otherLabel] of [
+for (const [
+  installationKind,
+  selectedPath,
+  otherPath,
+  selectedLabel,
+  otherLabel,
+] of [
   ["compose", "compose", "native", "Docker", "Native"],
   ["systemd", "native", "compose", "Native", "Docker"],
 ] as const) {
@@ -2963,9 +5738,9 @@ for (const [installationKind, selectedPath, otherPath, selectedLabel, otherLabel
     await expect(
       panel.getByRole("heading", { name: "Installation", exact: true }),
     ).toBeVisible();
-    await expect(panel.getByRole("heading", { name: "Host", exact: true })).toHaveCount(
-      0,
-    );
+    await expect(
+      panel.getByRole("heading", { name: "Host", exact: true }),
+    ).toHaveCount(0);
     await expect(
       panel.getByRole("heading", { name: "Docker", exact: true }),
     ).toHaveCount(0);
@@ -2994,7 +5769,9 @@ for (const [installationKind, selectedPath, otherPath, selectedLabel, otherLabel
       `[data-settings-path="${selectedPath}"]`,
     );
     await expect(selectedSection).toBeVisible();
-    await expect(panel.locator(`[data-settings-path="${otherPath}"]`)).toHaveCount(0);
+    await expect(
+      panel.locator(`[data-settings-path="${otherPath}"]`),
+    ).toHaveCount(0);
     const modeField =
       installationKind === "compose"
         ? selectedSection.getByLabel("Project name", { exact: true })
@@ -3012,11 +5789,15 @@ for (const [installationKind, selectedPath, otherPath, selectedLabel, otherLabel
     await page.screenshot({
       path: `/tmp/remoteagents-settings-installation-${installationKind}.png`,
     });
-    await expect(settings.getByText("No unsaved changes", { exact: true })).toBeVisible();
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toHaveCount(0);
     await settings
       .getByRole("button", { name: "Edit whole source", exact: true })
       .click();
-    const raw = panel.getByLabel("Installation source content", { exact: true });
+    const raw = panel.getByLabel("Installation source content", {
+      exact: true,
+    });
     await expect(raw).toBeEditable();
     await expect(raw).toHaveValue(/"cloudflaredUnit":"cloudflared\.service"/u);
     await settings
@@ -3063,7 +5844,9 @@ test("hides Docker-only TMUX aliases without installation metadata", async ({
     await expect(
       settings.locator(`[data-settings-path=${JSON.stringify(key)}]`),
     ).toHaveCount(0);
-  await expect(settings.getByLabel("RAC_TMUX_BIN", { exact: true })).toBeVisible();
+  await expect(
+    settings.getByLabel("RAC_TMUX_BIN", { exact: true }),
+  ).toBeVisible();
   expect(state.saves).toEqual([]);
 });
 
@@ -3128,7 +5911,9 @@ test("simplifies Installation around pinned source files", async ({ page }) => {
 
   await selectSettingsSection(settings, "installation", "Installation");
   const panel = settings.locator(".settings-source-panel");
-  await expect(panel.getByRole("heading", { name: "Installation" })).toBeVisible();
+  await expect(
+    panel.getByRole("heading", { name: "Installation" }),
+  ).toBeVisible();
   await expect(panel.getByRole("heading", { name: "Host" })).toHaveCount(0);
   await expect(panel.getByRole("heading", { name: "Docker" })).toHaveCount(0);
   const checkout = panel.getByLabel("Checkout", { exact: true });
@@ -3211,7 +5996,9 @@ test("simplifies Installation around pinned source files", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await composeFiles.scrollIntoViewIfNeeded();
   expect(
-    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
   ).toBe(true);
   await page.screenshot({
     path: "/tmp/remoteagents-settings-installation-pinned-mobile.png",
@@ -3318,14 +6105,14 @@ test("shows an inert default environment row when envFiles is empty", async ({
         }),
       ),
   ).toBeVisible();
-  await expect(settings.getByText("No unsaved changes", { exact: true })).toBeVisible();
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
   expect(state.saves).toHaveLength(0);
 });
 
 // keep Docker file metadata visible without exposing it as a structured mutation
-test("keeps Docker options permanent and file-only", async ({
-  page,
-}) => {
+test("keeps Docker options permanent and file-only", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const consoleErrors: string[] = [];
   page.on("console", (message) => {
@@ -3350,9 +6137,9 @@ test("keeps Docker options permanent and file-only", async ({
   await selectSettingsSection(settings, "installation", "Installation");
 
   const panel = settings.locator(".settings-source-panel");
-  await expect(panel.locator('[data-settings-path="compose.profiles"]')).toHaveCount(
-    0,
-  );
+  await expect(
+    panel.locator('[data-settings-path="compose.profiles"]'),
+  ).toHaveCount(0);
   const options = panel.locator('[data-settings-path="compose.options"]');
   const parallel = panel
     .locator('[data-settings-path="compose.options.parallel"]')
@@ -3361,11 +6148,16 @@ test("keeps Docker options permanent and file-only", async ({
     .locator('[data-settings-path="compose.options.compatibility"]')
     .getByRole("switch");
   await expect(options).toBeVisible();
-  await expect(parallel).toHaveValue("-1");
+  await expect(parallel).toHaveValue("");
+  await expect(parallel).toHaveAttribute("placeholder", "-1 (from Docker Compose default; unlimited)");
   await expect(parallel).toBeDisabled();
   await expect(compatibility).not.toBeChecked();
   await expect(compatibility).toBeDisabled();
-  await expect(options).toContainText(/unlimited/iu);
+  await expect(
+    options
+      .locator("small, p")
+      .filter({ hasText: /unlimited|leave off|default/iu }),
+  ).toHaveCount(0);
   await expect(options).toContainText(/legacy Compose behavior/iu);
   for (const name of [
     "Add Options",
@@ -3378,10 +6170,14 @@ test("keeps Docker options permanent and file-only", async ({
     await expect(
       options.getByRole("button", { name, exact: true }),
     ).toHaveCount(0);
-  await expect(settings.getByText("No unsaved changes", { exact: true })).toBeVisible();
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
   await selectSettingsSection(settings, "compose-override", "Docker");
   await selectSettingsSection(settings, "installation", "Installation");
-  await expect(settings.getByText("No unsaved changes", { exact: true })).toBeVisible();
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
   expect(state.saves).toHaveLength(0);
 
   await options.scrollIntoViewIfNeeded();
@@ -3391,7 +6187,9 @@ test("keeps Docker options permanent and file-only", async ({
   await page.setViewportSize({ width: 375, height: 812 });
   await options.scrollIntoViewIfNeeded();
   expect(
-    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
   ).toBe(true);
   await page.screenshot({
     path: "/tmp/remoteagents-settings-installation-options-mobile.png",
@@ -3430,14 +6228,16 @@ test("preserves explicit Docker options without enabling an inactive tunnel", as
   const compatibility = panel
     .locator('[data-settings-path="compose.options.compatibility"]')
     .getByRole("switch");
-  await expect(panel.locator('[data-settings-path="compose.profiles"]')).toHaveCount(
-    0,
-  );
+  await expect(
+    panel.locator('[data-settings-path="compose.profiles"]'),
+  ).toHaveCount(0);
   await expect(parallel).toHaveValue("6");
   await expect(parallel).toBeDisabled();
   await expect(compatibility).toBeChecked();
   await expect(compatibility).toBeDisabled();
-  await expect(settings.getByText("No unsaved changes", { exact: true })).toBeVisible();
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
   expect(installation.value.compose.profiles).toEqual(["metrics"]);
   expect(state.saves).toEqual([]);
 });
@@ -3463,9 +6263,9 @@ test("renders outlined transparent Installation lists with centered icon actions
   await selectSettingsSection(settings, "installation", "Installation");
   const panel = settings.locator(".settings-source-panel");
   const composeFiles = panel.locator('[data-settings-path="compose.files"]');
-  const entry = composeFiles.locator(
-    ".settings-array-list > .settings-array-entry",
-  ).nth(2);
+  const entry = composeFiles
+    .locator(".settings-array-list > .settings-array-entry")
+    .nth(2);
   await expect(entry).toBeVisible();
   expect(
     await entry.evaluate((element) => {
@@ -3494,11 +6294,13 @@ test("renders outlined transparent Installation lists with centered icon actions
         display: style.display,
         squareDelta: Math.abs(buttonRect.width - buttonRect.height),
         centerDeltaX: Math.abs(
-          buttonRect.left + buttonRect.width / 2 -
+          buttonRect.left +
+            buttonRect.width / 2 -
             (iconRect.left + iconRect.width / 2),
         ),
         centerDeltaY: Math.abs(
-          buttonRect.top + buttonRect.height / 2 -
+          buttonRect.top +
+            buttonRect.height / 2 -
             (iconRect.top + iconRect.height / 2),
         ),
       };
@@ -3579,7 +6381,7 @@ test("saves Application icon paths through the Installation source and blocks ra
   await heartPath.fill("/checkout/config/instance-icons/heart-next.svg");
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   await expect(
-    nav.getByRole("button", { name: /^Application config.*Unsaved changes$/u }),
+    nav.getByRole("button", { name: /^Application.*Unsaved changes$/u }),
   ).toBeVisible();
   await expect(
     nav.getByRole("button", { name: /^Installation.*Unsaved changes$/u }),
@@ -3624,7 +6426,9 @@ test("saves Application icon paths through the Installation source and blocks ra
   const heartDetails = settings
     .locator(".settings-icon-source")
     .filter({ hasText: "View / edit Heart icon" });
-  await expect(heartDetails.getByLabel("Heart icon path", { exact: true })).toBeDisabled();
+  await expect(
+    heartDetails.getByLabel("Heart icon path", { exact: true }),
+  ).toBeDisabled();
   await expect(
     heartDetails.getByText(
       "Finish or discard the Installation whole-source draft or removal before editing icon paths.",
@@ -3663,7 +6467,7 @@ test("keeps TMUX raw-draft and masking guards scoped to their original sources",
     .click();
   await selectSettingsSection(settings, "app", "Application config");
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   const appRaw = settings.getByLabel("Application config source content");
   const appDraft =
@@ -3689,8 +6493,12 @@ test("keeps TMUX raw-draft and masking guards scoped to their original sources",
     .locator('[data-settings-path="tmux.pollIntervalMs"]')
     .getByRole("spinbutton");
   await expect(poll).toBeDisabled();
-  await expect(settings.getByLabel("RAC_TMUX_BIN", { exact: true })).toBeEnabled();
-  await expect(settings.locator('[data-settings-path="sources.wrapper"]')).toHaveCount(0);
+  await expect(
+    settings.getByLabel("RAC_TMUX_BIN", { exact: true }),
+  ).toBeEnabled();
+  await expect(
+    settings.locator('[data-settings-path="sources.wrapper"]'),
+  ).toHaveCount(0);
   const wrapper = settings.getByLabel("Installation wrapper source content");
   await expect(wrapper).toHaveAttribute("readonly", "");
   await expect(wrapper).toHaveValue(
@@ -3707,14 +6515,16 @@ test("keeps TMUX raw-draft and masking guards scoped to their original sources",
   await settings
     .getByRole("button", { name: "Edit whole source", exact: true })
     .click();
-  const envRaw = settings.getByLabel(
-    "Environment & keys source content",
-  );
+  const envRaw = settings.getByLabel("Environment & keys source content");
   const envDraft = `${await envRaw.inputValue()}# retained environment draft\n`;
   await envRaw.fill(envDraft);
   await selectSettingsSection(settings, "tmux", "TMUX");
-  await expect(settings.getByLabel("RAC_TMUX_BIN", { exact: true })).toBeDisabled();
-  await expect(settings.locator('[data-settings-path="sources.wrapper"]')).toHaveCount(0);
+  await expect(
+    settings.getByLabel("RAC_TMUX_BIN", { exact: true }),
+  ).toBeDisabled();
+  await expect(
+    settings.locator('[data-settings-path="sources.wrapper"]'),
+  ).toHaveCount(0);
   await expect(
     settings.getByLabel("Installation wrapper source content"),
   ).toHaveAttribute("readonly", "");
@@ -3724,22 +6534,22 @@ test("keeps TMUX raw-draft and masking guards scoped to their original sources",
   await settings
     .getByRole("button", { name: "Edit whole source", exact: true })
     .click();
-  const installationRaw = settings.getByLabel(
-    "Installation source content",
-  );
+  const installationRaw = settings.getByLabel("Installation source content");
   await expect(installationRaw).toHaveValue(/"sources":\{"wrapper":/u);
   const installationDraft =
     '{"native":{"environmentFile":"/checkout/.env"},"compose":{"projectName":"rac"},"sources":{"wrapper":"/checkout/config/raw-wrapper.sh"}}\n';
   await installationRaw.fill(installationDraft);
   await selectSettingsSection(settings, "tmux", "TMUX");
-  await expect(settings.locator('[data-settings-path="sources.wrapper"]')).toHaveCount(0);
+  await expect(
+    settings.locator('[data-settings-path="sources.wrapper"]'),
+  ).toHaveCount(0);
   await expect(
     settings.getByLabel("Installation wrapper source content"),
   ).toHaveAttribute("readonly", "");
   await selectSettingsSection(settings, "app", "Application config");
-  await expect(settings.getByLabel("Application config source content")).toHaveValue(
-    appDraft,
-  );
+  await expect(
+    settings.getByLabel("Application config source content"),
+  ).toHaveValue(appDraft);
   await selectSettingsSection(settings, "env", "Environment & keys");
   await expect(
     settings.getByLabel("Environment & keys source content"),
@@ -3802,17 +6612,6 @@ test("asks for one authoritative handover only at save time", async ({
     exact: true,
   });
 
-  // validation reports the save-time decision without opening a modal
-  await settings
-    .getByRole("button", { name: "Validate", exact: true })
-    .click();
-  await expect(dialog).toHaveCount(0);
-  await expect(
-    settings.getByText("Save changes to choose a source handover.", {
-      exact: true,
-    }),
-  ).toBeVisible();
-
   // cancellation keeps every participant staged without persisting anything
   await save.click();
   await expect(dialog).toBeVisible();
@@ -3841,7 +6640,9 @@ test("asks for one authoritative handover only at save time", async ({
   await cancel.click();
   await expect(dialog).toHaveCount(0);
   await expect(save).toBeFocused();
-  await expect(installationRaw).toHaveValue(/\/checkout\/config\/runtime\.env/u);
+  await expect(installationRaw).toHaveValue(
+    /\/checkout\/config\/runtime\.env/u,
+  );
   expect(state.saves).toEqual([]);
   expect(
     await page.evaluate(() => localStorage.getItem("rac.color-theme")),
@@ -3857,7 +6658,9 @@ test("asks for one authoritative handover only at save time", async ({
     .check();
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  await expect(installationRaw).toHaveValue(/\/checkout\/config\/runtime\.env/u);
+  await expect(installationRaw).toHaveValue(
+    /\/checkout\/config\/runtime\.env/u,
+  );
   expect(state.saves).toEqual([]);
 
   // one explicit choice revalidates the captured transaction and commits once
@@ -3876,11 +6679,13 @@ test("asks for one authoritative handover only at save time", async ({
     .toBe("latte");
   await expect(
     page
-      .locator('body > .toast-region .operation-feedback.success[role="status"]')
+      .locator(
+        'body > .toast-region .operation-feedback.success[role="status"]',
+      )
       .filter({ hasText: "Saved" }),
   ).toContainText("Settings updated.");
   await expect(settings.getByText("Saved.", { exact: true })).toHaveCount(0);
-  expect(state.validations).toHaveLength(5);
+  expect(state.validations).toHaveLength(4);
   const transaction = state.saves[0] as {
     body: {
       changes: Array<{
@@ -3949,7 +6754,9 @@ test("collects every typed and Compose handover inside the mobile Settings split
     path: "/tmp/remoteagents-settings-handover-mobile.png",
   });
   const mobileGeometry = await dialog.evaluate((element) => {
-    const overlay = element.closest<HTMLElement>(".split-confirmation-overlay")!;
+    const overlay = element.closest<HTMLElement>(
+      ".split-confirmation-overlay",
+    )!;
     const card = element.closest<HTMLElement>(".split-confirmation-card")!;
     const radio = element.querySelector<HTMLInputElement>("input[type=radio]")!;
     const bounds = (target: HTMLElement) => {
@@ -4089,6 +6896,278 @@ test("cancels a paused source handover when Settings unmounts", async ({
   ).toBeNull();
 });
 
+// present page and field matches in a popup attached to the search input
+for (const width of [390, 1440]) {
+  test(`searches every settings page and field with typed result context at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { settings } = await setupSettings(page, false);
+    const search = settings.getByRole("searchbox", {
+      name: "Search settings",
+      exact: true,
+    });
+    await expect(search).toHaveAttribute("placeholder", "Search all settings");
+    await expect(
+      settings.getByText("Search settings", { exact: true }),
+    ).toHaveCount(0);
+
+    await search.fill("projects");
+    const results = page.getByRole("listbox", {
+      name: "Settings search results",
+      exact: true,
+    });
+    await expect(results).toBeVisible();
+    const pageResult = results
+      .getByRole("option")
+      .filter({ has: page.getByText("Projects", { exact: true }) })
+      .filter({ has: page.getByText("Page", { exact: true }) });
+    await expect(pageResult).toHaveCount(1);
+    await expect(pageResult.locator(".settings-search-breadcrumb")).toBeEmpty();
+    const [searchBox, resultsBox] = await Promise.all([
+      search.boundingBox(),
+      results.boundingBox(),
+    ]);
+    expect(searchBox).not.toBeNull();
+    expect(resultsBox).not.toBeNull();
+    expect(Math.abs(resultsBox!.x - searchBox!.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(resultsBox!.width - searchBox!.width)).toBeLessThanOrEqual(
+      1,
+    );
+    expect(resultsBox!.y).toBeGreaterThanOrEqual(
+      searchBox!.y + searchBox!.height,
+    );
+    await page.screenshot({
+      path: `/tmp/remoteagents-settings-search-${width}.png`,
+    });
+    await pageResult.click();
+    await expect(
+      settings.getByRole("heading", { name: "Projects", exact: true }),
+    ).toBeVisible();
+
+    await search.fill("server name");
+    const fieldResult = results
+      .getByRole("option")
+      .filter({ has: page.getByText("Server name", { exact: true }) })
+      .filter({ has: page.getByText("Field", { exact: true }) });
+    await expect(fieldResult).toHaveCount(1);
+    await expect(fieldResult.locator(".settings-search-breadcrumb")).toHaveText(
+      "Application › Identity and network",
+    );
+    await fieldResult.click();
+    await expect(
+      settings.getByRole("heading", {
+        name: "Application",
+        exact: true,
+        level: 2,
+      }),
+    ).toBeVisible();
+    await expect(
+      settings.locator('[data-settings-path="identity.name"]'),
+    ).toHaveAttribute("data-settings-search-highlight", "true");
+  });
+}
+
+// route both Storage source classes to their exact virtual-page fields
+test("routes Storage search results to scratch and environment paths", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(page, false);
+  configureStorageFixture(sources);
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  const search = settings.getByRole("searchbox", {
+    name: "Search settings",
+    exact: true,
+  });
+  const results = page.getByRole("listbox", {
+    name: "Settings search results",
+    exact: true,
+  });
+
+  await search.fill("storage");
+  const pageResult = results
+    .getByRole("option")
+    .filter({ has: page.getByText("Storage", { exact: true }) })
+    .filter({ has: page.getByText("Page", { exact: true }) });
+  await expect(pageResult).toHaveCount(1);
+  await pageResult.click();
+  await expect(
+    settings.getByRole("heading", { name: "Storage", exact: true, level: 2 }),
+  ).toBeVisible();
+
+  await search.fill("Scratch directory");
+  const scratchResult = results
+    .getByRole("option")
+    .filter({ has: page.getByText("Scratch directory", { exact: true }) })
+    .filter({ has: page.getByText("Field", { exact: true }) });
+  await expect(scratchResult).toHaveCount(1);
+  await expect(scratchResult.locator(".settings-search-breadcrumb")).toHaveText(
+    "Application › Storage",
+  );
+  await scratchResult.click();
+  await expect(
+    settings.locator('[data-settings-path="scratchDirectory"]'),
+  ).toHaveAttribute("data-settings-search-highlight", "true");
+
+  await search.fill("RAC_NOTES_FILE");
+  const notesResult = results
+    .getByRole("option")
+    .filter({ has: page.getByText("RAC_NOTES_FILE", { exact: true }) })
+    .filter({ has: page.getByText("Field", { exact: true }) });
+  await expect(notesResult).toHaveCount(1);
+  await expect(notesResult.locator(".settings-search-breadcrumb")).toHaveText(
+    "Application › Storage › Environment",
+  );
+  await notesResult.click();
+  await expect(
+    settings.locator('[data-settings-path="RAC_NOTES_FILE"]'),
+  ).toHaveAttribute("data-settings-search-highlight", "true");
+  expect(state.saves).toEqual([]);
+});
+
+// reveal a searched collection child without staging any project mutation
+test("opens, scrolls to and highlights a field inside a collapsed project", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 420 });
+  const { settings, state } = await setupSettings(page, false);
+  const search = settings.getByRole("searchbox", { name: "Search settings" });
+  await search.fill("repository directory path");
+  const results = page.getByRole("listbox", {
+    name: "Settings search results",
+    exact: true,
+  });
+  const fieldResult = results
+    .getByRole("option")
+    .filter({ has: page.getByText("Path", { exact: true }) })
+    .filter({ has: page.getByText("Field", { exact: true }) })
+    .filter({
+      has: page.getByText("Application › Projects › Project 1", {
+        exact: true,
+      }),
+    });
+  await expect(fieldResult).toHaveCount(1);
+  await expect(fieldResult.locator(".settings-search-breadcrumb")).toHaveText(
+    "Application › Projects › Project 1",
+  );
+  await fieldResult.click();
+
+  const panel = settings.locator(".settings-source-panel");
+  const path = settings.locator('[data-settings-path="projects.0.path"]');
+  await expect(path).toBeVisible();
+  await expect(path).toHaveAttribute("data-settings-search-highlight", "true");
+  await expect(path.locator("input")).toHaveValue("/code/atlas");
+  await expect
+    .poll(() => panel.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
+  expect(
+    await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0),
+  ).toBe(0);
+  expect(state.saves).toEqual([]);
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: "/tmp/remoteagents-settings-search-field.png",
+  });
+});
+
+// keep protected values outside the metadata index while exposing their field names
+test("never includes protected setting values in search results", async ({
+  page,
+}) => {
+  const { settings } = await setupSettings(page, false);
+  const search = settings.getByRole("searchbox", { name: "Search settings" });
+  await search.fill("fixture-session-secret");
+  const results = page.getByRole("listbox", {
+    name: "Settings search results",
+    exact: true,
+  });
+  await expect(results.getByRole("option")).toHaveCount(0);
+  await expect(results.getByRole("status")).toHaveText("No matching settings.");
+
+  await search.fill("RAC_SESSION_SECRET");
+  const protectedField = results
+    .getByRole("option")
+    .filter({ has: page.getByText("RAC_SESSION_SECRET", { exact: true }) })
+    .filter({ has: page.getByText("Field", { exact: true }) });
+  await expect(protectedField).toHaveCount(1);
+  await expect(
+    protectedField.locator(".settings-search-breadcrumb"),
+  ).toHaveText("Environment › Environment & keys");
+  await protectedField.click();
+  await expect(settings.getByLabel("RAC_SESSION_SECRET masked")).toBeVisible();
+  await expect(settings).not.toContainText("fixture-session-secret");
+});
+
+// support listbox dismissal and keyboard-only destination selection
+test("navigates search results with Escape, ArrowDown and Enter", async ({
+  page,
+}) => {
+  const { settings } = await setupSettings(page, true);
+  const search = settings.getByRole("searchbox", { name: "Search settings" });
+  await search.fill("terminal font");
+  const results = page.getByRole("listbox", {
+    name: "Settings search results",
+    exact: true,
+  });
+  await expect(results).toBeVisible();
+  await search.press("Escape");
+  await expect(results).toHaveCount(0);
+  await expect(search).toHaveValue("terminal font");
+
+  await search.press("ArrowDown");
+  await expect(results).toBeVisible();
+  await expect(
+    results
+      .getByRole("option")
+      .filter({ has: page.getByText("Terminal font", { exact: true }) }),
+  ).toHaveAttribute("aria-selected", "true");
+  await search.press("Enter");
+  await expect(results).toHaveCount(0);
+  await expect(
+    settings.getByRole("heading", { name: "This browser", exact: true }),
+  ).toBeVisible();
+  await expect(
+    settings.locator('[data-settings-path="terminalFontSize"]'),
+  ).toHaveAttribute("data-settings-search-highlight", "true");
+});
+
+// index safe tunnel setup fields before visiting their page
+test("finds unconfigured Cloudflare fields before opening Cloudflare", async ({
+  page,
+}) => {
+  const { settings } = await setupSettings(page, false);
+  const search = settings.getByRole("searchbox", { name: "Search settings" });
+  await search.fill("hostname");
+  const results = page.getByRole("listbox", {
+    name: "Settings search results",
+    exact: true,
+  });
+  const hostname = results
+    .getByRole("option")
+    .filter({ has: page.getByText("Hostname", { exact: true }) })
+    .filter({ has: page.getByText("Field", { exact: true }) })
+    .filter({
+      has: page.getByText("Deployment › Cloudflare › Tunnel setup", {
+        exact: true,
+      }),
+    });
+  await expect(hostname).toHaveCount(1);
+  await expect(hostname.locator(".settings-search-breadcrumb")).toHaveText(
+    "Deployment › Cloudflare › Tunnel setup",
+  );
+  await hostname.click();
+  await expect(
+    settings.getByRole("heading", { name: "Cloudflare", exact: true }),
+  ).toBeVisible();
+  await expect(
+    settings.locator('[data-settings-path="cloudflare.hostname"]'),
+  ).toHaveAttribute("data-settings-search-highlight", "true");
+});
+
 // keep navigation stable before the first file catalog is available
 for (const width of [390, 1440]) {
   test(`keeps all settings sections visible while initial files load at ${width}px`, async ({
@@ -4097,16 +7176,10 @@ for (const width of [390, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     const initial = deferredResponse();
     const retry = deferredResponse();
-    const { settings, state } = await setupSettings(
-      page,
-      false,
-      false,
-      false,
-      [
-        { wait: initial.promise, status: 503 },
-        { wait: retry.promise },
-      ],
-    );
+    const { settings, state } = await setupSettings(page, false, false, false, [
+      { wait: initial.promise, status: 503 },
+      { wait: retry.promise },
+    ]);
     const search = settings.getByRole("searchbox", {
       name: "Search settings",
     });
@@ -4115,6 +7188,12 @@ for (const width of [390, 1440]) {
       hasText: "Loading installation files",
     });
     await expectProgressBorder(catalogLoading, "blue");
+    await expectStandardSettingsHeader(
+      settings,
+      settingsPageHeaderExpectations.find(
+        (candidate) => candidate.id === "browser",
+      )!,
+    );
     // inspect the navigation presentation for this breakpoint
     if (width === 390) {
       const selector = settings.getByRole("combobox", {
@@ -4126,14 +7205,14 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(11);
+      await expect(listbox.getByRole("option")).toHaveCount(13);
       const browser = listbox.locator('[role="option"][data-value="browser"]');
       await expect(browser).not.toHaveAttribute("aria-disabled", "true");
       await expect(browser.locator(":scope > .update-progress-ring")).toHaveCount(0);
       for (const id of [
         "voice",
         "keyboard",
-        ...settingsSourcePlaceholders.map((source) => source.id),
+        ...settingsUnavailableSections.map((source) => source.id),
       ]) {
         const option = listbox.locator(
           `[role="option"][data-value=${JSON.stringify(id)}]`,
@@ -4151,14 +7230,14 @@ for (const width of [390, 1440]) {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      await expect(nav.getByRole("button")).toHaveCount(11);
+      await expect(nav.getByRole("button")).toHaveCount(13);
       await expect(
         nav.getByRole("button", { name: "This browser", exact: true }),
       ).toBeEnabled();
       for (const label of [
         "Voice",
         "Keyboard shortcuts",
-        ...settingsSourcePlaceholders.map((source) => source.label),
+        ...settingsUnavailableSections.map((source) => source.label),
       ]) {
         const button = nav.getByRole("button", { name: label, exact: true });
         await expect(button).toBeDisabled();
@@ -4170,9 +7249,10 @@ for (const width of [390, 1440]) {
       path: `/tmp/remoteagents-loading-borders-settings-${width}.png`,
     });
 
-    // search filters placeholders without removing the current mobile section
+    // search results never remove pending destinations from navigation
     await search.fill("cloudflare");
     if (width === 390) {
+      await search.press("Escape");
       const selector = settings.getByRole("combobox", {
         name: "Settings section",
         exact: true,
@@ -4181,21 +7261,16 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(3);
+      await expect(listbox.getByRole("option")).toHaveCount(13);
       await expect(
-        listbox.locator('[role="option"][data-value="cloudflared"]'),
-      ).toHaveAttribute("aria-disabled", "true");
-      await expect(
-        listbox.locator(
-          '[role="option"][data-value="cloudflared-credentials"]',
-        ),
+        listbox.locator('[role="option"][data-value="cloudflare"]'),
       ).toHaveAttribute("aria-disabled", "true");
       await page.keyboard.press("Escape");
     } else {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      await expect(nav.getByRole("button")).toHaveCount(2);
+      await expect(nav.getByRole("button")).toHaveCount(13);
     }
 
     initial.resolve();
@@ -4216,7 +7291,7 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      for (const source of settingsSourcePlaceholders) {
+      for (const source of settingsUnavailableSections) {
         const option = listbox.locator(
           `[role="option"][data-value=${JSON.stringify(source.id)}]`,
         );
@@ -4226,9 +7301,7 @@ for (const width of [390, 1440]) {
       }
       for (const id of ["voice", "keyboard"]) {
         await expect(
-          listbox.locator(
-            `[role="option"][data-value=${JSON.stringify(id)}]`,
-          ),
+          listbox.locator(`[role="option"][data-value=${JSON.stringify(id)}]`),
         ).not.toHaveAttribute("aria-disabled", "true");
       }
       await page.keyboard.press("Escape");
@@ -4236,7 +7309,7 @@ for (const width of [390, 1440]) {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      for (const source of settingsSourcePlaceholders) {
+      for (const source of settingsUnavailableSections) {
         const button = nav.getByRole("button", {
           name: source.label,
           exact: true,
@@ -4255,6 +7328,16 @@ for (const width of [390, 1440]) {
         }),
       ).toBeEnabled();
     }
+
+    // catalog-independent pages retain complete headers after failure
+    for (const id of ["voice", "keyboard"] as const) {
+      const expected = settingsPageHeaderExpectations.find(
+        (candidate) => candidate.id === id,
+      )!;
+      await selectSettingsSection(settings, expected.id, expected.title);
+      await expectStandardSettingsHeader(settings, expected);
+    }
+    await selectSettingsSection(settings, "browser", "This browser");
 
     await settings.getByRole("button", { name: "Retry files" }).click();
     await expect.poll(() => state.settingsReads).toBe(2);
@@ -4278,8 +7361,21 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(9);
-      for (const id of ["voice", "keyboard", "app", "projects", "tmux", "env", "installation", "compose-override"]) {
+      await expect(listbox.getByRole("option")).toHaveCount(13);
+      for (const id of [
+        "voice",
+        "keyboard",
+        "app",
+        "agents",
+        "projects",
+        "reviews",
+        "tmux",
+        "storage",
+        "env",
+        "installation",
+        "compose-override",
+        "cloudflare",
+      ]) {
         const option = listbox.locator(
           `[role="option"][data-value=${JSON.stringify(id)}]`,
         );
@@ -4294,16 +7390,20 @@ for (const width of [390, 1440]) {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      await expect(nav.getByRole("button")).toHaveCount(9);
+      await expect(nav.getByRole("button")).toHaveCount(13);
       for (const label of [
         "Voice",
         "Keyboard shortcuts",
-        "Application config",
+        "Application",
+        "Agents",
         "Projects",
+        "Reviews",
         "TMUX",
+        "Storage",
         "Environment & keys",
         "Installation",
         "Docker",
+        "Cloudflare",
       ]) {
         const button = nav.getByRole("button", { name: label, exact: true });
         await expect(button).toBeEnabled();
@@ -4326,13 +7426,10 @@ for (const width of [390, 1440]) {
   }) => {
     await page.setViewportSize({ width, height: 900 });
     const refresh = deferredResponse();
-    const { settings, state } = await setupSettings(
-      page,
-      false,
-      false,
-      false,
-      [{}, { wait: refresh.promise }],
-    );
+    const { settings, state } = await setupSettings(page, false, false, false, [
+      {},
+      { wait: refresh.promise },
+    ]);
     const search = settings.getByRole("searchbox", {
       name: "Search settings",
     });
@@ -4351,16 +7448,20 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(9);
+      await expect(listbox.getByRole("option")).toHaveCount(13);
       for (const id of [
         "voice",
         "keyboard",
         "app",
+        "agents",
         "projects",
+        "reviews",
         "tmux",
+        "storage",
         "env",
         "installation",
         "compose-override",
+        "cloudflare",
       ]) {
         const option = listbox.locator(
           `[role="option"][data-value=${JSON.stringify(id)}]`,
@@ -4378,16 +7479,20 @@ for (const width of [390, 1440]) {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      await expect(nav.getByRole("button")).toHaveCount(9);
+      await expect(nav.getByRole("button")).toHaveCount(13);
       for (const label of [
         "Voice",
         "Keyboard shortcuts",
-        "Application config",
+        "Application",
+        "Agents",
         "Projects",
+        "Reviews",
         "TMUX",
+        "Storage",
         "Environment & keys",
         "Installation",
         "Docker",
+        "Cloudflare",
       ]) {
         const button = nav.getByRole("button", { name: label, exact: true });
         await expect(button).toBeDisabled();
@@ -4396,9 +7501,10 @@ for (const width of [390, 1440]) {
       }
     }
 
-    // filtering stays available while retained entries are pending
+    // search results leave every retained destination in navigation
     await search.fill("docker");
     if (width === 390) {
+      await search.press("Escape");
       const selector = settings.getByRole("combobox", {
         name: "Settings section",
         exact: true,
@@ -4407,7 +7513,7 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(2);
+      await expect(listbox.getByRole("option")).toHaveCount(13);
       const compose = listbox.locator(
         '[role="option"][data-value="compose-override"]',
       );
@@ -4422,7 +7528,7 @@ for (const width of [390, 1440]) {
         name: "Docker",
         exact: true,
       });
-      await expect(nav.getByRole("button")).toHaveCount(1);
+      await expect(nav.getByRole("button")).toHaveCount(13);
       await expect(compose).toBeDisabled();
       await expectProgressBorder(compose, "blue");
     }
@@ -4443,7 +7549,20 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      for (const id of ["voice", "keyboard", "app", "projects", "tmux", "env", "installation", "compose-override"]) {
+      for (const id of [
+        "voice",
+        "keyboard",
+        "app",
+        "agents",
+        "projects",
+        "reviews",
+        "tmux",
+        "storage",
+        "env",
+        "installation",
+        "compose-override",
+        "cloudflare",
+      ]) {
         const option = listbox.locator(
           `[role="option"][data-value=${JSON.stringify(id)}]`,
         );
@@ -4459,12 +7578,16 @@ for (const width of [390, 1440]) {
       for (const label of [
         "Voice",
         "Keyboard shortcuts",
-        "Application config",
+        "Application",
+        "Agents",
         "Projects",
+        "Reviews",
         "TMUX",
+        "Storage",
         "Environment & keys",
         "Installation",
         "Docker",
+        "Cloudflare",
       ]) {
         const button = nav.getByRole("button", { name: label, exact: true });
         await expect(button).toBeEnabled();
@@ -4481,20 +7604,20 @@ test("matches desktop settings icons to mobile navigation without changing names
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const refresh = deferredResponse();
-  const { settings, state } = await setupSettings(
-    page,
-    true,
-    false,
-    false,
-    [{}, {}, { wait: refresh.promise }],
-  );
+  const { settings, state } = await setupSettings(page, true, false, false, [
+    {},
+    {},
+    { wait: refresh.promise },
+  ]);
   const sections = [
     { id: "browser", label: "This browser" },
     { id: "voice", label: "Voice" },
     { id: "keyboard", label: "Keyboard shortcuts" },
-    { id: "app", label: "Application config" },
+    { id: "app", label: "Application" },
+    { id: "agents", label: "Agents" },
     { id: "projects", label: "Projects" },
     { id: "tmux", label: "TMUX" },
+    { id: "storage", label: "Storage" },
     { id: "env", label: "Environment & keys" },
     { id: "installation", label: "Installation" },
     { id: "compose-override", label: "Docker" },
@@ -4533,7 +7656,7 @@ test("matches desktop settings icons to mobile navigation without changing names
   expect(desktopPaths.get("env")).toBe(environmentKeyPath);
   expect(desktopPaths.get("tmux")).toBe(tmuxPath);
   await expect(
-    nav.getByRole("button", { name: "Application config", exact: true }),
+    nav.getByRole("button", { name: "Application", exact: true }),
   ).toHaveAttribute("aria-current", "page");
 
   // mobile retains the same glyph geometry for every loaded section
@@ -4548,9 +7671,7 @@ test("matches desktop settings icons to mobile navigation without changing names
   });
   for (const section of sections) {
     const path = listbox
-      .locator(
-        `[role="option"][data-value=${JSON.stringify(section.id)}]`,
-      )
+      .locator(`[role="option"][data-value=${JSON.stringify(section.id)}]`)
       .locator(".settings-select-option-icon svg path");
     await expect(path).toHaveAttribute("d", desktopPaths.get(section.id)!);
   }
@@ -4568,12 +7689,12 @@ test("matches desktop settings icons to mobile navigation without changing names
   await page.setViewportSize({ width: 1440, height: 900 });
   await settings.getByLabel("Server name").fill("Icon parity draft");
   const application = nav.getByRole("button", {
-    name: "Application config Unsaved changes",
+    name: "Application Unsaved changes",
     exact: true,
   });
   await expect(application.locator(".settings-source-nav-icon")).toBeVisible();
   await expect(application.locator(".settings-source-nav-label")).toHaveText(
-    "Application config",
+    "Application",
   );
   await expect(application.getByLabel("Unsaved changes")).toBeVisible();
   await settings
@@ -4588,7 +7709,7 @@ test("matches desktop settings icons to mobile navigation without changing names
   await refreshButton.click();
   await expect.poll(() => state.settingsReads).toBe(3);
   const pendingApplication = nav.getByRole("button", {
-    name: "Application config",
+    name: "Application",
     exact: true,
   });
   await expect(
@@ -4783,35 +7904,72 @@ for (const width of [320, 390, 1440, 2560]) {
     }
     // keep every preference on its own full-width row
     expect(metrics.grid).toBe(1);
-    expect(Math.abs(metrics.terminalWidth - metrics.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(metrics.terminalWidth - metrics.width)).toBeLessThanOrEqual(
+      1,
+    );
   });
 }
 
 // keep every form group vertically stacked regardless of available split width
 for (const width of [375, 1440, 2560]) {
-  test(`stacks every settings form in one column at ${width}px`, async ({ page }) => {
+  test(`stacks every settings form in one column at ${width}px`, async ({
+    page,
+  }) => {
     await page.setViewportSize({ width, height: 1000 });
-    const { settings, sources, state } = await setupSettings(page, true, false, true);
+    const { settings, sources, state } = await setupSettings(
+      page,
+      true,
+      false,
+      true,
+    );
     const env = sources.find((source) => source.id === "env")!;
-    env.fields!.push({ key: "RAC_PASSWORD_HASH", protected: true, present: true, hasValue: true, apply: "rac-restart" });
-    await settings.getByRole("button", { name: "Refresh files", exact: true }).click();
+    env.fields!.push({
+      key: "RAC_PASSWORD_HASH",
+      protected: true,
+      present: true,
+      hasValue: true,
+      apply: "rac-restart",
+    });
+    await settings
+      .getByRole("button", { name: "Refresh files", exact: true })
+      .click();
     const panel = settings.locator(".settings-source-panel");
+    let observedLayouts = 0;
 
     // inspect real grid tracks and child geometry instead of matching CSS text
     const assertSingleColumn = async () => {
-      const layouts = await panel.locator(".settings-object-fields, .settings-env-fields, .client-settings-davo-form, .settings-password-replacement").evaluateAll((elements) => {
-        // ignore only form containers that have no rendered box
-        return elements.filter((element) => element.getBoundingClientRect().width > 0).map((element) => {
-          const bounds = element.getBoundingClientRect();
-          // compare complete setting rows rather than their inline controls
-          const children = Array.from(element.children).filter((child) => child.getBoundingClientRect().width > 0).map((child) => {
-            const rect = child.getBoundingClientRect();
-            return { left: rect.left, top: rect.top, bottom: rect.bottom, width: rect.width };
-          });
-          return { columns: getComputedStyle(element).gridTemplateColumns.split(" ").length, width: bounds.width, children };
+      const layouts = await panel
+        .locator(
+          ".settings-object-fields, .settings-env-fields, .client-settings-davo-form, .settings-password-replacement",
+        )
+        .evaluateAll((elements) => {
+          // ignore only form containers that have no rendered box
+          return elements
+            .filter((element) => element.getBoundingClientRect().width > 0)
+            .map((element) => {
+              const bounds = element.getBoundingClientRect();
+              // compare complete setting rows rather than their inline controls
+              const children = Array.from(element.children)
+                .filter((child) => child.getBoundingClientRect().width > 0)
+                .map((child) => {
+                  const rect = child.getBoundingClientRect();
+                  return {
+                    left: rect.left,
+                    top: rect.top,
+                    bottom: rect.bottom,
+                    width: rect.width,
+                  };
+                });
+              return {
+                columns:
+                  getComputedStyle(element).gridTemplateColumns.split(" ")
+                    .length,
+                width: bounds.width,
+                children,
+              };
+            });
         });
-      });
-      expect(layouts.length).toBeGreaterThan(0);
+      observedLayouts += layouts.length;
       // require a full-width row and vertical ordering for every visible group
       for (const layout of layouts) {
         expect(layout.columns).toBe(1);
@@ -4819,33 +7977,62 @@ for (const width of [375, 1440, 2560]) {
           expect(Math.abs(child.width - layout.width)).toBeLessThanOrEqual(2);
           if (index > 0) {
             // consecutive settings may not occupy the same row
-            expect(child.top).toBeGreaterThanOrEqual(layout.children[index - 1]!.bottom - 1);
-            expect(Math.abs(child.left - layout.children[index - 1]!.left)).toBeLessThanOrEqual(1);
+            expect(child.top).toBeGreaterThanOrEqual(
+              layout.children[index - 1]!.bottom - 1,
+            );
+            expect(
+              Math.abs(child.left - layout.children[index - 1]!.left),
+            ).toBeLessThanOrEqual(1);
           }
         }
       }
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
     };
 
     // cover each structured editor that shares the form-grid rules
-    for (const [id, label] of [["app", "Application config"], ["env", "Environment & keys"], ["tmux", "TMUX"], ["installation", "Installation"], ["projects", "Projects"], ["voice", "Voice"]] as const) {
+    for (const [id, label] of [
+      ["app", "Application config"],
+      ["agents", "Agents"],
+      ["env", "Environment & keys"],
+      ["tmux", "TMUX"],
+      ["storage", "Storage"],
+      ["installation", "Installation"],
+      ["projects", "Projects"],
+      ["voice", "Voice"],
+    ] as const) {
       await selectSettingsSection(settings, id, label);
       if (id === "projects") {
         // expose nested object fields inside the compact project row
-        await settings.getByRole("button", { name: "Edit Project 1", exact: true }).click();
+        await settings
+          .getByRole("button", { name: "Edit Project 1", exact: true })
+          .click();
       }
       if (id === "env") {
         // include the password and confirmation fields without authoring a change
-        await settings.getByRole("button", { name: "Set new password", exact: true }).click();
+        await settings
+          .getByRole("button", { name: "Set new password", exact: true })
+          .click();
       }
       await assertSingleColumn();
-      if ((width === 375 || width === 1440) && (id === "env" || id === "voice")) {
+      if (
+        (width === 375 || width === 1440) &&
+        (id === "env" || id === "voice")
+      ) {
         // retain desktop and mobile evidence for ordinary and specialized forms
-        await settings.screenshot({ path: `/tmp/remoteagents-settings-single-column-${id}-${width}.png` });
+        await settings.screenshot({
+          path: `/tmp/remoteagents-settings-single-column-${id}-${width}.png`,
+        });
       }
     }
+    expect(observedLayouts).toBeGreaterThan(0);
     expect(state.saves).toHaveLength(0);
-    await expect(settings.getByRole("button", { name: "Save changes", exact: true })).toHaveCount(0);
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toHaveCount(0);
   });
 }
 
@@ -5020,7 +8207,7 @@ test("renders Environment keys as blankable assignments with custom-only removal
   env.hasProtectedContent = true;
   env.fields!.push(
     {
-      key: "RAC_OPENAI_API_KEY",
+      key: "RAC_GITHUB_TOKEN",
       protected: true,
       present: false,
       apply: "rac-restart",
@@ -5050,19 +8237,22 @@ test("renders Environment keys as blankable assignments with custom-only removal
     ).toHaveCount(0);
   }
   await expect(
-    panel.getByRole("button", { name: "Replace without revealing", exact: true }),
+    panel.getByRole("button", {
+      name: "Replace without revealing",
+      exact: true,
+    }),
   ).toHaveCount(0);
-  for (const key of ["RAC_OPENAI_API_KEY", "RAC_EMPTY_TOKEN"]) {
+  for (const key of ["RAC_GITHUB_TOKEN", "RAC_EMPTY_TOKEN"]) {
     const field = panel.locator(`[data-settings-path=${JSON.stringify(key)}]`);
     const input = field.getByLabel(key, { exact: true });
     await expect(input).toBeEditable();
     await expect(input).toHaveValue("");
     await expect(field.getByText("Protected", { exact: true })).toHaveCount(0);
-    await expect(field.getByRole("button", { name: /Reveal|Mask/u })).toHaveCount(
-      0,
-    );
+    await expect(
+      field.getByRole("button", { name: /Reveal|Mask/u }),
+    ).toHaveCount(0);
   }
-  const missing = panel.getByLabel("RAC_OPENAI_API_KEY", { exact: true });
+  const missing = panel.getByLabel("RAC_GITHUB_TOKEN", { exact: true });
   await missing.fill("synthetic-unsaved-key");
   await expect(
     settings.getByRole("button", { name: "Save changes", exact: true }),
@@ -5094,7 +8284,7 @@ test("renders Environment keys as blankable assignments with custom-only removal
   // cover saved and missing protected environment values
   for (const key of [
     "RAC_SESSION_SECRET",
-    "RAC_OPENAI_API_KEY",
+    "RAC_GITHUB_TOKEN",
     "RAC_EMPTY_TOKEN",
   ]) {
     const field = panel.locator(`[data-settings-path=${JSON.stringify(key)}]`);
@@ -5148,9 +8338,9 @@ test("renders Environment keys as blankable assignments with custom-only removal
   expect(cardStyle.backgroundColor).toBe("rgba(0, 0, 0, 0)");
   expect(cardStyle.borderColor).toBe("rgba(0, 0, 0, 0)");
   expect(cardStyle.borderStyle).toBe("solid");
-  expect(cardStyle.borderImage.match(/repeating-linear-gradient/gu)).toHaveLength(
-    4,
-  );
+  expect(
+    cardStyle.borderImage.match(/repeating-linear-gradient/gu),
+  ).toHaveLength(4);
   expect(cardStyle.borderImage).toContain("10px");
   expect(cardStyle.borderImage).toContain("18px");
   expect(cardStyle.pointerEvents).toBe("none");
@@ -5224,7 +8414,9 @@ test("renders Environment keys as blankable assignments with custom-only removal
   await page.setViewportSize({ width: 375, height: 812 });
   await add.scrollIntoViewIfNeeded();
   expect(
-    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
   ).toBe(true);
   await page.screenshot({
     path: "/tmp/remoteagents-settings-environment-add-expanded-mobile.png",
@@ -5269,7 +8461,9 @@ test("renders Environment keys as blankable assignments with custom-only removal
   await page.setViewportSize({ width: 375, height: 812 });
   await masked.scrollIntoViewIfNeeded();
   expect(
-    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
   ).toBe(true);
   await page.screenshot({
     path: "/tmp/remoteagents-settings-environment-keys-mobile.png",
@@ -5328,11 +8522,7 @@ test("removes custom public and protected environment assignments with title tra
     .click();
   await selectSettingsSection(settings, "env", "Environment & keys");
 
-  for (const key of [
-    "RAC_SESSION_SECRET",
-    "RAC_HOST_PROC",
-    "RAC_HOST_UID",
-  ]) {
+  for (const key of ["RAC_SESSION_SECRET", "RAC_HOST_PROC", "RAC_HOST_UID"]) {
     await expect(
       settings
         .locator(`[data-settings-path=${JSON.stringify(key)}]`)
@@ -5360,8 +8550,9 @@ test("removes custom public and protected environment assignments with title tra
     expect(
       await remove.evaluate(
         (button) =>
-          button.parentElement?.classList.contains("settings-environment-key") &&
-          button.closest(".settings-field-heading") !== null,
+          button.parentElement?.classList.contains(
+            "settings-environment-key",
+          ) && button.closest(".settings-field-heading") !== null,
       ),
     ).toBe(true);
   }
@@ -5439,14 +8630,9 @@ test("shows a transient Saved toast while restart-required status remains action
   await expect(
     restart.getByRole("button", { name: "Restart", exact: true }),
   ).toBeEnabled();
-  await expect(restart).toContainText(
-    "Host recovery starts automatically if RAC does not return within 3 minutes.",
-  );
-  await expect(restart).toContainText("Manual recovery:");
-  await expect(restart).toContainText("Recovery keeps saved settings.");
-  await expect(restart.locator("code")).toHaveText(
-    "~/.local/bin/rac-settings-recover fixture-installation",
-  );
+  await expect(restart).not.toContainText("recovery");
+  await expect(restart.locator("code")).toHaveCount(0);
+  await expect(restart.getByRole("timer")).toHaveCount(0);
   await page.clock.runFor(200);
   const desktopBounds = await toastRegion.evaluate((element) => {
     const bounds = element.getBoundingClientRect();
@@ -5471,7 +8657,8 @@ test("shows a transient Saved toast while restart-required status remains action
       right: innerWidth - bounds.right,
       overflow: element.scrollWidth - element.clientWidth,
       documentOverflow:
-        document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
     };
   });
   expect(mobileBounds.left).toBeGreaterThanOrEqual(0);
@@ -5502,7 +8689,7 @@ for (const width of [390, 1440]) {
     const { settings, state, sources } = await setupSettings(page);
     const env = sources.find((source) => source.id === "env")!;
     env.fields!.push({
-      key: "RAC_OPENAI_API_KEY",
+      key: "RAC_GITHUB_TOKEN",
       protected: true,
       present: false,
       apply: "rac-restart",
@@ -5542,7 +8729,7 @@ for (const width of [390, 1440]) {
         ),
       ).toHaveText(/\S/u);
     }
-    const unset = settings.locator('[data-settings-path="RAC_OPENAI_API_KEY"]');
+    const unset = settings.locator('[data-settings-path="RAC_GITHUB_TOKEN"]');
     await expect(
       unset.getByRole("button", { name: /Reveal|Mask/u }),
     ).toHaveCount(0);
@@ -5550,12 +8737,21 @@ for (const width of [390, 1440]) {
     await expect(
       empty.getByRole("button", { name: /Reveal|Mask/u }),
     ).toHaveCount(0);
-    await expect(empty.getByLabel("RAC_EMPTY_TOKEN", { exact: true })).toHaveValue(
-      "",
-    );
     await expect(
-      settings.locator(".settings-env-fields .settings-remove-button"),
-    ).toHaveCount(0);
+      empty.getByLabel("RAC_EMPTY_TOKEN", { exact: true }),
+    ).toHaveValue("");
+    // built-in assignments stay blankable without custom-variable trash actions
+    for (const key of ["RAC_GITHUB_TOKEN", "RAC_SESSION_SECRET", "TZ"])
+      await expect(
+        settings.locator(
+          `[data-settings-path="${key}"] .settings-remove-button`,
+        ),
+      ).toHaveCount(0);
+    // custom entries retain their existing independent removal actions
+    for (const key of ["RAC_EMPTY_TOKEN", "RAC_MULTILINE_SECRET"])
+      await expect(
+        settings.getByRole("button", { name: `Remove ${key}`, exact: true }),
+      ).toHaveCount(1);
     const secret = settings.locator(
       '[data-settings-path="RAC_SESSION_SECRET"]',
     );
@@ -5631,19 +8827,19 @@ for (const width of [390, 1440]) {
     await expect.poll(() => state.remasks.length).toBe(1);
     // newly typed replacements start directly in the blank field and never disclose the saved key
     await unset
-      .getByLabel("RAC_OPENAI_API_KEY", { exact: true })
+      .getByLabel("RAC_GITHUB_TOKEN", { exact: true })
       .fill("synthetic-new-key");
     await unset
-      .getByRole("button", { name: "Mask RAC_OPENAI_API_KEY", exact: true })
+      .getByRole("button", { name: "Mask RAC_GITHUB_TOKEN", exact: true })
       .click();
     await expect(
-      unset.getByRole("textbox", { name: "RAC_OPENAI_API_KEY", exact: true }),
+      unset.getByRole("textbox", { name: "RAC_GITHUB_TOKEN", exact: true }),
     ).toHaveCount(0);
     await unset
-      .getByRole("button", { name: "Reveal RAC_OPENAI_API_KEY", exact: true })
+      .getByRole("button", { name: "Reveal RAC_GITHUB_TOKEN", exact: true })
       .click();
     await expect(
-      unset.getByRole("textbox", { name: "RAC_OPENAI_API_KEY", exact: true }),
+      unset.getByRole("textbox", { name: "RAC_GITHUB_TOKEN", exact: true }),
     ).toHaveValue("synthetic-new-key");
     const multiline = settings.locator(
       '[data-settings-path="RAC_MULTILINE_SECRET"]',
@@ -5658,7 +8854,9 @@ for (const width of [390, 1440]) {
       name: "RAC_MULTILINE_SECRET",
       exact: true,
     });
-    await expect(multilineValue).toHaveValue("line one\n# literal\nline three\n");
+    await expect(multilineValue).toHaveValue(
+      "line one\n# literal\nline three\n",
+    );
     await expect(multilineValue).toHaveJSProperty("tagName", "TEXTAREA");
     const multilineRail = await multiline.evaluate((field) => {
       const textarea = field.querySelector("textarea")!.getBoundingClientRect();
@@ -5727,16 +8925,20 @@ test("places structured secret eyes in the code field without covering its text"
   const mask = toolbar
     .locator(".settings-code-editor-field-action")
     .getByRole("button", {
-    name: "Mask Agent credentials",
-    exact: true,
-  });
+      name: "Mask Agent credentials",
+      exact: true,
+    });
   await expect(mask).toHaveAttribute("aria-pressed", "true");
-  await expect(surface.locator(".settings-code-editor-field-action")).toHaveCount(0);
+  await expect(
+    surface.locator(".settings-code-editor-field-action"),
+  ).toHaveCount(0);
   const geometry = await mask.evaluate((button) => {
     const toolbar = button.closest(".settings-code-editor-toolbar")!;
     const editor = button.closest(".settings-code-editor")!;
     const frame = toolbar.getBoundingClientRect();
-    const surface = editor.querySelector(".settings-code-editor-surface")!.getBoundingClientRect();
+    const surface = editor
+      .querySelector(".settings-code-editor-surface")!
+      .getBoundingClientRect();
     const action = button.getBoundingClientRect();
     return {
       inside:
@@ -5777,7 +8979,7 @@ test("locally masks raw edits to an empty-only credential source without showing
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   await expect(
     settings.getByRole("button", { name: "Reveal keys", exact: true }),
@@ -5862,7 +9064,9 @@ test("toggles source credential eyes inside code editors and hides missing-sourc
 });
 
 // keep the masked disclosure toolbar separate from code at phone width
-test("fits masked raw source disclosure controls on mobile", async ({ page }) => {
+test("fits masked raw source disclosure controls on mobile", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const consoleErrors: string[] = [];
   page.on("console", (message) => {
@@ -5874,9 +9078,7 @@ test("fits masked raw source disclosure controls on mobile", async ({ page }) =>
   await settings
     .getByRole("button", { name: "Edit whole source", exact: true })
     .click();
-  const input = settings.getByLabel(
-    "Environment & keys source content",
-  );
+  const input = settings.getByLabel("Environment & keys source content");
   const editor = input.locator("..").locator("..");
   const disclosure = editor.locator(".settings-code-editor-field-action");
   await expect(input).toHaveAttribute("readonly", "");
@@ -5902,7 +9104,7 @@ test("fits masked raw source disclosure controls on mobile", async ({ page }) =>
         format !== undefined &&
         Boolean(
           disclosure.compareDocumentPosition(format) &
-            Node.DOCUMENT_POSITION_FOLLOWING,
+          Node.DOCUMENT_POSITION_FOLLOWING,
         )
       );
     });
@@ -5923,7 +9125,9 @@ test("fits masked raw source disclosure controls on mobile", async ({ page }) =>
   });
   expect(geometry.actionInside).toBe(true);
   expect(geometry.overflow).toBe(0);
-  await editor.screenshot({ path: "/tmp/remoteagents-settings-masked-mobile.png" });
+  await editor.screenshot({
+    path: "/tmp/remoteagents-settings-masked-mobile.png",
+  });
   expect(state.saves).toHaveLength(0);
   expect(state.validations).toHaveLength(0);
   expect(consoleErrors).toEqual([]);
@@ -5999,12 +9203,7 @@ test("protects authored credential records and previews protected removal withou
   await saved
     .getByRole("button", { name: "Remove Agent credential", exact: true })
     .click();
-  await expect(saved.getByRole("button", { name: /Reveal|Mask/u })).toHaveCount(
-    0,
-  );
-  await expect(saved.getByLabel("Agent credential masked")).toHaveText(
-    "Not set",
-  );
+  await expect(saved).toHaveCount(0);
   expect(state.reveals).toHaveLength(0);
   await settings
     .getByRole("button", { name: "Discard changes", exact: true })
@@ -6020,7 +9219,9 @@ test("protects authored credential records and previews protected removal withou
 });
 
 // clearing a disclosed environment value revokes its lease and remains an authored removal
-test("revokes active field disclosure when clearing is staged", async ({ page }) => {
+test("revokes active field disclosure when clearing is staged", async ({
+  page,
+}) => {
   const { settings, state } = await setupSettings(page);
   await selectSettingsSection(settings, "env", "Environment & keys");
   const field = settings.locator('[data-settings-path="RAC_SESSION_SECRET"]');
@@ -6029,12 +9230,12 @@ test("revokes active field disclosure when clearing is staged", async ({ page })
     .click();
   await field.getByLabel("RAC_SESSION_SECRET", { exact: true }).fill("");
   await expect.poll(() => state.remasks.length).toBe(1);
-  await expect(field.getByLabel("RAC_SESSION_SECRET", { exact: true })).toHaveValue(
-    "",
-  );
   await expect(
-    field.getByRole("button", { name: /Reveal|Mask/u }),
-  ).toHaveCount(0);
+    field.getByLabel("RAC_SESSION_SECRET", { exact: true }),
+  ).toHaveValue("");
+  await expect(field.getByRole("button", { name: /Reveal|Mask/u })).toHaveCount(
+    0,
+  );
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
@@ -6050,8 +9251,8 @@ test("revokes active field disclosure when clearing is staged", async ({ page })
   ]);
 });
 
-// preserve an active Mask action until an empty disclosed edit is explicitly hidden
-test("retains masking for cleared disclosed keys and safely handles failed lease revocation", async ({
+// preserve local masking when clearing cannot revoke the server lease
+test("clears disclosed keys locally when lease revocation fails", async ({
   page,
 }) => {
   const { settings } = await setupSettings(page);
@@ -6061,28 +9262,24 @@ test("retains masking for cleared disclosed keys and safely handles failed lease
   await settings
     .getByRole("button", { name: "Reveal RAC_SESSION_SECRET", exact: true })
     .click();
-  await settings.getByLabel("RAC_SESSION_SECRET", { exact: true }).fill("");
-  const mask = settings.getByRole("button", {
-    name: "Mask RAC_SESSION_SECRET",
-    exact: true,
-  });
-  await expect(mask).toHaveAttribute("aria-pressed", "true");
   await page.route("**/api/settings/remask", (route) =>
     route.fulfill({
       status: 503,
       json: { error: "private host diagnostic that must not display" },
     }),
   );
-  await mask.click();
-  await expect(settings.getByLabel("RAC_SESSION_SECRET masked")).toBeVisible();
-  await expect(settings.getByRole("alert")).toHaveText(
+  await settings.getByLabel("RAC_SESSION_SECRET", { exact: true }).fill("");
+  await expect(
+    settings.getByRole("button", { name: /Reveal|Mask/u }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveText(
     "Value hidden locally, but its server disclosure could not be revoked.",
   );
   await expect(settings).not.toContainText("private host diagnostic");
   expect(errors).toEqual([]);
 });
 
-// keep icon artwork editable in context rather than adding source navigation tabs
+// keep protected wrapper drafts locally maskable without fetching saved bytes
 test("masks authored source drafts locally without discarding or fetching saved bytes", async ({
   page,
 }) => {
@@ -6095,16 +9292,28 @@ test("masks authored source drafts locally without discarding or fetching saved 
     "protected",
   );
   const wrapper = sources.find((source) => source.id === "wrapper")!;
+  expect(wrapper.exists).toBe(true);
   wrapper.content = undefined;
   wrapper.hasProtectedContent = true;
   await settings
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
   await selectSettingsSection(settings, "tmux", "TMUX");
+  const input = settings.getByLabel("Installation wrapper source content");
+  await expect(input).toHaveValue("********");
+  await expect(input).toHaveAttribute("readonly", "");
+  await expect(
+    settings.getByRole("button", {
+      name: "Reveal Installation wrapper",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    settings.getByRole("button", { name: "Create source", exact: true }),
+  ).toHaveCount(0);
   await settings
     .getByRole("button", { name: "Replace without revealing", exact: true })
     .click();
-  const input = settings.getByLabel("Installation wrapper source content");
   const draft =
     "EDITOR_COMMAND=local-editor\nRAC_SESSION_SECRET=synthetic-authored-secret\n";
   await input.fill(draft);
@@ -6204,9 +9413,7 @@ for (const raw of [false, true]) {
     });
     await settings
       .getByRole("button", {
-        name: raw
-          ? "Reveal Installation wrapper"
-          : "Reveal Credential",
+        name: raw ? "Reveal Installation wrapper" : "Reveal Credential",
         exact: true,
       })
       .click();
@@ -6220,9 +9427,7 @@ for (const raw of [false, true]) {
       .click();
     await settings
       .getByLabel(
-        raw
-          ? "Installation wrapper source content"
-          : "New Credential",
+        raw ? "Installation wrapper source content" : "New Credential",
         { exact: true },
       )
       .fill(draft);
@@ -6269,9 +9474,7 @@ for (const raw of [false, true]) {
       .click();
     await expect(
       settings.getByLabel(
-        raw
-          ? "Installation wrapper source content"
-          : "Credential",
+        raw ? "Installation wrapper source content" : "Credential",
         { exact: true },
       ),
     ).toHaveValue(draft);
@@ -6296,7 +9499,7 @@ test("edits and previews icon files beside their use with image-bearing custom d
     name: "Settings section options",
     exact: true,
   });
-  await expect(menu.getByRole("option")).toHaveCount(9);
+  await expect(menu.getByRole("option")).toHaveCount(13);
   await expect(
     menu.getByRole("option", { name: /Heart icon|Potato icon/u }),
   ).toHaveCount(0);
@@ -6304,7 +9507,7 @@ test("edits and previews icon files beside their use with image-bearing custom d
   for (const option of await menu.getByRole("option").all())
     await expect(option.locator("svg, img")).not.toHaveCount(0);
   await menu
-    .getByRole("option", { name: "Application config", exact: true })
+    .getByRole("option", { name: "Application", exact: true })
     .click();
   const icon = settings.getByRole("combobox", {
     name: "Server icon",
@@ -6373,10 +9576,15 @@ test("creates missing artwork and saves it with an explicitly changed server ico
   const content =
     '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>\n';
   await input.fill(content);
-  await chooseSettingsOption(
-    settings.getByRole("combobox", { name: "Server icon", exact: true }),
-    "potato",
-  );
+  const icon = settings.getByRole("combobox", {
+    name: "Server icon",
+    exact: true,
+  });
+  await icon.click();
+  await page
+    .getByRole("listbox", { name: "Server icon options", exact: true })
+    .locator('[role="option"][data-value="potato"]')
+    .click();
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
@@ -6469,7 +9677,7 @@ for (const width of [390, 780]) {
     await expect(
       settings.getByRole("navigation", { name: "Settings sources" }),
     ).toHaveCount(0);
-    await expectSettingsOptions(selector, 9, 5);
+    await expectSettingsOptions(selector, 13, 5);
     // keep virtual Application sections together in the mobile group
     await selector.click();
     const application = page
@@ -6478,18 +9686,27 @@ for (const width of [390, 780]) {
         exact: true,
       })
       .getByRole("group", { name: "Application", exact: true });
-    await expect(application.getByRole("option")).toHaveCount(3);
+    await expect(application.getByRole("option")).toHaveCount(6);
     await expect(
       application.getByRole("option", {
-        name: "Application config",
+        name: "Application",
         exact: true,
       }),
+    ).toBeVisible();
+    await expect(
+      application.getByRole("option", { name: "Agents", exact: true }),
     ).toBeVisible();
     await expect(
       application.getByRole("option", { name: "Projects", exact: true }),
     ).toBeVisible();
     await expect(
+      application.getByRole("option", { name: "Reviews", exact: true }),
+    ).toBeVisible();
+    await expect(
       application.getByRole("option", { name: "TMUX", exact: true }),
+    ).toBeVisible();
+    await expect(
+      application.getByRole("option", { name: "Storage", exact: true }),
     ).toBeVisible();
     await page.keyboard.press("Escape");
     await chooseSettingsOption(selector, "tmux");
@@ -6500,7 +9717,9 @@ for (const width of [390, 780]) {
       settings.locator('[data-settings-path="tmux.pollIntervalMs"]'),
     ).toBeVisible();
     expect(
-      await settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+      await settings.evaluate(
+        (element) => element.scrollWidth <= element.clientWidth,
+      ),
     ).toBe(true);
     await settings.screenshot({
       path:
@@ -6535,7 +9754,7 @@ test("preserves mobile section selection, drafts and remasking through search an
   await chooseSettingsOption(selector, "app");
   await settings.getByLabel("Server name").fill("Mobile draft");
   await expect(selector.locator(".settings-select-current-label")).toHaveText(
-    "Application config · Unsaved changes",
+    "Application · Unsaved changes",
   );
   await chooseSettingsOption(selector, "env");
   await settings
@@ -6552,28 +9771,33 @@ test("preserves mobile section selection, drafts and remasking through search an
   await expect(settings).not.toContainText("disclosed-draft");
   await chooseSettingsOption(selector, "app");
 
-  // a filtered-out selection must not falsely display another section
+  // searching must not disturb the current section or mobile navigation
   await search.fill("keyboard");
   await expect(selector).toHaveAttribute("data-value", "app");
   await expect(
     selector.locator(".settings-select-current-label"),
-  ).toContainText("outside search results");
-  await expectSettingsOptions(selector, 2);
+  ).toContainText("Application · Unsaved changes");
+  await search.press("Escape");
+  await expectSettingsOptions(selector, 13);
   await search.fill("no-matching-section");
   await expect(selector).toHaveAttribute("data-value", "app");
   await expect(
-    settings.getByText("No matching sections.", { exact: true }),
-  ).toBeVisible();
+    page.locator(
+      '[role="listbox"][aria-label="Settings search results"] [role="option"]',
+    ),
+  ).toHaveCount(0);
   await expect(settings.getByLabel("Server name")).toHaveValue("Mobile draft");
+  await search.press("Escape");
+  await expectSettingsOptions(selector, 13);
   await search.fill("");
-  await expectSettingsOptions(selector, 9);
+  await expectSettingsOptions(selector, 13);
 
   // crossing the breakpoint changes only the navigation presentation
   await page.setViewportSize({ width: 781, height: 844 });
   await expect(selector).toHaveCount(0);
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   await expect(
-    nav.getByRole("button", { name: /^Application config/u }),
+    nav.getByRole("button", { name: /^Application/u }),
   ).toHaveAttribute("aria-current", "page");
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(nav).toBeVisible();
@@ -6628,7 +9852,7 @@ test("merges browser controls and saves voice with file edits through one transa
   ).toBeNull();
   expect(state.saves).toHaveLength(0);
 
-  // search the browser preferences through the same source navigation
+  // search browser fields without filtering the source navigation
   await center
     .getByRole("searchbox", { name: "Search settings" })
     .fill("theme");
@@ -6637,11 +9861,11 @@ test("merges browser controls and saves voice with file edits through one transa
   ).toBeVisible();
   await expect(
     nav.getByRole("button", { name: "Voice", exact: true }),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await center.getByRole("searchbox", { name: "Search settings" }).fill("");
 
   // retain ordinary file drafts while remasking disclosures on section changes
-  await nav.getByRole("button", { name: /^Application config/u }).click();
+  await nav.getByRole("button", { name: /^Application/u }).click();
   await panel.getByLabel("Server name").fill("Framework Draft");
   await nav
     .getByRole("button", { name: "Environment & keys", exact: true })
@@ -6650,7 +9874,7 @@ test("merges browser controls and saves voice with file edits through one transa
     .getByRole("button", { name: "Reveal RAC_SESSION_SECRET", exact: true })
     .click();
   await expect(
-    panel.locator('textarea[aria-label="RAC_SESSION_SECRET"]'),
+    panel.getByRole("textbox", { name: "RAC_SESSION_SECRET", exact: true }),
   ).toHaveValue("fixture-session-secret");
   await nav
     .getByRole("button", { name: /^This browser.*Unsaved changes$/u })
@@ -6660,7 +9884,7 @@ test("merges browser controls and saves voice with file edits through one transa
   await expect(
     panel.getByRole("radio", { name: "Light theme" }),
   ).toHaveAttribute("aria-checked", "true");
-  await nav.getByRole("button", { name: /^Application config/u }).click();
+  await nav.getByRole("button", { name: /^Application/u }).click();
   await expect(panel.getByLabel("Server name")).toHaveValue("Framework Draft");
 
   // leave dedicated server, launcher and voice controls out of application fields
@@ -6718,7 +9942,7 @@ test("merges browser controls and saves voice with file edits through one transa
     ]),
   );
   expect(state.restarts).toBe(0);
-  await nav.getByRole("button", { name: /^Application config/u }).click();
+  await nav.getByRole("button", { name: /^Application/u }).click();
   await expect(panel.getByLabel("Server name")).toHaveValue("Framework Draft");
 });
 
@@ -6796,7 +10020,9 @@ test("keeps browser and voice settings available when the file catalog fails", a
     .toBe("latte");
   await expect(
     page
-      .locator('body > .toast-region .operation-feedback.success[role="status"]')
+      .locator(
+        'body > .toast-region .operation-feedback.success[role="status"]',
+      )
       .filter({ hasText: "Saved" }),
   ).toContainText("Browser preferences applied.");
   await expect(settings.getByText("Saved.", { exact: true })).toHaveCount(0);
@@ -6808,13 +10034,13 @@ test("keeps browser and voice settings available when the file catalog fails", a
     exact: true,
   });
   await expect(selector).toHaveAttribute("data-value", "voice");
-  await expectSettingsOptions(selector, 11);
+  await expectSettingsOptions(selector, 13);
   await selector.click();
   const options = page.getByRole("listbox", {
     name: "Settings section options",
   });
   // failed file placeholders stay unavailable without a loading claim
-  for (const source of settingsSourcePlaceholders) {
+  for (const source of settingsUnavailableSections) {
     const option = options.locator(
       `[role="option"][data-value=${JSON.stringify(source.id)}]`,
     );
@@ -6869,7 +10095,9 @@ test("fits the source editor in the desktop settings panel", async ({
 });
 
 // keep short Settings views fixed while only the selected tab content scrolls
-test("owns settings scrolling inside the active source panel", async ({ page }) => {
+test("owns settings scrolling inside the active source panel", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1440, height: 520 });
   const { settings } = await setupSettings(page);
   const outer = settings.locator(".client-settings-page-content");
@@ -6910,7 +10138,9 @@ test("owns settings scrolling inside the active source panel", async ({ page }) 
     .poll(() => panel.evaluate((element) => element.scrollTop))
     .toBeGreaterThan(0);
   expect(await outer.evaluate((element) => element.scrollTop)).toBe(0);
-  expect(await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0)).toBe(0);
+  expect(
+    await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0),
+  ).toBe(0);
 });
 
 for (const layout of [
@@ -6930,14 +10160,13 @@ for (const layout of [
     const { settings, state } = await setupSettings(page);
     const outer = settings.locator(".client-settings-page-content");
     const panel = settings.locator(".settings-source-panel");
-    const header = settings.locator(".settings-center-header");
     const search = settings.getByRole("searchbox", { name: "Search settings" });
     const navigation =
       layout.width <= 780
         ? settings.locator(".settings-source-select")
         : settings.getByRole("navigation", { name: "Settings sources" });
     const before = await Promise.all(
-      [header, search, navigation].map((locator) =>
+      [search, navigation].map((locator) =>
         locator.evaluate((element) => element.getBoundingClientRect().top),
       ),
     );
@@ -6945,21 +10174,27 @@ for (const layout of [
     await panel.evaluate((element) => {
       element.scrollTop = element.scrollHeight;
     });
-    await expect.poll(() => panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect
+      .poll(() => panel.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
     const after = await Promise.all(
-      [header, search, navigation].map((locator) =>
+      [search, navigation].map((locator) =>
         locator.evaluate((element) => element.getBoundingClientRect().top),
       ),
     );
     expect(after).toEqual(before);
     expect(await outer.evaluate((element) => element.scrollTop)).toBe(0);
-    expect(await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0)).toBe(0);
+    expect(
+      await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0),
+    ).toBe(0);
 
     // excess wheel input stays contained by the already-ended active panel
     await panel.hover();
     await page.mouse.wheel(0, 2_000);
     expect(await outer.evaluate((element) => element.scrollTop)).toBe(0);
-    expect(await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0)).toBe(0);
+    expect(
+      await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0),
+    ).toBe(0);
     await settings.screenshot({
       path: `/tmp/remoteagents-settings-inner-scroll-${layout.name.replace(" ", "-")}.png`,
     });
@@ -6978,7 +10213,9 @@ for (const layout of [
       expect(await sidebar.evaluate((element) => element.scrollTop > 0)).toBe(
         sidebarScrollable,
       );
-      expect(await panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+      expect(
+        await panel.evaluate((element) => element.scrollTop),
+      ).toBeGreaterThan(0);
     }
     expect(state.reveals).toHaveLength(0);
     expect(state.remasks).toHaveLength(0);
@@ -7026,7 +10263,10 @@ test("resets shared active-tab scrolling without losing drafts or leaking secret
     await expect(section.visible).toBeVisible();
     expect(await panel.evaluate((element) => element.scrollTop)).toBe(0);
     await panel.evaluate((element) => {
-      element.scrollTop = Math.min(120, element.scrollHeight - element.clientHeight);
+      element.scrollTop = Math.min(
+        120,
+        element.scrollHeight - element.clientHeight,
+      );
     });
   }
   await panel.getByLabel("Server name", { exact: true }).fill("Scroll draft");
@@ -7059,9 +10299,7 @@ test("edits every source class without leaking masked values and keeps restart p
   });
 
   // protected environment values start masked and disclose only on demand
-  await sourceNav
-    .getByRole("button", { name: "Environment & keys" })
-    .click();
+  await sourceNav.getByRole("button", { name: "Environment & keys" }).click();
   await expect(settings.getByLabel("RAC_SESSION_SECRET masked")).toHaveText(
     "••••••••",
   );
@@ -7114,12 +10352,10 @@ test("edits every source class without leaking masked values and keeps restart p
       exact: true,
     })
     .click();
-  await settings
-    .getByLabel("RAC_SESSION_SECRET", { exact: true })
-    .fill("");
+  await settings.getByLabel("RAC_SESSION_SECRET", { exact: true }).fill("");
 
   // nested collections remain typed and emit explicit reorder patches
-  await sourceNav.getByRole("button", { name: "Application config" }).click();
+  await sourceNav.getByRole("button", { name: "Application" }).click();
   await settings.getByLabel("Server name").fill("Framework Next");
   const args = settings.locator('[data-settings-path="adapter.args"]');
   await expect(settings.getByLabel("Shell command")).toHaveValue(
@@ -7145,23 +10381,20 @@ test("edits every source class without leaking masked values and keeps restart p
   await settings.getByRole("button", { name: "Confirm remove" }).click();
 
   // path migrations remain ordinary inline drafts until Save asks
-  await stageInstallationWholeSource(
-    settings,
-    "/checkout/config/runtime.env",
-  );
+  await stageInstallationWholeSource(settings, "/checkout/config/runtime.env");
   await expect(settings.locator(".settings-migration")).toHaveCount(0);
 
   // advanced sources name their execution trust and tracked-file risk
   await sourceNav.getByRole("button", { name: "Docker" }).click();
-  await expect(
-    settings.getByText("Trusted code", { exact: true }),
-  ).toHaveCount(0);
+  await expect(settings.getByText("Trusted code", { exact: true })).toHaveCount(
+    0,
+  );
   await expect(
     settings.getByText("Tracked file", { exact: true }),
   ).toBeVisible();
-  await expect(
-    settings.getByLabel("Docker source content"),
-  ).toHaveValue(/RAC_PORT: 8787/u);
+  await expect(settings.getByLabel("Docker source content")).toHaveValue(
+    /RAC_PORT: 8787/u,
+  );
   await expect(
     settings.getByRole("button", { name: "Reveal keys" }),
   ).toHaveCount(0);
@@ -7191,7 +10424,9 @@ test("edits every source class without leaking masked values and keeps restart p
     .click();
   await expect(
     page
-      .locator('body > .toast-region .operation-feedback.success[role="status"]')
+      .locator(
+        'body > .toast-region .operation-feedback.success[role="status"]',
+      )
       .filter({ hasText: "Saved" }),
   ).toContainText("Settings updated.");
   await expect(settings.getByText("Saved.", { exact: true })).toHaveCount(0);
@@ -7255,14 +10490,9 @@ test("edits every source class without leaking masked values and keeps restart p
   await expect(
     notice.getByRole("button", { name: /dismiss|close/iu }),
   ).toHaveCount(0);
-  await expect(notice).toContainText(
-    "Host recovery starts automatically if RAC does not return within 3 minutes.",
-  );
-  await expect(notice).toContainText("Manual recovery:");
-  await expect(notice).toContainText("Recovery keeps saved settings.");
-  await expect(notice.locator("code")).toHaveText(
-    "~/.local/bin/rac-settings-recover fixture-installation",
-  );
+  await expect(notice).not.toContainText("recovery");
+  await expect(notice.locator("code")).toHaveCount(0);
+  await expect(notice.getByRole("timer")).toHaveCount(0);
   await settings.getByRole("button", { name: "Close settings" }).click();
   await expect(notice).toBeVisible();
 
@@ -7275,9 +10505,9 @@ test("edits every source class without leaking masked values and keeps restart p
     .getByRole("status", { name: "Restart pending" })
     .getByRole("button", { name: "Restart", exact: true })
     .click();
-  await expect(
-    page.getByRole("status", { name: "Restart pending" }),
-  ).toContainText("Waiting for the host applier");
+  await expect(page.locator(".fullscreen-loader")).toContainText(
+    "Waiting for the host applier",
+  );
   expect(state.restarts).toBe(1);
 
   // protected plaintext never enters browser persistence or navigation state
@@ -7302,9 +10532,7 @@ test("keeps the settings center keyboard reachable without horizontal page overf
   });
   await selector.focus();
   await expect(selector).toBeFocused();
-  await page.keyboard.press("ArrowDown");
-  await page.keyboard.press("ArrowDown");
-  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("e");
   await page.keyboard.press("Enter");
   await expect(selector).toHaveAttribute("data-value", "env");
   await expect(settings.getByLabel("RAC_SESSION_SECRET masked")).toBeVisible();
@@ -7386,7 +10614,7 @@ test("shows every settings section and keyboard shortcuts on mobile", async ({
     exact: true,
   });
   const panel = center.locator(".settings-source-panel");
-  await expectSettingsOptions(selector, 9);
+  await expectSettingsOptions(selector, 13);
   await expect(
     panel.getByRole("group", { name: "Keyboard shortcuts", exact: true }),
   ).toHaveCount(0);
@@ -7403,7 +10631,9 @@ test("shows every settings section and keyboard shortcuts on mobile", async ({
   await expect(
     panel.getByRole("radio", { name: "Docker", exact: true }),
   ).toBeDisabled();
-  await expect(panel.getByLabel("Project name", { exact: true })).toBeDisabled();
+  await expect(
+    panel.getByLabel("Project name", { exact: true }),
+  ).toBeDisabled();
   await chooseSettingsOption(selector, "compose-override");
   await expect(panel.getByLabel("Docker source content")).toHaveValue(
     /RAC_PORT: 8787/u,
@@ -7422,7 +10652,10 @@ test("shows every settings section and keyboard shortcuts on mobile", async ({
   await center
     .getByRole("searchbox", { name: "Search settings" })
     .fill("keyboard");
-  await expectSettingsOptions(selector, 1);
+  await center
+    .getByRole("searchbox", { name: "Search settings" })
+    .press("Escape");
+  await expectSettingsOptions(selector, 13);
   await expect(selector.locator(".settings-select-current-label")).toHaveText(
     "Keyboard shortcuts",
   );
@@ -7504,7 +10737,10 @@ test("expires revealed plaintext and disclosure-derived drafts while settings st
   await settings
     .getByRole("button", { name: "Reveal RAC_SESSION_SECRET", exact: true })
     .click();
-  const secret = settings.locator('textarea[aria-label="RAC_SESSION_SECRET"]');
+  const secret = settings.getByRole("textbox", {
+    name: "RAC_SESSION_SECRET",
+    exact: true,
+  });
   await expect(secret).toHaveValue("fixture-session-secret");
   await secret.fill("disclosure-derived-candidate");
   await expect(settings.getByLabel("RAC_SESSION_SECRET masked")).toBeVisible({
@@ -7534,10 +10770,15 @@ test("retains unified voice and advanced drafts on validation and commit failure
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   await expect(
-    settings.getByText("Fix the validation issues before saving."),
-  ).toBeVisible();
+    page.locator(
+      'body > .toast-region .operation-feedback.error[role="alert"]',
+    ),
+  ).toContainText("Fix the validation issues before saving.");
   await expect(
-    page.locator('body > .toast-region .operation-feedback.success'),
+    settings.getByText("Fix the validation issues before saving."),
+  ).toHaveCount(0);
+  await expect(
+    page.locator("body > .toast-region .operation-feedback.success"),
   ).toHaveCount(0);
   expect(state.saves).toHaveLength(0);
   state.validationValid = true;
@@ -7545,11 +10786,13 @@ test("retains unified voice and advanced drafts on validation and commit failure
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
-  await expect(settings.getByRole("alert")).toContainText(
-    "changed outside Settings",
-  );
   await expect(
-    page.locator('body > .toast-region .operation-feedback.success'),
+    page.locator(
+      'body > .toast-region .operation-feedback.error[role="alert"]',
+    ),
+  ).toContainText("changed outside Settings");
+  await expect(
+    page.locator("body > .toast-region .operation-feedback.success"),
   ).toHaveCount(0);
   await expect(settings.getByLabel("Davo name")).toHaveValue("Riley");
   await expect(
@@ -7635,7 +10878,7 @@ test("keeps voice read-only while an application whole-source draft exists", asy
 }) => {
   const { settings } = await setupSettings(page);
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   await settings
     .getByRole("textbox", {
@@ -7660,7 +10903,7 @@ test("blocks basic and advanced voice editing while application removal is stage
 }) => {
   const { settings, state } = await setupSettings(page);
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   await settings
     .getByRole("button", { name: "Remove source", exact: true })
@@ -7679,11 +10922,14 @@ test("blocks basic and advanced voice editing while application removal is stage
       "Discard the Application source removal before editing voice settings.",
     ),
   ).toBeVisible();
-  await settings.getByRole("button", { name: "Validate", exact: true }).click();
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
   await expect.poll(() => state.validations.length).toBe(1);
   expect(state.validations[0]).toEqual({
     changes: [{ sourceId: "app", revisionId: "app-r1", remove: true }],
   });
+  await expect.poll(() => state.saves.length).toBe(1);
 });
 
 // malformed application JSON requires whole-source repair before structured voice edits
@@ -7713,6 +10959,36 @@ test("blocks voice edits until invalid application JSON is repaired", async ({
   await settings
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
+  await selectSettingsSection(settings, "app", "Application config");
+  const application = settings.getByRole("region", {
+    name: "Application settings content",
+    exact: true,
+  });
+  await expect(
+    application.getByRole("heading", {
+      name: "Application",
+      exact: true,
+      level: 2,
+    }),
+  ).toBeVisible();
+  await expect(
+    application.getByText(
+      "The current JSON cannot be parsed. Edit its source to repair it; credential values stay masked.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    application.getByLabel("Application config source content", {
+      exact: true,
+    }),
+  ).toHaveValue("{");
+  await expect(
+    application.getByRole("button", {
+      name: "Use structured editor",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await expect(application.locator(".settings-raw-mode")).toHaveCount(0);
   await selectSettingsSection(settings, "voice", "Voice");
   await expect(
     settings.getByRole("switch", { name: "Enable Davo" }),
@@ -7855,14 +11131,20 @@ test("remasks active disclosures before refreshing authoritative files", async (
     .getByRole("button", { name: "Reveal RAC_SESSION_SECRET", exact: true })
     .click();
   await expect(
-    settings.locator('textarea[aria-label="RAC_SESSION_SECRET"]'),
+    settings.getByRole("textbox", {
+      name: "RAC_SESSION_SECRET",
+      exact: true,
+    }),
   ).toHaveValue("fixture-session-secret");
   await settings
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
   await expect(settings.getByLabel("RAC_SESSION_SECRET masked")).toBeVisible();
   await expect(
-    settings.locator('textarea[aria-label="RAC_SESSION_SECRET"]'),
+    settings.getByRole("textbox", {
+      name: "RAC_SESSION_SECRET",
+      exact: true,
+    }),
   ).toHaveCount(0);
   await expect.poll(() => state.remasks.length).toBe(1);
   expect(state.saves).toHaveLength(0);
@@ -7982,7 +11264,7 @@ test("retains a keyboard navigation request while a shared save is pending", asy
     .click();
   await expect(
     settings.getByRole("heading", {
-      name: "Application config",
+      name: "Application",
       exact: true,
       level: 2,
     }),
@@ -8000,7 +11282,7 @@ test("keeps keyboard controls read-only while an application whole-source draft 
 }) => {
   const { settings, state } = await setupSettings(page);
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   await settings
     .getByRole("textbox", {
@@ -8106,3 +11388,769 @@ for (const width of [390, 1440]) {
     expect(state.voiceSaves).toHaveLength(0);
   });
 }
+
+// render a defaulted listener object without materializing either scalar field
+test("shows omitted listener defaults as placeholders instead of zero", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(page);
+  const application = sources.find((source) => source.id === "app") as {
+    value: Record<string, unknown>;
+    schema: { properties: Record<string, unknown> };
+  };
+  delete application.value.listen;
+  application.schema.properties.listen =
+    applicationSettingsSchema().properties!.listen;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  const host = settings.locator('[data-settings-path="listen.host"] input');
+  const port = settings.locator('[data-settings-path="listen.port"] input');
+  await expect(host).toHaveValue("");
+  await expect(host).toHaveAttribute(
+    "placeholder",
+    "127.0.0.1 (from built-in default)",
+  );
+  await expect(port).toHaveValue("");
+  await expect(port).toHaveAttribute(
+    "placeholder",
+    "8787 (from built-in default)",
+  );
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
+  expect(state.saves).toEqual([]);
+});
+
+// follow the live first Review preset without authoring its ID as the default
+test("updates the default Review preset placeholder from the first draft preset", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(page);
+  const application = sources.find((source) => source.id === "app") as {
+    value: Record<string, unknown>;
+    schema: { properties: Record<string, unknown> };
+  };
+  application.schema.properties.review =
+    applicationSettingsSchema().properties!.review!;
+  application.value.review = {
+    presets: [
+      {
+        id: "security",
+        label: "Security",
+        agent: "codex",
+        prompt: "Review security boundaries.",
+      },
+    ],
+  };
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "reviews", "Reviews");
+  const defaultPreset = settings.locator(
+    '[data-settings-path="review.defaultPreset"] input',
+  );
+  await expect(defaultPreset).toHaveValue("");
+  await expect(defaultPreset).toHaveAttribute(
+    "placeholder",
+    "security (from first Review preset)",
+  );
+  const presets = settings.locator('[data-settings-path="review.presets"]');
+  await presets
+    .locator('[data-settings-path="review.presets.0.id"] input')
+    .fill("correctness-two");
+  await expect(defaultPreset).toHaveAttribute(
+    "placeholder",
+    "correctness-two (from first Review preset)",
+  );
+  expect(state.saves).toEqual([]);
+});
+
+// capitalize product acronyms in display copy without rewriting stored settings values
+test("renders MCP and OMX labels while preserving their lowercase application values", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(page);
+  const application = sources.find((source) => source.id === "app") as {
+    value: Record<string, unknown>;
+    content: string;
+    schema: SettingsSchema;
+  };
+  const authoritative = applicationSettingsSchema();
+  application.schema.properties!.adapters =
+    authoritative.properties!.adapters!;
+  application.schema.properties!.integrations =
+    authoritative.properties!.integrations!;
+  const currentIntegrations = application.value.integrations as Record<
+    string,
+    unknown
+  >;
+  application.value = {
+    ...application.value,
+    adapters: {
+      omx: { program: "/opt/tools/omx", setup: "mcp seed" },
+    },
+    integrations: {
+      ...currentIntegrations,
+      mcp: {
+        readEnabled: true,
+        writeEnabled: false,
+        dangerousEnabled: false,
+      },
+    },
+  };
+  application.content = `${JSON.stringify(application.value)}\n`;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+
+  await selectSettingsSection(settings, "app", "Application");
+  await expect(
+    settings.getByRole("heading", { name: "MCP", exact: true, level: 3 }),
+  ).toBeVisible();
+  await expect(
+    settings.locator(
+      '[data-settings-path="integrations.mcp.readEnabled"]',
+    ),
+  ).toBeVisible();
+
+  await selectSettingsSection(settings, "agents", "Agents");
+  await expect(
+    settings.getByRole("heading", { name: "OMX", exact: true, level: 3 }),
+  ).toBeVisible();
+  const program = settings.locator(
+    '[data-settings-path="adapters.omx.program"] input',
+  );
+  await expect(program).toHaveValue("/opt/tools/omx");
+  await program.fill("/custom/bin/omx");
+  const setup = settings
+    .locator('[data-settings-path="adapters.omx.setup"]')
+    .getByRole("textbox");
+  await expect(setup).toHaveValue("mcp seed");
+  await setup.fill("mcp omx");
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  const patches = (
+    state.saves[0] as {
+      body: { changes: Array<{ sourceId: string; patches?: SettingsPatch[] }> };
+    }
+  ).body.changes.find((change) => change.sourceId === "app")!.patches!;
+  expect(patches).toEqual(
+    expect.arrayContaining([
+      {
+        op: "set",
+        path: ["adapters", "omx", "setup"],
+        value: "mcp omx",
+      },
+      {
+        op: "set",
+        path: ["adapters", "omx", "program"],
+        value: "/custom/bin/omx",
+      },
+    ]),
+  );
+});
+
+// retain save failures in the shared toast stack without losing the pending edit
+for (const failure of [
+  "server",
+  "conflict",
+  "network",
+  "unconfirmed",
+] as const) {
+  test(`keeps a ${failure} settings save error toast until dismissed and permits retry`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const { settings, state } = await setupSettings(page);
+    await settings
+      .getByLabel("Server name", { exact: true })
+      .fill("Retry draft");
+    // isolate toast geometry from independent validation warnings
+    await page.route("**/api/settings/validate", (route) =>
+      route.fulfill({ json: { valid: true, issues: [] } }),
+    );
+    let reject = true;
+    await page.route("**/api/settings", (route) => {
+      // leave reads and the explicit retry with the authoritative fixture
+      if (route.request().method() !== "PATCH" || !reject)
+        return route.fallback();
+      // simulate transport loss without interrupting unrelated status polling
+      if (failure === "network") return route.abort("failed");
+      return route.fulfill({
+        status:
+          failure === "conflict" ? 409 : failure === "unconfirmed" ? 200 : 500,
+        json: { error: "Fixture save rejected." },
+      });
+    });
+    await page.clock.install();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now()));
+    const panel = settings.locator(".settings-source-panel");
+    const before = await panel.boundingBox();
+    await settings
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    const toast = page.locator(
+      'body > .toast-region .operation-feedback.error[role="alert"]',
+    );
+    await expect(toast).toBeVisible();
+    await expect(toast.locator("strong")).toHaveText(
+      "Settings save incomplete",
+    );
+    const detail =
+      failure === "conflict"
+        ? "changed outside Settings"
+        : failure === "network"
+          ? "Console unavailable"
+          : failure === "unconfirmed"
+            ? "their refreshed state is unavailable"
+            : "Fixture save rejected.";
+    await expect(toast).toContainText(detail);
+    await expect(toast).toHaveAttribute("aria-live", "assertive");
+    await expect(toast.locator(".toast-timer-bar")).toHaveCount(0);
+    await expect(settings.locator(".settings-feedback")).toHaveCount(0);
+    await expect(panel).toBeVisible();
+    expect(await panel.boundingBox()).toEqual(before);
+    await page.clock.fastForward(60_000);
+    await expect(toast).toBeVisible();
+    await expect(
+      settings.getByLabel("Server name", { exact: true }),
+    ).toHaveValue("Retry draft");
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toBeEnabled();
+    // inspect a long error at phone width before explicitly dismissing it
+    if (failure === "network") {
+      await page.screenshot({
+        path: "/tmp/rac-settings-save-error-desktop.png",
+      });
+      await page.setViewportSize({ width: 375, height: 812 });
+      await expect(toast).toBeVisible();
+      const overflow = await toast.evaluate((element) => ({
+        toast: element.scrollWidth - element.clientWidth,
+        document:
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      }));
+      expect(overflow).toEqual({ toast: 0, document: 0 });
+      await page.screenshot({
+        path: "/tmp/rac-settings-save-error-mobile.png",
+      });
+    }
+    await toast
+      .getByRole("button", { name: "Dismiss operation status", exact: true })
+      .click();
+    await expect(toast).toHaveCount(0);
+    reject = false;
+    await settings
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    await expect.poll(() => state.saves.length).toBe(1);
+    const saved = page.locator(
+      'body > .toast-region .operation-feedback.success[role="status"]',
+    );
+    await expect(saved).toContainText("Settings updated.");
+    await expect(toast).toHaveCount(0);
+    await page.clock.fastForward(5_000);
+    await expect(saved).toHaveCount(0);
+  });
+}
+
+// keep save-time validation errors persistent while field-level repair guidance stays inline
+for (const failure of ["invalid", "unavailable"] as const) {
+  test(`shows a persistent settings save toast when validation is ${failure}`, async ({
+    page,
+  }) => {
+    const { settings, state } = await setupSettings(page);
+    await settings
+      .getByLabel("Server name", { exact: true })
+      .fill("Invalid draft");
+    await page.route("**/api/settings/validate", (route) =>
+      route.fulfill(
+        failure === "invalid"
+          ? {
+              json: {
+                valid: false,
+                issues: [
+                  {
+                    sourceId: "app",
+                    path: ["identity", "name"],
+                    code: "invalid_value",
+                    message: "Fixture name is invalid.",
+                  },
+                ],
+              },
+            }
+          : { status: 503, json: { error: "Validation service unavailable." } },
+      ),
+    );
+    await page.clock.install();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now()));
+    await settings
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    const toast = page.locator(
+      'body > .toast-region .operation-feedback.error[role="alert"]',
+    );
+    await expect(toast).toContainText(
+      failure === "invalid"
+        ? "Fix the validation issues before saving."
+        : "Validation service unavailable.",
+    );
+    await expect(toast.locator("strong")).toHaveText(
+      "Settings save incomplete",
+    );
+    await expect(settings.locator(".settings-feedback")).toHaveCount(0);
+    // invalid fields retain their precise repair message beneath the control
+    if (failure === "invalid")
+      await expect(
+        settings.getByText("Fixture name is invalid.", { exact: true }),
+      ).toBeVisible();
+    await page.clock.fastForward(60_000);
+    await expect(toast).toBeVisible();
+    await expect(toast.locator(".toast-timer-bar")).toHaveCount(0);
+    await expect(
+      settings.getByLabel("Server name", { exact: true }),
+    ).toHaveValue("Invalid draft");
+    expect(state.saves).toEqual([]);
+  });
+}
+
+// distinguish committed files from the remaining browser rename after a partial save
+test("shows a persistent partial settings save error without claiming full success", async ({
+  page,
+}) => {
+  const { settings, state } = await setupSettings(page);
+  await settings
+    .getByLabel("Server name", { exact: true })
+    .fill("Committed file");
+  await selectSettingsSection(settings, "browser", "This browser");
+  await settings
+    .getByRole("button", { name: "Rename browser name", exact: true })
+    .click();
+  const rename = page.getByRole("dialog", {
+    name: "Rename browser",
+    exact: true,
+  });
+  await rename
+    .getByRole("textbox", { name: "Name", exact: true })
+    .fill("Pending browser");
+  await rename.getByRole("button", { name: "Done", exact: true }).click();
+  await page.route("**/api/auth/device-name", (route) =>
+    route.fulfill({ status: 503, json: { error: "Fixture rename rejected." } }),
+  );
+  await page.clock.install();
+  await page.clock.pauseAt(await page.evaluate(() => Date.now()));
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  const toast = page.locator(
+    'body > .toast-region .operation-feedback.error[role="alert"]',
+  );
+  await expect(toast).toContainText(
+    "Files saved, but browser changes remain unsaved. Fixture rename rejected.",
+  );
+  await expect(toast.locator("strong")).toHaveText("Settings save incomplete");
+  await expect(
+    page.locator("body > .toast-region .operation-feedback.success"),
+  ).toHaveCount(0);
+  await expect(settings.locator(".settings-feedback .error")).toHaveCount(0);
+  await page.clock.fastForward(60_000);
+  await expect(toast).toBeVisible();
+  await expect(
+    settings.getByRole("group", { name: "Name", exact: true }),
+  ).toContainText("Pending browser");
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toBeEnabled();
+  expect(state.saves).toHaveLength(1);
+});
+
+// preserve intentionally empty voice context rather than implying built-in instructions
+test("describes explicit empty voice context without claiming the omission default", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(
+    page,
+    false,
+    false,
+    true,
+  );
+  const application = sources.find((source) => source.id === "app") as {
+    value: { integrations: { realtime: { context: string } } };
+  };
+  application.value.integrations.realtime.context = "";
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "voice", "Voice");
+  const context = settings.getByRole("textbox", {
+    name: "Davo context",
+    exact: true,
+  });
+  await expect(context).toHaveValue("");
+  await expect(context).toHaveAttribute(
+    "placeholder",
+    "No additional voice context",
+  );
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
+  expect(state.saves).toEqual([]);
+});
+
+// distinguish a retained empty dotenv value from removing its assignment
+test("keeps explicit empty environment hints separate from omission placeholders", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(page);
+  const env = sources.find((source) => source.id === "env") as {
+    fields: SettingsEnvField[];
+  };
+  const tmux = env.fields.find((field) => field.key === "RAC_TMUX_BIN")!;
+  Object.assign(tmux, {
+    value: "",
+    present: true,
+    fallback: environmentFallback("RAC_TMUX_BIN"),
+    emptyValueHint: "Empty (from explicit environment assignment)",
+  });
+  const instanceSecret = env.fields.find(
+    (field) => field.key === "RAC_INSTANCE_STATUS_SECRET",
+  )!;
+  Object.assign(instanceSecret, {
+    value: undefined,
+    protected: true,
+    present: true,
+    hasValue: false,
+    apply: "rac-restart",
+    fallback: environmentFallback("RAC_INSTANCE_STATUS_SECRET"),
+    emptyValueHint: "Empty (from explicit environment assignment)",
+  });
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "tmux", "TMUX");
+  const binary = settings.getByRole("textbox", {
+    name: "RAC_TMUX_BIN",
+    exact: true,
+  });
+  await expect(binary).toHaveValue("");
+  await expect(binary).toHaveAttribute(
+    "placeholder",
+    "Empty (from explicit environment assignment)",
+  );
+  await binary.fill("/tmp/tmux");
+  await binary.fill("");
+  await expect(binary).toHaveAttribute("placeholder", "/usr/bin/tmux");
+  await selectSettingsSection(settings, "env", "Environment & keys");
+  await expect(
+    settings.getByRole("textbox", {
+      name: "RAC_INSTANCE_STATUS_SECRET",
+      exact: true,
+    }),
+  ).toHaveAttribute("placeholder", "Empty (from explicit environment assignment)");
+  expect(state.saves).toEqual([]);
+});
+
+// keep the enabled voice controls in task order before their environment source
+for (const width of [1440, 390]) {
+  test(`orders enabled Voice controls before Environment at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { settings, sources, state } = await setupSettings(page, false);
+    addVoiceEnvironmentFixture(sources);
+    await settings
+      .getByRole("button", { name: "Refresh files", exact: true })
+      .click();
+    await selectSettingsSection(settings, "voice", "Voice");
+    const writeTools = settings.locator(
+      '[data-settings-path="integrations.realtime.writeToolsEnabled"]',
+    );
+    // keep the existing disabled-voice availability before checking enabled layout
+    await expect(writeTools.getByRole("switch")).toBeVisible();
+    await settings
+      .getByRole("switch", { name: "Enable Davo", exact: true })
+      .check();
+    const context = settings.locator(
+      '[data-settings-path="integrations.realtime.context"]',
+    );
+    const environment = settings.getByRole("region", {
+      name: "Voice environment settings",
+      exact: true,
+    });
+    await expect(context).toBeVisible();
+    await expect(writeTools).toBeVisible();
+    await expect(environment).toBeVisible();
+    await expect(
+      settings.getByRole("heading", {
+        name: "Advanced voice configuration",
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    await expect(
+      settings.getByText(
+        "Save these preferences together with the other voice settings.",
+        { exact: true },
+      ),
+    ).toHaveCount(0);
+    const [contextBox, writeToolsBox, environmentBox] = await Promise.all([
+      context.boundingBox(),
+      writeTools.boundingBox(),
+      environment.boundingBox(),
+    ]);
+    expect(contextBox).not.toBeNull();
+    expect(writeToolsBox).not.toBeNull();
+    expect(environmentBox).not.toBeNull();
+    expect(contextBox!.y + contextBox!.height).toBeLessThanOrEqual(
+      writeToolsBox!.y,
+    );
+    expect(writeToolsBox!.y + writeToolsBox!.height).toBeLessThanOrEqual(
+      environmentBox!.y,
+    );
+    expect(
+      environmentBox!.y - (writeToolsBox!.y + writeToolsBox!.height),
+    ).toBeGreaterThanOrEqual(16);
+    await settings.screenshot({
+      path: `/tmp/remoteagents-settings-voice-layout-${width}.png`,
+    });
+
+    const search = settings.getByRole("searchbox", {
+      name: "Search settings",
+      exact: true,
+    });
+    await search.fill("Write tools");
+    const writeToolsResult = page
+      .getByRole("listbox", {
+        name: "Settings search results",
+        exact: true,
+      })
+      .getByRole("option")
+      .filter({
+        has: page
+          .locator(".settings-search-result-title strong")
+          .filter({ hasText: /^Write tools enabled$/u }),
+      })
+      .filter({ has: page.getByText("Field", { exact: true }) });
+    await expect(writeToolsResult).toHaveCount(1);
+    await expect(
+      writeToolsResult.locator(".settings-search-breadcrumb"),
+    ).toHaveText("Console › Voice");
+    await expect(writeToolsResult).not.toContainText(
+      "Advanced voice configuration",
+    );
+    await writeToolsResult.click();
+    await expect(writeTools).toHaveAttribute(
+      "data-settings-search-highlight",
+      "true",
+    );
+    expect(state.saves).toEqual([]);
+  });
+}
+
+// move voice-only credentials without enabling voice or changing their environment-file ownership
+for (const width of [1440, 375]) {
+  test(`edits voice environment credentials only on Voice at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { settings, sources, state } = await setupSettings(page);
+    addVoiceEnvironmentFixture(sources);
+    await settings
+      .getByRole("button", { name: "Refresh files", exact: true })
+      .click();
+    await selectSettingsSection(settings, "env", "Environment & keys");
+    for (const key of [
+      "RAC_OPENAI_ADMIN_KEY",
+      "RAC_OPENAI_API_KEY_IDS",
+      "RAC_OPENAI_API_KEY",
+      "RAC_REALTIME_MCP_TOKEN",
+    ])
+      await expect(
+        settings.locator(`[data-settings-path="${key}"]`),
+      ).toHaveCount(0);
+    await selectSettingsSection(settings, "agents", "Agents");
+    // keep account-spend configuration with the agent accounts that consume it
+    for (const key of ["RAC_OPENAI_ADMIN_KEY", "RAC_OPENAI_API_KEY_IDS"])
+      await expect(
+        settings.locator(`[data-settings-path="${key}"]`),
+      ).toBeVisible();
+    for (const key of ["RAC_OPENAI_API_KEY", "RAC_REALTIME_MCP_TOKEN"])
+      await expect(
+        settings.locator(`[data-settings-path="${key}"]`),
+      ).toHaveCount(0);
+    await settings
+      .getByRole("searchbox", { name: "Search settings", exact: true })
+      .fill("RAC_OPENAI_API_KEY");
+    const result = page
+      .getByRole("listbox", { name: "Settings search results", exact: true })
+      .getByRole("option")
+      .filter({
+        has: page
+          .locator(".settings-search-result-title strong")
+          .filter({ hasText: /^RAC_OPENAI_API_KEY$/u }),
+      })
+      .filter({ has: page.getByText("Field", { exact: true }) });
+    await expect(result.locator(".settings-search-breadcrumb")).toHaveText(
+      "Console › Voice › Environment & keys",
+    );
+    await result.click();
+    const credentials = settings.getByRole("region", {
+      name: "Voice environment settings",
+      exact: true,
+    });
+    const apiField = credentials.locator(
+      '[data-settings-path="RAC_OPENAI_API_KEY"]',
+    );
+    await expect(apiField).toHaveAttribute(
+      "data-settings-search-highlight",
+      "true",
+    );
+    await expect(
+      settings.getByRole("switch", { name: "Enable Davo", exact: true }),
+    ).not.toBeChecked();
+    await expect(
+      credentials.getByLabel("RAC_OPENAI_API_KEY masked"),
+    ).toBeVisible();
+    const token = credentials.getByRole("textbox", {
+      name: "RAC_REALTIME_MCP_TOKEN",
+      exact: true,
+    });
+    await expect(token).toBeEditable();
+    await expect(token).toHaveValue("");
+    await expect(token).toHaveAttribute(
+      "placeholder",
+      "Derived from RAC_SESSION_SECRET",
+    );
+    await expect(
+      credentials.getByRole("button", {
+        name: "Add environment variable",
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    await expect(
+      settings.getByRole("button", { name: "Save changes", exact: true }),
+    ).toHaveCount(0);
+    await settings.screenshot({
+      path: `/tmp/rac-voice-environment-${width}.png`,
+    });
+    // keep masking and the original protected environment save path intact
+    await apiField
+      .getByRole("button", { name: "Reveal RAC_OPENAI_API_KEY", exact: true })
+      .click();
+    await apiField
+      .getByRole("textbox", { name: "RAC_OPENAI_API_KEY", exact: true })
+      .fill("synthetic-voice-key");
+    await token.fill("synthetic-voice-token");
+    await expect(
+      settings.locator(
+        '.settings-source-nav button[aria-current="page"] [aria-label="Unsaved changes"]',
+      ),
+    ).toHaveCount(1);
+    await settings
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    await expect.poll(() => state.saves.length).toBe(1);
+    const transaction = state.saves[0] as {
+      body: { changes: Array<{ sourceId: string; patches: unknown[] }> };
+    };
+    expect(transaction.body.changes).toHaveLength(1);
+    expect(transaction.body.changes[0]?.sourceId).toBe("env");
+    expect(transaction.body.changes[0]?.patches).toEqual(
+      expect.arrayContaining([
+        {
+          op: "set",
+          path: ["RAC_OPENAI_API_KEY"],
+          value: "synthetic-voice-key",
+        },
+        {
+          op: "set",
+          path: ["RAC_REALTIME_MCP_TOKEN"],
+          value: "synthetic-voice-token",
+        },
+      ]),
+    );
+    await expect(
+      page.getByRole("status", { name: "Restart pending", exact: true }),
+    ).toBeVisible();
+    expect(state.voiceSaves).toEqual([]);
+    expect(state.restarts).toBe(0);
+  });
+}
+
+// lock moved credentials against competing raw drafts and unavailable environment sources
+test("respects environment source locks on the Voice page", async ({
+  page,
+}) => {
+  const { settings, sources } = await setupSettings(page);
+  addVoiceEnvironmentFixture(sources);
+  const environment = sources.find((source) => source.id === "env")!;
+  environment.content = "TZ=UTC\n";
+  environment.hasProtectedContent = false;
+  Object.assign(
+    environment.fields!.find((field) => field.key === "RAC_OPENAI_API_KEY")!,
+    { present: false, hasValue: false },
+  );
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "env", "Environment & keys");
+  await settings
+    .getByRole("button", { name: "Edit whole source", exact: true })
+    .click();
+  await settings
+    .getByRole("textbox", {
+      name: "Environment & keys source content",
+      exact: true,
+    })
+    .fill("TZ=Etc/UTC\n");
+  await selectSettingsSection(settings, "voice", "Voice");
+  await expect(
+    settings.getByText(
+      "Finish or discard the Environment & keys whole-source draft before editing voice credentials.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  for (const key of ["RAC_OPENAI_API_KEY", "RAC_REALTIME_MCP_TOKEN"])
+    await expect(
+      settings.getByRole("textbox", { name: key, exact: true }),
+    ).toBeDisabled();
+  await settings
+    .getByRole("button", { name: "Discard changes", exact: true })
+    .click();
+  await confirmSettingsDiscard(page);
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
+  environment.writable = false;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await expect(
+    settings.getByText(
+      "Voice environment settings are read-only in this installation.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  for (const key of ["RAC_OPENAI_API_KEY", "RAC_REALTIME_MCP_TOKEN"])
+    await expect(
+      settings.getByRole("textbox", { name: key, exact: true }),
+    ).toBeDisabled();
+  sources.splice(sources.indexOf(environment), 1);
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await expect(
+    settings.getByText(
+      "Load Environment & keys before editing voice credentials.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    settings
+      .getByRole("region", { name: "Voice environment settings", exact: true })
+      .getByRole("textbox"),
+  ).toHaveCount(0);
+});

@@ -18,14 +18,13 @@ Host tmux integration and Cloudflare are independent opt-in layers.
    Wrap the Argon2 value in single quotes because its `$` characters otherwise
    trigger Compose interpolation.
 
-   Set `TZ` in the same ignored `.env` to the server's IANA timezone. On a
-   systemd host, `timedatectl show --property=Timezone --value` prints that value.
-   Compose passes it explicitly to the server and defaults to `Etc/UTC`; without
-   a per-host value, the image does not inherit the host's local timezone.
-   Queued/unsent-prompt note
-   titles and scheduled prompts use this server-local timezone, including
-   daylight-saving changes. Choose it before creating schedules. Existing note
-   titles are saved text and are not rewritten when the timezone changes.
+   Compose inherits the Linux host's timezone through a read-only
+   `/etc/localtime` mount; no `TZ` setting is needed. To deliberately use a
+   different IANA timezone, set `TZ` in the same ignored `.env`.
+   Queued/unsent-prompt note titles and scheduled prompts use this server-local
+   timezone, including daylight-saving changes. Recreate the container after
+   changing the host's timezone. Existing note titles are saved text and are
+   not rewritten when the timezone changes.
 
 3. Validate the configuration before building:
 
@@ -130,7 +129,8 @@ override adds the host process tree, tmux socket, tmux client, Codex home, and
 worktree mounts. For every host-backed Project:
 
 - Set the Project's `path` to its container path.
-- Set `hostPath` to the corresponding absolute host path of the Main worktree.
+- Set `hostPath` when the Main worktree's absolute host path differs from `path`.
+  When omitted, host-backed launches inherit `path`.
 - Add a matching bind mount to `compose.override.yaml`.
 - Discovered Linked worktrees must be mounted at the **same absolute path**
   inside the container as on the host, and their common Git directory mounted at
@@ -156,7 +156,7 @@ assumptions:
 | `HOST_TMUX_BIN` | Host tmux executable or wrapper mounted into the container | `/usr/bin/tmux` |
 | `HOST_TMUX_DIR` | Host tmux socket directory | `$HOME/.local/state/tmux/tmux-$HOST_UID` |
 | `HOST_UID` | UID owning the host tmux server | `1000` |
-| `RAC_HOST_NODE_BIN` | Absolute host Node.js executable for the Files broker | Required for bridged Files |
+| `RAC_HOST_NODE_BIN` | Optional absolute host Node.js executable for the Files broker | `node` from host PATH |
 | `RAC_HOST_CODEX_BIN` | Host-visible Codex executable used by the update advisor | `adapters.codex.program` |
 | `RAC_HOST_INTERACTIVE_SHELL` | Absolute zsh, bash, or fish path executed by the host tmux server | `/usr/bin/zsh` |
 | `RAC_HOST_PATH` | Complete PATH exported before host agent and stack commands | `/usr/local/bin:/usr/bin:/bin` |
@@ -170,9 +170,12 @@ longer assumes Homebrew, an x86-64 loader, or a particular host library layout.
 
 ### Full-host Files access
 
-Set `RAC_HOST_NODE_BIN` in the ignored `.env` to the absolute executable printed
-by `command -v node` on the host. The Files panel uses a private host-user broker
-launched through tmux, rather than limiting browsing to container bind mounts.
+When `RAC_HOST_NODE_BIN` is unset or blank, the Files broker resolves `node` on
+the host using `RAC_HOST_PATH` when configured, otherwise the host tmux server’s
+PATH. It does not use the container’s Node.js. To pin a particular version, set
+`RAC_HOST_NODE_BIN` in the ignored `.env` to its absolute host executable path.
+The Files panel uses a private host-user broker launched through tmux, rather
+than limiting browsing to container bind mounts.
 The container's numeric UID must match `HOST_UID` (the image defaults to 1000).
 Filesystem operations inherit the host tmux account's supplementary groups;
 they never use sudo or fall back to container permissions. Missing host Node,

@@ -32,6 +32,9 @@ RUN printf '%s\n' 'Acquire::http::Pipeline-Depth "0";' 'Acquire::http::No-Cache 
     && chown -R node:node /workspace /home/node \
     && rm -rf /var/lib/apt/lists/* /root/.npm /etc/apt/apt.conf.d/99-rac-build-transport
 
+# let ICU inspect mounted host data rather than follow the image's UTC symlink
+RUN rm /etc/localtime && cp /usr/share/zoneinfo/Etc/UTC /etc/localtime
+
 WORKDIR /app
 COPY --from=build /opt/rac-server ./server
 # keep copied public assets readable under restrictive checkout permissions

@@ -28,9 +28,6 @@ Add the integration gates to the server JSON configuration:
       "name": "Davo",
       "context": "The caller is Ansel. Always speak with a masculine, broad Australian accent and a relaxed bogan tradie cadence.",
       "writeToolsEnabled": true
-    },
-    "multiInstance": {
-      "enabled": true
     }
   }
 }
@@ -127,6 +124,11 @@ scopes and the originating active-voice authorization are rechecked by the
 target gateway, which applies its own feature flags, idempotency, and audit
 policy.
 
-Federation requires the same integration code, `multiInstance.enabled`, and
-matching federation secret on both instances. Partial outages return an
-`instance_unavailable` tool error without hiding the healthy instances.
+Federation is enabled automatically when an instance has at least one entry in
+`remoteServers`, and disabled when its remote-server list is empty. There is no
+separate multi-instance toggle; legacy `integrations.multiInstance.enabled` values
+are accepted for compatibility but do not override this behavior.
+
+Both instances still need integrations enabled, compatible integration code, and
+matching federation secrets. Partial outages return an `instance_unavailable`
+tool error without hiding the healthy instances.

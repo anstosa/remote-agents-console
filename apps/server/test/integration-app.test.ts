@@ -16,6 +16,45 @@ afterEach(async () => {
 });
 
 describe('application integration surfaces', () => {
+  it('derives federation route availability from remote servers for direct config fixtures', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-integration-federation-app-'));
+    roots.push(root);
+    const secret = Buffer.alloc(32, 5).toString('base64url');
+    vi.stubEnv('RAC_SESSION_SECRET', secret);
+    vi.stubEnv('RAC_INTEGRATION_AUTH_FILE', join(root, 'auth.json'));
+    vi.stubEnv('RAC_INTEGRATION_STATE_FILE', join(root, 'policy.json'));
+    vi.stubEnv('RAC_INTEGRATION_AUDIT_FILE', join(root, 'audit.jsonl'));
+    const base: ValidatedConfig = {
+      listen: { host: '127.0.0.1', port: 8787 },
+      name: 'Remote Agents',
+      publicOrigin: new URL('https://agents.example.com'),
+      remoteServers: [],
+      trustedProxyIps: new Set(['127.0.0.1']),
+      pollIntervalMs: 500,
+      adapters: {},
+      integrations: { enabled: true, mcp: { readEnabled: true, writeEnabled: false, dangerousEnabled: false }, realtime: { enabled: false, name: 'Davo', context: '', writeToolsEnabled: false }, multiInstance: { enabled: true } },
+      projects: []
+    };
+    const auth = new AuthService('$argon2id$unused', secret);
+    const withoutRemotes = await buildApp(base, { auth, reviewTours: { capability: async () => ({ available: false, reason: 'generator_unavailable' }) } as never });
+    try {
+      const disabled = await withoutRemotes.inject({ method: 'POST', url: '/api/integration-federation', headers: { host: 'agents.example.com' }, payload: {} });
+      expect(disabled.statusCode).toBe(404);
+    } finally { await withoutRemotes.close(); }
+
+    const withRemotes = await buildApp({ ...base, remoteServers: [{ url: new URL('https://peer.example.com') }], integrations: { ...base.integrations!, multiInstance: { enabled: false } } }, { auth, reviewTours: { capability: async () => ({ available: false, reason: 'generator_unavailable' }) } as never });
+    try {
+      const enabled = await withRemotes.inject({ method: 'POST', url: '/api/integration-federation', headers: { host: 'agents.example.com' }, payload: {} });
+      expect(enabled.statusCode).toBe(401);
+    } finally { await withRemotes.close(); }
+
+    const masterDisabled = await buildApp({ ...base, remoteServers: [{ url: new URL('https://peer.example.com') }], integrations: undefined }, { auth, reviewTours: { capability: async () => ({ available: false, reason: 'generator_unavailable' }) } as never });
+    try {
+      const metadata = await masterDisabled.inject({ method: 'GET', url: '/.well-known/oauth-protected-resource', headers: { host: 'agents.example.com' } });
+      expect(metadata.statusCode).toBe(404);
+    } finally { await masterDisabled.close(); }
+  });
+
   it('registers OAuth, MCP, and authenticated Realtime status behind feature gates', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rac-integration-app-'));
     roots.push(root);

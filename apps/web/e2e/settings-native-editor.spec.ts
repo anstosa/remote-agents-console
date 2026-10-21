@@ -169,7 +169,8 @@ async function setupNativeEditor(page: Page, options: NativeEditorOptions = {}) 
 
 // select one synthetic installation source
 async function selectSource(settings: Locator, label: string) {
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const visibleLabel = label === 'Application config' ? 'Application' : label;
+  const escaped = visibleLabel.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   const name = new RegExp(`^${escaped}(?: (?:· )?Unsaved changes)?$`, 'u');
   const selector = settings.getByRole('combobox', { name: 'Settings section', exact: true });
   // use the mobile dropdown at phone and tablet widths
@@ -182,7 +183,7 @@ async function selectSource(settings: Locator, label: string) {
 // open the source's whole-file representation
 async function openRawSource(settings: Locator, label: string) {
   await selectSource(settings, label);
-  const edit = settings.getByRole('button', { name: 'Edit whole source' });
+  const edit = settings.getByRole('button', { name: label === 'Application config' ? 'Edit base file' : 'Edit whole source' });
   // advanced sources already default to their raw representation
   if (await edit.count() > 0) await edit.click();
   return settings.getByLabel(`${label} source content`);

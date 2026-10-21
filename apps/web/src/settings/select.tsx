@@ -11,6 +11,7 @@ export type SettingsSelectOption = {
   group?: string;
   disabled?: boolean;
   busy?: boolean;
+  hasIssues?: boolean;
 };
 
 type IndexedOption = { option: SettingsSelectOption; index: number };
@@ -246,6 +247,7 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
       aria-controls={listboxId}
       aria-activedescendant={open && activeIndex >= 0 ? `${listboxId}-option-${activeIndex}` : undefined}
       data-value={value}
+      data-has-issues={shown.hasIssues || undefined}
       disabled={disabled}
       onClick={toggleMenu}
       onKeyDown={handleKeyDown}
@@ -273,6 +275,7 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
               aria-disabled={option.disabled || undefined}
               data-active={active || undefined}
               data-value={option.value}
+              data-has-issues={option.hasIssues || undefined}
               onMouseDown={event => { /* preserve trigger focus */ event.preventDefault(); }}
               onPointerMove={() => { /* follow enabled pointer choices */ if (option.disabled !== true) setActiveIndex(index); }}
               onClick={() => { /* commit one pointer choice */ commitOption(index); }}

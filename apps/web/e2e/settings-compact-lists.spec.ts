@@ -1,6 +1,8 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mockAccountSocket } from "./account-fixture.js";
 import { confirmSettingsDiscard } from "./settings-confirmation-helpers.js";
+import { applyAuthoredProjectPatch } from "../../server/src/settings/project-normalization.js";
+import { sourceSchema } from "../../server/src/config/schema.js";
 
 type SettingsPatch = {
   op: "set" | "remove" | "insert" | "move";
@@ -28,6 +30,7 @@ type FixtureOptions = {
   validationIssues?: ValidationIssue[];
   revealGate?: Promise<void>;
   saveGate?: Promise<void>;
+  value?: Record<string, unknown>;
 };
 
 const protectedValue = { __racProtected: true, present: true, hasValue: true };
@@ -61,7 +64,7 @@ const initialValue = {
 
 const appSchema = {
   type: "object",
-  label: "Application configuration",
+  label: "Application",
   properties: {
     aliases: {
       type: "array",
@@ -95,6 +98,12 @@ const appSchema = {
             type: "array",
             label: "Tags",
             items: { type: "string", label: "Tag" },
+          },
+          worktreeOrder: {
+            type: "array",
+            label: "Worktree order",
+            optional: true,
+            items: { type: "string", label: "Worktree path" },
           },
           credential: {
             type: "string",
@@ -233,7 +242,7 @@ function applicationSource(
 ) {
   return {
     id: "app",
-    label: "Application configuration",
+    label: "Application",
     path: "/synthetic/config/config.json",
     format: "json",
     exists: true,
@@ -250,7 +259,7 @@ function applicationSource(
 // mount Settings over a stateful synthetic settings host
 async function setupCompactLists(page: Page, options: FixtureOptions = {}) {
   await mockAccountSocket(page);
-  let saved = clone(initialValue) as Record<string, unknown>;
+  let saved = clone(options.value ?? initialValue) as Record<string, unknown>;
   let revision = 1;
   const state = {
     saves: [] as SettingsRequest[],
@@ -333,6 +342,18 @@ async function setupCompactLists(page: Page, options: FixtureOptions = {}) {
           targets: [],
           effective: "known",
           restartAvailable: true,
+        },
+      });
+    // keep tunnel metadata inside the synthetic fixture
+    if (path === "/api/settings/cloudflare" && request.method() === "GET")
+      return route.fulfill({
+        json: {
+          supported: true,
+          mode: "unconfigured",
+          enabled: false,
+          connected: false,
+          tokenPresent: false,
+          serviceUrl: "http://127.0.0.1:9876",
         },
       });
     // return the authoritative fixture snapshot
@@ -418,7 +439,7 @@ async function setupCompactLists(page: Page, options: FixtureOptions = {}) {
   return { settings, state };
 }
 
-// select Application configuration in either responsive navigator
+// select Application in either responsive navigator
 async function selectApplication(settings: Locator) {
   const selector = settings.getByRole("combobox", {
     name: "Settings section",
@@ -436,7 +457,7 @@ async function selectApplication(settings: Locator) {
   }
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: "Application configuration", exact: true })
+    .getByRole("button", { name: "Application", exact: true })
     .click();
 }
 
@@ -845,6 +866,112 @@ test("preserves edits on both sides of a move barrier and saves their final orde
   ).toContainText("Atlas edited");
 });
 
+// guard current-state indexes across parent and nested reorders
+test("submits current indexes through repeated project and nested list moves", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const baseline = {
+    publicOrigin: "https://console.example.test",
+    projects: [
+      { id: "atlas", label: "Atlas", path: "/srv/atlas" },
+      { id: "beacon", label: "Beacon", path: "/srv/beacon" },
+      {
+        id: "cinder",
+        label: "Cinder",
+        path: "/srv/cinder",
+        worktreeOrder: ["main", "feature", "release"],
+      },
+    ],
+  };
+  const { settings, state } = await setupCompactLists(page, {
+    value: baseline,
+  });
+  await selectProjects(settings);
+  await rowWithSummary(settings, "Project", "Cinder")
+    .getByRole("button", { name: "Move Projects 3 up", exact: true })
+    .click();
+  await rowWithSummary(settings, "Project", "Cinder")
+    .getByRole("button", { name: "Move Projects 2 up", exact: true })
+    .click();
+
+  let cinder = rowWithSummary(settings, "Project", "Cinder");
+  await cinder
+    .getByRole("button", { name: indexedActionName("Edit", "Project") })
+    .click();
+  await cinder
+    .getByRole("textbox", { name: "Name", exact: true })
+    .fill("Cinder moved");
+  await cinder
+    .getByRole("button", { name: "Move Worktree order 3 up", exact: true })
+    .click();
+  await cinder
+    .getByRole("button", { name: "Move Worktree order 2 up", exact: true })
+    .click();
+  await cinder
+    .getByRole("button", { name: indexedActionName("Close", "Project") })
+    .click();
+  await cinder
+    .getByRole("button", { name: "Move Projects 1 down", exact: true })
+    .click();
+
+  cinder = rowWithSummary(settings, "Project", "Cinder");
+  await cinder
+    .getByRole("button", { name: indexedActionName("Edit", "Project") })
+    .click();
+  await cinder
+    .getByRole("textbox", { name: "Name", exact: true })
+    .fill("Cinder final");
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.validations.length).toBe(1);
+  await expect.poll(() => state.saves.length).toBe(1);
+
+  const patches = state.validations[0]!.changes[0]!.patches!;
+  expect(patches).toEqual([
+    { op: "move", path: ["projects"], from: 2, to: 1 },
+    { op: "move", path: ["projects"], from: 1, to: 0 },
+    {
+      op: "set",
+      path: ["projects", "0", "label"],
+      value: "Cinder moved",
+    },
+    {
+      op: "move",
+      path: ["projects", "0", "worktreeOrder"],
+      from: 2,
+      to: 1,
+    },
+    {
+      op: "move",
+      path: ["projects", "0", "worktreeOrder"],
+      from: 1,
+      to: 0,
+    },
+    { op: "move", path: ["projects"], from: 0, to: 1 },
+    {
+      op: "set",
+      path: ["projects", "1", "label"],
+      value: "Cinder final",
+    },
+  ]);
+  const candidate = patches.reduce(applyAuthoredProjectPatch, baseline);
+  expect(sourceSchema.safeParse(candidate).success).toBe(true);
+  expect(candidate).toMatchObject({
+    projects: [
+      { id: "atlas", label: "Atlas" },
+      {
+        id: "cinder",
+        label: "Cinder final",
+        worktreeOrder: ["release", "main", "feature"],
+      },
+      { id: "beacon", label: "Beacon" },
+    ],
+  });
+  await expect(settings.getByText(/^Validation passed\./u)).toHaveCount(0);
+});
+
 test("keeps overlapping union summaries opaque when any matching branch is protected", async ({
   page,
 }) => {
@@ -954,8 +1081,11 @@ test("surfaces descendant validation issues while their row remains collapsed", 
   await atlas
     .getByRole("button", { name: indexedActionName("Close", "Project") })
     .click();
-  await settings.getByRole("button", { name: "Validate", exact: true }).click();
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
   await expect.poll(() => state.validations.length).toBe(1);
+  expect(state.saves).toEqual([]);
   await expect(atlas.getByRole("alert")).toContainText(
     "Choose an existing project path.",
   );

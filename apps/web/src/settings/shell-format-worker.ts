@@ -18,10 +18,11 @@ const statementRanges = (source: string, parsed: File): ShellSourceRange[] => pa
 });
 
 // parse and print shell drafts in an isolated worker without running commands
-globalThis.addEventListener('message', async (event: MessageEvent<string>) => {
+globalThis.addEventListener('message', async (event: MessageEvent<{ value: string; singleLine: boolean }>) => {
   try {
+    const { value, singleLine } = event.data;
     // fail closed before shfmt can normalize carriage returns or unsafe delimiters
-    if (!shellSourceCanFormat(event.data)) throw new Error('Shell source cannot be preserved safely');
+    if (!shellSourceCanFormat(value)) throw new Error('Shell source cannot be preserved safely');
     // load the Go shim in the worker before constructing its WebAssembly imports
     await import('sh-syntax/vendors/wasm_exec.cjs');
     const response = await fetch(wasmAsset);
@@ -30,7 +31,15 @@ globalThis.addEventListener('message', async (event: MessageEvent<string>) => {
     const bytes = await response.arrayBuffer();
     const processor = getProcessor(() => bytes);
     // canonicalize Bash before applying the requested argv layout
-    const canonical = await processor(event.data, { ...parserOptions, print: true });
+    const canonical = await processor(value, { ...parserOptions, print: true });
+    // preserve fields whose existing validators forbid newlines
+    if (singleLine) {
+      const formatted = (await structuralFingerprint(processor, value)).replace(/\n$/u, '');
+      // retain unsafe multiline output as an unchanged draft
+      if (/[\r\n]/u.test(formatted) || await structuralFingerprint(processor, formatted) !== await structuralFingerprint(processor, canonical)) throw new Error('Shell command cannot be preserved on one line');
+      globalThis.postMessage({ formatted });
+      return;
+    }
     const parsed = await processor(canonical, parserOptions);
     const firstPass = formatShellCommandArguments(canonical, statementRanges(canonical, parsed));
     // let the parser settle indentation introduced by newly multiline constructs

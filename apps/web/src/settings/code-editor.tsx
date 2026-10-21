@@ -17,6 +17,9 @@ type SettingsCodeEditorProps = {
   readOnly?: boolean;
   masked?: boolean;
   ariaLabel: string;
+  id?: string;
+  placeholder?: string;
+  singleLine?: boolean;
   format?: SettingsCodeFormat;
   onBlur?: () => void;
   editorSource?: SettingsSource;
@@ -44,7 +47,7 @@ const editorFailures: Record<string, string> = {
 const languageForFormat = (format?: SettingsCodeFormat): string => format === undefined ? 'plaintext' : formatLanguages[format];
 
 // render one controlled settings source editor
-export function SettingsCodeEditor({ value, onChange, disabled = false, readOnly: sourceReadOnly = false, masked = false, ariaLabel, format, onBlur, editorSource, fieldAction }: SettingsCodeEditorProps) {
+export function SettingsCodeEditor({ value, onChange, disabled = false, readOnly: sourceReadOnly = false, masked = false, ariaLabel, id, placeholder, singleLine = false, format, onBlur, editorSource, fieldAction }: SettingsCodeEditorProps) {
   // masked previews never become editable through a missing read-only flag
   const readOnly = sourceReadOnly || masked;
   const textarea = useRef<HTMLTextAreaElement>(null);
@@ -99,7 +102,7 @@ export function SettingsCodeEditor({ value, onChange, disabled = false, readOnly
     formatAbort.current?.abort();
     setFormatError(undefined);
     setFormatPending(false);
-  }, [value, format, disabled, readOnly, ariaLabel, securityEpoch]);
+  }, [value, format, singleLine, disabled, readOnly, ariaLabel, securityEpoch]);
 
   // discard editor feedback after source, workspace, or controller transitions
   useLayoutEffect(() => {
@@ -145,7 +148,7 @@ export function SettingsCodeEditor({ value, onChange, disabled = false, readOnly
     setFormatPending(true);
     setFormatError(undefined);
     try {
-      const formatted = await prettyFormatSettingsCode(value, format, abort.signal);
+      const formatted = await prettyFormatSettingsCode(value, format, abort.signal, singleLine);
       // discard stale completions after any editor or security transition
       if (!mounted.current || request !== formatRequest.current) return;
       onChange(formatted);
@@ -211,8 +214,10 @@ export function SettingsCodeEditor({ value, onChange, disabled = false, readOnly
     <div className="settings-code-editor-surface" onClick={hintReveal}>
       <SyntaxHighlightedCode code={value} language={language} presentation preRef={presentation} />
       <textarea
+        id={id}
         ref={textarea}
         aria-label={ariaLabel}
+        placeholder={placeholder}
         aria-describedby={formatError === undefined ? undefined : errorId}
         aria-invalid={formatError === undefined ? undefined : true}
         value={value}
@@ -222,6 +227,7 @@ export function SettingsCodeEditor({ value, onChange, disabled = false, readOnly
         wrap="off"
         onBlur={onBlur}
         onChange={handleChange}
+        onKeyDown={event => { /* retain single-line command contracts */ if (singleLine && event.key === 'Enter') event.preventDefault(); }}
         onScroll={handleScroll}
       />
     </div>

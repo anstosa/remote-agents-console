@@ -33,6 +33,7 @@ import type { KeysConfig } from '../../server/src/config/keys.js';
 import { applyColorTheme } from './color-theme.js';
 import { useDynamicWorktrees } from './dynamic-worktrees.js';
 import { applyReducedMotion } from './reduced-motion.js';
+import { useFullscreenAction } from './fullscreen-loader.js';
 import { applyFlyoutMarkers } from './flyout-markers.js';
 import { UpstreamRebaseNotification, type GitUpstreamSummary } from './upstream-rebase.js';
 import { useViewportFlyout } from './viewport-flyout.js';
@@ -50,7 +51,7 @@ import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './s
 import { SettingsHeaderActionsContext } from './settings/header-actions.js';
 import { isSettingsSnapshot, settingsResponseError } from './settings/contracts.js';
 import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
-import { SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, useSettingsRestartNoticeVisible } from './settings/runtime.js';
+import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, useSettingsRestartNoticeVisible } from './settings/runtime.js';
 import './styles.css';
 
 // preserve both middle-click and context-menu presses
@@ -1540,8 +1541,6 @@ function ServerUpdateDialog({ open, minimized, onMinimize, onClose }: { open: bo
 // share the global settings panel with the active workspace split and tab trigger
 const ClientSettingsSplitContext = createContext<{ open: boolean; page: ReactNode; trigger: ReactNode; close: () => Promise<boolean>; renameServer: () => void } | null>(null);
 
-const settingsHeaderLayoutEvent = 'rac-settings-header-layout';
-
 // keep global notices below any visible settings toolbar with file actions
 const syncSettingsToastClearance = () => {
   let clearance = 0;
@@ -1556,7 +1555,6 @@ const syncSettingsToastClearance = () => {
   // avoid feedback when measuring unchanged header geometry
   if (root.style.getPropertyValue('--settings-header-toast-clearance') === next) return;
   root.style.setProperty('--settings-header-toast-clearance', next);
-  window.dispatchEvent(new Event(settingsHeaderLayoutEvent));
 };
 
 // apply split expansion inside the owning workspace context
@@ -2021,7 +2019,7 @@ function ClientSettingsLayout({ settings, workspaceKey, children, onOperationFee
     if (event.key === 'Escape' && !event.defaultPrevented && dialog === undefined) { event.preventDefault(); event.stopPropagation(); void closeSettings(); }
   };
   // render staged browser and file-backed settings through one shared workspace
-  const settingsPage = !open ? null : <ClientSettingsPage panelRef={pageRef} busy={false} hidden={settings.serverUpdateVisible} onKeyDown={pageKey} onClose={closeSettings}><SettingsCenter active={open} session={settingsSession} closeGuardRef={settingsCloseGuard} remoteServers={serverIdentity?.remotes} browser={{ deviceName: settings.deviceName, renameClient: settings.renameClient }} voice={settings.davo} onSaved={settings.refreshDavo} onSavedNotice={detail => { /* share transient save feedback with the global toast stack */ onOperationFeedback({ tone: 'success', message: 'Saved', detail }); }} requestedSection={requestedSection?.workspaceKey === workspaceKey ? requestedSection : undefined} onSectionSelected={consumeSettingsSection} /></ClientSettingsPage>;
+  const settingsPage = !open ? null : <ClientSettingsPage panelRef={pageRef} busy={false} hidden={settings.serverUpdateVisible} onKeyDown={pageKey} onClose={closeSettings}><SettingsCenter active={open} session={settingsSession} closeGuardRef={settingsCloseGuard} remoteServers={serverIdentity?.remotes} browser={{ deviceName: settings.deviceName, renameClient: settings.renameClient }} voice={settings.davo} onSaved={settings.refreshDavo} onSaveNotice={(tone, detail) => { /* share timed successes and persistent failures with the global toast stack */ onOperationFeedback({ tone, message: tone === 'success' ? 'Saved' : 'Settings save incomplete', detail }); }} requestedSection={requestedSection?.workspaceKey === workspaceKey ? requestedSection : undefined} onSectionSelected={consumeSettingsSection} /></ClientSettingsPage>;
   const renameTarget = dialog === 'server' || dialog === 'account-rename' ? dialog : undefined;
   let renameTitle = renamingAccount?.authMode === 'apikey' ? 'API key' : 'account';
   let renameMaxLength = 120;
@@ -2209,10 +2207,6 @@ function LoadingScreen({ label = 'Restoring secure session' }: { label?: string 
   return <main className="auth-screen loading-screen" aria-live="polite"><div className="auth-glow" /><div className="loading-console progress-border progress-mauve" aria-busy="true"><ProgressRing busy /><div className="loading-line">{label}</div></div></main>;
 }
 
-// restore the full-screen status treatment without unmounting the console
-function ReconnectingOverlay() {
-  return <div className="reconnecting-overlay" role="alert" aria-label="Reconnecting to console"><div className="auth-glow" aria-hidden="true" /><div className="loading-console progress-border progress-mauve" aria-busy="true"><ProgressRing busy /><div className="loading-line">Reconnecting to console</div></div></div>;
-}
 
 function ControlScreen({ session, claimed }: { session: SessionInfo; claimed: (next: SessionInfo) => void }) {
   const [pending, setPending] = useState(false);
@@ -8244,7 +8238,7 @@ function NoteFeedbackProvider({ children }: { children: ReactNode }) {
   return <NoteFeedbackContext.Provider value={{ deleted, toasts }}>{children}</NoteFeedbackContext.Provider>;
 }
 
-// stack transient feedback and persistent notices in one corner region
+// overlay transient feedback and persistent notices without resizing split content
 function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDismissUpdateError, launchErrorMessage, launchErrorExpires }: { children?: ReactNode; feedback?: OperationFeedback; onDismissFeedback: () => void; updateError?: string; onDismissUpdateError: () => void; launchErrorMessage?: string; launchErrorExpires?: number }) {
   const clientSettings = useContext(ClientSettingsContext);
   const noteFeedback = useContext(NoteFeedbackContext);
@@ -8266,31 +8260,11 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
   const showClientUpdate = clientSettings?.clientUpdateAvailable === true;
   // the launch error is redundant while an error-tone operation toast already says the same thing
   const showLaunchError = Boolean(launchErrorMessage) && feedback?.tone !== 'error';
-  // keep the settings pane's scrollable controls below the visible toast stack
-  const reserveToastSpace = useCallback((element: HTMLDivElement | null) => {
-    // detached regions have no space to reserve
-    if (element === null) return;
-    const root = document.documentElement;
-    // include the resolved safe-area inset and keep wrapped notices clear of settings
-    const measure = () => {
-      const bottom = element.offsetHeight === 0 ? 0 : Math.ceil(element.getBoundingClientRect().bottom);
-      root.style.setProperty('--toast-region-clearance', `${bottom}px`);
-      // reserve notice space relative to each split rather than the document origin
-      for (const panel of Array.from(document.querySelectorAll<HTMLElement>('.settings-center-page'))) panel.style.setProperty('--settings-toast-region-clearance', `${Math.max(0, Math.ceil(bottom - panel.getBoundingClientRect().top))}px`);
-    };
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    window.addEventListener('resize', measure);
-    window.addEventListener(settingsHeaderLayoutEvent, measure);
-    measure();
-    // release the reservation when this workspace's region unmounts
-    return () => { observer.disconnect(); window.removeEventListener('resize', measure); window.removeEventListener(settingsHeaderLayoutEvent, measure); root.style.removeProperty('--toast-region-clearance'); for (const panel of Array.from(document.querySelectorAll<HTMLElement>('.settings-center-page'))) panel.style.removeProperty('--settings-toast-region-clearance'); };
-  }, []);
   // omit an empty stack when there is no persistent notice
   if (children == null && feedback === undefined && !updateError && !showLaunchError && !showClientUpdate && !showSettingsRestart && !noteFeedback?.toasts.length) return null;
-  return createPortal(<div className="toast-region" ref={reserveToastSpace}>
+  return createPortal(<div className="toast-region">
     {noteFeedback?.toasts}
-    {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>Reload to use the latest version.</span></div><button type="button" className="progress-border progress-blue" disabled={reloadingClient} aria-busy={reloadingClient} onClick={() => {
+    {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>Reload to use the latest version.</span></div><button type="button" className="progress-border progress-blue" data-fullscreen-focus-return="reload" disabled={reloadingClient} aria-busy={reloadingClient} onClick={() => {
       // keep reload feedback visible while the replacement document is loading
       if (reloadingClient) return;
       setReloadingClient(true);
@@ -10048,6 +10022,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
 
 // coordinate console session and update lifecycle
 function App() {
+  const { action, begin: beginFullscreenAction, finish: finishFullscreenAction, entered: fullscreenActionEntered } = useFullscreenAction();
   const [state, setState] = useState<'checking' | 'login' | 'naming' | 'ready' | 'inactive'>('checking');
   const [sessionInfo, setSessionInfo] = useState<SessionInfo>();
   const [serverInfo, setServerInfo] = useState<ServerInfo>(fallbackServerInfo);
@@ -10109,8 +10084,16 @@ function App() {
       return undefined;
     }
   }, []);
-  // reload one stale browser bundle
-  const reloadClient = useCallback(() => location.reload(), []);
+  // reload one stale browser bundle only behind the painted cover
+  const reloadClient = useCallback(async () => {
+    // ignore repeated reload clicks while one transition owns the screen
+    if (!await beginFullscreenAction('reload')) return;
+    location.reload();
+  }, [beginFullscreenAction]);
+  // begin one restart after the shared cover is fully painted
+  const beforeRestart = useCallback(() => beginFullscreenAction('restart'), [beginFullscreenAction]);
+  // release the restart cover only after a proved settled status
+  const onRestartSettled = useCallback(() => finishFullscreenAction('restart'), [finishFullscreenAction]);
   // persist the server-wide launch fallback
   const setDefaultAgent = useCallback(async (kind: AgentKind): Promise<string | undefined> => {
     const response = await request('/api/server/default-agent', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind }) });
@@ -10568,7 +10551,7 @@ function App() {
   const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
   // share the current launch settings with every flyout
   const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, updating: updatingAgent, errors: Array.from(new Set([defaultAgentError, versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), defaultAgent: sessionInfo?.defaultAgent, defaultPending: defaultAgentPending, setDefaultAgent: (kind: AgentKind) => { /* persist one default */ void selectDefaultAgent(kind); }, updateAgent: (kind: AgentKind) => { /* run one installer */ void runAgentUpdate(kind); } }), [agentUpdateStatuses, updatingAgent, versionCheckError, defaultAgentError, sessionInfo?.defaultAgent, defaultAgentPending, selectDefaultAgent, runAgentUpdate]);
-  return <SettingsRuntimeProvider request={request} enabled={sessionInfo !== undefined} canMutate={state === 'ready'}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <StandaloneSettingsRestartNotice />}<ContextMenuHost /><ContextFlyoutEvents /><ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} />{reconnecting && <ReconnectingOverlay />}</AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider>;
+  return <SettingsRuntimeProvider request={request} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <StandaloneSettingsRestartNotice />}<ContextMenuHost /><ContextFlyoutEvents /><ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider>;
 }
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js');
 // Reflect the stored flavour before the first render, now that the stylesheet is

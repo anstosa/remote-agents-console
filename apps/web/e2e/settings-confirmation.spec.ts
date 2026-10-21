@@ -135,6 +135,18 @@ async function setupConfirmationSettings(page: Page, files = false) {
       return route.fulfill({ json: { available: false } });
     if (path === "/api/settings/status")
       return route.fulfill({ json: status });
+    // keep tunnel metadata inside the synthetic fixture
+    if (path === "/api/settings/cloudflare" && request.method() === "GET")
+      return route.fulfill({
+        json: {
+          supported: true,
+          mode: "unconfigured",
+          enabled: false,
+          connected: false,
+          tokenPresent: false,
+          serviceUrl: "http://127.0.0.1:9876",
+        },
+      });
     // publish or reject the controlled file catalog
     if (path === "/api/settings" && request.method() === "GET") {
       state.settingsReads += 1;
@@ -445,7 +457,7 @@ test("prevents duplicate confirmation while async discard is pending", async ({
   const { settings, state } = await setupConfirmationSettings(page, true);
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: "Application configuration", exact: true })
+    .getByRole("button", { name: "Application", exact: true })
     .click();
   const title = settings.getByRole("textbox", {
     name: "Service title",

@@ -21,6 +21,12 @@ type SettingsChange = {
 };
 type SettingsRequest = { changes: SettingsChange[] };
 type Gate = Promise<{ status: number; valid?: boolean }>;
+type SettingsIssue = {
+  sourceId: string;
+  path: string[];
+  code: string;
+  message: string;
+};
 
 const baselineApp = {
   title: "Alpha service",
@@ -34,6 +40,32 @@ const baselineApp = {
   ),
 };
 const baselineContent = `${JSON.stringify(baselineApp, null, 2)}\n`;
+
+// cover source and virtual issue routing
+const routedNavigationIssues: SettingsIssue[] = [
+  { sourceId: "app", path: ["title"], code: "invalid_value", message: "Fix the application title." },
+  { sourceId: "app", path: ["adapters", "codex", "program"], code: "invalid_value", message: "Fix the Codex program." },
+  { sourceId: "app", path: ["projects", "0", "path"], code: "invalid_value", message: "Fix the project path." },
+  { sourceId: "app", path: ["review", "tour", "prompt"], code: "invalid_value", message: "Fix the review prompt." },
+  { sourceId: "app", path: ["scratchDirectory"], code: "invalid_value", message: "Fix the scratch directory." },
+  { sourceId: "app", path: ["tmux", "pollIntervalMs"], code: "invalid_value", message: "Fix the TMUX interval." },
+  { sourceId: "app", path: ["keys", "global", "x", "command"], code: "invalid_value", message: "Fix the keyboard command." },
+  { sourceId: "app", path: ["integrations", "realtime", "enabled"], code: "invalid_value", message: "Fix Voice." },
+  { sourceId: "env", path: ["EDITOR_COMMAND"], code: "invalid_value", message: "Fix the editor command." },
+];
+
+// retain visible navigation order
+const routedIssuePageLabels = [
+  "Voice",
+  "Keyboard shortcuts",
+  "Application",
+  "Agents",
+  "Projects",
+  "Reviews",
+  "TMUX",
+  "Storage",
+  "Environment & keys",
+];
 
 // resolve a controlled request later
 function deferred<T>() {
@@ -191,6 +223,7 @@ type HeaderFixtureState = {
   revision: number;
   pending: boolean;
   validations: SettingsRequest[];
+  validationIssues: SettingsIssue[];
   saves: SettingsRequest[];
   settingsGets: number;
   remasks: unknown[];
@@ -211,6 +244,7 @@ async function setupHeaderSettings(page: Page) {
     revision: 1,
     pending: false,
     validations: [],
+    validationIssues: [],
     saves: [],
     settingsGets: 0,
     remasks: [],
@@ -275,7 +309,7 @@ async function setupHeaderSettings(page: Page) {
     // publish the current saved files
     if (path === "/api/settings" && request.method() === "GET") {
       state.settingsGets += 1;
-      const outcome =
+      const outcome: { status: number } =
         state.getGate === undefined
           ? (state.getOutcomes.shift() ?? { status: 200 })
           : await state.getGate;
@@ -314,15 +348,19 @@ async function setupHeaderSettings(page: Page) {
     if (path === "/api/settings/validate" && request.method() === "POST") {
       const body = request.postDataJSON() as SettingsRequest;
       state.validations.push(body);
-      const outcome =
+      const outcome: { status: number; valid?: boolean } =
         state.validationGate === undefined
-          ? { status: 200, valid: true }
+          ? { status: 200 }
           : await state.validationGate;
       return route.fulfill({
         status: outcome.status,
         json:
           outcome.status === 200
-            ? { valid: outcome.valid ?? true, issues: [], warnings: [] }
+            ? {
+                valid: outcome.valid ?? state.validationIssues.length === 0,
+                issues: state.validationIssues,
+                warnings: [],
+              }
             : { error: "synthetic validation failure" },
       });
     }
@@ -383,9 +421,10 @@ async function selectSection(settings: Locator, id: string, label: string) {
       .click();
     return;
   }
+  const visibleLabel = id === "app" ? "Application" : label;
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: new RegExp(`^${label}`, "u") })
+    .getByRole("button", { name: new RegExp(`^${visibleLabel}`, "u") })
     .click();
 }
 
@@ -429,7 +468,34 @@ async function expectButtonCenterHit(button: Locator) {
     .toBe(true);
 }
 
-// keep a visible global notice beneath the complete settings header
+// compare one rendered marker with a theme color
+async function expectThemeColor(
+  container: Locator,
+  selector: string,
+  variable: "--red" | "--yellow",
+) {
+  const colors = await container.evaluate(
+    (element, input) => {
+      const target = element.querySelector<HTMLElement>(input.selector)!;
+      const reference = document.createElement("span");
+      reference.style.color = `var(${input.variable})`;
+      document.body.append(reference);
+      const expected = getComputedStyle(reference).color;
+      reference.remove();
+      return {
+        actual:
+          input.selector === "i"
+            ? getComputedStyle(target).backgroundColor
+            : getComputedStyle(target).color,
+        expected,
+      };
+    },
+    { selector, variable },
+  );
+  expect(colors.actual).toBe(colors.expected);
+}
+
+// overlay content without covering the settings toolbar
 async function expectNoticeBelowHeader(settings: Locator, notice: Locator) {
   const layout = await settings.evaluate((panel) => {
     const panelBounds = panel.getBoundingClientRect();
@@ -451,9 +517,45 @@ async function expectNoticeBelowHeader(settings: Locator, notice: Locator) {
   });
   await expect(notice).toBeVisible();
   expect(layout.noticeTop).toBeGreaterThanOrEqual(layout.headerBottom);
-  expect(layout.contentFromPane).toBeGreaterThanOrEqual(
-    layout.noticeBottomFromPane - 1,
-  );
+  expect(layout.contentFromPane).toBeLessThan(layout.noticeBottomFromPane);
+}
+
+// retain content geometry while transient and persistent notices enter and leave
+for (const width of [320, 390, 1440]) {
+  test(`overlays Settings toasts without moving content at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { settings, state } = await setupHeaderSettings(page);
+    await expectNoFileActions(settings);
+    // settle initial toolbar measurements before capturing the clean layout
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    // compare the split inset and tab scroller rather than the changing field value
+    const geometry = () => settings.evaluate(panel => {
+      const content = panel.querySelector('.client-settings-page-content')!.getBoundingClientRect();
+      const tab = panel.querySelector<HTMLElement>('.settings-source-panel')!;
+      const bounds = tab.getBoundingClientRect();
+      return { contentTop: content.top, contentHeight: content.height, tabTop: bounds.top, tabHeight: bounds.height, scrollTop: tab.scrollTop, paddingTop: getComputedStyle(panel).paddingTop };
+    });
+    const baseline = await geometry();
+    await settings.getByRole('textbox', { name: 'Service title', exact: true }).fill('Overlay toast save');
+    await fileActions(settings).save.click();
+    await expect.poll(() => state.saves.length).toBe(1);
+    await expectNoFileActions(settings);
+    const saved = page.locator('body > .toast-region .operation-feedback.success').filter({ hasText: 'Saved' });
+    const notice = page.getByRole('status', { name: 'Restart pending', exact: true });
+    await expect(saved).toBeVisible();
+    await expect(notice).toBeVisible();
+    await expect.poll(geometry).toEqual(baseline);
+    await expectNoticeBelowHeader(settings, notice);
+    await page.screenshot({ path: `/tmp/remoteagents-settings-toast-overlay-${width}.png` });
+
+    await saved.getByRole('button', { name: 'Dismiss operation status', exact: true }).click();
+    await expect(saved).toHaveCount(0);
+    await expect.poll(geometry).toEqual(baseline);
+    state.pending = false;
+    await fileActions(settings).refresh.click();
+    await expect(notice).toHaveCount(0);
+    await expect.poll(geometry).toEqual(baseline);
+  });
 }
 
 // compare action order through each button's accessible label source
@@ -500,7 +602,7 @@ for (const width of [320, 390, 1440]) {
     await expect(actions.refresh).toBeEnabled();
     await expect(actions.refresh).toHaveText("");
     await expect(actions.refresh).toHaveAttribute("title", "Refresh files");
-    await expect(actions.refresh).toHaveAttribute("aria-busy", "false");
+    await expect(actions.refresh).not.toHaveAttribute("aria-busy");
     await expect(actions.refresh.locator("svg path")).toHaveAttribute(
       "d",
       "M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6",
@@ -526,7 +628,7 @@ for (const width of [320, 390, 1440]) {
       exact: true,
     });
     await title.fill("Beta service");
-    await expect(actions.validate).toBeVisible();
+    await expect(actions.validate).toHaveCount(0);
     await expect(actions.discard).toBeVisible();
     await expect(actions.save).toBeVisible();
     await expect(actions.refresh).toBeDisabled();
@@ -534,9 +636,8 @@ for (const width of [320, 390, 1440]) {
       "title",
       "Discard or save local changes before refreshing files",
     );
-    await expect(actions.toolbar.getByRole("button")).toHaveCount(6);
+    await expect(actions.toolbar.getByRole("button")).toHaveCount(5);
     await expectToolbarActions(actions.toolbar, [
-      "Validate",
       "Discard changes",
       "Save changes",
       "Refresh files",
@@ -545,7 +646,7 @@ for (const width of [320, 390, 1440]) {
     ]);
     await expect(
       settings.getByRole("button", { name: "Validate", exact: true }),
-    ).toHaveCount(1);
+    ).toHaveCount(0);
     await expect(
       settings.getByRole("button", { name: "Discard changes", exact: true }),
     ).toHaveCount(1);
@@ -553,11 +654,6 @@ for (const width of [320, 390, 1440]) {
       settings.getByRole("button", { name: "Save changes", exact: true }),
     ).toHaveCount(1);
     await expect(settings.locator(".settings-save-bar")).toHaveCount(0);
-    await expect(actions.validate).toHaveText("Validate");
-    await expect(actions.validate.locator("svg path")).toHaveAttribute(
-      "d",
-      "m5 12 4 4L19 6",
-    );
     await expect(actions.discard).toHaveText("");
     await expect(actions.discard).toHaveAttribute("title", "Discard changes");
     await expect(actions.discard.locator("svg path")).toHaveAttribute(
@@ -691,7 +787,7 @@ for (const width of [320, 390, 1440]) {
     heldRefresh.resolve({ status: 200 });
     await expect(actions.refresh).toBeEnabled();
     state.getGate = undefined;
-    await expect(actions.refresh).toHaveAttribute("aria-busy", "false");
+    await expect(actions.refresh).not.toHaveAttribute("aria-busy");
     await expect(settings).toBeFocused();
     await expect(
       item.getByRole("button", { name: "Edit Item 1", exact: true }),
@@ -718,7 +814,7 @@ test("keeps Refresh files retryable after a catalog error", async ({
     "synthetic refresh failure",
   );
   await expect(refresh).toBeEnabled();
-  await expect(refresh).toHaveAttribute("aria-busy", "false");
+  await expect(refresh).not.toHaveAttribute("aria-busy");
   await expect(settings).toBeFocused();
 
   state.appValue.title = "Recovered service";
@@ -770,13 +866,12 @@ for (const width of [320, 390, 1440]) {
         ),
       )
       .toBeGreaterThan(0);
-    await expectButtonCenterHit(actions.validate);
+    await expect(actions.validate).toHaveCount(0);
     await expectButtonCenterHit(actions.discard);
     await expectButtonCenterHit(actions.save);
     await expectNoticeBelowHeader(settings, notice);
 
-    await actions.validate.click();
-    await expect.poll(() => state.validations.length).toBe(2);
+    expect(state.validations).toHaveLength(1);
     await actions.discard.click();
     await confirmSettingsDiscard(page);
     await expectNoFileActions(settings);
@@ -841,7 +936,7 @@ test("hides file actions for reverted raw bytes, collection order, and browser d
   await page.setViewportSize({ width: 1440, height: 820 });
   const { settings, state } = await setupHeaderSettings(page);
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   const raw = settings.getByRole("textbox", {
     name: "Application configuration source content",
@@ -923,7 +1018,7 @@ test("keeps global header actions across sections and discard clears every draft
   expect(state.saves).toHaveLength(0);
 });
 
-test("locks header actions through validation and saving, retains failures, then disappears after success", async ({
+test("keeps Save busy through validation and commit, retains failures, then disappears after success", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 820 });
@@ -934,41 +1029,33 @@ test("locks header actions through validation and saving, retains failures, then
   });
   await title.fill("Transactional title");
   const validation = deferred<{ status: number; valid?: boolean }>();
-  state.validationGate = validation.promise;
-  await fileActions(settings).validate.click();
-  await expect.poll(() => state.validations.length).toBe(1);
-  const validating = settings.getByRole("button", { name: "Validating…", exact: true });
-  await expect(validating).toBeDisabled();
-  await expectProgressBorder(validating, "blue");
-  await expect(validating.locator("svg")).toBeVisible();
-  await expect(fileActions(settings).discard).toBeDisabled();
-  await expect(fileActions(settings).save).toBeDisabled();
-  await expect(fileActions(settings).refresh).toBeDisabled();
-  expect(state.saves).toHaveLength(0);
-  validation.resolve({ status: 200, valid: true });
-  state.validationGate = undefined;
-  const validationMessage = settings.getByText(/^Validation passed\./u);
-  await expect(validationMessage).toBeVisible();
-  await expect(validationMessage).not.toContainText(
-    /\b(?:restart|recreate)\b/iu,
-  );
-  await expect(fileActions(settings).save).toBeEnabled();
-
   const rejectedSave = deferred<{ status: number }>();
+  state.validationGate = validation.promise;
   state.saveGate = rejectedSave.promise;
   await fileActions(settings).save.click();
-  await expect.poll(() => state.saves.length).toBe(1);
+  await expect.poll(() => state.validations.length).toBe(1);
   const saving = settings.getByRole("button", { name: "Saving…", exact: true });
   await expect(saving).toBeDisabled();
   await expectProgressBorder(saving, "blue");
   await expect(saving.locator("svg")).toBeVisible();
-  await expect(fileActions(settings).validate).toBeDisabled();
+  await expect(fileActions(settings).validate).toHaveCount(0);
   await expect(fileActions(settings).discard).toBeDisabled();
   await expect(fileActions(settings).refresh).toBeDisabled();
   await expect(title).toBeDisabled();
+  expect(state.saves).toHaveLength(0);
+  validation.resolve({ status: 200, valid: true });
+  state.validationGate = undefined;
+  await expect.poll(() => state.saves.length).toBe(1);
+  await expect(saving).toBeDisabled();
+  await expectProgressBorder(saving, "blue");
+  await expect(saving.locator("svg")).toBeVisible();
+  await expect(fileActions(settings).discard).toBeDisabled();
+  await expect(fileActions(settings).refresh).toBeDisabled();
+  await expect(title).toBeDisabled();
+  await expect(settings.getByText(/^Validation passed\./u)).toHaveCount(0);
   rejectedSave.resolve({ status: 409 });
   state.saveGate = undefined;
-  await expect(settings.getByRole("alert")).toContainText(
+  await expect(page.locator('body > .toast-region .operation-feedback.error[role="alert"]')).toContainText(
     "changed outside Settings",
   );
   await expect(title).toHaveValue("Transactional title");
@@ -984,6 +1071,167 @@ test("locks header actions through validation and saving, retains failures, then
   await expectNoFileActions(settings);
   await expect(settings).toBeFocused();
   await expect(title).toHaveValue("Transactional title");
+});
+
+test("marks desktop source and virtual page icons red until correction or discard", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const { settings, state } = await setupHeaderSettings(page);
+  await selectSection(settings, "browser", "This browser");
+  await settings
+    .getByRole("radio", { name: "Light theme", exact: true })
+    .click();
+  await selectSection(settings, "app", "Application configuration");
+  const title = settings.getByRole("textbox", {
+    name: "Service title",
+    exact: true,
+  });
+  await title.fill("Invalid routed title");
+  state.validationIssues = structuredClone(routedNavigationIssues);
+  await fileActions(settings).save.click();
+  await expect.poll(() => state.validations.length).toBe(1);
+  await expect(title).toBeEnabled();
+  expect(state.saves).toEqual([]);
+  expect(
+    await page.evaluate(() => localStorage.getItem("rac.color-theme")),
+  ).toBeNull();
+  await expect(
+    page.getByRole("status", { name: "Restart pending", exact: true }),
+  ).toHaveCount(0);
+  await expect(fileActions(settings).validate).toHaveCount(0);
+
+  const navigation = settings.getByRole("navigation", {
+    name: "Settings sources",
+    exact: true,
+  });
+  const issuePages = navigation.locator('button[data-has-issues="true"]');
+  await expect
+    .poll(() =>
+      issuePages.locator(".settings-source-nav-label").allTextContents(),
+    )
+    .toEqual(routedIssuePageLabels);
+  // prove every routed issue uses the red icon and marker
+  for (const button of await issuePages.all()) {
+    await expectThemeColor(button, ".settings-source-nav-icon", "--red");
+    await expect(
+      button.getByLabel("Validation issues", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      button.getByLabel("Unsaved changes", { exact: true }),
+    ).toHaveCount(0);
+  }
+  const browser = navigation.getByRole("button", {
+    name: /^This browser/u,
+  });
+  await expect(browser).not.toHaveAttribute("data-has-issues", "true");
+  await expect(
+    browser.getByLabel("Unsaved changes", { exact: true }),
+  ).toBeVisible();
+  await expectThemeColor(browser, "i", "--yellow");
+  await settings.screenshot({
+    path: "/tmp/remoteagents-settings-validation-pages-desktop.png",
+  });
+
+  await title.fill("Corrected routed title");
+  await expect(issuePages).toHaveCount(routedIssuePageLabels.length);
+  state.validationIssues = [];
+  await fileActions(settings).save.click();
+  await expect.poll(() => state.validations.length).toBe(2);
+  await expect.poll(() => state.saves.length).toBe(1);
+  await expect(issuePages).toHaveCount(0);
+  await expect(settings.getByText(/^Validation passed\./u)).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("rac.color-theme")))
+    .toBe("latte");
+
+  await title.fill("Discarded invalid title");
+  state.validationIssues = [
+    {
+      sourceId: "app",
+      path: ["projects", "0", "path"],
+      code: "invalid_value",
+      message: "Fix the discarded project path.",
+    },
+  ];
+  await fileActions(settings).save.click();
+  await expect.poll(() => state.validations.length).toBe(3);
+  expect(state.saves).toHaveLength(1);
+  await expect(issuePages).toHaveCount(2);
+  await fileActions(settings).discard.click();
+  await confirmSettingsDiscard(page);
+  await expect(issuePages).toHaveCount(0);
+  await expect(title).toHaveValue("Corrected routed title");
+});
+
+test("shows mobile validation issue icons in the selected trigger and options", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const { settings, state } = await setupHeaderSettings(page);
+  await selectSection(settings, "browser", "This browser");
+  await settings
+    .getByRole("radio", { name: "Light theme", exact: true })
+    .click();
+  await selectSection(settings, "app", "Application configuration");
+  await settings
+    .getByRole("textbox", { name: "Service title", exact: true })
+    .fill("Invalid mobile title");
+  state.validationIssues = structuredClone(routedNavigationIssues);
+  await fileActions(settings).save.click();
+  await expect.poll(() => state.validations.length).toBe(1);
+  expect(state.saves).toEqual([]);
+
+  const trigger = settings.locator(
+    ".settings-source-select .settings-select-trigger",
+  );
+  await expect(trigger).toHaveAttribute("data-has-issues", "true");
+  await expect(trigger.locator(".settings-select-current-label")).toHaveText(
+    "Application · Validation issues",
+  );
+  await expectThemeColor(trigger, ".settings-select-current-icon", "--red");
+  await trigger.click();
+  const listbox = page.getByRole("listbox", {
+    name: "Settings section options",
+    exact: true,
+  });
+  const issueOptions = listbox.locator(
+    '.settings-select-option[data-has-issues="true"]',
+  );
+  await expect
+    .poll(() =>
+      issueOptions.locator(".settings-select-option-label").allTextContents(),
+    )
+    .toEqual(
+      routedIssuePageLabels.map((label) => `${label} · Validation issues`),
+    );
+  // prove each mobile option shares the red issue state
+  for (const option of await issueOptions.all())
+    await expectThemeColor(option, ".settings-select-option-icon", "--red");
+  const browser = listbox.locator(
+    '.settings-select-option[data-value="browser"]',
+  );
+  await expect(browser).not.toHaveAttribute("data-has-issues", "true");
+  await expect(browser.locator(".settings-select-option-label")).toHaveText(
+    "This browser · Unsaved changes",
+  );
+  await page.screenshot({
+    path: "/tmp/remoteagents-settings-validation-pages-mobile.png",
+  });
+
+  await page.keyboard.press("Escape");
+  await fileActions(settings).discard.click();
+  await confirmSettingsDiscard(page);
+  await expect(trigger).not.toHaveAttribute("data-has-issues", "true");
+  await trigger.click();
+  await expect(
+    page
+      .getByRole("listbox", {
+        name: "Settings section options",
+        exact: true,
+      })
+      .locator('.settings-select-option[data-has-issues="true"]'),
+  ).toHaveCount(0);
 });
 
 test("omits a disclosed no-op secret when another field in its source changes", async ({

@@ -15,6 +15,23 @@ import { recoverControlPlaneHandover } from "./checkout-handover.mjs";
 
 const REQUEST_NAME = /^([A-Za-z0-9_-]{20,64})\.json$/;
 const TERMINAL = new Set(["complete", "failed"]);
+const RESTART_STATES = new Set(["restarting", "recovering", "restarted", "recovered", "recovery-failed"]);
+
+// retain only the fixed public restart progress contract
+function restartProgress(value) {
+  // reject additions and invalid clock or state data
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Object.keys(value).length !== 2 ||
+    !Number.isSafeInteger(value.recoveryDeadline) ||
+    value.recoveryDeadline < 0 ||
+    !RESTART_STATES.has(value.state)
+  ) {
+    return undefined;
+  }
+  return { recoveryDeadline: value.recoveryDeadline, state: value.state };
+}
 
 // drain claimed work before atomically claiming queued work
 export async function drainQueue(descriptor, options = {}) {
@@ -157,6 +174,7 @@ export async function processClaim(path, descriptor, options = {}) {
   const fileId = fileMatch[1];
   const statusPath = resolve(descriptor.controlRoot, "status", `${fileId}.json`);
   const existing = existsSync(statusPath) ? readJsonFile(statusPath, MAX_REQUEST_BYTES * 2) : undefined;
+  let restart = restartProgress(existing?.restart);
   if (existing && TERMINAL.has(existing.state)) {
     if (existing.privateRecord?.requestDigest !== digest) {
       atomicWriteFile(resolve(descriptor.controlRoot, "journal", `${fileId}-rejected.json`), `${JSON.stringify({
@@ -180,29 +198,55 @@ export async function processClaim(path, descriptor, options = {}) {
     if (request.id !== fileId) {
       throw safeError("invalid-request");
     }
-    writeStatus(descriptor, request.id, "running", request.kind, { phase: "claimed", requestDigest: digest });
+    writeStatus(descriptor, request.id, "running", request.kind, { phase: "claimed", restart, requestDigest: digest });
     const recoveredReceipt = recoverClaimedTransaction(descriptor, request);
     if (recoveredReceipt) {
       writeStatus(descriptor, request.id, "complete", request.kind, {
         phase: "committed",
         receipt: recoveredReceipt,
+        restart,
         requestDigest: digest
       });
       return;
     }
-    const execute = async () => processOperation(descriptor, request, options);
-    const result = options.withMutation ? await options.withMutation(execute, request) : await execute();
+    // publish safe long-running phases through the existing durable status
+    const operationOptions = {
+      ...options,
+      onPhase: (phase) => {
+        writeStatus(descriptor, request.id, "running", request.kind, { phase, restart, requestDigest: digest });
+        options.onPhase?.(phase);
+      },
+      // persist the watchdog-backed deadline before the replacement command
+      onRestartProgress: (value) => {
+        const next = restartProgress(value);
+        if (next === undefined) throw safeError("invalid-restart-progress");
+        const phase = next.state === "restarting" || next.state === "recovering" ? next.state : undefined;
+        writeStatus(descriptor, request.id, "running", request.kind, { phase, restart: next, requestDigest: digest });
+        restart = next;
+        try {
+          options.onRestartProgress?.(next);
+        } catch {
+          // test observers cannot replace durable status authority
+        }
+      }
+    };
+    const operation = async () => processOperation(descriptor, request, operationOptions);
+    const result = options.withMutation ? await options.withMutation(operation, request) : await operation();
     writeStatus(descriptor, request.id, "complete", request.kind, {
       phase: result.phase,
       receipt: result.receipt,
       response: result.response,
       sourceMetadata: result.sourceMetadata,
+      cloudflare: result.cloudflare,
+      restart,
       requestDigest: digest
     });
   } catch (error) {
     writeStatus(descriptor, fileId, "failed", request?.kind ?? "unknown", {
       error: safeCode(error),
       errorMetadata: migrationErrorMetadata(error, request),
+      cloudflare: error?.cloudflare,
+      restart,
       requestDigest: digest
     });
   } finally {
@@ -227,7 +271,9 @@ export function writeStatus(descriptor, id, state, kind, details = {}) {
     ...(details.errorMetadata ? { errorMetadata: details.errorMetadata } : {}),
     ...(details.receipt ? { privateRecord: { ...details.receipt, requestDigest: details.requestDigest } } : { privateRecord: { requestDigest: details.requestDigest } }),
     ...(details.response ? { response: details.response } : {}),
-    ...(details.sourceMetadata ? { sourceMetadata: details.sourceMetadata } : {})
+    ...(details.sourceMetadata ? { sourceMetadata: details.sourceMetadata } : {}),
+    ...(details.cloudflare ? { cloudflare: details.cloudflare } : {}),
+    ...(details.restart ? { restart: details.restart } : {})
   };
   atomicWriteFile(resolve(descriptor.controlRoot, "status", `${id}.json`), `${JSON.stringify(status)}\n`, 0o600);
   const latest = {
@@ -237,6 +283,7 @@ export function writeStatus(descriptor, id, state, kind, details = {}) {
     kind,
     ...(details.phase ? { phase: details.phase } : {}),
     ...(details.error ? { error: details.error } : {}),
+    ...(details.restart ? { restart: details.restart } : {}),
     updatedAt: new Date().toISOString()
   };
   atomicWriteFile(resolve(descriptor.controlRoot, "latest.json"), `${JSON.stringify(latest)}\n`, 0o600);

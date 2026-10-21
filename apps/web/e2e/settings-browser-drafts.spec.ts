@@ -40,7 +40,7 @@ function deferred<T>() {
 function applicationSource(state: BrowserFixtureState) {
   return {
     id: "app",
-    label: "Application configuration",
+    label: "Application",
     path: "/synthetic/config.json",
     format: "json",
     exists: true,
@@ -60,7 +60,7 @@ function applicationSource(state: BrowserFixtureState) {
     },
     schema: {
       type: "object",
-      label: "Application configuration",
+      label: "Application",
       properties: {
         title: { type: "string", label: "Service title" },
         items: {
@@ -406,7 +406,7 @@ test("closes open file collection editors after a browser-only save", async ({
   page,
 }) => {
   const { settings, state } = await setupBrowserDrafts(page, true);
-  await selectSection(settings, "app", "Application configuration");
+  await selectSection(settings, "app", "Application");
   let item = settings.getByRole("group", { name: /^Item \d+$/u }).first();
   await item.getByRole("button", { name: /^Edit Item \d+$/u }).click();
   await expect(item.getByRole("textbox")).toHaveValue("Saved item");
@@ -420,7 +420,7 @@ test("closes open file collection editors after a browser-only save", async ({
   expect(state.validations).toEqual([]);
   expect(state.fileSaves).toEqual([]);
 
-  await selectSection(settings, "app", "Application configuration");
+  await selectSection(settings, "app", "Application");
   item = settings.getByRole("group", { name: /^Item \d+$/u }).first();
   await expect(
     item.getByRole("button", { name: /^Edit Item \d+$/u }),
@@ -556,7 +556,7 @@ test("collapses reverted browser drafts and discards unapplied values", async ({
   await settings
     .getByRole("button", { name: "Larger terminal font", exact: true })
     .click();
-  await controls.validate.click();
+  await expect(controls.validate).toHaveCount(0);
   expect(await appliedBrowserState(page)).toEqual(defaultAppliedState);
   expect(state.validations).toEqual([]);
   await controls.discard.click();
@@ -612,7 +612,7 @@ test("retains browser, file and voice drafts through settings navigation", async
   const rename = page.getByRole("dialog", { name: "Rename browser" });
   await rename.getByLabel("Name", { exact: true }).fill("Navigation draft");
   await rename.getByRole("button", { name: "Done", exact: true }).click();
-  await selectSection(settings, "app", "Application configuration");
+  await selectSection(settings, "app", "Application");
   await settings
     .getByRole("textbox", { name: "Service title", exact: true })
     .fill("File draft");
@@ -631,7 +631,7 @@ test("retains browser, file and voice drafts through settings navigation", async
   await expect(
     settings.getByRole("group", { name: "Name", exact: true }),
   ).toContainText("Navigation draft");
-  await selectSection(settings, "app", "Application configuration");
+  await selectSection(settings, "app", "Application");
   await expect(
     settings.getByRole("textbox", { name: "Service title", exact: true }),
   ).toHaveValue("File draft");
@@ -663,7 +663,7 @@ for (const failure of ["validation", "save"] as const) {
     const rename = page.getByRole("dialog", { name: "Rename browser" });
     await rename.getByLabel("Name", { exact: true }).fill("Blocked browser");
     await rename.getByRole("button", { name: "Done", exact: true }).click();
-    await selectSection(settings, "app", "Application configuration");
+    await selectSection(settings, "app", "Application");
     await settings
       .getByRole("textbox", { name: "Service title", exact: true })
       .fill("Blocked file");
@@ -698,13 +698,13 @@ test("retains browser drafts and reports partial completion when rename fails af
   const rename = page.getByRole("dialog", { name: "Rename browser" });
   await rename.getByLabel("Name", { exact: true }).fill("Rejected browser");
   await rename.getByRole("button", { name: "Done", exact: true }).click();
-  await selectSection(settings, "app", "Application configuration");
+  await selectSection(settings, "app", "Application");
   await settings
     .getByRole("textbox", { name: "Service title", exact: true })
     .fill("Saved file");
   await actions(settings).save.click();
 
-  await expect(settings.getByRole("alert")).toContainText(
+  await expect(page.getByRole("alert")).toContainText(
     /saved.*browser|browser.*(?:not|could)/iu,
   );
   expect(state.validations).toHaveLength(1);
@@ -755,7 +755,7 @@ test("locks every browser control while the shared save is pending", async ({
   await expect(
     settings.getByRole("button", { name: "Rename browser name", exact: true }),
   ).toBeDisabled();
-  await expect(actions(settings).validate).toBeDisabled();
+  await expect(actions(settings).validate).toHaveCount(0);
   await expect(actions(settings).discard).toBeDisabled();
   await expect(
     settings.getByRole("button", { name: "Saving…", exact: true }),

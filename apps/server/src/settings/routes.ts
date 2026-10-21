@@ -5,7 +5,7 @@ import { SettingsError, type SettingsInput } from './contracts.js';
 import { safePath } from './patches.js';
 import type { SettingsService } from './service.js';
 
-export type SettingsRoutes = { service: Pick<SettingsService, 'snapshot' | 'status' | 'validate' | 'save' | 'reveal' | 'remask' | 'restart' | 'operation'>; session: (request: FastifyRequest, mutation?: boolean) => Session; controlled: (request: FastifyRequest, mutation?: boolean) => Session; isController: (sessionId: string) => boolean };
+export type SettingsRoutes = { service: Pick<SettingsService, 'snapshot' | 'status' | 'validate' | 'save' | 'reveal' | 'remask' | 'restart' | 'operation' | 'cloudflareStatus' | 'configureCloudflare'>; session: (request: FastifyRequest, mutation?: boolean) => Session; controlled: (request: FastifyRequest, mutation?: boolean) => Session; isController: (sessionId: string) => boolean };
 // require one bounded exact JSON body
 function body(request: FastifyRequest, keys?: string[]): Record<string, unknown> {
   const value = request.body;
@@ -39,6 +39,7 @@ export async function registerSettingsRoutes(app: FastifyInstance, deps: Setting
     return snapshot;
   }));
   app.get('/api/settings/status', endpoint(async request => { deps.session(request); return await deps.service.status(); }));
+  app.get('/api/settings/cloudflare', endpoint(async request => { deps.session(request); return await deps.service.cloudflareStatus(); }));
   app.get('/api/settings/operations/:id', endpoint(async (request, reply) => { deps.session(request); const operation = await deps.service.operation((request.params as { id: string }).id); return operation ?? reply.code(404).send({ error: 'settings_operation_unavailable' }); }));
   app.post('/api/settings/validate', mutation, endpoint(async request => { const session = deps.controlled(request, true); return await deps.service.validate(body(request, ['changes']) as SettingsInput, session.id); }));
   app.patch('/api/settings', mutation, endpoint(async request => {
@@ -58,6 +59,13 @@ export async function registerSettingsRoutes(app: FastifyInstance, deps: Setting
   }));
   app.post('/api/settings/remask', mutation, endpoint(async request => { const session = deps.controlled(request, true); const input = body(request, ['leaseId']); if (typeof input.leaseId !== 'string') throw new SettingsError('invalid_settings_request'); return await deps.service.remask(input.leaseId, session.id); }));
   app.post('/api/settings/restart', mutation, endpoint(async request => { deps.controlled(request, true); body(request, []); return await deps.service.restart(); }));
+  app.post('/api/settings/cloudflare', mutation, endpoint(async (request, reply) => {
+    const session = deps.controlled(request, true); const input = body(request, ['action', 'hostname', 'token']);
+    const result = await deps.service.configureCloudflare(input);
+    // discard operation details after a controller takeover
+    if (!deps.isController(session.id)) throw new SettingsError('another_client_is_active', 423);
+    return reply.code(202).send(result);
+  }));
   app.post('/api/settings/password/hash', { bodyLimit: 16_384, config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, endpoint(async request => {
     const session = deps.controlled(request, true); const input = body(request, ['password']);
     // retain replacement passwords only in request memory

@@ -1,4 +1,5 @@
-.settings-code-editor { --settings-code-gutter: 4.2ch; display: grid; min-width: 0; gap: .38rem; }
+/* let content rows size the editor without consuming spare panel height */
+.settings-code-editor { --settings-code-gutter: 4.2ch; --settings-code-gutter-background: color-mix(in srgb, var(--crust) 94%, var(--mantle)); display: grid; min-width: 0; min-height: 0; gap: .38rem; }
 .settings-code-editor-toolbar { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .5rem; color: var(--overlay-1); font: 600 .58rem var(--font-mono); }
 /* group code actions on the right while keeping line counts on the left */
 .settings-code-editor-toolbar > span { margin-right: auto; }
@@ -6,20 +7,26 @@
 /* reuse shared SVG glyphs instead of depending on font fallback */
 .settings-code-editor button > .panel-header-icon { flex: none; width: .9rem; height: .9rem; }
 .settings-code-editor .settings-code-editor-toolbar > button:not(:disabled):hover { border-color: var(--blue); background: var(--surface-1); color: var(--text); }
-.settings-code-editor-surface { position: relative; min-width: 0; height: 12rem; min-height: 8rem; overflow: hidden; resize: vertical; border: 1px solid var(--surface-2); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); box-shadow: inset 0 1px #0003; }
-.settings-raw-editor .settings-code-editor-surface { height: min(34rem, 56vh); min-height: 24rem; }
+/* retain manual resizing above the complete source's intrinsic height */
+.settings-code-editor-surface { position: relative; display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); min-height: min-content; overflow: hidden; resize: vertical; border: 1px solid var(--surface-2); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); box-shadow: inset 0 1px #0003; font: 600 .7rem/1.5 var(--font-mono); }
+/* paint the ruler through padding and manually enlarged unnumbered space */
+.settings-code-editor-surface::before { content: ''; position: absolute; inset: 0 auto 0 0; box-sizing: border-box; width: var(--settings-code-gutter); border-right: 1px solid var(--surface-1); background: var(--settings-code-gutter-background); pointer-events: none; }
 .settings-code-editor-surface:has(textarea:focus-visible) { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* resolve ruler and number-column character widths against one shared font */
 .settings-code-editor .syntax-highlight-presentation,
-.settings-code-editor .settings-code-editor-surface > textarea { position: absolute; inset: 0; box-sizing: border-box; width: 100%; min-width: 0; height: 100%; min-height: 0; margin: 0; border: 0; border-radius: inherit; font: 600 .7rem/1.5 var(--font-mono); tab-size: 2; white-space: pre; }
-.settings-code-editor .syntax-highlight-presentation { overflow: auto; padding: 0; background: transparent; color: var(--text); pointer-events: none; scrollbar-width: none; }
-.settings-code-editor .syntax-highlight-presentation::-webkit-scrollbar { display: none; }
+.settings-code-editor .settings-code-editor-surface > textarea { position: absolute; inset: 0; box-sizing: border-box; width: 100%; min-width: 0; height: 100%; min-height: 0; margin: 0; border: 0; border-radius: inherit; font: inherit; tab-size: 2; white-space: pre; }
+/* let native overflow reserve scrollbar height only for genuinely long lines */
+.settings-code-editor .syntax-highlight-presentation { position: relative; inset: auto; grid-area: 1 / 1; align-self: start; height: auto; overflow: auto; padding: 0; background: transparent; color: var(--text); pointer-events: none; scrollbar-color: transparent transparent; }
 .settings-code-editor .syntax-highlight-presentation code { display: grid; width: max-content; min-width: 100%; padding: .55rem 0; font: inherit; }
 .settings-code-editor .syntax-line { display: grid; min-height: 1.5em; grid-template-columns: var(--settings-code-gutter) minmax(max-content, 1fr); }
-.settings-code-editor .syntax-line-number { position: sticky; left: 0; z-index: 1; box-sizing: border-box; width: var(--settings-code-gutter); padding: 0 .7rem 0 .35rem; border-right: 1px solid var(--surface-1); background: color-mix(in srgb, var(--crust) 94%, transparent); color: var(--overlay-0); text-align: right; user-select: none; }
+/* keep numbers opaque above horizontally scrolled source text */
+.settings-code-editor .syntax-line-number { position: sticky; left: 0; z-index: 1; box-sizing: border-box; width: var(--settings-code-gutter); padding: 0 .7rem 0 .35rem; border-right: 1px solid var(--surface-1); background: var(--settings-code-gutter-background); color: var(--overlay-0); text-align: right; user-select: none; }
 .settings-code-editor .syntax-line-content { min-width: 0; padding: 0 .72rem; }
 .settings-code-editor .settings-code-editor-surface > textarea { z-index: 1; overflow: auto; resize: none; padding: .55rem .72rem .55rem calc(var(--settings-code-gutter) + .72rem); background: transparent; color: transparent; caret-color: var(--text); box-shadow: none; -webkit-text-fill-color: transparent; }
 .settings-code-editor .settings-code-editor-surface > textarea:focus-visible { outline: 0; }
 .settings-code-editor .settings-code-editor-surface > textarea::selection { background: color-mix(in srgb, var(--blue) 38%, transparent); }
+/* keep omitted command guidance visible through the highlighted editing layer */
+.settings-code-editor .settings-code-editor-surface > textarea::placeholder { color: var(--overlay-1); -webkit-text-fill-color: var(--overlay-1); opacity: 1; }
 /* keep disclosure guidance beside its icon without covering source text */
 .settings-code-editor-field-action { display: inline-flex; align-items: center; gap: .35rem; min-width: 0; max-width: 100%; }
 .settings-code-editor-disclosure-note { color: var(--subtext-0); }
@@ -45,7 +52,3 @@
 .settings-code-editor .syntax-constant { color: var(--sapphire); font-weight: 700; }
 .settings-code-editor .syntax-tag { color: var(--red); }
 .settings-code-editor .syntax-operator { color: var(--blue); }
-
-@media (max-width: 520px) {
-  .settings-raw-editor .settings-code-editor-surface { height: min(28rem, 54vh); min-height: 16rem; }
-}

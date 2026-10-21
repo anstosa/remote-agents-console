@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import type { ValidatedConfig } from './config/schema.js';
+import { registerHealthRoute } from './settings/health-proof.js';
 import { AuthService, type Session } from './auth/service.js';
 import { ControlService } from './auth/control.js';
 import { DeviceService } from './auth/devices.js';
@@ -72,7 +73,7 @@ import { mergeBaseChoices, saveMergeBase } from './git/comparison.js';
 import { loadInstanceIconSvg, isInstanceIcon, type InstanceIcon } from './instance-icon.js';
 import { instanceAttention, RemoteInstanceStatusPoller, validInstanceStatusRequest, type InstanceStatus } from './instance-status.js';
 import { createHmac, randomBytes } from 'node:crypto';
-import { defaultIntegrationConfig, parseDavoSettings, resolveClaudeProgram, resolveCodexProgram, reviewConfig } from './config/schema.js';
+import { integrationConfigForRemotes, parseDavoSettings, resolveClaudeProgram, resolveCodexProgram, reviewConfig } from './config/schema.js';
 import { OrchestrationService } from './orchestration/index.js';
 import { IntegrationAuthService, registerIntegrationAuthServer, type IntegrationScope, type LocalIntegrationSubject } from './integrations/auth/index.js';
 import { IntegrationPolicyService } from './integrations/policy/service.js';
@@ -208,7 +209,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   };
   let accountSwitching = false;
   let notesRevision = 0;
-  const integrationConfig = structuredClone(config.integrations ?? defaultIntegrationConfig);
+  // derive peer forwarding independently of the legacy saved toggle
+  const integrationConfig = structuredClone(integrationConfigForRemotes(config.integrations, config.remoteServers));
   const davoAvailable = integrationConfig.enabled && Boolean(process.env.RAC_OPENAI_API_KEY?.trim());
   // expose one secret-free voice settings snapshot
   const publicDavoSettings = () => ({ enabled: integrationConfig.realtime.enabled, available: davoAvailable, name: integrationConfig.realtime.name, context: integrationConfig.realtime.context });
@@ -559,7 +561,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       return { ok: true };
     });
   }
-  app.get('/healthz', async () => ({ ok: true }));
+  // share a boot-local route proof with the tunnel setup health check
+  registerHealthRoute(app);
   // publish only the local instance attention state
   app.get('/api/instance-status', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
     browser(request);
@@ -1677,7 +1680,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (!result.ok) return reply.code(404).send({ error: result.reason === 'not_in_comparison' ? 'file unavailable' : 'comparison unavailable' });
     return { path: result.path, base: result.base ?? null, working: result.working ?? null };
   });
-  app.get('/api/push/public-key', async (request) => { session(request); return push.enabled ? { publicKey: push.publicKey } : { publicKey: undefined }; });
+  // expose the persisted public identity only to an authenticated browser
+  app.get('/api/push/public-key', async (request, reply) => {
+    session(request);
+    try {
+      await push.initialize();
+      return { publicKey: push.publicKey };
+    } catch {
+      return reply.code(503).send({ error: 'push_unavailable' });
+    }
+  });
   app.post('/api/push/subscriptions', async (request, reply) => { session(request, true); return await push.subscribe(body(request) as never) ? reply.code(204).send() : reply.code(400).send({ error: 'invalid push subscription' }); });
   // dismiss the viewed agent regardless of its current directory or workspace
   app.post('/api/agents/:id/notifications/dismiss', async (request, reply) => {

@@ -10,7 +10,7 @@ export function environment(content: string): Record<string, string> {
 }
 
 // retain complete quoted logical lines
-function records(content: string): { text: string; key?: string }[] {
+function records(content: string, tolerateUnterminated = false): { text: string; key?: string }[] {
   const lines = content.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
   const result: { text: string; key?: string }[] = [];
   // group multiline quoted assignments
@@ -21,14 +21,33 @@ function records(content: string): { text: string; key?: string }[] {
     // find the closing delimiter without consuming adjacent entries
     if (quote !== undefined) {
       const start = match![0].length;
-      // extend only an unfinished value
-      while (!text.slice(start).includes(quote) && index + 1 < lines.length) text += lines[++index]!;
+      let end = index;
+      let candidate = text;
+      // scan ahead without consuming later records until a closing quote is proved
+      while (!candidate.slice(start).includes(quote) && end + 1 < lines.length) candidate += lines[++end]!;
       // reject unterminated quoted input
-      if (!text.slice(start).includes(quote)) throw new SettingsError('invalid_environment');
+      if (!candidate.slice(start).includes(quote)) {
+        if (!tolerateUnterminated) throw new SettingsError('invalid_environment');
+      } else { text = candidate; index = end; }
     }
     result.push({ text, ...(match === null ? {} : { key: match[1] }) });
   }
   return result;
+}
+
+// separate server-managed assignments without parsing or normalizing their bytes
+export function partitionEnvironment(content: string, managedKeys: readonly string[]): { visible: string; hidden: string } {
+  const managed = new Set(managedKeys);
+  const visible: string[] = []; const hidden: string[] = [];
+  // preserve every complete record in exactly one projection
+  for (const record of records(content, true)) (record.key !== undefined && managed.has(record.key) ? hidden : visible).push(record.text);
+  return { visible: visible.join(''), hidden: hidden.join('') };
+}
+
+// restore unchanged managed records after the editable projection
+export function restoreManagedEnvironment(visible: string, hidden: string): string {
+  // avoid joining an unterminated visible record to a managed assignment
+  return hidden.length === 0 ? visible : `${visible}${visible.length > 0 && !visible.endsWith('\n') ? '\n' : ''}${hidden}`;
 }
 
 // preserve untouched bytes and literal secrets

@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import webpush, { type PushSubscription, type RequestOptions } from 'web-push';
 import type { PushMessage } from './notifications.js';
+import { loadVapidKeys } from './push-vapid.js';
 
 type Stored = Record<string, PushSubscription>;
 // inspect provider failures without logging response contents
@@ -51,28 +52,39 @@ const sameSubscription = (left: PushSubscription | undefined, right: PushSubscri
 
 // manage ordered push delivery and persisted subscriptions
 export class PushService {
-  readonly publicKey = process.env.RAC_VAPID_PUBLIC_KEY;
-  private readonly privateKey = process.env.RAC_VAPID_PRIVATE_KEY;
+  private keys?: { publicKey: string; privateKey: string };
+  private initialization?: Promise<void>;
+  private readonly legacyKeys = { publicKey: process.env.RAC_VAPID_PUBLIC_KEY, privateKey: process.env.RAC_VAPID_PRIVATE_KEY };
   private readonly file = process.env.RAC_PUSH_SUBSCRIPTIONS_FILE ?? '.data/push-subscriptions.json';
   private storeOperations: Promise<void> = Promise.resolve();
   private readonly deliveryQueues = new Map<string, Promise<void>>();
   private readonly latestEvents = new Map<string, AbortController>();
 
-  // configure the shared sender only when credentials are complete
-  constructor() {
-    // avoid partially configured VAPID state
-    if (this.publicKey && this.privateKey) webpush.setVapidDetails('mailto:admin@localhost', this.publicKey, this.privateKey);
+  // reuse one durable identity before exposing keys or delivering notifications
+  async initialize(): Promise<void> {
+    // coalesce initialization and allow recovery after a storage failure
+    this.initialization ??= loadVapidKeys(this.file, this.legacyKeys).then(keys => { this.keys = keys; }).catch(error => {
+      this.initialization = undefined;
+      throw error;
+    });
+    await this.initialization;
+  }
+
+  // expose only the browser registration key
+  get publicKey() {
+    return this.keys?.publicKey;
   }
 
   // expose whether delivery is configured
   get enabled() {
-    return Boolean(this.publicKey && this.privateKey);
+    return this.keys !== undefined;
   }
 
   // validate and persist one subscription without racing other mutations
   async subscribe(subscription: PushSubscription) {
-    // reject disabled or malformed registrations
-    if (!this.enabled || !this.valid(subscription)) return false;
+    // reject malformed registrations before initializing storage
+    if (!this.valid(subscription)) return false;
+    await this.initialize();
     await this.mutate(async all => {
       all[subscription.endpoint] = subscription;
     });
@@ -81,8 +93,7 @@ export class PushService {
 
   // deliver one coalesced event to the current subscription snapshot
   async notify(message: PushMessage) {
-    // skip delivery when VAPID is unavailable
-    if (!this.enabled) return;
+    await this.initialize();
     const topic = messageTopic(message.tag);
     const subscriptions = Object.values(await this.snapshot());
     const event = new AbortController();
@@ -96,7 +107,9 @@ export class PushService {
         TTL: message.kind === 'finished' ? 15 * 60 : 60 * 60,
         timeout: deliveryTimeoutMs,
         topic,
-        urgency: message.kind === 'cleanup' ? 'normal' : 'high'
+        urgency: message.kind === 'cleanup' ? 'normal' : 'high',
+        // keep signing credentials local to this service rather than global sender state
+        vapidDetails: { subject: 'mailto:admin@localhost', publicKey: this.keys!.publicKey, privateKey: this.keys!.privateKey }
       };
       // deliver to independent endpoints concurrently
       const results = await Promise.all(subscriptions.map(async subscription => await this.queuedDelivery(subscription, payload, options, message.kind, event)));

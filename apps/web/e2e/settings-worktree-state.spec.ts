@@ -361,7 +361,7 @@ test("retains an ordinary Settings draft but remasks a disclosure across worktre
     .click();
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: /^Application config/u })
+    .getByRole("button", { name: /^Application/u })
     .click();
   await settings.getByLabel("Server name", { exact: true }).fill("Cora draft");
   await settings
@@ -388,7 +388,7 @@ test("retains an ordinary Settings draft but remasks a disclosure across worktre
   expect(state.reveals).toHaveLength(1);
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: /^Application config/u })
+    .getByRole("button", { name: /^Application/u })
     .click();
   await expect(settings.getByLabel("Server name", { exact: true })).toHaveValue(
     "Cora draft",
@@ -426,10 +426,10 @@ test("retains and saves a whole-source draft in raw mode after a worktree switch
   await page.getByRole("button", { name: "Global settings" }).first().click();
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: /^Application config/u })
+    .getByRole("button", { name: /^Application/u })
     .click();
   await settings
-    .getByRole("button", { name: "Edit whole source", exact: true })
+    .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   await settings
     .getByRole("button", { name: "Replace without revealing", exact: true })
@@ -444,9 +444,15 @@ test("retains and saves a whole-source draft in raw mode after a worktree switch
   await expect(settings).toBeVisible();
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: /^Application config/u })
+    .getByRole("button", { name: /^Application/u })
     .click();
-  await expect(settings.getByText("Whole source editor")).toBeVisible();
+  await expect(
+    settings.getByRole("button", {
+      name: "Use structured editor",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(settings.locator(".settings-raw-mode")).toHaveCount(0);
   await settings
     .getByRole("button", { name: "Reveal keys", exact: true })
     .click();
@@ -481,7 +487,7 @@ test("keeps a shared Settings save locked across a worktree handoff", async ({
   await page.getByRole("button", { name: "Global settings" }).first().click();
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: /^Application config/u })
+    .getByRole("button", { name: /^Application/u })
     .click();
   await settings
     .getByLabel("Server name", { exact: true })
@@ -513,7 +519,7 @@ test("keeps a shared Settings save locked across a worktree handoff", async ({
   await expect.poll(() => state.saves.length).toBe(1);
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: /^Application config/u })
+    .getByRole("button", { name: /^Application/u })
     .click();
   const name = settings.getByLabel("Server name", { exact: true });
   await expect(name).toHaveValue("Saved across handoff");
@@ -532,7 +538,7 @@ test("cancels a held shared save after runtime security invalidation", async ({
     .click();
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: /^Application config/u })
+    .getByRole("button", { name: /^Application/u })
     .click();
   await settings
     .getByLabel("Server name", { exact: true })
@@ -688,7 +694,7 @@ test("ignores an older passive Settings read after a newer worktree reopen", asy
   await expect.poll(() => state.settingsReads).toBe(2);
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: /^Application config/u })
+    .getByRole("button", { name: /^Application/u })
     .click();
   const name = settings.getByLabel("Server name", { exact: true });
   await expect(name).toHaveValue("Newer snapshot");

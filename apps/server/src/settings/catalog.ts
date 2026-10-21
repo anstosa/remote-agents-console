@@ -2,44 +2,62 @@ import type { SettingsApply, SettingsFallback, SettingsSchema } from './contract
 
 export const labels: Record<string, string> = { app: 'Application configuration', env: 'Environment & keys', installation: 'Installation', compose: 'Base Compose', 'compose-override': 'Docker', cloudflared: 'Cloudflare tunnel', 'cloudflared-credentials': 'Cloudflare credentials', wrapper: 'Installation wrapper', 'icon-heart': 'Heart icon', 'icon-potato': 'Potato icon' };
 export const composeOptionSettings = {
-  parallel: { default: -1, description: 'Maximum simultaneous Docker operations, such as image pulls and builds. Use -1 for unlimited (default). This does not limit RAC agents or requests.' },
-  compatibility: { default: false, description: 'Use legacy Compose behavior, including underscore-separated container names. Leave off unless older tooling requires it.' }
-} as const satisfies Record<'parallel' | 'compatibility', Pick<SettingsSchema, 'default' | 'description'>>;
+  parallel: { default: -1, placeholder: '-1 (from Docker Compose default; unlimited)', description: 'Maximum simultaneous Docker operations, such as image pulls and builds. This does not limit RAC agents or requests.' },
+  compatibility: { default: false, placeholder: 'false', description: 'Use legacy Compose behavior, including underscore-separated container names.' }
+} as const satisfies Record<'parallel' | 'compatibility', Pick<SettingsSchema, 'default' | 'description' | 'placeholder'>>;
 export const knownEnvironmentKeys = [
   'RAC_PASSWORD_HASH', 'RAC_SESSION_SECRET', 'RAC_INSTANCE_STATUS_SECRET', 'RAC_INTEGRATION_FEDERATION_SECRET', 'RAC_REALTIME_MCP_TOKEN',
-  'RAC_OPENAI_API_KEY', 'RAC_OPENAI_ADMIN_KEY', 'RAC_OPENAI_API_KEY_IDS', 'RAC_GITHUB_TOKEN', 'RAC_VAPID_PUBLIC_KEY', 'RAC_VAPID_PRIVATE_KEY',
+  'RAC_OPENAI_API_KEY', 'RAC_OPENAI_ADMIN_KEY', 'RAC_OPENAI_API_KEY_IDS', 'RAC_GITHUB_TOKEN',
   'RAC_CONFIG', 'RAC_CONFIG_WRITE_PATH', 'RAC_LISTEN_HOST', 'RAC_LISTEN_PORT', 'RAC_LOG_LEVEL', 'TZ', 'RAC_INTERACTIVE_SHELL', 'RAC_TMUX_BIN', 'RAC_CODEX_BIN', 'RAC_CLAUDE_BIN', 'RAC_CLAUDE_CONFIG_DIR', 'RAC_GH_HOSTS', 'RAC_ADAPTER_FILES_DIR', 'RAC_SERVER_CHECKOUT', 'RAC_SERVER_ADMIN_STATUS_DIR', 'RAC_TEMP_PREVIEW_ORIGIN',
   'RAC_PROJECT_PROXY_HOST', 'RAC_HOST_PROC', 'RAC_HOST_TMUX_DIR', 'RAC_HOST_TMUX_SOURCE', 'RAC_HOST_UNIX_SOCKETS', 'RAC_HOST_UID', 'RAC_HOST_NODE_BIN', 'RAC_HOST_CODEX_BIN', 'RAC_HOST_INTERACTIVE_SHELL', 'RAC_HOST_PATH', 'RAC_HOST_REPOSITORY', 'RAC_HOST_WORKSPACE', 'HOST_UID', 'HOST_TMUX_DIR', 'HOST_TMUX_BIN',
   'RAC_DEVICE_NAMES_FILE', 'RAC_CONSOLE_NAMED_FILE', 'RAC_WORKTREES_FILE', 'RAC_SAVED_PROMPTS_FILE', 'RAC_PROMPT_HISTORY_FILE', 'RAC_QUEUED_PROMPTS_FILE', 'RAC_NOTES_FILE', 'RAC_REVIEW_TOURS_FILE', 'RAC_PUSH_SUBSCRIPTIONS_FILE', 'RAC_FILE_FAVORITES_FILE', 'RAC_FILE_OPERATION_JOURNAL', 'RAC_INTEGRATION_AUTH_FILE', 'RAC_INTEGRATION_STATE_FILE', 'RAC_INTEGRATION_AUDIT_FILE', 'RAC_TEMP_PREVIEWS_DIR', 'RAC_BOOKMARKS_FILE',
   'CODEX_VERSION', 'CLOUDFLARED_CREDENTIALS_FILE', 'COMPOSE_FILE', 'COMPOSE_ENV_FILES', 'COMPOSE_PROJECT_NAME', 'COMPOSE_PROFILES', 'COMPOSE_PARALLEL_LIMIT', 'COMPOSE_COMPATIBILITY', 'NODE_BIN', 'RAC_ENV_FILE'
 ] as const;
+export const managedEnvironmentKeys = ['RAC_VAPID_PUBLIC_KEY', 'RAC_VAPID_PRIVATE_KEY'] as const;
 type KnownEnvironmentKey = typeof knownEnvironmentKeys[number];
 type StaticEnvironmentFallback = SettingsFallback & { kind: 'literal' | 'derived' };
 // describe only omission behavior proved by a current runtime consumer or installer
 const environmentFallbacks = {
+  RAC_PASSWORD_HASH: { value: 'Required; no default', kind: 'derived' },
+  RAC_SESSION_SECRET: { value: 'Required; no default', kind: 'derived' },
   RAC_INSTANCE_STATUS_SECRET: { value: 'Uses RAC_SESSION_SECRET', kind: 'derived' },
   RAC_INTEGRATION_FEDERATION_SECRET: { value: 'Uses RAC_INSTANCE_STATUS_SECRET, then RAC_SESSION_SECRET', kind: 'derived' },
   RAC_REALTIME_MCP_TOKEN: { value: 'Derived from RAC_SESSION_SECRET', kind: 'derived' },
   RAC_GITHUB_TOKEN: { value: 'GitHub CLI credentials from RAC_GH_HOSTS', kind: 'derived' },
-  RAC_CONFIG_WRITE_PATH: { value: 'Uses RAC_CONFIG', kind: 'derived' },
+  RAC_OPENAI_API_KEY: { value: 'Voice unavailable when unset', kind: 'derived' },
+  RAC_OPENAI_ADMIN_KEY: { value: 'Usage and cost queries unavailable when unset', kind: 'derived' },
+  RAC_OPENAI_API_KEY_IDS: { value: 'Per-account cost attribution unavailable when unset', kind: 'derived' },
+  RAC_CONFIG: { value: 'Required; no default application file', kind: 'derived' },
+  RAC_CONFIG_WRITE_PATH: { value: 'Same as RAC_CONFIG', kind: 'derived' },
   RAC_LISTEN_HOST: { value: 'Application configuration listen.host (127.0.0.1 if unspecified)', kind: 'derived' },
   RAC_LISTEN_PORT: { value: 'Application configuration listen.port (8787 if unspecified)', kind: 'derived' },
-  TZ: { value: 'Host time zone (Docker Compose supplies Etc/UTC)', kind: 'derived' },
+  RAC_LOG_LEVEL: { value: 'Not used by RAC', kind: 'derived' },
+  TZ: { value: 'Host time zone', kind: 'derived' },
   RAC_INTERACTIVE_SHELL: { value: '/usr/bin/zsh', kind: 'literal' },
   RAC_TMUX_BIN: { value: '/usr/bin/tmux', kind: 'literal' },
   RAC_CODEX_BIN: { value: 'adapters.codex.program', kind: 'derived' },
   RAC_CLAUDE_BIN: { value: 'adapters.claude.program', kind: 'derived' },
-  RAC_CLAUDE_CONFIG_DIR: { value: 'CLAUDE_CONFIG_DIR, then $HOME/.claude', kind: 'derived' },
-  RAC_GH_HOSTS: { value: '$HOME/.config/gh/hosts.yml', kind: 'derived' },
-  RAC_ADAPTER_FILES_DIR: { value: '<host-visible RAC checkout>/.data/adapters', kind: 'derived' },
+  RAC_CLAUDE_CONFIG_DIR: { value: 'CLAUDE_CONFIG_DIR, then ~/.claude', kind: 'derived' },
+  RAC_GH_HOSTS: { value: '~/.config/gh/hosts.yml', kind: 'derived' },
+  RAC_ADAPTER_FILES_DIR: { value: '.data/adapters', kind: 'derived' },
   RAC_SERVER_CHECKOUT: { value: 'running RAC checkout', kind: 'derived' },
-  RAC_SERVER_ADMIN_STATUS_DIR: { value: '<RAC server checkout>/.data', kind: 'derived' },
+  RAC_SERVER_ADMIN_STATUS_DIR: { value: '.data', kind: 'derived' },
   RAC_TEMP_PREVIEW_ORIGIN: { value: 'Application publicOrigin', kind: 'derived' },
   RAC_PROJECT_PROXY_HOST: { value: '127.0.0.1', kind: 'literal' },
+  RAC_HOST_PROC: { value: '/proc for discovery; host Files needs a host procfs mount', kind: 'derived' },
+  RAC_HOST_TMUX_DIR: { value: 'Native socket discovery; no mounted host socket directory', kind: 'derived' },
   RAC_HOST_TMUX_SOURCE: { value: '/tmp/tmux-${RAC_HOST_UID or process UID}', kind: 'derived' },
   RAC_HOST_UNIX_SOCKETS: { value: '${RAC_HOST_PROC or /proc}/net/unix', kind: 'derived' },
+  RAC_HOST_UID: { value: 'Process UID for discovery; host Files needs an explicit UID', kind: 'derived' },
+  RAC_HOST_NODE_BIN: { value: 'node from host PATH', kind: 'derived' },
   RAC_HOST_CODEX_BIN: { value: 'adapters.codex.program', kind: 'derived' },
   RAC_HOST_INTERACTIVE_SHELL: { value: 'RAC_INTERACTIVE_SHELL, then /usr/bin/zsh', kind: 'derived' },
+  RAC_HOST_PATH: { value: 'Inherit host tmux PATH', kind: 'derived' },
+  RAC_HOST_REPOSITORY: { value: 'Native: RAC checkout; Docker host adapters require an explicit path', kind: 'derived' },
+  RAC_HOST_WORKSPACE: { value: 'Project hostPath/path for this checkout; unavailable if not mapped', kind: 'derived' },
+  HOST_UID: { value: 'Standard Docker bridge: 1000', kind: 'derived' },
+  HOST_TMUX_DIR: { value: 'Standard Docker bridge: ~/.local/state/tmux/tmux-${HOST_UID:-1000}', kind: 'derived' },
+  HOST_TMUX_BIN: { value: 'Standard Docker bridge: /usr/bin/tmux', kind: 'derived' },
   RAC_DEVICE_NAMES_FILE: { value: '.data/device-names.json', kind: 'literal' },
   RAC_CONSOLE_NAMED_FILE: { value: '.data/console-named-conversations.json', kind: 'literal' },
   RAC_WORKTREES_FILE: { value: '.data/worktrees.json', kind: 'literal' },
@@ -78,10 +96,8 @@ const environmentDescriptions = {
   RAC_OPENAI_ADMIN_KEY: 'OpenAI organization Admin API key used only for read-only usage and cost queries.',
   RAC_OPENAI_API_KEY_IDS: 'JSON map from local account IDs to OpenAI API key IDs for per-account cost attribution.',
   RAC_GITHUB_TOKEN: 'GitHub token used for pull request lookup and posting guided review drafts.',
-  RAC_VAPID_PUBLIC_KEY: 'Public VAPID application-server key sent to browsers when registering push notifications.',
-  RAC_VAPID_PRIVATE_KEY: 'Private VAPID key used by the server to sign browser push notifications.',
   RAC_CONFIG: 'Application configuration file read by RAC at startup and by configuration-aware helper scripts.',
-  RAC_CONFIG_WRITE_PATH: 'Application configuration destination written by the settings host, normally the same file as RAC_CONFIG.',
+  RAC_CONFIG_WRITE_PATH: 'Application configuration destination written by the settings host.',
   RAC_LISTEN_HOST: 'Network interface address that overrides the application configuration when RAC starts.',
   RAC_LISTEN_PORT: 'TCP port that overrides the application configuration when RAC starts.',
   RAC_LOG_LEVEL: 'Reserved log verbosity setting preserved for deployment tooling; RAC does not currently read it.',
@@ -91,7 +107,7 @@ const environmentDescriptions = {
   RAC_CODEX_BIN: 'Codex executable used for container-local launches, reviews, and account management.',
   RAC_CLAUDE_BIN: 'Claude executable used for configured launches and headless review runs.',
   RAC_CLAUDE_CONFIG_DIR: 'Claude configuration directory used to discover accounts and conversation transcripts.',
-  RAC_GH_HOSTS: 'GitHub CLI hosts file used as the fallback source for a github.com access token.',
+  RAC_GH_HOSTS: 'GitHub CLI hosts file used to obtain a github.com access token.',
   RAC_ADAPTER_FILES_DIR: 'Directory where RAC renders generated adapter files such as Claude hook configuration.',
   RAC_SERVER_CHECKOUT: 'Path to the RAC checkout as seen by the running server and settings helpers.',
   RAC_SERVER_ADMIN_STATUS_DIR: 'Directory where server update operations write their status and log files.',
@@ -151,10 +167,16 @@ export function protectedSettingIdentity(key: string): boolean {
 }
 // protect credential-bearing environment values without hiding unknown ordinary settings
 export function protectedEnvironment(key: string): boolean { return protectedSettingIdentity(key); }
+// reserve server-managed values outside typed settings controls
+export function managedEnvironment(key: string): boolean { return (managedEnvironmentKeys as readonly string[]).includes(key); }
 // return useful guidance without inventing a consumer for custom variables
 export function environmentDescription(key: string): string { return Object.hasOwn(environmentDescriptions, key) ? environmentDescriptions[key as KnownEnvironmentKey] : customEnvironmentDescription; }
 // return safe display metadata without resolving environment or secret bytes
-export function environmentFallback(key: string): StaticEnvironmentFallback | undefined {
+export function environmentFallback(key: string, installationKind?: 'compose' | 'systemd'): StaticEnvironmentFallback | undefined {
+  // describe bridge conventions without inventing a native mount default
+  if (key === 'RAC_HOST_TMUX_DIR' && installationKind === 'compose') return { value: 'Docker bridge: /host-tmux; otherwise native socket discovery', kind: 'derived' };
+  // compose supplies this path rather than the server defaulting it
+  if (key === 'RAC_CONFIG' && installationKind === 'compose') return { value: 'Docker supplies /workspace/config/remote-agent-console.docker.json; otherwise required', kind: 'derived' };
   return Object.hasOwn(environmentFallbacks, key) ? environmentFallbacks[key as keyof typeof environmentFallbacks] : undefined;
 }
 // explain fields without runtime consumers

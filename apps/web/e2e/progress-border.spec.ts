@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions';
 
 test.describe.configure({ timeout: 60_000 });
@@ -26,15 +26,6 @@ function createGate(): Gate {
   let release: () => void = () => undefined;
   const promise = new Promise<void>(resolve => { release = resolve; });
   return { promise, release };
-}
-
-// compare the rendered progress token with one named theme color
-async function expectProgressTheme(parent: Locator, themeVariable: string) {
-  const expected = await parent.evaluate((element, variable) => getComputedStyle(element).getPropertyValue(variable).trim(), themeVariable);
-  await expect.poll(() => parent.evaluate(element => {
-    const style = getComputedStyle(element);
-    return style.getPropertyValue('--progress-ring-color').trim() || style.getPropertyValue('--mauve').trim();
-  })).toBe(expected);
 }
 
 // mount one authenticated console with only settings mutations mocked
@@ -180,8 +171,8 @@ test('paints reload progress before navigating to the fresh client', async ({ pa
   expect(fixture.restartRequests).toBe(0);
 });
 
-// keep yellow progress across the local request and durable operation states
-test('keeps restart yellow while pending and removes progress after the operation settles', async ({ page }) => {
+// keep restart progress in the fullscreen handoff until durable status settles
+test('keeps restart progress fullscreen until the operation settles', async ({ page }) => {
   const restartGate = createGate();
   const fixture: RestartFixture = {
     status: { pending: true, targets: ['rac'], effective: 'known', restartAvailable: true },
@@ -197,40 +188,35 @@ test('keeps restart yellow while pending and removes progress after the operatio
   const notice = page.getByRole('status', { name: 'Restart pending' });
   const restart = notice.getByRole('button', { name: 'Restart', exact: true });
   await expect(restart).toBeEnabled();
-  await expectProgressTheme(restart, '--yellow');
   await expect(restart.locator('.update-progress-ring')).toHaveCount(0);
 
-  const pending = notice.getByRole('button', { name: 'Restarting…', exact: true });
-  const ring = pending.locator(':scope > .update-progress-ring');
+  const loader = page.getByRole('alert', { name: 'Preparing restart', exact: true });
+  const card = loader.locator(':scope > .fullscreen-card');
   try {
     await restart.click();
     await expect.poll(() => fixture.restartRequests).toBe(1);
-    await expect(pending).toBeDisabled();
-    await expect(pending).toHaveAttribute('aria-busy', 'true');
-    await expect(ring).toBeVisible();
-    await expect(notice.locator('.settings-restart-icon')).toHaveText('↻');
-    await expect(notice.locator('.spinner')).toHaveCount(0);
-    await expectProgressTheme(pending, '--yellow');
-    await expect.poll(() => pending.evaluate(element => ({ animations: element.getAnimations().length, transform: getComputedStyle(element).transform }))).toEqual({ animations: 0, transform: 'none' });
+    await expect(loader).toBeVisible();
+    await expect(notice).toHaveCount(0);
+    await expectProgressBorder(card, 'mauve');
+    await expectClockwiseProgressBorder(card);
   } finally {
     // release the mocked restart during failed assertions too
     restartGate.release();
   }
-  await expect(notice).toContainText('Waiting for the host applier');
-  await expect(ring).toBeVisible();
+  await expect(loader).toContainText('Waiting for the host applier');
   fixture.status = { pending: true, targets: ['rac'], effective: 'known', restartAvailable: true, operation: { id: 'restart-1', state: 'running', phase: 'Restarting RAC' } };
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-  await expect(notice).toContainText('Restarting RAC');
-  await expect(ring).toBeVisible();
+  await expect(loader).toContainText('Restarting RAC');
+  await expectProgressBorder(card, 'mauve');
 
   fixture.status = { pending: false, targets: [], effective: 'known', restartAvailable: true, operation: { id: 'restart-1', state: 'complete' } };
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-  await expect(notice).toHaveCount(0);
-  await expect(page.locator('.settings-restart-notice .update-progress-ring')).toHaveCount(0);
+  await expect(loader).toHaveCount(0);
+  await expect(page.locator('.fullscreen-loader .update-progress-ring')).toHaveCount(0);
 });
 
-// keep a failed retry red only while its repeated request is pending
-test('shows a red reduced-motion retry spinner and stops it after failure', async ({ page }) => {
+// keep a failed retry inside the reduced-motion fullscreen handoff
+test('shows a reduced-motion fullscreen retry spinner and stops it after failure', async ({ page }) => {
   const restartGate = createGate();
   const fixture: RestartFixture = {
     status: { pending: true, targets: ['rac'], effective: 'known', restartAvailable: true, operation: { id: 'restart-1', state: 'failed', error: 'First restart failed.' } },
@@ -246,31 +232,30 @@ test('shows a red reduced-motion retry spinner and stops it after failure', asyn
   const notice = page.getByRole('alert', { name: 'Restart pending' });
   const retry = notice.getByRole('button', { name: 'Retry restart', exact: true });
   await expect(retry).toBeEnabled();
-  await expectProgressTheme(retry, '--red');
   await expect(retry.locator('.update-progress-ring')).toHaveCount(0);
 
-  const pending = notice.getByRole('button', { name: 'Restarting…', exact: true });
+  const loader = page.getByRole('alert', { name: 'Preparing restart', exact: true });
+  const card = loader.locator(':scope > .fullscreen-card');
   try {
     await retry.click();
     await expect.poll(() => fixture.restartRequests).toBe(1);
-    await expect(pending).toBeDisabled();
-    await expect(pending).toHaveAttribute('aria-busy', 'true');
-    await expectReducedMotionSpinner(pending, 'red');
-    await expect(notice.locator('.settings-restart-icon')).toHaveText('!');
-    await expect(notice.locator('.spinner')).toHaveCount(0);
+    await expect(loader).toBeVisible();
+    await expect(notice).toHaveCount(0);
+    await expectReducedMotionSpinner(card, 'mauve');
 
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
-    await expectReducedMotionSpinner(pending, 'red');
+    await expectReducedMotionSpinner(card, 'mauve');
     await page.evaluate(() => { delete document.documentElement.dataset.motion; });
-    await expectProgressBorder(pending, 'red');
-    await expectClockwiseProgressBorder(pending);
+    await expectProgressBorder(card, 'mauve');
+    await expectClockwiseProgressBorder(card);
   } finally {
     // release the mocked retry during failed assertions too
     restartGate.release();
   }
+  await expect(loader).toHaveCount(0);
   await expect(retry).toBeEnabled();
-  await expect(retry).toHaveAttribute('aria-busy', 'false');
+  await expect(retry).not.toHaveAttribute('aria-busy');
   await expect(retry.locator('.update-progress-ring')).toHaveCount(0);
   await expect(notice).toContainText('First restart failed.');
 });

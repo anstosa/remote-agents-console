@@ -13,7 +13,6 @@ describe('portable deployment', () => {
 
     expect(compose).toContain('RAC_PROJECT_PROXY_HOST: ${RAC_PROJECT_PROXY_HOST:-127.0.0.1}');
     expect(compose).toContain('RAC_SERVER_CHECKOUT: /workspace');
-    expect(compose).toContain('TZ: ${TZ:-Etc/UTC}');
     // bookmarks are retired at boot; the env override stays so the one-time retirement finds the mounted file
     expect(compose).toContain('RAC_BOOKMARKS_FILE: /workspace/.data/bookmarks.json');
     expect(compose).toContain('profiles: ["tunnel"]');
@@ -21,6 +20,18 @@ describe('portable deployment', () => {
     expect(compose).not.toContain('/host-proc');
     expect(compose).not.toContain('/home/linuxbrew');
     expect(compose).not.toContain('network_mode: "service:remote-agent-console"');
+  });
+
+  // inherit host timezone data without overriding an operator's environment file
+  it('mounts host localtime read-only without forcing a timezone', async () => {
+    const compose = await repositoryFile('compose.yaml');
+    const dockerfile = await repositoryFile('Dockerfile');
+
+    expect(compose).toMatch(/env_file:\s*\n\s+- \.env/);
+    expect(compose).not.toMatch(/^\s+TZ:/m);
+    expect(compose).toMatch(/type: bind\s+source: \/etc\/localtime\s+target: \/etc\/localtime\s+read_only: true\s+bind:\s+create_host_path: false/);
+    // ICU must inspect the mounted data rather than follow the image's UTC link
+    expect(dockerfile).toContain('RUN rm /etc/localtime && cp /usr/share/zoneinfo/Etc/UTC /etc/localtime');
   });
 
   // keep installation files outside version control

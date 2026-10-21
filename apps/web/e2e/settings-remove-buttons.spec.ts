@@ -271,7 +271,7 @@ for (const width of [390, 1440]) {
   }) => {
     await page.setViewportSize({ width, height: 900 });
     const { saves, settings } = await setupRemoveSettings(page);
-    await selectSource(settings, "app", "Application config");
+    await selectSource(settings, "app", "Application");
 
     const optional = settings.locator('[data-settings-path="optionalText"]');
     await expect(

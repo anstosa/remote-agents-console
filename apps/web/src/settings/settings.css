@@ -7,13 +7,24 @@
 .settings-center input:is([type='text'], [type='number'], [type='password'], [type='search'], :not([type])) { box-sizing: border-box; height: var(--settings-control-height); min-height: var(--settings-control-height); }
 /* adapt the editor to its resizable split rather than the viewport */
 .settings-center-page { container-type: inline-size; container-name: settings-panel; }
-/* retain desktop status alignment after removing the page introduction */
-.settings-center-header { display: flex; min-width: 0; justify-content: flex-end; }
-.settings-dirty-summary { flex: none; border: 1px solid var(--surface-2); border-radius: 999px; padding: .3rem .55rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
-.settings-center-summary { display: flex; flex: none; align-items: center; gap: .4rem; }
-.settings-search { display: grid; min-width: 0; gap: .3rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+/* anchor typeahead without a visible field label or status pill */
+.settings-search { display: grid; min-width: 0; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
 .settings-search input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .52rem .62rem; background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); color: var(--text); font: 600 .7rem var(--font-mono); }
 .settings-search input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* keep attached results above split content without moving its layout */
+.settings-search-results { z-index: 220; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .3rem; background: var(--mantle); box-shadow: 0 .5rem 1.5rem #0005; color: var(--text); font: 500 .68rem/1.5 var(--font-mono); }
+.settings-search-result { display: grid; min-width: 0; gap: .16rem; border: 1px solid transparent; border-radius: .3rem; padding: .48rem .6rem; cursor: pointer; }
+.settings-search-result[aria-selected='true'] { border-color: var(--mauve); background: color-mix(in srgb, var(--mauve) 12%, var(--mantle)); }
+.settings-search-result[aria-disabled='true'] { cursor: default; opacity: .55; }
+.settings-search-result-title { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: .7rem; }
+.settings-search-result-title strong { min-width: 0; font-weight: 650; overflow-wrap: anywhere; }
+.settings-search-result-title small { flex: none; color: var(--subtext-0); font-size: .58rem; }
+.settings-search-breadcrumb { color: var(--subtext-0); font-size: .59rem; overflow-wrap: anywhere; }
+.settings-search-results mark { border-radius: .1rem; background: color-mix(in srgb, var(--yellow) 20%, transparent); color: var(--yellow); }
+.settings-search-empty { padding: .65rem; color: var(--subtext-0); }
+/* highlight destinations without flashing or changing field geometry */
+.settings-source-panel [data-settings-search-highlight='true'],
+.settings-source-panel[data-settings-search-highlight='true'] { outline: 2px solid var(--mauve); outline-offset: 3px; border-radius: .3rem; background-color: color-mix(in srgb, var(--mauve) 9%, var(--mantle)); }
 .settings-center-layout { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: minmax(10rem, 13rem) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; border: 1px solid var(--surface-1); border-radius: .65rem; background: color-mix(in srgb, var(--mantle) 88%, var(--crust)); }
 /* keep a usable tab scroller below persistent notices on short screens */
 @media (max-height: 480px) {
@@ -36,12 +47,17 @@
 .settings-source-nav button:disabled { color: var(--overlay-0); cursor: default; opacity: .65; }
 .settings-source-nav button.active { border-color: color-mix(in srgb, var(--mauve) 62%, var(--surface-2)); background: color-mix(in srgb, var(--mauve) 14%, var(--surface-0)); color: var(--text); }
 .settings-source-nav button i { width: .42rem; height: .42rem; flex: none; border-radius: 50%; background: var(--yellow); box-shadow: 0 0 .5rem color-mix(in srgb, var(--yellow) 50%, transparent); }
-/* contain wheel and touch scrolling within the selected tab */
+/* distinguish invalid pages from ordinary unsaved drafts */
+.settings-source-nav button[data-has-issues='true'] .settings-source-nav-icon { color: var(--red); }
+.settings-source-nav button[data-has-issues='true'] i { background: var(--red); box-shadow: 0 0 .5rem color-mix(in srgb, var(--red) 50%, transparent); }
+/* keep content naturally sized while containing wheel and touch scrolling */
 .settings-source-panel { display: grid; min-width: 0; min-height: 0; align-content: start; gap: 1rem; overflow-y: auto; overscroll-behavior: contain; padding: 1rem; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
 /* keep the keyboard scrolling target visible inside the clipped tab frame */
 .settings-source-panel:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 /* place browser controls in the same field grid as file-backed settings */
 .settings-preferences { min-width: 0; }
+/* separate review guidance from its permanently expanded field groups */
+.settings-reviews { display: grid; min-width: 0; gap: 1rem; }
 /* keep the shared TMUX sources in one scrollable tab */
 .settings-tmux { display: grid; min-width: 0; gap: 1rem; }
 /* keep each browser preference on its own row at every width */
@@ -52,22 +68,27 @@
 .settings-catalog-state { display: flex; min-width: 0; align-items: center; gap: .65rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); padding: .65rem; color: var(--subtext-0); font: 600 .65rem/1.4 var(--font-mono); }
 .settings-catalog-state > span:not(.update-progress-ring) { flex: 1; }
 .settings-catalog-state button { width: max-content; flex: none; padding: .3rem .5rem; font: 700 .62rem var(--font-mono); }
-.settings-source-header { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 1rem; padding-bottom: .85rem; border-bottom: 1px solid var(--surface-1); }
-.settings-source-header > div { display: grid; min-width: 0; gap: .2rem; }
+.settings-source-header { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); align-items: start; gap: .5rem .6rem; padding-bottom: .85rem; border-bottom: 1px solid var(--surface-1); }
+.settings-source-heading { display: grid; min-width: 0; gap: .2rem; }
 .settings-source-header h2 { margin: 0; font-size: 1.12rem; }
-.settings-source-header code { overflow: hidden; color: var(--overlay-1); font: 600 .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 /* retain the base-file action to the right even in narrow settings splits */
-.settings-source-header.settings-docker-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .6rem; }
+.settings-source-header.settings-source-header-with-actions { grid-template-columns: minmax(0, 1fr) auto; }
 /* keep the secondary base-file action outlined and on a single line */
-.settings-docker-header > button { width: max-content; background: transparent; border-color: var(--blue); color: var(--blue); box-shadow: none; font-size: .68rem; white-space: nowrap; }
+.settings-source-header-with-actions > button { width: max-content; align-self: center; background: transparent; border-color: var(--blue); color: var(--blue); box-shadow: none; font-size: .68rem; white-space: nowrap; }
+/* let purpose copy and source details span beneath the title and action row */
+.settings-source-header > p { grid-column: 1 / -1; }
+.settings-source-metadata { display: flex; min-width: 0; flex-wrap: wrap; gap: .3rem .7rem; margin: 0; color: var(--overlay-1); font: 600 .62rem/1.4 var(--font-mono); }
+.settings-source-metadata code { min-width: 0; overflow-wrap: anywhere; color: inherit; font: inherit; }
 .settings-source-kicker { color: var(--mauve); font: 800 .58rem var(--font-mono); letter-spacing: .1em; text-transform: uppercase; }
 .settings-source-origin { color: var(--subtext-0); font: 600 .61rem/1.35 var(--font-mono); overflow-wrap: anywhere; }
 .settings-source-warning { margin: 0; border: 1px solid color-mix(in srgb, var(--yellow) 52%, var(--surface-1)); border-radius: var(--control-radius); padding: .65rem; background: color-mix(in srgb, var(--yellow) 8%, transparent); color: var(--yellow); font-size: .7rem; line-height: 1.45; }
 .settings-schema-section { display: grid; min-width: 0; gap: .75rem; border: 0; padding: 0; }
+/* separate environment sections from their file-backed fields */
+.settings-storage-environment, .settings-voice-environment { margin-top: 1.5rem; }
 .settings-schema-section + .settings-schema-section { padding-top: 1rem; border-top: 1px solid var(--surface-1); }
 .settings-schema-section > header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .75rem; }
 .settings-schema-section > header > div { display: grid; gap: .12rem; }
-.settings-schema-section h3 { margin: 0; color: var(--text); font: 800 .78rem var(--font-mono); }
+.settings-schema-section h3 { margin: 0; color: var(--lavender); font: 800 .78rem var(--font-mono); }
 .settings-schema-section p { margin: 0; color: var(--subtext-0); font-size: .68rem; line-height: 1.4; }
 /* keep future adapters visible without implying their controls work */
 .settings-unimplemented-field { opacity: .55; }
@@ -202,6 +223,9 @@
 button.settings-collection-add-button { width: 100%; min-height: 2.65rem; justify-content: center; border: 1px solid transparent; background: transparent; box-shadow: none; color: var(--blue); filter: none; font: 400 .62rem var(--font-mono); }
 button.settings-collection-add-button:not(:disabled):hover { --settings-placeholder-border: var(--blue); border-color: transparent; background: transparent; color: var(--text); filter: none; }
 button.settings-collection-add-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* keep empty collection guidance inside its add placeholder */
+button.settings-collection-add-button:has(.settings-collection-placeholder) { flex-direction: column; gap: .25rem; }
+.settings-collection-placeholder { color: var(--subtext-0); font-weight: 400; }
 button.settings-collection-add-button:disabled { --settings-placeholder-border: var(--surface-1); border-color: transparent; background: transparent; color: var(--overlay-0); filter: none; }
 /* paint fixed ten-pixel dashes with eight-pixel gaps without filling the placeholder */
 .settings-record-add,
@@ -315,10 +339,20 @@ button.settings-installation-file-link:disabled { background: transparent; color
 .settings-restart-copy a { color: var(--blue); }
 .settings-restart-notice > button { flex: none; min-height: 2rem; justify-content: center; border-color: color-mix(in srgb, var(--yellow) 70%, var(--surface-1)); padding: .3rem .58rem; background: transparent; color: var(--yellow); box-shadow: none; font: 800 .65rem var(--font-mono); }
 .settings-restart-notice.failed > button { border-color: var(--red); color: var(--red); }
+/* distinguish durable restart outcomes without shifting or replacing pending changes */
+.settings-restart-notice.settings-restart-result { grid-template-columns: auto minmax(0, 1fr) auto; }
+.settings-restart-result.success { border-color: var(--green); background: color-mix(in srgb, var(--mantle) 92%, var(--green)); }
+.settings-restart-result.success .settings-restart-icon { color: var(--green); }
+.settings-restart-notice.settings-restart-result > button { grid-column: auto; width: 2rem; height: 2rem; min-height: 2rem; padding: .3rem; color: var(--subtext-0); border-color: var(--surface-2); }
+.settings-restart-result > button > svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+/* keep recovery guidance centered and readable through disconnection */
+.fullscreen-restart-details { display: grid; min-width: 0; gap: .8rem; margin-top: 1rem; color: var(--subtext-0); font: 500 .78rem/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.fullscreen-restart-details p { margin: 0; }
+.fullscreen-restart-details small { font: inherit; }
+.fullscreen-restart-details a { color: var(--blue); }
+.fullscreen-restart-details code { color: var(--text); white-space: normal; }
+.fullscreen-restart-details .settings-recovery-countdown { color: var(--yellow); font-weight: 800; font-variant-numeric: tabular-nums; }
 @media (max-width: 780px) {
-  .settings-center-header { display: grid; }
-  .settings-center-summary { flex-wrap: wrap; }
-  .settings-dirty-summary { width: max-content; }
   .settings-center-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   /* show one accessible custom dropdown instead of the horizontal tab strip */
   .settings-source-select { display: grid; }
@@ -337,8 +371,6 @@ button.settings-installation-file-link:disabled { background: transparent; color
 
 /* keep narrow desktop splits as usable as phone panels */
 @container settings-panel (max-width: 900px) {
-  .settings-center-header { flex-direction: column; }
-  .settings-center-summary { flex-wrap: wrap; }
   .settings-center-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .settings-source-nav { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--surface-1); }
   .settings-source-nav h3 { display: none; }
@@ -348,16 +380,14 @@ button.settings-installation-file-link:disabled { background: transparent; color
   .settings-source-header { display: grid; }
 }
 
-/* separate staged voice fields from browser preference controls */
-.settings-voice-advanced { display: grid; min-width: 0; gap: .8rem; padding-top: 1rem; border-top: 1px solid var(--surface-1); }
-.settings-voice-advanced > header { display: grid; gap: .3rem; }
-.settings-voice-advanced h3 { margin: 0; font-size: .85rem; }
-.settings-voice-advanced p { color: var(--subtext-0); font-size: .68rem; }
+/* keep voice options beside the basic context controls */
+.settings-voice-fields { display: grid; min-width: 0; gap: .8rem; margin-top: .8rem; }
+.settings-voice-fields p { color: var(--subtext-0); font-size: .68rem; }
 
 /* edit local artwork beside its consumer without adding navigation tabs */
 .settings-application-icon { display: grid; min-width: 0; gap: .8rem; padding-top: .9rem; border-top: 1px solid var(--surface-1); }
 .settings-application-icon > header { display: grid; gap: .3rem; }
-.settings-application-icon h3 { margin: 0; font-size: .85rem; }
+.settings-application-icon h3 { margin: 0; color: var(--lavender); font-size: .85rem; }
 .settings-application-icon p { color: var(--subtext-0); font-size: .68rem; line-height: 1.45; }
 .settings-icon-choice { display: grid; min-width: 0; grid-template-columns: 3.5rem minmax(0, 1fr); align-items: start; gap: .7rem; }
 .settings-icon-choice > div { display: grid; min-width: 0; gap: .35rem; }
@@ -410,11 +440,11 @@ button.settings-installation-file-link:disabled { background: transparent; color
 
 /* reuse the existing header pill without leaving empty action placeholders */
 .settings-header-actions { display: contents; }
-.client-settings-page.settings-center-page { padding-top: max(var(--panel-header-clearance), var(--settings-header-clearance, 0px), var(--settings-toast-region-clearance, var(--toast-region-clearance, 0px))); }
+/* reserve only the wrapped toolbar while toasts overlay the content */
+.client-settings-page.settings-center-page { padding-top: max(var(--panel-header-clearance), var(--settings-header-clearance, 0px)); }
 .settings-center-page > .panel-header { flex-wrap: wrap; }
 .settings-center-page .panel-header-actions { max-width: 100%; flex-wrap: wrap; margin-left: auto; }
 .settings-center-page .settings-header-labelled-action { display: inline-flex; flex: none; width: auto; align-items: center; justify-content: center; gap: .35rem; padding: 0 .45rem; font: 700 .62rem var(--font-mono); white-space: nowrap; }
-.settings-center-page .settings-header-validate { color: var(--green); }
 .settings-center-page .settings-header-discard { color: var(--red); }
 .settings-center-page .settings-header-discard:not(:disabled):hover { border-color: var(--red); color: var(--red); }
 .settings-center-page .settings-header-save { border-color: var(--mauve); background: var(--mauve); color: var(--crust); }

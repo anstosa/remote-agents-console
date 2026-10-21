@@ -10,6 +10,13 @@ const snapshot = (fallback?: unknown, protectedValue = false): unknown => ({
 });
 
 describe('environment omission metadata contract', () => {
+  // keep configured-empty guidance textual and distinct from omission metadata
+  it.each([null, false, 123, {}])('rejects malformed configured-empty guidance %j', emptyValueHint => {
+    const value = snapshot() as { sources: Array<{ fields: Array<Record<string, unknown>> }> };
+    value.sources[0]!.fields[0]!.emptyValueHint = emptyValueHint;
+    expect(isSettingsSnapshot(value)).toBe(false);
+  });
+
   // preserve older snapshots without fallback hints
   it('accepts existing snapshots and safe omission metadata', () => {
     expect(isSettingsSnapshot(snapshot())).toBe(true);
@@ -25,5 +32,21 @@ describe('environment omission metadata contract', () => {
   // secret-bearing fields may expose only symbolic dependency guidance
   it.each(['literal', 'compose'])('rejects concrete %s values for protected fields', kind => {
     expect(isSettingsSnapshot(snapshot({ value: 'never-expose-this', kind }, true))).toBe(false);
+  });
+});
+
+describe('structured field placeholder metadata', () => {
+  // validate guidance recursively without accepting nontext placeholders
+  it('accepts string placeholders and rejects malformed descendant metadata', () => {
+    const source = { id: 'app', label: 'Application', format: 'json', exists: true, writable: true, protected: false, tracked: false, revisionId: 'app', apply: 'rac-restart', schema: { type: 'object', properties: { branch: { type: 'string', placeholder: undefined as unknown } } } };
+    const value = { version: 1, revisionId: 'snapshot', sources: [source], status: { pending: false, targets: [], effective: 'known', restartAvailable: true } };
+    expect(isSettingsSnapshot(value)).toBe(true);
+    source.schema.properties.branch.placeholder = 'main';
+    expect(isSettingsSnapshot(value)).toBe(true);
+    // reject every nontext placeholder before rendering
+    for (const placeholder of [null, false, 123, {}, ['main']]) {
+      source.schema.properties.branch.placeholder = placeholder;
+      expect(isSettingsSnapshot(value)).toBe(false);
+    }
   });
 });

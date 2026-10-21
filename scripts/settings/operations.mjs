@@ -39,6 +39,7 @@ import { verifyComposeDependencies } from "./dependencies.mjs";
 import { proveInitialTargetBaseline, retargetNativeCloudflaredCommand } from "./baseline.mjs";
 import { handoverControlPlane, recoverControlPlaneHandover, validateCheckoutHandover } from "./checkout-handover.mjs";
 import { withRestartWatchdog } from "./restart-watchdog.mjs";
+import { processCloudflareRequest } from "./cloudflare.mjs";
 
 // dispatch one claimed operation
 export async function processOperation(descriptor, request, options = {}) {
@@ -59,6 +60,44 @@ export async function processOperation(descriptor, request, options = {}) {
       return reconcileRequest(descriptor, request, options);
     case "recover":
       return recoverRequest(descriptor, request, options);
+    case "cloudflare": {
+      let nestedRestart;
+      const cloudflareOptions = {
+        ...options,
+        // retain the RAC deadline for activation rollback after restart success
+        onRestartProgress: (progress) => {
+          options.onRestartProgress?.(progress);
+          nestedRestart = progress;
+        }
+      };
+      // keep rollback reporting from changing rollback behavior
+      const publishNestedRestartProgress = (state, operationOptions) => {
+        // suppress progress for connector-only operations
+        if (nestedRestart?.recoveryDeadline === undefined) return;
+        try {
+          operationOptions.onRestartProgress?.({ recoveryDeadline: nestedRestart.recoveryDeadline, state });
+        } catch {
+          // observability cannot own runtime recovery
+        }
+      };
+      return processCloudflareRequest(descriptor, request, cloudflareOptions, {
+        // capture RAC recovery before public-origin mutation
+        ensureRacBaseline: (current, operationOptions) => ensureRecoveryBaselines(current, ["rac"], operationOptions),
+        // reuse the guarded replacement workflow
+        restartRac: (current, restart, operationOptions) => restartRequest(current, restart, operationOptions),
+        // reuse the last-effective recovery proof after a late failure
+        recoverRac: async (current, sources, operationOptions) => {
+          publishNestedRestartProgress("recovering", operationOptions);
+          try {
+            await recoverLastEffective(current, ["rac"], sources, operationOptions);
+            publishNestedRestartProgress("recovered", operationOptions);
+          } catch (error) {
+            publishNestedRestartProgress("recovery-failed", operationOptions);
+            throw error;
+          }
+        }
+      });
+    }
     default:
       throw safeError("invalid-request");
   }
@@ -530,8 +569,21 @@ async function restartRequest(descriptor, request, options) {
   }
   const previousBoot = readOptionalJson(resolve(descriptor.controlRoot, "boot.json"));
   const expectedEnvironment = request.targets.includes("rac") ? await expectedEnvironmentHashes(desiredDescriptor, options) : {};
-  let applyStarted = false;
+  const recoveryTargets = new Set();
   let controlPlaneHandedOver = false;
+  let restartProgress;
+  // publish only progress anchored to the real replacement deadline
+  const publishRestartProgress = (state) => {
+    // suppress recovery copy before RAC replacement
+    if (restartProgress?.recoveryDeadline === undefined) return;
+    const next = { recoveryDeadline: restartProgress.recoveryDeadline, state };
+    try {
+      options.onRestartProgress?.(next);
+    } catch {
+      // observability cannot own runtime recovery
+    }
+    restartProgress = next;
+  };
   try {
     const composeValidation = await validateDeploymentGraph(desiredDescriptor, request.id, options);
     // recheck the live graph immediately before deployment
@@ -542,7 +594,7 @@ async function restartRequest(descriptor, request, options) {
     const snapshotProofs = {};
     let proof = previousBoot ?? { bootNonce: undefined };
     const applyCloudflared = async () => {
-      applyStarted = true;
+      recoveryTargets.add("cloudflared");
       Object.assign(targetProofs, await applyTargets(desiredDescriptor, ["cloudflared"], deploymentOptions));
       // prove the exact Cloudflare inputs consumed by the replacement
       const cloudflaredProof = await proveAppliedCloudflared(desiredDescriptor, options, "apply");
@@ -551,7 +603,6 @@ async function restartRequest(descriptor, request, options) {
       targetProofs.cloudflared = cloudflaredProof.targetProofs.cloudflared;
     };
     const applyRac = async () => {
-      applyStarted = true;
       proof = await withRestartWatchdog(async (watchdog) => {
         const forwardController = new AbortController();
         const forwardSignal = AbortSignal.any([watchdog.signal, forwardController.signal]);
@@ -564,7 +615,11 @@ async function restartRequest(descriptor, request, options) {
           proofClock: watchdog.clock,
           beforeRacRestart: () => {
             const boundaryBoot = readOptionalJson(resolve(descriptor.controlRoot, "boot.json"));
-            watchdog.start();
+            const starting = { recoveryDeadline: watchdog.start(), state: "restarting" };
+            // require durable progress before allowing the mutating command
+            options.onRestartProgress?.(starting);
+            restartProgress = starting;
+            recoveryTargets.add("rac");
             reachRestartBoundary(boundaryBoot);
           }
         };
@@ -654,15 +709,24 @@ async function restartRequest(descriptor, request, options) {
     }
     recordEffectiveReceipt(desiredDescriptor, receipt);
     clearPendingTargets(desiredDescriptor, request.targets);
+    publishRestartProgress("restarted");
     return { phase: "effective", receipt };
   } catch (error) {
-    // roll back a proved helper handover when promotion did not complete
-    if (controlPlaneHandedOver) {
-      await recoverControlPlaneHandover(activeDescriptor, options);
-    }
-    // recover only after a deployment could have changed host state
-    if (applyStarted) {
-      await recoverLastEffective(activeDescriptor, request.targets, request.sources ?? [], options);
+    // expose recovery only after the RAC replacement boundary was crossed
+    publishRestartProgress("recovering");
+    try {
+      // roll back a proved helper handover when promotion did not complete
+      if (controlPlaneHandedOver) {
+        await recoverControlPlaneHandover(activeDescriptor, options);
+      }
+      // recover only targets that reached a mutation boundary
+      if (recoveryTargets.size > 0) {
+        await recoverLastEffective(activeDescriptor, request.targets.filter((target) => recoveryTargets.has(target)), request.sources ?? [], options);
+      }
+      publishRestartProgress("recovered");
+    } catch (recoveryError) {
+      publishRestartProgress("recovery-failed");
+      throw recoveryError;
     }
     throw error;
   }

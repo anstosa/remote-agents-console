@@ -4,6 +4,9 @@ export type SettingsSchema = {
   type: 'object' | 'array' | 'record' | 'string' | 'number' | 'boolean' | 'enum' | 'json' | 'union';
   label?: string;
   description?: string;
+  placeholder?: string;
+  editor?: 'shell';
+  singleLine?: boolean;
   optional?: boolean;
   nullable?: boolean;
   protected?: boolean;
@@ -30,6 +33,7 @@ export type SettingsEnvField = {
   overriddenBy?: string;
   winningSource?: string;
   fallback?: SettingsEnvironmentFallback;
+  emptyValueHint?: string;
 };
 
 export type SettingsSource = {
@@ -72,11 +76,18 @@ export type SettingsChange = {
   migration?: { mode: 'copy' | 'adopt' | 'empty' };
 };
 
+export type SettingsRestartProgress = {
+  recoveryDeadline: number;
+  state: 'restarting' | 'recovering' | 'restarted' | 'recovered' | 'recovery-failed';
+};
+
 export type SettingsOperation = {
   id: string;
   state: 'queued' | 'running' | 'complete' | 'failed';
+  kind?: 'cloudflare';
   phase?: string;
   error?: string;
+  restart?: SettingsRestartProgress;
 };
 
 export type SettingsStatus = {
@@ -97,6 +108,37 @@ export type SettingsSnapshot = {
   revisionId: string;
   sources: SettingsSource[];
   status: SettingsStatus;
+};
+
+export type CloudflareStatus = {
+  supported: boolean;
+  reason?: string;
+  mode: 'unconfigured' | 'token' | 'local';
+  enabled: boolean;
+  hostname?: string;
+  endpoint?: string;
+  tokenPresent: boolean;
+  serviceUrl: string;
+  connected?: boolean;
+  verifiedAt?: string;
+  operation?: SettingsOperation;
+  reconnectOrigin?: string;
+};
+
+// accept only redacted setup metadata and ordinary operation progress
+export const isCloudflareStatus = (value: unknown): value is CloudflareStatus => {
+  if (value === null || typeof value !== 'object') return false;
+  const status = value as CloudflareStatus;
+  return typeof status.supported === 'boolean' && typeof status.enabled === 'boolean'
+    && typeof status.tokenPresent === 'boolean' && typeof status.serviceUrl === 'string'
+    && ['unconfigured', 'token', 'local'].includes(status.mode)
+    && (status.reason === undefined || typeof status.reason === 'string')
+    && (status.hostname === undefined || typeof status.hostname === 'string')
+    && (status.endpoint === undefined || typeof status.endpoint === 'string')
+    && (status.connected === undefined || typeof status.connected === 'boolean')
+    && (status.verifiedAt === undefined || typeof status.verifiedAt === 'string')
+    && (status.reconnectOrigin === undefined || typeof status.reconnectOrigin === 'string')
+    && (status.operation === undefined || isSettingsOperation(status.operation));
 };
 
 export type SettingsIssue = {
@@ -124,6 +166,11 @@ const applyClasses = new Set<SettingsApply>(['live', 'saved-only', 'rac-restart'
 const isSettingsSchema = (value: unknown): value is SettingsSchema => {
   if (value === null || typeof value !== 'object' || !schemaTypes.has((value as SettingsSchema).type)) return false;
   const schema = value as SettingsSchema;
+  // accept only textual presentation guidance
+  if (schema.placeholder !== undefined && typeof schema.placeholder !== 'string') return false;
+  // accept only supported code editor hints
+  if (schema.editor !== undefined && schema.editor !== 'shell') return false;
+  if (schema.singleLine !== undefined && typeof schema.singleLine !== 'boolean') return false;
   if (schema.optional !== undefined && typeof schema.optional !== 'boolean') return false;
   if (schema.nullable !== undefined && typeof schema.nullable !== 'boolean') return false;
   if (schema.protected !== undefined && typeof schema.protected !== 'boolean') return false;
@@ -136,12 +183,22 @@ const isSettingsSchema = (value: unknown): value is SettingsSchema => {
 };
 
 // validate one public restart operation
-const isSettingsOperation = (value: unknown): value is SettingsOperation => value !== null
+const isSettingsRestartProgress = (value: unknown): value is SettingsRestartProgress => value !== null
+  && typeof value === 'object'
+  && Number.isSafeInteger((value as SettingsRestartProgress).recoveryDeadline)
+  && (value as SettingsRestartProgress).recoveryDeadline >= 0
+  && Object.keys(value).length === 2
+  && ['restarting', 'recovering', 'restarted', 'recovered', 'recovery-failed'].includes((value as SettingsRestartProgress).state);
+
+// accept only bounded host-owned restart progress
+export const isSettingsOperation = (value: unknown): value is SettingsOperation => value !== null
   && typeof value === 'object'
   && typeof (value as SettingsOperation).id === 'string'
   && ['queued', 'running', 'complete', 'failed'].includes((value as SettingsOperation).state)
+  && ((value as SettingsOperation).kind === undefined || (value as SettingsOperation).kind === 'cloudflare')
   && ((value as SettingsOperation).phase === undefined || typeof (value as SettingsOperation).phase === 'string')
-  && ((value as SettingsOperation).error === undefined || typeof (value as SettingsOperation).error === 'string');
+  && ((value as SettingsOperation).error === undefined || typeof (value as SettingsOperation).error === 'string')
+  && ((value as SettingsOperation).restart === undefined || isSettingsRestartProgress((value as SettingsOperation).restart));
 
 // validate the redacted global status contract
 export const isSettingsStatus = (value: unknown): value is SettingsStatus => value !== null
@@ -154,6 +211,7 @@ export const isSettingsStatus = (value: unknown): value is SettingsStatus => val
   && ((value as SettingsStatus).reason === undefined || typeof (value as SettingsStatus).reason === 'string')
   && ((value as SettingsStatus).operation === undefined || isSettingsOperation((value as SettingsStatus).operation))
   && ((value as SettingsStatus).reconnectOrigin === undefined || typeof (value as SettingsStatus).reconnectOrigin === 'string')
+  && ((value as SettingsStatus).recoveryCommand === undefined || typeof (value as SettingsStatus).recoveryCommand === 'string')
   && ((value as SettingsStatus).reloginRequired === undefined || typeof (value as SettingsStatus).reloginRequired === 'boolean');
 
 // validate public omission hints without admitting concrete secret defaults
@@ -175,7 +233,7 @@ const isSettingsSource = (value: unknown): value is SettingsSource => {
   if (source.content !== undefined && typeof source.content !== 'string' || source.hasProtectedContent !== undefined && typeof source.hasProtectedContent !== 'boolean') return false;
   if (source.schema !== undefined && !isSettingsSchema(source.schema)) return false;
   // accept winner labels only as explicit nonempty conflict metadata
-  if (source.fields !== undefined && (!Array.isArray(source.fields) || !source.fields.every(field => field !== null && typeof field === 'object' && typeof field.key === 'string' && (field.value === undefined || typeof field.value === 'string') && typeof field.protected === 'boolean' && typeof field.present === 'boolean' && (field.hasValue === undefined || typeof field.hasValue === 'boolean') && applyClasses.has(field.apply) && (field.description === undefined || typeof field.description === 'string') && (field.origin === undefined || typeof field.origin === 'string') && (field.overriddenBy === undefined || typeof field.overriddenBy === 'string') && (field.fallback === undefined || isEnvironmentFallback(field.fallback, field.protected)) && (field.winningSource === undefined || typeof field.winningSource === 'string' && field.winningSource.trim().length > 0 && field.present)))) return false;
+  if (source.fields !== undefined && (!Array.isArray(source.fields) || !source.fields.every(field => field !== null && typeof field === 'object' && typeof field.key === 'string' && (field.value === undefined || typeof field.value === 'string') && typeof field.protected === 'boolean' && typeof field.present === 'boolean' && (field.hasValue === undefined || typeof field.hasValue === 'boolean') && applyClasses.has(field.apply) && (field.description === undefined || typeof field.description === 'string') && (field.origin === undefined || typeof field.origin === 'string') && (field.overriddenBy === undefined || typeof field.overriddenBy === 'string') && (field.fallback === undefined || isEnvironmentFallback(field.fallback, field.protected)) && (field.emptyValueHint === undefined || typeof field.emptyValueHint === 'string') && (field.winningSource === undefined || typeof field.winningSource === 'string' && field.winningSource.trim().length > 0 && field.present)))) return false;
   if (source.pathRevisions !== undefined && (source.pathRevisions === null || typeof source.pathRevisions !== 'object' || !Object.values(source.pathRevisions).every(revision => typeof revision === 'string'))) return false;
   return true;
 };

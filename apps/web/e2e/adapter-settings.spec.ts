@@ -340,7 +340,7 @@ test('stages Davo and advanced voice fields until the global settings save', asy
     { op: 'set', path: ['integrations', 'realtime', 'writeToolsEnabled'], value: true }
   ]));
   expect(saves[0]?.changes[0]?.patches).toHaveLength(4);
-  await expect(settingsPage.getByText(/Saved\./u)).toBeVisible();
+  await expect(page.getByRole('status').getByText('Saved', { exact: true })).toBeVisible();
   await expect(settingsPage).toBeVisible();
   await settingsPage.getByRole('button', { name: 'Close settings' }).click();
   await expect(page.getByRole('button', { name: 'Call Riley' }).first()).toBeVisible();
@@ -462,7 +462,7 @@ test('resizes settings and switches splits without closing it', async ({ page })
   await settings.getByRole('switch', { name: 'Enable Davo' }).check();
   await settings.getByLabel('Davo context').fill('Retain this unsaved context.');
   await settings.getByLabel('Davo context').blur();
-  const swipeTarget = await settings.locator('.settings-center-header').boundingBox();
+  const swipeTarget = await settings.locator('.settings-search').boundingBox();
   // require swipe target geometry
   if (swipeTarget === null) throw new Error('Settings swipe target has no bounds');
   const touch = await page.context().newCDPSession(page);

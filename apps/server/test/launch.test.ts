@@ -53,6 +53,34 @@ afterEach(async () => {
 });
 
 describe('LaunchService', () => {
+  // retries must preserve the host environment without modifying an idle shell
+  it.each(['scratch', 'worktree'] as const)('opens a fresh %s window with the host environment', async scope => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    process.env.RAC_HOST_PATH = '/host/bin:/usr/bin';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
+    const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
+    const worktree = cora({ hostPath: '/host/account/repo' });
+    const config = { ...(codex as object), scratchDirectory: '/scratch', projects: [{ id: 'proj', hostPath: '/host/account/repo' }] };
+    const scratch = scope === 'scratch';
+    const panes = {
+      // expose only the idle shell owned by this launch scope
+      listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, command: 'zsh', title: '', socket, path: scratch ? '/scratch' : worktree.hostPath!, placeMark: scratch ? 'scratch:/scratch' : worktree.id, ...(scratch ? { displayLabel: scratchLabel, consoleManaged: true } : {}) }],
+      pastePrompt: vi.fn(async () => true),
+      enter: vi.fn(async () => true)
+    };
+    const store = { launchProfiles: async () => ({}), rememberLaunchProfile: async () => {} };
+    const service = new LaunchService(config as never, { find: async () => [socket] }, panes as never, async path => path, store as never, () => [worktree]);
+
+    await expect(scratch ? service.launchHome() : service.launch(worktree.id)).resolves.toBe(true);
+
+    const window = run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[];
+    const cwd = scratch ? '/scratch' : '/host/account/repo';
+    expect(window.slice(0, 8)).toEqual(['-S', '/host-tmux/default', 'new-window', '-d', '-t', '$1', '-c', cwd]);
+    expect(window.at(-1)).toBe(interactiveShellBootstrap(hostCommand(expandHomeCommand(codexProgram, cwd), '/host/account'), '/host/account', '/usr/bin/zsh'));
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
+  });
+
   it('launches configured Codex worktrees through the interactive zsh environment', () => {
     const command = expandCommand('codex', { identity: '/worktrees/cora' });
 
@@ -74,23 +102,27 @@ describe('LaunchService', () => {
   });
 
   it('continues a worktree with codex resume --last instead of a shell alias', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora();
-    const calls: string[][] = [];
-    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: async (_socket: SocketRef, pane: string, buffer: string, command: string) => { calls.push(['paste', pane, buffer, command]); return true; }, enter: async (_socket: SocketRef, pane: string) => { calls.push(['enter', pane]); return true; } };
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
     const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree]);
 
     await expect(service.resume(worktree.id)).resolves.toBe(true);
 
-    expect(calls[0]).toMatchObject(['paste', '%4', expect.stringMatching(/^rac-launch-/), `${codexProgram} resume --last`]);
-    expect(calls[1]).toEqual(['enter', '%4']);
+    const window = run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[];
+    expect(window.at(-1)).toContain(`${codexProgram} resume --last`);
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
   });
 
   it('resumes an exact conversation with codex resume <id> through its Adapter', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora();
-    const calls: string[][] = [];
-    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: async (_socket: SocketRef, pane: string, buffer: string, command: string) => { calls.push(['paste', pane, buffer, command]); return true; }, enter: async (_socket: SocketRef, pane: string) => { calls.push(['enter', pane]); return true; } };
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
     const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree]);
 
     // any launchable codex worktree can resume through its Adapter; a template is no longer configured
@@ -100,26 +132,34 @@ describe('LaunchService', () => {
     // a malformed id never reaches the shell
     await expect(service.resumeConversation(worktree.id, 'bad; rm -rf /')).resolves.toBe(false);
 
-    expect(calls[0]).toMatchObject(['paste', '%4', expect.stringMatching(/^rac-launch-/), `${codexProgram} resume 0198c333-3333-7333-8333-333333333333`]);
-    expect(calls).toHaveLength(2);
+    const windows = run.mock.calls.filter(call => (call[1] as string[]).includes('new-window'));
+    expect((windows[0]?.[1] as string[]).at(-1)).toContain(`${codexProgram} resume 0198c333-3333-7333-8333-333333333333`);
+    expect(windows).toHaveLength(1);
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
   });
 
   it('injects the rendered hooks settings into a Claude worktree launch', async () => {
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const filesDir = await mkdtemp(join(tmpdir(), 'rac-launch-files-'));
     tempDirs.push(filesDir);
     process.env.RAC_ADAPTER_FILES_DIR = filesDir;
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora();
-    const calls: string[][] = [];
-    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: async (_socket: SocketRef, pane: string, buffer: string, command: string) => { calls.push(['paste', pane, buffer, command]); return true; }, enter: async (_socket: SocketRef, pane: string) => { calls.push(['enter', pane]); return true; } };
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
     const config = { adapters: { claude: { program: '/usr/local/bin/claude', args: [], env: {}, launchable: true } }, projects: [] };
     const store = { launchProfiles: async () => ({}), rememberLaunchProfile: async () => {} };
-    const service = new LaunchService(config as never, { find: async () => [socket] }, panes as never, undefined, store as never, () => [worktree]);
+    const service = new LaunchService(config as never, { find: async () => [socket] }, panes as never, undefined, store as never, () => [worktree], undefined, undefined, join(filesDir, 'launch'));
 
     await expect(service.resume(worktree.id, 'claude')).resolves.toBe(true);
 
     // continue → --continue --settings <rendered hooks.json>, program prepended
-    expect(calls[0]?.[3]).toBe(`/usr/local/bin/claude --continue --settings ${join(filesDir, 'claude', 'hooks.json')}`);
+    const window = run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[];
+    const descriptor = JSON.parse(await readFile(window.at(-1)!, 'utf8')) as { program: string; args: string[]; cwd: string };
+    const command = `/usr/local/bin/claude --continue --settings ${join(filesDir, 'claude', 'hooks.json')}`;
+    expect(descriptor).toEqual({ program: interactiveShellPath(), args: ['-lc', interactiveShellBootstrap(expandHomeCommand(command, worktree.identity), '$HOME', interactiveShellPath())], cwd: worktree.identity });
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
     expect(existsSync(join(filesDir, 'claude', 'hooks.json'))).toBe(true);
   });
 
@@ -221,6 +261,18 @@ describe('LaunchService', () => {
     expect(run).toHaveBeenLastCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%5', '@rac_display_label', 'Update Advisor Starting v4 2222222']);
   });
 
+  // closes the fresh advisor pane when its required label fails
+  it('closes an update advisor session when its display label fails', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    // fail only the required display label after creation
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: args.includes('@rac_display_label') ? 1 : 0, stdout: args.includes('new-session') ? '%5' : '', stderr: '' }));
+    const service = new LaunchService({ adapters: { codex: { program: codexProgram, args: [], env: {}, launchable: true } }, projects: [{ hostPath: '/home/ubuntu/remoteagents' }] } as never);
+
+    await expect(service.launchUpdateAdvisor('/home/ubuntu/remoteagents', '2'.repeat(40))).resolves.toBe(false);
+
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'kill-pane', '-t', '%5']);
+  });
+
   // account selection survives both the host bridge and the local runner
   it.each(['host', 'local'] as const)('keeps the configured Codex account for a %s update advisor', async transport => {
     const root = await mkdtemp(join(tmpdir(), 'rac-advisor-account-'));
@@ -310,7 +362,7 @@ describe('LaunchService', () => {
 
     await expect(service.launch('cora')).resolves.toBe(true);
     const freshSession = run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[];
-    expect(freshSession.slice(0, 12)).toEqual(['-S', '/host-tmux/default', 'new-session', '-d', '-s', 'cora', '-P', '-F', '#{pane_id}', '-c', '/home/ubuntu/cora', '/usr/bin/zsh']);
+    expect(freshSession.slice(0, 12)).toEqual(['-S', '/host-tmux/default', 'new-session', '-d', '-s', 'cora', '-c', '/home/ubuntu/cora', '-P', '-F', '#{pane_id}', '/usr/bin/zsh']);
     expect(freshSession[12]).toBe('-lc');
     // a fresh launch runs the configured program unchanged — no resume verb
     expect(freshSession[13]).toContain('codex');
@@ -361,16 +413,79 @@ describe('LaunchService', () => {
     expect(run).not.toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['@rac_sandboxed']));
   });
 
-  it('records @rac_sandboxed on the reused pane for a Sandboxed reuse-launch', async () => {
-    run.mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+  it('records @rac_sandboxed on the fresh window beside an idle shell', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora();
-    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: async () => true, enter: async () => true };
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
     const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree]);
 
     await expect((service as unknown as { launchWorktree(id: string, input: unknown): Promise<boolean> }).launchWorktree('cora', { mode: 'fresh', sandboxed: true })).resolves.toBe(true);
-    // the reused-pane branch marks the pane id on the pane's own socket
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%4', '@rac_sandboxed', '1']);
+    // the fresh window carries the launch marker while the old shell stays untouched
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%9', '@rac_sandboxed', '1']);
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
+  });
+
+  // closes only the fresh window when required metadata fails
+  it('closes a fresh Worktree window when its console mark fails', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    // fail only the new pane's required console mark
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: args.includes('@rac_console_managed') ? 1 : 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
+    const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
+    const worktree = cora();
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }] };
+    const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree]);
+
+    await expect(service.launch(worktree.id)).resolves.toBe(false);
+
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'kill-pane', '-t', '%9']);
+    expect(run).not.toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'kill-pane', '-t', '%4']);
+  });
+
+  // closes the fresh pane when the metadata process rejects
+  it('closes a fresh Worktree window when its console mark rejects', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    // reject only the new pane's required console mark
+    run.mockImplementation(async (_binary: string, args: string[]) => {
+      // emulate the process spawn error boundary
+      if (args.includes('@rac_console_managed')) throw new Error('private spawn detail');
+      return { code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' };
+    });
+    const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
+    const worktree = cora();
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }] };
+    const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree]);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let launched = true;
+    let diagnostic = '';
+
+    // capture the public diagnostic only
+    try {
+      launched = await service.launch(worktree.id);
+      diagnostic = error.mock.calls.flat().join(' ');
+    } finally {
+      error.mockRestore();
+    }
+
+    expect(launched).toBe(false);
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'kill-pane', '-t', '%9']);
+    expect(run).not.toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'kill-pane', '-t', '%4']);
+    expect(diagnostic).not.toContain('private spawn detail');
+  });
+
+  // closes only the fresh session pane when its place mark fails
+  it('closes a fresh Worktree session when its Place mark fails', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    // fail only the required place mark after creation
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: args.includes('@rac_place') ? 1 : 0, stdout: args.includes('new-session') ? '%7' : '', stderr: '' }));
+    const worktree = cora();
+    const service = new LaunchService(codex, { find: async () => [] }, undefined, undefined, undefined, () => [worktree]);
+
+    await expect(service.launch(worktree.id)).resolves.toBe(false);
+
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'kill-pane', '-t', '%7']);
   });
 
   it('names a new tmux session after the worktree directory, marking it through its pane since a dotted name is no target', async () => {
@@ -388,20 +503,20 @@ describe('LaunchService', () => {
     expect(run.mock.calls.some(call => (call[1] as string[]).includes('ferry.fyi') && (call[1] as string[]).includes('set-option'))).toBe(false);
   });
 
-  it('moves a colliding named session aside before launching a worktree agent', async () => {
+  it('suffixes a colliding session name without renaming or killing the existing session', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
-    run
-      .mockResolvedValueOnce({ code: 0, stdout: '$42\n', stderr: '' })
-      .mockResolvedValueOnce({ code: 0, stdout: 'owen\n', stderr: '' })
-      .mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+    run.mockImplementation(async (_binary: string, args: string[]) => ({
+      code: 0,
+      stdout: args.includes('list-sessions') ? 'owen\n' : args.includes('new-session') ? '%7\n' : '',
+      stderr: ''
+    }));
     const worktree = cora({ id: 'owen', label: 'Owen', path: '/worktrees/owen', hostPath: '/home/ubuntu/owen', pinned: true });
     const service = new LaunchService(codex, { find: async () => [] }, undefined, undefined, undefined, () => [worktree]);
 
     await expect(service.launch(worktree.id)).resolves.toBe(true);
 
-    expect(run.mock.calls[0]?.[1]).toEqual(['-S', '/host-tmux/default', 'display-message', '-p', '-t', '=owen:', '#{session_id}']);
-    expect(run.mock.calls[2]?.[1]).toEqual(['-S', '/host-tmux/default', 'rename-session', '-t', '$42', expect.stringMatching(/^rac-replacing-[a-f0-9]+$/u)]);
-    expect(run.mock.calls[3]?.[1]).toEqual(expect.arrayContaining(['-S', '/host-tmux/default', 'new-session', '-d', '-s', 'owen', '-c', worktree.hostPath]));
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['-S', '/host-tmux/default', 'new-session', '-d', '-s', 'owen-2', '-c', worktree.hostPath]));
+    expect(run.mock.calls.some(call => (call[1] as string[]).includes('rename-session') || (call[1] as string[]).includes('kill-session'))).toBe(false);
   });
 
   it('starts a Worktree idle shell named after the checkout when the name is free', async () => {
@@ -530,24 +645,27 @@ describe('LaunchService', () => {
     expect(run.mock.calls[4]?.[1]).toEqual(['-S', '/tmp/tmux', 'rename-session', '-t', '$42', 'owen']);
   });
 
-  it('reuses an existing shell whose git toplevel is the worktree, even from a subdirectory', async () => {
+  it('opens a fresh window in the marked worktree session even when its shell changed directories', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora({ id: 'alex', label: 'Alex', path: '/worktrees/alex', hostPath: '/home/ubuntu/alex' });
-    const calls: string[][] = [];
     const finder = { find: async () => [socket] };
-    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: '/home/ubuntu/alex/src', command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: async (_socket: SocketRef, pane: string, buffer: string, command: string) => { calls.push(['paste', pane, buffer, command]); return true; }, enter: async (_socket: SocketRef, pane: string) => { calls.push(['enter', pane]); return true; } };
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: '/home/ubuntu/alex/src', command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
     // the subdirectory shares the worktree's toplevel, so it belongs to the worktree
     const paneRoot = async (path: string) => path === '/home/ubuntu/alex/src' ? '/home/ubuntu/alex' : path;
     const service = new LaunchService(codex, finder, panes as never, paneRoot, undefined, () => [worktree]);
 
     await expect(service.launch('alex')).resolves.toBe(true);
-    expect(calls[0]).toMatchObject(['paste', '%4', expect.stringMatching(/^rac-launch-/), codexProgram]);
-    expect(calls[1]).toEqual(['enter', '%4']);
+    const window = run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[];
+    expect(window.slice(0, 8)).toEqual(['-S', '/host-tmux/default', 'new-window', '-d', '-t', '$1', '-c', '/home/ubuntu/alex']);
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
   });
 
-  it('never hijacks a shell sitting in a nested checkout under the worktree', async () => {
+  it('uses the marked workspace session without modifying a shell in a nested checkout', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
-    run.mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora({ id: 'alex', label: 'Alex', path: '/worktrees/alex', hostPath: '/home/ubuntu/alex' });
     const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: '/home/ubuntu/alex/.claude/worktrees/3', command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(), enter: vi.fn() };
@@ -557,24 +675,26 @@ describe('LaunchService', () => {
 
     await expect(service.launch('alex')).resolves.toBe(true);
 
-    // the nested checkout is left alone; the console starts a fresh session instead
+    // the nested checkout is left alone; the agent gets a fresh window in its marked session
     expect(panes.pastePrompt).not.toHaveBeenCalled();
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['new-session', '-d', '-s', 'alex', '-c', '/home/ubuntu/alex']));
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['new-window', '-d', '-t', '$1', '-c', '/home/ubuntu/alex']));
+    expect(run.mock.calls.some(call => (call[1] as string[]).includes('new-session'))).toBe(false);
   });
 
   it('lists panes on every socket concurrently and prefers the first socket', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const first: SocketRef = { fingerprint: 'first', path: '/host-tmux/first', device: 1, inode: 1 };
     const second: SocketRef = { fingerprint: 'second', path: '/host-tmux/second', device: 1, inode: 2 };
     const worktree = cora({ id: 'alex', label: 'Alex', path: '/worktrees/alex', hostPath: '/home/ubuntu/alex' });
-    const calls: string[][] = [];
     const started: string[] = [];
     const finder = { find: async () => [first, second] };
     const pane = (socket: SocketRef, id: string) => ({ paneId: id, sessionId: '$1', pid: 123, path: '/home/ubuntu/alex', command: 'zsh', title: '', placeMark: worktree.id, socket });
     const panes = {
       // the first socket answers last; a sequential scan would still finish it first, a concurrent scan must not wait to start the second
       listPanes: async (socket: SocketRef) => { started.push(socket.fingerprint); await new Promise(resolve => setTimeout(resolve, socket === first ? 20 : 0)); return [pane(socket, socket === first ? '%1' : '%2')]; },
-      pastePrompt: async (socket: SocketRef, pane: string, buffer: string, command: string) => { calls.push(['paste', socket.fingerprint, pane, buffer, command]); return true; },
-      enter: async (socket: SocketRef, pane: string) => { calls.push(['enter', socket.fingerprint, pane]); return true; }
+      pastePrompt: vi.fn(async () => true),
+      enter: vi.fn(async () => true)
     };
     const service = new LaunchService(codex, finder, panes as never, undefined, undefined, () => [worktree]);
 
@@ -583,59 +703,63 @@ describe('LaunchService', () => {
     await new Promise(resolve => setTimeout(resolve, 5));
     expect(started).toEqual(['first', 'second']);
     await expect(launch).resolves.toBe(true);
-    expect(calls[0]).toMatchObject(['paste', 'first', '%1', expect.stringMatching(/^rac-launch-/), codexProgram]);
-    expect(calls[1]).toEqual(['enter', 'first', '%1']);
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['-S', '/host-tmux/first', 'new-window', '-d', '-t', '$1']));
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
   });
 
-  it('does not start an agent from an existing Bash pane', async () => {
+  it('preserves a terminal-open shell and launches beside it without replacing its session', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
-    run.mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora({ id: 'owen', label: 'Owen', path: '/worktrees/owen', hostPath: '/home/ubuntu/owen' });
     const panes = {
       listPanes: async () => [{ paneId: '%4', sessionId: '$1', sessionName: 'operator-bash', pid: 123, path: '/home/ubuntu/owen', command: 'bash', title: '', placeMark: worktree.id, socket }],
       pastePrompt: vi.fn(),
-      enter: vi.fn()
+      enter: vi.fn(),
+      close: vi.fn()
     };
-    const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree]);
+    const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree], () => new Set(['socket\0%4']));
 
     await expect(service.launch('owen')).resolves.toBe(true);
 
     expect(panes.pastePrompt).not.toHaveBeenCalled();
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['/usr/bin/zsh', '-lc', expect.stringContaining('source "$HOME/.zshrc"')]));
+    expect(panes.enter).not.toHaveBeenCalled();
+    expect(panes.close).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['new-window', '-d', '-t', '$1']));
+    expect(run.mock.calls.some(call => (call[1] as string[]).includes('new-session') || (call[1] as string[]).includes('rename-session'))).toBe(false);
   });
 
-  // identify the rejected shell handoff without retrying an uncertain launch
-  it.each(['paste', 'submit', 'mark'])('reports the %s stage of a failed reused-shell launch', async stage => {
+  it('does not fall back or modify the idle shell when its fresh window fails', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora();
     const panes = {
-      // expose one reusable worktree shell
+      // expose one marked worktree shell
       listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }],
-      // reject the selected handoff stage
-      pastePrompt: vi.fn(async () => stage !== 'paste'),
-      // reject the selected submission stage
-      enter: vi.fn(async () => stage !== 'submit')
+      pastePrompt: vi.fn(async () => true),
+      enter: vi.fn(async () => true)
     };
-    // reject the selected ownership marker
-    run.mockResolvedValue({ code: stage === 'mark' ? 1 : 0, stdout: '', stderr: '' });
+    run.mockImplementation(async (_binary: string, args: string[]) => args.includes('new-window') ? { code: 1, stdout: '', stderr: 'failed' } : { code: 0, stdout: '', stderr: '' });
     // silence the expected launch diagnostics
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    // discover only the reusable worktree shell
     const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree]);
     try {
       await expect(service.launch(worktree.id)).resolves.toBe(false);
-      expect(error).toHaveBeenCalledWith(expect.stringContaining(`shell %4: ${stage} failed`));
-      expect(panes.enter).toHaveBeenCalledTimes(stage === 'paste' ? 0 : 1);
-      // exclude a duplicate fallback launch
-      expect(run.mock.calls.some(call => (call[1] as string[]).includes('new-window'))).toBe(false);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("tmux new-window in '$1' failed (code 1): failed"));
+      expect(panes.pastePrompt).not.toHaveBeenCalled();
+      expect(panes.enter).not.toHaveBeenCalled();
+      expect(run.mock.calls.filter(call => (call[1] as string[]).includes('new-window'))).toHaveLength(1);
+      expect(run.mock.calls.some(call => (call[1] as string[]).includes('new-session'))).toBe(false);
     } finally {
       error.mockRestore();
     }
   });
 
-  it('reuses an existing pane for the configured host shell', async () => {
+  it('opens a fresh window with the configured host shell beside a matching pane', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
     process.env.RAC_HOST_INTERACTIVE_SHELL = '/bin/bash';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora({ id: 'bash-project', label: 'Bash project', path: '/worktrees/bash-project', hostPath: '/home/operator/bash-project' });
     const panes = { listPanes: async () => [{ paneId: '%7', sessionId: '$7', pid: 456, path: worktree.hostPath!, command: 'bash', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
@@ -643,13 +767,16 @@ describe('LaunchService', () => {
 
     await expect(service.launch(worktree.id)).resolves.toBe(true);
 
-    expect(panes.pastePrompt).toHaveBeenCalled();
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%7', '@rac_console_managed', '1']);
+    const window = run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[];
+    expect(window).toEqual(expect.arrayContaining(['-t', '$7', '--', '/bin/bash', '-lc']));
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%9', '@rac_console_managed', '1']);
   });
 
-  it('does not launch Owen inside a transient stack command session', async () => {
+  it('opens a fresh window when an existing marked session has a stack-like name', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
-    run.mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora({ id: 'owen', label: 'Owen', path: '/worktrees/owen', hostPath: '/home/ubuntu/owen' });
     const panes = {
@@ -662,12 +789,15 @@ describe('LaunchService', () => {
     await expect(service.launch('owen')).resolves.toBe(true);
 
     expect(panes.pastePrompt).not.toHaveBeenCalled();
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['new-session', '-d', '-s', 'owen', '-c', '/home/ubuntu/owen']));
+    expect(panes.enter).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['new-window', '-d', '-t', '$1', '-c', '/home/ubuntu/owen']));
+    expect(run.mock.calls.some(call => (call[1] as string[]).includes('new-session'))).toBe(false);
   });
 
-  // keep modal shells outside worktree launches
-  it('does not reuse a labeled update-advisor shell for a worktree launch', async () => {
+  // preserve modal panes while using their marked workspace session
+  it('opens a fresh window beside a labeled update-advisor shell', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora({ id: 'remoteagents', label: 'Remote Agents', path: '/workspace', hostPath: '/home/ubuntu/remoteagents' });
     const panes = {
@@ -681,7 +811,9 @@ describe('LaunchService', () => {
     await expect(service.resume(worktree.id)).resolves.toBe(true);
 
     expect(panes.pastePrompt).not.toHaveBeenCalled();
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['new-session', '-d', '-s', 'remoteagents', '-c', '/home/ubuntu/remoteagents']));
+    expect(panes.enter).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['new-window', '-d', '-t', '$1', '-c', '/home/ubuntu/remoteagents']));
+    expect(run.mock.calls.some(call => (call[1] as string[]).includes('new-session'))).toBe(false);
   });
 
   it('composes [program, …adapter args, …operator args] with the merged env as a shell-quoted prefix', () => {
@@ -703,10 +835,11 @@ describe('LaunchService', () => {
   });
 
   it('launches a configured kind through its program, appending operator args and env', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora();
-    const calls: string[][] = [];
-    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: async (_socket: SocketRef, pane: string, _buffer: string, command: string) => { calls.push(['paste', pane, command]); return true; }, enter: async () => true };
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
     const remembered: Array<[string, string]> = [];
     const store = { launchProfiles: async () => ({}), rememberLaunchProfile: async (key: string, kind: string) => { remembered.push([key, kind]); } };
     const config = { adapters: { codex: { program: '/usr/local/bin/codex', args: ['--search'], env: { RAC_X: '1' }, launchable: true } }, projects: [] };
@@ -715,16 +848,20 @@ describe('LaunchService', () => {
     await expect(service.launch('cora')).resolves.toBe(true);
 
     // fresh launch: no adapter mode args, operator's --search appended, env prefixed
-    expect(calls[0]).toEqual(['paste', '%4', 'RAC_X=1 /usr/local/bin/codex --search']);
+    const window = run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[];
+    expect(window.at(-1)).toContain('RAC_X=1 /usr/local/bin/codex --search');
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
     // the resolved kind is recorded for this Worktree and its Project
     expect(remembered).toEqual([['cora', 'codex'], ['proj', 'codex']]);
   });
 
   it('runs a configured setup command before the program in the launched pane', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora();
-    const calls: string[][] = [];
-    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: async (_socket: SocketRef, pane: string, _buffer: string, command: string) => { calls.push(['paste', pane, command]); return true; }, enter: async () => true };
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
     const store = { launchProfiles: async () => ({}), rememberLaunchProfile: async () => {} };
     const config = { adapters: { codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true, setup: 'rm -f .omx/state/session.json' } }, projects: [] };
     const service = new LaunchService(config as never, { find: async () => [socket] }, panes as never, undefined, store as never, () => [worktree]);
@@ -732,14 +869,19 @@ describe('LaunchService', () => {
     await expect(service.launch('cora')).resolves.toBe(true);
 
     // the setup runs first in the same pane; its non-zero exit would stop the program
-    expect(calls[0]).toEqual(['paste', '%4', "eval 'rm -f .omx/state/session.json' && /usr/local/bin/codex"]);
+    const window = run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[];
+    const command = "eval 'rm -f .omx/state/session.json' && /usr/local/bin/codex";
+    expect(window.at(-1)).toBe(interactiveShellBootstrap(hostCommand(expandHomeCommand(command, worktree.hostPath!), '/home/ubuntu'), '/home/ubuntu', '/usr/bin/zsh'));
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
   });
 
   it('composes an OMX launch from adapters.omx: the setup, then the program with --direct and the mode arguments', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? `%${run.mock.calls.filter(call => (call[1] as string[]).includes('new-window')).length + 9}` : '', stderr: '' }));
     const socket: SocketRef = { fingerprint: 'socket', path: '/host-tmux/default', device: 1, inode: 2 };
     const worktree = cora();
-    const calls: string[][] = [];
-    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: async (_socket: SocketRef, pane: string, _buffer: string, command: string) => { calls.push(['paste', pane, command]); return true; }, enter: async () => true };
+    const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
     const store = { launchProfiles: async () => ({}), rememberLaunchProfile: async () => {} };
     // the OMX-on-ZFS configuration: plain Codex stays on adapters.codex, OMX carries the pointer cleanup
     const config = { adapters: { codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true }, omx: { program: '/abs/omx', args: [], env: {}, launchable: true, setup: 'rm -f .omx/state/session.json' } }, projects: [] };
@@ -751,11 +893,16 @@ describe('LaunchService', () => {
     await expect(service.resume('cora', 'omx')).resolves.toBe(true);
     await expect(service.resumeConversation('cora', '0198c333-3333-7333-8333-333333333333', 'omx')).resolves.toBe(true);
 
-    expect(calls.map(call => call[2])).toEqual([
-      "eval 'rm -f .omx/state/session.json' && /abs/omx --direct",
-      "eval 'rm -f .omx/state/session.json' && /abs/omx --direct resume --last",
-      "eval 'rm -f .omx/state/session.json' && /abs/omx --direct resume 0198c333-3333-7333-8333-333333333333"
+    const bootstraps = run.mock.calls.filter(call => (call[1] as string[]).includes('new-window')).map(call => (call[1] as string[]).at(-1));
+    // build the exact host bootstrap
+    const bootstrap = (command: string) => interactiveShellBootstrap(hostCommand(expandHomeCommand(command, worktree.hostPath!), '/home/ubuntu'), '/home/ubuntu', '/usr/bin/zsh');
+    expect(bootstraps).toEqual([
+      bootstrap("eval 'rm -f .omx/state/session.json' && /abs/omx --direct"),
+      bootstrap("eval 'rm -f .omx/state/session.json' && /abs/omx --direct resume --last"),
+      bootstrap("eval 'rm -f .omx/state/session.json' && /abs/omx --direct resume 0198c333-3333-7333-8333-333333333333")
     ]);
+    expect(panes.pastePrompt).not.toHaveBeenCalled();
+    expect(panes.enter).not.toHaveBeenCalled();
   });
 
   it('refuses a requested kind that is not configured or launchable', async () => {
@@ -836,7 +983,7 @@ describe('LaunchService', () => {
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['set-option', '-t', '%5', '@rac_place', 'alex']);
     });
 
-    it('never adopts a Console shell for a launch and joins its session instead', async () => {
+    it('opens a fresh window in a Console shell session without modifying the shell', async () => {
       process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
       run.mockResolvedValue({ code: 0, stdout: '%9', stderr: '' });
       const socket: SocketRef = { fingerprint: 'sock', path: '/host-tmux/default', device: 1, inode: 2 };
@@ -847,7 +994,7 @@ describe('LaunchService', () => {
       await expect(service.launch('alex')).resolves.toBe(true);
 
       expect(panes.pastePrompt).not.toHaveBeenCalled();
-      // no adoptable idle shell: the launch adds a window to the session holding the Console shell
+      // the launch adds a window to the session holding the Console shell
       const newWindow = run.mock.calls.find(call => call[1].includes('new-window'));
       expect(newWindow?.[1]).toEqual(expect.arrayContaining(['-S', '/host-tmux/default', 'new-window', '-d', '-t', '$1']));
     });
@@ -857,7 +1004,7 @@ describe('LaunchService', () => {
       run.mockResolvedValue({ code: 0, stdout: '%9', stderr: '' });
       const socket: SocketRef = { fingerprint: 'sock', path: '/host-tmux/default', device: 1, inode: 2 };
       const worktree = alex();
-      // the live Agent's pane runs the agent, not a shell, so nothing is adoptable
+      // the live Agent's session has placement priority
       const panes = { listPanes: async () => [shellPane({ command: 'codex' }, socket)], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
       const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree], () => new Set(), async placeId => (placeId === 'alex' ? { socket, session: '$3' } : undefined));
 
@@ -870,7 +1017,7 @@ describe('LaunchService', () => {
 
     // a Stack process runs in the Workspace session; its pane's foreground command is the login
     // shell wrapping the dev server, so only its role tells it from an idle shell
-    it('never adopts a Stack process pane for a launch, which would type a prompt into the dev server', async () => {
+    it('opens beside a Stack process pane without typing into the dev server', async () => {
       process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
       run.mockResolvedValue({ code: 0, stdout: '%9', stderr: '' });
       const socket: SocketRef = { fingerprint: 'sock', path: '/host-tmux/default', device: 1, inode: 2 };
@@ -900,12 +1047,12 @@ describe('LaunchService', () => {
       expect(run.mock.calls.some(call => call[1].includes('new-session') || call[1].includes('rename-session'))).toBe(false);
     });
 
-    it('never adopts a pane the operator currently has open as a Terminal', async () => {
+    it('opens beside a pane the operator currently has open as a Terminal', async () => {
       process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
       run.mockResolvedValue({ code: 0, stdout: '%9', stderr: '' });
       const socket: SocketRef = { fingerprint: 'sock', path: '/host-tmux/default', device: 1, inode: 2 };
       const worktree = alex();
-      // an ordinary idle shell that would normally be adopted, but a browser has it open
+      // the browser-open shell remains untouched
       const panes = { listPanes: async () => [shellPane({}, socket)], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
       const service = new LaunchService(codex, { find: async () => [socket] }, panes as never, undefined, undefined, () => [worktree], () => new Set(['sock\0%1']));
 
@@ -1030,40 +1177,48 @@ describe('LaunchService', () => {
     const tmuxCall = (verb: string) => run.mock.calls.find(call => (call[1] as string[]).includes(verb))?.[1] as string[] | undefined;
     beforeEach(() => { process.env.RAC_HOST_TMUX_DIR = '/host-tmux'; });
 
-    it("adopts the Place's idle console-launched shell, never a Console shell, a stranger's shell, a subfolder, another label or another session's", async () => {
+    it("opens a fresh window in the Place's marked session without modifying any existing pane", async () => {
       const pastePrompt = vi.fn(async () => true);
+      const enter = vi.fn(async () => true);
+      run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
       const launch = service([
         { paneId: '%1', role: 'shell', consoleManaged: true, displayLabel: 'Notes' }, // a Console shell
         { paneId: '%2' },                                                            // the operator's own shell
-        { paneId: '%6', consoleManaged: true },                                      // the operator's shell a Worktree launch once adopted
+        { paneId: '%6', consoleManaged: true },                                      // another console-managed pane
         { paneId: '%3', path: '/host/notes/drafts', consoleManaged: true, displayLabel: 'Notes' }, // a subfolder
         { paneId: '%4', consoleManaged: true, displayLabel: 'Update Advisor' },     // another launch's label
         { paneId: '%7', command: 'codex', consoleManaged: true, displayLabel: 'Notes' }, // a running Agent
         { paneId: '%8', sessionId: '$2', consoleManaged: true, displayLabel: 'Notes', placeMark: undefined }, // outside the Workspace session
         { paneId: '%5', consoleManaged: true, displayLabel: 'Notes' }               // the Project's last Agent, exited
-      ], undefined, { pastePrompt });
+      ], undefined, { pastePrompt, enter });
 
       await expect(launch.launchProjectDirectory('notes')).resolves.toBe(true);
 
-      expect(pastePrompt).toHaveBeenCalledTimes(1);
-      expect(pastePrompt).toHaveBeenCalledWith(socket, '%5', expect.stringMatching(/^rac-launch-/u), codexProgram);
-      expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%5', '@rac_display_label', 'Notes']);
+      expect(pastePrompt).not.toHaveBeenCalled();
+      expect(enter).not.toHaveBeenCalled();
+      expect(tmuxCall('new-window')?.slice(0, 8)).toEqual(['-S', '/host-tmux/default', 'new-window', '-d', '-t', '$1', '-c', '/host/notes']);
+      expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%9', '@rac_display_label', 'Notes']);
       expect(tmuxCall('new-session')).toBeUndefined();
-      expect(tmuxCall('new-window')).toBeUndefined();
     });
 
-    it('adopts at the Place home itself for a Scratch Place and an unbridged directory Project', async () => {
-      const pastePrompt = vi.fn(async (_socket: SocketRef, _pane: string, _buffer: string, _text: string) => true);
+    it('opens fresh windows at the Place home for Scratch and an unbridged directory Project', async () => {
+      let paneId = 8;
+      run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? `%${++paneId}` : '', stderr: '' }));
+      const pastePrompt = vi.fn(async () => true);
+      const enter = vi.fn(async () => true);
       const local = { ...(config as object), projects: [{ ...notes, hostPath: undefined }] } as never;
       const launch = service([
         { paneId: '%1', path: '/data/notes', consoleManaged: true, displayLabel: 'Notes' },
         { paneId: '%2', sessionId: '$2', path: '/home/me/scratch', consoleManaged: true, displayLabel: scratchLabel, placeMark: 'scratch:/home/me/scratch' }
-      ], undefined, { pastePrompt }, local);
+      ], undefined, { pastePrompt, enter }, local);
 
       await expect(launch.launchProjectDirectory('notes')).resolves.toBe(true);
       await expect(launch.launchHome()).resolves.toBe(true);
 
-      expect(pastePrompt.mock.calls.map(call => call[1])).toEqual(['%1', '%2']);
+      const windows = run.mock.calls.filter(call => (call[1] as string[]).includes('new-window')).map(call => call[1] as string[]);
+      expect(windows.map(window => window.slice(4, 8))).toEqual([['-t', '$1', '-c', '/data/notes'], ['-t', '$2', '-c', '/home/me/scratch']]);
+      expect(pastePrompt).not.toHaveBeenCalled();
+      expect(enter).not.toHaveBeenCalled();
       expect(tmuxCall('new-session')).toBeUndefined();
     });
 
@@ -1100,7 +1255,19 @@ describe('LaunchService', () => {
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/run/user/1000/tmux/default', 'set-option', '-p', '-t', '%9', '@rac_display_label', 'Notes']);
     });
 
-    it('starts a session named for the Place when it has nothing to adopt or join', async () => {
+    // closes only the fresh place window when its label fails
+    it('closes a fresh Place window when its display label fails', async () => {
+      // fail only the required display label after creation
+      run.mockImplementation(async (_binary: string, args: string[]) => ({ code: args.includes('@rac_display_label') ? 1 : 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
+      const launch = service([{ paneId: '%1', role: 'shell', consoleManaged: true, displayLabel: 'Notes' }]);
+
+      await expect(launch.launchProjectDirectory('notes')).resolves.toBe(false);
+
+      expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'kill-pane', '-t', '%9']);
+      expect(run).not.toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'kill-pane', '-t', '%1']);
+    });
+
+    it('starts a session named for the Place when it has nothing to join', async () => {
       let panes = 0;
       run.mockImplementation(async (_bin: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? `%${++panes}` : '', stderr: '' }));
       const launch = service([]);
@@ -1119,6 +1286,17 @@ describe('LaunchService', () => {
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%1', '@rac_display_label', 'Notes']);
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%1', '@rac_console_managed', '1']);
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%2', '@rac_display_label', scratchLabel]);
+    });
+
+    // closes the fresh place session pane when its label fails
+    it('closes a fresh Place session when its display label fails', async () => {
+      // fail only the required display label after creation
+      run.mockImplementation(async (_binary: string, args: string[]) => ({ code: args.includes('@rac_display_label') ? 1 : 0, stdout: args.includes('new-session') ? '%5' : '', stderr: '' }));
+      const launch = service([]);
+
+      await expect(launch.launchProjectDirectory('notes')).resolves.toBe(false);
+
+      expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'kill-pane', '-t', '%5']);
     });
 
     it('writes a dotted Place folder as tmux will list its session, so the free-name check sees it', async () => {
@@ -1301,7 +1479,7 @@ describe('Review run launches', () => {
     expect(codexMcpDisableArgs(['docs', 'a.b'])).toBeUndefined();
   });
 
-  it('opens a marked, labelled window in the Workspace session, keeping the Claude hooks settings, without adopting its idle shell', async () => {
+  it('opens a marked, labelled window in the Workspace session, keeping the Claude hooks settings and idle shell untouched', async () => {
     const filesDir = await mkdtemp(join(tmpdir(), 'rac-launch-files-'));
     tempDirs.push(filesDir);
     process.env.RAC_ADAPTER_FILES_DIR = filesDir;
@@ -1364,7 +1542,7 @@ describe('Review run launches', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it('never adopts a Review run pane whose Agent exited back to the shell', async () => {
+  it('opens beside a Review run pane whose Agent exited back to the shell', async () => {
     run.mockResolvedValue({ code: 0, stdout: '', stderr: '' });
     const worktree = cora();
     const root = await mkdtemp(join(tmpdir(), 'rac-launch-root-'));

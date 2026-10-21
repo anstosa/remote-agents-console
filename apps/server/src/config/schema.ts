@@ -77,8 +77,10 @@ const serverName = z.string().trim().min(1).max(80).refine(value => !value.inclu
 const adapterProgram = z.string().min(1).max(4096).startsWith('/', 'adapter program must be an absolute path').refine(value => !value.includes('\0'), 'NUL is forbidden');
 const adapterArgument = z.string().max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden');
 const adapterEnvName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u, 'invalid environment variable name');
+// reject whitespace-only update commands without normalizing meaningful bytes
+const adapterUpdateCommand = command.refine(value => value.trim().length > 0, 'update command cannot be blank');
 // version inspection and update commands are one all-or-nothing trusted shell contract
-const adapterUpdates = z.object({ current: command, latest: command, run: command }).strict();
+const adapterUpdates = z.object({ current: adapterUpdateCommand, latest: adapterUpdateCommand, run: adapterUpdateCommand }).strict();
 // `setup`/`teardown` are operator-trust lifecycle commands (shell-interpreted, like a
 // Project's stack commands): `setup` runs in the launched pane before the program and
 // aborts the launch on failure; `teardown` runs best-effort after the console stops an
@@ -97,6 +99,7 @@ const integrationFeatures = z.object({
   enabled: z.boolean().default(false),
   mcp: z.object({ readEnabled: z.boolean().default(true), writeEnabled: z.boolean().default(false), dangerousEnabled: z.boolean().default(false) }).strict().default({}),
   realtime: z.object({ enabled: z.boolean().default(false), name: davoName.default(defaultDavoName), context: davoContext.default(defaultDavoContext), writeToolsEnabled: z.boolean().default(false) }).strict().default({}),
+  // accept legacy input while runtime derives federation from configured remotes
   multiInstance: z.object({ enabled: z.boolean().default(false) }).strict().default({})
 }).strict().default({});
 export const sourceSchema = z.object({
@@ -141,6 +144,11 @@ export type ValidatedConfig = { listen: { host: string; port: number }; name: st
 export type ValidateConfigOptions = { warn?: (message: string) => void; checkExecutables?: boolean };
 // support legacy test fixtures
 export const defaultIntegrationConfig: IntegrationConfig = integrationFeatures.parse(undefined);
+
+// derive federation from configured peers, never the legacy authored switch
+export function integrationConfigForRemotes(config: IntegrationConfig | undefined, remoteServers: readonly RemoteServer[]): IntegrationConfig {
+  return { ...(config ?? defaultIntegrationConfig), multiInstance: { enabled: remoteServers.length > 0 } };
+}
 
 // parse one exact voice setting update
 export function parseDavoSettings(value: unknown): DavoSettings | undefined {
@@ -251,13 +259,15 @@ async function resolveProject(raw: ParsedProject): Promise<Project> {
     const absolute = resolve(raw.path, path);
     return await realpath(absolute).catch(() => absolute);
   }));
+  // a blank host override inherits path only when launches run through the host bridge
+  const hostPath = raw.hostPath ?? (process.env.RAC_HOST_TMUX_DIR === undefined ? undefined : raw.path);
   const optional = {
     ...(worktreeOverrides === undefined ? {} : { worktreeOverrides }),
     ...(worktreeOrder === undefined ? {} : { worktreeOrder }),
     ...(raw.commands === undefined ? {} : { commands: raw.commands satisfies StackCommands }),
     ...(raw.newTask === undefined ? {} : { newTask: raw.newTask }),
     ...(raw.defaultBranch === undefined ? {} : { defaultBranch: raw.defaultBranch }),
-    ...(raw.hostPath === undefined ? {} : { hostPath: resolve(raw.hostPath) }),
+    ...(hostPath === undefined ? {} : { hostPath: resolve(hostPath) }),
     ...preview
   };
   const canonical = await realpath(raw.path).catch(() => undefined);
@@ -395,5 +405,5 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
     else { if (identities.has(project.identity)) throw new Error('duplicate project identity'); identities.add(project.identity); }
     projects.push(project);
   }
-  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: parsed.integrations, review, projects };
+  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), review, projects };
 }

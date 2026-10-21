@@ -216,6 +216,23 @@ describe('settings host transport', () => {
     await expect(transport.request(request)).rejects.toThrowError('settings_helper_invalid');
   });
 
+  // retain only the exact watchdog progress shape from host replies
+  it('sanitizes restart progress on terminal host replies', async () => {
+    const root = await fixtureRoot();
+    const transport = new HostSettingsTransport(root, 20);
+    await mkdir(join(root, 'status'), { recursive: true, mode: 0o700 });
+    const validId = 'restartprogressreply001';
+    const validRequest: HostRequest = { version: 1, id: validId, kind: 'restart', generation: 1, targets: ['rac'] };
+    const restart = { recoveryDeadline: 1_800_000_000_000, state: 'restarted' };
+    await writeFile(join(root, 'status', `${validId}.json`), JSON.stringify({ version: 1, id: validId, kind: 'restart', state: 'complete', restart }), { mode: 0o600 });
+    await expect(transport.request(validRequest)).resolves.toMatchObject({ restart });
+
+    const invalidId = 'restartprogressreply002';
+    const invalidRequest: HostRequest = { ...validRequest, id: invalidId };
+    await writeFile(join(root, 'status', `${invalidId}.json`), JSON.stringify({ version: 1, id: invalidId, kind: 'restart', state: 'complete', restart: { ...restart, extra: true } }), { mode: 0o600 });
+    await expect(transport.request(invalidRequest)).resolves.not.toHaveProperty('restart');
+  });
+
   // convert only scoped migration requirements into field-safe validation issues
   it('maps scoped migration failures and rejects unscoped or malformed metadata', async () => {
     const root = await fixtureRoot();

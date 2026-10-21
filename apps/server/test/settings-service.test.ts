@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validateConfig, type ValidatedConfig } from '../src/config/schema.js';
-import { SettingsError, type HostReply, type HostRequest, type Installation } from '../src/settings/contracts.js';
+import { SettingsError, type CloudflareStatus, type HostReply, type HostRequest, type Installation } from '../src/settings/contracts.js';
 import { readBounded, writePrivate } from '../src/settings/files.js';
 import { applicationHash, contentHash, environmentProjection } from '../src/settings/proof.js';
 import { SettingsService } from '../src/settings/service.js';
@@ -25,6 +25,197 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
+describe('simple Cloudflare connector setup', () => {
+  // status inspection must not take ownership of a saved settings restart
+  it('keeps pending settings restartable after a read-only connector status query', async () => {
+    const current = await fixture();
+    await establishEffective(current);
+    const before = source(await current.service.snapshot(), 'app');
+    await current.service.save({ changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [{ op: 'set', path: ['listen'], value: { host: '127.0.0.1', port: 9191 } }] }] });
+    await current.service.cloudflareStatus();
+    const query = current.transport.records.find(record => record.request.cloudflare?.action === 'status')!.request;
+    await writePrivate(join(current.controlRoot, 'latest.json'), JSON.stringify({ id: query.id, kind: 'cloudflare', state: 'complete', phase: 'inspected' }));
+
+    const status = await current.service.status();
+
+    expect(status).toMatchObject({ pending: true, targets: ['rac'], restartAvailable: true });
+    expect(status).not.toHaveProperty('operation');
+    await expect(current.service.restart()).resolves.toMatchObject({ state: 'queued' });
+  });
+
+  // retain old restart discovery without granting inspection deployment authority
+  it.each(['restart', 'reconcile'])('retains the legacy %s deployment pointer', async kind => {
+    const current = await fixture();
+    const operation = { id: 'legacy_restart_pointer_01', kind, state: 'running', phase: 'restarting' };
+    await writePrivate(join(current.controlRoot, 'latest.json'), JSON.stringify(operation));
+
+    await expect(current.service.status()).resolves.toMatchObject({ operation: { id: operation.id, state: 'running', phase: 'restarting' } });
+  });
+
+  // retain the configured public endpoint separately from the loopback upstream
+  it('returns the configured tunnel endpoint without credentials or path selectors', async () => {
+    const current = await fixture();
+    current.transport.cloudflare = { supported: true, mode: 'local', enabled: true, tokenPresent: false, serviceUrl: 'http://127.0.0.1:8787', hostname: 'agents.example.com', endpoint: 'https://agents.example.com:8443', connected: true };
+    await expect(current.service.cloudflareStatus()).resolves.toMatchObject({ endpoint: 'https://agents.example.com:8443', hostname: 'agents.example.com', connected: true });
+  });
+  // reject credential-bearing or noncanonical endpoint metadata before caching
+  it.each(['https://operator:private@agents.example.com', 'javascript:alert(1)', 'https://agents.example.com/private'])('rejects unsafe configured tunnel endpoint metadata', async endpoint => {
+    const current = await fixture();
+    current.transport.cloudflare = { supported: true, mode: 'local', enabled: true, tokenPresent: false, serviceUrl: 'http://127.0.0.1:8787', endpoint, connected: true };
+    await expect(current.service.cloudflareStatus()).rejects.toMatchObject({ code: 'settings_helper_invalid' });
+  });
+  // stage connector credentials privately and keep status responses redacted
+  it('queues connector setup with app and installation compare-and-swap proof', async () => {
+    const current = await fixture();
+    const installationPath = await addInstallationSource(current);
+    await establishCloudflareEffective(current, installationPath);
+    const token = 'synthetic-connector-credential';
+
+    const result = await current.service.configureCloudflare({ action: 'connect', token });
+    const status = await current.service.cloudflareStatus();
+    const runtime = await current.service.status();
+    const connect = current.transport.records.find(record => record.request.cloudflare?.action === 'connect')!;
+    const staged = await readFile(join(current.controlRoot, 'staging', result.operation.id, 'cloudflare-connect'), 'utf8');
+
+    expect(result).toEqual({ operation: { id: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/u), state: 'queued', kind: 'cloudflare' } });
+    expect(connect).toMatchObject({ wait: false, request: { kind: 'cloudflare', cloudflare: { action: 'connect', candidate: 'cloudflare-connect' }, sources: [{ id: 'app', existed: true }, { id: 'installation', existed: true }] } });
+    expect(JSON.parse(staged)).toEqual({ action: 'connect', token });
+    expect(status).toMatchObject({ mode: 'unconfigured', tokenPresent: false, operation: result.operation });
+    expect(runtime).toMatchObject({ pending: false, targets: [], operation: { id: result.operation.id, state: 'queued', kind: 'cloudflare' } });
+    expect(JSON.stringify({ result, status })).not.toContain(token);
+    expect(current.transport.records.filter(record => record.request.cloudflare?.action === 'status')).toHaveLength(1);
+  });
+
+  // consume durable terminal connector proof without issuing a status request behind it
+  it('refreshes cached status from the completed asynchronous operation', async () => {
+    const current = await fixture();
+    const installationPath = await addInstallationSource(current);
+    await establishCloudflareEffective(current, installationPath);
+    const queued = await current.service.configureCloudflare({ action: 'connect', token: 'A'.repeat(100) });
+    const proved = { supported: true, mode: 'token', enabled: true, tokenPresent: true, serviceUrl: 'http://remote-agent-console:8787', connected: true };
+    const fresh = { ...proved, enabled: false, connected: false };
+    await writePrivate(join(current.controlRoot, 'status', `${queued.operation.id}.json`), JSON.stringify({ version: 1, id: queued.operation.id, kind: 'cloudflare', state: 'complete', phase: 'connector-ready', cloudflare: proved }));
+    current.transport.cloudflare = fresh;
+
+    const status = await current.service.cloudflareStatus();
+    const operation = await current.service.operation(queued.operation.id);
+
+    expect(status).toEqual({ ...fresh, operation: { id: queued.operation.id, state: 'complete', kind: 'cloudflare', phase: 'connector-ready' } });
+    expect(operation).toEqual({ id: queued.operation.id, state: 'complete', kind: 'cloudflare', phase: 'connector-ready' });
+    expect(JSON.parse(await readFile(join(current.controlRoot, 'cloudflare-status.json'), 'utf8'))).toEqual(fresh);
+    expect(current.transport.records.filter(record => record.request.cloudflare?.action === 'status')).toHaveLength(2);
+  });
+
+  // expose bounded rollback status after a failed asynchronous operation
+  it('returns redacted failed operation and recovered connector status', async () => {
+    const current = await fixture();
+    const installationPath = await addInstallationSource(current);
+    await establishCloudflareEffective(current, installationPath);
+    const queued = await current.service.configureCloudflare({ action: 'connect', token: 'A'.repeat(100) });
+    const recovered = { supported: true, mode: 'unconfigured', enabled: false, tokenPresent: false, serviceUrl: 'http://127.0.0.1:8787' };
+    await writePrivate(join(current.controlRoot, 'status', `${queued.operation.id}.json`), JSON.stringify({ version: 1, id: queued.operation.id, kind: 'cloudflare', state: 'failed', error: 'cloudflare-connector-start-failed', cloudflare: recovered }));
+    current.transport.cloudflare = recovered;
+
+    const status = await current.service.cloudflareStatus();
+
+    expect(status).toEqual({ ...recovered, operation: { id: queued.operation.id, state: 'failed', kind: 'cloudflare', error: 'cloudflare-connector-start-failed' } });
+    expect(status).not.toHaveProperty('reconnectOrigin');
+  });
+
+  // validate the discriminated public request before any helper or staging work
+  it.each([
+    { action: 'connect', hostname: 'agents.example.com' },
+    { action: 'connect', token: 'token with spaces' },
+    { action: 'connect', token: 'docker' },
+    { action: 'activate', hostname: 'https://agents.example.com' },
+    { action: 'activate', hostname: 'Agents.Example.COM' },
+    { action: 'activate', hostname: 'localhost' },
+    { action: 'activate', hostname: 'agents.example.com', token: 'unexpected' }
+  ])('rejects malformed connector input %#', async input => {
+    const current = await fixture();
+    await addInstallationSource(current);
+
+    await expect(current.service.configureCloudflare(input)).rejects.toMatchObject({ code: 'invalid_cloudflare_request', statusCode: 400 });
+    expect(current.transport.records).toHaveLength(0);
+  });
+
+  // reject helper payloads that add credential-shaped status fields
+  it('does not cache or return connector credentials from host status', async () => {
+    const current = await fixture();
+    current.transport.cloudflare = { supported: true, mode: 'token', enabled: true, tokenPresent: true, serviceUrl: 'http://127.0.0.1:8787', token: 'must-not-escape' } as never;
+
+    await expect(current.service.cloudflareStatus()).rejects.toMatchObject({ code: 'settings_helper_invalid', message: 'settings_helper_invalid' });
+    await expect(readFile(join(current.controlRoot, 'cloudflare-status.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  // verify only a connected saved connector and return the future origin without credentials
+  it('queues hostname activation after connector readiness', async () => {
+    const current = await fixture();
+    const installationPath = await addInstallationSource(current);
+    await establishCloudflareEffective(current, installationPath);
+    current.transport.cloudflare = { supported: true, mode: 'token', enabled: true, tokenPresent: true, serviceUrl: 'http://127.0.0.1:8787', connected: true };
+
+    const result = await current.service.configureCloudflare({ action: 'activate', hostname: 'agents.example.net' });
+    const status = await current.service.cloudflareStatus();
+    const activate = current.transport.records.find(record => record.request.cloudflare?.action === 'activate')!;
+    const staged = JSON.parse(await readFile(join(current.controlRoot, 'staging', result.operation.id, 'cloudflare-connect'), 'utf8'));
+
+    expect(result).toMatchObject({ operation: { state: 'queued' }, reconnectOrigin: 'https://agents.example.net' });
+    expect(status).not.toHaveProperty('reconnectOrigin');
+    expect(staged).toEqual({ action: 'activate', hostname: 'agents.example.net' });
+    expect(activate.request.sources?.map(source => source.id)).toEqual(['app', 'installation']);
+
+    const activated = { ...current.transport.cloudflare, hostname: 'agents.example.net', verifiedAt: '2026-10-18T20:00:00.000Z' };
+    await writePrivate(join(current.controlRoot, 'status', `${result.operation.id}.json`), JSON.stringify({ version: 1, id: result.operation.id, kind: 'cloudflare', state: 'complete', phase: 'activated', cloudflare: activated }));
+    current.transport.cloudflare = activated;
+    await expect(current.service.cloudflareStatus()).resolves.toMatchObject({ reconnectOrigin: 'https://agents.example.net', operation: { state: 'complete', phase: 'activated' } });
+  });
+
+  // refuse route activation when the saved connector process is stopped
+  it('rejects activation until the managed connector is running', async () => {
+    const current = await fixture();
+    const installationPath = await addInstallationSource(current);
+    await establishCloudflareEffective(current, installationPath);
+    current.transport.cloudflare = { supported: true, mode: 'token', enabled: true, tokenPresent: true, serviceUrl: 'http://127.0.0.1:8787', connected: false };
+
+    await expect(current.service.configureCloudflare({ action: 'activate', hostname: 'agents.example.net' })).rejects.toMatchObject({ code: 'cloudflare_connector_not_ready', statusCode: 409 });
+    expect(current.transport.records.some(record => record.request.cloudflare?.action === 'activate')).toBe(false);
+  });
+
+  // avoid applying unrelated pending settings during the activation restart
+  it('rejects activation while restart-bound settings are pending', async () => {
+    const current = await fixture();
+    await addInstallationSource(current);
+    current.transport.cloudflare = { supported: true, mode: 'token', enabled: true, tokenPresent: true, serviceUrl: 'http://127.0.0.1:8787', connected: true };
+
+    await expect(current.service.configureCloudflare({ action: 'activate', hostname: 'agents.example.net' })).rejects.toMatchObject({ code: 'settings_changes_pending', statusCode: 409 });
+    expect(current.transport.records.some(record => record.request.cloudflare?.action === 'activate')).toBe(false);
+  });
+
+  // block ordinary saves while an asynchronous connector mutation owns deployment
+  it('prevents settings writes from queueing behind active connector setup', async () => {
+    const current = await fixture();
+    const installationPath = await addInstallationSource(current);
+    await establishCloudflareEffective(current, installationPath);
+    await current.service.configureCloudflare({ action: 'connect', token: 'A'.repeat(100) });
+    const snapshot = await current.service.snapshot();
+
+    await expect(current.service.save({ changes: [{ sourceId: 'app', revisionId: source(snapshot, 'app').revisionId, patches: [{ op: 'set', path: ['name'], value: 'Blocked' }] }] })).rejects.toMatchObject({ code: 'settings_operation_in_progress', statusCode: 409 });
+    expect(current.transport.records.filter(record => record.request.kind === 'commit')).toHaveLength(0);
+  });
+
+  // reject replacement connector input while the first asynchronous action owns deployment
+  it('does not queue a second connector action behind active setup', async () => {
+    const current = await fixture();
+    const installationPath = await addInstallationSource(current);
+    await establishCloudflareEffective(current, installationPath);
+    await current.service.configureCloudflare({ action: 'connect', token: 'A'.repeat(100) });
+
+    await expect(current.service.configureCloudflare({ action: 'connect', token: 'B'.repeat(100) })).rejects.toMatchObject({ code: 'settings_operation_in_progress', statusCode: 409 });
+    expect(current.transport.records.filter(record => record.request.cloudflare?.action === 'connect')).toHaveLength(1);
+  });
+});
+
 // model only the fixed host boundary used by service tests
 class FakeTransport implements SettingsTransport {
   readonly records: RequestRecord[] = [];
@@ -32,6 +223,7 @@ class FakeTransport implements SettingsTransport {
   failKind?: HostRequest['kind'];
   failError?: SettingsError;
   pendingKind?: HostRequest['kind'];
+  cloudflare: Omit<CloudflareStatus, 'operation' | 'reconnectOrigin'> = { supported: true, mode: 'unconfigured', enabled: false, tokenPresent: false, serviceUrl: 'http://remote-agent-console:8787', connected: false };
   // bind the fixture authority and staging root
   constructor(readonly descriptor: Installation, readonly controlRoot: string) {}
   // return the immutable fixture installation
@@ -83,12 +275,14 @@ class FakeTransport implements SettingsTransport {
     }
     // publish terminal validation evidence for stage cleanup parity
     if (request.kind === 'validate') await writePrivate(join(this.controlRoot, 'status', `${request.id}.json`), JSON.stringify({ version: 1, id: request.id, kind: request.kind, state: 'complete' }));
-    return { version: 1, id: request.id, kind: request.kind, state: request.kind === 'restart' ? 'queued' : 'complete' };
+    // return only redacted connector state for Cloudflare status reads
+    if (request.kind === 'cloudflare' && request.cloudflare?.action === 'status') return { version: 1, id: request.id, kind: request.kind, state: 'complete', cloudflare: this.cloudflare };
+    return { version: 1, id: request.id, kind: request.kind, state: ['restart', 'cloudflare'].includes(request.kind) ? 'queued' : 'complete' };
   }
 }
 
 // create a full file-backed Settings service without live installation access
-async function fixture(overrides: { app?: Record<string, unknown>; env?: string; live?: SettingsOptions['live'] } = {}): Promise<Fixture> {
+async function fixture(overrides: { app?: Record<string, unknown>; env?: string; live?: SettingsOptions['live']; placeholderRuntime?: SettingsOptions['placeholderRuntime'] } = {}): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'rac-settings-service-'));
   roots.push(root);
   const controlRoot = join(root, 'control');
@@ -117,7 +311,7 @@ async function fixture(overrides: { app?: Record<string, unknown>; env?: string;
     compose: { projectDirectory: root, projectName: 'isolated-settings', files: [join(root, 'compose.yaml')], envFiles: [envPath], profiles: [] }
   };
   const transport = new FakeTransport(descriptor, controlRoot);
-  const service = new SettingsService(config, { controlRoot, transport, configPath: appPath, checkout: root, ...(overrides.live === undefined ? {} : { live: overrides.live }) });
+  const service = new SettingsService(config, { controlRoot, transport, configPath: appPath, checkout: root, placeholderRuntime: overrides.placeholderRuntime ?? (async () => ({ hostNode: '/host/bin/node', hostPath: '/host/bin:/usr/bin', timeZone: 'America/Los_Angeles' })), ...(overrides.live === undefined ? {} : { live: overrides.live }) });
   return { root, controlRoot, appPath, envPath, app, env, config, transport, service };
 }
 
@@ -137,6 +331,23 @@ async function establishEffective(current: Fixture): Promise<void> {
       }
     }
   }));
+}
+
+// add the authored installation source required by Cloudflare compare-and-swap
+async function addInstallationSource(current: Fixture): Promise<string> {
+  const path = join(current.root, 'installation-settings.json');
+  await writeFile(path, `${JSON.stringify({ version: 1, compose: current.transport.descriptor.compose }, null, 2)}\n`);
+  current.transport.descriptor.sources.installation = { path, serverPath: path, kind: 'installation', apply: 'rac-restart' };
+  return path;
+}
+
+// prove every RAC-owned source in the Cloudflare fixture is already effective
+async function establishCloudflareEffective(current: Fixture, installationPath: string): Promise<void> {
+  await establishEffective(current);
+  const path = join(current.controlRoot, 'effective.json');
+  const effective = JSON.parse(await readFile(path, 'utf8')) as { targets: { rac: { hashes: Record<string, string> } } };
+  effective.targets.rac.hashes.installation = contentHash(await readFile(installationPath, 'utf8'));
+  await writePrivate(path, JSON.stringify(effective));
 }
 
 // locate one expected snapshot source
@@ -183,6 +394,22 @@ describe('settings snapshot and disclosure', () => {
     expect(current.transport.records.some(record => record.request.kind === 'restart')).toBe(false);
   });
 
+  // retain managed token activation without enabling the legacy local tunnel
+  it('preserves the helper-managed token profile in installation edits', async () => {
+    const current = await fixture();
+    current.transport.descriptor.compose!.profiles = ['tunnel-token'];
+    const installationPath = join(current.root, 'installation.json');
+    const value = { version: 1, compose: { ...current.transport.descriptor.compose, profiles: ['metrics'] } };
+    await writeFile(installationPath, `${JSON.stringify(value)}\n`);
+    current.transport.descriptor.sources.installation = { path: installationPath, serverPath: installationPath, kind: 'installation', apply: 'rac-restart' };
+    const before = source(await current.service.snapshot(), 'installation');
+
+    await current.service.save({ changes: [{ sourceId: 'installation', revisionId: before.revisionId, patches: [{ op: 'set', path: ['compose', 'projectName'], value: 'renamed' }] }] });
+
+    expect(JSON.parse(await readFile(installationPath, 'utf8')).compose.profiles).toEqual(['metrics', 'tunnel-token']);
+    expect(JSON.parse(await readFile(installationPath, 'utf8')).compose.profiles).not.toContain('tunnel');
+  });
+
   // report the installed mode independently of editable source branches
   it.each(['compose', 'systemd'] as const)('exposes the authoritative %s installation kind', async kind => {
     const current = await fixture();
@@ -207,11 +434,98 @@ describe('settings snapshot and disclosure', () => {
     const requiredSecret = controller.fields?.find(field => field.key === 'RAC_SESSION_SECRET');
     const custom = controller.fields?.find(field => field.key === 'CUSTOM_OPERATOR_SETTING');
 
-    expect(tmux).toMatchObject({ present: false, fallback: { value: '/usr/bin/tmux', kind: 'literal' } });
+    expect(tmux).toMatchObject({ present: false, fallback: { value: '/usr/bin/tmux (from built-in default)', kind: 'literal' } });
     expect(tmux).not.toHaveProperty('value');
-    expect(inheritedSecret).toMatchObject({ protected: true, present: false, fallback: { value: 'Uses RAC_SESSION_SECRET', kind: 'derived' } });
-    expect(requiredSecret).not.toHaveProperty('fallback');
+    expect(inheritedSecret).toMatchObject({ protected: true, present: false, fallback: { value: 'Hidden (from RAC_SESSION_SECRET)', kind: 'derived' } });
+    expect(requiredSecret).toHaveProperty('fallback', { value: 'Required; no default', kind: 'derived' });
     expect(custom).not.toHaveProperty('fallback');
+    expect(source(await current.service.snapshot(false), 'env').fields?.every(field => !Object.hasOwn(field, 'fallback'))).toBe(true);
+  });
+
+  // resolve source references without materializing placeholder text in the file
+  it('publishes actual values before their sources and follows saved application edits', async () => {
+    const current = await fixture();
+    const before = await readFile(current.envPath, 'utf8');
+    const first = source(await current.service.snapshot(), 'env');
+    expect(first.fields?.find(field => field.key === 'RAC_HOST_NODE_BIN')).toMatchObject({ present: false, fallback: { value: '/host/bin/node (from host PATH)' } });
+    expect(first.fields?.find(field => field.key === 'RAC_TEMP_PREVIEW_ORIGIN')).toHaveProperty('fallback.value', 'https://agents.example.com (from Application Public Origin)');
+    await writeFile(current.appPath, JSON.stringify({ ...current.app, publicOrigin: 'https://next.example.org' }));
+    const next = source(await current.service.snapshot(), 'env');
+    expect(next.fields?.find(field => field.key === 'RAC_TEMP_PREVIEW_ORIGIN')).toHaveProperty('fallback.value', 'https://next.example.org (from Application Public Origin)');
+    expect(await readFile(current.envPath, 'utf8')).toBe(before);
+  });
+
+  // observers perform no host inspection and concurrent controllers share one lookup
+  it('deduplicates runtime facts without executing pending environment values', async () => {
+    vi.stubEnv('RAC_HOST_PATH', '/applied/bin');
+    const lookup = vi.fn(async () => ({ hostNode: `${process.env.RAC_HOST_PATH}/node` }));
+    const current = await fixture({ env: 'RAC_HOST_PATH=/pending/bin\n', placeholderRuntime: lookup });
+    await current.service.snapshot(false);
+    expect(lookup).not.toHaveBeenCalled();
+    const snapshots = await Promise.all([current.service.snapshot(), current.service.snapshot()]);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    // pending PATH is configuration text rather than permission to execute it
+    for (const snapshot of snapshots) expect(source(snapshot, 'env').fields?.find(field => field.key === 'RAC_HOST_NODE_BIN')).toHaveProperty('fallback.value', '/applied/bin/node (from host PATH)');
+  });
+
+  // unavailable host facts must not substitute the container runtime
+  it('retains a usable snapshot when runtime inspection fails', async () => {
+    const current = await fixture({ placeholderRuntime: async () => { throw new Error('host unavailable'); } });
+    const env = source(await current.service.snapshot(), 'env');
+    expect(env.fields?.find(field => field.key === 'RAC_HOST_NODE_BIN')).toHaveProperty('fallback.value', 'Unavailable (from host PATH)');
+  });
+
+  // inherited defaults remain subject to cross-source credential redaction
+  it('suppresses concrete defaults that repeat protected bytes', async () => {
+    const current = await fixture({ app: { publicOrigin: 'https://agents.example.com', adapters: { codex: { program: `/host/${fixtureSessionSecret}/codex` } } }, placeholderRuntime: async () => ({ hostNode: `/host/${fixtureSessionSecret}/node`, hostPath: `/host/${fixtureSessionSecret}` }) });
+    const snapshot = await current.service.snapshot();
+    const env = source(snapshot, 'env');
+    // filter both application references and fixed host inspection output
+    for (const key of ['RAC_CODEX_BIN', 'RAC_HOST_CODEX_BIN', 'RAC_HOST_NODE_BIN', 'RAC_HOST_PATH']) expect(env.fields?.find(field => field.key === key)).not.toHaveProperty('fallback');
+    expect(JSON.stringify(snapshot)).not.toContain(fixtureSessionSecret);
+  });
+
+  // keep missing bridge hints installation-aware and display-only
+  it.each(['compose', 'systemd'] as const)('publishes missing TMUX guidance for %s without writing defaults', async kind => {
+    const current = await fixture();
+    current.transport.descriptor.kind = kind;
+    const before = await readFile(current.envPath, 'utf8');
+    const env = source(await current.service.snapshot(true, 'controller-session'), 'env');
+    const expected = 'Not mounted (from native socket discovery)';
+    expect(env.fields?.find(field => field.key === 'RAC_HOST_TMUX_DIR')).toMatchObject({ present: false, fallback: { value: expected, kind: 'derived' } });
+    expect(env.fields?.find(field => field.key === 'HOST_TMUX_DIR')).toMatchObject({ present: false, fallback: { value: 'Unavailable (from host HOME)', kind: 'derived' } });
+    expect(env.fields?.find(field => field.key === 'HOST_TMUX_BIN')).toMatchObject({ present: false, fallback: { value: '/usr/bin/tmux (from Docker bridge default)', kind: 'derived' } });
+    expect(await readFile(current.envPath, 'utf8')).toBe(before);
+    expect(source(await current.service.snapshot(false), 'env').fields?.every(field => !Object.hasOwn(field, 'fallback'))).toBe(true);
+  });
+
+  // distinguish explicit empty assignments from genuine omission defaults
+  it('describes retained empty environment values without changing blank-aware node lookup', async () => {
+    const current = await fixture({ env: 'RAC_TMUX_BIN=\nRAC_INSTANCE_STATUS_SECRET=\nRAC_HOST_NODE_BIN=\n' });
+    const env = source(await current.service.snapshot(true, 'controller-session'), 'env');
+    expect(env.fields?.find(field => field.key === 'RAC_TMUX_BIN')).toHaveProperty('emptyValueHint', 'Empty (from explicit environment assignment)');
+    expect(env.fields?.find(field => field.key === 'RAC_INSTANCE_STATUS_SECRET')).toMatchObject({ hasValue: false, emptyValueHint: 'Empty (from explicit environment assignment)' });
+    expect(env.fields?.find(field => field.key === 'RAC_HOST_NODE_BIN')).not.toHaveProperty('emptyValueHint');
+    expect(env.fields?.find(field => field.key === 'RAC_HOST_NODE_BIN')).toHaveProperty('fallback', { value: '/host/bin/node (from host PATH)', kind: 'derived' });
+    expect(source(await current.service.snapshot(false), 'env').fields?.every(field => !Object.hasOwn(field, 'emptyValueHint'))).toBe(true);
+  });
+
+  // expose the host-node omission default even when Compose explicitly passes blank
+  it.each([undefined, '', ' \t '])('publishes the host PATH placeholder for blank Compose node %j', async running => {
+    vi.stubEnv('RAC_HOST_NODE_BIN', running);
+    const current = await fixture({ env: 'RAC_HOST_NODE_BIN=\n' });
+    await establishEffective(current);
+    const proofPath = join(current.controlRoot, 'effective.json');
+    const proof = JSON.parse(await readFile(proofPath, 'utf8'));
+    proof.targets.rac.shadowedEnvironmentKeys = ['RAC_HOST_NODE_BIN'];
+    await writePrivate(proofPath, JSON.stringify(proof));
+
+    const snapshot = await current.service.snapshot(true, 'controller-session');
+    const env = source(snapshot, 'env');
+    expect(env.fields?.find(field => field.key === 'RAC_HOST_NODE_BIN')).toMatchObject({
+      value: '', present: true, protected: false, fallback: { value: '/host/bin/node (from host PATH)', kind: 'derived' }
+    });
+    expect(await readFile(current.envPath, 'utf8')).toBe('RAC_HOST_NODE_BIN=\n');
     expect(source(await current.service.snapshot(false), 'env').fields?.every(field => !Object.hasOwn(field, 'fallback'))).toBe(true);
   });
 
@@ -233,14 +547,14 @@ describe('settings snapshot and disclosure', () => {
 
     const snapshot = await current.service.snapshot(true, 'controller-session');
     const env = source(snapshot, 'env');
-    expect(env.fields?.find(field => field.key === 'RAC_HOST_TMUX_DIR')).toHaveProperty('fallback', { value: '/host-tmux', kind: 'compose' });
-    expect(env.fields?.find(field => field.key === 'RAC_INSTANCE_STATUS_SECRET')).not.toHaveProperty('fallback');
+    expect(env.fields?.find(field => field.key === 'RAC_HOST_TMUX_DIR')).toHaveProperty('fallback', { value: '/host-tmux (from Compose environment)', kind: 'compose' });
+    expect(env.fields?.find(field => field.key === 'RAC_INSTANCE_STATUS_SECRET')).toHaveProperty('fallback', { value: 'Hidden (from Compose environment)', kind: 'derived' });
     expect(env.fields?.find(field => field.key === 'RAC_INTERACTIVE_SHELL')).not.toHaveProperty('fallback');
     expect(env.fields?.find(field => field.key === 'RAC_TMUX_BIN')).not.toHaveProperty('fallback');
     expect(env.fields?.find(field => field.key === 'RAC_PROJECT_PROXY_HOST')).not.toHaveProperty('fallback');
     expect(env.fields?.find(field => field.key === 'TZ')).not.toHaveProperty('fallback');
-    expect(env.fields?.find(field => field.key === 'RAC_SESSION_SECRET')).not.toHaveProperty('fallback');
-    expect(env.fields?.find(field => field.key === 'RAC_HOST_TMUX_SOURCE')).toHaveProperty('fallback', { value: '/tmp/tmux-${RAC_HOST_UID or process UID}', kind: 'derived' });
+    expect(env.fields?.find(field => field.key === 'RAC_SESSION_SECRET')).toHaveProperty('fallback', { value: 'Hidden (from Compose environment)', kind: 'derived' });
+    expect(env.fields?.find(field => field.key === 'RAC_HOST_TMUX_SOURCE')).toHaveProperty('fallback', { value: `/tmp/tmux-${process.getuid()} (from process UID)`, kind: 'derived' });
     expect(JSON.stringify(snapshot)).not.toContain('runtime-instance-secret');
     expect(JSON.stringify(snapshot)).not.toContain('runtime-session-secret');
     expect(JSON.stringify(snapshot)).not.toContain('x'.repeat(4_097));
@@ -391,10 +705,10 @@ describe('settings snapshot and disclosure', () => {
 
   // retain empty secret presence for removal while hiding its reveal affordance
   it('marks an explicitly empty environment credential and preserves missing and nonempty shapes', async () => {
-    const current = await fixture({ env: `RAC_PASSWORD_HASH='${fixturePasswordHash}'\nRAC_SESSION_SECRET='${fixtureSessionSecret}'\nRAC_GITHUB_TOKEN=\nRAC_VAPID_PRIVATE_KEY='push secret'\n` });
+    const current = await fixture({ env: `RAC_PASSWORD_HASH='${fixturePasswordHash}'\nRAC_SESSION_SECRET='${fixtureSessionSecret}'\nRAC_GITHUB_TOKEN=\nRAC_OPENAI_API_KEY='voice secret'\n` });
     const before = source(await current.service.snapshot(), 'env');
     const empty = before.fields?.find(field => field.key === 'RAC_GITHUB_TOKEN');
-    const nonempty = before.fields?.find(field => field.key === 'RAC_VAPID_PRIVATE_KEY');
+    const nonempty = before.fields?.find(field => field.key === 'RAC_OPENAI_API_KEY');
     const missing = before.fields?.find(field => field.key === 'RAC_REALTIME_MCP_TOKEN');
 
     expect(empty).toMatchObject({ protected: true, present: true, hasValue: false });
@@ -410,6 +724,56 @@ describe('settings snapshot and disclosure', () => {
     const removed = source(await current.service.snapshot(), 'env').fields?.find(field => field.key === 'RAC_GITHUB_TOKEN');
     expect(removed).toMatchObject({ protected: true, present: false });
     expect(removed).not.toHaveProperty('hasValue');
+  });
+
+  // preserve legacy VAPID bytes for migration without exposing typed controls
+  it('hides and rejects direct edits or disclosure of legacy VAPID environment values', async () => {
+    const legacy = "export RAC_VAPID_PUBLIC_KEY='legacy public'\nRAC_VAPID_PRIVATE_KEY='legacy\nprivate'\n";
+    const visible = `RAC_PASSWORD_HASH='${fixturePasswordHash}'\nRAC_SESSION_SECRET='${fixtureSessionSecret}'\nVISIBLE_SETTING=before\n`;
+    const current = await fixture({ env: `${visible}${legacy}` });
+    const before = source(await current.service.snapshot(true, 'controller-session'), 'env');
+
+    expect(before.fields?.some(field => field.key.startsWith('RAC_VAPID_'))).toBe(false);
+    expect(before.content).not.toContain('RAC_VAPID_');
+    expect(before.content).not.toContain('legacy');
+    await expect(current.service.save({ changes: [{ sourceId: 'env', revisionId: before.revisionId, patches: [{ op: 'set', path: ['RAC_VAPID_PUBLIC_KEY'], value: 'replacement' }] }] }, 'controller-session')).rejects.toMatchObject({ code: 'invalid_environment_patch' });
+    await expect(current.service.reveal({ sourceId: 'env', revisionId: before.revisionId, path: ['RAC_VAPID_PRIVATE_KEY'] }, 'controller-session')).rejects.toMatchObject({ code: 'invalid_settings_path' });
+    const maskedSaved = await current.service.save({ changes: [{ sourceId: 'env', revisionId: before.revisionId, content: before.content!.replace('VISIBLE_SETTING=before', 'VISIBLE_SETTING=masked') }] }, 'controller-session');
+    expect(await readFile(current.envPath, 'utf8')).toBe(`${visible.replace('VISIBLE_SETTING=before', 'VISIBLE_SETTING=masked')}${legacy}`);
+
+    const maskedSource = source(maskedSaved, 'env');
+    const disclosure = await current.service.reveal({ sourceId: 'env', revisionId: maskedSource.revisionId }, 'controller-session');
+    expect(disclosure.value).toBe(visible.replace('VISIBLE_SETTING=before', 'VISIBLE_SETTING=masked'));
+
+    await current.service.save({ changes: [{ sourceId: 'env', revisionId: maskedSource.revisionId, content: String(disclosure.value).replace('VISIBLE_SETTING=masked', 'VISIBLE_SETTING=after') }] }, 'controller-session');
+    expect(await readFile(current.envPath, 'utf8')).toBe(`${visible.replace('VISIBLE_SETTING=before', 'VISIBLE_SETTING=after')}${legacy}`);
+  });
+
+  // reject managed assignments submitted through the projected raw editor
+  it.each(['RAC_VAPID_PUBLIC_KEY', 'RAC_VAPID_PRIVATE_KEY'])('rejects raw insertion of managed %s', async key => {
+    const legacy = "RAC_VAPID_PUBLIC_KEY='legacy public'\nRAC_VAPID_PRIVATE_KEY='legacy private'\n";
+    const current = await fixture({ env: `${legacy}RAC_PASSWORD_HASH='${fixturePasswordHash}'\nRAC_SESSION_SECRET='${fixtureSessionSecret}'\n` });
+    const before = source(await current.service.snapshot(true, 'controller-session'), 'env');
+
+    await expect(current.service.save({ changes: [{ sourceId: 'env', revisionId: before.revisionId, content: `${before.content}${key}='replacement'\n` }] }, 'controller-session')).rejects.toMatchObject({ code: 'invalid_environment_patch' });
+    expect(await readFile(current.envPath, 'utf8')).toBe(`${legacy}RAC_PASSWORD_HASH='${fixturePasswordHash}'\nRAC_SESSION_SECRET='${fixtureSessionSecret}'\n`);
+  });
+
+  // keep malformed ordinary dotenv bytes repairable while hiding managed records after them
+  it('projects and repairs an unterminated environment assignment without exposing VAPID keys', async () => {
+    const visible = `RAC_PASSWORD_HASH='${fixturePasswordHash}'\nRAC_SESSION_SECRET='${fixtureSessionSecret}'\nBROKEN="unfinished\nVISIBLE=ok\n`;
+    const hidden = "RAC_VAPID_PRIVATE_KEY='legacy private'\nRAC_VAPID_PUBLIC_KEY='legacy public'\n";
+    const current = await fixture({ env: `${visible.slice(0, -11)}${hidden}VISIBLE=ok\n` });
+    const before = source(await current.service.snapshot(true, 'controller-session'), 'env');
+
+    expect(before.content).toContain('BROKEN="unfinished');
+    expect(before.content).not.toContain('RAC_VAPID_');
+    const disclosure = await current.service.reveal({ sourceId: 'env', revisionId: before.revisionId }, 'controller-session');
+    expect(disclosure.value).toBe(visible);
+
+    const repaired = String(disclosure.value).replace('BROKEN="unfinished', 'BROKEN=fixed');
+    await current.service.save({ changes: [{ sourceId: 'env', revisionId: before.revisionId, content: repaired }] }, 'controller-session');
+    expect(await readFile(current.envPath, 'utf8')).toBe(`${repaired}${hidden}`);
   });
 
   // redact one credential everywhere it is repeated across structured and raw sources
@@ -840,6 +1204,15 @@ describe('settings save and validation', () => {
     expect(project).toMatchObject({ worktreeOverrides: [{ path: 'feature', commands: {} }] });
   });
 
+  // preserve file-only preview fields during unrelated structured project edits
+  it('preserves Project and Worktree preview selectors hidden from the editor', async () => {
+    const project = { id: 'one', path: '/tmp/one', hostname: 'one.example.test', port: 3000, worktreeOverrides: [{ path: 'feature', hostname: 'feature.example.test', port: 3001 }] };
+    const current = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [project] } });
+    const before = (await current.service.snapshot()).sources.find(source => source.id === 'app')!;
+    await current.service.save({ changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [{ op: 'set', path: ['projects', '0', 'label'], value: 'Renamed' }] }] });
+    expect(JSON.parse(await readFile(current.appPath, 'utf8'))).toMatchObject({ projects: [{ ...project, label: 'Renamed' }] });
+  });
+
   // create the optional project collection only when its first row is authored
   it('inserts the first Project into an absent collection', async () => {
     const current = await fixture({ app: { publicOrigin: 'https://agents.example.com' } });
@@ -1176,6 +1549,23 @@ describe('settings pending and restart state', () => {
     expect(current.transport.records[0]).toMatchObject({ wait: false, request: { version: 1, id: operation.id, kind: 'restart', generation: 1, targets: ['rac'] } });
     expect(Object.keys(current.transport.records[0]!.request).sort()).toEqual(['generation', 'id', 'kind', 'sources', 'targets', 'version']);
     await expect(current.service.status()).resolves.toMatchObject({ operation: { id: operation.id, state: 'queued' } });
+  });
+
+  // expose only the exact watchdog-backed restart progress envelope
+  it('projects valid restart progress and drops malformed metadata', async () => {
+    const current = await fixture();
+    const id = 'restart_progress_status01';
+    const restart = { recoveryDeadline: 1_800_000_000_000, state: 'restarting' } as const;
+    await writePrivate(join(current.controlRoot, 'latest-deploy.json'), JSON.stringify({ id, kind: 'restart', state: 'running' }));
+    await writePrivate(join(current.controlRoot, 'status', `${id}.json`), JSON.stringify({ version: 1, id, kind: 'restart', state: 'running', phase: 'restarting', restart }));
+
+    await expect(current.service.status()).resolves.toMatchObject({ operation: { id, state: 'running', phase: 'restarting', restart } });
+    await expect(current.service.operation(id)).resolves.toEqual({ id, state: 'running', phase: 'restarting', restart });
+
+    await writePrivate(join(current.controlRoot, 'status', `${id}.json`), JSON.stringify({ version: 1, id, kind: 'restart', state: 'failed', error: 'apply-failed', restart: { ...restart, state: 'recovered', extra: 'untrusted' } }));
+    await expect(current.service.status()).resolves.toMatchObject({ operation: { id, state: 'failed', error: 'apply-failed' } });
+    await expect(current.service.status()).resolves.not.toHaveProperty('operation.restart');
+    await expect(current.service.operation(id)).resolves.toEqual({ id, state: 'failed', error: 'apply-failed' });
   });
 
   // coalesce repeated clicks onto the durable active operation
