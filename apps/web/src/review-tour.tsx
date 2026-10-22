@@ -7,7 +7,8 @@ import { useAskThreads } from './asks.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
 import { patchRowIndex, patchRows } from './code-panel/patch-rows.js';
 import { fetchComparisonFile, type ExpandedLines } from './code-panel/comparison.js';
-import { codeReviewCount, codeReviewErrorMessage, failureCode, isCodeReviewJob, reviewRunFrom, useCodeReviewPoll, useJobElapsed, type CodeReview, type CodeReviewCapability, type CodeReviewJob, type CodeReviewOptions, type CodeReviewOutcome, type GeneralFinding, type ReviewRunLink } from './code-review.js';
+import { codeReviewCount, codeReviewErrorMessage, useCodeReviewPoll, type CodeReview, type CodeReviewCapability, type CodeReviewOptions, type CodeReviewOutcome, type GeneralFinding } from './code-review.js';
+import { failureCode, isReviewJob, reviewRunFrom, useJobElapsed, type ReviewJob, type ReviewRunLink } from './review-jobs.js';
 import { CodeReviewSheet, reviewAgentLabel, type ReviewAgentKind } from './review-start.js';
 import { MarkdownBlocks } from './note-markdown.js';
 
@@ -30,7 +31,6 @@ type ReviewStep = { id: string; title: string; explanation: string; changeIds: s
 export type ReviewTour = { title: string; overview: string; scope: ReviewScope; commit?: string; base: string; includeTests: boolean; includeDocs: boolean; fingerprint: string; changes: ReviewChange[]; steps: ReviewStep[] };
 type ReviewRequest = (url: string, init?: RequestInit, observeReachability?: boolean) => Promise<Response>;
 type StepState = 'unvisited' | 'visited' | 'skipped';
-type Job = { id: string; expiresAt: string; retryAfterMs: number };
 type PublicReviewComparison = { scope: ReviewScope; commit?: string; base: string; includeTests: boolean; includeDocs: boolean; fingerprint: string };
 // `overview` is the tour's first page, its title and overview ahead of the first step
 type ViewState = 'loading' | 'overview' | 'tour' | 'summary' | 'empty' | 'error' | 'cancelled';
@@ -113,11 +113,6 @@ export function isReviewTour(value: unknown): value is ReviewTour {
   const assigned = tour.steps.flatMap(step => step.changeIds);
   // require exact one-time assignments
   return changeIds.size === tour.changes.length && assigned.length === changeIds.size && new Set(assigned).size === assigned.length && assigned.every(id => changeIds.has(id));
-}
-
-// validate bounded job descriptors
-function isJob(value: unknown): value is Job {
-  return value !== null && typeof value === 'object' && typeof (value as Job).id === 'string' && typeof (value as Job).expiresAt === 'string' && typeof (value as Job).retryAfterMs === 'number';
 }
 
 // validate public comparison identities
@@ -364,12 +359,12 @@ export function ReviewPanelColumn({ onSlot }: { onSlot: (slot: ReviewPanelSlot |
 // interactive Review run's Agent in the console, for its "Open pane" link. `pullRequest`, the reviewed
 // branch's open or draft pull request, lets an All PR tour's summary post its feedback there as a draft review.
 // `onError` raises a failure the panel has no place to show, such as a diff's lines not expanding.
-export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent, initialCodeReview, initialCodeReviewJob, codeReviewCapability, pullRequest, onMinimize, onDismiss, onIndicatorChange, onReady, onOpenInEditor, onOpenAgent, onError }: { launch: ReviewLaunch; request: ReviewRequest; slot?: ReviewPanelSlot; initialTour?: ReviewTour; tourAgent?: ReviewAgentKind; initialCodeReview?: CodeReview; initialCodeReviewJob?: CodeReviewJob; codeReviewCapability?: CodeReviewCapability; pullRequest?: ReviewPullRequest; onMinimize: () => void; onDismiss: () => Promise<boolean>; onIndicatorChange: (indicator: ReviewTourIndicator) => void; onReady: (tour: ReviewTour) => void; onOpenInEditor?: (target: EditorTarget) => void; onOpenAgent?: (agentId: string) => void; onError?: (message: string, detail: string) => void }) {
+export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent, initialCodeReview, initialCodeReviewJob, codeReviewCapability, pullRequest, onMinimize, onDismiss, onIndicatorChange, onReady, onOpenInEditor, onOpenAgent, onError }: { launch: ReviewLaunch; request: ReviewRequest; slot?: ReviewPanelSlot; initialTour?: ReviewTour; tourAgent?: ReviewAgentKind; initialCodeReview?: CodeReview; initialCodeReviewJob?: ReviewJob; codeReviewCapability?: CodeReviewCapability; pullRequest?: ReviewPullRequest; onMinimize: () => void; onDismiss: () => Promise<boolean>; onIndicatorChange: (indicator: ReviewTourIndicator) => void; onReady: (tour: ReviewTour) => void; onOpenInEditor?: (target: EditorTarget) => void; onOpenAgent?: (agentId: string) => void; onError?: (message: string, detail: string) => void }) {
   // the Comparison is fixed for the review's lifetime: changing it means starting again
   const { includeTests, includeDocs } = launch;
   const [state, setState] = useState<ViewState>(initialTour === undefined ? 'loading' : 'overview');
   const [tour, setTour] = useState<ReviewTour | undefined>(initialTour);
-  const [job, setJob] = useState<Job>();
+  const [job, setJob] = useState<ReviewJob>();
   // an interactive tour run's Agent, once its pending poll names it
   const [tourRun, setTourRun] = useState<ReviewRunLink>();
   const [error, setError] = useState('');
@@ -407,7 +402,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
   const [dismissError, setDismissError] = useState('');
   // The AI Code review beside the tour: the job running it, the completed review (its Findings are
   // what the diffs show), or why it failed. `codeReviewOptions` is what Retry runs again.
-  const [codeReviewJob, setCodeReviewJob] = useState<CodeReviewJob | undefined>(initialCodeReviewJob);
+  const [codeReviewJob, setCodeReviewJob] = useState<ReviewJob | undefined>(initialCodeReviewJob);
   const [codeReview, setCodeReview] = useState<CodeReview | undefined>(initialCodeReview);
   const [codeReviewError, setCodeReviewError] = useState('');
   const [codeReviewOptions, setCodeReviewOptions] = useState<CodeReviewOptions | undefined>(launch.codeReview);
@@ -514,12 +509,12 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     }
     let closed = false;
     let timer: number | undefined;
-    let createdJob: Job | undefined;
+    let createdJob: ReviewJob | undefined;
     let transientStartFailures = 0;
     const startDeadline = Date.now() + 30_000;
     const startRequestId = crypto.randomUUID();
     const run = ++generation.current;
-    let createdReviewJob: CodeReviewJob | undefined;
+    let createdReviewJob: ReviewJob | undefined;
     let tourSettled = false;
     setState('loading');
     setError('');
@@ -538,7 +533,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     setCodeReviewError('');
     setCodeReviewOptions(launch.codeReview);
     // poll one bounded job
-    const poll = async (next: Job) => {
+    const poll = async (next: ReviewJob) => {
       // stop obsolete polls before transport
       if (closed || generation.current !== run) return;
       const response = await request(`/api/review-tour/jobs/${encodeURIComponent(next.id)}`, undefined, false);
@@ -604,18 +599,18 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
       const failure = responseFailure(body);
       // reap jobs created after local closure
       if (closed || generation.current !== run) {
-        if (response.status === 202 && body.status === 'pending' && isJob(pending)) void request(`/api/review-tour/jobs/${encodeURIComponent(pending.id)}`, { method: 'DELETE' }, false);
-        if (response.status === 202 && isCodeReviewJob(reviewJob)) void request(`/api/code-review/jobs/${encodeURIComponent(reviewJob.id)}`, { method: 'DELETE' }, false);
+        if (response.status === 202 && body.status === 'pending' && isReviewJob(pending)) void request(`/api/review-tour/jobs/${encodeURIComponent(pending.id)}`, { method: 'DELETE' }, false);
+        if (response.status === 202 && isReviewJob(reviewJob)) void request(`/api/code-review/jobs/${encodeURIComponent(reviewJob.id)}`, { method: 'DELETE' }, false);
         return;
       }
       // publish an empty selection
       if (response.ok && body.status === 'empty') { setState('empty'); return; }
       // require a bounded job descriptor
-      if (response.status === 202 && body.status === 'pending' && isJob(pending)) {
+      if (response.status === 202 && body.status === 'pending' && isReviewJob(pending)) {
         createdJob = pending;
         setJob(pending);
         // follow the Code review that started from the same Comparison
-        if (isCodeReviewJob(reviewJob)) { createdReviewJob = reviewJob; setCodeReviewJob(reviewJob); }
+        if (isReviewJob(reviewJob)) { createdReviewJob = reviewJob; setCodeReviewJob(reviewJob); }
         await poll(pending);
         return;
       }
@@ -695,7 +690,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     const response = await request(`/api/agents/${encodeURIComponent(launch.agentId)}/code-review/jobs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...comparisonParams(launch), includeTests, includeDocs, fingerprint: tour.fingerprint, ...options }) }, false);
     const body = await responseBody(response);
     // follow the started job
-    if (response.status === 202 && isCodeReviewJob(body.job)) {
+    if (response.status === 202 && isReviewJob(body.job)) {
       setCodeReviewOptions(options);
       setCodeReview(undefined);
       setCodeReviewError('');
@@ -962,7 +957,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     if (!askable) return null;
     const findingId = 'suggestionId' in anchor ? anchor.suggestionId : findingOfComment.get(anchor.commentId);
     if (findingId === undefined) return null;
-    return <AskThreadView key={findingId} thread={askThreads.get(findingId)} pending={askPending.get(findingId)} failed={askFailures.get(findingId)} onAsk={question => ask(findingId, question)} onUseAnswer={answer => copyAnswer(findingId, answer)} {...(onOpenAgent === undefined ? {} : { onOpenRun: openRun })} />;
+    return <AskThreadView key={findingId} role="reviewer" thread={askThreads.get(findingId)} pending={askPending.get(findingId)} failed={askFailures.get(findingId)} onAsk={question => ask(findingId, question)} onUseAnswer={answer => copyAnswer(findingId, answer)} {...(onOpenAgent === undefined ? {} : { onOpenRun: openRun })} />;
   };
   // dismiss one stale durable review
   const dismiss = async () => {

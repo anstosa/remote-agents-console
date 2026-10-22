@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { failureCode, reviewJobProgress, transientFailure, type ReviewJob, type ReviewJobProgress } from './review-jobs.js';
 
 // The AI Code review that can run beside a Review tour: its Findings, the dashboard's Review presets,
 // the device's last choice, and the polling of a running job. The shapes follow the server's Code review API; every guard
@@ -113,44 +114,14 @@ export function initialEffort(preset: CodeReviewPreset): string {
   return preset.effort !== undefined && preset.efforts.includes(preset.effort) ? preset.effort : '';
 }
 
-// A running Code review job, from the tour start reply's `codeReview.job`, an "Add AI review"
-// start, or a restored stored tour's `codeReviewJob`. A newer server says when it started.
-export type CodeReviewJob = { id: string; expiresAt: string; retryAfterMs: number; startedAt?: string };
-// The Agent an interactive Review run is working in, and whether it is waiting on the operator; a
-// pending poll reply carries it once the run's pane is up.
-export type ReviewRunLink = { agentId: string; needsInput: boolean };
-// what a pending poll reply says about a running job, beyond that it is still running
-export type ReviewJobProgress = { run?: ReviewRunLink; startedAt?: string };
 type CodeReviewRequest = (url: string, init?: RequestInit, observeReachability?: boolean) => Promise<Response>;
 // how a polled job settled: its review, why it failed, or quietly gone (cancelled, or superseded by a
 // new tour start or a dismissal)
 export type CodeReviewOutcome = { review: CodeReview } | { error: string } | { gone: true };
 
-// validate a bounded job descriptor
-export function isCodeReviewJob(value: unknown): value is CodeReviewJob {
-  return isRecord(value) && typeof value.id === 'string' && typeof value.expiresAt === 'string' && typeof value.retryAfterMs === 'number';
-}
-
-// Read a pending reply's `run`, or undefined when absent (a headless run, an older server) or malformed.
-export function reviewRunFrom(value: unknown): ReviewRunLink | undefined {
-  return isRecord(value) && typeof value.agentId === 'string' && value.agentId !== '' ? { agentId: value.agentId, needsInput: value.needsInput === true } : undefined;
-}
-
-// Read what a pending poll reply says: its `run`, and its job's `startedAt` when that is a valid time.
-export function reviewJobProgress(body: Record<string, unknown>): ReviewJobProgress {
-  const run = reviewRunFrom(body.run);
-  const startedAt = isRecord(body.job) && typeof body.job.startedAt === 'string' && Number.isFinite(Date.parse(body.job.startedAt)) ? body.job.startedAt : undefined;
-  return { ...(run === undefined ? {} : { run }), ...(startedAt === undefined ? {} : { startedAt }) };
-}
-
 // read one JSON body, tolerating empty or invalid ones
 async function responseRecord(response: Response): Promise<Record<string, unknown>> {
   return await response.json().then((value: unknown) => isRecord(value) ? value : {}).catch(() => ({}));
-}
-
-// the typed error code of a failed reply, if any
-export function failureCode(body: Record<string, unknown>): string | undefined {
-  return isRecord(body.error) && typeof body.error.code === 'string' ? body.error.code : undefined;
 }
 
 // explain one failed Code review start or run
@@ -171,13 +142,10 @@ export function codeReviewErrorMessage(code: string | undefined, status: number)
   return 'The AI review failed. Try again.';
 }
 
-// a gateway or proxy failure without a typed code, worth polling through
-export const transientFailure = (response: Response, code: string | undefined) => code === undefined && (response.status === 502 || response.status === 503 || response.status === 504 || response.status >= 520 && response.status <= 530);
-
 // Poll one Code review job until it settles, then report its outcome once. Polling stops when the
 // job changes or the caller unmounts; it never cancels the job. Returns what the job's latest pending
 // reply said (its run's pane and start time).
-export function useCodeReviewPoll(request: CodeReviewRequest, job: CodeReviewJob | undefined, onSettled: (outcome: CodeReviewOutcome) => void): ReviewJobProgress {
+export function useCodeReviewPoll(request: CodeReviewRequest, job: ReviewJob | undefined, onSettled: (outcome: CodeReviewOutcome) => void): ReviewJobProgress {
   const [progress, setProgress] = useState<ReviewJobProgress & { jobId: string }>();
   const settled = useRef(onSettled);
   // retain the latest outcome callback
@@ -210,32 +178,6 @@ export function useCodeReviewPoll(request: CodeReviewRequest, job: CodeReviewJob
   }, [job, request]);
   // only the current job's progress
   return progress !== undefined && progress.jobId === job?.id ? { ...(progress.run === undefined ? {} : { run: progress.run }), ...(progress.startedAt === undefined ? {} : { startedAt: progress.startedAt }) } : {};
-}
-
-// When each job was first seen running on this page, so a reopened dialog keeps counting.
-const jobsSeenAt = new Map<string, number>();
-
-// "2m 10s" or "45s"
-export const formatElapsed = (ms: number): string => {
-  const seconds = Math.max(0, Math.floor(ms / 1_000));
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-};
-
-// The time a job has been running, ticking each second while it runs: from the server's start time
-// (`startedAt`, else the job's own) when known, else from when this page first saw it.
-export function useJobElapsed(job: CodeReviewJob | undefined, startedAt?: string): string {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    // tick only while a job runs
-    if (job === undefined) return;
-    if (!jobsSeenAt.has(job.id)) jobsSeenAt.set(job.id, Date.now());
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [job]);
-  if (job === undefined) return '';
-  const serverStart = Date.parse(startedAt ?? job.startedAt ?? '');
-  return formatElapsed(now - (Number.isFinite(serverStart) ? serverStart : jobsSeenAt.get(job.id) ?? now));
 }
 
 // "4 findings · 1 general", the chip's count of a completed review

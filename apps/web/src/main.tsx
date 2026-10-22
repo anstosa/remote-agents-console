@@ -41,7 +41,8 @@ import { UpstreamRebaseNotification, type GitUpstreamSummary } from './upstream-
 import { useViewportFlyout } from './viewport-flyout.js';
 import { isReviewTour, ReviewPanelColumn, ReviewTourPanel, type ReviewLaunch, type ReviewPanelSlot, type ReviewScope, type ReviewTarget, type ReviewTour, type ReviewTourIndicator } from './review-tour.js';
 import { ReviewStartSheet, reviewTourUnavailableText, type ReviewTourCapability } from './review-start.js';
-import { codeReviewCapability, codeReviewFrom, isCodeReviewJob, type CodeReview, type CodeReviewCapability, type CodeReviewJob } from './code-review.js';
+import { codeReviewCapability, codeReviewFrom, type CodeReview, type CodeReviewCapability } from './code-review.js';
+import { isReviewJob, type ReviewJob } from './review-jobs.js';
 import { VoiceDialog, type VoiceWorktree } from './voice/voice-dialog.js';
 import { AdaptersContext, AgentLaunchSettingsContext, AgentAccountsMenuContext, agentKindGlyph, agentKindLabel, agentKinds, configuredKinds, defaultSandboxed, LaunchMenu, LaunchSplitButton, LaunchTabBadge, launchRequestInit, originCopy, sandboxCopy, type AdapterCapabilities, type AgentKind, type AgentUpdateStatus, type LaunchMenuEntry, type LaunchResolution, type LaunchChoice } from './launch-profile.js';
 import { ScheduleEditor, defaultScheduleCron, lastRunNeedsAttention, scheduleInvalid, type Schedule, type ScheduleAdapterOption, type ScheduleSetBody, type ScheduleTarget, type ScheduleTargetOption } from './schedule-editor.js';
@@ -8529,7 +8530,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const [reviewStart, setReviewStart] = useState<ReviewTarget>();
   const [reviewInitialTour, setReviewInitialTour] = useState<ReviewTour>();
   // a restored tour's stored Code review, or the job still running one
-  const [reviewInitialCodeReview, setReviewInitialCodeReview] = useState<{ review?: CodeReview; job?: CodeReviewJob }>({});
+  const [reviewInitialCodeReview, setReviewInitialCodeReview] = useState<{ review?: CodeReview; job?: ReviewJob }>({});
   const [reviewMinimized, setReviewMinimized] = useState(false);
   // the open review panel's column in the reviewed Worktree's split, while that tab is in view
   const [reviewSlot, setReviewSlot] = useState<ReviewPanelSlot>();
@@ -9630,7 +9631,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       setReviewInitialTour(review.tour);
       // resume the stored Code review, or poll the job still running one
       const storedCodeReview = codeReviewFrom(review.codeReview);
-      setReviewInitialCodeReview({ ...(storedCodeReview === undefined ? {} : { review: storedCodeReview }), ...(isCodeReviewJob(review.codeReviewJob) ? { job: review.codeReviewJob } : {}) });
+      setReviewInitialCodeReview({ ...(storedCodeReview === undefined ? {} : { review: storedCodeReview }), ...(isReviewJob(review.codeReviewJob) ? { job: review.codeReviewJob } : {}) });
       setReviewLaunch({ agentId: agent.id, worktreeId: stored.worktreeId, scope: review.tour.scope, ...(review.tour.commit === undefined ? {} : { commit: review.tour.commit }), includeTests: review.tour.includeTests, includeDocs: review.tour.includeDocs });
       setReviewIndicator({ generating: false, stale: false });
       setReviewMinimized(false);

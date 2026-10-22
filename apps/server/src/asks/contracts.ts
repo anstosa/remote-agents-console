@@ -16,10 +16,10 @@ export const ASK_REQUEST_BODY_BYTES = 16_384;
 // the lines of context an excerpt keeps either side of the asked-about lines
 const excerptContext = 3;
 
-// Where a question points: the Finding asked about (its id and title), the Change and the line
-// range on one side (`additions` are new-file line numbers, `deletions` old-file ones), and that
-// range's hunk lines with a little context.
-export type AskAnchor = { findingId: string; title: string; changeId: string; file: string; side: Finding['side']; startLine: number; endLine: number; excerpt: string };
+// Where a question points: the Change and the line range on one side (`additions` are new-file
+// line numbers, `deletions` old-file ones), that range's hunk lines with a little context, and, for a
+// question about a Finding, the Finding's id and title.
+export type AskAnchor = { changeId: string; file: string; side: Finding['side']; startLine: number; endLine: number; excerpt: string; findingId?: string; title?: string };
 // one question and how it settled: its answer, or why it has none
 export type AskTurn = { id: string; question: string; askedAt: string; answer?: string; error?: { code: string; retryable: boolean } };
 // One Ask thread: the questions asked about one anchor, all in one agent conversation. `reviewer` threads
@@ -31,9 +31,9 @@ const text = (max: number) => z.string().max(max).refine(value => !value.include
 const line = z.number().int().positive();
 const id = z.string().min(1).max(64);
 const turnSchema = z.object({ id, question: text(MAX_ASK_QUESTION).refine(value => value !== ''), askedAt: z.string().refine(value => Number.isFinite(Date.parse(value))), answer: z.string().max(MAX_ASK_ANSWER_BYTES).optional(), error: z.object({ code: z.string().min(1).max(64), retryable: z.boolean() }).strict().optional() }).strict();
-const anchorSchema = z.object({ findingId: id, title: z.string().min(1).max(200), changeId: z.string().min(1).max(100), file: z.string().min(1).max(4_096), side: z.enum(['additions', 'deletions']), startLine: line, endLine: line, excerpt: text(MAX_ASK_EXCERPT) }).strict();
+const anchorSchema = z.object({ findingId: id.optional(), title: z.string().min(1).max(200).optional(), changeId: z.string().min(1).max(100), file: z.string().min(1).max(4_096), side: z.enum(['additions', 'deletions']), startLine: line, endLine: line, excerpt: text(MAX_ASK_EXCERPT) }).strict();
 const threadSchema = z.object({ id, target: z.literal('reviewer'), kind: z.enum(reviewAgentKinds), conversation: z.string().min(1).max(200), anchor: anchorSchema, turns: z.array(turnSchema).max(MAX_ASK_TURNS) }).strict()
-  .refine(thread => validConversationId(thread.kind, thread.conversation));
+  .refine(thread => validConversationId(thread.kind, thread.conversation) && (thread.target !== 'reviewer' || thread.anchor.findingId !== undefined && thread.anchor.title !== undefined));
 const requestSchema = z.object({ findingId: id, question: text(MAX_ASK_QUESTION), fingerprint: z.string().min(16).max(128) }).strict();
 
 // validate a persisted Ask thread
@@ -68,14 +68,18 @@ export function findingAnchor(finding: Finding, change: ReviewChange): AskAnchor
 
 // One question to a reviewer about one of its own Findings. Each turn repeats the anchor, so a
 // follow-up on a long conversation still says which lines it means.
-export function reviewerAskPrompt(finding: Pick<Finding, 'severity' | 'body'>, anchor: AskAnchor, question: string): string {
-  const lines = anchor.startLine === anchor.endLine ? `line ${anchor.startLine}` : `lines ${anchor.startLine}-${anchor.endLine}`;
+export function reviewerAskPrompt(finding: Pick<Finding, 'title' | 'severity' | 'body'>, anchor: AskAnchor, question: string): string {
   return [
     'The operator reviewing these changes has a question about one of the findings from your review. Answer it in Markdown, concisely. Read the repository as you need to, but do not change any files.',
-    `Finding: ${anchor.title} (${finding.severity})`,
+    `Finding: ${finding.title} (${finding.severity})`,
     finding.body,
-    `Location: ${anchor.file}, ${anchor.side === 'additions' ? 'new' : 'old'} ${lines}`,
-    ...(anchor.excerpt === '' ? [] : [`\`\`\`diff\n${anchor.excerpt}\n\`\`\``]),
+    ...anchorLines(anchor),
     `Question: ${question}`
   ].join('\n\n');
+}
+
+// where an anchor points, and its hunk lines
+function anchorLines(anchor: AskAnchor): string[] {
+  const lines = anchor.startLine === anchor.endLine ? `line ${anchor.startLine}` : `lines ${anchor.startLine}-${anchor.endLine}`;
+  return [`Location: ${anchor.file}, ${anchor.side === 'additions' ? 'new' : 'old'} ${lines}`, ...(anchor.excerpt === '' ? [] : [`\`\`\`diff\n${anchor.excerpt}\n\`\`\``])];
 }
