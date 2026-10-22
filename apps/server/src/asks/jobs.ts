@@ -15,16 +15,21 @@ type GoneAsk = { kind: 'gone'; code: 'job_superseded' };
 export type AskJobState = PendingAsk | ReadyAsk | FailedAsk | GoneAsk;
 // A pending job does not expire: its run has its own timeout, and a turn may wait its turn behind
 // others on the same conversation. A settled one is forgotten a minute later.
-export type AskJob = { id: string; owner: string; worktreeId: string; thread: Omit<AskThread, 'turns'>; question: string; startedAt: number; expiresAt: number; state: AskJobState; removal?: NodeJS.Timeout };
+// `on` names the collection its thread is kept in, such as the stored tour's.
+export type AskJob = { id: string; owner: string; worktreeId: string; on: string; thread: Omit<AskThread, 'turns'>; question: string; startedAt: number; expiresAt: number; state: AskJobState; removal?: NodeJS.Timeout };
 // a question still being answered, as a reopened tour shows it under its thread, which it may be starting
 export type PendingAskTurn = { threadId: string; target: AskThread['target']; anchor: AskAnchor; question: string; job: StartedReviewJob };
 // the Worktree a question is asked in, on the branch its stored tour was made on
 export type AskTarget = { worktreeId: string; workspace: string; branch: string };
 type AskStore = Pick<ReviewTourStore, 'current' | 'codeReview' | 'askThreads' | 'saveAskTurn'>;
-// what a question resolves to before it runs: its thread (without turns), its prompt, and how to run it
 // a stored run's effort, while its agent still accepts it
 const acceptedEffort = (kind: ReviewAgentKind, effort: string | undefined) => effort !== undefined && acceptsReviewEffort(kind, effort) ? effort : undefined;
-type ResolvedAsk = { thread: Omit<AskThread, 'turns'>; prompt: string; label: string; model?: string; effort?: string };
+// What a question resolves to before it runs: the collection its thread is kept in (`on`), the thread
+// (without turns), its prompt, how to run it, and how to keep a settled turn on the thread, resolving
+// whether it was kept.
+export type ResolvedAsk = { on: string; thread: Omit<AskThread, 'turns'>; prompt: string; label: string; model?: string; effort?: string; save: (turn: AskTurn) => Promise<boolean> };
+// the collection a stored tour's threads are kept in
+const tourThreads = 'tour';
 
 // Asks questions about a stored tour as Review runs resuming the conversation of the run asked about
 // (ADR 0013), each turn a job polled to its end. A thread takes one question at a time; its turns are
@@ -38,16 +43,27 @@ export class AskJobs {
   // what the question points at is unknown, it kept no conversation, its agent cannot run, or the
   // question's thread is still answering
   async ask(owner: string, target: AskTarget, request: AskRequest): Promise<{ job: StartedReviewJob; threadId: string }> {
+    const resolved = request.target === 'reviewer' ? await this.resolveReviewer(target, request) : await this.resolveGuide(target, request);
+    return await this.start(owner, target, resolved, request.question);
+  }
+
+  // the stored tour a question is about, while it is still the asked-about Comparison
+  private async storedTour(target: AskTarget, fingerprint: string): Promise<StoredReviewTour> {
     const stored = await this.store.current(target.worktreeId, target.branch);
     if (stored === undefined) throw new ReviewTourError('target_unavailable', false);
-    if (stored.tour.fingerprint !== request.fingerprint) throw new ReviewTourError('stale_during_generation', true);
-    const resolved = request.target === 'reviewer' ? await this.resolveReviewer(target, stored, request) : await this.resolveGuide(target, stored, request);
-    return await this.start(owner, target, stored, resolved, request.question);
+    if (stored.tour.fingerprint !== fingerprint) throw new ReviewTourError('stale_during_generation', true);
+    return stored;
+  }
+
+  // keep a turn on a thread of the stored tour, while the tour is still the one asked about
+  private tourSave(target: AskTarget, stored: StoredReviewTour, thread: Omit<AskThread, 'turns'>): ResolvedAsk['save'] {
+    return async turn => await this.store.saveAskTurn(target.worktreeId, stored.branch, stored.tour.fingerprint, thread, turn);
   }
 
   // A question to the reviewer about one Finding of the tour's Code review, on the Finding's own
   // thread, with the review's preset model and effort while its preset and agent still accept them.
-  private async resolveReviewer(target: AskTarget, stored: StoredReviewTour, request: Extract<AskRequest, { target: 'reviewer' }>): Promise<ResolvedAsk> {
+  private async resolveReviewer(target: AskTarget, request: Extract<AskRequest, { target: 'reviewer' }>): Promise<ResolvedAsk> {
+    const stored = await this.storedTour(target, request.fingerprint);
     const review = await this.store.codeReview(target.worktreeId, stored.branch, stored.tour.fingerprint);
     const finding = review?.findings.find(candidate => candidate.id === request.findingId);
     const change = finding === undefined ? undefined : stored.tour.changes.find(candidate => candidate.id === finding.changeId);
@@ -58,12 +74,14 @@ export class AskJobs {
     const anchor = findingAnchor(finding, change);
     const model = this.presets().find(preset => preset.id === review.preset.id && preset.agent === kind)?.model;
     const effort = acceptedEffort(kind, review.effort);
-    return { thread: { id: finding.id, target: 'reviewer', kind, conversation, anchor }, prompt: reviewerAskPrompt(finding, anchor, request.question), label: askRunLabel(review.preset.label), ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
+    const thread: Omit<AskThread, 'turns'> = { id: finding.id, target: 'reviewer', kind, conversation, anchor };
+    return { on: tourThreads, thread, save: this.tourSave(target, stored, thread), prompt: reviewerAskPrompt(finding, anchor, request.question), label: askRunLabel(review.preset.label), ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
   }
 
   // A question to the tour's guide, in the tour's own conversation with the model and effort it ran
   // on: about new lines of one of its Changes, on a new thread, or on one of its existing threads.
-  private async resolveGuide(target: AskTarget, stored: StoredReviewTour, request: Exclude<AskRequest, { target: 'reviewer' }>): Promise<ResolvedAsk> {
+  private async resolveGuide(target: AskTarget, request: Exclude<AskRequest, { target: 'reviewer' }>): Promise<ResolvedAsk> {
+    const stored = await this.storedTour(target, request.fingerprint);
     const { guide } = stored.tour;
     if (guide === undefined) throw new ReviewTourError('conversation_unavailable', false);
     let thread: Omit<AskThread, 'turns'> | undefined;
@@ -75,30 +93,36 @@ export class AskJobs {
       const anchor = change === undefined ? undefined : linesAnchor(request.lines, change);
       if (anchor !== undefined && anchor.excerpt !== '') thread = { id: `ask_${randomBytes(12).toString('base64url')}`, target: 'guide', kind: guide.agent, conversation: guide.conversation, anchor };
       // a new thread must fit beside the stored ones and those still starting, or its answer could not be kept
-      const starting = [...this.jobs.values()].filter(job => job.worktreeId === target.worktreeId && job.state.kind === 'pending' && job.thread.target === 'guide').length;
+      const starting = this.waiting(target.worktreeId, tourThreads).filter(job => job.thread.target === 'guide').length;
       if (thread !== undefined && (await this.store.askThreads(target.worktreeId, stored.branch, stored.tour.fingerprint)).length + starting >= MAX_ASK_THREADS) throw new ReviewTourError('too_large', false);
     }
     if (thread === undefined) throw new ReviewTourError('target_unavailable', false);
     const effort = acceptedEffort(guide.agent, guide.effort);
-    return { thread, prompt: guideAskPrompt(thread.anchor, request.question), label: askRunLabel('Tour guide'), ...(guide.model === undefined ? {} : { model: guide.model }), ...(effort === undefined ? {} : { effort }) };
+    return { on: tourThreads, thread, save: this.tourSave(target, stored, thread), prompt: guideAskPrompt(thread.anchor, request.question), label: askRunLabel('Tour guide'), ...(guide.model === undefined ? {} : { model: guide.model }), ...(effort === undefined ? {} : { effort }) };
   }
 
-  // start one resolved question as a job resuming its thread's conversation
-  private async start(owner: string, target: AskTarget, stored: StoredReviewTour, resolved: ResolvedAsk, question: string): Promise<{ job: StartedReviewJob; threadId: string }> {
-    const { thread, prompt, label, model, effort } = resolved;
+  // the questions still being answered in one Worktree, in one collection of threads or all of them
+  waiting(worktreeId: string, on?: string): AskJob[] {
+    return [...this.jobs.values()].filter(job => job.worktreeId === worktreeId && (on === undefined || job.on === on) && job.state.kind === 'pending');
+  }
+
+  // Start one resolved question as a job resuming its thread's conversation: refused when its agent
+  // cannot run, its thread is still answering, or the Worktree has too many questions waiting.
+  async start(owner: string, target: Omit<AskTarget, 'branch'>, resolved: ResolvedAsk, question: string): Promise<{ job: StartedReviewJob; threadId: string }> {
+    const { on, thread, prompt, label, model, effort, save } = resolved;
     const capability = await this.runner.capability(thread.kind);
     if (!capability.available) throw new ReviewTourError('capability_unavailable', capability.reason === 'generator_unavailable');
-    const waiting = [...this.jobs.values()].filter(job => job.worktreeId === target.worktreeId && job.state.kind === 'pending');
-    if (waiting.length >= MAX_ASK_PENDING || waiting.some(job => job.thread.id === thread.id)) throw new ReviewTourError('busy', true);
+    const waiting = this.waiting(target.worktreeId);
+    if (waiting.length >= MAX_ASK_PENDING || waiting.some(job => job.on === on && job.thread.id === thread.id)) throw new ReviewTourError('busy', true);
     const id = randomBytes(18).toString('base64url');
     const startedAt = Date.now();
-    const job: AskJob = { id, owner, worktreeId: target.worktreeId, thread, question, startedAt, expiresAt: startedAt + ASK_JOB_TTL_MS, state: { kind: 'pending', controller: new AbortController() } };
+    const job: AskJob = { id, owner, worktreeId: target.worktreeId, on, thread, question, startedAt, expiresAt: startedAt + ASK_JOB_TTL_MS, state: { kind: 'pending', controller: new AbortController() } };
     this.jobs.set(id, job);
     const askedAt = new Date(startedAt).toISOString();
     void this.run(job, async signal => {
       const output = await this.runner.run({ kind: thread.kind, workspace: target.workspace, worktreeId: target.worktreeId, prompt, reply: { kind: 'text' }, resume: thread.conversation, followUps: true, timeoutMs: ASK_TIMEOUT_MS, maxOutputBytes: MAX_ASK_ANSWER_BYTES, label, ...pendingRunProgress(() => job.state), ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) }, signal);
       return String(output.value);
-    }, async turn => await this.store.saveAskTurn(target.worktreeId, stored.branch, stored.tour.fingerprint, thread, { id, question, askedAt, ...turn }));
+    }, async turn => await save({ id, question, askedAt, ...turn }));
     return { job: startedReviewJob(job), threadId: thread.id };
   }
 
@@ -126,9 +150,9 @@ export class AskJobs {
     return job?.owner === owner ? job : undefined;
   }
 
-  // the owner's questions still being answered in one Worktree
-  pending(owner: string, worktreeId: string): PendingAskTurn[] {
-    return [...this.jobs.values()].filter(job => job.owner === owner && job.worktreeId === worktreeId && job.state.kind === 'pending').map(job => ({ threadId: job.thread.id, target: job.thread.target, anchor: job.thread.anchor, question: job.question, job: startedReviewJob(job) }));
+  // the owner's questions still being answered in one Worktree's collection of threads, the stored tour's by default
+  pending(owner: string, worktreeId: string, on = tourThreads): PendingAskTurn[] {
+    return this.waiting(worktreeId, on).filter(job => job.owner === owner).map(job => ({ threadId: job.thread.id, target: job.thread.target, anchor: job.thread.anchor, question: job.question, job: startedReviewJob(job) }));
   }
 
   // A new tour, a dismissal or a Remove ends one Worktree's questions: their turns stop, and the Agents

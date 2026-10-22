@@ -16,13 +16,13 @@ type Sides = { codeReviews: StoredCodeReviews; asks: StoredAskRecords };
 type Mutation<T> = { value: T; changed: boolean; codeReviewsChanged?: boolean; asksChanged?: boolean };
 type BranchBinding = { worktreeId: string; branch?: string };
 
-const maxWorktrees = 100;
+export const maxWorktrees = 100;
 const maxBranchLength = 1_024;
 const maxStoredBytes = 100 * 1024 * 1024;
 // keyed by the Worktree wire id `<projectId>:<realpath>` (ADR 0003), so accept the `:`
 // and `/` the path carries — bounded, single-line, no NUL — not just the old bare id
-const validWorktreeId = (value: string) => value.length >= 1 && value.length <= 4096 && !/[\0\n\r]/u.test(value);
-const validBranch = (value: string) => value.length > 0 && value.length <= maxBranchLength && !value.includes('\0');
+export const validWorktreeId = (value: string) => value.length >= 1 && value.length <= 4096 && !/[\0\n\r]/u.test(value);
+export const validBranch = (value: string) => value.length > 0 && value.length <= maxBranchLength && !value.includes('\0');
 
 // validate one durable review record
 function parseStoredReview(value: unknown, expectedWorktreeId: string): StoredReviewTour | undefined {
@@ -75,7 +75,7 @@ function summary(stored: StoredReviewTour, codeReview: CodeReview | undefined): 
 }
 
 // a file beside the tour file, so the tour file keeps its format
-function sideFileFor(file: string, name: string): string {
+export function sideFileFor(file: string, name: string): string {
   return file.endsWith('.json') ? `${file.slice(0, -'.json'.length)}.${name}.json` : `${file}.${name}`;
 }
 
@@ -83,7 +83,7 @@ function sideFileFor(file: string, name: string): string {
 // cached; the store is the file's only writer. An unreadable or corrupt file reads as empty, with a
 // warning, so it never breaks the tour operations sharing the store; a corrupt file is rejected as
 // a whole.
-class SideRecords<T> {
+export class SideRecords<T> {
   private cached?: Record<string, T>;
 
   constructor(readonly file: string, private readonly label: string, private readonly parse: (value: unknown, worktreeId: string) => T | undefined) {}
@@ -377,9 +377,9 @@ export class ReviewTourStore {
       const sides = { codeReviews: { ...codeReviews }, asks: { ...asks } };
       const result = change(stored, sides);
       // avoid writes for pure reads
-      if (result.changed) await this.write(this.file, stored);
-      if (withSides && result.codeReviewsChanged === true) { await this.write(this.codeReviews.file, sides.codeReviews); this.codeReviews.wrote(sides.codeReviews); }
-      if (withSides && result.asksChanged === true) { await this.write(this.asks.file, sides.asks); this.asks.wrote(sides.asks); }
+      if (result.changed) await writeRecords(this.file, stored);
+      if (withSides && result.codeReviewsChanged === true) { await writeRecords(this.codeReviews.file, sides.codeReviews); this.codeReviews.wrote(sides.codeReviews); }
+      if (withSides && result.asksChanged === true) { await writeRecords(this.asks.file, sides.asks); this.asks.wrote(sides.asks); }
       return result.value;
     });
     this.mutation = operation.then(() => undefined, () => undefined);
@@ -413,15 +413,15 @@ export class ReviewTourStore {
     }
     return stored;
   }
+}
 
-  // atomically replace one durable file
-  private async write(file: string, value: StoredReviews | StoredCodeReviews | StoredAskRecords): Promise<void> {
-    const serialized = JSON.stringify(value);
-    // enforce the aggregate storage boundary
-    if (Buffer.byteLength(serialized) > maxStoredBytes) throw new Error('review tour store exceeds storage limits');
-    await mkdir(dirname(file), { recursive: true });
-    const next = `${file}.next`;
-    await writeFile(next, serialized, { mode: 0o600 });
-    await rename(next, file);
-  }
+// atomically replace one durable file of records
+export async function writeRecords(file: string, value: Record<string, unknown>): Promise<void> {
+  const serialized = JSON.stringify(value);
+  // enforce the aggregate storage boundary
+  if (Buffer.byteLength(serialized) > maxStoredBytes) throw new Error('review tour store exceeds storage limits');
+  await mkdir(dirname(file), { recursive: true });
+  const next = `${file}.next`;
+  await writeFile(next, serialized, { mode: 0o600 });
+  await rename(next, file);
 }
