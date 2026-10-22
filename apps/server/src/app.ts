@@ -271,7 +271,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const inactiveClient = () => Object.assign(new Error('another client is active'), { statusCode: 423 });
   function browser(request: FastifyRequest, mutation = false): void { if (request.headers.host !== expectedHost) throw forbidden(); if (mutation && request.headers.origin !== config.publicOrigin.origin) throw forbidden(); }
   function session(request: FastifyRequest, mutation = false): Session { browser(request, mutation); const s = auth.get(auth.unsign(request.cookies[cookieName])); if (!s) throw unauthorized(); if (mutation && !auth.csrf(s, request.headers['x-csrf-token'] as string | undefined)) throw forbidden(); return s; }
-  function controlled(request: FastifyRequest, mutation = false): Session { const s = session(request, mutation); if (!control.connect(s.id)) throw inactiveClient(); return s; }
+  // protected routes renew existing control but never acquire it implicitly
+  function controlled(request: FastifyRequest, mutation = false): Session {
+    const s = session(request, mutation);
+    // require explicit takeover when no controller has been established
+    if (!control.connect(s.id, false)) throw inactiveClient();
+    return s;
+  }
   // serve one authenticated expiring preview
   const temporaryPreview = async (request: FastifyRequest<{ Params: { token: string } }>, reply: FastifyReply) => {
     browser(request);
@@ -589,7 +595,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.get('/preview/:token/*', temporaryPreview);
   app.get('/', async (request, reply) => { browser(request); return reply.sendFile('index.html'); });
   app.get('/api/ui-version', async (request) => { browser(request); return { version: await uiVersion() }; });
-  app.get('/api/auth/session', async (request) => { const s = session(request); return await sessionState(s, control.connect(s.id)); });
+  // restore authentication without silently claiming an unowned console
+  app.get('/api/auth/session', async (request) => { const s = session(request); return await sessionState(s, control.connect(s.id, false)); });
   // issue bootstrap without waiting for peers
   app.get('/api/auth/bootstrap', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request) => { browser(request); void refreshRemoteServers().catch(() => undefined); return { csrfToken: auth.bootstrap(), server }; });
   // aggregate configured instance attention for authenticated clients
@@ -599,7 +606,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await refreshRemoteServers(remotes);
     return { servers: [{ url: config.publicOrigin.origin, name: server.name, ...(server.icon === undefined ? {} : { icon: server.icon }), attention: localAttention }, ...remotes.map(publishedRemoteStatus)] };
   });
-  app.post('/api/auth/login', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => { browser(request, true); const data = body(request); const preauth = request.headers['x-csrf-token']; if (typeof data.password !== 'string' || typeof preauth !== 'string') return reply.code(401).send({ error: 'invalid credentials' }); const s = await auth.login(data.password, preauth); if (!s) return reply.code(401).send({ error: 'invalid credentials' }); reply.setCookie(cookieName, auth.sign(s), { path: '/', secure: secureOrigin, httpOnly: true, sameSite: 'lax', signed: false, maxAge: 400 * 24 * 60 * 60 }); return await sessionState(s, control.connect(s.id)); });
+  // explicit sign-in may establish initial ownership without displacing another client
+  app.post('/api/auth/login', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => { browser(request, true); const data = body(request); const preauth = request.headers['x-csrf-token']; if (typeof data.password !== 'string' || typeof preauth !== 'string') return reply.code(401).send({ error: 'invalid credentials' }); const s = await auth.login(data.password, preauth); if (!s) return reply.code(401).send({ error: 'invalid credentials' }); reply.setCookie(cookieName, auth.sign(s), { path: '/', secure: secureOrigin, httpOnly: true, sameSite: 'lax', signed: false, maxAge: 400 * 24 * 60 * 60 }); return await sessionState(s, control.connect(s.id, true)); });
   app.post('/api/auth/take-control', async (request, reply) => {
     const s = session(request, true);
     const providedName = body(request).deviceName;

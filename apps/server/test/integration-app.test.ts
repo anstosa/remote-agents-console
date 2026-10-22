@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { AuthService } from '../src/auth/service.js';
+import { ControlService } from '../src/auth/control.js';
 import type { ValidatedConfig } from '../src/config/schema.js';
 
 const roots: string[] = [];
@@ -80,7 +81,8 @@ describe('application integration surfaces', () => {
       projects: []
     };
     const auth = new AuthService('$argon2id$unused', secret);
-    const app = await buildApp(config, { auth, reviewTours: { capability: async () => ({ available: false, reason: 'generator_unavailable' }) } as never });
+    const control = new ControlService();
+    const app = await buildApp(config, { auth, control, reviewTours: { capability: async () => ({ available: false, reason: 'generator_unavailable' }) } as never });
     try {
       const metadata = await app.inject({ method: 'GET', url: '/.well-known/oauth-protected-resource', headers: { host: 'agents.example.com' } });
       expect(metadata.json().resource).toBe('https://agents.example.com/mcp');
@@ -88,6 +90,11 @@ describe('application integration surfaces', () => {
       const status = await app.inject({ method: 'GET', url: '/api/integrations/status', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}` } });
       expect(status.json()).toMatchObject({ enabled: true, control: { voiceActive: false }, realtime: { enabled: true, available: true, writeToolsEnabled: true } });
       const voiceSessionId = 'voice-session-123456789';
+      // authentication alone cannot start voice mode or acquire control
+      const inactiveRealtime = await app.inject({ method: 'POST', url: '/api/realtime/session', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId } });
+      expect(inactiveRealtime.statusCode).toBe(423);
+      // establish explicit ownership before exercising the voice lifecycle
+      control.take('browser-session');
       const realtime = await app.inject({ method: 'POST', url: '/api/realtime/session', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId } });
       expect(realtime.statusCode).toBe(200);
       const activeStatus = await app.inject({ method: 'GET', url: '/api/integrations/status', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}` } });

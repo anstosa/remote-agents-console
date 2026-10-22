@@ -2211,6 +2211,7 @@ function LoadingScreen({ label = 'Restoring secure session' }: { label?: string 
 }
 
 
+// require explicit naming or control handoff before entering the console
 function ControlScreen({ session, claimed }: { session: SessionInfo; claimed: (next: SessionInfo) => void }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
@@ -2232,8 +2233,8 @@ function ControlScreen({ session, claimed }: { session: SessionInfo; claimed: (n
       setPending(false);
     }
   };
-  const controller = session.controllingDeviceName ?? 'Another device';
-  return <main className="auth-screen loading-screen" aria-live="polite"><div className="auth-glow" /><section className="loading-console console-recovery"><ServerSwitcher className="auth-server-switcher" /><strong className={namingOnly ? undefined : 'control-owner'}>{namingOnly ? 'Name this device.' : `${controller} is active`}</strong>{namingOnly && <span>Give this device a name before continuing.</span>}{needsName && <label>Device name<input autoFocus type="text" value={deviceName} maxLength={64} autoComplete="nickname" placeholder="e.g. Kitchen iPad" onChange={event => setDeviceName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && deviceName.trim()) void takeControl(); }} /></label>}{error && <span className="auth-error" role="alert">{error}</span>}<button type="button" className={pending ? 'progress-border progress-blue' : undefined} aria-busy={pending || undefined} disabled={pending || (needsName && !deviceName.trim())} onClick={() => void takeControl()}><ProgressRing busy={pending} />{pending ? namingOnly ? 'Saving name' : 'Taking control' : namingOnly ? 'Save device name' : 'Take control'}</button><NotificationControl /></section></main>;
+  const controlLabel = session.controllingDeviceName === undefined ? 'Take control of this console' : `${session.controllingDeviceName} is active`;
+  return <main className="auth-screen loading-screen" aria-live="polite"><div className="auth-glow" /><section className="loading-console console-recovery"><ServerSwitcher className="auth-server-switcher" /><strong className={namingOnly ? undefined : 'control-owner'}>{namingOnly ? 'Name this device.' : controlLabel}</strong>{namingOnly && <span>Give this device a name before continuing.</span>}{needsName && <label>Device name<input autoFocus type="text" value={deviceName} maxLength={64} autoComplete="nickname" placeholder="e.g. Kitchen iPad" onChange={event => setDeviceName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && deviceName.trim()) void takeControl(); }} /></label>}{error && <span className="auth-error" role="alert">{error}</span>}<button type="button" className={pending ? 'progress-border progress-blue' : undefined} aria-busy={pending || undefined} disabled={pending || (needsName && !deviceName.trim())} onClick={() => void takeControl()}><ProgressRing busy={pending} />{pending ? namingOnly ? 'Saving name' : 'Taking control' : namingOnly ? 'Save device name' : 'Take control'}</button><NotificationControl /></section></main>;
 }
 
 class ConsoleBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {

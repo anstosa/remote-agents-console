@@ -4,6 +4,7 @@ import { createHmac } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { worktreePlace } from '../src/places/places.js';
 import { AuthService } from '../src/auth/service.js';
+import { ControlService } from '../src/auth/control.js';
 import { AgentNotificationCoordinator } from '../src/notifications.js';
 import { stated } from './helpers/agent.js';
 import { testProject, testWorktree } from './helpers/config.js';
@@ -431,7 +432,10 @@ describe('project browser security boundary', () => {
 });
 
 describe('client control', () => {
+  // require deliberate takeover even after a browser stops sending heartbeats
   it('automatically activates the first client and lets another client take control', async () => {
+    let now = 1_000;
+    const control = new ControlService(() => now, 100);
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const names = new Map<string, string>();
     const devices = {
@@ -443,7 +447,7 @@ describe('client control', () => {
         return normalized;
       }
     };
-    const controlApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 5).toString('base64url')), devices: devices as never });
+    const controlApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 5).toString('base64url')), control, devices: devices as never });
     const login = async () => {
       const boot = await controlApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const response = await controlApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
@@ -472,6 +476,12 @@ describe('client control', () => {
     const blockedTicket = await controlApp.inject({ method: 'POST', url: '/api/dashboard/ticket', headers: secondHeaders });
     expect(blocked.statusCode).toBe(423);
     expect(blockedTicket.statusCode).toBe(423);
+    // passive refreshes and protected routes cannot acquire an expired lease
+    now += 101;
+    const idleSession = await controlApp.inject({ method: 'GET', url: '/api/auth/session', headers: secondHeaders });
+    expect(idleSession.json().active).toBe(false);
+    expect((await controlApp.inject({ method: 'GET', url: '/api/dashboard', headers: secondHeaders })).statusCode).toBe(423);
+    expect((await controlApp.inject({ method: 'POST', url: '/api/dashboard/ticket', headers: secondHeaders })).statusCode).toBe(423);
     const unnamedSecond = await controlApp.inject({ method: 'POST', url: '/api/auth/take-control', headers: secondHeaders });
     const take = await controlApp.inject({ method: 'POST', url: '/api/auth/take-control', headers: secondHeaders, payload: { deviceName: 'Kitchen iPad' } });
     expect(unnamedSecond.statusCode).toBe(400);
@@ -480,7 +490,20 @@ describe('client control', () => {
     const displacedSession = await controlApp.inject({ method: 'GET', url: '/api/auth/session', headers: { host: 'agents.example.com', cookie: first.cookie } });
     expect(displaced.statusCode).toBe(423);
     expect(displacedSession.json()).toMatchObject({ active: false, deviceName: 'Studio Display', controllingDeviceName: 'Kitchen iPad' });
+    // an old controller cannot steal control back when the new controller sleeps
+    now += 101;
+    expect((await controlApp.inject({ method: 'GET', url: '/api/auth/session', headers: firstHeaders })).json().active).toBe(false);
+    expect((await controlApp.inject({ method: 'GET', url: '/api/auth/session', headers: secondHeaders })).json().active).toBe(true);
     await controlApp.close();
+    // restored cookies cannot claim an unowned console after server restart
+    const restartedApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 5).toString('base64url')), devices: devices as never });
+    try {
+      const restored = await restartedApp.inject({ method: 'GET', url: '/api/auth/session', headers: secondHeaders });
+      expect(restored.json()).toMatchObject({ active: false, deviceName: 'Kitchen iPad' });
+      expect((await restartedApp.inject({ method: 'POST', url: '/api/dashboard/ticket', headers: firstHeaders })).statusCode).toBe(423);
+      const reclaimed = await restartedApp.inject({ method: 'POST', url: '/api/auth/take-control', headers: secondHeaders });
+      expect(reclaimed.json()).toMatchObject({ active: true, controllingDeviceName: 'Kitchen iPad' });
+    } finally { await restartedApp.close(); }
   }, 15_000);
 
   it('registers every authenticated client without pushing silent notification dismissals', async () => {

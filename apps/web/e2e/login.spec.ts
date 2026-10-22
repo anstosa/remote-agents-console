@@ -41,6 +41,53 @@ test('lets a named device take control without asking for its name again', async
   await expect(page.getByRole('button', { name: 'Take control', exact: true })).toBeEnabled();
 });
 
+// keep an inactive named client behind explicit takeover
+test('does not take control automatically after focus refreshes or reloads', async ({ page }) => {
+  let sessionRequests = 0;
+  let takeoverRequests = 0;
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    // model an expired owner without erasing this client identity
+    if (url.pathname === '/api/auth/session') {
+      sessionRequests += 1;
+      return route.fulfill({ json: { csrfToken: 'csrf-token', active: false, deviceName: 'Kitchen iPad' } });
+    }
+    // activate only after the visible control is selected
+    if (url.pathname === '/api/auth/take-control') {
+      takeoverRequests += 1;
+      return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Kitchen iPad', controllingDeviceName: 'Kitchen iPad' } });
+    }
+    // expose the normal console after explicit takeover
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [], projects: [] } });
+    // suppress unrelated notification setup
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  const takeControl = page.getByRole('button', { name: 'Take control', exact: true });
+  await expect(takeControl).toBeEnabled();
+  await expect(page.getByText(/is active$/)).toHaveCount(0);
+  await expect(page.getByLabel('Device name')).toHaveCount(0);
+  expect(takeoverRequests).toBe(0);
+
+  const beforeFocus = sessionRequests;
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect.poll(() => sessionRequests).toBeGreaterThan(beforeFocus);
+  await expect(takeControl).toBeVisible();
+  expect(takeoverRequests).toBe(0);
+
+  const beforeReload = sessionRequests;
+  await page.reload();
+  await expect.poll(() => sessionRequests).toBeGreaterThan(beforeReload);
+  await expect(takeControl).toBeVisible();
+  expect(takeoverRequests).toBe(0);
+
+  await takeControl.click();
+  await expect.poll(() => takeoverRequests).toBe(1);
+  await expect(page.getByRole('heading', { name: 'No sessions' })).toBeVisible();
+});
+
 test('prompts the first active device for a name before opening the console', async ({ page }) => {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
