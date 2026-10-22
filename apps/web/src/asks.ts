@@ -1,23 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { failureCode, isReviewJob, reviewJobProgress, transientFailure, type ReviewJob, type ReviewRunLink } from './review-jobs.js';
+import type { ReviewDiffSide as Side } from './code-panel/review-diffs.js';
+import { failureCode, isRecord, isReviewJob, reviewJobProgress, transientFailure, type ReviewJob, type ReviewRunLink } from './review-jobs.js';
 
-// Ask threads: questions about a stored tour's Findings, asked of the Code review's own conversation and
-// stored with the tour on the server. Each question is a job polled to its end; the thread is read
-// back from the server once it settles. Every guard tolerates extra fields.
+// Ask threads: questions about a stored tour, asked of the conversation of the run asked about (the
+// Code review's for a Finding, the tour's own for some of its lines) and stored with the tour on the
+// server. Each question is a job polled to its end; the thread is read back from the server once it
+// settles. Every guard tolerates extra fields.
 
 export const maxAskQuestion = 4_000;
 
 // one question and how it settled
 export type AskTurn = { id: string; question: string; askedAt: string; answer?: string; error?: { code: string; retryable: boolean } };
-// the questions about one Finding, keyed by the Finding's id
-export type AskThread = { id: string; findingId: string; turns: AskTurn[] };
-// a question still being answered: its job, and what the job's latest poll said about its pane
-export type PendingAsk = { question: string; job: ReviewJob; run?: ReviewRunLink; startedAt?: string };
-// why a thread's last question has no answer when the thread does not hold it as a turn (`turnId`)
-export type AskFailure = { turnId: string; message: string };
+// Lines of one Change: a range on `side`, or, with `startSide`, from a line on that side to `endLine` on `side`
+export type AskLines = { changeId: string; startSide?: Side; side: Side; startLine: number; endLine: number };
+// where a thread points: its lines, and the Finding when it is about one
+export type AskAnchor = AskLines & { findingId?: string };
+// the questions about one anchor; a reviewer thread's id is its Finding's
+export type AskThread = { id: string; target: AskRole; anchor: AskAnchor; turns: AskTurn[] };
+// A question still being answered: its job, what the job's latest poll said about its pane, and the
+// thread it is on, which it may be starting
+export type PendingAsk = { question: string; job: ReviewJob; target: AskRole; anchor: AskAnchor; run?: ReviewRunLink; startedAt?: string };
+// what a question is about: a Finding, new lines, or an existing thread of the guide
+export type AskSubject = { target: 'reviewer'; findingId: string } | { target: 'guide'; lines: AskLines } | { target: 'guide'; threadId: string };
+// Why a thread's last question has no answer when the thread does not hold it as a turn (`turnId`), and
+// where that question was asked, for a thread its failed first question left unstored
+export type AskFailure = { turnId: string; message: string; target: AskRole; anchor: AskAnchor };
 type AskRequest = (url: string, init?: RequestInit, observeReachability?: boolean) => Promise<Response>;
 
-const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object';
 
 function turnFrom(value: unknown): AskTurn | undefined {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.question !== 'string' || typeof value.askedAt !== 'string') return undefined;
@@ -25,9 +34,24 @@ function turnFrom(value: unknown): AskTurn | undefined {
   return { id: value.id, question: value.question, askedAt: value.askedAt, ...(typeof value.answer === 'string' ? { answer: value.answer } : {}), ...(error === undefined ? {} : { error }) };
 }
 
+const isSide = (value: unknown): value is Side => value === 'additions' || value === 'deletions';
+const isRole = (value: unknown): value is AskRole => value === 'reviewer' || value === 'guide';
+
+function anchorFrom(value: unknown): AskAnchor | undefined {
+  if (!isRecord(value) || typeof value.changeId !== 'string' || !isSide(value.side) || typeof value.startLine !== 'number' || typeof value.endLine !== 'number') return undefined;
+  return { changeId: value.changeId, side: value.side, startLine: value.startLine, endLine: value.endLine, ...(isSide(value.startSide) ? { startSide: value.startSide } : {}), ...(typeof value.findingId === 'string' ? { findingId: value.findingId } : {}) };
+}
+
 function threadFrom(value: unknown): AskThread | undefined {
-  if (!isRecord(value) || typeof value.id !== 'string' || !isRecord(value.anchor) || typeof value.anchor.findingId !== 'string' || !Array.isArray(value.turns)) return undefined;
-  return { id: value.id, findingId: value.anchor.findingId, turns: value.turns.map(turnFrom).filter((turn): turn is AskTurn => turn !== undefined) };
+  const anchor = isRecord(value) ? anchorFrom(value.anchor) : undefined;
+  if (!isRecord(value) || typeof value.id !== 'string' || !isRole(value.target) || anchor === undefined || !Array.isArray(value.turns)) return undefined;
+  return { id: value.id, target: value.target, anchor, turns: value.turns.map(turnFrom).filter((turn): turn is AskTurn => turn !== undefined) };
+}
+
+function pendingFrom(value: unknown): [string, PendingAsk] | undefined {
+  const anchor = isRecord(value) ? anchorFrom(value.anchor) : undefined;
+  if (!isRecord(value) || typeof value.threadId !== 'string' || typeof value.question !== 'string' || !isRole(value.target) || anchor === undefined || !isReviewJob(value.job)) return undefined;
+  return [value.threadId, { question: value.question, job: value.job, target: value.target, anchor }];
 }
 
 // who a thread asks: the reviewer about one of its Findings, or the tour's guide about some lines
@@ -51,16 +75,18 @@ export function askErrorMessage(role: AskRole, code: string | undefined, status 
   if (code === 'capability_unavailable') return `The ${copy.agent} cannot run on this server.`;
   if (code === 'malformed_result') return `The ${copy.who} gave no answer. Its pane is left open if it needs you.`;
   if (code === 'cancelled') return 'The question was cancelled.';
+  if (code === 'job_lost') return 'The question was lost, likely to a server restart. Ask again.';
+  if (code === 'too_large') return 'This tour holds too many questions. Ask on one of its threads instead.';
   if (code === 'invalid_request') return 'The question was rejected. Refresh the console and try again.';
   if (status === 423) return 'Another browser controls this console. Take control, then try again.';
   if (status === 429) return 'Too many requests were sent. Wait a moment, then try again.';
   return 'The question failed. Try again.';
 }
 
-// The Ask threads of the Worktree's stored tour, read when `enabled` and again for each Code review
-// (`conversation`), with the owner's questions still being answered polled until they settle; `ask`
-// starts a question about one Finding and resolves to why it did not start.
-export function useAskThreads(request: AskRequest, worktreeId: string, fingerprint: string | undefined, conversation: string | undefined, enabled: boolean): { threads: Map<string, AskThread>; pending: Map<string, PendingAsk>; failures: Map<string, AskFailure>; ask: (findingId: string, question: string) => Promise<string | undefined> } {
+// The Ask threads of the Worktree's stored tour, read when `enabled` and again whenever `conversations`
+// (the conversations it can ask) changes, with the owner's questions still being answered polled until
+// they settle; `ask` starts a question and resolves to why it did not start.
+export function useAskThreads(request: AskRequest, worktreeId: string, fingerprint: string | undefined, conversations: string, enabled: boolean): { threads: Map<string, AskThread>; pending: Map<string, PendingAsk>; failures: Map<string, AskFailure>; ask: (subject: AskSubject, anchor: AskAnchor, question: string, replacing?: string) => Promise<string | undefined> } {
   const [threads, setThreads] = useState(new Map<string, AskThread>());
   const [pending, setPending] = useState(new Map<string, PendingAsk>());
   const [failures, setFailures] = useState(new Map<string, AskFailure>());
@@ -73,22 +99,24 @@ export function useAskThreads(request: AskRequest, worktreeId: string, fingerpri
     const body: unknown = await response.json().catch(() => undefined);
     if (!live.current || !response.ok || !isRecord(body) || !Array.isArray(body.threads)) return;
     setThreads(new Map(body.threads.map(threadFrom).filter((thread): thread is AskThread => thread !== undefined).map(thread => [thread.id, thread])));
-    if (withPending && Array.isArray(body.pending)) setPending(new Map(body.pending.flatMap(entry => isRecord(entry) && typeof entry.threadId === 'string' && typeof entry.question === 'string' && isReviewJob(entry.job) ? [[entry.threadId, { question: entry.question, job: entry.job }] as const] : [])));
+    if (withPending && Array.isArray(body.pending)) setPending(new Map(body.pending.map(pendingFrom).filter((entry): entry is [string, PendingAsk] => entry !== undefined)));
   }, [request, worktreeId]);
-  useEffect(() => { if (enabled) void refresh(true); }, [enabled, fingerprint, conversation, refresh]);
+  useEffect(() => { if (enabled) void refresh(true); }, [enabled, fingerprint, conversations, refresh]);
 
   // poll each pending question's job; a settled one is read back with its thread
   const polling = [...pending.entries()].map(([threadId, entry]) => `${threadId}\0${entry.job.id}`).join('|');
   useEffect(() => {
     const timers: number[] = [];
     let stopped = false;
-    // a failed job's turn is normally on its thread; `message` shows when it is not (a store failure)
-    const settle = (threadId: string, jobId: string, message?: string) => {
-      setPending(current => { if (current.get(threadId)?.job.id !== jobId) return current; const next = new Map(current); next.delete(threadId); return next; });
-      if (message !== undefined) setFailures(current => new Map(current).set(threadId, { turnId: jobId, message }));
-      void refresh(false);
+    // A failed job's turn is normally on its thread; `message` shows when it is not (a store failure, a
+    // restart). The question stays pending until its thread is read back, so a thread it was starting
+    // never drops out of view in between.
+    const settle = (threadId: string, entry: PendingAsk, message?: string) => {
+      if (message !== undefined) setFailures(current => new Map(current).set(threadId, { turnId: entry.job.id, message, target: entry.target, anchor: entry.anchor }));
+      void refresh(false).finally(() => setPending(current => { if (current.get(threadId)?.job.id !== entry.job.id) return current; const next = new Map(current); next.delete(threadId); return next; }));
     };
-    for (const [threadId, { job }] of pending) {
+    for (const [threadId, entry] of pending) {
+      const { job, target } = entry;
       const poll = async () => {
         const response = await request(`/api/review-tour/asks/jobs/${encodeURIComponent(job.id)}`, undefined, false);
         const body: unknown = await response.json().catch(() => ({}));
@@ -103,7 +131,7 @@ export function useAskThreads(request: AskRequest, worktreeId: string, fingerpri
         // poll through transient failures for the job's lifetime
         if (transientFailure(response, failureCode(record)) && Date.now() < Date.parse(job.expiresAt)) { timers.push(window.setTimeout(() => void poll(), 2_000)); return; }
         // answered, failed, superseded with its tour or review (410), or forgotten by a restart (404)
-        settle(threadId, job.id, response.ok || response.status === 410 || response.status === 404 ? undefined : askErrorMessage('reviewer', failureCode(record), response.status));
+        settle(threadId, entry, response.ok || response.status === 410 ? undefined : response.status === 404 ? askErrorMessage(target, 'job_lost') : askErrorMessage(target, failureCode(record), response.status));
       };
       timers.push(window.setTimeout(() => void poll(), 0));
     }
@@ -112,19 +140,21 @@ export function useAskThreads(request: AskRequest, worktreeId: string, fingerpri
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [polling, refresh, request]);
 
-  const ask = useCallback(async (findingId: string, question: string): Promise<string | undefined> => {
-    if (fingerprint === undefined) return askErrorMessage('reviewer', 'target_unavailable');
-    const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/review-tour/asks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ findingId, question, fingerprint }) }, false);
+  // `anchor` is where the question's thread sits, shown while its first question is answered;
+  // `replacing` is a thread its failed first question left unstored, which this question starts again
+  const ask = useCallback(async (subject: AskSubject, anchor: AskAnchor, question: string, replacing?: string): Promise<string | undefined> => {
+    if (fingerprint === undefined) return askErrorMessage(subject.target, 'target_unavailable');
+    const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/review-tour/asks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...subject, question, fingerprint }) }, false);
     const body: unknown = await response.json().catch(() => ({}));
     const record = isRecord(body) ? body : {};
     if (response.status === 202 && isReviewJob(record.job) && typeof record.threadId === 'string') {
       const job = record.job;
       const threadId = record.threadId;
-      setPending(current => new Map(current).set(threadId, { question, job }));
-      setFailures(current => { if (!current.has(threadId)) return current; const next = new Map(current); next.delete(threadId); return next; });
+      setPending(current => new Map(current).set(threadId, { question, job, target: subject.target, anchor }));
+      setFailures(current => { if (!current.has(threadId) && (replacing === undefined || !current.has(replacing))) return current; const next = new Map(current); next.delete(threadId); if (replacing !== undefined) next.delete(replacing); return next; });
       return undefined;
     }
-    return askErrorMessage('reviewer', failureCode(record), response.status);
+    return askErrorMessage(subject.target, failureCode(record), response.status);
   }, [request, worktreeId, fingerprint]);
 
   return { threads, pending, failures, ask };

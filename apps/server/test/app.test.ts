@@ -1646,7 +1646,9 @@ describe('code review API', () => {
       await until(async () => (await reviewApp.inject({ method: 'GET', url: `/api/code-review/jobs/${reviewJob}`, headers })).statusCode === 200);
       const ready = await reviewApp.inject({ method: 'GET', url: `/api/code-review/jobs/${reviewJob}`, headers });
       expect(ready.json()).toMatchObject({ status: 'ready', review: { fingerprint: comparison.fingerprint, preset: { id: 'correctness', label: 'Correctness', agent: 'codex' }, effort: 'high', findings: [{ changeId: change.id, side: 'additions', startLine: 2, endLine: 2, severity: 'high' }], general: [] } });
-      finishTour(tour);
+      // the tour keeps its guide's conversation, which an Ask about its lines resumes
+      const guideConversation = '019a0000-2222-7222-8333-444455556666';
+      finishTour({ ...tour, guide: { agent: 'codex', conversation: guideConversation, effort: 'low' } });
       await until(async () => (await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour', headers })).statusCode === 200);
       const stored = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour', headers });
       expect(stored.json()).toMatchObject({ status: 'ready', review: { tour: { fingerprint: comparison.fingerprint }, codeReview: ready.json().review } });
@@ -1657,21 +1659,31 @@ describe('code review API', () => {
 
       // ask the reviewer about its Finding: a job resuming the review's conversation, stored on the thread once answered
       const findingId = stored.json().review.codeReview.findings[0].id as string;
-      const badAsk = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/asks', headers: mutationHeaders, payload: JSON.stringify({ findingId, question: '   ', fingerprint: comparison.fingerprint }) });
+      const badAsk = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/asks', headers: mutationHeaders, payload: JSON.stringify({ target: 'reviewer', findingId, question: '   ', fingerprint: comparison.fingerprint }) });
       expect(badAsk.statusCode).toBe(400);
-      const asked = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/asks', headers: mutationHeaders, payload: JSON.stringify({ findingId, question: 'Why skip it?', fingerprint: comparison.fingerprint }) });
+      const asked = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/asks', headers: mutationHeaders, payload: JSON.stringify({ target: 'reviewer', findingId, question: 'Why skip it?', fingerprint: comparison.fingerprint }) });
       expect(asked.statusCode).toBe(202);
       expect(asked.json()).toMatchObject({ status: 'pending', threadId: findingId, job: { id: expect.any(String) } });
       expect(runs[1]!.request).toMatchObject({ label: '💬 Ask · Correctness', resume: conversation, reply: { kind: 'text' }, followUps: true, effort: 'high' });
       const askJob = asked.json().job.id as string;
-      expect((await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/asks', headers })).json()).toEqual({ status: 'ready', threads: [], pending: [{ threadId: findingId, question: 'Why skip it?', job: asked.json().job }] });
+      expect((await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/asks', headers })).json()).toEqual({ status: 'ready', threads: [], pending: [{ threadId: findingId, target: 'reviewer', anchor: expect.objectContaining({ findingId }), question: 'Why skip it?', job: asked.json().job }] });
       runs[1]!.request.onStarted?.({ agentId: 'agent-ask' });
       expect((await reviewApp.inject({ method: 'GET', url: `/api/review-tour/asks/jobs/${askJob}`, headers })).json()).toMatchObject({ status: 'pending', run: { agentId: 'agent-ask', needsInput: false } });
-      expect((await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/asks', headers: mutationHeaders, payload: JSON.stringify({ findingId, question: 'And?', fingerprint: comparison.fingerprint }) })).json()).toEqual({ status: 'error', error: { code: 'busy', retryable: true } });
+      expect((await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/asks', headers: mutationHeaders, payload: JSON.stringify({ target: 'reviewer', findingId, question: 'And?', fingerprint: comparison.fingerprint }) })).json()).toEqual({ status: 'error', error: { code: 'busy', retryable: true } });
       runs[1]!.resolve('Because **validation** happens later.');
       await until(async () => (await reviewApp.inject({ method: 'GET', url: `/api/review-tour/asks/jobs/${askJob}`, headers })).statusCode === 200);
       const threads = (await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/asks', headers })).json();
       expect(threads).toMatchObject({ status: 'ready', pending: [], threads: [{ id: findingId, target: 'reviewer', conversation, anchor: { findingId, file: 'src/route.ts', side: 'additions', startLine: 2, endLine: 2 }, turns: [{ question: 'Why skip it?', answer: 'Because **validation** happens later.' }] }] });
+      runs.splice(1, 1);
+
+      // ask the guide about some lines: a new thread in the tour's own conversation
+      const toGuide = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/asks', headers: mutationHeaders, payload: JSON.stringify({ target: 'guide', lines: { changeId: change.id, side: 'additions', startLine: 1, endLine: 2 }, question: 'What changed?', fingerprint: comparison.fingerprint }) });
+      expect(toGuide.statusCode).toBe(202);
+      const guideThread = toGuide.json().threadId as string;
+      expect(runs[1]!.request).toMatchObject({ label: '💬 Ask · Tour guide', resume: guideConversation, reply: { kind: 'text' }, followUps: true, effort: 'low' });
+      runs[1]!.resolve('It adds **more**.');
+      await until(async () => (await reviewApp.inject({ method: 'GET', url: `/api/review-tour/asks/jobs/${toGuide.json().job.id as string}`, headers })).statusCode === 200);
+      expect((await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/asks', headers })).json().threads).toMatchObject([{ id: findingId }, { id: guideThread, target: 'guide', conversation: guideConversation, anchor: { changeId: change.id, file: 'src/route.ts', side: 'additions', startLine: 1, endLine: 2 }, turns: [{ question: 'What changed?', answer: 'It adds **more**.' }] }]);
       runs.splice(1, 1);
 
       // "Add AI review" to the stored tour

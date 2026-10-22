@@ -177,7 +177,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // questions about a stored tour's Findings, asked of the Code review's own conversation
   const asks = new AskJobs(reviewRunner, reviewStore, () => review.presets);
   // a review that lands replaces the one the Worktree's questions were asked of
-  const codeReviews = new CodeReviewJobs(codeReviewer, reviewStore, async settled => { if (settled.state.kind === 'ready') void asks.supersedeWorktree(settled.worktreeId); await dashboardUpdates.refresh().catch(() => undefined); });
+  const codeReviews = new CodeReviewJobs(codeReviewer, reviewStore, async settled => { if (settled.state.kind === 'ready') void asks.supersedeWorktree(settled.worktreeId, 'reviewer'); await dashboardUpdates.refresh().catch(() => undefined); });
   const reviewJobs = new ReviewTourJobs(reviewTours, reviewStore, async review => {
     const worktree = review.prepared.resolved.worktree;
     const projectName = config.projects.find(project => project.id === worktree.projectId)?.label ?? worktree.label;
@@ -2012,7 +2012,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const codeReviewJob = codeReviews.pending(owner, id, review.tour.fingerprint);
     return reply.code(200).send({ status: 'ready', review: { ...review, ...(codeReview === undefined ? {} : { codeReview }), ...(codeReviewJob === undefined ? {} : { codeReviewJob }) } });
   });
-  // ask the reviewer about one Finding of the Worktree's stored tour: a job polled to its answer
+  // ask about the Worktree's stored tour, the reviewer about a Finding or the guide about some lines: a job polled to its answer
   app.post('/api/worktrees/:id/review-tour/asks', { bodyLimit: ASK_REQUEST_BODY_BYTES }, async (request, reply) => {
     const owner = controlled(request, true).id;
     const id = (request.params as { id: string }).id;

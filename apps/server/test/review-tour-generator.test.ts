@@ -150,6 +150,17 @@ describe('configured review tour generator', () => {
     expect(prompt).toContain(JSON.stringify(change.id));
   });
 
+  it('keeps the guide\'s conversation with the tour, with the model and effort it ran on', async () => {
+    const conversation = '6f1c2a90-1111-4222-8333-444455556666';
+    const runner: ReviewRunner = { capability: async () => ({ available: true }), run: async () => ({ value: generated, conversation }), closeWorktree: async () => {} };
+    const generator = new ConfiguredReviewTourGenerator(runner, { agent: 'claude', model: 'opus', effort: 'high', prompt: builtInTourPrompt });
+    await expect(generator.generate(comparison('/w'), new AbortController().signal)).resolves.toEqual({ ...generated, guide: { agent: 'claude', conversation, model: 'opus', effort: 'high' } });
+    await expect(generator.generate(comparison('/w'), new AbortController().signal, 'low')).resolves.toMatchObject({ guide: { effort: 'low' } });
+    // a conversation its agent could not resume is not kept
+    const unresumable: ReviewRunner = { ...runner, run: async () => ({ value: generated, conversation: 'not a uuid' }) };
+    await expect(new ConfiguredReviewTourGenerator(unresumable, defaultTour).generate(comparison('/w'), new AbortController().signal)).resolves.toEqual(generated);
+  });
+
   it('still rejects output that does not assign every change exactly once', async () => {
     const runner: ReviewRunner = { capability: async () => ({ available: true }), run: async () => ({ value: { ...generated, steps: [{ ...generated.steps[0], changeIds: ['chg_unknown0'] }] } }), closeWorktree: async () => {} };
     await expect(new ConfiguredReviewTourGenerator(runner, defaultTour).generate(comparison('/w'), new AbortController().signal)).rejects.toMatchObject<ReviewTourError>({ code: 'malformed_result', retryable: true });

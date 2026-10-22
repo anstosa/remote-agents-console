@@ -1,13 +1,15 @@
 import { basename } from 'node:path';
 import type { ResolvedReviewTour } from '../review-runs/config.js';
-import { reviewEfforts } from '../review-runs/kinds.js';
+import { reviewEfforts, validConversationId } from '../review-runs/kinds.js';
 import { tourRunLabel, type ReviewRunner, type ReviewRunProgress } from '../review-runs/runner.js';
-import { generatedReviewTourJsonSchema, parseGeneratedReviewTourResult, REVIEW_GENERATION_TIMEOUT_MS, ReviewTourError, type GeneratedReviewTour, type ReviewComparison, type ReviewTourCapability } from './contracts.js';
+import { generatedReviewTourJsonSchema, parseGeneratedReviewTourResult, REVIEW_GENERATION_TIMEOUT_MS, ReviewTourError, type GeneratedReviewTour, type ReviewComparison, type ReviewTourCapability, type TourGuide } from './contracts.js';
 
 export interface ReviewTourGenerator {
   capability(): Promise<ReviewTourCapability>;
-  generate(comparison: ReviewComparison, signal: AbortSignal, effort?: string, progress?: ReviewRunProgress): Promise<GeneratedReviewTour>;
+  generate(comparison: ReviewComparison, signal: AbortSignal, effort?: string, progress?: ReviewRunProgress): Promise<GuidedReviewTour>;
 }
+// a generated tour with its guide, when the run kept a conversation its agent can resume
+export type GuidedReviewTour = GeneratedReviewTour & { guide?: TourGuide };
 
 // the operator's narration guidance followed by the server-owned contract the parser enforces,
 // so a configured prompt can change what the tour says but never break its shape
@@ -35,12 +37,14 @@ export class ConfiguredReviewTourGenerator implements ReviewTourGenerator {
 
   // run one structured generation at the requested effort, else the configured one; an
   // interactive run is checked against the same parse and gets one correction
-  async generate(comparison: ReviewComparison, signal: AbortSignal, effort = this.tour.effort, progress: ReviewRunProgress = {}): Promise<GeneratedReviewTour> {
+  async generate(comparison: ReviewComparison, signal: AbortSignal, effort = this.tour.effort, progress: ReviewRunProgress = {}): Promise<GuidedReviewTour> {
     const validate = (value: unknown) => { const result = parseGeneratedReviewTourResult(value, comparison.changes); return result.ok ? undefined : result.error; };
     const parsed = await this.runner.run({ kind: this.tour.agent, workspace: comparison.workspace, worktreeId: comparison.worktreeId, prompt: reviewTourPrompt(this.tour.prompt, comparison), reply: { kind: 'json', schema: generatedReviewTourJsonSchema, validate }, timeoutMs: this.timeoutMs, label: tourRunLabel(comparison.branch ?? basename(comparison.workspace)), ...progress, ...(this.tour.model === undefined ? {} : { model: this.tour.model }), ...(effort === undefined ? {} : { effort }) }, signal);
     const result = parseGeneratedReviewTourResult(parsed.value, comparison.changes);
     // reject invalid assignments or narration
     if (!result.ok) throw new ReviewTourError(result.code, true);
-    return result.tour;
+    const { conversation } = parsed;
+    if (conversation === undefined || !validConversationId(this.tour.agent, conversation)) return result.tour;
+    return { ...result.tour, guide: { agent: this.tour.agent, conversation, ...(this.tour.model === undefined ? {} : { model: this.tour.model }), ...(effort === undefined ? {} : { effort }) } };
   }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { classifyReviewPath } from '../src/git/change-classification.js';
-import { parseGeneratedReviewTour, parseReviewRequestId, ReviewTourError, parseReviewTourInput, prohibitedNarration, type ReviewComparison, type ReviewTour } from '../src/review-tour/contracts.js';
+import { parseGeneratedReviewTour, parseReviewRequestId, parseReviewTour, ReviewTourError, parseReviewTourInput, prohibitedNarration, type ReviewComparison, type ReviewTour } from '../src/review-tour/contracts.js';
 import { ReviewTourJobs } from '../src/review-tour/jobs.js';
 import { ReviewTourService, type PreparedReviewTour } from '../src/review-tour/service.js';
 import type { ReviewTourGenerator } from '../src/review-tour/generator.js';
@@ -53,6 +53,17 @@ describe('review tour contracts', () => {
     expect(prohibitedNarration('Ｆｉｎｄｉｎｇ: unsafe branch')).toBe(true);
     expect(parseGeneratedReviewTour({ ...valid, title: 'Finding: unsafe branch' }, [implementationChange])).toBeUndefined();
     expect(parseGeneratedReviewTour({ ...valid, steps: [{ ...valid.steps[0], changeIds: ['chg_unknown0'] }] }, [implementationChange])).toBeUndefined();
+  });
+
+  it('keeps a stored tour\'s guide only on a conversation its agent can resume', () => {
+    const tour: ReviewTour = { title: 'Authentication flow', overview: 'Walk through the request path.', steps: [{ id: 'authentication', title: 'Wire the request', explanation: 'The handler delegates to the service.', changeIds: [implementationChange.id] }], scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'fingerprint-1234567890', changes: [implementationChange] };
+    const guide = { agent: 'claude' as const, conversation: '6f1c2a90-1111-4222-8333-444455556666', model: 'opus', effort: 'high' };
+    expect(parseReviewTour({ ...tour, guide })).toEqual({ ...tour, guide });
+    expect(parseReviewTour(tour)).toEqual(tour);
+    expect(parseReviewTour({ ...tour, guide: { ...guide, conversation: 'not a uuid' } })).toBeUndefined();
+    expect(parseReviewTour({ ...tour, guide: { ...guide, extra: true } })).toBeUndefined();
+    // a model is one argv value, so a stored one never starts like a flag
+    expect(parseReviewTour({ ...tour, guide: { ...guide, model: '--dangerously-skip-permissions' } })).toBeUndefined();
   });
 });
 

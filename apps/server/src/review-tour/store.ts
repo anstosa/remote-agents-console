@@ -61,11 +61,12 @@ function joinedCodeReview(record: StoredCodeReview | undefined, branch: string, 
   return record !== undefined && record.branch === branch && record.review.fingerprint === fingerprint ? record.review : undefined;
 }
 
-// Whether a tour's thread still applies: it must be on the one conversation its target asks, the
-// Code review's for a reviewer thread. A thread on any other belongs to a replaced run.
-function threadApplies(thread: Pick<AskThread, 'target' | 'conversation'>, review: CodeReview | undefined): boolean {
-  const conversation = review?.conversation;
-  return conversation !== undefined && thread.conversation === conversation;
+// Whether a tour's thread still applies: it must be on the one agent and conversation its target
+// asks, the Code review's for a reviewer thread and the tour's own for a guide thread. A thread on any
+// other belongs to a replaced run.
+function threadApplies(thread: Pick<AskThread, 'target' | 'kind' | 'conversation'>, tour: StoredReviewTour | undefined, review: CodeReview | undefined): boolean {
+  const asked = thread.target === 'reviewer' ? review && { kind: review.preset.agent, conversation: review.conversation } : tour?.tour.guide && { kind: tour.tour.guide.agent, conversation: tour.tour.guide.conversation };
+  return asked?.conversation !== undefined && thread.kind === asked.kind && thread.conversation === asked.conversation;
 }
 
 // copy a safe dashboard summary, counting a joined Code review's findings
@@ -280,7 +281,7 @@ export class ReviewTourStore {
   // is a review begun before this process: current while nothing has begun or cleared one since.
   async saveCodeReviewIfCurrent(worktreeId: string, branch: string, review: CodeReview, generation: number): Promise<StoredCodeReview | false | undefined> {
     if (!validWorktreeId(worktreeId) || !validBranch(branch) || parseCodeReview(review) === undefined) return undefined;
-    return await this.mutate<StoredCodeReview | false | undefined>((_stored, { codeReviews, asks }) => {
+    return await this.mutate<StoredCodeReview | false | undefined>((stored, { codeReviews, asks }) => {
       // reject a superseded review inside the serialized mutation
       if ((this.codeReviewGenerations.get(worktreeId) ?? 0) !== generation) return { value: false, changed: false };
       // cap distinct configured worktrees
@@ -288,7 +289,7 @@ export class ReviewTourStore {
       const record = { worktreeId, branch, review };
       codeReviews[worktreeId] = record;
       // threads asked of a replaced review's reviewer go with it
-      return { value: record, changed: false, codeReviewsChanged: true, asksChanged: this.clearStrayThreads(asks, worktreeId, review) };
+      return { value: record, changed: false, codeReviewsChanged: true, asksChanged: this.clearStrayThreads(asks, worktreeId, stored[worktreeId], review) };
     });
   }
 
@@ -312,7 +313,7 @@ export class ReviewTourStore {
     return await this.mutate((stored, sides) => {
       const tour = stored[worktreeId];
       const review = tour === undefined ? undefined : joinedCodeReview(sides.codeReviews[worktreeId], branch, fingerprint);
-      if (tour?.branch !== branch || tour.tour.fingerprint !== fingerprint || !threadApplies(thread, review)) return { value: false, changed: false };
+      if (tour?.branch !== branch || tour.tour.fingerprint !== fingerprint || !threadApplies(thread, tour, review)) return { value: false, changed: false };
       const threads = this.joinedThreads(stored, sides, worktreeId, branch, fingerprint);
       const existing = threads.find(candidate => candidate.id === thread.id);
       if (existing === undefined && threads.length >= MAX_ASK_THREADS) return { value: false, changed: false };
@@ -329,7 +330,7 @@ export class ReviewTourStore {
     const tour = stored[worktreeId];
     if (record === undefined || tour?.branch !== branch || tour.tour.fingerprint !== fingerprint || record.branch !== branch || record.fingerprint !== fingerprint) return [];
     const review = joinedCodeReview(sides.codeReviews[worktreeId], branch, fingerprint);
-    return record.threads.filter(thread => threadApplies(thread, review));
+    return record.threads.filter(thread => threadApplies(thread, tour, review));
   }
 
   // forget one worktree's Code review and refuse saves already running for it
@@ -359,9 +360,9 @@ export class ReviewTourStore {
   }
 
   // forget one worktree's threads that no longer apply now `review` is its Code review
-  private clearStrayThreads(asks: StoredAskRecords, worktreeId: string, review: CodeReview): boolean {
+  private clearStrayThreads(asks: StoredAskRecords, worktreeId: string, tour: StoredReviewTour | undefined, review: CodeReview): boolean {
     const record = asks[worktreeId];
-    const kept = record?.threads.filter(thread => threadApplies(thread, review));
+    const kept = record?.threads.filter(thread => threadApplies(thread, tour, review));
     if (record === undefined || kept!.length === record.threads.length) return false;
     asks[worktreeId] = { ...record, threads: kept! };
     return true;

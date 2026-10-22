@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 // descriptor, what a pending reply says about its run, error codes, and the elapsed time a running job
 // shows. Every guard tolerates extra fields.
 
-const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object';
+export const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object';
 
 // A running job's descriptor (a tour, a Code review or an Ask), polled until it settles. A newer
 // server says when it started.

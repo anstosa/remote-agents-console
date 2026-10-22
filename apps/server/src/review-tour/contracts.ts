@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { ReviewCategory } from '../git/change-classification.js';
 import { objectId } from '../git/comparison.js';
-import type { ReviewAgentKind } from '../review-runs/kinds.js';
+import { reviewModel } from '../review-runs/config.js';
+import { reviewAgentKinds, validConversationId, type ReviewAgentKind } from '../review-runs/kinds.js';
 import type { ReviewRunCapability } from '../review-runs/runner.js';
 
 // room for a Code review's 2000-character focus note in any script
@@ -48,7 +49,11 @@ export type ReviewComparison = {
 };
 export type GeneratedReviewStep = { id: string; title: string; explanation: string; changeIds: string[] };
 export type GeneratedReviewTour = { title: string; overview: string; steps: GeneratedReviewStep[] };
-export type ReviewTour = GeneratedReviewTour & Pick<ReviewComparison, 'scope' | 'commit' | 'base' | 'includeTests' | 'includeDocs' | 'fingerprint' | 'changes'>;
+// The agent that narrated a tour, in its own conversation, with the model and effort it ran on; an Ask
+// about the tour's lines resumes that conversation (ADR 0013)
+export type TourGuide = { agent: ReviewAgentKind; conversation: string; model?: string; effort?: string };
+// `guide` is absent for a tour whose run kept no conversation
+export type ReviewTour = GeneratedReviewTour & Pick<ReviewComparison, 'scope' | 'commit' | 'base' | 'includeTests' | 'includeDocs' | 'fingerprint' | 'changes'> & { guide?: TourGuide };
 // `effort` picks one of the tour agent's levels for this run; absent, the configured one applies
 export type ReviewTourInput = { scope: ReviewScope; commit?: string; includeTests: boolean; includeDocs: boolean; effort?: string };
 // whether the tour's configured agent can run, with its configured effort and every level it accepts
@@ -72,7 +77,8 @@ const requestIdSchema = z.string().min(16).max(128).regex(/^[A-Za-z0-9_-]+$/u);
 const generatedStepSchema = z.object({ id: z.string().min(1).max(80), title: z.string().trim().min(1).max(240), explanation: z.string().trim().min(1).max(4_000), changeIds: z.array(z.string().min(8).max(100)).min(1).max(MAX_REVIEW_CHANGES) }).strict();
 const generatedTourSchema = z.object({ title: z.string().trim().min(1).max(240), overview: z.string().trim().min(1).max(2_000), steps: z.array(generatedStepSchema).min(1).max(MAX_REVIEW_CHANGES) }).strict();
 const reviewChangeSchema = z.object({ id: z.string().min(8).max(100), file: z.string().min(1).max(4_096), originalFile: z.string().min(1).max(4_096).optional(), category: z.enum(['implementation', 'test', 'doc']), kind: z.enum(['hunk', 'binary', 'rename', 'metadata', 'untracked']), oldStart: z.number().int().nonnegative().optional(), oldLines: z.number().int().nonnegative().optional(), newStart: z.number().int().nonnegative().optional(), newLines: z.number().int().nonnegative().optional(), patch: z.string().max(MAX_REVIEW_FILE_BYTES) }).strict();
-const reviewTourSchema = generatedTourSchema.extend({ ...reviewScopeShape, base: z.string().min(1).max(4_096), includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), changes: z.array(reviewChangeSchema).min(1).max(MAX_REVIEW_CHANGES) }).strict().refine(commitMatchesScope);
+const guideSchema = z.object({ agent: z.enum(reviewAgentKinds), conversation: z.string().min(1).max(200), model: reviewModel.optional(), effort: z.string().min(1).max(20).optional() }).strict().refine(guide => validConversationId(guide.agent, guide.conversation));
+const reviewTourSchema = generatedTourSchema.extend({ ...reviewScopeShape, base: z.string().min(1).max(4_096), includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), changes: z.array(reviewChangeSchema).min(1).max(MAX_REVIEW_CHANGES), guide: guideSchema.optional() }).strict().refine(commitMatchesScope);
 const prohibitedPrefix = /^(?:finding|findings|warning|warnings|issue|issues|recommendation|recommendations|severity|verdict|approval|approved|rejection|rejected)\s*[:\-–—]/iu;
 
 // parse the fixed review request
@@ -146,7 +152,7 @@ export function parseReviewTour(value: unknown): ReviewTour | undefined {
   if (patchBytes > MAX_REVIEW_DIFF_BYTES) return undefined;
   const generated = parseGeneratedReviewTour({ title: tour.title, overview: tour.overview, steps: tour.steps }, tour.changes);
   // retain only exact change assignments
-  return generated === undefined ? undefined : { ...generated, scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), base: tour.base, includeTests: tour.includeTests, includeDocs: tour.includeDocs, fingerprint: tour.fingerprint, changes: tour.changes };
+  return generated === undefined ? undefined : { ...generated, scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), base: tour.base, includeTests: tour.includeTests, includeDocs: tour.includeDocs, fingerprint: tour.fingerprint, changes: tour.changes, ...(tour.guide === undefined ? {} : { guide: tour.guide as TourGuide }) };
 }
 
 // expose only Comparison identity fields

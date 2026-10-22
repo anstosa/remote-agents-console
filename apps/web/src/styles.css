@@ -2279,6 +2279,13 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-suggestion.dismissed > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-tour-suggestion.dismissed button { flex: none; border-color: transparent; background: transparent; color: var(--blue); }
 @media (pointer: coarse) { .review-tour-suggestion button { min-height: 2.2rem; padding-inline: .9rem; } }
+/* the gutter "+" choice on picked lines: comment on them or ask about them */
+.review-tour-line-choice { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .4rem; margin: .35rem .6rem .5rem; padding: .3rem .4rem .3rem .65rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); font: 500 .76rem/1.45 var(--font-mono); white-space: normal; }
+.review-tour-line-choice > small { margin-right: auto; color: var(--overlay-1); font: 800 .62rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+.review-tour-line-choice button { padding: .3rem .65rem; font-size: .68rem; box-shadow: none; }
+.review-tour-line-choice .review-tour-line-cancel { border-color: var(--surface-2); background: transparent; color: var(--subtext-0); }
+.review-tour-line-choice .review-tour-line-ask { border-color: color-mix(in srgb, var(--mauve) 55%, var(--surface-2)); background: transparent; color: var(--mauve); }
+@media (pointer: coarse) { .review-tour-line-choice button { min-height: 2.2rem; padding-inline: .9rem; } }
 /* a Finding's Ask thread, under its suggested or kept comment: questions, the reviewer's Markdown answers and the next question */
 .review-ask-open { display: flex; justify-content: flex-end; margin: -.25rem .6rem .5rem; }
 .review-ask-open button { padding: .2rem .55rem; border-color: transparent; background: transparent; box-shadow: none; color: var(--mauve); font: 700 .66rem var(--font-mono); }

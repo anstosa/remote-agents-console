@@ -6,11 +6,12 @@ import { MarkdownBlocks } from './note-markdown.js';
 // One Ask thread in a tour diff: the questions asked and the Markdown answers of `role` (the reviewer
 // under its Finding, the guide under the asked-about lines), the question still being answered (with
 // its pane, when the agent runs interactive), and a box for the next one. Closed and empty, it is one
-// "Ask reviewer" button.
-export function AskThreadView({ role, thread, pending, failed, onAsk, onUseAnswer, onOpenRun }: { role: AskRole; thread?: AskThread; pending?: PendingAsk; failed?: AskFailure; onAsk: (question: string) => Promise<string | undefined>; onUseAnswer: (answer: string) => void; onOpenRun?: (run: ReviewRunLink) => void }) {
+// "Ask reviewer" button; a thread just started from the gutter (`onCancel`) opens on its box instead,
+// and Cancel drops it.
+export function AskThreadView({ role, thread, pending, failed, onAsk, onUseAnswer, onOpenRun, onCancel }: { role: AskRole; thread?: AskThread; pending?: PendingAsk; failed?: AskFailure; onAsk: (question: string) => Promise<string | undefined>; onUseAnswer: (answer: string) => void; onOpenRun?: (run: ReviewRunLink) => void; onCancel?: () => void }) {
   const copy = askRoleCopy[role];
   const turns = thread?.turns ?? [];
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(onCancel !== undefined);
   const [question, setQuestion] = useState('');
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState('');
@@ -51,7 +52,7 @@ export function AskThreadView({ role, thread, pending, failed, onAsk, onUseAnswe
         <textarea aria-label={`Question for the ${copy.who}`} placeholder={turns.length === 0 && pending === undefined ? copy.placeholder : 'Ask a follow-up'} value={question} maxLength={maxAskQuestion} autoFocus={turns.length === 0 && pending === undefined} onChange={event => setQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) event.currentTarget.form?.requestSubmit(); }} />
         {failure !== '' && <p className="review-ask-error" role="alert">{failure}</p>}
         <div className="review-ask-actions">
-          {turns.length === 0 && pending === undefined && <button type="button" onClick={() => { setOpen(false); setFailure(''); }}>Cancel</button>}
+          {turns.length === 0 && pending === undefined && <button type="button" onClick={() => { if (onCancel !== undefined) { onCancel(); return; } setOpen(false); setFailure(''); }}>Cancel</button>}
           <button type="submit" disabled={busy || question.trim() === ''}>{sending ? 'Asking…' : 'Ask'}</button>
         </div>
       </form>

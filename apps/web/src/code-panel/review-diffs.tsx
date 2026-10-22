@@ -20,10 +20,13 @@ import { codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch, reme
 import type { ExpandedLines } from './comparison.js';
 import { patchRowIndex, patchRows } from './patch-rows.js';
 
-// an annotation is either an inline comment or a suggested comment (an untriaged or dismissed Finding)
-export type CommentAnchor = { commentId: string } | { suggestionId: string };
-type ReviewItem = CodeViewItem<CommentAnchor>;
-type ReviewOptions = CodeViewReactOptions<CommentAnchor, undefined>;
+// what a thread can sit under: an inline comment, a suggested comment (an untriaged or dismissed
+// Finding), or lines asked about on their own (`askId`, a ReviewDiffAsk)
+export type CommentAnchor = { commentId: string } | { suggestionId: string } | { askId: string };
+// an annotation is one of those, or the choice the gutter "+" offers on picked lines
+type Annotation = CommentAnchor | { choice: true };
+type ReviewItem = CodeViewItem<Annotation>;
+type ReviewOptions = CodeViewReactOptions<Annotation, undefined>;
 
 // One Change of a tour step: the file it touches (and, for a rename, where it moved from), the kind
 // of change, and its captured unified patch. A structural subset of the tour's ReviewChange — the
@@ -42,6 +45,13 @@ export type ReviewDiffComment = { id: string; changeId: string; startSide: Revie
 // follow ReviewDiffComment's), with the `source` line naming the review that wrote it. A dismissed one
 // collapses to a row that can restore it.
 export type ReviewDiffSuggestion = { id: string; changeId: string; side: ReviewDiffSide; startLine: number; endLine: number; severity: 'high' | 'medium' | 'low'; title: string; body: string; source: string; dismissed: boolean };
+
+// A line range picked with the gutter "+", as ReviewDiffComment's range.
+export type ReviewDiffRange = Pick<ReviewDiffComment, 'changeId' | 'startSide' | 'startLine' | 'endSide' | 'endLine'>;
+
+// Lines with an Ask thread of their own (the caller renders it through `threadFor`), which shows under
+// the range's last line.
+export type ReviewDiffAsk = { id: string; changeId: string; side: ReviewDiffSide; endLine: number };
 
 // The longest one inline comment may grow; the caller enforces the shared aggregate cap on top.
 export const MAX_INLINE_COMMENT = 4_000;
@@ -63,8 +73,15 @@ type ReviewDiffsProps = {
   onSuggestionKeep?: (id: string) => void;
   onSuggestionDismiss?: (id: string) => void;
   onSuggestionRestore?: (id: string) => void;
-  // what shows under a comment or an untriaged suggestion: its Ask thread, when it has one
+  // what shows under a comment, an untriaged suggestion or asked-about lines: its Ask thread
   threadFor?: (anchor: CommentAnchor) => ReactNode;
+  // the lines with an Ask thread of their own
+  asks?: ReviewDiffAsk[];
+  // When given, the gutter "+" offers Comment or Ask on the picked lines, and Ask reports them;
+  // otherwise it starts a comment directly.
+  onAskStart?: (range: ReviewDiffRange) => void;
+  // the name of who Ask asks, for its button: "Ask guide"
+  askLabel?: string;
   // open a file at a line in the configured editor; the header button is hidden without it
   onOpenInEditor?: (target: EditorTarget) => void;
   // the working tree's text of a file, which lets the unchanged lines between hunks expand
@@ -205,6 +222,18 @@ function InlineComment({ comment, editing, onEdit, onChange, onDone, onDelete }:
   );
 }
 
+// The choice the gutter "+" offers on picked lines when they can be asked about: comment on them, or ask.
+function LineChoice({ range, askLabel, onComment, onAsk, onCancel }: { range: ReviewDiffRange; askLabel: string; onComment: () => void; onAsk: () => void; onCancel: () => void }) {
+  return (
+    <div className="review-tour-line-choice" role="group" aria-label={commentRangeLabel(range)}>
+      <small>{commentRangeLabel(range)}</small>
+      <button type="button" className="review-tour-line-cancel" onClick={onCancel}>Cancel</button>
+      <button type="button" className="review-tour-line-ask" onClick={onAsk}>{askLabel}</button>
+      <button type="button" onClick={onComment} autoFocus>Comment</button>
+    </div>
+  );
+}
+
 // One suggested comment: its severity, title, body and source with Keep and Dismiss, or, dismissed,
 // one row that restores it.
 function SuggestedComment({ suggestion, onKeep, onDismiss, onRestore }: { suggestion: ReviewDiffSuggestion; onKeep: () => void; onDismiss: () => void; onRestore: () => void }) {
@@ -220,9 +249,13 @@ function SuggestedComment({ suggestion, onKeep, onDismiss, onRestore }: { sugges
 }
 
 // render one tour step with current display settings
-export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, threadFor, onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll, expandedLines }: ReviewDiffsProps) {
+export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, threadFor, asks = [], onAskStart, askLabel = 'Ask', onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll, expandedLines }: ReviewDiffsProps) {
   const theme = useColorTheme();
-  const codeView = useRef<CodeViewHandle<CommentAnchor, undefined>>(null);
+  const codeView = useRef<CodeViewHandle<Annotation, undefined>>(null);
+  // the lines the gutter "+" was last clicked on, while they show the choice of a comment or a question
+  const [choice, setChoice] = useState<ReviewDiffRange>();
+  // a choice belongs to the lines it was offered on, while they can still be asked about
+  useEffect(() => setChoice(undefined), [changes, onAskStart]);
   const initialScrollTop = useRef(scrollTop);
   const terminalFontSize = useTerminalFontSize();
   // The step's hunk Changes of one file become one diff item, keyed by their Change ids; any other
@@ -244,19 +277,23 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
     return { baseItems, placeholders };
   }, [changes]);
 
-  // Each comment, and each suggested comment, anchors one annotation under its last line. CodeView only
-  // re-reads an item when its version moves, so an item's version folds in where its annotations sit —
-  // and only that, so typing into a comment (which changes no anchor) never re-lays out the diff.
-  const anchorKey = [...comments.map(comment => `${comment.id}@${comment.changeId}:${comment.endSide}:${comment.endLine}`), ...suggestions.map(suggestion => `${suggestion.id}@${suggestion.changeId}:${suggestion.side}:${suggestion.endLine}`)].join('|');
+  // Each comment, suggested comment and asked-about range, and the "+" choice, anchors one annotation
+  // under its last line. CodeView only re-reads an item when its version moves, so an item's version
+  // folds in where its annotations sit — and only that, so typing into a comment (which changes no
+  // anchor) never re-lays out the diff.
+  const anchors = useMemo(() => [
+    ...suggestions.map(suggestion => ({ changeId: suggestion.changeId, side: suggestion.side, endLine: suggestion.endLine, metadata: { suggestionId: suggestion.id } as Annotation, key: `s:${suggestion.id}` })),
+    ...comments.map(comment => ({ changeId: comment.changeId, side: comment.endSide, endLine: comment.endLine, metadata: { commentId: comment.id } as Annotation, key: `c:${comment.id}` })),
+    ...asks.map(ask => ({ changeId: ask.changeId, side: ask.side, endLine: ask.endLine, metadata: { askId: ask.id } as Annotation, key: `a:${ask.id}` })),
+    ...(choice === undefined ? [] : [{ changeId: choice.changeId, side: choice.endSide, endLine: choice.endLine, metadata: { choice: true } as Annotation, key: 'choice' }])
+  ], [suggestions, comments, asks, choice]);
+  const anchorKey = anchors.map(anchor => `${anchor.key}@${anchor.changeId}:${anchor.side}:${anchor.endLine}`).join('|');
   const items = useMemo(() => [...baseItems.values()].map(({ item, view }): ReviewItem => {
     const inView = (changeId: string) => view.changeId === changeId || view.hunks.some(hunk => hunk.changeId === changeId);
-    const annotations: DiffLineAnnotation<CommentAnchor>[] = [
-      ...suggestions.filter(suggestion => inView(suggestion.changeId)).map(suggestion => ({ side: suggestion.side, lineNumber: viewLine(view, suggestion.changeId, suggestion.side, suggestion.endLine), metadata: { suggestionId: suggestion.id } })),
-      ...comments.filter(comment => inView(comment.changeId)).map(comment => ({ side: comment.endSide, lineNumber: viewLine(view, comment.changeId, comment.endSide, comment.endLine), metadata: { commentId: comment.id } }))
-    ];
-    if (annotations.length === 0) return item as ReviewItem;
-    return { ...item, annotations, version: contentHash(`${item.version}|${annotations.map(annotation => `${'commentId' in annotation.metadata ? annotation.metadata.commentId : annotation.metadata.suggestionId}:${annotation.side}:${annotation.lineNumber}`).join('|')}`) };
-  }), [baseItems, anchorKey]); // anchorKey stands in for `comments` and `suggestions`: it covers every field read here
+    const placed = anchors.filter(anchor => inView(anchor.changeId)).map(anchor => ({ key: anchor.key, annotation: { side: anchor.side, lineNumber: viewLine(view, anchor.changeId, anchor.side, anchor.endLine), metadata: anchor.metadata } as DiffLineAnnotation<Annotation> }));
+    if (placed.length === 0) return item as ReviewItem;
+    return { ...item, annotations: placed.map(entry => entry.annotation), version: contentHash(`${item.version}|${placed.map(entry => `${entry.key}:${entry.annotation.side}:${entry.annotation.lineNumber}`).join('|')}`) };
+  }), [baseItems, anchorKey]); // anchorKey stands in for `anchors`: it covers every field read here
   const viewByDiff = useMemo(() => new Map([...baseItems.values()].map(({ item, view }) => [item.fileDiff, view])), [baseItems]);
   const patchByChangeId = useMemo(() => new Map(changes.map(change => [change.id, change.patch])), [changes]);
 
@@ -295,9 +332,10 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
   }, [viewByDiff, loadFile, onExpandError]);
 
   // The Code panel's shared render options (the tour has no full-context toggle), plus the gutter "+"
-  // that starts a comment. On a mouse it shows on hover; on touch, tapping a line number reveals it.
-  // Clicking it — after optionally selecting a range of lines — reports the range to comment on,
-  // which must lie within one of the step's hunks.
+  // that starts a comment, or offers the choice of one or a question when the lines can be asked
+  // about. On a mouse it shows on hover; on touch, tapping a line number reveals it. Clicking it —
+  // after optionally selecting a range of lines — picks the range, which must lie within one of the
+  // step's hunks.
   const options = useMemo<ReviewOptions>(() => ({
     ...codeViewBaseOptions(theme === 'latte' ? 'light' : 'dark', terminalFontSize),
     diffStyle: effectiveSplit ? 'split' : 'unified',
@@ -311,15 +349,24 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
       const start = view && changeLine(view, startSide, range.start);
       const end = view && changeLine(view, range.endSide ?? startSide, range.end);
       if (start === undefined || end === undefined || start.changeId !== end.changeId) return;
-      onCommentAdd({ id: crypto.randomUUID(), changeId: start.changeId, ...orderedRange({ ...range, start: start.line, end: end.line }, patchByChangeId.get(start.changeId) ?? ''), body: '' });
+      const picked: ReviewDiffRange = { changeId: start.changeId, ...orderedRange({ ...range, start: start.line, end: end.line }, patchByChangeId.get(start.changeId) ?? '') };
+      if (onAskStart === undefined) onCommentAdd({ id: crypto.randomUUID(), ...picked, body: '' }); else setChoice(picked);
       // the library commits the picked range as the selection after this callback returns
       window.setTimeout(() => setSelection(null), 0);
     }
-  }), [baseItems, patchByChangeId, effectiveSplit, onCommentAdd, terminalFontSize, theme, loadFile, loadDiffFiles, expandedLines]);
+  }), [baseItems, patchByChangeId, effectiveSplit, onCommentAdd, onAskStart, terminalFontSize, theme, loadFile, loadDiffFiles, expandedLines]);
 
   const commentsById = useMemo(() => new Map(comments.map(comment => [comment.id, comment])), [comments]);
   const suggestionsById = useMemo(() => new Map(suggestions.map(suggestion => [suggestion.id, suggestion])), [suggestions]);
-  const renderAnnotation = (annotation: { metadata?: CommentAnchor }) => {
+  const renderAnnotation = (annotation: { metadata?: Annotation }) => {
+    // the "+" choice on picked lines
+    if (annotation.metadata !== undefined && 'choice' in annotation.metadata) {
+      const picked = choice;
+      if (picked === undefined) return null;
+      return <LineChoice range={picked} askLabel={askLabel} onCancel={() => setChoice(undefined)} onComment={() => { setChoice(undefined); onCommentAdd({ id: crypto.randomUUID(), ...picked, body: '' }); }} onAsk={() => { setChoice(undefined); onAskStart?.(picked); }} />;
+    }
+    // lines asked about on their own
+    if (annotation.metadata !== undefined && 'askId' in annotation.metadata) return threadFor?.(annotation.metadata) ?? null;
     // a suggested comment
     if (annotation.metadata !== undefined && 'suggestionId' in annotation.metadata) {
       const suggestion = suggestionsById.get(annotation.metadata.suggestionId);
@@ -328,7 +375,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
     }
     const comment = annotation.metadata === undefined ? undefined : commentsById.get(annotation.metadata.commentId);
     if (comment === undefined) return null;
-    return <><InlineComment comment={comment} editing={openCommentIds.has(comment.id)} onEdit={() => onCommentOpen(comment.id)} onChange={body => onCommentChange(comment.id, body)} onDone={() => onCommentClose(comment.id)} onDelete={() => onCommentDelete(comment.id)} />{threadFor?.(annotation.metadata!)}</>;
+    return <><InlineComment comment={comment} editing={openCommentIds.has(comment.id)} onEdit={() => onCommentOpen(comment.id)} onChange={body => onCommentChange(comment.id, body)} onDone={() => onCommentClose(comment.id)} onDelete={() => onCommentDelete(comment.id)} />{threadFor?.({ commentId: comment.id })}</>;
   };
 
   // Each file header's editor button opens the working tree's copy at the selected line when one is

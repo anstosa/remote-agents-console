@@ -26,7 +26,7 @@ export const builtInCorrectnessPrompt = [
 
 const reviewPrompt = z.string().trim().min(1).max(8_000).refine(value => !value.includes('\0'), 'NUL is forbidden');
 // a model name is one argv value after `-m`/`--model`, so it never starts like a flag
-const reviewModel = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,199}$/u, 'model names are letters, digits and `._:/@[]-`');
+export const reviewModel = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,199}$/u, 'model names are letters, digits and `._:/@[]-`');
 const reviewEffort = z.string().min(1).max(20);
 const reviewAgent = z.enum(reviewAgentKinds);
 const reviewMode = z.object({ mode: z.enum(['headless', 'interactive']).default('headless') }).strict();

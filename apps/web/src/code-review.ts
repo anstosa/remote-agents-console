@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { failureCode, reviewJobProgress, transientFailure, type ReviewJob, type ReviewJobProgress } from './review-jobs.js';
+import { failureCode, isRecord, reviewJobProgress, transientFailure, type ReviewJob, type ReviewJobProgress } from './review-jobs.js';
 
 // The AI Code review that can run beside a Review tour: its Findings, the dashboard's Review presets,
 // the device's last choice, and the polling of a running job. The shapes follow the server's Code review API; every guard
@@ -23,7 +23,6 @@ export type CodeReviewCapability = { defaultPreset: string; presets: CodeReviewP
 
 export const maxCodeReviewFocus = 2_000;
 
-const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object';
 const isSeverity = (value: unknown): value is CodeReviewSeverity => value === 'high' || value === 'medium' || value === 'low';
 const isAgent = (value: unknown): value is CodeReviewAgent => value === 'codex' || value === 'claude';
 const isLine = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
