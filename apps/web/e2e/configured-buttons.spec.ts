@@ -36,7 +36,7 @@ const effective = {
   leftNav: [button('left-action', 'Left action', 'green', 'solid')],
   rightNav: [button('right-action', 'Right action', 'sapphire', 'outline')],
   navMenu: [button('menu-action', 'Menu action', 'maroon', 'solid', 'prompt')],
-  pullRequest: [button('push-action', 'Commit/Push', 'mauve', 'solid', 'prompt'), button('fixup-action', '$fixup', 'lavender', 'outline', 'prompt')],
+  pullRequest: [button('push-action', 'Commit/Push', 'mauve', 'solid', 'prompt'), button('fixup-action', '$fixup', 'lavender', 'outline', 'shell')],
   'split:agent': [button('agent-action', 'Agent action', 'sky', 'outline', 'prompt')]
 };
 const worktree = { id: 'wt-1', projectId: 'repo', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/buttons', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0 } };
@@ -62,12 +62,15 @@ async function mount(page: import('@playwright/test').Page) {
     if (/^\/api\/agents\/[^/]+\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
     if (path === `/api/worktrees/${worktree.id}/panes`) return route.fulfill({ json: { panes: [] } });
     if (path === `/api/worktrees/${worktree.id}/notes`) return route.fulfill({ json: { notes: [] } });
+    // record one configured action dispatch
     if (path === '/api/button-actions' && request.method() === 'POST') {
       const body = request.postDataJSON() as Record<string, unknown> & { actionId: string };
       starts.push(body);
-      return route.fulfill({ status: 202, json: { operation: { id: `operation-${body.actionId}`, state: body.actionId === 'menu-action' ? 'running' : 'complete', ...(body.actionId === 'agent-action' ? { phase: 'submitted' } : {}) } } });
+      return route.fulfill({ status: 202, json: { operation: { id: `operation-${body.actionId}`, state: ['menu-action', 'push-action', 'fixup-action'].includes(body.actionId) ? 'running' : 'complete', ...(body.actionId === 'agent-action' ? { phase: 'submitted' } : {}) } } });
     }
     if (path === '/api/button-actions/operation-menu-action') return route.fulfill({ json: { operation: { id: 'operation-menu-action', state: menuComplete ? 'complete' : 'running', ...(menuComplete ? { phase: 'submitted' } : {}) } } });
+    // retain git action progress across flyout remounts
+    if (path === '/api/button-actions/operation-push-action' || path === '/api/button-actions/operation-fixup-action') return route.fulfill({ json: { operation: { id: path.slice('/api/button-actions/'.length), state: 'running' } } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
   await page.goto('/');
@@ -126,6 +129,46 @@ test('renders configured slots and retains closed flyout progress without execut
   await expect(actions.getByRole('button', { name: /Push/u })).toHaveCount(1);
   await expect(actions.locator('.git-status-push, .pull-request-fixup')).toHaveCount(0);
   await page.getByRole('region', { name: 'Changed files' }).screenshot({ path: '/tmp/remoteagents-configured-pr-colors.png' });
+});
+
+// verify git actions dismiss on dispatch without losing retained progress
+test('dismisses the Git flyout when prompt and shell actions start while retaining their progress', async ({ page }) => {
+  const controls = await mount(page);
+  const branch = page.getByRole('button', { name: /^Git status: feature\/buttons/u });
+  const expectedActions = [
+    { id: 'push-action', name: 'Commit/Push' },
+    { id: 'fixup-action', name: '$fixup' }
+  ];
+
+  // exercise both configured action kinds through the same flyout boundary
+  for (const expected of expectedActions) {
+    await branch.click();
+    const panel = page.getByRole('region', { name: 'Changed files' });
+    await expect(panel).toBeVisible();
+    await expect(branch).toHaveAttribute('aria-expanded', 'true');
+    await panel.getByRole('button', { name: expected.name, exact: true }).click();
+    await expect.poll(() => controls.starts.filter(start => start.actionId === expected.id).length).toBe(1);
+    await expect(panel).toHaveCount(0);
+    await expect(branch).toHaveAttribute('aria-expanded', 'false');
+    await expect(branch).toHaveAttribute('aria-busy', 'true');
+
+    await branch.click();
+    const runningAction = page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: expected.name, exact: true });
+    await expect(runningAction).toHaveAttribute('aria-busy', 'true');
+    await expect(runningAction).toBeDisabled();
+    await page.keyboard.press('Escape');
+  }
+
+  expect(controls.starts).toHaveLength(2);
+  // verify the dispatch contract without executable request data
+  for (const expected of expectedActions) {
+    const starts = controls.starts.filter(start => start.actionId === expected.id);
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({ actionId: expected.id, configRevision: 'buttons-v1', placeId: 'wt-1', slot: 'pullRequest', agentId: 'agent-1' });
+    expect(starts[0]).not.toHaveProperty('command');
+    expect(starts[0]).not.toHaveProperty('prompt');
+    expect(starts[0]).not.toHaveProperty('cwd');
+  }
 });
 
 test('interrupts a delayed action response from an old server boot', async ({ page }) => {
