@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { askErrorMessage, askRoleCopy, maxAskQuestion, type AskFailure, type AskRole, type AskThread, type PendingAsk } from './asks.js';
+import { type ReactNode, useCallback, useState } from 'react';
+import { askErrorMessage, askRoleCopy, maxAskQuestion, type AskAnchor, type AskFailure, type AskLines, type AskRole, type AskSubject, type AskThread, type AskThreads, type PendingAsk } from './asks.js';
+import type { ReviewDiffAsk } from './code-panel/review-diffs.js';
 import { useJobElapsed, type ReviewRunLink } from './review-jobs.js';
 import { MarkdownBlocks } from './note-markdown.js';
 
@@ -7,8 +8,8 @@ import { MarkdownBlocks } from './note-markdown.js';
 // under its Finding, the guide under the asked-about lines), the question still being answered (with
 // its pane, when the agent runs interactive), and a box for the next one. Closed and empty, it is one
 // "Ask reviewer" button; a thread just started from the gutter (`onCancel`) opens on its box instead,
-// and Cancel drops it.
-export function AskThreadView({ role, thread, pending, failed, onAsk, onUseAnswer, onOpenRun, onCancel }: { role: AskRole; thread?: AskThread; pending?: PendingAsk; failed?: AskFailure; onAsk: (question: string) => Promise<string | undefined>; onUseAnswer: (answer: string) => void; onOpenRun?: (run: ReviewRunLink) => void; onCancel?: () => void }) {
+// and Cancel drops it. Answers copy into a comment where there is one to copy them into (`onUseAnswer`).
+export function AskThreadView({ role, thread, pending, failed, onAsk, onUseAnswer, onOpenRun, onCancel }: { role: AskRole; thread?: AskThread; pending?: PendingAsk; failed?: AskFailure; onAsk: (question: string) => Promise<string | undefined>; onUseAnswer?: (answer: string) => void; onOpenRun?: (run: ReviewRunLink) => void; onCancel?: () => void }) {
   const copy = askRoleCopy[role];
   const turns = thread?.turns ?? [];
   const [open, setOpen] = useState(onCancel !== undefined);
@@ -33,7 +34,7 @@ export function AskThreadView({ role, thread, pending, failed, onAsk, onUseAnswe
         <article key={turn.id} className="review-ask-turn">
           <p className="review-ask-question">{turn.question}</p>
           {turn.answer !== undefined
-            ? <><div className="note-markdown review-ask-answer"><MarkdownBlocks text={turn.answer} /></div><div className="review-ask-actions"><button type="button" onClick={() => onUseAnswer(turn.answer!)}>Copy to comment</button></div></>
+            ? <><div className="note-markdown review-ask-answer"><MarkdownBlocks text={turn.answer} /></div>{onUseAnswer !== undefined && <div className="review-ask-actions"><button type="button" onClick={() => onUseAnswer(turn.answer!)}>Copy to comment</button></div>}</>
             : <p className="review-ask-error" role="alert">{askErrorMessage(role, turn.error?.code)}{turn.error?.retryable === true && !busy && <button type="button" onClick={() => void send(turn.question)}>Ask again</button>}</p>}
         </article>
       ))}
@@ -58,4 +59,38 @@ export function AskThreadView({ role, thread, pending, failed, onAsk, onUseAnswe
       </form>
     </section>
   );
+}
+
+// The Ask threads under lines of a diff rather than a Finding: lines just picked, which show a thread's
+// box until its first question starts it, then the threads stored, starting with a pending first
+// question, or left unstored by a failed first question (asked again as new lines). `role` asks the
+// picked lines, and `target` is what the endpoint is told it asks, when it asks more than one; only
+// threads of `targets` are line threads. Picked lines belong to the `scope` they were picked in, and
+// drop out of view when it changes. `onUseAnswer` copies an answer near its thread's anchor.
+export function useLineAsks(asks: AskThreads, { role, target, targets, enabled, scope, onUseAnswer, onOpenRun }: { role: AskRole; target?: 'guide'; targets?: readonly AskRole[]; enabled: boolean; scope: string; onUseAnswer?: (threadId: string, anchor: AskAnchor, answer: string) => void; onOpenRun?: (run: ReviewRunLink) => void }): { lineAsks: ReviewDiffAsk[]; start: (lines: AskLines) => void; threadFor: (id: string) => ReactNode } {
+  const { threads, pending, failures, ask } = asks;
+  const [picked, setPicked] = useState<Array<{ id: string; scope: string; lines: AskLines }>>([]);
+  const drafts = picked.filter(draft => draft.scope === scope);
+  const start = useCallback((lines: AskLines) => setPicked(current => [...current.filter(draft => draft.scope === scope), { id: crypto.randomUUID(), scope, lines }]), [scope]);
+  const anchors = new Map<string, AskAnchor>();
+  for (const [id, entry] of [...failures, ...pending, ...threads]) if (targets === undefined || targets.includes(entry.target)) anchors.set(id, entry.anchor);
+  const lineAsks: ReviewDiffAsk[] = !enabled ? [] : [...[...anchors].map(([id, anchor]) => ({ id, ...anchor })), ...drafts.map(draft => ({ id: draft.id, ...draft.lines }))];
+  const subject = (about: { lines: AskLines } | { threadId: string }): AskSubject => target === undefined ? about : { target, ...about };
+  const runLink = onOpenRun === undefined ? {} : { onOpenRun };
+  const threadFor = (id: string): ReactNode => {
+    if (!enabled) return null;
+    const draft = drafts.find(candidate => candidate.id === id);
+    const dropDraft = () => setPicked(current => current.filter(candidate => candidate.id !== id));
+    if (draft !== undefined) return <AskThreadView key={id} role={role} onCancel={dropDraft} onAsk={async question => { const refused = await ask(role, subject({ lines: draft.lines }), draft.lines, question); if (refused === undefined) dropDraft(); return refused; }} {...runLink} />;
+    const thread = threads.get(id);
+    const waiting = pending.get(id);
+    const failed = failures.get(id);
+    const anchor = thread?.anchor ?? waiting?.anchor ?? failed?.anchor;
+    if (anchor === undefined) return null;
+    const asked = thread?.target ?? waiting?.target ?? failed?.target ?? role;
+    const { findingId: _findingId, ...lines } = anchor;
+    const onAsk = (question: string) => thread === undefined && waiting === undefined ? ask(role, subject({ lines }), anchor, question, id) : ask(asked, subject({ threadId: id }), anchor, question);
+    return <AskThreadView key={id} role={asked} thread={thread} pending={waiting} failed={failed} onAsk={onAsk} {...(onUseAnswer === undefined ? {} : { onUseAnswer: (answer: string) => onUseAnswer(id, anchor, answer) })} {...runLink} />;
+  };
+  return { lineAsks, start, threadFor };
 }

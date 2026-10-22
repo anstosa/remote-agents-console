@@ -20,8 +20,9 @@ export type AskThread = { id: string; target: AskRole; anchor: AskAnchor; turns:
 // A question still being answered: its job, what the job's latest poll said about its pane, and the
 // thread it is on, which it may be starting
 export type PendingAsk = { question: string; job: ReviewJob; target: AskRole; anchor: AskAnchor; run?: ReviewRunLink; startedAt?: string };
-// what a question is about: a Finding, new lines, or an existing thread of the guide
-export type AskSubject = { target: 'reviewer'; findingId: string } | { target: 'guide'; lines: AskLines } | { target: 'guide'; threadId: string };
+// what a question is about: a Finding, new lines, or an existing thread of lines, each with the target
+// its endpoint asks it of when it asks more than one
+export type AskSubject = { target: 'reviewer'; findingId: string } | { target?: 'guide'; lines: AskLines } | { target?: 'guide'; threadId: string };
 // Why a thread's last question has no answer when the thread does not hold it as a turn (`turnId`), and
 // where that question was asked, for a thread its failed first question left unstored
 export type AskFailure = { turnId: string; message: string; target: AskRole; anchor: AskAnchor };
@@ -83,10 +84,16 @@ export function askErrorMessage(role: AskRole, code: string | undefined, status 
   return 'The question failed. Try again.';
 }
 
-// The Ask threads of the Worktree's stored tour, read when `enabled` and again whenever `conversations`
-// (the conversations it can ask) changes, with the owner's questions still being answered polled until
-// they settle; `ask` starts a question and resolves to why it did not start.
-export function useAskThreads(request: AskRequest, worktreeId: string, fingerprint: string | undefined, conversations: string, enabled: boolean): { threads: Map<string, AskThread>; pending: Map<string, PendingAsk>; failures: Map<string, AskFailure>; ask: (subject: AskSubject, anchor: AskAnchor, question: string, replacing?: string) => Promise<string | undefined> } {
+// One collection of Ask threads, and `ask`, which starts a question of `role` and resolves to why it did not start
+export type AskThreads = { threads: Map<string, AskThread>; pending: Map<string, PendingAsk>; failures: Map<string, AskFailure>; ask: (role: AskRole, subject: AskSubject, anchor: AskAnchor, question: string, replacing?: string) => Promise<string | undefined> };
+
+// the lines a range picked in a diff covers
+export const askLines = ({ changeId, startSide, startLine, endSide, endLine }: { changeId: string; startSide: Side; startLine: number; endSide: Side; endLine: number }): AskLines => ({ changeId, side: endSide, startLine, endLine, ...(startSide === endSide ? {} : { startSide }) });
+
+// The Ask threads at `url` (which reads them and takes questions about the Comparison `fingerprint`),
+// read when `enabled` and again whenever `refreshKey` (such as the conversations they can ask)
+// changes, with the owner's questions still being answered polled until they settle.
+export function useAskThreads(request: AskRequest, url: string, fingerprint: string | undefined, refreshKey: string, enabled: boolean): AskThreads {
   const [threads, setThreads] = useState(new Map<string, AskThread>());
   const [pending, setPending] = useState(new Map<string, PendingAsk>());
   const [failures, setFailures] = useState(new Map<string, AskFailure>());
@@ -95,13 +102,13 @@ export function useAskThreads(request: AskRequest, worktreeId: string, fingerpri
 
   // read the stored threads, and the questions still pending when asked to
   const refresh = useCallback(async (withPending: boolean) => {
-    const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/review-tour/asks`, undefined, false);
+    const response = await request(url, undefined, false);
     const body: unknown = await response.json().catch(() => undefined);
     if (!live.current || !response.ok || !isRecord(body) || !Array.isArray(body.threads)) return;
     setThreads(new Map(body.threads.map(threadFrom).filter((thread): thread is AskThread => thread !== undefined).map(thread => [thread.id, thread])));
     if (withPending && Array.isArray(body.pending)) setPending(new Map(body.pending.map(pendingFrom).filter((entry): entry is [string, PendingAsk] => entry !== undefined)));
-  }, [request, worktreeId]);
-  useEffect(() => { if (enabled) void refresh(true); }, [enabled, fingerprint, conversations, refresh]);
+  }, [request, url]);
+  useEffect(() => { if (enabled) void refresh(true); }, [enabled, fingerprint, refreshKey, refresh]);
 
   // poll each pending question's job; a settled one is read back with its thread
   const polling = [...pending.entries()].map(([threadId, entry]) => `${threadId}\0${entry.job.id}`).join('|');
@@ -142,20 +149,20 @@ export function useAskThreads(request: AskRequest, worktreeId: string, fingerpri
 
   // `anchor` is where the question's thread sits, shown while its first question is answered;
   // `replacing` is a thread its failed first question left unstored, which this question starts again
-  const ask = useCallback(async (subject: AskSubject, anchor: AskAnchor, question: string, replacing?: string): Promise<string | undefined> => {
-    if (fingerprint === undefined) return askErrorMessage(subject.target, 'target_unavailable');
-    const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/review-tour/asks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...subject, question, fingerprint }) }, false);
+  const ask = useCallback(async (role: AskRole, subject: AskSubject, anchor: AskAnchor, question: string, replacing?: string): Promise<string | undefined> => {
+    if (fingerprint === undefined) return askErrorMessage(role, 'target_unavailable');
+    const response = await request(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...subject, question, fingerprint }) }, false);
     const body: unknown = await response.json().catch(() => ({}));
     const record = isRecord(body) ? body : {};
     if (response.status === 202 && isReviewJob(record.job) && typeof record.threadId === 'string') {
       const job = record.job;
       const threadId = record.threadId;
-      setPending(current => new Map(current).set(threadId, { question, job, target: subject.target, anchor }));
+      setPending(current => new Map(current).set(threadId, { question, job, target: role, anchor }));
       setFailures(current => { if (!current.has(threadId) && (replacing === undefined || !current.has(replacing))) return current; const next = new Map(current); next.delete(threadId); if (replacing !== undefined) next.delete(replacing); return next; });
       return undefined;
     }
-    return askErrorMessage(subject.target, failureCode(record), response.status);
-  }, [request, worktreeId, fingerprint]);
+    return askErrorMessage(role, failureCode(record), response.status);
+  }, [request, url, fingerprint]);
 
   return { threads, pending, failures, ask };
 }

@@ -16,9 +16,9 @@ import { useColorTheme } from '../color-theme.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, type EditorTarget } from './editor-jump.js';
-import { codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch, rememberExpandedLines } from './items.js';
+import { annotatedItem, codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch, hunkLinesOnlyCSS, rememberExpandedLines } from './items.js';
 import type { ExpandedLines } from './comparison.js';
-import { patchRowIndex, patchRows } from './patch-rows.js';
+import { orderedRange } from './patch-rows.js';
 
 // what a thread can sit under: an inline comment, a suggested comment (an untriaged or dismissed
 // Finding), or lines asked about on their own (`askId`, a ReviewDiffAsk)
@@ -174,10 +174,6 @@ const viewFiles = (view: FileView, fileDiff: FileDiffMetadata, working: string):
   };
 };
 
-// The comment "+" is offered only on the step's own lines: an expanded unchanged line may lie
-// outside the pull request's diff, where a review comment cannot be posted.
-const reviewCSS = '[data-line-type="context-expanded"] [data-gutter-utility-slot] { display: none; }';
-
 // how a label names a side: the base's old lines or the change's new ones
 const sideWord = (side: ReviewDiffSide): string => side === 'deletions' ? 'old' : 'new';
 
@@ -186,20 +182,6 @@ const sideWord = (side: ReviewDiffSide): string => side === 'deletions' ? 'old' 
 export const commentRangeLabel = (comment: Pick<ReviewDiffComment, 'startSide' | 'startLine' | 'endSide' | 'endLine'>): string => {
   if (comment.startSide !== comment.endSide) return `Lines ${sideWord(comment.startSide)} ${comment.startLine} – ${sideWord(comment.endSide)} ${comment.endLine}`;
   return comment.startLine === comment.endLine ? `Line ${comment.startLine}` : `Lines ${comment.startLine}–${comment.endLine}`;
-};
-
-// Order a picked range top-to-bottom. Within one side line numbers order it; across sides (unified
-// view only) the two ends' rows in the rendered patch do, since an added block can sit above a later
-// removed one. An end the patch does not hold falls back to deletions first.
-const orderedRange = (range: SelectedLineRange, patch: string): Pick<ReviewDiffComment, 'startSide' | 'startLine' | 'endSide' | 'endLine'> => {
-  const startSide = range.side ?? range.endSide ?? 'additions';
-  const endSide = range.endSide ?? startSide;
-  if (startSide === endSide) return { startSide, startLine: Math.min(range.start, range.end), endSide, endLine: Math.max(range.start, range.end) };
-  const rows = patchRows(patch);
-  const startRow = patchRowIndex(rows, startSide, range.start);
-  const endRow = patchRowIndex(rows, endSide, range.end);
-  const inOrder = startRow < 0 || endRow < 0 ? startSide === 'deletions' : startRow <= endRow;
-  return inOrder ? { startSide, startLine: range.start, endSide, endLine: range.end } : { startSide: endSide, startLine: range.end, endSide: startSide, endLine: range.start };
 };
 
 // One inline comment: an editor while it is new or reopened, and the saved text otherwise.
@@ -290,9 +272,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
   const anchorKey = anchors.map(anchor => `${anchor.key}@${anchor.changeId}:${anchor.side}:${anchor.endLine}`).join('|');
   const items = useMemo(() => [...baseItems.values()].map(({ item, view }): ReviewItem => {
     const inView = (changeId: string) => view.changeId === changeId || view.hunks.some(hunk => hunk.changeId === changeId);
-    const placed = anchors.filter(anchor => inView(anchor.changeId)).map(anchor => ({ key: anchor.key, annotation: { side: anchor.side, lineNumber: viewLine(view, anchor.changeId, anchor.side, anchor.endLine), metadata: anchor.metadata } as DiffLineAnnotation<Annotation> }));
-    if (placed.length === 0) return item as ReviewItem;
-    return { ...item, annotations: placed.map(entry => entry.annotation), version: contentHash(`${item.version}|${placed.map(entry => `${entry.key}:${entry.annotation.side}:${entry.annotation.lineNumber}`).join('|')}`) };
+    return annotatedItem(item as ReviewItem, anchors.filter(anchor => inView(anchor.changeId)).map(anchor => ({ key: anchor.key, annotation: { side: anchor.side, lineNumber: viewLine(view, anchor.changeId, anchor.side, anchor.endLine), metadata: anchor.metadata } as DiffLineAnnotation<Annotation> })));
   }), [baseItems, anchorKey]); // anchorKey stands in for `anchors`: it covers every field read here
   const viewByDiff = useMemo(() => new Map([...baseItems.values()].map(({ item, view }) => [item.fileDiff, view])), [baseItems]);
   const patchByChangeId = useMemo(() => new Map(changes.map(change => [change.id, change.patch])), [changes]);
@@ -340,7 +320,9 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
     ...codeViewBaseOptions(theme === 'latte' ? 'light' : 'dark', terminalFontSize),
     diffStyle: effectiveSplit ? 'split' : 'unified',
     enableGutterUtility: true,
-    unsafeCSS: reviewCSS,
+    // the comment "+" is offered only on the step's own lines: an expanded unchanged line may lie
+    // outside the pull request's diff, where a review comment cannot be posted
+    unsafeCSS: hunkLinesOnlyCSS,
     ...(loadFile === undefined ? {} : { loadDiffFiles }),
     onPostRender: rememberExpandedLines(expandedLines),
     onGutterUtilityClick: (range: SelectedLineRange, context: { item: { id: string } }) => {

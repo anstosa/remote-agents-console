@@ -4,7 +4,7 @@
 // importers, code-panel.tsx and code-panel/review-diffs.tsx, are both reached through a dynamic
 // `import()`. Kept side-effect free so the isolated-component fixture can exercise item derivation
 // without the dashboard.
-import { parseDiffFromFile, parsePatchFiles, type CodeViewDiffItem, type CodeViewFileItem, type CodeViewItem, type FileDiffLoadedChangedFiles, type FileDiffMetadata, type HunkExpansionRegion, type PostRenderPhase } from '@pierre/diffs';
+import { parseDiffFromFile, parsePatchFiles, type CodeViewDiffItem, type CodeViewFileItem, type CodeViewItem, type DiffLineAnnotation, type FileDiffLoadedChangedFiles, type FileDiffMetadata, type HunkExpansionRegion, type PostRenderPhase } from '@pierre/diffs';
 import type { ComparisonFile, ComparisonFileContents, ExpandedLines, RevisionFile } from './comparison.js';
 
 // Line cap for syntax tokenization: past this a file renders as plain (un-highlighted) text so a
@@ -49,6 +49,17 @@ export const contentHash = (value: string): number => {
   let hash = 5381;
   for (let index = 0; index < value.length; index += 1) hash = (hash * 33) ^ value.charCodeAt(index);
   return hash >>> 0;
+};
+
+// Hide the gutter "+" on unchanged lines a diff expanded, so lines are picked only inside its hunks.
+export const hunkLinesOnlyCSS = '[data-line-type="context-expanded"] [data-gutter-utility-slot] { display: none; }';
+
+// An item with its annotations, each keyed. CodeView only re-reads an item when its version moves, so
+// the version folds in where the annotations sit, and only that: what an annotation renders can change
+// without re-laying out the diff. An item with none is returned as is.
+export const annotatedItem = <A,>(item: CodeViewItem<A>, placed: Array<{ key: string; annotation: DiffLineAnnotation<A> }>): CodeViewItem<A> => {
+  if (placed.length === 0) return item;
+  return { ...item, annotations: placed.map(entry => entry.annotation), version: contentHash(`${item.version}|${placed.map(entry => `${entry.key}:${entry.annotation.side}:${entry.annotation.lineNumber}`).join('|')}`) };
 };
 
 // Combine a file's two sides into one hash input; the leading old-side length keeps the boundary
