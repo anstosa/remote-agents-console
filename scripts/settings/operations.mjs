@@ -41,6 +41,11 @@ import { handoverControlPlane, recoverControlPlaneHandover, validateCheckoutHand
 import { withRestartWatchdog } from "./restart-watchdog.mjs";
 import { processCloudflareRequest } from "./cloudflare.mjs";
 
+// retain helper-only effective source proof data
+const EFFECTIVE_SOURCES = Symbol("effectiveSources");
+const HASH_PATTERN = /^[0-9a-f]{64}$/u;
+const APP_SOURCE_MIGRATION = "push-to-buttons-v1";
+
 // dispatch one claimed operation
 export async function processOperation(descriptor, request, options = {}) {
   switch (request.kind) {
@@ -569,6 +574,9 @@ async function restartRequest(descriptor, request, options) {
   }
   const previousBoot = readOptionalJson(resolve(descriptor.controlRoot, "boot.json"));
   const expectedEnvironment = request.targets.includes("rac") ? await expectedEnvironmentHashes(desiredDescriptor, options) : {};
+  let effectiveSources = request.sources ?? [];
+  // retain the manifest accepted by the real boot proof
+  const captureProofEffectiveSources = (sources) => { effectiveSources = sources; };
   const recoveryTargets = new Set();
   let controlPlaneHandedOver = false;
   let restartProgress;
@@ -643,7 +651,7 @@ async function restartRequest(descriptor, request, options) {
             : await waitForProof(desiredDescriptor, request, boundaryBoot, expectedEnvironment, {
                 ...guardedOptions,
                 deadline: watchdog.deadline
-              });
+              }, captureProofEffectiveSources);
           watchdog.markProved();
           return { boundaryBoot, value };
         });
@@ -653,12 +661,13 @@ async function restartRequest(descriptor, request, options) {
         Object.assign(targetProofs, applyOutcome.value);
         // recheck live health after the deployment command settles
         if (!options.prove) {
-          return waitForProof(desiredDescriptor, request, proofOutcome.value.boundaryBoot, expectedEnvironment, {
+          const settledProof = await waitForProof(desiredDescriptor, request, proofOutcome.value.boundaryBoot, expectedEnvironment, {
             ...options,
             deadline: undefined,
             signal: undefined,
             proofClock: undefined
-          });
+          }, captureProofEffectiveSources);
+          return settledProof;
         }
         return proofOutcome.value.value;
       }, {
@@ -681,7 +690,10 @@ async function restartRequest(descriptor, request, options) {
       await handoverControlPlane(activeDescriptor, desiredDescriptor, options);
       controlPlaneHandedOver = true;
     }
-    const hashes = currentHashes(desiredDescriptor, request.sources?.map((source) => source.id));
+    // reject edits after the attested migration proof
+    const consumedSourceIds = new Set(Object.values(snapshotProofs).flatMap((targetProof) => Object.keys(targetProof.consumedSources ?? {})));
+    verifyRequestedHashes(desiredDescriptor, effectiveSources.filter((source) => !consumedSourceIds.has(source.id)));
+    const hashes = Object.fromEntries(effectiveSources.map((source) => [source.id, source.contentHash]));
     // report consumed Cloudflare bytes rather than a renamed host path
     if (snapshotProofs.cloudflared) {
       for (const id of Object.keys(hashes)) {
@@ -703,7 +715,7 @@ async function restartRequest(descriptor, request, options) {
       ...(Object.keys(targetProofs).length ? { targetProofs } : {}),
       completedAt: new Date().toISOString()
     };
-    await captureEffectiveSnapshots(desiredDescriptor, request.targets, snapshotProofs);
+    await captureEffectiveSnapshots(desiredDescriptor, request.targets, snapshotProofs, effectiveSources);
     if (desiredDescriptor.generation !== activeDescriptor.generation) {
       promoteDescriptor(activeDescriptor, desiredDescriptor);
     }
@@ -721,7 +733,7 @@ async function restartRequest(descriptor, request, options) {
       }
       // recover only targets that reached a mutation boundary
       if (recoveryTargets.size > 0) {
-        await recoverLastEffective(activeDescriptor, request.targets.filter((target) => recoveryTargets.has(target)), request.sources ?? [], options);
+        await recoverLastEffective(activeDescriptor, request.targets.filter((target) => recoveryTargets.has(target)), effectiveSources, options);
       }
       publishRestartProgress("recovered");
     } catch (recoveryError) {
@@ -946,7 +958,7 @@ function verifyRequestedHashes(descriptor, sources) {
 }
 
 // wait for new boot attestation plus local health
-async function waitForProof(descriptor, request, previousBoot, expectedEnvironment, options) {
+async function waitForProof(descriptor, request, previousBoot, expectedEnvironment, options, captureEffectiveSources) {
   const clock = options.proofClock ?? {
     now: () => Date.now(),
     setTimer: (callback, delay) => setTimeout(callback, delay),
@@ -958,12 +970,13 @@ async function waitForProof(descriptor, request, previousBoot, expectedEnvironme
     // stop proof work when the restart watchdog fires
     if (options.signal?.aborted) throw safeError("command-aborted");
     const boot = readOptionalJson(resolve(descriptor.controlRoot, "boot.json"));
+    const effectiveSources = boot === undefined ? undefined : effectiveProofSources(descriptor, boot, request.sources ?? []);
     if (
       boot?.version === PROTOCOL_VERSION &&
       boot.generation === descriptor.generation &&
       typeof boot.bootNonce === "string" &&
       boot.bootNonce !== previousBoot?.bootNonce &&
-      proofHashesMatch(descriptor, boot.hashes, request.sources ?? []) &&
+      effectiveSources !== undefined &&
       environmentHashesMatch(boot.environmentHashes, expectedEnvironment) &&
       await probeRacHealth(descriptor, boot.listen, {
         runner: options.runner ?? runBounded,
@@ -971,7 +984,9 @@ async function waitForProof(descriptor, request, previousBoot, expectedEnvironme
         remainingMs: deadline - clock.now()
       })
     ) {
-      return boot;
+      // publish effective hashes before concurrent apply settlement
+      captureEffectiveSources?.(effectiveSources);
+      return Object.assign(boot, { [EFFECTIVE_SOURCES]: effectiveSources });
     }
     await waitForProofPoll(clock, deadline, options.signal);
   }
@@ -1006,14 +1021,62 @@ function waitForProofPoll(clock, deadline, signal) {
   });
 }
 
-// match attested source hashes
-function proofHashesMatch(descriptor, hashes, sources) {
-  if (!hashes || typeof hashes !== "object") {
+// derive the exact manifest accepted by one boot proof
+function effectiveProofSources(descriptor, boot, sources) {
+  const hashes = boot.hashes;
+  const migrations = boot.sourceMigrations;
+  // reject malformed hashes or migration namespaces
+  if (!isRecord(hashes) || (migrations !== undefined && (!isRecord(migrations) || Object.keys(migrations).some((id) => id !== "app")))) {
+    return undefined;
+  }
+  const migration = migrations?.app;
+  const requestedApp = sources.find((source) => source.id === "app");
+  // bind migration metadata to the requested app source only
+  if (migration !== undefined && (!requestedApp || !validAppSourceMigration(descriptor, migration, requestedApp, hashes))) {
+    return undefined;
+  }
+  // require every other boot-consumed source to remain exact
+  for (const source of sources) {
+    // ignore sources outside the server boot attestation
+    if (!["json", "env"].includes(descriptor.sources[source.id]?.kind)) continue;
+    // replace only the attested app transition
+    if (source.id === "app" && migration !== undefined) continue;
+    // reject every unrelated attested hash change
+    if (hashes[source.id] !== source.contentHash) return undefined;
+  }
+  return sources.map((source) => source.id === "app" && migration !== undefined
+    ? { ...source, existed: true, contentHash: migration.toHash }
+    : source);
+}
+
+// validate the only supported boot-time source migration
+function validAppSourceMigration(descriptor, migration, requested, hashes) {
+  // require an exact closed migration record
+  if (
+    descriptor.sources.app?.kind !== "json" ||
+    !isRecord(migration) ||
+    Object.keys(migration).some((key) => !["kind", "fromHash", "toHash"].includes(key)) ||
+    migration.kind !== APP_SOURCE_MIGRATION ||
+    !HASH_PATTERN.test(migration.fromHash ?? "") ||
+    !HASH_PATTERN.test(migration.toHash ?? "") ||
+    migration.fromHash === migration.toHash ||
+    requested.existed !== true ||
+    requested.contentHash !== migration.fromHash ||
+    hashes.app !== migration.toHash
+  ) {
     return false;
   }
-  return sources
-    .filter((source) => ["json", "env"].includes(descriptor.sources[source.id]?.kind))
-    .every((source) => hashes[source.id] === source.contentHash);
+  // bind attestation to the current host bytes
+  try {
+    return existsSync(descriptor.sources.app.path) && currentHashes(descriptor, ["app"]).app === migration.toHash;
+  } catch {
+    return false;
+  }
+}
+
+// recognize one non-array protocol record
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 // require every winning environment value to match the new process
@@ -1164,15 +1227,22 @@ function validateMigrationCloudflarePair(descriptor, plans) {
 }
 
 // capture encrypted source truth only after target proof
-async function captureEffectiveSnapshots(descriptor, targets, proofs = {}) {
+async function captureEffectiveSnapshots(descriptor, targets, proofs = {}, expectedSources = []) {
   const key = readRecoveryKey(descriptor.controlRoot);
+  const expected = new Map(expectedSources.map((source) => [source.id, source]));
   // keep independent baselines for separately applied targets
   for (const target of targets) {
     const consumedSources = proofs[target]?.consumedSources ?? {};
     const originals = recoverySourceIds(descriptor, target).map((id) => {
       const current = captureEntry(descriptor.sources[id], id);
+      const captured = consumedSources[id] === undefined ? current : { ...current, existed: true, bytes: consumedSources[id] };
+      const requested = expected.get(id);
+      // bind snapshots to the effective manifest when supplied
+      if (requested) {
+        assertExpectedEntry(captured, requested);
+      }
       // preserve container-consumed bind bytes when the host path already drifted
-      return consumedSources[id] === undefined ? current : { ...current, existed: true, bytes: consumedSources[id] };
+      return captured;
     });
     const expectedHashes = proofs[target]?.hashes;
     // bind initial snapshots to the nonmutating target proof
@@ -1287,6 +1357,7 @@ async function recoverEffectiveTarget(descriptor, target, expectedSources, optio
   const expected = new Map(expectedSources.map((source) => [source.id, source]));
   const desired = [];
   const restored = [];
+  let verifiedRecoverySources;
   const previousBoot = readOptionalJson(resolve(descriptor.controlRoot, "boot.json"));
   try {
     // preserve current desired bytes before temporary restoration
@@ -1343,7 +1414,8 @@ async function recoverEffectiveTarget(descriptor, target, expectedSources, optio
       if (options.recoveryProve) {
         await options.recoveryProve(baseline, recoveryRequest, previousBoot);
       } else {
-        await waitForProof(baseline, recoveryRequest, previousBoot, await expectedEnvironmentHashes(baseline, options), options);
+        const recoveryProof = await waitForProof(baseline, recoveryRequest, previousBoot, await expectedEnvironmentHashes(baseline, options), options);
+        verifiedRecoverySources = new Map(recoveryProof[EFFECTIVE_SOURCES].map((source) => [source.id, source]));
       }
     }
   } finally {
@@ -1353,7 +1425,13 @@ async function recoverEffectiveTarget(descriptor, target, expectedSources, optio
       const original = restored[index];
       const source = baseline.sources[original.id];
       try {
-        assertEntryUnchanged(source, original);
+        const verified = verifiedRecoverySources?.get(original.id);
+        // accept only a migration verified by the recovery boot
+        if (verified && verified.contentHash !== sha256(Buffer.from(original.bytes, "base64"))) {
+          assertExpectedEntry(captureEntry(source, original.id), verified);
+        } else {
+          assertEntryUnchanged(source, original);
+        }
         restoreEntry(source.path, desired.find((entry) => entry.id === original.id));
       } catch (error) {
         restoreError ??= error;

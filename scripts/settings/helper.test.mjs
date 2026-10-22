@@ -932,6 +932,229 @@ test("native installer creates desired source before publishing descriptor", asy
   }
 });
 
+// build one fresh boot attesting the supported app migration
+function migratedAppBoot(port, fromHash, toHash, overrides = {}) {
+  return {
+    version: 1,
+    generation: 1,
+    bootNonce: overrides.bootNonce ?? "migrated-app-boot",
+    hashes: { app: toHash, ...(overrides.hashes ?? {}) },
+    sourceMigrations: {
+      app: { kind: "push-to-buttons-v1", fromHash, toHash },
+      ...(overrides.sourceMigrations ?? {})
+    },
+    environmentHashes: {},
+    listen: { host: "127.0.0.1", port }
+  };
+}
+
+test("replacement proof records an attested app migration as effective", async () => {
+  const current = fixture();
+  const fromHash = sha256(readFileSync(current.app));
+  const migrated = Buffer.from('{"name":"before","buttons":[]}\n');
+  const toHash = sha256(migrated);
+  const server = createServer((_request, response) => response.writeHead(200).end("ok"));
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  try {
+    const result = await processOperation(current.descriptor, {
+      version: 1,
+      id: "restart_app_migration01",
+      kind: "restart",
+      generation: 1,
+      sources: currentSourceManifest(current.descriptor),
+      targets: ["rac"]
+    }, {
+      nativeUnitDirectory: resolve(current.root, "systemd"),
+      expectedEnvironmentHashes: {},
+      runner: async (_command, args) => {
+        // publish the migrated bytes with the replacement boot
+        if (args.includes("restart")) {
+          atomicWriteFile(current.app, migrated, 0o600);
+          atomicWriteFile(resolve(current.controlRoot, "boot.json"), `${JSON.stringify(migratedAppBoot(address.port, fromHash, toHash))}\n`, 0o600);
+        }
+        return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      }
+    });
+
+    assert.equal(result.phase, "effective");
+    assert.equal(result.receipt.hashes.app, toHash);
+    const effective = JSON.parse(readFileSync(resolve(current.controlRoot, "effective.json"), "utf8"));
+    assert.equal(effective.targets.rac.hashes.app, toHash);
+    const envelope = JSON.parse(readFileSync(resolve(current.controlRoot, "recovery/effective-rac.json"), "utf8"));
+    const snapshot = openLocal(readFileSync(resolve(current.controlRoot, "recovery.key")), envelope);
+    assert.equal(sha256(Buffer.from(snapshot.originals.find((entry) => entry.id === "app").bytes, "base64")), toHash);
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});
+
+test("replacement proof rejects malformed or non-app migration attestations", async () => {
+  const variants = ["kind", "from", "to", "live", "nonapp", "existence"];
+  // exercise every rejected migration dimension independently
+  for (const variant of variants) {
+    const current = fixture();
+    const before = readFileSync(current.app);
+    const fromHash = sha256(before);
+    const migrated = Buffer.from('{"name":"before","buttons":[]}\n');
+    const toHash = sha256(migrated);
+    const unrelated = Buffer.from('{"name":"external"}\n');
+    let healthChecks = 0;
+    const server = createServer((_request, response) => {
+      healthChecks += 1;
+      response.writeHead(200).end("unexpected");
+    });
+    await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+    const address = server.address();
+    assert.equal(typeof address, "object");
+    let restarts = 0;
+    try {
+      const sources = currentSourceManifest(current.descriptor);
+      // reject a migration without an exact preexisting app claim
+      if (variant === "existence") delete sources.find((source) => source.id === "app").existed;
+      await assert.rejects(() => processOperation(current.descriptor, {
+        version: 1,
+        id: `invalid_app_migration_${variant}`,
+        kind: "restart",
+        generation: 1,
+        sources,
+        targets: ["rac"]
+      }, {
+        restartWatchdogTimeoutMs: 30,
+        nativeUnitDirectory: resolve(current.root, "systemd"),
+        expectedEnvironmentHashes: {},
+        runner: async (_command, args, commandOptions = {}) => {
+          // stage only the invalid replacement boot on the first restart
+          if (args.includes("restart") && restarts++ === 0) {
+            const live = variant === "live" ? unrelated : (variant === "nonapp" ? before : migrated);
+            atomicWriteFile(current.app, live, 0o600);
+            const boot = migratedAppBoot(address.port, fromHash, toHash);
+            // alter exactly one attestation constraint
+            if (variant === "kind") boot.sourceMigrations.app.kind = "unsupported-migration";
+            if (variant === "from") boot.sourceMigrations.app.fromHash = "0".repeat(64);
+            if (variant === "to") boot.sourceMigrations.app.toHash = "0".repeat(64);
+            if (variant === "nonapp") {
+              boot.hashes.app = fromHash;
+              boot.sourceMigrations = { env: boot.sourceMigrations.app };
+            }
+            atomicWriteFile(resolve(current.controlRoot, "boot.json"), `${JSON.stringify(boot)}\n`, 0o600);
+            commandOptions.signal?.addEventListener("abort", () => atomicWriteFile(current.app, before, 0o600), { once: true });
+          }
+          return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+        },
+        recoveryProve: async () => ({ bootNonce: "recovered-invalid-proof" })
+      }), (error) => ["health-proof-failed", "restart-watchdog-expired"].includes(error.code));
+      assert.equal(healthChecks, 0);
+      assert.equal(readFileSync(current.app, "utf8"), before.toString("utf8"));
+    } finally {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+  }
+});
+
+test("post-proof app edits are refused and preserved", async () => {
+  const current = fixture();
+  const fromHash = sha256(readFileSync(current.app));
+  const migrated = Buffer.from('{"name":"before","buttons":[]}\n');
+  const edited = Buffer.from('{"name":"operator-edit"}\n');
+  const toHash = sha256(migrated);
+  let healthChecks = 0;
+  const server = createServer((_request, response) => {
+    healthChecks += 1;
+    // race an edit after matching the proof but before it returns
+    if (healthChecks === 1) atomicWriteFile(current.app, edited, 0o600);
+    response.writeHead(200).end("ok");
+  });
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  try {
+    await assert.rejects(() => processOperation(current.descriptor, {
+      version: 1,
+      id: "post_proof_app_edit001",
+      kind: "restart",
+      generation: 1,
+      sources: currentSourceManifest(current.descriptor),
+      targets: ["rac"]
+    }, {
+      healthTimeoutMs: 30,
+      nativeUnitDirectory: resolve(current.root, "systemd"),
+      expectedEnvironmentHashes: {},
+      runner: async (_command, args) => {
+        // publish one valid migrated replacement
+        if (args.includes("restart")) {
+          atomicWriteFile(current.app, migrated, 0o600);
+          atomicWriteFile(resolve(current.controlRoot, "boot.json"), `${JSON.stringify(migratedAppBoot(address.port, fromHash, toHash))}\n`, 0o600);
+        }
+        return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      }
+    }), { code: "manual-recovery-required" });
+    assert.equal(healthChecks, 1);
+    assert.equal(readFileSync(current.app, "utf8"), edited.toString("utf8"));
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});
+
+test("post-attestation apply failure recovers through baseline remigration", async () => {
+  const current = fixture();
+  const before = readFileSync(current.app);
+  const fromHash = sha256(before);
+  const migrated = Buffer.from('{"name":"before","buttons":[]}\n');
+  const toHash = sha256(migrated);
+  const icon = resolve(current.root, "heart.svg");
+  atomicWriteFile(icon, "<svg/>\n", 0o600);
+  current.descriptor.sources["icon-heart"] = { path: icon, serverPath: icon, kind: "svg", apply: "live" };
+  let firstHealth;
+  const firstHealthy = new Promise((resolvePromise) => { firstHealth = resolvePromise; });
+  const server = createServer((_request, response) => {
+    firstHealth();
+    response.writeHead(200).end("ok");
+  });
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  const clock = restartClock();
+  let restarts = 0;
+  try {
+    await assert.rejects(() => processOperation(current.descriptor, {
+      version: 1,
+      id: "apply_fail_after_proof01",
+      kind: "restart",
+      generation: 1,
+      sources: currentSourceManifest(current.descriptor),
+      targets: ["rac"]
+    }, {
+      restartWatchdogClock: clock,
+      nativeUnitDirectory: resolve(current.root, "systemd"),
+      expectedEnvironmentHashes: {},
+      runner: async (_command, args) => {
+        // emulate desired failure followed by new-binary recovery migration
+        if (args.includes("restart")) {
+          restarts += 1;
+          atomicWriteFile(current.app, migrated, 0o600);
+          atomicWriteFile(resolve(current.controlRoot, "boot.json"), `${JSON.stringify(migratedAppBoot(address.port, fromHash, toHash, {
+            bootNonce: restarts === 1 ? "desired-migrated-boot" : "recovery-migrated-boot"
+          }))}\n`, 0o600);
+          if (restarts === 1) {
+            await firstHealthy;
+            assert.equal(await waitFor(() => !clock.pending()), true);
+            return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+          }
+          atomicWriteFile(icon, "<svg id=\"operator\"/>\n", 0o600);
+        }
+        return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      }
+    }), { code: "apply-failed" });
+    assert.equal(restarts, 2);
+    assert.equal(sha256(readFileSync(current.app)), toHash);
+    assert.equal(readFileSync(icon, "utf8"), '<svg id="operator"/>\n');
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});
+
 test("recovery restores a proven graph across separate saves", async () => {
   const current = fixture();
   const env = resolve(current.root, ".env");

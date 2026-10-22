@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -9,6 +9,7 @@ import { run } from '../tmux/command.js';
 import { interactiveShellPath } from '../tmux/interactive-shell.js';
 import { validateConfig } from '../config/schema.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
+import { contentHash } from '../settings/proof.js';
 import {
   DataFileError,
   isLegacyConfig as isProjectsLegacyConfig,
@@ -66,7 +67,13 @@ export type MigrationReport = {
   backups: string[];
   warnings: string[];
   buttons?: { defaults: boolean; projects: number };
+  sourceMigration?: ConfigSourceMigration;
 };
+
+// attest only the configuration-only buttons transition
+export type ConfigSourceMigration = { kind: 'push-to-buttons-v1'; fromHash: string; toHash: string };
+type ConfigSnapshot = { content: string; dev: number; ino: number };
+type CreatedBackup = { path: string; dev: number; ino: number };
 
 // resolve one store's path: an explicit override, else its env var, else its default
 function storePath(key: keyof DataFilePaths, envVar: string, fallback: string, deps: MigrationDeps): string {
@@ -206,9 +213,17 @@ async function unwritableTargets(deps: MigrationDeps, changedFiles: string[]): P
 
 // write a stage-specific sibling backup with the original bytes, never overwriting an
 // existing backup (the older original wins); returns the backup path when one was written
-async function backup(file: string, original: string, stage = 'projects'): Promise<string | undefined> {
+// retain the created inode so failed config-only attempts can remove their own backup
+async function backup(file: string, original: string, stage = 'projects'): Promise<CreatedBackup | undefined> {
   const path = `${file}.pre-${stage}.bak`;
-  try { await writeFile(path, original, { flag: 'wx', mode: 0o600 }); return path; }
+  try {
+    const handle = await open(path, 'wx', 0o600);
+    try {
+      const identity = await handle.stat();
+      await handle.writeFile(original);
+      return { path, dev: identity.dev, ino: identity.ino };
+    } finally { await handle.close(); }
+  }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') return undefined; throw error; }
 }
 
@@ -219,12 +234,22 @@ async function writeAtomic(file: string, content: string): Promise<void> {
   await rename(next, file);
 }
 
-async function writeConfig(deps: MigrationDeps, config: Record<string, unknown>): Promise<void> {
+// publish the planned config only while its original file is unchanged
+async function writeConfig(deps: MigrationDeps, config: Record<string, unknown>, original: ConfigSnapshot): Promise<string> {
   const target = deps.configWritePath ?? deps.configPath;
   const temporary = `${target}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  const content = `${JSON.stringify(config, null, 2)}\n`;
   await mkdir(dirname(target), { recursive: true });
-  await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, target);
+  try {
+    await writeFile(temporary, content, { mode: 0o600 });
+    const current = await lstat(target);
+    // preserve edits and replaced files rather than overwriting their owner
+    if (current.dev !== original.dev || current.ino !== original.ino || await readFile(target, 'utf8') !== original.content) throw new MigrationError(['configuration changed during migration; retry from its current contents']);
+    await rename(temporary, target);
+    return content;
+  } finally {
+    await unlink(temporary).catch(() => {});
+  }
 }
 
 function buildReport(plan: MigrationPlan, planned: PlannedStore[], backups: string[], buttonStage: { defaults: boolean; projects: number }): MigrationReport {
@@ -240,7 +265,14 @@ function buildReport(plan: MigrationPlan, planned: PlannedStore[], backups: stri
  * problem listed and nothing written on any content or writability error. Returns the report.
  */
 export async function runMigration(deps: MigrationDeps): Promise<MigrationReport> {
-  const { plan, planned, errors, buttonStage, projectsLegacy } = await prepare(deps);
+  const identity = await lstat(deps.configPath);
+  const content = await readFile(deps.configPath, 'utf8');
+  let raw: unknown;
+  try { raw = JSON.parse(content); }
+  catch { throw new MigrationError([`${deps.configPath} is not valid JSON`]); }
+  // plan from the same bytes whose hash and backup will be retained
+  const original: ConfigSnapshot = { content, dev: identity.dev, ino: identity.ino };
+  const { plan, planned, errors, buttonStage, projectsLegacy } = await prepare({ ...deps, raw });
   // schema validation of the output; a validation failure is a migration error
   if (errors.length === 0) {
     try { await validateConfig(plan.newConfig, { checkExecutables: false }); }
@@ -252,12 +284,26 @@ export async function runMigration(deps: MigrationDeps): Promise<MigrationReport
   if (unwritable.length > 0) throw new MigrationError([...unwritable, 'fix: mount it rw under Docker; or move the config somewhere writable and point RAC_CONFIG at it; or run `pnpm config:migrate` as a user who can write it']);
   // backups first (config included), then data files, then the config last
   const backups: string[] = [];
-  const configBackup = await backup(deps.configWritePath ?? deps.configPath, await readFile(deps.configPath, 'utf8'), projectsLegacy ? 'projects' : 'buttons');
-  if (configBackup !== undefined) backups.push(configBackup);
-  for (const entry of planned) if (entry.changed && entry.originalText !== undefined) { const path = await backup(entry.store.file, entry.originalText); if (path !== undefined) backups.push(path); }
+  const configBackup = await backup(deps.configWritePath ?? deps.configPath, content, projectsLegacy ? 'projects' : 'buttons');
+  // report paths without exposing backup contents
+  if (configBackup !== undefined) backups.push(configBackup.path);
+  for (const entry of planned) if (entry.changed && entry.originalText !== undefined) { const created = await backup(entry.store.file, entry.originalText); if (created !== undefined) backups.push(created.path); }
   for (const entry of planned) if (entry.changed) await writeAtomic(entry.store.file, JSON.stringify(entry.value));
-  await writeConfig(deps, plan.newConfig);
-  return buildReport(plan, planned, backups, buttonStage);
+  let published: string;
+  try { published = await writeConfig(deps, plan.newConfig, original); }
+  catch (error) {
+    // a refused config-only attempt must not leave a stale rollback copy for its retry
+    if (!projectsLegacy && configBackup !== undefined) {
+      const current = await lstat(configBackup.path).catch(() => undefined);
+      // preserve pre-existing or externally replaced backup files
+      if (current?.dev === configBackup.dev && current.ino === configBackup.ino && await readFile(configBackup.path, 'utf8') === content) await unlink(configBackup.path);
+    }
+    throw error;
+  }
+  const report = buildReport(plan, planned, backups, buttonStage);
+  // combined projects/data migrations are outside the app-only proof contract
+  if (!projectsLegacy && (buttonStage.defaults || buttonStage.projects > 0)) report.sourceMigration = { kind: 'push-to-buttons-v1', fromHash: contentHash(content), toHash: contentHash(published) };
+  return report;
 }
 
 /** The dry-run report for `config:check`: the plan and per-store counts, plus any errors, without writing. */

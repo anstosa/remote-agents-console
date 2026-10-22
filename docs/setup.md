@@ -867,6 +867,21 @@ New migrations preserve valid attachments. Earlier migrations kept only their
 filenames in note text; those backups remain untouched and are not replayed
 automatically into notes that may since have been edited or deleted.
 
+### Migrating project Push buttons
+
+The first boot with a `projects[]` configuration adds root `buttons` defaults
+and converts legacy `projects[].push` actions without changing their prompt
+bytes. This stage rewrites only the application config and creates a private
+`*.pre-buttons.bak` sibling. Existing backups are never overwritten; retain a
+fresh private pre-update copy for rollback.
+
+The updater accepts this known migration only when its boot evidence binds the
+exact original and migrated config hashes and the live file still matches.
+Concurrent config edits are refused. A crash after config replacement but before
+boot evidence is published requires manual recovery. To roll back to an older
+version, restore both compatible code and the fresh pre-update config before
+restarting; older versions reject root `buttons`.
+
 ### Migrating from `worktrees[]`
 
 Upgrading from a `worktrees[]` configuration is automatic: **start the console

@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,9 +8,14 @@ import { acquireConfig } from '../src/migrations/boot.js';
 import { isLegacyConfig, MigrationError, runMigration } from '../src/migrations/runner.js';
 import { needsPushToButtonsMigration, planPushToButtonsMigration } from '../src/migrations/push-to-buttons.js';
 import { planMigration, type ResolvedFacts } from '../src/migrations/worktrees-to-projects.js';
+import { contentHash } from '../src/settings/proof.js';
+
+// expose the filesystem publication boundary without changing its default behavior
+vi.mock('node:fs/promises', async importOriginal => ({ ...await importOriginal<typeof import('node:fs/promises')>() }));
 
 const directories: string[] = [];
-afterEach(async () => { for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }); });
+// restore filesystem spies before removing isolated fixtures
+afterEach(async () => { vi.restoreAllMocks(); for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }); });
 
 // isolate every migration file beneath one temporary root
 async function fixture(raw: unknown): Promise<{ root: string; configPath: string }> {
@@ -117,6 +123,43 @@ describe('push-to-buttons migration planner', () => {
 });
 
 describe('push-to-buttons migration runner', () => {
+  // preserve a concurrent writer at the config publication boundary
+  it.each(['edit', 'replacement'])('refuses a concurrent config %s after migration planning', async kind => {
+    const { root, configPath } = await fixture({ publicOrigin: 'https://agents.example.com', projects: [] });
+    const original = await readFile(configPath, 'utf8');
+    const external = JSON.stringify({ publicOrigin: 'https://edited.example.com', projects: [] });
+    const write = writeFile;
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (...args: Parameters<typeof writeFile>) => {
+      // introduce the competing edit after the planned output has been staged
+      if (String(args[0]).endsWith('.tmp')) {
+        // identical replacement bytes must not conceal a changed file identity
+        if (kind === 'replacement') {
+          await write(`${configPath}.external`, original);
+          await fs.rename(`${configPath}.external`, configPath);
+        } else await write(configPath, external);
+      }
+      return write(...args);
+    });
+    await expect(runMigration({ configPath, env: dataEnv(root) })).rejects.toThrow('configuration changed during migration');
+    const retained = kind === 'replacement' ? original : external;
+    expect(await readFile(configPath, 'utf8')).toBe(retained);
+    expect((await fs.readdir(root)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+    await expect(readFile(`${configPath}.pre-buttons.bak`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    vi.restoreAllMocks();
+    // retry from the winning writer's bytes with its own fresh rollback copy
+    await runMigration({ configPath, env: dataEnv(root) });
+    expect(await readFile(`${configPath}.pre-buttons.bak`, 'utf8')).toBe(retained);
+  });
+
+  // data-store migrations cannot claim a config-only transition
+  it('omits app-only evidence when the projects migration also runs', async () => {
+    const { root, configPath } = await fixture({ publicOrigin: 'https://agents.example.com', adapters: { codex: { program: '/usr/bin/codex' } }, worktrees: [] });
+    const report = await runMigration({ configPath, env: dataEnv(root) });
+    expect(report.buttons?.defaults).toBe(true);
+    expect(report).not.toHaveProperty('sourceMigration');
+    expect(report.backups).toContain(`${configPath}.pre-projects.bak`);
+  });
+
   // malformed project collections cannot be silently replaced with an empty list
   it.each([null, 'invalid', { id: 'retained-project' }])('rejects malformed projects without writes: %j', async projects => {
     const { root, configPath } = await fixture({ publicOrigin: 'https://agents.example.com', projects });
@@ -127,6 +170,7 @@ describe('push-to-buttons migration runner', () => {
     await expect(readFile(`${configPath}.pre-buttons.bak`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  // bind replacement proof to the exact migration input and output
   it('writes one validated config last, creates a private backup, and is byte-idempotent', async () => {
     const { root, configPath } = await fixture({ publicOrigin: 'https://agents.example.com', projects: [{ id: 'p', path: '/missing', push: { label: 'Ship', prompt: 'ship it' } }] });
     // the earlier migration's backup must not replace this stage's rollback copy
@@ -135,6 +179,7 @@ describe('push-to-buttons migration runner', () => {
     const report = await runMigration({ configPath, env: dataEnv(root) });
     const first = await readFile(configPath, 'utf8');
     expect(report.buttons).toEqual({ defaults: true, projects: 1 });
+    expect(report.sourceMigration).toEqual({ kind: 'push-to-buttons-v1', fromHash: contentHash(original), toHash: contentHash(first) });
     expect(isLegacyConfig(JSON.parse(first))).toBe(false);
     expect((await stat(`${configPath}.pre-buttons.bak`)).mode & 0o777).toBe(0o600);
     expect(await readFile(`${configPath}.pre-buttons.bak`, 'utf8')).toBe(original);
@@ -153,11 +198,18 @@ describe('push-to-buttons migration runner', () => {
     await expect(readFile(`${configPath}.pre-buttons.bak`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  // carry only this boot's completed transition into its attestation
   it('boot rereads the exact migrated content before returning validated defaults', async () => {
     const { root, configPath } = await fixture({ publicOrigin: 'https://agents.example.com', projects: [] });
+    const original = await readFile(configPath, 'utf8');
     let loaded = '';
-    const config = await acquireConfig({ RAC_CONFIG: configPath, ...dataEnv(root) }, () => {}, content => { loaded = content; });
+    let transition: unknown;
+    const config = await acquireConfig({ RAC_CONFIG: configPath, ...dataEnv(root) }, () => {}, (content, migration) => { loaded = content; transition = migration; });
     expect(loaded).toBe(await readFile(configPath, 'utf8'));
+    expect(transition).toEqual({ kind: 'push-to-buttons-v1', fromHash: contentHash(original), toHash: contentHash(loaded) });
     expect(config.buttons).toEqual(defaultButtons);
+    // a later boot must not replay evidence from an earlier migration
+    await acquireConfig({ RAC_CONFIG: configPath, ...dataEnv(root) }, () => {}, (_content, migration) => { transition = migration; });
+    expect(transition).toBeUndefined();
   });
 });

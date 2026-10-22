@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { applyListenOverrides, validateConfig, type ValidatedConfig } from '../config/schema.js';
-import { isLegacyConfig, MigrationError, runMigration, type MigrationReport } from './runner.js';
+import { isLegacyConfig, MigrationError, runMigration, type ConfigSourceMigration, type MigrationReport } from './runner.js';
+import { contentHash } from '../settings/proof.js';
 
 /** A migration/validation failure as one line per problem — `MigrationError` lists every one. */
 export function migrationErrorLines(error: unknown): string[] {
@@ -27,18 +28,23 @@ export function formatReport(report: MigrationReport): string[] {
  * everything and reads no data file. Errors propagate — the caller prints them as
  * `Configuration invalid:` lines and exits, replacing today's unhandled-rejection trace.
  */
-export async function acquireConfig(env: NodeJS.ProcessEnv = process.env, log: (message: string) => void = message => process.stderr.write(message), loaded?: (content: string) => void): Promise<ValidatedConfig> {
+export async function acquireConfig(env: NodeJS.ProcessEnv = process.env, log: (message: string) => void = message => process.stderr.write(message), loaded?: (content: string, migration?: ConfigSourceMigration) => void): Promise<ValidatedConfig> {
   const configPath = env.RAC_CONFIG;
   if (!configPath) throw new Error('RAC_CONFIG must point to a server-local configuration file');
   const raw = JSON.parse(await readFile(configPath, 'utf8')) as unknown;
+  let sourceMigration: ConfigSourceMigration | undefined;
+  // migrate only a legacy source and retain this boot's completed transition
   if (isLegacyConfig(raw)) {
     const report = await runMigration({ configPath, ...(env.RAC_CONFIG_WRITE_PATH === undefined ? {} : { configWritePath: env.RAC_CONFIG_WRITE_PATH }), bridge: env.RAC_HOST_TMUX_DIR !== undefined, env });
+    sourceMigration = report.sourceMigration;
     log(`Configuration migrated: ${configPath}\n`);
     for (const line of formatReport(report)) log(`  ${line}\n`);
   }
   // capture the exact consumed revision for settings boot proof
   const finalContent = await readFile(configPath, 'utf8');
+  // refuse edits between migration publication and configuration consumption
+  if (sourceMigration !== undefined && sourceMigration.toHash !== contentHash(finalContent)) throw new MigrationError(['configuration changed after migration; retry from its current contents']);
   const finalRaw = JSON.parse(finalContent) as unknown;
-  loaded?.(finalContent);
+  loaded?.(finalContent, sourceMigration);
   return validateConfig(applyListenOverrides(finalRaw, env), { warn: message => log(`Configuration warning: ${message}\n`) });
 }

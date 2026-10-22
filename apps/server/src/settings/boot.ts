@@ -6,6 +6,7 @@ import { readBounded, writePrivate } from './files.js';
 import { applicationHash, contentHash, environmentProjection } from './proof.js';
 import { environment } from './env.js';
 import { HostSettingsTransport, settingsControlRoot, validateInstallation } from './transport.js';
+import type { ConfigSourceMigration } from '../migrations/runner.js';
 
 // select only an installer-authorized next generation for replacement proof
 export async function bootInstallation(root = settingsControlRoot()): Promise<Installation | undefined> {
@@ -20,7 +21,7 @@ export async function bootInstallation(root = settingsControlRoot()): Promise<In
   return desired;
 }
 // attest consumed bytes locally without queueing behind a waiting restart helper
-export async function attestBoot(installation: Installation | undefined, config: ValidatedConfig, applicationContent: string, root = settingsControlRoot()): Promise<void> {
+export async function attestBoot(installation: Installation | undefined, config: ValidatedConfig, applicationContent: string, root = settingsControlRoot(), sourceMigration?: ConfigSourceMigration): Promise<void> {
   // uninstalled capability has no effective-state claim
   if (installation === undefined) return;
   const hashes: Record<string, string> = {}; const semanticHashes: Record<string, string> = {};
@@ -39,5 +40,8 @@ export async function attestBoot(installation: Installation | undefined, config:
   const environmentHashes = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string').map(([key, value]) => [key, contentHash(value)]));
   const environmentFile = installation.sources.env?.serverPath;
   const environmentFileHashes = environmentFile === undefined ? {} : Object.fromEntries(Object.entries(environment(await readBounded(environmentFile, installation.sources.env?.optional) ?? '')).map(([key, value]) => [key, contentHash(value)]));
-  await writePrivate(join(root, 'boot.json'), JSON.stringify({ version: 1, generation: installation.generation, bootNonce: randomBytes(24).toString('base64url'), hashes, semanticHashes, environmentHashes, environmentFileHashes, listen: config.listen, createdAt: new Date().toISOString() }));
+  // bind migration evidence to the same consumed app bytes as the boot proof
+  if (sourceMigration !== undefined && sourceMigration.toHash !== hashes.app) throw new Error('configuration migration proof does not match consumed bytes');
+  const sourceMigrations = sourceMigration === undefined ? undefined : { app: sourceMigration };
+  await writePrivate(join(root, 'boot.json'), JSON.stringify({ version: 1, generation: installation.generation, bootNonce: randomBytes(24).toString('base64url'), hashes, semanticHashes, environmentHashes, environmentFileHashes, ...(sourceMigrations === undefined ? {} : { sourceMigrations }), listen: config.listen, createdAt: new Date().toISOString() }));
 }
