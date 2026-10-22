@@ -208,6 +208,7 @@ function addBrowserFields(index: FieldIndex): void {
     { label: 'Terminal font', path: ['terminalFontSize'], keywords: 'font size preview' },
     { label: 'Theme', path: ['colorTheme'], keywords: 'appearance dark light mocha latte' },
     { label: 'Reduced motion', path: ['reducedMotion'], keywords: 'animation shimmer pulse accessibility' },
+    { label: 'Notification sounds', path: ['notificationSounds'], keywords: 'alert chime audio mute silent' },
     { label: 'Flyout markers', path: ['flyoutMarkers'], keywords: 'carets menu buttons' },
     { label: 'Dynamic worktrees', path: ['dynamicWorktrees'], keywords: 'launcher multiple worktrees' }
   ];

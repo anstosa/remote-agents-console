@@ -55,7 +55,7 @@ path:LINE`, say) is not supported by the jump.
 ### Browser preferences
 
 In **Settings → This browser**, Name, terminal font, theme, reduced motion,
-flyout markers and dynamic worktrees remain drafts until the top-right
+notification sounds, flyout markers and dynamic worktrees remain drafts until the top-right
 **Save changes** action. **Done** in the Rename dialog stages the name; it does
 not save it. **Validate** does not apply preferences, and **Discard changes**
 restores the currently applied values. Browser-only saves remain available

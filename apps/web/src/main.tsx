@@ -35,6 +35,7 @@ import { useDynamicWorktrees } from './dynamic-worktrees.js';
 import { applyReducedMotion } from './reduced-motion.js';
 import { useFullscreenAction } from './fullscreen-loader.js';
 import { applyFlyoutMarkers } from './flyout-markers.js';
+import { readNotificationSounds } from './notification-sounds.js';
 import { UpstreamRebaseNotification, type GitUpstreamSummary } from './upstream-rebase.js';
 import { useViewportFlyout } from './viewport-flyout.js';
 import { isReviewTour, ReviewPanelColumn, ReviewTourPanel, type ReviewLaunch, type ReviewPanelSlot, type ReviewScope, type ReviewTarget, type ReviewTour, type ReviewTourIndicator } from './review-tour.js';
@@ -868,8 +869,9 @@ const playNotificationSound = async (kind: 'question' | 'finished' | 'system', t
 // show alerts with durable worktree metadata
 const showNotification = async (kind: 'question' | 'finished' | 'system', title: string, body: string, tag: string, url = '/', worktreeId?: string) => {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const customSoundPlayed = await playNotificationSound(kind, tag);
-  const options = { body, tag, icon: '/favicon.svg', badge: '/notification-badge.png', requireInteraction: kind === 'question', silent: customSoundPlayed, data: { url, kind, worktreeId } };
+  const sounds = readNotificationSounds();
+  const customSoundPlayed = sounds && await playNotificationSound(kind, tag);
+  const options = { body, tag, icon: '/favicon.svg', badge: '/notification-badge.png', requireInteraction: kind === 'question', silent: !sounds || customSoundPlayed, data: { url, kind, worktreeId } };
   if ('serviceWorker' in navigator) {
     const registration = await navigator.serviceWorker.ready;
     await registration.showNotification(title, options);

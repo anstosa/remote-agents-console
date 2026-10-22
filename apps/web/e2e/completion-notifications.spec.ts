@@ -51,11 +51,13 @@ test('suppresses an intermediate completion when the next queued prompt starts',
   ).__testNotifications.map(notification => notification.title)), { timeout: 15_000 }).toEqual(['Done working in Remote Agents']);
 });
 
-test('notifies when the visible focused agent finishes', async ({ page }) => {
+// a muted browser still notifies, without the chime or a native sound
+for (const muted of [false, true]) test(`notifies when the visible focused agent finishes${muted ? ' with sounds off' : ''}`, async ({ page }) => {
   test.setTimeout(30_000);
   let dashboardRequests = 0;
   let dismissals = 0;
-  await page.addInitScript(() => {
+  await page.addInitScript(muted => {
+    if (muted) localStorage.setItem('rac.notification-sounds', 'disabled');
     Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true });
     const notifications: Array<{ title: string; options?: NotificationOptions }> = [];
     const sounds: string[] = [];
@@ -83,7 +85,7 @@ test('notifies when the visible focused agent finishes', async ({ page }) => {
       configurable: true,
       value: { ready: Promise.resolve(registration), register: async () => registration }
     });
-  });
+  }, muted);
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
@@ -109,7 +111,7 @@ test('notifies when the visible focused agent finishes', async ({ page }) => {
     window as unknown as { __testNotifications: Array<{ title: string }> }
   ).__testNotifications.map(notification => notification.title)), { timeout: 15_000 }).toEqual(['Done working in Remote Agents']);
   await expect.poll(async () => await page.evaluate(() => (window as unknown as { __testNotifications: Array<{ options?: NotificationOptions }> }).__testNotifications[0]?.options?.body)).toBe('Cora is ready for a new prompt');
-  await expect.poll(async () => await page.evaluate(() => (window as unknown as { __testSounds: string[] }).__testSounds)).toEqual(['/notification-success.wav']);
+  await expect.poll(async () => await page.evaluate(() => (window as unknown as { __testSounds: string[] }).__testSounds)).toEqual(muted ? [] : ['/notification-success.wav']);
   await expect.poll(async () => await page.evaluate(() => (window as unknown as { __testNotifications: Array<{ options?: NotificationOptions }> }).__testNotifications[0]?.options?.silent)).toBe(true);
   expect(dismissals).toBe(0);
   await page.getByRole('textbox', { name: 'Prompt' }).focus();

@@ -1909,7 +1909,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
 
   // keep all preference pages in the shared save flow
   const preferences = [
-    { id: 'browser', group: 'Console', label: 'This browser', keywords: 'client rename theme dark light terminal font reduced motion flyout markers dynamic worktrees', content: browserDraft.content },
+    { id: 'browser', group: 'Console', label: 'This browser', keywords: 'client rename theme dark light terminal font reduced motion notification sounds flyout markers dynamic worktrees', content: browserDraft.content },
     { id: 'voice', group: 'Console', label: 'Voice', keywords: `davo voice assistant name context enable write tools advanced OpenAI realtime MCP ${[...voiceEnvironmentKeys].join(' ')}`, content: <>{voiceEditor}{voiceFieldsEditor}{voiceEnvironmentEditor}</> },
     { id: 'keyboard', group: 'Console', label: 'Keyboard shortcuts', keywords: 'keyboard shortcuts bindings keys prefix terminal command', content: keyboardSettings },
     { id: 'agents', group: 'Application', label: 'Agents', keywords: `adapters codex omx claude pi opencode program arguments environment setup teardown updates accounts usage cost ${[...agentEnvironmentKeys].join(' ')}`, content: agentsEditor },
