@@ -1,5 +1,6 @@
 import { basename, resolve } from "node:path";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { parseEnv } from "node:util";
 import { MAX_COMMAND_BYTES, MAX_SOURCE_BYTES, PROTOCOL_VERSION } from "./constants.mjs";
 import { runBounded } from "./command.mjs";
@@ -594,13 +595,16 @@ function hashSubset(actual, expected) {
 
 // probe the attested listener in its deployment network namespace
 export async function probeRacHealth(descriptor, listen, options = {}) {
-  if (!listen || !["127.0.0.1", "::1", "localhost"].includes(listen.host) || !Number.isInteger(listen.port) || listen.port < 1 || listen.port > 65_535) {
+  const loopback = ["127.0.0.1", "::1", "localhost"].includes(listen?.host);
+  // a native console may bind one of this host's own interfaces, such as a Docker bridge
+  const localInterface = descriptor.kind === "systemd" && Object.values(networkInterfaces()).flat().some((entry) => entry.address === listen?.host);
+  if (!listen || !(loopback || localInterface) || !Number.isInteger(listen.port) || listen.port < 1 || listen.port > 65_535) {
     return false;
   }
   const remainingMs = Number.isFinite(options.remainingMs) ? Math.max(1, Math.floor(options.remainingMs)) : 30_000;
   const commandTimeoutMs = Math.min(30_000, remainingMs);
   const requestTimeoutMs = Math.min(2_000, commandTimeoutMs);
-  const host = listen.host === "::1" ? "[::1]" : listen.host;
+  const host = listen.host.includes(":") ? `[${listen.host}]` : listen.host;
   const url = `http://${host}:${listen.port}/healthz`;
   // enter only the exact inspected Compose service namespace
   if (descriptor.kind === "compose") {

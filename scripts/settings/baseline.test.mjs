@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { createServer } from "node:http";
+import { networkInterfaces, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 import { extractDockerCopyPayload, probeRacHealth, proveInitialTargetBaseline } from "./baseline.mjs";
@@ -155,6 +156,21 @@ test("Compose RAC bootstrap canonicalizes escaped dollar environment values", as
   assert.equal(healthCalls[0].includes("http://127.0.0.1:8787/healthz"), true);
   healthy = false;
   await assert.rejects(() => proveInitialTargetBaseline(descriptor, "rac", { runner }), { code: "baseline-required" });
+});
+
+test("native RAC health probes reach this host's own interfaces only", async (t) => {
+  const descriptor = { kind: "systemd" };
+  const fetchMock = t.mock.method(globalThis, "fetch");
+  assert.equal(await probeRacHealth(descriptor, { host: "192.0.2.1", port: 8787 }), false);
+  assert.equal(fetchMock.mock.callCount(), 0);
+  fetchMock.mock.restore();
+  const address = Object.values(networkInterfaces()).flat().find((entry) => !entry.internal)?.address;
+  if (address === undefined) return t.skip("no non-loopback interface");
+  const server = createServer((_request, response) => response.end("ok"));
+  await new Promise((resolvePromise) => server.listen(0, address, resolvePromise));
+  try {
+    assert.equal(await probeRacHealth(descriptor, { host: address, port: server.address().port }), true);
+  } finally { server.close(); }
 });
 
 test("Compose RAC health discovery shares the bounded probe deadline", async () => {
