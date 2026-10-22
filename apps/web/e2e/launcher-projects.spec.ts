@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import { expectProgressBorder } from './progress-border-assertions';
 
 // the projects[] wire: the "+" launcher groups idle Worktrees under one section per Project
-// — a header, one row per Worktree (name, Pin, Rename, Remove, Launch), then New worktree…
+// — a header, one row per Worktree (name, Pin, Rename, Remove, Launch), with New worktree… as a + in the header
 // — and each row's Pin toggle POSTs to /api/worktrees/:id/pin
 test('launcher lists per-project sections and pins a worktree', async ({ page }) => {
   const pins: Array<{ id: string; pinned: boolean }> = [];
@@ -73,8 +73,8 @@ test('launcher lists per-project sections and pins a worktree', async ({ page })
   expect(projectStyle.color).toBe(projectStyle.purple);
   // rows sit under that header, so Main uses its branch while a custom linked name stays exact
   await expect(launcher.locator('.launcher-row-label')).toHaveText(['Scratch', 'main', '🥔 Dave']);
-  // New worktree… closes the section, below the last row
-  await expect(launcher.locator('.launcher-project > :last-child')).toHaveClass(/launcher-new-worktree/u);
+  // New worktree… is a + icon at the right end of the project header, not a row of its own
+  await expect(launcher.locator('.launcher-project-header > :last-child')).toHaveClass(/launcher-new-worktree/u);
   // the pinned Main worktree offers an Unpin toggle; the idle feature offers a Pin toggle.
   // Both are icon-only, so the accessible name and the tooltip carry the wording
   const pin = launcher.getByRole('button', { name: 'Pin 🥔 Dave' });

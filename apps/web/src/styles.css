@@ -2495,7 +2495,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* fill compact icon spaces without widening their buttons */
 .launcher-menu .launch-compact .launch-kind-mark { width: 1rem; height: 1rem; font-size: 1rem; }
 .launcher-menu .launch-compact .launch-lock { stroke: var(--crust); }
-/* one section per project in the + launcher: a header, its Worktree rows, then New worktree… */
+/* one section per project in the + launcher: a header (with its New worktree… +), then its Worktree rows */
 .launcher-project { margin-top: .35rem; }
 .launcher-project-header { display: flex; min-height: 2.4rem; align-items: center; justify-content: space-between; gap: .5rem; padding: .3rem .45rem; color: var(--mauve); font-size: .74rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
 /* give the project name all space left by the compact action */
@@ -2507,9 +2507,6 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* keep stale cleanup below the aligned worktree controls */
 .launcher-project-header.inline-worktree .launcher-project-worktree-controls { order: 1; }
 .launcher-project-header.inline-worktree .launcher-prune { order: 2; width: 100%; margin-left: 0; }
-.launcher-new-worktree { display: flex; align-items: center; gap: 1ch; margin-top: .1rem; padding: .3rem .45rem !important; border-radius: calc(var(--control-radius) - .1rem); background: transparent; color: var(--lavender); font-size: .74rem; letter-spacing: 0; text-transform: none; cursor: pointer; }
-.launcher-new-worktree:not(:disabled):hover { background: color-mix(in srgb, var(--lavender) 16%, transparent); }
-.launcher-new-worktree:disabled { opacity: .45; cursor: not-allowed; }
 
 /* the New worktree… dialog */
 .new-worktree-dialog > div { display: grid; width: min(30rem, 100%); gap: .8rem; }
@@ -2550,6 +2547,8 @@ svg.action-icon-glyph { fill: none; stroke: currentColor; stroke-linecap: round;
 .launcher-menu .launcher-pin:not(.pinned):not(:disabled):hover { background: color-mix(in srgb, var(--surface-2) 55%, transparent); color: var(--text); }
 .launcher-menu .launcher-rename:not(:disabled):hover { background: color-mix(in srgb, var(--blue) 18%, transparent); color: var(--blue); }
 .launcher-menu .launcher-remove:not(:disabled):hover { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
+.launcher-menu .launcher-new-worktree { color: var(--lavender); }
+.launcher-menu .launcher-new-worktree:not(:disabled):hover { background: color-mix(in srgb, var(--lavender) 16%, transparent); }
 /* hold every compact Open or Launch control to one width so the icons line up */
 .launcher-row > .launch-split.compact, .launcher-row > .launch-compact, .launcher-project-worktree-controls > .launch-split.compact, .launcher-project-worktree-controls > .launch-compact { width: 8rem !important; min-width: 8rem; }
 .launcher-row > .launch-split.compact .launch-primary, .launcher-project-worktree-controls > .launch-split.compact .launch-primary { flex: 1; min-width: 0; }

@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 // cover compact and wide launcher layouts
 for (const width of [360, 1280]) {
   // keep project names flexible and stale controls compact on every row
-  test(`project headers reserve the right edge for prune at ${width}px`, async ({ page }) => {
+  test(`project headers keep prune and New worktree… at the right edge at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     const projects = [
       { id: 'short', label: 'Short', stalePaths: ['/short/gone', '/short/orphan'] },
@@ -20,7 +20,7 @@ for (const width of [360, 1280]) {
       return route.fulfill({ json: {} });
     });
     await page.goto('/');
-    await page.getByRole('button', { name: 'Launch agent', exact: true }).click();
+    await page.locator('.new-agent-tab').click();
     const launcher = page.getByRole('group', { name: 'Agent launcher' });
     await expect(launcher).toBeVisible();
     await page.evaluate(() => document.fonts.ready);
@@ -34,25 +34,28 @@ for (const width of [360, 1280]) {
         const bounds = element.getBoundingClientRect();
         const style = getComputedStyle(element);
         const label = element.querySelector('span')!.getBoundingClientRect();
-        const button = element.querySelector('button');
-        const prune = button?.getBoundingClientRect();
+        const prune = element.querySelector('.launcher-prune')?.getBoundingClientRect();
+        const add = element.querySelector('.launcher-new-worktree')!.getBoundingClientRect();
         const contentLeft = bounds.left + parseFloat(style.paddingLeft);
         const contentRight = bounds.right - parseFloat(style.paddingRight);
         return {
           contentLeft, contentRight, gap: parseFloat(style.columnGap),
           clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
           label: { left: label.left, right: label.right, width: label.width },
-          prune: prune === undefined ? undefined : { left: prune.left, right: prune.right, width: prune.width }
+          prune: prune === undefined ? undefined : { left: prune.left, right: prune.right, width: prune.width },
+          add: { left: add.left, right: add.right }
         };
       });
       expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
       expect(geometry.label.width).toBeGreaterThan(0);
       expect(Math.abs(geometry.label.left - geometry.contentLeft)).toBeLessThanOrEqual(1);
-      const labelRight = geometry.prune === undefined ? geometry.contentRight : geometry.prune.left - geometry.gap;
+      // New worktree… is the header's last control, flush with its right edge
+      expect(Math.abs(geometry.add.right - geometry.contentRight)).toBeLessThanOrEqual(1);
+      const labelRight = (geometry.prune?.left ?? geometry.add.left) - geometry.gap;
       expect(Math.abs(geometry.label.right - labelRight)).toBeLessThanOrEqual(1);
-      // stale controls stay compact at the right edge without squeezing the name
+      // stale controls stay compact just before New worktree… without squeezing the name
       if (geometry.prune !== undefined) {
-        expect(Math.abs(geometry.prune.right - geometry.contentRight)).toBeLessThanOrEqual(1);
+        expect(Math.abs(geometry.prune.right - (geometry.add.left - geometry.gap))).toBeLessThanOrEqual(1);
         expect(geometry.prune.width).toBeLessThan((geometry.contentRight - geometry.contentLeft) / 2);
         expect(geometry.label.right).toBeLessThan(geometry.prune.left);
       }

@@ -40,13 +40,9 @@ async function verifyLauncherLabels(page: import('@playwright/test').Page, scree
   const scratchLabel = launcher.locator('.launcher-symbol-label');
   const newWorktree = launcher.getByRole('button', { name: 'New worktree…' });
   await expect(scratchLabel).toHaveText('Scratch');
-  await expect(newWorktree).toHaveAccessibleName('New worktree…');
   await expect(scratchLabel.locator('.launcher-label-icon')).toBeVisible();
-  await expect(newWorktree.locator('.launcher-label-icon')).toBeVisible();
   await expect(scratchLabel.locator('.launcher-label-icon > svg')).toBeVisible();
-  await expect(newWorktree.locator('.launcher-label-icon > svg')).toBeVisible();
   await expect(scratchLabel.locator('.launcher-label-icon')).toHaveAttribute('aria-hidden', 'true');
-  await expect(newWorktree.locator('.launcher-label-icon')).toHaveAttribute('aria-hidden', 'true');
 
   // measure real browser glyph cells
   const measurements = await launcher.evaluate(element => {
@@ -54,11 +50,8 @@ async function verifyLauncherLabels(page: import('@playwright/test').Page, scree
     const scratchIcon = scratch?.querySelector<HTMLElement>('.launcher-label-icon');
     const scratchText = scratch?.querySelector<HTMLElement>(':scope > span:last-child');
     const worktree = Array.from(element.querySelectorAll<HTMLElement>('.launcher-row-label')).find(label => label.textContent === '🥔 Cora');
-    const addButton = element.querySelector<HTMLElement>('.launcher-new-worktree');
-    const addIcon = addButton?.querySelector<HTMLElement>('.launcher-label-icon');
-    const addText = addButton?.querySelector<HTMLElement>(':scope > span:last-child');
     // require rendered comparison targets
-    if (scratch === null || scratchIcon === null || scratchText === null || worktree === undefined || addButton === null || addIcon === null || addText === null || worktree.firstChild?.nodeType !== Node.TEXT_NODE) throw new Error('Launcher label targets did not render');
+    if (scratch === null || scratchIcon === null || scratchText === null || worktree === undefined || worktree.firstChild?.nodeType !== Node.TEXT_NODE) throw new Error('Launcher label targets did not render');
     const emojiRange = document.createRange();
     emojiRange.setStart(worktree.firstChild, 0);
     emojiRange.setEnd(worktree.firstChild, 2);
@@ -66,19 +59,14 @@ async function verifyLauncherLabels(page: import('@playwright/test').Page, scree
     worktreeTextRange.setStart(worktree.firstChild, 3);
     worktreeTextRange.setEnd(worktree.firstChild, 4);
     const scratchIconRect = scratchIcon.getBoundingClientRect();
-    const addIconRect = addIcon.getBoundingClientRect();
     return {
       emojiWidth: emojiRange.getBoundingClientRect().width,
       scratchIconWidth: scratchIconRect.width,
       scratchIconHeight: scratchIconRect.height,
-      addIconWidth: addIconRect.width,
-      addIconHeight: addIconRect.height,
       scratchTextLeft: scratchText.getBoundingClientRect().left,
-      addTextLeft: addText.getBoundingClientRect().left,
       worktreeTextLeft: worktreeTextRange.getBoundingClientRect().left,
       scratchFontSize: getComputedStyle(scratch).fontSize,
-      worktreeFontSize: getComputedStyle(worktree).fontSize,
-      addFontSize: getComputedStyle(addButton).fontSize
+      worktreeFontSize: getComputedStyle(worktree).fontSize
     };
   });
 
@@ -86,11 +74,8 @@ async function verifyLauncherLabels(page: import('@playwright/test').Page, scree
 
   // allow subpixel glyph rounding
   expect(Math.abs(measurements.scratchIconWidth - measurements.emojiWidth)).toBeLessThan(1);
-  expect(Math.abs(measurements.addIconWidth - measurements.emojiWidth)).toBeLessThan(1);
   expect(Math.abs(measurements.scratchTextLeft - measurements.worktreeTextLeft)).toBeLessThan(1);
-  expect(Math.abs(measurements.addTextLeft - measurements.worktreeTextLeft)).toBeLessThan(1);
   expect(measurements.scratchFontSize).toBe(measurements.worktreeFontSize);
-  expect(measurements.addFontSize).toBe(measurements.worktreeFontSize);
 
   await newWorktree.click();
   await expect(page.getByRole('dialog', { name: 'New worktree' })).toBeVisible();
