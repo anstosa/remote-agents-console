@@ -22,11 +22,21 @@ async function stubConsole(page: Page) {
   });
 }
 
-// open the browser settings panel
+// open the interface settings panel
 async function openSettings(page: Page) {
-  await page.getByRole('button', { name: 'Global settings', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
-  return page.getByRole('switch', { name: 'Flyout markers', exact: true });
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  // avoid closing a peer tab that followed the shared open state
+  if (!await settings.isVisible()) await page.getByRole('button', { name: 'Global settings', exact: true }).click();
+  await expect(settings).toBeVisible();
+  const selector = settings.getByRole('combobox', { name: 'Settings section', exact: true });
+  // use the compact section picker on narrow viewports
+  if (await selector.isVisible()) {
+    await selector.click();
+    await page.getByRole('listbox', { name: 'Settings section options', exact: true }).locator('[role="option"][data-value="interface"]').click();
+  } else {
+    await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Interface', exact: true }).click();
+  }
+  return settings.getByRole('switch', { name: 'Flyout markers', exact: true });
 }
 
 // inspect all rendered marker decorations
@@ -84,15 +94,19 @@ for (const width of [1400, 390]) {
 test('the activation link enables this browser once and opens settings', async ({ page }) => {
   await stubConsole(page);
   await page.goto('/?keep=value&flyout-markers=enabled#settings');
-  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
-  const markers = page.getByRole('switch', { name: 'Flyout markers', exact: true });
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settings).toBeVisible();
+  await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Interface', exact: true }).click();
+  const markers = settings.getByRole('switch', { name: 'Flyout markers', exact: true });
   await expect(markers).toBeChecked();
   await expect(page).toHaveURL('/?keep=value#settings');
   expect(await storedMarkers(page)).toBe('enabled');
   await markers.uncheck();
   await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await page.reload();
-  await expect(markers).not.toBeChecked();
+  const reopened = page.getByRole('dialog', { name: 'Settings' });
+  await reopened.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Interface', exact: true }).click();
+  await expect(reopened.getByRole('switch', { name: 'Flyout markers', exact: true })).not.toBeChecked();
   await expect(visibleMarkers(page)).toHaveCount(0);
 });
 

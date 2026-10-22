@@ -17,6 +17,15 @@ export type SettingsSelectOption = {
 type IndexedOption = { option: SettingsSelectOption; index: number };
 type OptionSegment = { group?: string; entries: IndexedOption[] };
 
+// render one visible endpoint of a two-way switch
+function TwoWayChoice({ option, selected }: { option: SettingsSelectOption; selected: boolean }) {
+  return <span className="settings-select-switch-choice" data-selected={selected || undefined} data-has-issues={option.hasIssues || undefined} aria-disabled={option.disabled || undefined} title={option.group === undefined ? option.label : `${option.group}: ${option.label}`}>
+    {option.busy === true && <span className="update-progress-ring" aria-hidden="true" />}
+    {option.icon !== undefined && <span className="settings-select-switch-icon" aria-hidden="true">{option.icon}</span>}
+    <span>{option.label}</span>
+  </span>;
+}
+
 // find the first enabled choice
 const firstIndex = (options: readonly SettingsSelectOption[]): number => options.findIndex(option => option.disabled !== true);
 
@@ -75,9 +84,16 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
   const typeahead = useRef({ value: '', at: 0 });
   const generatedId = useId().replaceAll(':', '');
   const listboxId = `settings-select-${generatedId}`;
+  const switchDescriptionId = `${listboxId}-switch-description`;
   const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(open, { align: 'start', matchAnchorWidth: true });
   const selected = options.find(option => option.value === value);
   const shown: SettingsSelectOption = selected ?? { value, label: value };
+  const twoWay = options.length === 2 && selected !== undefined;
+  const first = twoWay ? options[0]! : undefined;
+  const second = twoWay ? options[1]! : undefined;
+  const switchChecked = second?.value === value;
+  const switchTarget = switchChecked ? first : second;
+  const switchDisabled = disabled || switchTarget?.disabled === true;
   const busy = shown.busy === true;
   const hasIcons = options.some(option => option.icon !== undefined);
   const segments = optionSegments(options);
@@ -115,6 +131,12 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
 
   // close when the trigger becomes unavailable
   useEffect(() => {
+    // retire dropdown state when this control becomes a switch
+    if (twoWay) {
+      // close only a menu left open by a prior option set
+      if (open) closeMenu();
+      return;
+    }
     // close immediately when disabled
     if (disabled) {
       closeMenu();
@@ -152,7 +174,14 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
       mutationObserver.disconnect();
       window.removeEventListener('resize', closeIfUnavailable);
     };
-  }, [anchorRef, closeMenu, disabled, open]);
+  }, [anchorRef, closeMenu, disabled, open, twoWay]);
+
+  // toggle only after explicit pointer or keyboard activation
+  const toggleTwoWay = () => {
+    // reject unavailable destinations without changing the authored value
+    if (switchTarget === undefined || switchTarget.disabled === true || disabled) return;
+    onChange(switchTarget.value);
+  };
 
   // handle select-only keyboard navigation
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -233,6 +262,29 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
     if (open) closeMenu();
     else openMenu();
   };
+
+  // exactly two choices use the compact binary control
+  if (first !== undefined && second !== undefined) return <span className="settings-select settings-select-binary">
+    <button
+      ref={anchorRef}
+      type="button"
+      role="switch"
+      className={`settings-select-two-way${busy ? ' progress-border progress-blue' : ''}`}
+      aria-label={label}
+      aria-describedby={switchDescriptionId}
+      aria-checked={switchChecked}
+      aria-busy={busy || undefined}
+      data-value={value}
+      data-has-issues={shown.hasIssues || undefined}
+      disabled={switchDisabled}
+      onClick={toggleTwoWay}
+    >
+      <TwoWayChoice option={first} selected={first.value === value} />
+      <span className="settings-select-switch-track" aria-hidden="true"><span /></span>
+      <TwoWayChoice option={second} selected={second.value === value} />
+    </button>
+    <span id={switchDescriptionId} className="sr-only">Unchecked selects {first.label}{first.group === undefined ? '' : ` in ${first.group}`}. Checked selects {second.label}{second.group === undefined ? '' : ` in ${second.group}`}.</span>
+  </span>;
 
   return <span className="settings-select">
     <button

@@ -356,7 +356,7 @@ describe('settings schema metadata', () => {
   });
 
   // describe every visible project field without changing validator optionality or defaults
-  it('publishes grounded metadata for Project, override, command, process, and push fields', () => {
+  it('publishes grounded metadata for Project, override, command, process, and button fields', () => {
     const projects = applicationSettingsSchema().properties?.projects;
     const project = projects?.items;
     const commands = project?.properties?.commands;
@@ -364,15 +364,15 @@ describe('settings schema metadata', () => {
     const overrideCommands = override?.properties?.commands;
     const process = commands?.properties?.processes?.items;
     const processObject = process?.variants?.find(variant => variant.type === 'object');
-    const push = project?.properties?.push;
+    const buttons = project?.properties?.buttons;
+    const button = buttons?.properties?.pullRequest?.items;
     const described = [
       projects, project,
       ...Object.values(project?.properties ?? {}),
       ...Object.values(commands?.properties ?? {}),
       override, ...Object.values(override?.properties ?? {}),
       ...Object.values(overrideCommands?.properties ?? {}),
-      process, processObject, ...Object.values(processObject?.properties ?? {}),
-      ...Object.values(push?.properties ?? {})
+      process, processObject, ...Object.values(processObject?.properties ?? {})
     ];
 
     expect(described.every(node => typeof node?.description === 'string' && node.description.length >= 24)).toBe(true);
@@ -395,11 +395,20 @@ describe('settings schema metadata', () => {
     expect(processObject?.properties?.dependsOn?.description).toContain('cannot cycle');
     expect(processObject?.properties?.dependsOn?.items?.description).toContain('declared process');
     expect(project?.properties?.worktreeOrder?.items?.description).toContain('checkout path');
-    expect(push?.properties?.prompt?.description).toContain('active agent');
-    expect(push?.description).toBe('Label and prompt for the commit-and-push action.');
-    expect(push?.properties?.label?.placeholder).toBe('Commit/Push (from built-in default)');
-    expect(push?.properties?.prompt?.placeholder).toBe('review, commit, and push (from built-in default)');
-    expect(push).toMatchObject({ optional: true, default: { label: 'Commit/Push', prompt: 'review, commit, and push' } });
+    expect(project?.properties).not.toHaveProperty('push');
+    expect(buttons).toMatchObject({ label: 'Button overrides', default: {}, description: expect.stringContaining('same text') });
+    expect(buttons?.properties?.pullRequest).toMatchObject({ label: 'Pull request', default: [] });
+    expect(buttons?.properties?.pullRequest?.description).toBeUndefined();
+    expect(JSON.stringify(applicationSettingsSchema())).not.toContain('Buttons appear in this order.');
+    expect(button?.properties?.text?.label).toBe('Button text');
+    expect(button?.properties?.icon?.description).toContain('SVG path data');
+    expect(button?.properties?.icon).toMatchObject({ optional: true, placeholder: 'No icon' });
+    // keep the split group context out of individual slot labels
+    const splitLabels = ['Agent', 'Terminal', 'Note', 'Browser', 'Files', 'Code', 'Review', 'Stack', 'Settings'];
+    expect(Object.values(buttons?.properties?.splits?.properties ?? {}).map(slot => slot.label)).toEqual(splitLabels);
+    expect(Object.values(applicationSettingsSchema().properties?.buttons?.properties?.splits?.properties ?? {}).map(slot => slot.label)).toEqual(splitLabels);
+    expect(button?.properties?.action?.variants?.map(variant => variant.label)).toEqual(['Shell command', 'Agent prompt']);
+    expect(button?.properties?.action?.variants?.find(variant => variant.label === 'Agent prompt')?.properties?.agentPrompt).toMatchObject({ multiline: true });
   });
 
   // retain raw preview compatibility outside the structured Project editor

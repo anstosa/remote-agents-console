@@ -7,6 +7,7 @@ export type SettingsSchema = {
   placeholder?: string;
   editor?: 'shell';
   singleLine?: boolean;
+  multiline?: boolean;
   optional?: boolean;
   nullable?: boolean;
   protected?: boolean;

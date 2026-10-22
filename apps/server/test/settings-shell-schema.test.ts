@@ -66,7 +66,9 @@ describe('shell command settings metadata', () => {
     }
     expect(property(terminal, 'terminal')).toMatchObject({ editor: 'shell', singleLine: true });
     expect(property(project, 'path').editor).toBeUndefined();
-    expect(property(project, 'push').properties?.prompt?.editor).toBeUndefined();
+    const buttonAction = property(property(project, 'buttons'), 'pullRequest').items!.properties!.action!;
+    expect(buttonAction.variants!.find(variant => variant.label === 'Shell command')!.properties?.shellCommand?.editor).toBe('shell');
+    expect(buttonAction.variants!.find(variant => variant.label === 'Agent prompt')!.properties?.agentPrompt?.editor).toBeUndefined();
     expect(property(property(review, 'tour'), 'prompt').editor).toBeUndefined();
     expect(property(review, 'presets').items?.properties?.prompt?.editor).toBeUndefined();
   });

@@ -46,9 +46,12 @@ const terminalFontPx = (page: Page) => page.evaluate(() => {
   return element === null ? null : getComputedStyle(element).fontSize;
 });
 
+// open interface settings
 const openSettings = async (page: Page) => {
   await page.getByRole('button', { name: 'Global settings' }).first().click();
-  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settings).toBeVisible();
+  await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Interface', exact: true }).click();
 };
 
 test('the stepper stages a size, applies it on Save, and resets to the default', async ({ page }) => {

@@ -12,12 +12,18 @@ import {
   type SettingsSchema,
 } from "../src/settings/contracts.js";
 import { applicationSettingsSchema } from "../../server/src/settings/schema.js";
+import {
+  buttonColors,
+  defaultButtons,
+} from "../../server/src/config/buttons.js";
 import { environmentFallback } from "../../server/src/settings/catalog.js";
 import { applyPatch } from "../../server/src/settings/patches.js";
 import { applyAuthoredProjectPatch } from "../../server/src/settings/project-normalization.js";
 
 const authoritativeProjectsSchema =
   applicationSettingsSchema().properties!.projects!;
+const authoritativeButtonsSchema =
+  applicationSettingsSchema().properties!.buttons!;
 
 // choose only an explicitly clicked custom option
 async function chooseSettingsOption(selector: Locator, value: string) {
@@ -72,15 +78,47 @@ async function selectSettingsSection(
   }
 }
 
+// verify every split slot uses its concise product label
+async function expectSplitButtonLabels(container: Locator) {
+  const labels = [
+    "Agent",
+    "Terminal",
+    "Note",
+    "Browser",
+    "Files",
+    "Code",
+    "Review",
+    "Stack",
+    "Settings",
+  ];
+  // inspect every split slot independently
+  for (const label of labels) {
+    await expect(container.getByText(label, { exact: true })).toBeVisible();
+    await expect(
+      container.getByText(`${label} split`, { exact: true }),
+    ).toHaveCount(0);
+  }
+}
+
 type SettingsPageHeaderExpectation = {
   id: string;
   title: string;
-  eyebrow: "Browser settings" | "Server settings" | "Deployment settings";
+  eyebrow:
+    | "Application settings"
+    | "Browser settings"
+    | "Server settings"
+    | "Deployment settings";
+  description?: string;
   sourcePath?: string;
 };
 
 const settingsPageHeaderExpectations: SettingsPageHeaderExpectation[] = [
-  { id: "browser", title: "This browser", eyebrow: "Browser settings" },
+  {
+    id: "browser",
+    title: "This browser",
+    eyebrow: "Browser settings",
+    description: "Manage this browser’s name and identity.",
+  },
   { id: "voice", title: "Voice", eyebrow: "Server settings" },
   {
     id: "keyboard",
@@ -93,8 +131,21 @@ const settingsPageHeaderExpectations: SettingsPageHeaderExpectation[] = [
     eyebrow: "Server settings",
     sourcePath: "/checkout/config/config.json",
   },
+  {
+    id: "interface",
+    title: "Interface",
+    eyebrow: "Application settings",
+    description:
+      "Customize this browser’s appearance and configure application-wide buttons.",
+  },
   { id: "agents", title: "Agents", eyebrow: "Server settings" },
-  { id: "projects", title: "Projects", eyebrow: "Server settings" },
+  {
+    id: "projects",
+    title: "Projects",
+    eyebrow: "Server settings",
+    description:
+      "Configure repositories, worktrees, project-specific commands, and this browser’s launcher behavior.",
+  },
   { id: "reviews", title: "Reviews", eyebrow: "Server settings" },
   { id: "tmux", title: "TMUX", eyebrow: "Server settings" },
   { id: "storage", title: "Storage", eyebrow: "Server settings" },
@@ -146,7 +197,7 @@ async function expectStandardSettingsHeader(
   ).toHaveCount(1);
   const description = header.locator(".settings-preference-description");
   await expect(description).toHaveCount(1);
-  await expect(description).toHaveText(/\S/u);
+  await expect(description).toHaveText(expected.description ?? /\S/u);
   const metadata = header.locator(".settings-source-metadata");
   await expect(metadata).toHaveCount(expected.sourcePath === undefined ? 0 : 1);
   // source-backed pages retain subordinate file identity
@@ -281,7 +332,6 @@ type SettingsReadPlan = {
 const settingsUnavailableSections = [
   { id: "app", label: "Application" },
   { id: "agents", label: "Agents" },
-  { id: "projects", label: "Projects" },
   { id: "reviews", label: "Reviews" },
   { id: "tmux", label: "TMUX" },
   { id: "storage", label: "Storage" },
@@ -3082,12 +3132,14 @@ test("moves structured TMUX settings into one Application tab and saves original
   );
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   const labels = await nav.getByRole("button").allTextContents();
-  expect(labels.indexOf("Agents")).toBe(
+  expect(labels.indexOf("Interface")).toBe(
     labels.indexOf("Application") + 1,
   );
+  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Interface") + 1);
   expect(labels.indexOf("Projects")).toBe(labels.indexOf("Agents") + 1);
   expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
   expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Reviews") + 1);
+  expect(labels.indexOf("Storage")).toBe(labels.indexOf("TMUX") + 1);
   await expect(
     nav.getByRole("button", { name: "Installation wrapper", exact: true }),
   ).toHaveCount(0);
@@ -3767,9 +3819,10 @@ test("moves adapter settings into Agents and saves both backing sources together
     .click();
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   const labels = await nav.getByRole("button").allTextContents();
-  expect(labels.indexOf("Agents")).toBe(
+  expect(labels.indexOf("Interface")).toBe(
     labels.indexOf("Application") + 1,
   );
+  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Interface") + 1);
   expect(labels.indexOf("Projects")).toBe(labels.indexOf("Agents") + 1);
 
   await selectSettingsSection(settings, "app", "Application config");
@@ -4549,18 +4602,23 @@ test("moves Projects into its own Application section on desktop and mobile", as
   const { settings, state } = await setupSettings(page);
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   const labels = await nav.getByRole("button").allTextContents();
-  expect(labels.indexOf("Agents")).toBe(
+  expect(labels.indexOf("Interface")).toBe(
     labels.indexOf("Application") + 1,
   );
+  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Interface") + 1);
   expect(labels.indexOf("Projects")).toBe(labels.indexOf("Agents") + 1);
   expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
   expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Reviews") + 1);
+  expect(labels.indexOf("Storage")).toBe(labels.indexOf("TMUX") + 1);
 
   await selectSettingsSection(settings, "app", "Application config");
   await expect(settings.locator('[data-settings-path="projects"]')).toHaveCount(
     0,
   );
   await selectSettingsSection(settings, "projects", "Projects");
+  await expect(
+    settings.getByRole("switch", { name: "Dynamic worktrees" }),
+  ).toBeVisible();
   await expect(
     settings.locator('[data-settings-path="projects"]'),
   ).toBeVisible();
@@ -4616,6 +4674,611 @@ test("moves Projects into its own Application section on desktop and mobile", as
   await settings.screenshot({
     path: "/tmp/remoteagents-settings-projects-mobile.png",
   });
+});
+
+// keep global and project button definitions on their dedicated pages
+test("moves custom buttons to Interface and keeps project overrides in Projects", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(
+    page,
+    true,
+    false,
+    false,
+    [],
+    "none",
+    "compose",
+    true,
+  );
+  const application = sources.find((source) => source.id === "app")!;
+  application.value = {
+    ...application.value,
+    buttons: structuredClone(defaultButtons),
+  };
+  application.schema.properties.buttons = authoritativeButtonsSchema;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await expect(settings.locator('[data-settings-path="buttons"]')).toHaveCount(
+    0,
+  );
+  await selectSettingsSection(settings, "interface", "Interface");
+  await expect(
+    settings.getByRole("region", {
+      name: "Interface settings content",
+      exact: true,
+    }),
+  ).toContainText("Custom buttons");
+  const globalButtons = settings.locator('[data-settings-path="buttons"]');
+  await expect(globalButtons).toBeVisible();
+  await expectSplitButtonLabels(
+    globalButtons.locator('[data-settings-path="buttons.splits"]'),
+  );
+  // omit redundant ordering guidance from application button lists
+  await expect(settings.getByText("Buttons appear in this order.", { exact: true })).toHaveCount(0);
+  await selectSettingsSection(settings, "projects", "Projects");
+  const project = settings
+    .getByRole("group", { name: "Project 1", exact: true })
+    .first();
+  await project
+    .getByRole("button", { name: "Edit Project 1", exact: true })
+    .click();
+  await expect(
+    project.locator('[data-settings-path="projects.0.buttons"]'),
+  ).toBeVisible();
+  await expectSplitButtonLabels(
+    project.locator('[data-settings-path="projects.0.buttons.splits"]'),
+  );
+  // keep project override lists free of the same helper copy
+  await expect(settings.getByText("Buttons appear in this order.", { exact: true })).toHaveCount(0);
+  expect(state.saves).toEqual([]);
+});
+
+// preserve passive previews while ordered split rows change
+test("keeps global and project split previews ordered through row controls", async ({
+  page,
+}) => {
+  const actionRequests: string[] = [];
+  // record only configured action execution attempts
+  page.on("request", (request) => {
+    // ignore ordinary Settings traffic
+    if (new URL(request.url()).pathname === "/api/button-actions")
+      actionRequests.push(request.method());
+  });
+  const { settings, sources, state } = await setupSettings(
+    page,
+    true,
+    false,
+    false,
+    [],
+    "none",
+    "compose",
+    true,
+  );
+  const application = sources.find((source) => source.id === "app")!;
+  const buttons = structuredClone(defaultButtons);
+  buttons.splits.agent = [
+    { ...structuredClone(defaultButtons.pullRequest[0]!), text: "Agent first" },
+    { ...structuredClone(defaultButtons.pullRequest[1]!), text: "Agent second" },
+  ];
+  const projects = (
+    application.value?.projects as Array<Record<string, unknown>>
+  ).map((project, index) =>
+    index === 0
+      ? {
+          ...project,
+          buttons: {
+            splits: {
+              terminal: [
+                {
+                  ...structuredClone(defaultButtons.pullRequest[0]!),
+                  text: "Project terminal first",
+                },
+                {
+                  ...structuredClone(defaultButtons.pullRequest[1]!),
+                  text: "Project terminal second",
+                },
+              ],
+            },
+          },
+        }
+      : project,
+  );
+  application.value = { ...application.value, buttons, projects };
+  application.schema.properties.buttons = authoritativeButtonsSchema;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "interface", "Interface");
+  const agent = settings.locator(
+    '[data-settings-path="buttons.splits.agent"]',
+  );
+  const agentRows = agent.locator('[data-settings-entry-index]');
+  await expect(agentRows).toHaveCount(2);
+  // keep every collapsed global row preview-only
+  for (const row of await agentRows.all()) {
+    await expect(
+      row
+        .locator(":scope > .settings-collection-entry-header")
+        .getByRole("group", { name: "Button preview" }),
+    ).toHaveCount(1);
+    await expect(row.locator(".settings-collection-summary")).toHaveCount(0);
+    await expect(row.locator(".settings-collection-editor")).toHaveCount(0);
+  }
+  const agentLabels = agentRows.locator(".configured-button-label");
+  await expect(agentLabels).toHaveText(["Agent first", "Agent second"]);
+  await agent
+    .getByRole("button", { name: "Move Agent 2 up", exact: true })
+    .click();
+  await expect(agentLabels).toHaveText(["Agent second", "Agent first"]);
+  await agent
+    .getByRole("button", { name: "Remove Agent 1", exact: true })
+    .click();
+  await expect(agentLabels).toHaveText(["Agent first"]);
+
+  await selectSettingsSection(settings, "projects", "Projects");
+  const project = settings
+    .getByRole("group", { name: "Project 1", exact: true })
+    .first();
+  await project
+    .getByRole("button", { name: "Edit Project 1", exact: true })
+    .click();
+  const terminal = project.locator(
+    '[data-settings-path="projects.0.buttons.splits.terminal"]',
+  );
+  const terminalRows = terminal.locator('[data-settings-entry-index]');
+  await expect(terminalRows).toHaveCount(2);
+  // keep every collapsed project row preview-only
+  for (const row of await terminalRows.all()) {
+    await expect(
+      row
+        .locator(":scope > .settings-collection-entry-header")
+        .getByRole("group", { name: "Button preview" }),
+    ).toHaveCount(1);
+    await expect(row.locator(".settings-collection-summary")).toHaveCount(0);
+    await expect(row.locator(".settings-collection-editor")).toHaveCount(0);
+  }
+  const terminalLabels = terminalRows.locator(".configured-button-label");
+  await expect(terminalLabels).toHaveText([
+    "Project terminal first",
+    "Project terminal second",
+  ]);
+  await terminal
+    .getByRole("button", { name: "Move Terminal 2 up", exact: true })
+    .click();
+  await expect(terminalLabels).toHaveText([
+    "Project terminal second",
+    "Project terminal first",
+  ]);
+  await terminal
+    .getByRole("button", { name: "Remove Terminal 1", exact: true })
+    .click();
+  await expect(terminalLabels).toHaveText(["Project terminal first"]);
+  await terminal
+    .getByRole("group", { name: "Button preview" })
+    .locator(".configured-button")
+    .dispatchEvent("click");
+  expect(actionRequests).toEqual([]);
+  expect(state.saves).toEqual([]);
+});
+
+// preview button appearance without executing its configured action
+test("previews button edits with accessible switches and every configured color", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const actionRequests: string[] = [];
+  const consoleErrors: string[] = [];
+  // record only configured action execution attempts
+  page.on("request", (request) => {
+    // ignore every ordinary Settings request
+    if (new URL(request.url()).pathname === "/api/button-actions")
+      actionRequests.push(request.method());
+  });
+  // retain rendered browser failures for the final assertion
+  page.on("console", (message) => {
+    // collect only browser errors
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  const { settings, sources, state } = await setupSettings(
+    page,
+    true,
+    false,
+    false,
+    [],
+    "none",
+    "compose",
+    true,
+  );
+  const application = sources.find((source) => source.id === "app")!;
+  application.value = {
+    ...application.value,
+    buttons: structuredClone(defaultButtons),
+  };
+  application.schema.properties.buttons = authoritativeButtonsSchema;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "interface", "Interface");
+  const pullRequest = settings.locator(
+    '[data-settings-path="buttons.pullRequest"]',
+  );
+  const row = pullRequest.locator('[data-settings-entry-index="0"]');
+  const header = row.locator(":scope > .settings-collection-entry-header");
+  const preview = header.getByRole("group", {
+    name: "Button preview",
+    exact: true,
+  });
+  const previewButton = preview.locator(".configured-button");
+  await expect(row).toHaveAttribute("data-settings-editing", "false");
+  await expect(row.getByRole("group", { name: "Button preview" })).toHaveCount(
+    1,
+  );
+  await expect(header.locator(".settings-collection-summary")).toHaveCount(0);
+  await expect(row.locator(".settings-collection-editor")).toHaveCount(0);
+  await expect(row.getByRole("textbox")).toHaveCount(0);
+  await expect(previewButton).toBeDisabled();
+  await expect(previewButton).toHaveText("Commit/Push");
+  await row
+    .getByRole("button", { name: "Edit Button 1", exact: true })
+    .click();
+  await expect(row).toHaveAttribute("data-settings-editing", "true");
+  const editor = row.locator(":scope > .settings-collection-editor");
+  await expect(
+    editor.getByRole("group", { name: "Button preview", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    editor.getByRole("heading", { name: "Button", exact: true }),
+  ).toHaveCount(0);
+
+  await editor
+    .getByRole("textbox", { name: "Button text", exact: true })
+    .fill("Ship safely");
+  await expect(previewButton).toHaveText("Ship safely");
+  await editor
+    .getByRole("textbox", { name: "Button icon path", exact: true })
+    .fill("M4 12h16");
+  await expect(previewButton.locator("svg path")).toHaveAttribute(
+    "d",
+    "M4 12h16",
+  );
+
+  const color = editor.getByRole("combobox", {
+    name: "Button color",
+    exact: true,
+  });
+  const selectedSwatch = color.locator(".settings-button-color-swatch");
+  await color.click();
+  const colorOptions = page.getByRole("listbox", {
+    name: "Button color options",
+    exact: true,
+  });
+  await expect(colorOptions.getByRole("option")).toHaveCount(
+    buttonColors.length,
+  );
+  await expect(
+    colorOptions.locator(".settings-button-color-swatch"),
+  ).toHaveCount(buttonColors.length);
+  // verify every configured palette row and its live style
+  for (const buttonColor of buttonColors) {
+    const option = colorOptions.getByRole("option", {
+      name: buttonColor,
+      exact: true,
+    });
+    await expect(option).toBeVisible();
+    const appearance = await option
+      .locator(".settings-button-color-swatch")
+      .evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          background: style.backgroundColor,
+          border: style.borderTopColor,
+        };
+      });
+    expect(appearance.background).toBe(appearance.border);
+    expect(appearance.background).not.toBe("rgba(0, 0, 0, 0)");
+  }
+  await colorOptions
+    .locator('[role="option"][data-value="green"]')
+    .click();
+  const solidAppearance = await previewButton.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      background: style.backgroundColor,
+      border: style.borderTopColor,
+    };
+  });
+  const solidSwatch = await selectedSwatch.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      background: style.backgroundColor,
+      border: style.borderTopColor,
+    };
+  });
+  expect(solidAppearance.background).toBe(solidSwatch.background);
+  expect(solidAppearance.border).toBe(solidSwatch.border);
+  expect(solidAppearance.background).not.toBe("rgba(0, 0, 0, 0)");
+
+  const buttonStyle = editor.getByRole("switch", {
+    name: "Button style",
+    exact: true,
+  });
+  await expect(buttonStyle).toHaveAttribute("aria-checked", "true");
+  await buttonStyle.click();
+  await expect(buttonStyle).toHaveAttribute("aria-checked", "false");
+  await expect(previewButton).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  expect(await previewButton.evaluate((element) => getComputedStyle(element).borderTopColor)).not.toBe(
+    "rgba(0, 0, 0, 0)",
+  );
+  await color.click();
+  // verify the entire popup follows the staged outline choice
+  for (const buttonColor of buttonColors) {
+    const option = colorOptions.getByRole("option", {
+      name: buttonColor,
+      exact: true,
+    });
+    await expect(option).toBeVisible();
+    const appearance = await option
+      .locator(".settings-button-color-swatch")
+      .evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          background: style.backgroundColor,
+          border: style.borderTopColor,
+        };
+      });
+    expect(appearance.background).toBe("rgba(0, 0, 0, 0)");
+    expect(appearance.border).not.toBe("rgba(0, 0, 0, 0)");
+  }
+  await page.keyboard.press("Escape");
+
+  const actionType = editor.getByRole("switch", {
+    name: "Action type",
+    exact: true,
+  });
+  await expect(actionType).toHaveAttribute("aria-checked", "true");
+  await actionType.click();
+  await expect(actionType).toHaveAttribute("aria-checked", "false");
+  await expect(
+    editor.getByRole("textbox", { name: "Shell command", exact: true }),
+  ).toBeVisible();
+  await expect(
+    editor.getByRole("textbox", { name: "Agent prompt", exact: true }),
+  ).toHaveCount(0);
+  await actionType.click();
+  await expect(actionType).toHaveAttribute("aria-checked", "true");
+  await expect(
+    editor.getByRole("textbox", { name: "Agent prompt", exact: true }),
+  ).toBeVisible();
+  await previewButton.dispatchEvent("click");
+  expect(actionRequests).toEqual([]);
+  await row
+    .getByRole("button", { name: "Close Button 1", exact: true })
+    .click();
+  await expect(row).toHaveAttribute("data-settings-editing", "false");
+  await expect(row.locator(".settings-collection-editor")).toHaveCount(0);
+  await expect(row.getByRole("textbox")).toHaveCount(0);
+  await expect(row.getByRole("group", { name: "Button preview" })).toHaveCount(
+    1,
+  );
+  await expect(previewButton).toHaveText("Ship safely");
+  await expect(previewButton.locator("svg path")).toHaveAttribute(
+    "d",
+    "M4 12h16",
+  );
+  await expect(previewButton).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await row
+    .getByRole("button", { name: "Edit Button 1", exact: true })
+    .click();
+  await expect(row).toHaveAttribute("data-settings-editing", "true");
+  await expect(
+    editor.getByRole("textbox", { name: "Button text", exact: true }),
+  ).toHaveValue("Ship safely");
+  await expect(
+    editor.getByRole("textbox", { name: "Button icon path", exact: true }),
+  ).toHaveValue("M4 12h16");
+  await expect(editor.getByRole("switch", { name: "Button style" })).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
+  await expect(editor.getByRole("switch", { name: "Action type" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await row.scrollIntoViewIfNeeded();
+  await row.screenshot({
+    path: "/tmp/remoteagents-settings-button-preview-desktop.png",
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(preview).toBeVisible();
+  await expect(buttonStyle).toBeVisible();
+  await expect(actionType).toBeVisible();
+  const [editorBox, previewBox] = await Promise.all([
+    editor.boundingBox(),
+    preview.boundingBox(),
+  ]);
+  expect(editorBox).not.toBeNull();
+  expect(previewBox).not.toBeNull();
+  expect(previewBox!.width).toBeLessThanOrEqual(editorBox!.width + 1);
+  await row.screenshot({
+    path: "/tmp/remoteagents-settings-button-preview-mobile.png",
+  });
+  expect(state.saves).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+});
+
+// keep optional button artwork directly editable and resettable
+test("keeps button icon fields permanent and saves blank icons as removals", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(
+    page,
+    true,
+    false,
+    false,
+    [],
+    "none",
+    "compose",
+    true,
+  );
+  const application = sources.find((source) => source.id === "app")!;
+  application.value = {
+    ...application.value,
+    buttons: structuredClone(defaultButtons),
+  };
+  application.schema.properties.buttons = authoritativeButtonsSchema;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "interface", "Interface");
+  const pullRequest = settings.locator(
+    '[data-settings-path="buttons.pullRequest"]',
+  );
+  await pullRequest
+    .getByRole("button", { name: "Edit Button 2", exact: true })
+    .click();
+  const absentRow = pullRequest.locator(
+    '[data-settings-entry-index="1"]',
+  );
+  const absentEditor = absentRow.locator(
+    ":scope > .settings-collection-editor",
+  );
+  const absentIcon = absentEditor.getByRole("textbox", {
+    name: "Button icon path",
+    exact: true,
+  });
+  const absentPreview = absentRow
+    .locator(":scope > .settings-collection-entry-header")
+    .getByRole("group", { name: "Button preview", exact: true });
+  await expect(absentRow.getByRole("group", { name: "Button preview" })).toHaveCount(
+    1,
+  );
+  await expect(
+    absentEditor.getByRole("group", { name: "Button preview" }),
+  ).toHaveCount(0);
+  await expect(absentIcon).toHaveValue("");
+  await expect(absentIcon).toHaveAttribute("placeholder", "No icon");
+  await expect(absentPreview.locator("svg")).toHaveCount(0);
+  await expect(
+    absentEditor.getByRole("button", {
+      name: /^(?:Add|Remove) Button icon path$/u,
+    }),
+  ).toHaveCount(0);
+  await absentIcon.fill("M3 12h18");
+  await expect(absentPreview.locator("svg path")).toHaveAttribute(
+    "d",
+    "M3 12h18",
+  );
+  await absentIcon.fill("");
+  await expect(absentPreview.locator("svg")).toHaveCount(0);
+  await expect(
+    settings.getByRole("button", { name: "Save changes", exact: true }),
+  ).toHaveCount(0);
+
+  await pullRequest
+    .getByRole("button", { name: "Close Button 2", exact: true })
+    .click();
+  await pullRequest
+    .getByRole("button", { name: "Edit Button 1", exact: true })
+    .click();
+  const savedRow = pullRequest.locator('[data-settings-entry-index="0"]');
+  const savedEditor = savedRow.locator(
+    ":scope > .settings-collection-editor",
+  );
+  const savedIcon = savedEditor.getByRole("textbox", {
+    name: "Button icon path",
+    exact: true,
+  });
+  await expect(savedIcon).not.toHaveValue("");
+  await savedIcon.fill("");
+  await expect(
+    savedRow
+      .getByRole("group", { name: "Button preview", exact: true })
+      .locator("svg"),
+  ).toHaveCount(0);
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  const save = state.saves[0] as {
+    body: {
+      changes: Array<{ sourceId: string; patches: SettingsPatch[] }>;
+    };
+  };
+  expect(
+    save.body.changes.find((change) => change.sourceId === "app")?.patches,
+  ).toContainEqual({
+    op: "remove",
+    path: ["buttons", "pullRequest", "0", "icon"],
+  });
+});
+
+// materialize inherited defaults before removing their inherited icon
+test("clears an inherited default button icon when buttons are omitted", async ({
+  page,
+}) => {
+  const { settings, sources, state } = await setupSettings(
+    page,
+    true,
+    false,
+    false,
+    [],
+    "none",
+    "compose",
+    true,
+  );
+  const application = sources.find((source) => source.id === "app")!;
+  application.schema.properties.buttons = authoritativeButtonsSchema;
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await selectSettingsSection(settings, "interface", "Interface");
+  const pullRequest = settings.locator(
+    '[data-settings-path="buttons.pullRequest"]',
+  );
+  await pullRequest
+    .getByRole("button", { name: "Edit Button 1", exact: true })
+    .click();
+  const row = pullRequest.locator('[data-settings-entry-index="0"]');
+  const editor = row.locator(":scope > .settings-collection-editor");
+  const icon = editor.getByRole("textbox", {
+    name: "Button icon path",
+    exact: true,
+  });
+  await expect(icon).not.toHaveValue("");
+  await icon.fill("");
+  await expect(
+    row
+      .getByRole("group", { name: "Button preview", exact: true })
+      .locator("svg"),
+  ).toHaveCount(0);
+  await settings
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect.poll(() => state.saves.length).toBe(1);
+  const save = state.saves[0] as {
+    body: {
+      changes: Array<{ sourceId: string; patches: SettingsPatch[] }>;
+    };
+  };
+  const patches = save.body.changes.find(
+    (change) => change.sourceId === "app",
+  )?.patches;
+  expect(patches).toContainEqual({
+    op: "remove",
+    path: ["buttons", "pullRequest", "0", "icon"],
+  });
+  const savedButtons = application.value?.buttons as {
+    pullRequest: Array<Record<string, unknown>>;
+  };
+  expect(savedButtons.pullRequest[0]).not.toHaveProperty("icon");
 });
 
 // fail closed when the Application catalog cannot describe project entries
@@ -5260,23 +5923,9 @@ test("shows Project placeholders and omits untouched optional blanks on save", a
     "placeholder",
     "Unavailable (from resolved branch)",
   );
-  // keep omitted nested defaults as placeholders rather than authored values
-  const pushLabel = project.locator(
-    '[data-settings-path="projects.0.push.label"] input',
-  );
-  const pushPrompt = project.locator(
-    '[data-settings-path="projects.0.push.prompt"] input',
-  );
-  await expect(pushLabel).toHaveValue("");
-  await expect(pushLabel).toHaveAttribute(
-    "placeholder",
-    "Commit/Push (from built-in default)",
-  );
-  await expect(pushPrompt).toHaveValue("");
-  await expect(pushPrompt).toHaveAttribute(
-    "placeholder",
-    "review, commit, and push (from built-in default)",
-  );
+  await expect(
+    project.locator('[data-settings-path="projects.0.push"]'),
+  ).toHaveCount(0);
   await expect(
     project
       .locator("small, p")
@@ -6598,6 +7247,7 @@ test("asks for one authoritative handover only at save time", async ({
 }) => {
   const { settings, state } = await setupSettings(page, false);
   state.migrationRequiredSourceIds = ["installation"];
+  await selectSettingsSection(settings, "interface", "Interface");
   await settings.getByRole("radio", { name: "Light theme" }).click();
   const installationRaw = await stageInstallationWholeSource(
     settings,
@@ -6870,6 +7520,7 @@ test("cancels a paused source handover when Settings unmounts", async ({
 }) => {
   const { settings, state } = await setupSettings(page, false);
   state.migrationRequiredSourceIds = ["installation"];
+  await selectSettingsSection(settings, "interface", "Interface");
   await settings.getByRole("radio", { name: "Light theme" }).click();
   await stageInstallationWholeSource(
     settings,
@@ -7128,10 +7779,25 @@ test("navigates search results with Escape, ArrowDown and Enter", async ({
   await search.press("Enter");
   await expect(results).toHaveCount(0);
   await expect(
-    settings.getByRole("heading", { name: "This browser", exact: true }),
+    settings.getByRole("heading", { name: "Interface", exact: true }),
   ).toBeVisible();
   await expect(
     settings.locator('[data-settings-path="terminalFontSize"]'),
+  ).toHaveAttribute("data-settings-search-highlight", "true");
+
+  await search.fill("dynamic worktrees");
+  const launcherResult = results
+    .getByRole("option")
+    .filter({ has: page.getByText("Dynamic worktrees", { exact: true }) });
+  await expect(launcherResult.locator(".settings-search-breadcrumb")).toHaveText(
+    "Application › Projects",
+  );
+  await launcherResult.click();
+  await expect(
+    settings.getByRole("heading", { name: "Projects", exact: true }),
+  ).toBeVisible();
+  await expect(
+    settings.locator('[data-settings-path="dynamicWorktrees"]'),
   ).toHaveAttribute("data-settings-search-highlight", "true");
 });
 
@@ -7205,10 +7871,18 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(13);
+      await expect(listbox.getByRole("option")).toHaveCount(14);
       const browser = listbox.locator('[role="option"][data-value="browser"]');
       await expect(browser).not.toHaveAttribute("aria-disabled", "true");
       await expect(browser.locator(":scope > .update-progress-ring")).toHaveCount(0);
+      // browser-owned pages stay usable before files are ready
+      for (const id of ["interface", "projects"]) {
+        const option = listbox.locator(
+          `[role="option"][data-value=${JSON.stringify(id)}]`,
+        );
+        await expect(option).not.toHaveAttribute("aria-disabled", "true");
+        await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
+      }
       for (const id of [
         "voice",
         "keyboard",
@@ -7224,16 +7898,20 @@ for (const width of [390, 1440]) {
       await page.keyboard.press("ArrowDown");
       await expect(
         listbox.locator('[role="option"][data-active="true"]'),
-      ).toHaveAttribute("data-value", "browser");
+      ).toHaveAttribute("data-value", "interface");
       await page.keyboard.press("Escape");
     } else {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      await expect(nav.getByRole("button")).toHaveCount(13);
+      await expect(nav.getByRole("button")).toHaveCount(14);
       await expect(
         nav.getByRole("button", { name: "This browser", exact: true }),
       ).toBeEnabled();
+      for (const label of ["Interface", "Projects"])
+        await expect(
+          nav.getByRole("button", { name: label, exact: true }),
+        ).toBeEnabled();
       for (const label of [
         "Voice",
         "Keyboard shortcuts",
@@ -7261,7 +7939,7 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(13);
+      await expect(listbox.getByRole("option")).toHaveCount(14);
       await expect(
         listbox.locator('[role="option"][data-value="cloudflare"]'),
       ).toHaveAttribute("aria-disabled", "true");
@@ -7270,7 +7948,7 @@ for (const width of [390, 1440]) {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      await expect(nav.getByRole("button")).toHaveCount(13);
+      await expect(nav.getByRole("button")).toHaveCount(14);
     }
 
     initial.resolve();
@@ -7299,7 +7977,7 @@ for (const width of [390, 1440]) {
         await expect(option).not.toHaveAttribute("aria-busy", "true");
         await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
       }
-      for (const id of ["voice", "keyboard"]) {
+      for (const id of ["voice", "keyboard", "interface", "projects"]) {
         await expect(
           listbox.locator(`[role="option"][data-value=${JSON.stringify(id)}]`),
         ).not.toHaveAttribute("aria-disabled", "true");
@@ -7327,10 +8005,14 @@ for (const width of [390, 1440]) {
           exact: true,
         }),
       ).toBeEnabled();
+      for (const label of ["Interface", "Projects"])
+        await expect(
+          nav.getByRole("button", { name: label, exact: true }),
+        ).toBeEnabled();
     }
 
     // catalog-independent pages retain complete headers after failure
-    for (const id of ["voice", "keyboard"] as const) {
+    for (const id of ["voice", "keyboard", "interface", "projects"] as const) {
       const expected = settingsPageHeaderExpectations.find(
         (candidate) => candidate.id === id,
       )!;
@@ -7361,11 +8043,12 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(13);
+      await expect(listbox.getByRole("option")).toHaveCount(14);
       for (const id of [
         "voice",
         "keyboard",
         "app",
+        "interface",
         "agents",
         "projects",
         "reviews",
@@ -7390,11 +8073,12 @@ for (const width of [390, 1440]) {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      await expect(nav.getByRole("button")).toHaveCount(13);
+      await expect(nav.getByRole("button")).toHaveCount(14);
       for (const label of [
         "Voice",
         "Keyboard shortcuts",
         "Application",
+        "Interface",
         "Agents",
         "Projects",
         "Reviews",
@@ -7448,13 +8132,12 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(13);
+      await expect(listbox.getByRole("option")).toHaveCount(14);
       for (const id of [
         "voice",
         "keyboard",
         "app",
         "agents",
-        "projects",
         "reviews",
         "tmux",
         "storage",
@@ -7469,23 +8152,29 @@ for (const width of [390, 1440]) {
         await expect(option).toHaveAttribute("aria-disabled", "true");
         await expectProgressBorder(option, "blue");
       }
+      for (const id of ["interface", "projects"]) {
+        const option = listbox.locator(
+          `[role="option"][data-value=${JSON.stringify(id)}]`,
+        );
+        await expect(option).not.toHaveAttribute("aria-disabled", "true");
+        await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
+      }
       await selector.focus();
       await page.keyboard.press("ArrowDown");
       await expect(
         listbox.locator('[role="option"][data-active="true"]'),
-      ).toHaveAttribute("data-value", "browser");
+      ).toHaveAttribute("data-value", "interface");
       await page.keyboard.press("Escape");
     } else {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      await expect(nav.getByRole("button")).toHaveCount(13);
+      await expect(nav.getByRole("button")).toHaveCount(14);
       for (const label of [
         "Voice",
         "Keyboard shortcuts",
         "Application",
         "Agents",
-        "Projects",
         "Reviews",
         "TMUX",
         "Storage",
@@ -7498,6 +8187,11 @@ for (const width of [390, 1440]) {
         await expect(button).toBeDisabled();
         await expect(button).toHaveAttribute("aria-busy", "true");
         await expectProgressBorder(button, "blue");
+      }
+      for (const label of ["Interface", "Projects"]) {
+        const button = nav.getByRole("button", { name: label, exact: true });
+        await expect(button).toBeEnabled();
+        await expect(button).not.toHaveAttribute("aria-busy", "true");
       }
     }
 
@@ -7513,7 +8207,7 @@ for (const width of [390, 1440]) {
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(13);
+      await expect(listbox.getByRole("option")).toHaveCount(14);
       const compose = listbox.locator(
         '[role="option"][data-value="compose-override"]',
       );
@@ -7528,7 +8222,7 @@ for (const width of [390, 1440]) {
         name: "Docker",
         exact: true,
       });
-      await expect(nav.getByRole("button")).toHaveCount(13);
+      await expect(nav.getByRole("button")).toHaveCount(14);
       await expect(compose).toBeDisabled();
       await expectProgressBorder(compose, "blue");
     }
@@ -7553,6 +8247,7 @@ for (const width of [390, 1440]) {
         "voice",
         "keyboard",
         "app",
+        "interface",
         "agents",
         "projects",
         "reviews",
@@ -7579,6 +8274,7 @@ for (const width of [390, 1440]) {
         "Voice",
         "Keyboard shortcuts",
         "Application",
+        "Interface",
         "Agents",
         "Projects",
         "Reviews",
@@ -7614,6 +8310,7 @@ test("matches desktop settings icons to mobile navigation without changing names
     { id: "voice", label: "Voice" },
     { id: "keyboard", label: "Keyboard shortcuts" },
     { id: "app", label: "Application" },
+    { id: "interface", label: "Interface" },
     { id: "agents", label: "Agents" },
     { id: "projects", label: "Projects" },
     { id: "tmux", label: "TMUX" },
@@ -7849,15 +8546,18 @@ test("shows winning sources only for confirmed conflicting environment values", 
   );
 });
 
-// keep browser preference copy and actions aligned without spanning grid columns
+// keep interface preference copy and actions aligned without spanning grid columns
 for (const width of [320, 390, 1440, 2560]) {
-  test(`aligns browser preference controls beside their copy at ${width}px`, async ({
+  test(`aligns interface preference controls beside their copy at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 900 });
     const { settings } = await setupSettings(page, false);
-    const overview = settings.locator(".client-settings-overview");
-    const name = overview.getByRole("group", { name: "Name", exact: true });
+    const browserOverview = settings.locator(".client-settings-overview");
+    const name = browserOverview.getByRole("group", {
+      name: "Name",
+      exact: true,
+    });
     await expect(name).toBeVisible({ timeout: 3_000 });
     await expect(name.getByText("This browser", { exact: true })).toHaveCount(
       0,
@@ -7865,6 +8565,11 @@ for (const width of [320, 390, 1440, 2560]) {
     await expect(
       name.getByRole("button", { name: "Rename browser name", exact: true }),
     ).toBeVisible();
+    await expect(browserOverview.locator(".client-settings-setting")).toHaveCount(
+      1,
+    );
+    await selectSettingsSection(settings, "interface", "Interface");
+    const overview = settings.locator(".client-settings-overview");
     const theme = overview.getByRole("group", { name: "Theme", exact: true });
     await expect(theme.locator(".client-settings-setting-copy")).toContainText(
       "Use a dark or light appearance in this browser.",
@@ -7895,8 +8600,9 @@ for (const width of [320, 390, 1440, 2560]) {
       });
       return { grid, width: bounds.width, terminalWidth: terminal.width, rows };
     });
-    expect(metrics.rows).toHaveLength(6);
-    // prove right alignment and centering for every browser preference
+    // include notification sounds alongside the four appearance controls
+    expect(metrics.rows).toHaveLength(5);
+    // prove right alignment and centering for every interface preference
     for (const row of metrics.rows) {
       expect(row.separation).toBeGreaterThanOrEqual(0);
       expect(row.centerDelta).toBeLessThanOrEqual(1);
@@ -9499,7 +10205,7 @@ test("edits and previews icon files beside their use with image-bearing custom d
     name: "Settings section options",
     exact: true,
   });
-  await expect(menu.getByRole("option")).toHaveCount(13);
+  await expect(menu.getByRole("option")).toHaveCount(14);
   await expect(
     menu.getByRole("option", { name: /Heart icon|Potato icon/u }),
   ).toHaveCount(0);
@@ -9677,7 +10383,7 @@ for (const width of [390, 780]) {
     await expect(
       settings.getByRole("navigation", { name: "Settings sources" }),
     ).toHaveCount(0);
-    await expectSettingsOptions(selector, 13, 5);
+    await expectSettingsOptions(selector, 14, 5);
     // keep virtual Application sections together in the mobile group
     await selector.click();
     const application = page
@@ -9686,12 +10392,15 @@ for (const width of [390, 780]) {
         exact: true,
       })
       .getByRole("group", { name: "Application", exact: true });
-    await expect(application.getByRole("option")).toHaveCount(6);
+    await expect(application.getByRole("option")).toHaveCount(7);
     await expect(
       application.getByRole("option", {
         name: "Application",
         exact: true,
       }),
+    ).toBeVisible();
+    await expect(
+      application.getByRole("option", { name: "Interface", exact: true }),
     ).toBeVisible();
     await expect(
       application.getByRole("option", { name: "Agents", exact: true }),
@@ -9778,7 +10487,7 @@ test("preserves mobile section selection, drafts and remasking through search an
     selector.locator(".settings-select-current-label"),
   ).toContainText("Application · Unsaved changes");
   await search.press("Escape");
-  await expectSettingsOptions(selector, 13);
+  await expectSettingsOptions(selector, 14);
   await search.fill("no-matching-section");
   await expect(selector).toHaveAttribute("data-value", "app");
   await expect(
@@ -9788,9 +10497,9 @@ test("preserves mobile section selection, drafts and remasking through search an
   ).toHaveCount(0);
   await expect(settings.getByLabel("Server name")).toHaveValue("Mobile draft");
   await search.press("Escape");
-  await expectSettingsOptions(selector, 13);
+  await expectSettingsOptions(selector, 14);
   await search.fill("");
-  await expectSettingsOptions(selector, 13);
+  await expectSettingsOptions(selector, 14);
 
   // crossing the breakpoint changes only the navigation presentation
   await page.setViewportSize({ width: 781, height: 844 });
@@ -9811,7 +10520,7 @@ test("preserves mobile section selection, drafts and remasking through search an
   expect(state.voiceSaves).toEqual([]);
 });
 
-// keep browser preferences and file-backed edits in the same workspace
+// keep distributed browser preferences and file-backed edits in one transaction
 test("merges browser controls and saves voice with file edits through one transaction", async ({
   page,
 }) => {
@@ -9828,6 +10537,10 @@ test("merges browser controls and saves voice with file edits through one transa
   ).toBeVisible();
   await expect(
     panel.getByRole("group", { name: "Terminal font", exact: true }),
+  ).toHaveCount(0);
+  await nav.getByRole("button", { name: "Interface", exact: true }).click();
+  await expect(
+    panel.getByRole("group", { name: "Terminal font", exact: true }),
   ).toBeVisible();
   await expect(
     panel.getByRole("switch", { name: "Reduced motion" }),
@@ -9837,7 +10550,7 @@ test("merges browser controls and saves voice with file edits through one transa
   ).toBeVisible();
   await expect(
     panel.getByRole("switch", { name: "Dynamic worktrees" }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(
     settings.locator(
       ".client-settings-page-content > .client-settings-console",
@@ -9857,12 +10570,22 @@ test("merges browser controls and saves voice with file edits through one transa
     .getByRole("searchbox", { name: "Search settings" })
     .fill("theme");
   await expect(
-    nav.getByRole("button", { name: /^This browser.*Unsaved changes$/u }),
+    nav.getByRole("button", { name: /^Interface.*Unsaved changes$/u }),
   ).toBeVisible();
   await expect(
     nav.getByRole("button", { name: "Voice", exact: true }),
   ).toBeVisible();
   await center.getByRole("searchbox", { name: "Search settings" }).fill("");
+
+  // keep launcher preferences on Projects without splitting the save transaction
+  await nav.getByRole("button", { name: "Projects", exact: true }).click();
+  await panel.getByRole("switch", { name: "Dynamic worktrees" }).uncheck();
+  await expect(
+    nav.getByRole("button", { name: /^Projects.*Unsaved changes$/u }),
+  ).toBeVisible();
+  await expect(
+    nav.getByRole("button", { name: "This browser", exact: true }),
+  ).toBeVisible();
 
   // retain ordinary file drafts while remasking disclosures on section changes
   await nav.getByRole("button", { name: /^Application/u }).click();
@@ -9877,7 +10600,7 @@ test("merges browser controls and saves voice with file edits through one transa
     panel.getByRole("textbox", { name: "RAC_SESSION_SECRET", exact: true }),
   ).toHaveValue("fixture-session-secret");
   await nav
-    .getByRole("button", { name: /^This browser.*Unsaved changes$/u })
+    .getByRole("button", { name: /^Interface.*Unsaved changes$/u })
     .click();
   await expect(center).not.toContainText("fixture-session-secret");
   await expect.poll(() => state.remasks.length).toBeGreaterThan(0);
@@ -9919,6 +10642,11 @@ test("merges browser controls and saves voice with file edits through one transa
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem("rac.color-theme")))
     .toBe("latte");
+  await expect
+    .poll(() =>
+      page.evaluate(() => localStorage.getItem("rac.dynamic-worktrees")),
+    )
+    .toBe("disabled");
   expect(state.voiceSaves).toHaveLength(0);
   const transaction = state.saves[0] as {
     body: { changes: Array<{ sourceId: string; patches: unknown[] }> };
@@ -9977,7 +10705,7 @@ test("edits advanced voice settings once through the voice tab", async ({
 });
 
 // leave existing preferences usable when installation metadata cannot load
-test("keeps browser and voice settings available when the file catalog fails", async ({
+test("keeps browser preferences and voice settings available when the file catalog fails", async ({
   page,
 }) => {
   test.setTimeout(30_000);
@@ -9991,9 +10719,10 @@ test("keeps browser and voice settings available when the file catalog fails", a
   const nav = settings.getByRole("navigation", { name: "Settings sources" });
   await expect(
     settings.getByText(
-      "Installation files are unavailable. Browser settings remain available; voice settings are read-only.",
+      "Installation files are unavailable. Browser preferences remain available in This browser, Interface, and Projects; file settings are unavailable.",
     ),
   ).toBeVisible();
+  await nav.getByRole("button", { name: "Interface", exact: true }).click();
   await settings.getByRole("radio", { name: "Light theme" }).click();
   await expect(
     settings.getByRole("radio", { name: "Light theme" }),
@@ -10034,7 +10763,7 @@ test("keeps browser and voice settings available when the file catalog fails", a
     exact: true,
   });
   await expect(selector).toHaveAttribute("data-value", "voice");
-  await expectSettingsOptions(selector, 13);
+  await expectSettingsOptions(selector, 14);
   await selector.click();
   const options = page.getByRole("listbox", {
     name: "Settings section options",
@@ -10048,9 +10777,23 @@ test("keeps browser and voice settings available when the file catalog fails", a
     await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
   }
   await page.keyboard.press("Escape");
-  await chooseSettingsOption(selector, "browser");
+  await chooseSettingsOption(selector, "interface");
   await expect(
     settings.getByRole("group", { name: "Terminal font", exact: true }),
+  ).toBeVisible();
+  await expect(
+    settings.getByRole("note").filter({
+      hasText: "Load Application configuration before editing custom buttons.",
+    }),
+  ).toBeVisible();
+  await chooseSettingsOption(selector, "projects");
+  await expect(
+    settings.getByRole("switch", { name: "Dynamic worktrees" }),
+  ).toBeVisible();
+  await expect(
+    settings.getByRole("note").filter({
+      hasText: "Load Application configuration before editing projects.",
+    }),
   ).toBeVisible();
 });
 
@@ -10236,7 +10979,17 @@ test("resets shared active-tab scrolling without losing drafts or leaking secret
     {
       id: "browser",
       label: "This browser",
+      visible: panel.getByRole("group", { name: "Name", exact: true }),
+    },
+    {
+      id: "interface",
+      label: "Interface",
       visible: panel.getByRole("group", { name: "Terminal font", exact: true }),
+    },
+    {
+      id: "projects",
+      label: "Projects",
+      visible: panel.getByRole("switch", { name: "Dynamic worktrees" }),
     },
     {
       id: "voice",
@@ -10614,7 +11367,7 @@ test("shows every settings section and keyboard shortcuts on mobile", async ({
     exact: true,
   });
   const panel = center.locator(".settings-source-panel");
-  await expectSettingsOptions(selector, 13);
+  await expectSettingsOptions(selector, 14);
   await expect(
     panel.getByRole("group", { name: "Keyboard shortcuts", exact: true }),
   ).toHaveCount(0);
@@ -10655,7 +11408,7 @@ test("shows every settings section and keyboard shortcuts on mobile", async ({
   await center
     .getByRole("searchbox", { name: "Search settings" })
     .press("Escape");
-  await expectSettingsOptions(selector, 13);
+  await expectSettingsOptions(selector, 14);
   await expect(selector.locator(".settings-select-current-label")).toHaveText(
     "Keyboard shortcuts",
   );
@@ -11159,13 +11912,13 @@ test("saves keyboard shortcuts in server config through the single floating save
   await settings.getByLabel("Server name").fill("Server with keyboard changes");
   await selectSettingsSection(settings, "keyboard", "Keyboard shortcuts");
   // legacy command coverage selects its exclusive editor representation
-  await settings
-    .getByRole("combobox", { name: "Keyboard editor view", exact: true })
-    .click();
-  await page
-    .getByRole("listbox", { name: "Keyboard editor view options", exact: true })
-    .getByRole("option", { name: "Command shortcuts", exact: true })
-    .click();
+  const editorView = settings.getByRole("switch", {
+    name: "Keyboard editor view",
+    exact: true,
+  });
+  // select the second endpoint only when needed
+  if ((await editorView.getAttribute("aria-checked")) !== "true")
+    await editorView.click();
   await expect(
     settings.getByRole("region", { name: "Edit keyboard shortcuts" }),
   ).toBeVisible();
@@ -11297,13 +12050,13 @@ test("keeps keyboard controls read-only while an application whole-source draft 
     ),
   ).toBeVisible();
   // read-only browsing can still inspect either keyboard representation
-  await settings
-    .getByRole("combobox", { name: "Keyboard editor view", exact: true })
-    .click();
-  await page
-    .getByRole("listbox", { name: "Keyboard editor view options", exact: true })
-    .getByRole("option", { name: "Command shortcuts", exact: true })
-    .click();
+  const editorView = settings.getByRole("switch", {
+    name: "Keyboard editor view",
+    exact: true,
+  });
+  // select the second endpoint only when needed
+  if ((await editorView.getAttribute("aria-checked")) !== "true")
+    await editorView.click();
   await expect(settings.locator(".shortcut-change").first()).toBeDisabled();
   await expect(
     settings.getByRole("button", { name: "Reset all shortcuts", exact: true }),

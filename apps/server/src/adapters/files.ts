@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { adapters } from './registry.js';
@@ -75,6 +75,8 @@ export async function renderAdapterFiles(env: NodeJS.ProcessEnv = process.env): 
     for (const [name, content] of Object.entries(adapter.files(context))) {
       const path = join(dir, name);
       await writeFile(path, content, { mode: 0o644 });
+      // restore the promised mode independently of umask and existing permissions
+      await chmod(path, 0o644);
       paths[name] = path;
     }
     rendered[adapter.kind] = paths;

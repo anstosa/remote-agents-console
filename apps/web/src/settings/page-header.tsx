@@ -2,18 +2,19 @@ import type { ReactNode } from 'react';
 import type { SettingsSource } from './contracts.js';
 
 type PageHeaderCopy = {
-  eyebrow: 'Browser settings' | 'Server settings' | 'Deployment settings';
+  eyebrow: 'Application settings' | 'Browser settings' | 'Server settings' | 'Deployment settings';
   description: string;
 };
 
 // keep every page's scope and purpose in one presentation contract
 const pageHeaders: Readonly<Record<string, PageHeaderCopy>> = {
-  browser: { eyebrow: 'Browser settings', description: 'Customize this browser’s identity, appearance, terminal, and workspace behavior.' },
+  browser: { eyebrow: 'Browser settings', description: 'Manage this browser’s name and identity.' },
   voice: { eyebrow: 'Server settings', description: 'Configure the voice assistant, its context, tools, and credentials.' },
   keyboard: { eyebrow: 'Server settings', description: 'Configure server-wide keyboard shortcuts stored with the application.' },
+  interface: { eyebrow: 'Application settings', description: 'Customize this browser’s appearance and configure application-wide buttons.' },
   app: { eyebrow: 'Server settings', description: 'Configure network access, integrations, and remote servers.' },
   agents: { eyebrow: 'Server settings', description: 'Configure agent programs, launch commands, and credentials.' },
-  projects: { eyebrow: 'Server settings', description: 'Configure repositories, worktrees, and project-specific commands.' },
+  projects: { eyebrow: 'Server settings', description: 'Configure repositories, worktrees, project-specific commands, and this browser’s launcher behavior.' },
   reviews: { eyebrow: 'Server settings', description: 'Configure Review tours and optional AI code-review presets.' },
   tmux: { eyebrow: 'Server settings', description: 'Configure terminal discovery, polling, and the host tmux wrapper.' },
   storage: { eyebrow: 'Server settings', description: 'Configure data files, scratch directories, and workspace storage.' },

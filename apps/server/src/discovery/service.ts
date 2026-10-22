@@ -535,7 +535,6 @@ export class DiscoveryService {
           ...(stack.commands === undefined ? {} : { commands: stack.commands }),
           ...(project.newTask === undefined ? {} : { newTask: project.newTask }),
           ...(project.defaultBranch === undefined ? {} : { defaultBranch: project.defaultBranch }),
-          push: project.push,
           ...(stack.projectUrl === undefined ? {} : { projectUrl: stack.projectUrl, ...(stack.projectPort === undefined ? {} : { projectPort: stack.projectPort }) })
         });
       }
@@ -719,7 +718,7 @@ export class DiscoveryService {
       const gitPrStatus = await this.gitPrComparisonForBase(meta, branch, pullRequest?.baseBranch, defaultBranch);
       const details = worktree === undefined
         ? { ...agent, branch, ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }) }
-        : { ...agent, branch, ...(meta.gitStatus === undefined ? {} : { gitStatus: meta.gitStatus }), ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }), home: worktree.identity, projectId: worktree.projectId, worktreeId: worktree.id, ...(worktree.newTask === undefined ? {} : { newTaskConfigured: true }), push: worktree.push, ...(worktree.projectUrl === undefined ? {} : { projectUrl: worktree.projectUrl, projectProxied: worktree.projectPort !== undefined }) };
+        : { ...agent, branch, ...(meta.gitStatus === undefined ? {} : { gitStatus: meta.gitStatus }), ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }), home: worktree.identity, projectId: worktree.projectId, worktreeId: worktree.id, ...(worktree.newTask === undefined ? {} : { newTaskConfigured: true }), ...(worktree.projectUrl === undefined ? {} : { projectUrl: worktree.projectUrl, projectProxied: worktree.projectPort !== undefined }) };
       // re-resolve now that a pending Inline question is known (precedence: reported → question → inferred → finished)
       const attention = resolveAttention({ kind: agent.kind, title: agent.title, reported: this.paneReported.get(agent.id), hasQuestion: question !== undefined });
       return { ...details, attention, ...(pullRequest === undefined ? {} : { pullRequest }), ...(question === undefined ? {} : { question }) };

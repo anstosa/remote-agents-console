@@ -9,6 +9,8 @@ config/cloudflared.yml
 config/cloudflared.credentials.json
 config/cloudflared.token
 config/instance-icons
+**/*.pre-projects.bak
+**/*.pre-buttons.bak
 node_modules
 **/node_modules
 **/dist

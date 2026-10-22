@@ -249,6 +249,19 @@ export class HostFilesService {
   // expose the backend only for controlled route streaming and shutdown
   get backend(): HostFilesBackend { return this.options.backend; }
 
+  // retain signed directory identity through host-side command scheduling
+  async resolveDirectoryCapability(place: HostFilesPlace, session: HostFilesSession, token: string): Promise<{ canonicalHostPath: string; backendGeneration: string; expiresAt: number; identity: { dev: string; ino: string; kind: 'directory' }; current(): boolean }> {
+    const selected = await this.directoryToken(place, session, token);
+    return {
+      canonicalHostPath: selected.path,
+      backendGeneration: selected.backendGeneration,
+      expiresAt: selected.expiresAt,
+      identity: { dev: selected.identity.dev, ino: selected.identity.ino, kind: 'directory' },
+      // reject backend replacement before the owned host process starts
+      current: () => this.options.backend.generation() === selected.backendGeneration && this.now() <= selected.expiresAt
+    };
+  }
+
   // list one canonical host directory and issue fresh session capabilities
   async list(place: HostFilesPlace, session: HostFilesSession, path?: string, objectToken?: string): Promise<{ path: string; parent?: string; destinationDirectoryToken: string; directoryEntry: FileEntry; entries: FileEntry[]; inaccessibleEntries: number; truncated: boolean; limits: typeof hostFilesLimits }> {
     this.prune();

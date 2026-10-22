@@ -41,7 +41,7 @@ const browserNameError = (name: string): string | undefined => {
 };
 
 // stage browser-only preferences for the shared settings transaction
-export function useBrowserSettingsDraft(identity: BrowserSettingsIdentity, locked: boolean, operationPending: RefObject<boolean>, browserDraft: ReturnType<typeof useSettingsBrowserDraftState>): { content: ReactNode; dirty: boolean; validate: () => string | undefined; save: () => Promise<string | undefined>; discard: () => void } {
+export function useBrowserSettingsDraft(identity: BrowserSettingsIdentity, locked: boolean, operationPending: RefObject<boolean>, browserDraft: ReturnType<typeof useSettingsBrowserDraftState>): { content: ReactNode; interfaceContent: ReactNode; projectsContent: ReactNode; dirtyPageIds: ReadonlySet<string>; dirty: boolean; validate: () => string | undefined; save: () => Promise<string | undefined>; discard: () => void } {
   const liveTerminalFontSize = useTerminalFontSize();
   const liveColorTheme = useColorTheme();
   const liveReducedMotion = useReducedMotion();
@@ -196,21 +196,31 @@ export function useBrowserSettingsDraft(identity: BrowserSettingsIdentity, locke
   const reducedMotionSetting = <div className="client-settings-setting client-settings-reduced-motion" data-settings-path="reducedMotion" role="group" aria-label="Reduced motion setting"><div className="client-settings-setting-copy"><header><small>REDUCED MOTION</small></header><span>Keep status colours, use compact spinners, and stop shimmers and pulses.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Reduced motion" role="switch" type="checkbox" checked={reducedMotion} disabled={controlsLocked} onChange={event => { /* stage this browser's motion preference */ stage('reducedMotion', event.currentTarget.checked, liveReducedMotion); }} /><span className="client-settings-switch-state">{reducedMotion ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
   const notificationSoundsSetting = <div className="client-settings-setting client-settings-notification-sounds" data-settings-path="notificationSounds" role="group" aria-label="Notification sounds setting"><div className="client-settings-setting-copy"><header><small>NOTIFICATION SOUNDS</small></header><span>Play a sound with agent alerts. Notifications still show when this is off.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Notification sounds" role="switch" type="checkbox" checked={notificationSounds} disabled={controlsLocked} onChange={event => { /* stage this browser's alert sounds */ stage('notificationSounds', event.currentTarget.checked, liveNotificationSounds); }} /><span className="client-settings-switch-state">{notificationSounds ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
   const flyoutMarkersSetting = <div className="client-settings-setting client-settings-flyout-markers" data-settings-path="flyoutMarkers" role="group" aria-label="Flyout markers setting"><div className="client-settings-setting-copy"><header><small>FLYOUT MARKERS</small></header><span>Show little carets on buttons that open flyouts.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Flyout markers" role="switch" type="checkbox" checked={flyoutMarkers} disabled={controlsLocked} onChange={event => { /* stage this browser's markers */ stage('flyoutMarkers', event.currentTarget.checked, liveFlyoutMarkers); }} /><span className="client-settings-switch-state">{flyoutMarkers ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
-  const dynamicWorktreesSetting = <div className="client-settings-setting client-settings-dynamic-worktrees" data-settings-path="dynamicWorktrees" role="group" aria-label="Dynamic worktrees setting"><div className="client-settings-setting-copy"><header><small>DYNAMIC WORKTREES</small></header><span>Create and manage multiple worktrees from the launcher.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Dynamic worktrees" role="switch" type="checkbox" checked={dynamicWorktrees} disabled={controlsLocked} onChange={event => { /* stage the browser launcher mode */ stage('dynamicWorktrees', event.currentTarget.checked, liveDynamicWorktrees); }} /><span className="client-settings-switch-state">{dynamicWorktrees ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
+  const dynamicWorktreesSetting = <div className="client-settings-setting client-settings-dynamic-worktrees" data-settings-path="dynamicWorktrees" role="group" aria-label="Dynamic worktrees setting"><div className="client-settings-setting-copy"><header><small>DYNAMIC WORKTREES</small></header><span>Create and manage multiple worktrees from the launcher in this browser.</span></div><label className="client-settings-toggle client-settings-setting-control"><input aria-label="Dynamic worktrees" role="switch" type="checkbox" checked={dynamicWorktrees} disabled={controlsLocked} onChange={event => { /* stage the browser launcher mode */ stage('dynamicWorktrees', event.currentTarget.checked, liveDynamicWorktrees); }} /><span className="client-settings-switch-state">{dynamicWorktrees ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></div>;
   const renameDialog = !renameOpen ? null : createPortal(<div className="dialog client-rename-dialog" role="dialog" aria-modal="true" aria-labelledby="browser-settings-rename-title" onKeyDown={renameKey}><div><header><div><small>GLOBAL SETTINGS</small><h2 id="browser-settings-rename-title">Rename browser</h2></div><button type="button" aria-label="Close rename browser" disabled={controlsLocked} onClick={closeRename}><PanelIcon path={panelIcons.close} /></button></header><form onSubmit={finishRename}><label>Name<input autoFocus type="text" value={shownRenameValue} maxLength={64} autoComplete="off" disabled={controlsLocked} onChange={event => { /* retain only an explicit browser-name edit */ if (!locked && !operationPending.current) { setRenameValue(event.target.value); setRenameTouched(true); } }} /></label>{renameError && <span className="auth-error" role="alert">{renameError}</span>}<footer><button type="button" disabled={controlsLocked} onClick={closeRename}>Cancel</button><button type="submit" disabled={controlsLocked || !shownRenameValue.trim()}>Done</button></footer></form></div></div>, document.body);
   const content = <><div className="client-settings-overview">
     <div className="client-settings-setting client-settings-identity" data-settings-path="deviceName" role="group" aria-label="Name">
       <div className="client-settings-setting-copy"><header><small>NAME</small></header><strong>{deviceName}</strong></div>
       <span className="client-settings-setting-actions client-settings-setting-control"><button ref={renameButton} type="button" aria-label="Rename browser name" disabled={controlsLocked} onClick={beginRename}>Rename</button></span>
     </div>
-    {terminalFontSetting}{themeSetting}{reducedMotionSetting}{notificationSoundsSetting}{flyoutMarkersSetting}{dynamicWorktreesSetting}
   </div>{renameDialog}</>;
-  const dirty = draft.deviceName !== undefined && draft.deviceName !== identity.deviceName
-    || draft.terminalFontSize !== undefined && draft.terminalFontSize !== liveTerminalFontSize
+  // share one transaction while rendering each preference on its owning page
+  const interfaceContent = <><p className="settings-preference-description">Interface preferences apply only to this browser.</p><div className="client-settings-overview">{terminalFontSetting}{themeSetting}{reducedMotionSetting}{notificationSoundsSetting}{flyoutMarkersSetting}</div></>;
+  const projectsContent = <div className="client-settings-overview">{dynamicWorktreesSetting}</div>;
+  const browserDirty = draft.deviceName !== undefined && draft.deviceName !== identity.deviceName;
+  const interfaceDirty = draft.terminalFontSize !== undefined && draft.terminalFontSize !== liveTerminalFontSize
     || draft.colorTheme !== undefined && draft.colorTheme !== liveColorTheme
     || draft.reducedMotion !== undefined && draft.reducedMotion !== liveReducedMotion
     || draft.notificationSounds !== undefined && draft.notificationSounds !== liveNotificationSounds
-    || draft.flyoutMarkers !== undefined && draft.flyoutMarkers !== liveFlyoutMarkers
-    || draft.dynamicWorktrees !== undefined && draft.dynamicWorktrees !== liveDynamicWorktrees;
-  return { content, dirty, validate, save, discard };
+    || draft.flyoutMarkers !== undefined && draft.flyoutMarkers !== liveFlyoutMarkers;
+  const projectsDirty = draft.dynamicWorktrees !== undefined && draft.dynamicWorktrees !== liveDynamicWorktrees;
+  // mark the visible owner of each staged browser preference
+  const dirtyPageIds = new Set<string>();
+  // keep identity changes on this browser
+  if (browserDirty) dirtyPageIds.add('browser');
+  // keep appearance changes on interface
+  if (interfaceDirty) dirtyPageIds.add('interface');
+  // keep launcher changes on projects
+  if (projectsDirty) dirtyPageIds.add('projects');
+  return { content, interfaceContent, projectsContent, dirtyPageIds, dirty: dirtyPageIds.size > 0, validate, save, discard };
 }

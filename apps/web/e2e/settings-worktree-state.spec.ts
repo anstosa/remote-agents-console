@@ -357,6 +357,10 @@ test("retains an ordinary Settings draft but remasks a disclosure across worktre
 
   await page.getByRole("button", { name: "Global settings" }).first().click();
   await settings
+    .getByRole("navigation", { name: "Settings sources" })
+    .getByRole("button", { name: "Interface", exact: true })
+    .click();
+  await settings
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();
   await settings
@@ -395,7 +399,7 @@ test("retains an ordinary Settings draft but remasks a disclosure across worktre
   );
   await settings
     .getByRole("navigation", { name: "Settings sources" })
-    .getByRole("button", { name: /^This browser.*Unsaved changes$/u })
+    .getByRole("button", { name: /^Interface.*Unsaved changes$/u })
     .click();
   await expect(
     settings.getByRole("radio", { name: "Light theme", exact: true }),
@@ -501,15 +505,16 @@ test("keeps a shared Settings save locked across a worktree handoff", async ({
 
   await page.getByRole("tab", { name: "Owen — Prompt done" }).click();
   await page.getByRole("button", { name: "Global settings" }).first().click();
-  const theme = settings.getByRole("radio", {
-    name: "Light theme",
+  // captured saves keep the default browser identity action locked
+  const rename = settings.getByRole("button", {
+    name: "Rename browser name",
     exact: true,
   });
   const saving = settings.getByRole("button", {
     name: "Saving…",
     exact: true,
   });
-  await expect(theme).toBeDisabled();
+  await expect(rename).toBeDisabled();
   await expect(saving).toBeDisabled();
   await saving.click({ force: true });
   expect(state.validations).toHaveLength(1);
@@ -533,6 +538,10 @@ test("cancels a held shared save after runtime security invalidation", async ({
   const state = await setupWorktreeSettings(page);
   const settings = page.getByRole("dialog", { name: "Settings" });
   await page.getByRole("button", { name: "Global settings" }).first().click();
+  await settings
+    .getByRole("navigation", { name: "Settings sources" })
+    .getByRole("button", { name: "Interface", exact: true })
+    .click();
   await settings
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();
@@ -724,6 +733,10 @@ test("leaves active dirty Settings alone when closing inactive worktree splits",
   await setupWorktreeSettings(page);
   const settings = page.getByRole("dialog", { name: "Settings" });
   await page.getByRole("button", { name: "Global settings" }).first().click();
+  await settings
+    .getByRole("navigation", { name: "Settings sources" })
+    .getByRole("button", { name: "Interface", exact: true })
+    .click();
   await settings
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();

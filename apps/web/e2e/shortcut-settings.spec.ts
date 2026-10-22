@@ -279,20 +279,7 @@ async function openKeyboardSettings(page: Page) {
   await expect(settings).toBeVisible();
   await selectKeyboardSettings(settings);
   // command-oriented coverage uses the exclusive quick-assignment view
-  const view = settings.getByRole("combobox", {
-    name: "Keyboard editor view",
-    exact: true,
-  });
-  if (await view.count()) {
-    await view.click();
-    await page
-      .getByRole("listbox", {
-        name: "Keyboard editor view options",
-        exact: true,
-      })
-      .getByRole("option", { name: "Command shortcuts", exact: true })
-      .click();
-  }
+  await chooseEditorOption(settings, "Keyboard editor view", "Command shortcuts");
   await expect(
     settings.getByRole("region", { name: "Edit keyboard shortcuts" }),
   ).toBeVisible();
@@ -314,13 +301,29 @@ async function openKeyTables(page: Page) {
 const command = (page: Page, id: string) =>
   page.locator(`[data-shortcut-command=${JSON.stringify(id)}]`);
 
-// select an explicit option in the shared custom dropdown
+// locate either shape of the shared settings selector
+const editorControl = (scope: Locator, label: string) => scope
+  .getByRole("combobox", { name: label, exact: true })
+  .or(scope.getByRole("switch", { name: label, exact: true }));
+
+// select an explicit option in the shared settings control
 async function chooseEditorOption(
   settings: Locator,
   label: string,
   option: string,
 ) {
-  await settings.getByRole("combobox", { name: label, exact: true }).click();
+  const control = editorControl(settings, label);
+  const role = await control.getAttribute("role");
+  // binary controls expose both endpoints without opening a menu
+  if (role === "switch") {
+    const choice = control.getByText(option, { exact: true }).locator("..");
+    await expect(choice).toHaveClass(/settings-select-switch-choice/u);
+    // reselecting the active endpoint must not navigate or clear local forms
+    if (await choice.getAttribute("data-selected") !== "true") await control.click();
+    await expect(choice).toHaveAttribute("data-selected", "true");
+    return;
+  }
+  await control.click();
   await settings
     .page()
     .getByRole("listbox", { name: `${label} options`, exact: true })
@@ -328,21 +331,15 @@ async function chooseEditorOption(
     .click();
 }
 
-// align key-table selectors with their adjacent text control
+// keep compact selectors aligned while allowing long binary labels to wrap
 for (const width of [320, 390, 1440]) {
-  test(`keeps key-table dropdowns the same height as text controls at ${width}px`, async ({
+  test(`keeps key-table controls legible beside text controls at ${width}px`, async ({
     page,
   }) => {
     await setupShortcutSettings(page, { width });
     const { settings, editor } = await openKeyTables(page);
-    const view = settings.getByRole("combobox", {
-      name: "Keyboard editor view",
-      exact: true,
-    });
-    const table = editor.getByRole("combobox", {
-      name: "Key table",
-      exact: true,
-    });
+    const view = editorControl(settings, "Keyboard editor view");
+    const table = editorControl(editor, "Key table");
     const name = editor.getByRole("textbox", {
       name: "New table name",
       exact: true,
@@ -355,8 +352,20 @@ for (const width of [320, 390, 1440]) {
     expect(viewBox).not.toBeNull();
     expect(tableBox).not.toBeNull();
     expect(nameBox).not.toBeNull();
-    expect(Math.abs(viewBox!.height - nameBox!.height)).toBeLessThanOrEqual(1);
+    expect(viewBox!.height).toBeGreaterThanOrEqual(nameBox!.height);
     expect(Math.abs(tableBox!.height - nameBox!.height)).toBeLessThanOrEqual(1);
+    expect(
+      await view
+        .locator(".settings-select-switch-choice")
+        .evaluateAll((choices) => {
+          // require every wrapped endpoint to remain unclipped
+          return choices.every((choice) => {
+            // compare both rendered dimensions
+            return choice.scrollWidth <= choice.clientWidth + 1
+              && choice.scrollHeight <= choice.clientHeight + 1;
+          });
+        }),
+    ).toBe(true);
   });
 }
 
@@ -380,7 +389,7 @@ for (const width of [390, 1440]) {
       .getByRole("button", { name: "Add table", exact: true })
       .click();
     await expect(
-      editor.getByRole("combobox", { name: "Key table", exact: true }),
+      editorControl(editor, "Key table"),
     ).toHaveAttribute("data-value", "tools");
     await editor
       .getByRole("button", { name: "Add binding", exact: true })
@@ -574,7 +583,7 @@ test("retargets inbound bindings on table rename and blocks removal until refere
     .getByRole("button", { name: "Apply table name", exact: true })
     .click();
   await expect(
-    editor.getByRole("combobox", { name: "Key table", exact: true }),
+    editorControl(editor, "Key table"),
   ).toHaveAttribute("data-value", "utilities");
   await expect(
     editor.getByText("Entered by: root: Ctrl + G", { exact: true }),
@@ -599,7 +608,7 @@ test("retargets inbound bindings on table rename and blocks removal until refere
     .getByRole("button", { name: "Remove utilities table", exact: true })
     .click();
   await expect(
-    editor.getByRole("combobox", { name: "Key table", exact: true }),
+    editorControl(editor, "Key table"),
   ).toHaveAttribute("data-value", "root");
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
@@ -694,13 +703,10 @@ test("locks editor navigation during held validation and preserves an unapplied 
     settings.getByRole("button", { name: "Saving…", exact: true }),
   ).toBeDisabled();
   await expect(
-    settings.getByRole("combobox", {
-      name: "Keyboard editor view",
-      exact: true,
-    }),
+    editorControl(settings, "Keyboard editor view"),
   ).toBeDisabled();
   await expect(
-    editor.getByRole("combobox", { name: "Key table", exact: true }),
+    editorControl(editor, "Key table"),
   ).toBeDisabled();
   await expect(form).toBeVisible();
   await expect(recorder).toHaveValue("Ctrl + F9");
@@ -708,7 +714,7 @@ test("locks editor navigation during held validation and preserves an unapplied 
   await expect(commandInput).toBeDisabled();
   releaseValidation();
   await expect(
-    settings.getByText("Fix the validation issues before saving.", {
+    page.getByRole("alert").getByText("Fix the validation issues before saving.", {
       exact: true,
     }),
   ).toBeVisible();
@@ -716,13 +722,10 @@ test("locks editor navigation during held validation and preserves an unapplied 
   await expect(commandInput).toBeEnabled();
   await expect(commandInput).toHaveValue("  printf held-form  ");
   await expect(
-    settings.getByRole("combobox", {
-      name: "Keyboard editor view",
-      exact: true,
-    }),
+    editorControl(settings, "Keyboard editor view"),
   ).toBeEnabled();
   await expect(
-    editor.getByRole("combobox", { name: "Key table", exact: true }),
+    editorControl(editor, "Key table"),
   ).toBeEnabled();
   expect(state.saves).toHaveLength(0);
 });
@@ -870,7 +873,7 @@ for (const delayed of [false, true]) {
       .click();
     releaseReveal();
     await expect(
-      editor.getByRole("combobox", { name: "Key table", exact: true }),
+      editorControl(editor, "Key table"),
     ).toHaveAttribute(
       "data-value",
       delayed ? "pending-table" : "accepted-table",
@@ -977,13 +980,10 @@ test("locks key-table controls while Refresh waits for an active terminal remask
   await expect(refresh).toBeDisabled();
   await expect(refresh).toHaveAttribute("aria-busy", "true");
   await expect(
-    settings.getByRole("combobox", {
-      name: "Keyboard editor view",
-      exact: true,
-    }),
+    editorControl(settings, "Keyboard editor view"),
   ).toBeDisabled();
   await expect(
-    editor.getByRole("combobox", { name: "Key table", exact: true }),
+    editorControl(editor, "Key table"),
   ).toBeDisabled();
   await expect(form).toHaveCount(0);
   await expect(
@@ -991,7 +991,7 @@ test("locks key-table controls while Refresh waits for an active terminal remask
   ).toBeDisabled();
   releaseRemask();
   await expect(refresh).toBeEnabled();
-  await expect(refresh).toHaveAttribute("aria-busy", "false");
+  await expect(refresh).not.toHaveAttribute("aria-busy");
   await expect(
     row.getByRole("button", { name: "Reveal Terminal command", exact: true }),
   ).toBeVisible();
@@ -1189,7 +1189,7 @@ test("requires advanced controls for masked terminals and supports discard and f
     .click();
   state.saveStatus = 409;
   await settings.getByRole("button", { name: "Save changes" }).click();
-  await expect(settings.getByRole("alert")).toContainText(
+  await expect(page.getByRole("alert")).toContainText(
     "changed outside Settings",
   );
   await expect(

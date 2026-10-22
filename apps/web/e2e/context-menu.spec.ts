@@ -319,6 +319,7 @@ test('cancelling dirty Settings preflight leaves every close-all sibling mounted
   await openWorkspaceSplits(page);
   await page.getByRole('button', { name: 'Global settings', exact: true }).click();
   const settings = page.getByRole('dialog', { name: 'Settings' });
+  await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Interface', exact: true }).click();
   await settings.getByRole('radio', { name: 'Light theme', exact: true }).click();
 
   const tab = page.getByRole('tab', { name: /^Cora —/u });

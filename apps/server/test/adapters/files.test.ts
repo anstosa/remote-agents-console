@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { adapterFileContext, hostVisibleRepoRoot, renderAdapterFiles } from '../../src/adapters/files.js';
@@ -23,15 +23,30 @@ describe('adapter file rendering', () => {
     expect(rendered.codex).toBeUndefined();
   });
 
-  it('rewrites the file every boot, restoring content that drifted', async () => {
+  // repair both content and permissions left by an earlier boot
+  it('rewrites the file every boot, restoring content and permissions that drifted', async () => {
     const dir = await filesDir();
     const env = { RAC_ADAPTER_FILES_DIR: dir, RAC_HOST_REPOSITORY: '/srv/remoteagents' } as NodeJS.ProcessEnv;
     const first = (await renderAdapterFiles(env)).claude!['hooks.json']!;
     const golden = await readFile(first, 'utf8');
     // a stale/edited file from a previous boot is overwritten, not left in place
     await writeFile(first, 'CORRUPT');
+    await chmod(first, 0o600);
     await renderAdapterFiles(env);
     expect(await readFile(first, 'utf8')).toBe(golden);
+    expect((await stat(first)).mode & 0o777).toBe(0o644);
+  });
+
+  // preserve host-readable adapter files even with a private process default
+  it('renders files at 0644 under a restrictive umask', async () => {
+    const dir = await filesDir();
+    const previousMask = process.umask(0o077);
+    try {
+      const rendered = await renderAdapterFiles({ RAC_ADAPTER_FILES_DIR: dir, RAC_HOST_REPOSITORY: '/srv/remoteagents' });
+      expect((await stat(rendered.claude!['hooks.json']!)).mode & 0o777).toBe(0o644);
+    } finally {
+      process.umask(previousMask);
+    }
   });
 
   it('names paths against RAC_HOST_REPOSITORY and drops the tmux prefix under the bridge', () => {

@@ -6,6 +6,16 @@ type DashboardMount = {
   onHistoryRequest?: () => void;
 };
 
+const emptyButtonSlots = () => ({
+  tabLead: [], leftNav: [], rightNav: [], navMenu: [], pullRequest: [],
+  'split:agent': [], 'split:terminal': [], 'split:note': [], 'split:browser': [], 'split:files': [], 'split:code': [], 'split:review': [], 'split:stack': [], 'split:settings': []
+});
+const pullRequestButtons = [
+  { id: 'push-project', text: 'Finish and PR', icon: 'M12 16V4m0 0-5 5m5-5 5 5M5 14v5h14v-5', color: 'mauve', style: 'solid', actionKind: 'prompt' },
+  { id: 'fixup-project', text: '$fixup', color: 'mauve', style: 'outline', actionKind: 'prompt' }
+];
+const buttonCatalog = { revision: 'buttons-v1', application: { ...emptyButtonSlots(), pullRequest: pullRequestButtons }, projects: { repo: { ...emptyButtonSlots(), pullRequest: pullRequestButtons } } };
+
 // fail explicitly when layout geometry is unavailable
 async function renderedBox(locator: Locator) {
   const box = await locator.boundingBox();
@@ -30,7 +40,7 @@ async function mountDashboard(page: Page, options: DashboardMount) {
     // authenticate the browser
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // publish the requested worktrees
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: options.dashboard });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { ...(options.dashboard as object), serverStartedAt: 1, buttons: buttonCatalog } });
     // disable push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // connect active agent logs
@@ -44,10 +54,10 @@ async function mountDashboard(page: Page, options: DashboardMount) {
     }
     // expose repository tabs
     if (/^\/api\/agents\/[^/]+\/switch-prs$/u.test(url.pathname)) return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
-    // record active-agent prompt submissions
-    if (/^\/api\/agents\/[^/]+\/prompt$/u.test(url.pathname) && request.method() === 'POST') {
+    // record configured action submissions
+    if (url.pathname === '/api/button-actions' && request.method() === 'POST') {
       await options.onPrompt?.(request.postDataJSON());
-      return route.fulfill({ status: 202, json: { ok: true } });
+      return route.fulfill({ status: 202, json: { operation: { id: `operation-${Date.now()}`, state: 'complete' } } });
     }
     // serve empty inactive-worktree notes
     if (/^\/api\/worktrees\/[^/]+\/notes$/u.test(url.pathname)) return route.fulfill({ json: { notes: [] } });
@@ -88,7 +98,7 @@ test('keeps the current pull request in the Working footer and queues one active
     // delay one fixup response
     onPrompt: async body => {
       promptRequests += 1;
-      expect(body).toEqual({ prompt: '$fixup', attachments: [] });
+      expect(body).toMatchObject({ actionId: 'fixup-project', configRevision: 'buttons-v1', placeId: 'active', slot: 'pullRequest', agentId: 'agent-active' });
       await promptFinished;
     },
     // count every history refresh
@@ -146,8 +156,8 @@ test('keeps the current pull request in the Working footer and queues one active
   await expect(card).toBeVisible();
 
   // keep the standalone fixup immediately after push
-  const fixup = actions.getByRole('button', { name: 'Queue $fixup' });
-  await expect(actions.locator('.git-status-push + .pull-request-fixup')).toHaveCount(1);
+  const fixup = actions.getByRole('button', { name: '$fixup', exact: true });
+  await expect(actions.locator('.configured-pull-request-actions .configured-button')).toHaveCount(2);
   await expect(card.getByRole('button')).toHaveCount(1);
   await expect(card.getByRole('button', { name: 'Show PR comments' })).toBeVisible();
   await fixup.click();
@@ -156,8 +166,8 @@ test('keeps the current pull request in the Working footer and queues one active
   await fixup.evaluate(button => { /* exercise a disabled native button */ button.click(); });
   expect(promptRequests).toBe(1);
   finishPrompt();
-  await expect(fixup).toContainText('Queued');
-  await expect.poll(() => historyRequests).toBeGreaterThanOrEqual(2);
+  await expect(fixup).toBeEnabled();
+  expect(historyRequests).toBeGreaterThanOrEqual(1);
 });
 
 // keep mobile pr health floating around a centered branch glyph
@@ -289,7 +299,7 @@ test('keeps fixup pending across popup and tab roundtrips', async ({ page }) => 
   const branch = page.getByRole('button', { name: /^Git status: feature\/current-pr-controls/u });
   await branch.click();
   const panel = page.getByRole('region', { name: 'Changed files' });
-  const fixup = panel.getByRole('button', { name: 'Queue $fixup' });
+  const fixup = panel.getByRole('button', { name: '$fixup', exact: true });
   await fixup.click();
   await expect.poll(() => promptRequests).toBe(1);
   await expect(fixup).toBeDisabled();
@@ -308,29 +318,27 @@ test('keeps fixup pending across popup and tab roundtrips', async ({ page }) => 
 });
 
 // surface rejected and disconnected submissions without preventing retries
-test('reports fixup failures and allows a successful retry', async ({ page }) => {
+test('reports fixup rejection and recovers one ambiguous submission with the same request', async ({ page }) => {
   test.setTimeout(120_000);
   await mountDashboard(page, { dashboard: { generation: 1, agents: [activeAgent], projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [activeWorktree] }] } });
   let promptRequests = 0;
-  await page.route('**/api/agents/agent-active/prompt', async route => {
+  await page.route('**/api/button-actions', async route => {
     promptRequests += 1;
     // expose the server rejection
     if (promptRequests === 1) return route.fulfill({ status: 409, json: { error: 'Agent is not accepting prompts' } });
     // simulate a lost connection on retry
     if (promptRequests === 2) return route.abort('failed');
-    return route.fulfill({ status: 202, json: { ok: true } });
+    return route.fulfill({ status: 202, json: { operation: { id: 'fixup-retry', state: 'complete' } } });
   });
   await page.getByRole('button', { name: /^Git status: feature\/current-pr-controls/u }).click();
-  const fixup = page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Queue $fixup' });
+  const fixup = page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: '$fixup', exact: true });
   await fixup.click();
   const feedback = page.locator('.operation-feedback[role="alert"]');
   await expect(feedback).toContainText('Agent is not accepting prompts');
   await expect(fixup).toBeEnabled();
   await fixup.click();
-  await expect(feedback).toContainText('Console unavailable');
+  await expect(page.locator('.operation-feedback').filter({ hasText: '$fixup finished' })).toBeVisible();
   await expect(fixup).toBeEnabled();
-  await fixup.click();
-  await expect(fixup).toContainText('Queued');
   expect(promptRequests).toBe(3);
 });
 
@@ -368,7 +376,7 @@ test('stacks standard-height Working footer controls at 375px without growing th
 
   const cardMain = await renderedBox(card.locator('.pull-request-card-main'));
   const cardIndicators = await renderedBox(card.locator(':scope > .pull-request-issues'));
-  const fixup = await renderedBox(actions.getByRole('button', { name: 'Queue $fixup' }));
+  const fixup = await renderedBox(actions.getByRole('button', { name: '$fixup', exact: true }));
   const push = await renderedBox(actions.getByRole('button', { name: 'Finish and PR', exact: true }));
   // keep pr content on one row while fixes stay beside push
   expect(Math.abs(cardBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);

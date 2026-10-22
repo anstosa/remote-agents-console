@@ -52,6 +52,7 @@ const applicationDedicatedPaths = new Set([
   'adapters',
   'tmux',
   'projects',
+  'buttons',
   'review',
   'proxy',
   'integrations.multiInstance',
@@ -204,16 +205,16 @@ function visitSchema(index: FieldIndex, pageId: string, schema: SettingsSchema, 
 // index browser-owned controls that have no file schema
 function addBrowserFields(index: FieldIndex): void {
   const fields = [
-    { label: 'Name', path: ['deviceName'], keywords: 'browser device rename identity' },
-    { label: 'Terminal font', path: ['terminalFontSize'], keywords: 'font size preview' },
-    { label: 'Theme', path: ['colorTheme'], keywords: 'appearance dark light mocha latte' },
-    { label: 'Reduced motion', path: ['reducedMotion'], keywords: 'animation shimmer pulse accessibility' },
-    { label: 'Notification sounds', path: ['notificationSounds'], keywords: 'alert chime audio mute silent' },
-    { label: 'Flyout markers', path: ['flyoutMarkers'], keywords: 'carets menu buttons' },
-    { label: 'Dynamic worktrees', path: ['dynamicWorktrees'], keywords: 'launcher multiple worktrees' }
+    { pageId: 'browser', label: 'Name', path: ['deviceName'], keywords: 'browser device rename identity' },
+    { pageId: 'interface', label: 'Terminal font', path: ['terminalFontSize'], keywords: 'font size preview' },
+    { pageId: 'interface', label: 'Theme', path: ['colorTheme'], keywords: 'appearance dark light mocha latte' },
+    { pageId: 'interface', label: 'Reduced motion', path: ['reducedMotion'], keywords: 'animation shimmer pulse accessibility' },
+    { pageId: 'interface', label: 'Notification sounds', path: ['notificationSounds'], keywords: 'alert chime audio mute silent' },
+    { pageId: 'interface', label: 'Flyout markers', path: ['flyoutMarkers'], keywords: 'carets menu buttons' },
+    { pageId: 'projects', label: 'Dynamic worktrees', path: ['dynamicWorktrees'], keywords: 'launcher multiple worktrees' }
   ];
   // add stable browser field identities
-  for (const field of fields) index.add('browser', field.label, field.path, [], [field.keywords]);
+  for (const field of fields) index.add(field.pageId, field.label, field.path, [], [field.keywords]);
 }
 
 // index application-owned fields routed to dedicated pages
@@ -272,6 +273,10 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
     label: projects.label ?? 'Projects',
     skip: path => options.installationKind !== 'compose' && path.length === 3 && path[2] === 'hostPath'
   });
+
+  const buttons = baseSchema.properties?.buttons;
+  // button definitions retain their application paths on Interface
+  if (buttons !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'interface', buttons, childValue(source.value, 'buttons'), ['buttons'], []);
 
   const review = baseSchema.properties?.review;
   // keep permanent Review controls searchable without creating omitted configuration

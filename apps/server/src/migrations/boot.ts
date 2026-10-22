@@ -12,6 +12,8 @@ export function formatReport(report: MigrationReport): string[] {
   const lines: string[] = [];
   for (const project of report.projects) lines.push(`project ${project.id}${project.mergedFrom.length > 1 ? ` (merged ${project.mergedFrom.join(', ')})` : ''}`);
   if (report.codexProgram !== undefined) lines.push(`adapters.codex.program ${report.codexProgram}`);
+  if (report.buttons?.defaults === true) lines.push('application button defaults materialized');
+  if ((report.buttons?.projects ?? 0) > 0) lines.push(`${report.buttons!.projects} Project push setting${report.buttons!.projects === 1 ? '' : 's'} migrated to buttons`);
   for (const [file, count] of Object.entries(report.counts)) lines.push(`${file}: ${count} record${count === 1 ? '' : 's'} re-keyed`);
   for (const backup of report.backups) lines.push(`backup ${backup}`);
   for (const warning of report.warnings) lines.push(`warning: ${warning}`);

@@ -8,6 +8,7 @@ import { checkMain } from '../src/config/check.js';
 import { migrateMain } from '../src/config/migrate.js';
 import { acquireConfig } from '../src/migrations/boot.js';
 import type { CliContext } from '../src/config/cli.js';
+import { defaultButtons } from '../src/config/buttons.js';
 
 const dirs: string[] = [];
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -59,7 +60,7 @@ describe('config:migrate (migrateMain)', () => {
   it('reports nothing to do for a config already in the new shape', async () => {
     const { root, repo } = await gitRepo();
     const configPath = join(root, 'config.json');
-    await writeFile(configPath, JSON.stringify({ publicOrigin: 'https://x', adapters: { codex: { program: '/usr/bin/codex' } }, projects: [{ id: 'a', path: repo }] }));
+    await writeFile(configPath, JSON.stringify({ publicOrigin: 'https://x', buttons: defaultButtons, adapters: { codex: { program: '/usr/bin/codex' } }, projects: [{ id: 'a', path: repo }] }));
     const ctx = context(root, [configPath]);
 
     expect(await migrateMain(ctx)).toBe(0);
@@ -105,7 +106,7 @@ describe('config:check (checkMain) on a legacy config', () => {
   it('still validates a config already in the new shape', async () => {
     const { root, repo } = await gitRepo();
     const configPath = join(root, 'config.json');
-    await writeFile(configPath, JSON.stringify({ publicOrigin: 'https://x', adapters: { codex: { program: '/usr/bin/codex' } }, projects: [{ id: 'a', path: repo }] }));
+    await writeFile(configPath, JSON.stringify({ publicOrigin: 'https://x', buttons: defaultButtons, adapters: { codex: { program: '/usr/bin/codex' } }, projects: [{ id: 'a', path: repo }] }));
     const ctx = context(root, [configPath]);
 
     expect(await checkMain(ctx)).toBe(0);
@@ -117,7 +118,7 @@ describe('acquireConfig', () => {
   it('skips a config already in the new shape, writing no backup', async () => {
     const { root, repo } = await gitRepo();
     const configPath = join(root, 'config.json');
-    await writeFile(configPath, JSON.stringify({ publicOrigin: 'https://x', adapters: { codex: { program: '/usr/bin/codex' } }, projects: [{ id: 'a', path: repo }] }));
+    await writeFile(configPath, JSON.stringify({ publicOrigin: 'https://x', buttons: defaultButtons, adapters: { codex: { program: '/usr/bin/codex' } }, projects: [{ id: 'a', path: repo }] }));
     const logs: string[] = [];
 
     const config = await acquireConfig({ RAC_CONFIG: configPath, ...dataEnv(root) }, message => { logs.push(message); });

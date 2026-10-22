@@ -1,5 +1,5 @@
 // describe safe schema controls
-export type SettingsSchema = { type: 'object' | 'array' | 'record' | 'string' | 'number' | 'boolean' | 'enum' | 'json' | 'union'; optional?: boolean; nullable?: boolean; protected?: boolean; apply?: SettingsApply; default?: unknown; label?: string; description?: string; placeholder?: string; editor?: 'shell'; singleLine?: boolean; properties?: Record<string, SettingsSchema>; items?: SettingsSchema; options?: string[]; variants?: SettingsSchema[] };
+export type SettingsSchema = { type: 'object' | 'array' | 'record' | 'string' | 'number' | 'boolean' | 'enum' | 'json' | 'union'; optional?: boolean; nullable?: boolean; protected?: boolean; apply?: SettingsApply; default?: unknown; label?: string; description?: string; placeholder?: string; editor?: 'shell'; singleLine?: boolean; multiline?: boolean; properties?: Record<string, SettingsSchema>; items?: SettingsSchema; options?: string[]; variants?: SettingsSchema[] };
 export type SettingsTarget = 'rac' | 'cloudflared';
 export type SettingsApply = 'live' | 'saved-only' | 'rac-restart' | 'cloudflared-recreate' | 'source-migration';
 export type SettingsFormat = 'json' | 'env' | 'compose' | 'cloudflared' | 'credentials' | 'wrapper' | 'svg' | 'installation';

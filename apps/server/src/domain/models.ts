@@ -1,4 +1,5 @@
 import type { AdapterCapability, AgentKind, AttentionState, InlineQuestion } from '../adapters/types.js';
+import type { ProjectButtons } from '../config/buttons.js';
 
 export type SocketRef = { fingerprint: string; path: string; device: number; inode: number };
 // `role` is the console's pane-role marker (`@rac_role`): `shell` on a Console shell the
@@ -78,7 +79,7 @@ export const agentTmuxSession = (agent: Pick<Agent, 'sessionId' | 'socketFingerp
  * are defaults; canonical worktree overrides replace them for individual checkouts.
  * discovered worktrees denormalise the resolved settings for convenience.
  */
-export type Project = { id: string; label: string; defaultBranch?: string; path: string; identity: string; mode: 'repository' | 'directory'; hostPath?: string; worktreeOrder?: string[]; worktreeOverrides?: WorktreeOverride[]; worktreesDirectory: string; available: boolean; unavailableReason?: string; commands?: StackCommands; newTask?: string; push: PromptAction; projectUrl?: string; projectPort?: number };
+export type Project = { id: string; label: string; defaultBranch?: string; path: string; identity: string; mode: 'repository' | 'directory'; hostPath?: string; worktreeOrder?: string[]; worktreeOverrides?: WorktreeOverride[]; worktreesDirectory: string; available: boolean; unavailableReason?: string; commands?: StackCommands; newTask?: string; buttons?: ProjectButtons; push: PromptAction; projectUrl?: string; projectPort?: number };
 /**
  * One checkout of a Project as `git worktree list` reports it, keyed by the wire id
  * `<projectId>:<realpath>` (ADR 0003). `identity` equals the checkout's realpath

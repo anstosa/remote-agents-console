@@ -25,6 +25,7 @@ const pages: SettingsSearchPage[] = [
   { id: 'voice', label: 'Voice', group: 'Console' },
   { id: 'keyboard', label: 'Keyboard shortcuts', group: 'Console' },
   { id: 'app', label: 'Application', group: 'Application' },
+  { id: 'interface', label: 'Interface', group: 'Application' },
   { id: 'agents', label: 'Agents', group: 'Application' },
   { id: 'projects', label: 'Projects', group: 'Application' },
   { id: 'reviews', label: 'Reviews', group: 'Application' },
@@ -119,6 +120,32 @@ test('indexes Review descendants only while the application structured editor is
   const raw = build([application], { rawSourceIds: new Set(['app']) });
   expect(raw.find(result => result.kind === 'page' && result.pageId === 'reviews')).toBeDefined();
   expect(raw.filter(result => result.kind === 'field' && result.pageId === 'reviews')).toEqual([]);
+});
+
+// route client preferences and application buttons to their dedicated pages
+test('indexes Interface and Projects controls under their owning pages', () => {
+  const application = source('app', 'json', applicationSettingsSchema(), {
+    buttons: {
+      pullRequest: [{
+        text: 'PRIVATE_BUTTON_TEXT',
+        color: 'mauve',
+        style: 'solid',
+        action: { agentPrompt: 'PRIVATE_BUTTON_PROMPT' }
+      }]
+    }
+  });
+  const results = build([application]);
+
+  expect(fieldAt(results, 'browser', ['deviceName'])).toBeDefined();
+  expect(fieldAt(results, 'interface', ['terminalFontSize'])).toBeDefined();
+  expect(fieldAt(results, 'interface', ['colorTheme'])).toBeDefined();
+  expect(fieldAt(results, 'interface', ['reducedMotion'])).toBeDefined();
+  expect(fieldAt(results, 'interface', ['flyoutMarkers'])).toBeDefined();
+  expect(fieldAt(results, 'projects', ['dynamicWorktrees'])).toBeDefined();
+  expect(fieldAt(results, 'interface', ['buttons', 'pullRequest', '0', 'text'])).toBeDefined();
+  expect(fieldAt(results, 'app', ['buttons', 'pullRequest', '0', 'text'])).toBeUndefined();
+  expect(JSON.stringify(results)).not.toContain('PRIVATE_BUTTON_TEXT');
+  expect(JSON.stringify(results)).not.toContain('PRIVATE_BUTTON_PROMPT');
 });
 
 // normalize product acronyms only in search metadata, never canonical values

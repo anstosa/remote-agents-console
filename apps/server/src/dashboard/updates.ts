@@ -4,6 +4,7 @@ import type { StackState } from '../worktree-commands/service.js';
 import type { ReviewTourCapability, StoredReviewTourSummary } from '../review-tour/contracts.js';
 import type { CodeReviewCapability } from '../code-review/contracts.js';
 import type { KeysConfig } from '../config/keys.js';
+import type { ButtonCatalog } from '../button-actions/catalog.js';
 
 // one Worktree on the wire, augmented with the per-Worktree state the loader adds:
 // its stack controls and its resolved Launch profile
@@ -31,10 +32,11 @@ export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'>
   editor?: true;
   // the operator's key tables, each terminal command reduced to its program name
   keys?: KeysConfig;
+  buttons?: ButtonCatalog;
 };
 
 // fingerprint every dashboard field that drives browser refreshes
-export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.notesRevision, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews]);
+export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.notesRevision, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews, dashboard.buttons]);
 
 export class DashboardUpdates<T = DashboardPayload> {
   private loader?: () => Promise<T>;

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mockAccountSocket } from "./account-fixture.js";
 
 type ConfirmationFixtureState = {
@@ -43,6 +43,35 @@ function applicationSource(state: ConfirmationFixtureState) {
       },
     },
   };
+}
+
+// choose one Settings page through either responsive navigation surface
+async function selectSettingsPage(
+  settings: Locator,
+  id: string,
+  label: string,
+) {
+  const selector = settings.getByRole("combobox", {
+    name: "Settings section",
+    exact: true,
+  });
+  // use the compact section picker on narrow viewports
+  if (await selector.isVisible()) {
+    await selector.click();
+    await settings
+      .page()
+      .getByRole("listbox", {
+        name: "Settings section options",
+        exact: true,
+      })
+      .locator(`[role="option"][data-value=${JSON.stringify(id)}]`)
+      .click();
+    return;
+  }
+  await settings
+    .getByRole("navigation", { name: "Settings sources" })
+    .getByRole("button", { name: new RegExp(`^${label}`, "u") })
+    .click();
 }
 
 // mount browser-only Settings without touching the live console
@@ -207,6 +236,7 @@ async function setupConfirmationSettings(page: Page, files = false) {
   await expect(
     settings.getByRole("searchbox", { name: "Search settings", exact: true }),
   ).toBeVisible();
+  await selectSettingsPage(settings, "interface", "Interface");
   return { settings, state };
 }
 
@@ -352,6 +382,7 @@ test("guards every Settings close route while drafts remain", async ({
     .getByRole("button", { name: "Global settings", exact: true })
     .click();
   const reopened = page.getByRole("dialog", { name: "Settings" });
+  await selectSettingsPage(reopened, "interface", "Interface");
   await expect(
     reopened.getByRole("radio", { name: "Dark theme", exact: true }),
   ).toHaveAttribute("aria-checked", "true");
@@ -393,6 +424,7 @@ test("does not guard clean, reverted, or successfully saved Settings", async ({
     .getByRole("button", { name: "Global settings", exact: true })
     .click();
   const reopened = page.getByRole("dialog", { name: "Settings" });
+  await selectSettingsPage(reopened, "interface", "Interface");
   await reopened
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();
@@ -416,6 +448,7 @@ test("does not guard clean, reverted, or successfully saved Settings", async ({
 
 test("blocks closing during a captured save transaction", async ({ page }) => {
   const { settings, state } = await setupConfirmationSettings(page);
+  await selectSettingsPage(settings, "browser", "This browser");
   await settings
     .getByRole("button", { name: "Rename browser name", exact: true })
     .click();

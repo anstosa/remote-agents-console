@@ -11,7 +11,7 @@ import { validateConfig } from '../config/schema.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
 import {
   DataFileError,
-  isLegacyConfig,
+  isLegacyConfig as isProjectsLegacyConfig,
   planMigration,
   resolutionRequests,
   rewriteListStore,
@@ -22,6 +22,7 @@ import {
   type MigrationPlan,
   type ResolvedFacts,
 } from './worktrees-to-projects.js';
+import { needsPushToButtonsMigration, planPushToButtonsMigration } from './push-to-buttons.js';
 
 const execute = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -64,6 +65,7 @@ export type MigrationReport = {
   counts: Record<string, number>;
   backups: string[];
   warnings: string[];
+  buttons?: { defaults: boolean; projects: number };
 };
 
 // resolve one store's path: an explicit override, else its env var, else its default
@@ -150,22 +152,31 @@ async function planStore(store: Store, plan: MigrationPlan, warnings: string[], 
 }
 
 /** Resolve the raw config (or a caller-supplied one), every fact, the plan, and each store's rewrite. */
-async function prepare(deps: MigrationDeps): Promise<{ plan: MigrationPlan; planned: PlannedStore[]; errors: string[] }> {
+async function prepare(deps: MigrationDeps): Promise<{ plan: MigrationPlan; planned: PlannedStore[]; errors: string[]; buttonStage: { defaults: boolean; projects: number }; projectsLegacy: boolean }> {
   let raw: unknown;
   if (deps.raw !== undefined) raw = deps.raw;
   else {
     const rawText = await readFile(deps.configPath, 'utf8');
     try { raw = JSON.parse(rawText); } catch { throw new MigrationError([`${deps.configPath} is not valid JSON`]); }
   }
-  const facts = await resolveFacts(raw, deps);
-  const plan = planMigration(raw, facts);
+  const projectsLegacy = isProjectsLegacyConfig(raw);
+  const facts = projectsLegacy ? await resolveFacts(raw, deps) : { entries: [], commands: {} };
+  const projectPlan: MigrationPlan = projectsLegacy
+    ? planMigration(raw, facts)
+    : { newConfig: raw as Record<string, unknown>, keyMaps: { notes: {}, savedPrompts: {}, queued: {}, history: {}, reviewTours: {}, worktrees: {} }, pins: {}, labels: {}, projectsCreated: [], warnings: [], errors: [] };
+  // compose push migration after worktrees become projects, then validate only the final candidate
+  const buttonPlan = planPushToButtonsMigration(projectPlan.newConfig);
+  const plan: MigrationPlan = { ...projectPlan, newConfig: buttonPlan.newConfig, errors: [...projectPlan.errors, ...buttonPlan.errors] };
   const errors = [...plan.errors];
   const planned: PlannedStore[] = [];
-  for (const store of stores(deps)) {
-    const result = await planStore(store, plan, plan.warnings, errors);
-    if (result !== undefined) planned.push(result);
+  // button-only migration never reads or rewrites unrelated data stores
+  if (projectsLegacy) {
+    for (const store of stores(deps)) {
+      const result = await planStore(store, plan, plan.warnings, errors);
+      if (result !== undefined) planned.push(result);
+    }
   }
-  return { plan, planned, errors };
+  return { plan, planned, errors, buttonStage: { defaults: buttonPlan.materializedDefaults, projects: buttonPlan.migratedProjects }, projectsLegacy };
 }
 
 // the nearest existing ancestor directory of a target, which a recursive mkdir + rename
@@ -193,10 +204,10 @@ async function unwritableTargets(deps: MigrationDeps, changedFiles: string[]): P
   return problems;
 }
 
-// write a sibling <file>.pre-projects.bak with the original bytes, never overwriting an
+// write a stage-specific sibling backup with the original bytes, never overwriting an
 // existing backup (the older original wins); returns the backup path when one was written
-async function backup(file: string, original: string): Promise<string | undefined> {
-  const path = `${file}.pre-projects.bak`;
+async function backup(file: string, original: string, stage = 'projects'): Promise<string | undefined> {
+  const path = `${file}.pre-${stage}.bak`;
   try { await writeFile(path, original, { flag: 'wx', mode: 0o600 }); return path; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') return undefined; throw error; }
 }
@@ -216,10 +227,11 @@ async function writeConfig(deps: MigrationDeps, config: Record<string, unknown>)
   await rename(temporary, target);
 }
 
-function buildReport(plan: MigrationPlan, planned: PlannedStore[], backups: string[]): MigrationReport {
+function buildReport(plan: MigrationPlan, planned: PlannedStore[], backups: string[], buttonStage: { defaults: boolean; projects: number }): MigrationReport {
   const counts: Record<string, number> = {};
   for (const entry of planned) if (entry.changed) counts[entry.store.key] = entry.count;
-  return { projects: plan.projectsCreated, ...(plan.codexProgram === undefined ? {} : { codexProgram: plan.codexProgram }), counts, backups, warnings: plan.warnings };
+  const buttons = buttonStage.defaults || buttonStage.projects > 0 ? { buttons: buttonStage } : {};
+  return { projects: plan.projectsCreated, ...(plan.codexProgram === undefined ? {} : { codexProgram: plan.codexProgram }), counts, backups, warnings: plan.warnings, ...buttons };
 }
 
 /**
@@ -228,7 +240,7 @@ function buildReport(plan: MigrationPlan, planned: PlannedStore[], backups: stri
  * problem listed and nothing written on any content or writability error. Returns the report.
  */
 export async function runMigration(deps: MigrationDeps): Promise<MigrationReport> {
-  const { plan, planned, errors } = await prepare(deps);
+  const { plan, planned, errors, buttonStage, projectsLegacy } = await prepare(deps);
   // schema validation of the output; a validation failure is a migration error
   if (errors.length === 0) {
     try { await validateConfig(plan.newConfig, { checkExecutables: false }); }
@@ -240,12 +252,12 @@ export async function runMigration(deps: MigrationDeps): Promise<MigrationReport
   if (unwritable.length > 0) throw new MigrationError([...unwritable, 'fix: mount it rw under Docker; or move the config somewhere writable and point RAC_CONFIG at it; or run `pnpm config:migrate` as a user who can write it']);
   // backups first (config included), then data files, then the config last
   const backups: string[] = [];
-  const configBackup = await backup(deps.configWritePath ?? deps.configPath, await readFile(deps.configPath, 'utf8'));
+  const configBackup = await backup(deps.configWritePath ?? deps.configPath, await readFile(deps.configPath, 'utf8'), projectsLegacy ? 'projects' : 'buttons');
   if (configBackup !== undefined) backups.push(configBackup);
   for (const entry of planned) if (entry.changed && entry.originalText !== undefined) { const path = await backup(entry.store.file, entry.originalText); if (path !== undefined) backups.push(path); }
   for (const entry of planned) if (entry.changed) await writeAtomic(entry.store.file, JSON.stringify(entry.value));
   await writeConfig(deps, plan.newConfig);
-  return buildReport(plan, planned, backups);
+  return buildReport(plan, planned, backups, buttonStage);
 }
 
 /** The dry-run report for `config:check`: the plan and per-store counts, plus any errors, without writing. */
@@ -253,13 +265,16 @@ export type MigrationDryRun = { report: MigrationReport; errors: string[]; newCo
 
 /** Plan the migration and, off the bridge/Compose, validate the output — but write nothing. */
 export async function dryRunMigration(deps: MigrationDeps): Promise<MigrationDryRun> {
-  const { plan, planned, errors } = await prepare(deps);
+  const { plan, planned, errors, buttonStage, projectsLegacy } = await prepare(deps);
   // validate the output against the schema except under Compose, where programs are container paths
-  if (errors.length === 0 && deps.compose !== true) {
+  if (errors.length === 0 && (deps.compose !== true || !projectsLegacy)) {
     try { await validateConfig(plan.newConfig, { checkExecutables: false }); }
     catch (error) { errors.push((error as Error).message); }
   }
-  return { report: buildReport(plan, planned, []), errors, newConfig: plan.newConfig };
+  return { report: buildReport(plan, planned, [], buttonStage), errors, newConfig: plan.newConfig };
 }
 
-export { isLegacyConfig };
+// run either independent stage through one atomic runner
+export function isLegacyConfig(raw: unknown): boolean {
+  return isProjectsLegacyConfig(raw) || needsPushToButtonsMigration(raw);
+}

@@ -396,15 +396,17 @@ test('shows settings above the static controls on a phone', async ({ page }) => 
   await expect(tabs).toBeVisible();
   await expect(toolbar).toBeVisible();
   const clientBounds = await settingsPage.getByRole('group', { name: 'Name', exact: true }).boundingBox();
+  await expect(settingsPage.getByRole('group', { name: 'Terminal font' })).toHaveCount(0);
+  const selector = settingsPage.getByRole('combobox', { name: 'Settings section', exact: true });
+  await selector.click();
+  await page.getByRole('listbox', { name: 'Settings section options', exact: true }).getByRole('option', { name: 'Interface', exact: true }).click();
+  await expect(settingsPage.getByRole('group', { name: 'Name', exact: true })).toHaveCount(0);
   const terminalBounds = await settingsPage.getByRole('group', { name: 'Terminal font' }).boundingBox();
   const themeBounds = await settingsPage.getByRole('group', { name: 'Theme' }).boundingBox();
-  // retain visible breathing room between flat settings
+  // retain visible breathing room between interface settings
   if (clientBounds === null || terminalBounds === null || themeBounds === null) throw new Error('Settings have no layout bounds');
-  const clientTerminalGap = terminalBounds.y - (clientBounds.y + clientBounds.height);
   const terminalThemeGap = themeBounds.y - (terminalBounds.y + terminalBounds.height);
-  expect(clientTerminalGap).toBeGreaterThanOrEqual(12);
   expect(terminalThemeGap).toBeGreaterThanOrEqual(12);
-  expect(Math.abs(clientTerminalGap - terminalThemeGap)).toBeLessThanOrEqual(4);
   const back = settingsPage.getByRole('button', { name: 'Close settings' });
   await back.focus();
   await page.keyboard.press('Escape');
@@ -462,11 +464,13 @@ test('resizes settings and switches splits without closing it', async ({ page })
   await settings.getByRole('switch', { name: 'Enable Davo' }).check();
   await settings.getByLabel('Davo context').fill('Retain this unsaved context.');
   await settings.getByLabel('Davo context').blur();
-  const swipeTarget = await settings.locator('.settings-search').boundingBox();
+  const swipeTarget = await settings.getByRole('heading', { name: 'Voice', exact: true, level: 2 }).boundingBox();
   // require swipe target geometry
   if (swipeTarget === null) throw new Error('Settings swipe target has no bounds');
   const touch = await page.context().newCDPSession(page);
   const y = Math.round(swipeTarget.y + swipeTarget.height / 2);
+  // start outside editable and actionable controls so native selection stays intact
+  expect(await page.evaluate(y => document.elementFromPoint(55, y)?.closest('input, textarea, select, button, a, [contenteditable="true"]') === null, y)).toBe(true);
   await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 55, y }] });
   // drag across noninteractive settings content
   for (let step = 1; step <= 12; step += 1) await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 55 + step * 24, y }] });
@@ -568,20 +572,22 @@ test('keeps the agent update orbit visible across desktop and phone launcher sta
   await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
 });
 
-// retain a visible static update ring for both reduced-motion preferences
-test('keeps a visible static agent update ring when motion is reduced', async ({ page }) => {
+// replace border motion with a compact spinner for both reduced-motion preferences
+test('keeps a compact agent update spinner when motion is reduced', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const { ring } = await startRunningCodexUpdate(page);
   await expect(ring).toBeVisible();
-  await expect.poll(() => ring.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
-  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::before').backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::before').animationName)).toBe('none');
+  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::after').animationName)).not.toBe('none');
+  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::after').display)).not.toBe('none');
 
   // apply the in-app preference independently of the operating system
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
   await expect(ring).toBeVisible();
-  await expect.poll(() => ring.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
-  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::before').backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::before').animationName)).toBe('none');
+  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::after').animationName)).not.toBe('none');
+  await expect.poll(() => ring.evaluate(element => getComputedStyle(element, '::after').display)).not.toBe('none');
 });
 
 // keep long-running codex and omx updates attached to one queued job

@@ -56,8 +56,8 @@
 .settings-source-panel:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 /* place browser controls in the same field grid as file-backed settings */
 .settings-preferences { min-width: 0; }
-/* separate review guidance from its permanently expanded field groups */
-.settings-reviews { display: grid; min-width: 0; gap: 1rem; }
+/* separate preference groups from their file-backed controls */
+.settings-reviews, .settings-interface, .settings-projects { display: grid; min-width: 0; gap: 1rem; }
 /* keep the shared TMUX sources in one scrollable tab */
 .settings-tmux { display: grid; min-width: 0; gap: 1rem; }
 /* keep each browser preference on its own row at every width */
@@ -97,6 +97,11 @@
 /* share one form column across root and nested source fields */
 .settings-object-fields,
 .settings-env-fields { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: .7rem .9rem; }
+/* keep previews inert without dimming their actual configured appearance */
+.settings-button-preview { display: inline-flex; width: max-content; max-width: 100%; min-width: 0; align-items: center; }
+.settings-center .settings-button-preview .configured-button:disabled { max-width: 100%; opacity: 1; cursor: default; white-space: normal; overflow-wrap: anywhere; }
+/* mirror solid fills and outline borders in the shared color selector */
+.settings-button-color-swatch { display: block; box-sizing: border-box; width: 1rem; height: 1rem; border: 2px solid; border-radius: .2rem; }
 .settings-object-fields > .settings-schema-section,
 .settings-env-fields > .settings-schema-section,
 .settings-object-fields > .settings-field-array,

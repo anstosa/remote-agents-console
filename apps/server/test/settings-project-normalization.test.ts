@@ -14,7 +14,7 @@ describe('authored Project patch normalization', () => {
   });
 
   // prune only semantically empty optional containers from authored values
-  it('keeps override command suppression and invalid process or push objects explicit', () => {
+  it('keeps override command suppression and invalid process or unknown legacy objects explicit', () => {
     const value = applyAuthoredProjectPatch({}, {
       op: 'set',
       path: ['projects'],
@@ -112,24 +112,40 @@ describe('authored Project patch normalization', () => {
   });
 
   // omit optional blank scalars while retaining explicit and required values
-  it('removes a blank port without weakening required push fields or nullable overrides', () => {
+  it('removes a blank port without weakening required button fields or nullable overrides', () => {
     const baseline = { projects: [{
       id: 'one',
       path: '/tmp/one',
       port: 8787,
-      push: { label: 'Ship', prompt: 'review' },
+      buttons: { pullRequest: [{ text: 'Ship', icon: 'M1 1', color: 'mauve', style: 'solid', action: { agentPrompt: 'review' } }] },
       worktreeOverrides: [{ path: 'feature', port: 8788 }]
     }] };
     let value = applyAuthoredProjectPatch(baseline, { op: 'set', path: ['projects', '0', 'port'], value: '' });
-    value = applyAuthoredProjectPatch(value, { op: 'set', path: ['projects', '0', 'push', 'label'], value: '' });
+    value = applyAuthoredProjectPatch(value, { op: 'set', path: ['projects', '0', 'buttons', 'pullRequest', '0', 'icon'], value: '' });
+    value = applyAuthoredProjectPatch(value, { op: 'set', path: ['projects', '0', 'buttons', 'pullRequest', '0', 'action', 'agentPrompt'], value: '' });
     value = applyAuthoredProjectPatch(value, { op: 'set', path: ['projects', '0', 'worktreeOverrides', '0', 'port'], value: null });
 
     expect(value).toEqual({ projects: [{
       id: 'one',
       path: '/tmp/one',
-      push: { label: '', prompt: 'review' },
+      buttons: { pullRequest: [{ text: 'Ship', color: 'mauve', style: 'solid', action: { agentPrompt: '' } }] },
       worktreeOverrides: [{ path: 'feature', port: null }]
     }] });
+  });
+
+  // preserve the action variant selected by its unique owned key
+  it('normalizes each button action branch and prunes the final project list', () => {
+    const prompt = '  review\n    exactly\n';
+    let value: unknown = { projects: [{ id: 'one', path: '/tmp/one', buttons: { pullRequest: [], splits: { files: [] } } }] };
+    value = applyAuthoredProjectPatch(value, { op: 'insert', path: ['projects', '0', 'buttons', 'pullRequest'], value: { text: 'Ask', icon: '', color: 'mauve', style: 'outline', action: { agentPrompt: prompt } } });
+    value = applyAuthoredProjectPatch(value, { op: 'insert', path: ['projects', '0', 'buttons', 'splits', 'files'], value: { text: 'Run', color: 'blue', style: 'solid', action: { shellCommand: '  pwd\n' } } });
+    expect(value).toEqual({ projects: [{ id: 'one', path: '/tmp/one', buttons: {
+      pullRequest: [{ text: 'Ask', color: 'mauve', style: 'outline', action: { agentPrompt: prompt } }],
+      splits: { files: [{ text: 'Run', color: 'blue', style: 'solid', action: { shellCommand: '  pwd\n' } }] }
+    } }] });
+    value = applyAuthoredProjectPatch(value, { op: 'remove', path: ['projects', '0', 'buttons', 'pullRequest', '0'] });
+    value = applyAuthoredProjectPatch(value, { op: 'remove', path: ['projects', '0', 'buttons', 'splits', 'files', '0'] });
+    expect(value).toEqual({ projects: [{ id: 'one', path: '/tmp/one' }] });
   });
 
   // keep the optional comparison fallback editable without persisting blanks

@@ -143,7 +143,10 @@ describe('DiscoveryService dashboard', () => {
 
     expect(dashboard.agents).toHaveLength(1);
     // the pane's host path matches the Main worktree's hostPath, not its console path
-    expect(dashboard.agents[0]).toMatchObject({ home: '/worktrees/ferry', projectId: 'ferry', worktreeId: 'ferry:/worktrees/ferry', newTaskConfigured: true, push: { label: 'Commit/Push', prompt: '$push' }, projectUrl: 'https://ferry.external.example.com', projectProxied: false });
+    expect(dashboard.agents[0]).toMatchObject({ home: '/worktrees/ferry', projectId: 'ferry', worktreeId: 'ferry:/worktrees/ferry', newTaskConfigured: true, projectUrl: 'https://ferry.external.example.com', projectProxied: false });
+    // executable button definitions stay on the server
+    expect(dashboard.agents[0]).not.toHaveProperty('push');
+    expect(dashboard.projects[0]?.worktrees[0]).not.toHaveProperty('push');
     // the Agent's folder travels as `home` only; the retired `workspace` key must not reappear on the wire
     expect(dashboard.agents[0]).not.toHaveProperty('workspace');
     // the Worktree is carried under its Project; an active Worktree omits idle git metadata

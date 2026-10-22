@@ -18,7 +18,7 @@ export async function migrateMain({ args, env, cwd, out, err }: CliContext): Pro
   try {
     const raw = JSON.parse(await readFile(path, 'utf8')) as unknown;
     // a config already in the new shape has nothing to migrate
-    if (!isLegacyConfig(raw)) { out(`Configuration already uses projects[]; nothing to migrate: ${path}\n`); return 0; }
+    if (!isLegacyConfig(raw)) { out(`Configuration already uses the current schema; nothing to migrate: ${path}\n`); return 0; }
     const report = await runMigration({ configPath: path, bridge: env.RAC_HOST_TMUX_DIR !== undefined, env });
     out(`Configuration migrated: ${path}\n`);
     for (const line of formatReport(report)) out(`  ${line}\n`);

@@ -62,8 +62,9 @@ const openKeyboardSettings = async (page: Page) => {
     await page.getByRole('listbox').getByRole('option', { name: 'Keyboard shortcuts', exact: true }).click();
   } else await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Keyboard shortcuts', exact: true }).click();
   // command-oriented scenarios use the exclusive command view
-  await settings.getByRole('combobox', { name: 'Keyboard editor view', exact: true }).click();
-  await page.getByRole('listbox', { name: 'Keyboard editor view options', exact: true }).getByRole('option', { name: 'Command shortcuts', exact: true }).click();
+  const view = settings.getByRole('switch', { name: 'Keyboard editor view', exact: true });
+  // preserve command view when the same settings split is reopened
+  if (await view.getAttribute('aria-checked') !== 'true') await view.click();
   return settings;
 };
 
@@ -387,6 +388,7 @@ test('closing dirty Settings by keyboard uses its split confirmation', async ({ 
   await openWithTerminal(page);
   await page.getByRole('button', { name: 'Global settings', exact: true }).click();
   const settings = page.getByRole('dialog', { name: 'Settings' });
+  await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Interface', exact: true }).click();
   await settings.getByRole('radio', { name: 'Light theme', exact: true }).click();
 
   // Settings owns the dirty close instead of the generic y/n key prompt

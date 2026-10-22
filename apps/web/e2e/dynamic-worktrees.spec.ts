@@ -32,13 +32,27 @@ async function stubDynamicWorktrees(page: import('@playwright/test').Page, soloS
   });
 }
 
+// open the projects settings page at either responsive breakpoint
+async function openProjectsSettings(page: import('@playwright/test').Page) {
+  await page.getByRole('button', { name: 'Global settings' }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  const selector = settings.getByRole('combobox', { name: 'Settings section', exact: true });
+  // use the compact section picker on narrow viewports
+  if (await selector.isVisible()) {
+    await selector.click();
+    await page.getByRole('listbox', { name: 'Settings section options', exact: true }).locator('[role="option"][data-value="projects"]').click();
+  } else {
+    await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Projects', exact: true }).click();
+  }
+  return settings;
+}
+
 // persist density changes and compact only single-worktree projects
 test('dynamic worktrees defaults on and compacts single-worktree projects when disabled', async ({ page }) => {
   await stubDynamicWorktrees(page);
   await page.goto('/');
 
-  await page.getByRole('button', { name: 'Global settings' }).click();
-  const settings = page.getByRole('dialog', { name: 'Settings' });
+  const settings = await openProjectsSettings(page);
   const dynamicWorktrees = settings.getByRole('switch', { name: 'Dynamic worktrees' });
   await expect(dynamicWorktrees).toBeChecked();
   await settings.getByRole('button', { name: 'Close settings' }).click();
@@ -51,7 +65,7 @@ test('dynamic worktrees defaults on and compacts single-worktree projects when d
   await expect(expandedSoloProject.getByRole('button', { name: 'Open Solo main' })).toBeVisible();
   await page.keyboard.press('Escape');
 
-  await page.getByRole('button', { name: 'Global settings' }).click();
+  await openProjectsSettings(page);
   await dynamicWorktrees.uncheck();
   await expect(dynamicWorktrees).not.toBeChecked();
   expect(await page.evaluate(() => localStorage.getItem('rac.dynamic-worktrees'))).toBeNull();
@@ -86,7 +100,7 @@ test('dynamic worktrees defaults on and compacts single-worktree projects when d
   expect(Math.abs(soloPinBounds.x - multiPinBounds.x)).toBeLessThanOrEqual(1);
 
   await page.reload();
-  await page.getByRole('button', { name: 'Global settings' }).click();
+  await openProjectsSettings(page);
   await expect(page.getByRole('dialog', { name: 'Settings' }).getByRole('switch', { name: 'Dynamic worktrees' })).not.toBeChecked();
 });
 
@@ -96,8 +110,7 @@ test('a stale single-worktree project stays contained when compacted', async ({ 
   await stubDynamicWorktrees(page, true);
   await page.goto('/');
 
-  await page.getByRole('button', { name: 'Global settings' }).click();
-  const settings = page.getByRole('dialog', { name: 'Settings' });
+  const settings = await openProjectsSettings(page);
   await settings.getByRole('switch', { name: 'Dynamic worktrees' }).uncheck();
   await settings.getByRole('button', { name: 'Save changes', exact: true }).click();
   await settings.getByRole('button', { name: 'Close settings' }).click();

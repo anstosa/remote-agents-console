@@ -23,6 +23,7 @@ export function applicationSettingsSchema(presentation: ApplicationSettingsPrese
   schema.properties!.adapters!.properties!.omx!.label = 'OMX';
   describeApplicationPlaceholders(schema, presentation);
   describeApplicationCommands(schema);
+  describeButtonSettings(schema);
   describeProjectSettings(schema);
   // annotate each declared object and collection control
   const visit = (node: SettingsSchema, path: string[]): void => {
@@ -38,6 +39,56 @@ export function applicationSettingsSchema(presentation: ApplicationSettingsPrese
     if (node.variants !== undefined) for (const child of node.variants) visit(child, path);
   };
   visit(schema, []); return schema;
+}
+
+// label ordered button slots and their disjoint action editors
+function describeButtonSettings(schema: SettingsSchema): void {
+  const labelLists = (buttons: SettingsSchema | undefined, project: boolean): void => {
+    if (buttons?.properties === undefined) return;
+    buttons.label = project ? 'Button overrides' : 'Buttons';
+    buttons.description = project
+      ? 'Replace application buttons with the same text or append new buttons. Empty lists inherit application buttons.'
+      : 'Ordered configurable actions shown throughout the application.';
+    if (project) buttons.default = {};
+    const labels: Record<string, string> = { tabLead: 'Left of tabs', leftNav: 'Left navigation', rightNav: 'Right navigation', navMenu: 'Navigation menu', pullRequest: 'Pull request' };
+    // annotate every direct slot
+    for (const [key, label] of Object.entries(labels)) {
+      const list = buttons.properties[key];
+      if (list === undefined) continue;
+      Object.assign(list, { label, default: [] });
+      describeButtonList(list);
+    }
+    const splits = buttons.properties.splits;
+    if (splits?.properties === undefined) return;
+    Object.assign(splits, { label: 'Split buttons', default: {} });
+    // annotate every split-kind slot
+    for (const [key, list] of Object.entries(splits.properties)) {
+      Object.assign(list, { label: `${key[0]!.toUpperCase()}${key.slice(1)}`, default: [] });
+      describeButtonList(list);
+    }
+  };
+  labelLists(schema.properties?.buttons, false);
+  labelLists(schema.properties?.projects?.items?.properties?.buttons, true);
+}
+
+// describe one ordered configured-button list
+function describeButtonList(list: SettingsSchema): void {
+  const button = list.items;
+  if (button?.properties === undefined) return;
+  button.label = 'Button';
+  Object.assign(button.properties.text!, { label: 'Button text' });
+  Object.assign(button.properties.icon!, { label: 'Button icon path', description: 'Optional SVG path data using the existing icon style. Leave blank for no icon.', placeholder: 'No icon' });
+  Object.assign(button.properties.color!, { label: 'Button color' });
+  Object.assign(button.properties.style!, { label: 'Button style' });
+  const action = button.properties.action;
+  if (action?.variants === undefined) return;
+  // label both exclusive action variants
+  for (const variant of action.variants) {
+    const shell = variant.properties?.shellCommand;
+    const prompt = variant.properties?.agentPrompt;
+    if (shell !== undefined) Object.assign(variant, { label: 'Shell command' }, { properties: { ...variant.properties, shellCommand: { ...shell, label: 'Shell command', editor: 'shell' as const } } });
+    if (prompt !== undefined) Object.assign(variant, { label: 'Agent prompt' }, { properties: { ...variant.properties, agentPrompt: { ...prompt, label: 'Agent prompt', description: 'Codex and OMX stay loading until the prompt finishes. Claude stays loading until the prompt is submitted.', multiline: true } } });
+  }
 }
 
 // mark application-level shell command controls
@@ -163,7 +214,7 @@ function describeProjectSettings(schema: SettingsSchema): void {
     externalUrl: 'Existing HTTPS origin to open directly.',
     commands: 'Trusted shell commands shared by this Project’s Worktrees.',
     newTask: 'Trusted shell command for New Task. It is available only for clean, pushed Worktrees; {taskId} inserts a random task ID.',
-    push: 'Label and prompt for the commit-and-push action.'
+    buttons: 'Replace application buttons with the same text or append new buttons. Empty lists inherit application buttons.'
   };
   // describe every declared project field
   for (const [key, description] of Object.entries(descriptions)) {
@@ -176,6 +227,8 @@ function describeProjectSettings(schema: SettingsSchema): void {
   Object.assign(project.properties.worktreeOrder!, { placeholder: 'Unavailable (from discovered Worktree order)' });
   Object.assign(project.properties.worktreesDirectory!, { placeholder: 'Unavailable (from resolved Worktrees directory)' });
   project.properties.newTask!.editor = 'shell';
+  // legacy push is migrated into generic buttons and has no Settings control
+  delete project.properties.push;
   describeProjectCommands(project.properties.commands, 'project');
   // describe each preferred checkout path
   if (project.properties.worktreeOrder?.items !== undefined) project.properties.worktreeOrder.items.description = 'One checkout path to place ahead of unlisted Worktrees.';
@@ -188,11 +241,6 @@ function describeProjectSettings(schema: SettingsSchema): void {
     delete override.properties.hostname;
     delete override.properties.port;
     describeProjectCommands(override.properties.commands, 'override');
-  }
-  const push = project.properties.push;
-  if (push?.properties !== undefined) {
-    Object.assign(push.properties.label!, { description: 'Button text shown for the commit-and-push action.', placeholder: sourcedPlaceholder('Commit/Push', 'built-in default') });
-    Object.assign(push.properties.prompt!, { description: 'Prompt queued to the active agent when the action is selected.', placeholder: sourcedPlaceholder('review, commit, and push', 'built-in default') });
   }
 }
 

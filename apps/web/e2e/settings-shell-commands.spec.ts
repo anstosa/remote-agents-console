@@ -109,7 +109,6 @@ const applicationValue = {
         },
       },
       newTask: "codex exec --task {taskId}",
-      push: { label: "Ship", prompt: "review, commit, and push" },
     },
   ],
 };
@@ -359,7 +358,8 @@ test("edits only executable application values as shell code", async ({
     await expectShellEditor(settings, path);
   await expectPlainInput(settings, "projects.0.path");
   await expectPlainInput(settings, "projects.0.hostPath");
-  await expectPlainInput(settings, "projects.0.push.prompt");
+  // legacy push controls are replaced by configured button collections
+  await expect(settings.locator('[data-settings-path="projects.0.push.prompt"]')).toHaveCount(0);
 
   const worktreeOrder = settings.locator(
     '[data-settings-path="projects.0.worktreeOrder"]',
@@ -477,11 +477,11 @@ test("uses single-line shell editors for safe and protected terminal bindings", 
   test.setTimeout(90_000);
   const { settings, state } = await setupShellSettings(page);
   await selectSection(settings, "Keyboard shortcuts");
-  await settings.getByRole("combobox", { name: "Key table" }).click();
-  await page
-    .getByRole("listbox", { name: "Key table options" })
-    .getByRole("option", { name: "prefix", exact: true })
-    .click();
+  // switch from the root table to the second configured table
+  const keyTable = settings.getByRole("switch", { name: "Key table", exact: true });
+  await expect(keyTable).not.toBeChecked();
+  await keyTable.click();
+  await expect(keyTable).toBeChecked();
 
   const safeRow = settings.locator(
     '[data-key-table="prefix"] [data-key-chord="t"]',

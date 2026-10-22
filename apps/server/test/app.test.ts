@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import argon2 from 'argon2';
 import { createHmac } from 'node:crypto';
 import { buildApp } from '../src/app.js';
@@ -22,8 +22,19 @@ import type { ReviewTour } from '../src/review-tour/contracts.js';
 import { PullRequestLookupError } from '../src/pull-requests/service.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from '../src/dashboard/updates.js';
 const config: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen:{host:'127.0.0.1',port:8787},publicOrigin:new URL('https://agents.example.com'),trustedProxyIps:new Set(['127.0.0.1']),pollIntervalMs:500,adapters:{},projects:[] };
-// reset environment overrides
-afterEach(() => { vi.unstubAllEnvs(); });
+let queueDirectory: string | undefined;
+// keep default queues independent of persisted developer prompts
+beforeEach(async () => {
+  queueDirectory = await mkdtemp(join(tmpdir(), 'rac-app-queue-'));
+  vi.stubEnv('RAC_QUEUED_PROMPTS_FILE', join(queueDirectory, 'queued.json'));
+});
+// restore overrides and remove only this test's queue
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  // tolerate setup failure before the temporary queue exists
+  if (queueDirectory !== undefined) await rm(queueDirectory, { recursive: true, force: true });
+  queueDirectory = undefined;
+});
 describe('HTTP security boundary',()=>{let app:Awaited<ReturnType<typeof buildApp>>;afterEach(async()=>{await app?.close()});it('serves the browser application and its build version for the canonical host',async()=>{const hash=await argon2.hash('synthetic-password',{type:argon2.argon2id});app=await buildApp(config,{auth:new AuthService(hash,Buffer.alloc(32,2).toString('base64url'))});const response=await app.inject({method:'GET',url:'/',headers:{host:'agents.example.com'}});expect(response.statusCode).toBe(200);expect(response.headers['content-type']).toContain('text/html');expect(response.headers['cross-origin-opener-policy']).toBe('same-origin-allow-popups');expect(response.body).toContain('<!doctype html>');const version=await app.inject({method:'GET',url:'/api/ui-version',headers:{host:'agents.example.com'}});expect(version.statusCode).toBe(200);expect(version.json().version).toMatch(/^\/assets\/index-[\w-]+\.js$/)}, 15_000);it('requires canonical Host and Origin and creates a secure host cookie',async()=>{const hash=await argon2.hash('synthetic-password',{type:argon2.argon2id});app=await buildApp(config,{auth:new AuthService(hash,Buffer.alloc(32,2).toString('base64url'))});const bad=await app.inject({method:'GET',url:'/api/auth/bootstrap',headers:{host:'evil.example'}});expect(bad.statusCode).toBe(403);const boot=await app.inject({method:'GET',url:'/api/auth/bootstrap',headers:{host:'agents.example.com'}});const token=boot.json().csrfToken;const denied=await app.inject({method:'POST',url:'/api/auth/login',headers:{host:'agents.example.com','x-csrf-token':token},payload:{password:'synthetic-password'}});expect(denied.statusCode).toBe(403);const ok=await app.inject({method:'POST',url:'/api/auth/login',headers:{host:'agents.example.com',origin:'https://agents.example.com','x-csrf-token':token},payload:{password:'synthetic-password'}});expect(ok.statusCode).toBe(200);expect(ok.headers['set-cookie']).toContain('__Host-rac=');expect(ok.headers['set-cookie']).toContain('HttpOnly');expect(ok.headers['set-cookie']).toContain('Secure');expect(ok.headers['content-security-policy']).toContain("default-src 'self'");expect(ok.headers['content-security-policy']).toContain("img-src 'self' data:")}, 15_000)});
 
 describe('server identity API', () => {

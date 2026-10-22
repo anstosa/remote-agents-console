@@ -11,13 +11,14 @@ function worker() {
   const focus = vi.fn().mockResolvedValue(undefined);
   const navigate = vi.fn().mockResolvedValue({ focus });
   const openWindow = vi.fn().mockResolvedValue(undefined);
+  const cachedPreference = vi.fn().mockResolvedValue(undefined);
   const clients = { claim: vi.fn(), matchAll: vi.fn().mockResolvedValue([{ url: 'https://agents.example.com/', navigate, focus }]), openWindow };
   const self = {
     // retain registered event handlers
     addEventListener: (name: string, listener: (event: unknown) => void) => listeners.set(name, listener),
     skipWaiting: vi.fn(), clients, location: { origin: 'https://agents.example.com' }, registration: { showNotification }
   };
-  runInNewContext(source, { self, clients, URL });
+  runInNewContext(source, { self, clients, URL, caches: { match: cachedPreference } });
   // await the worker lifetime promise
   const dispatch = async (name: string, event: Record<string, unknown>) => {
     const waitUntil = vi.fn();
@@ -25,11 +26,27 @@ function worker() {
     await Promise.all(waitUntil.mock.calls.map(([promise]) => promise));
     return waitUntil;
   };
-  return { dispatch, showNotification, navigate, focus, openWindow };
+  return { dispatch, showNotification, navigate, focus, openWindow, cachedPreference };
 }
 
 // preserve immediate display and durable routing
 describe('push service worker', () => {
+  // honor the browser's cached opt-out without suppressing visible alerts
+  it.each([false, true])('displays notifications with cached sound muting set to %s', async muted => {
+    const { dispatch, showNotification, cachedPreference } = worker();
+    cachedPreference.mockResolvedValue(muted ? {} : undefined);
+    await dispatch('push', { data: { json: () => ({ title: 'Done' }) } });
+    expect(showNotification).toHaveBeenCalledWith('Done', expect.objectContaining({ silent: muted }));
+  });
+
+  // preserve push delivery when browser preference storage is unavailable
+  it('displays notifications when the sound preference cache fails', async () => {
+    const { dispatch, showNotification, cachedPreference } = worker();
+    cachedPreference.mockRejectedValue(new Error('cache unavailable'));
+    await dispatch('push', { data: { json: () => ({ title: 'Done' }) } });
+    expect(showNotification).toHaveBeenCalledWith('Done', expect.objectContaining({ silent: false }));
+  });
+
   // keep delivery independent of an open app or a fetch
   it('displays an actionable push inside the worker lifetime', async () => {
     const { dispatch, showNotification } = worker();

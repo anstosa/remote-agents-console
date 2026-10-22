@@ -49,9 +49,12 @@ const terminalBackground = (page: Page) => page.evaluate(() => {
   return scrollable?.style.backgroundColor ?? '';
 });
 
+// open interface settings
 const openSettings = async (page: Page) => {
   await page.getByRole('button', { name: 'Global settings' }).first().click();
-  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settings).toBeVisible();
+  await settings.getByRole('navigation', { name: 'Settings sources' }).getByRole('button', { name: 'Interface', exact: true }).click();
 };
 
 test('the toggle flips the whole UI between Dark and Light', async ({ page }) => {

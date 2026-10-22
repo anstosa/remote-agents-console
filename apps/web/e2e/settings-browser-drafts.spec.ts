@@ -282,6 +282,7 @@ async function setupBrowserDrafts(page: Page, files = false) {
   await expect(
     settings.getByRole("searchbox", { name: "Search settings", exact: true }),
   ).toBeVisible();
+  await selectSection(settings, "interface", "Interface");
   return { settings, state };
 }
 
@@ -307,7 +308,7 @@ async function selectSection(settings: Locator, id: string, label: string) {
     .click();
 }
 
-// stage every browser-backed preference without applying it
+// stage every browser-backed preference across its owning pages
 async function stageAllBrowserPreferences(settings: Locator) {
   await settings
     .getByRole("radio", { name: "Light theme", exact: true })
@@ -321,9 +322,11 @@ async function stageAllBrowserPreferences(settings: Locator) {
   await settings
     .getByRole("switch", { name: "Flyout markers", exact: true })
     .check();
+  await selectSection(settings, "projects", "Projects");
   await settings
     .getByRole("switch", { name: "Dynamic worktrees", exact: true })
     .uncheck();
+  await selectSection(settings, "browser", "This browser");
   await settings
     .getByRole("button", { name: "Rename browser name", exact: true })
     .click();
@@ -332,7 +335,23 @@ async function stageAllBrowserPreferences(settings: Locator) {
     .getByRole("dialog", { name: "Rename browser" });
   await rename.getByLabel("Name", { exact: true }).fill("Staged browser");
   await rename.getByRole("button", { name: "Done", exact: true }).click();
+  await selectSection(settings, "interface", "Interface");
 }
+
+// retain the upstream sound preference on its new interface page
+test("saves notification sounds from Interface without changing files", async ({ page }) => {
+  const { settings, state } = await setupBrowserDrafts(page, true);
+  const sounds = settings.getByRole("switch", { name: "Notification sounds", exact: true });
+  await expect(sounds).toBeChecked();
+  await sounds.uncheck();
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.notification-sounds"))).toBe("disabled");
+  expect(state.fileSaves).toHaveLength(0);
+  await selectSection(settings, "browser", "This browser");
+  await expect(sounds).toHaveCount(0);
+  await selectSection(settings, "interface", "Interface");
+  await expect(sounds).not.toBeChecked();
+});
 
 // read only applied browser state outside the settings draft
 const appliedBrowserState = (page: Page) =>
@@ -369,6 +388,21 @@ test("stages all browser preferences and applies them together without file writ
 }) => {
   const { settings, state } = await setupBrowserDrafts(page);
   await stageAllBrowserPreferences(settings);
+  const navigation = settings.getByRole("navigation", {
+    name: "Settings sources",
+    exact: true,
+  });
+  await expect(
+    navigation.getByRole("button", {
+      name: /^This browser.*Unsaved changes$/u,
+    }),
+  ).toBeVisible();
+  await expect(
+    navigation.getByRole("button", { name: /^Interface.*Unsaved changes$/u }),
+  ).toBeVisible();
+  await expect(
+    navigation.getByRole("button", { name: /^Projects.*Unsaved changes$/u }),
+  ).toBeVisible();
   await expect(
     settings.getByRole("radio", { name: "Light theme", exact: true }),
   ).toHaveAttribute("aria-checked", "true");
@@ -379,9 +413,11 @@ test("stages all browser preferences and applies them together without file writ
   await expect(
     settings.getByRole("switch", { name: "Flyout markers", exact: true }),
   ).toBeChecked();
+  await selectSection(settings, "projects", "Projects");
   await expect(
     settings.getByRole("switch", { name: "Dynamic worktrees", exact: true }),
   ).not.toBeChecked();
+  await selectSection(settings, "browser", "This browser");
   await expect(
     settings.getByRole("group", { name: "Name", exact: true }),
   ).toContainText("Staged browser");
@@ -390,6 +426,9 @@ test("stages all browser preferences and applies them together without file writ
 
   await actions(settings).save.click();
   await expect(actions(settings).save).toHaveCount(0);
+  await expect(
+    navigation.getByLabel("Unsaved changes", { exact: true }),
+  ).toHaveCount(0);
   expect(state.validations).toEqual([]);
   expect(state.fileSaves).toEqual([]);
   expect(state.renames).toEqual([{ deviceName: "Staged browser" }]);
@@ -411,7 +450,7 @@ test("closes open file collection editors after a browser-only save", async ({
   await item.getByRole("button", { name: /^Edit Item \d+$/u }).click();
   await expect(item.getByRole("textbox")).toHaveValue("Saved item");
 
-  await selectSection(settings, "browser", "This browser");
+  await selectSection(settings, "interface", "Interface");
   await settings
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();
@@ -428,10 +467,33 @@ test("closes open file collection editors after a browser-only save", async ({
   await expect(item.getByRole("textbox")).toHaveCount(0);
 });
 
+test("retains Interface through file refresh and discard", async ({ page }) => {
+  const { settings } = await setupBrowserDrafts(page, true);
+  await selectSection(settings, "interface", "Interface");
+  await settings
+    .getByRole("button", { name: "Refresh files", exact: true })
+    .click();
+  await expect(
+    settings.getByRole("heading", { name: "Interface", exact: true }),
+  ).toBeVisible();
+
+  await selectSection(settings, "app", "Application");
+  await settings
+    .getByRole("textbox", { name: "Service title", exact: true })
+    .fill("Discarded service title");
+  await selectSection(settings, "interface", "Interface");
+  await actions(settings).discard.click();
+  await confirmSettingsDiscard(page);
+  await expect(
+    settings.getByRole("heading", { name: "Interface", exact: true }),
+  ).toBeVisible();
+});
+
 test("updates an untouched rename dialog when the live browser name changes", async ({
   page,
 }) => {
   const { settings, state } = await setupBrowserDrafts(page);
+  await selectSection(settings, "browser", "This browser");
   state.deviceName = "Alice";
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(
@@ -459,6 +521,7 @@ test("preserves an explicit rename edit across a live browser name change", asyn
   page,
 }) => {
   const { settings, state } = await setupBrowserDrafts(page);
+  await selectSection(settings, "browser", "This browser");
   state.deviceName = "Alice";
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(
@@ -537,15 +600,18 @@ test("collapses reverted browser drafts and discards unapplied values", async ({
   await settings
     .getByRole("switch", { name: "Flyout markers", exact: true })
     .uncheck();
+  await selectSection(settings, "projects", "Projects");
   await settings
     .getByRole("switch", { name: "Dynamic worktrees", exact: true })
     .check();
+  await selectSection(settings, "browser", "This browser");
   await settings
     .getByRole("button", { name: "Rename browser name", exact: true })
     .click();
   const rename = page.getByRole("dialog", { name: "Rename browser" });
   await rename.getByLabel("Name", { exact: true }).fill("Fixture browser");
   await rename.getByRole("button", { name: "Done", exact: true }).click();
+  await selectSection(settings, "interface", "Interface");
   await expect(controls.validate).toHaveCount(0);
   await expect(controls.discard).toHaveCount(0);
   await expect(controls.save).toHaveCount(0);
@@ -581,6 +647,7 @@ test("drops browser drafts when Settings closes", async ({ page }) => {
 
   await page.getByRole("button", { name: "Global settings" }).first().click();
   const reopened = page.getByRole("dialog", { name: "Settings" });
+  await selectSection(reopened, "interface", "Interface");
   await expect(
     reopened.getByRole("radio", { name: "Dark theme", exact: true }),
   ).toHaveAttribute("aria-checked", "true");
@@ -590,9 +657,11 @@ test("drops browser drafts when Settings closes", async ({ page }) => {
   await expect(
     reopened.getByRole("switch", { name: "Flyout markers", exact: true }),
   ).not.toBeChecked();
+  await selectSection(reopened, "projects", "Projects");
   await expect(
     reopened.getByRole("switch", { name: "Dynamic worktrees", exact: true }),
   ).toBeChecked();
+  await selectSection(reopened, "browser", "This browser");
   await expect(
     reopened.getByRole("group", { name: "Name", exact: true }),
   ).toContainText("Fixture browser");
@@ -606,6 +675,7 @@ test("retains browser, file and voice drafts through settings navigation", async
   await settings
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();
+  await selectSection(settings, "browser", "This browser");
   await settings
     .getByRole("button", { name: "Rename browser name", exact: true })
     .click();
@@ -624,10 +694,11 @@ test("retains browser, file and voice drafts through settings navigation", async
     .getByRole("textbox", { name: "Davo name", exact: true })
     .fill("Voice draft");
 
-  await selectSection(settings, "browser", "This browser");
+  await selectSection(settings, "interface", "Interface");
   await expect(
     settings.getByRole("radio", { name: "Light theme", exact: true }),
   ).toHaveAttribute("aria-checked", "true");
+  await selectSection(settings, "browser", "This browser");
   await expect(
     settings.getByRole("group", { name: "Name", exact: true }),
   ).toContainText("Navigation draft");
@@ -657,6 +728,7 @@ for (const failure of ["validation", "save"] as const) {
     await settings
       .getByRole("radio", { name: "Light theme", exact: true })
       .click();
+    await selectSection(settings, "browser", "This browser");
     await settings
       .getByRole("button", { name: "Rename browser name", exact: true })
       .click();
@@ -674,10 +746,11 @@ for (const failure of ["validation", "save"] as const) {
     expect(state.renames).toEqual([]);
     expect(state.validations).toHaveLength(1);
     expect(state.fileSaves).toHaveLength(failure === "save" ? 1 : 0);
-    await selectSection(settings, "browser", "This browser");
+    await selectSection(settings, "interface", "Interface");
     await expect(
       settings.getByRole("radio", { name: "Light theme", exact: true }),
     ).toHaveAttribute("aria-checked", "true");
+    await selectSection(settings, "browser", "This browser");
     await expect(
       settings.getByRole("group", { name: "Name", exact: true }),
     ).toContainText("Blocked browser");
@@ -692,6 +765,7 @@ test("retains browser drafts and reports partial completion when rename fails af
   await settings
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();
+  await selectSection(settings, "browser", "This browser");
   await settings
     .getByRole("button", { name: "Rename browser name", exact: true })
     .click();
@@ -715,17 +789,18 @@ test("retains browser drafts and reports partial completion when rename fails af
   await expect(
     settings.getByRole("textbox", { name: "Service title", exact: true }),
   ).toHaveValue("Saved file");
-  await selectSection(settings, "browser", "This browser");
+  await selectSection(settings, "interface", "Interface");
   await expect(
     settings.getByRole("radio", { name: "Light theme", exact: true }),
   ).toHaveAttribute("aria-checked", "true");
+  await selectSection(settings, "browser", "This browser");
   await expect(
     settings.getByRole("group", { name: "Name", exact: true }),
   ).toContainText("Rejected browser");
   await expect(actions(settings).save).toBeVisible();
 });
 
-test("locks every browser control while the shared save is pending", async ({
+test("locks visible browser controls and page changes while the shared save is pending", async ({
   page,
 }) => {
   const { settings, state } = await setupBrowserDrafts(page);
@@ -749,12 +824,13 @@ test("locks every browser control while the shared save is pending", async ({
   await expect(
     settings.getByRole("switch", { name: "Flyout markers", exact: true }),
   ).toBeDisabled();
+  await selectSection(settings, "projects", "Projects");
+  await expect(
+    settings.getByRole("heading", { name: "Interface", exact: true, level: 2 }),
+  ).toBeVisible();
   await expect(
     settings.getByRole("switch", { name: "Dynamic worktrees", exact: true }),
-  ).toBeDisabled();
-  await expect(
-    settings.getByRole("button", { name: "Rename browser name", exact: true }),
-  ).toBeDisabled();
+  ).toHaveCount(0);
   await expect(actions(settings).validate).toHaveCount(0);
   await expect(actions(settings).discard).toBeDisabled();
   await expect(
@@ -762,6 +838,7 @@ test("locks every browser control while the shared save is pending", async ({
   ).toBeDisabled();
   held.resolve({ status: 200 });
   await expect(actions(settings).save).toHaveCount(0);
+  expect(state.renames).toEqual([{ deviceName: "Staged browser" }]);
   expect(await appliedBrowserState(page)).toEqual({
     theme: "latte",
     font: "12",

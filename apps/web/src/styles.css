@@ -437,7 +437,7 @@ html.software-keyboard-open .tabs { display: none; }
 .git-status-panel-footer > .pull-request-card { flex: 1 1 0; min-width: 0; height: var(--standard-control-size); min-height: var(--standard-control-size); margin: 0; }
 .git-status-panel-footer .git-status-actions, .git-status-panel-footer .git-status-mode { flex: 0 0 auto; }
 /* keep branch actions aligned at the standard control height */
-.git-status-panel-footer :is(.git-status-view-changes, .git-status-review, .git-status-push, .pull-request-fixup, .git-status-mode button) { height: var(--standard-control-size); min-height: var(--standard-control-size); padding: .5rem .7rem; font-size: .75rem; line-height: 1.2; }
+.git-status-panel-footer :is(.git-status-view-changes, .git-status-review, .git-status-push, .pull-request-fixup, .configured-pull-request-actions .configured-button, .git-status-mode button) { height: var(--standard-control-size); min-height: var(--standard-control-size); padding: .5rem .7rem; font-size: .75rem; line-height: 1.2; }
 /* keep the single-line pr readable beside the additional action */
 @media (max-width: 900px) {
   .git-status-panel-footer { flex-direction: column; align-items: stretch; }
@@ -665,6 +665,10 @@ html.software-keyboard-open .tabs { display: none; }
 .panel-header-action:is(.note-delete, .pane-delete) { color: var(--red); }
 .panel-header-action:is(.note-delete, .pane-delete):hover:not(:disabled) { border-color: var(--red); color: var(--red); }
 .panel-header-action.copied { border-color: var(--green); color: var(--green); }
+.panel-header-action.configured-button { display: inline-flex; flex: 0 0 auto; width: auto; min-width: 1.9rem; gap: .35rem; padding: 0 .5rem; color: var(--configured-button-color); white-space: nowrap; }
+.panel-header-action.configured-button-solid { border-color: var(--configured-button-color); background: var(--configured-button-color); color: var(--crust); }
+.panel-header-action.configured-button-outline { border-color: color-mix(in srgb, var(--configured-button-color) 72%, var(--surface-1)); background: transparent; }
+.panel-header-action.configured-button:hover:not(:disabled) { border-color: var(--configured-button-color); background: color-mix(in srgb, var(--configured-button-color) 16%, var(--mantle)); color: var(--configured-button-color); }
 .panel-header .browser-refresh.loading { border-color: color-mix(in srgb, var(--blue) 68%, var(--surface-2)); color: var(--blue); }
 .panel-header .note-send { border-color: color-mix(in srgb, var(--mauve) 72%, var(--lavender)); background: linear-gradient(135deg, var(--mauve), color-mix(in srgb, var(--blue) 72%, var(--lavender))); color: var(--crust); box-shadow: 0 0 .7rem color-mix(in srgb, var(--mauve) 35%, transparent); }
 .panel-header .note-send:not(:disabled):hover { border-color: var(--lavender); background: linear-gradient(135deg, color-mix(in srgb, var(--mauve) 88%, white), var(--blue)); color: var(--crust); filter: brightness(1.08); }
@@ -678,6 +682,7 @@ html.software-keyboard-open .tabs { display: none; }
 .panel-header-menu { display: grid; gap: .1rem; }
 .panel-header-menu .panel-header-row { display: flex; width: 100%; height: auto; align-items: center; gap: .55rem; padding: .55rem .7rem; border: 0; color: var(--text); }
 .panel-header-menu .panel-header-row:hover:not(:disabled) { background: var(--surface-0); }
+.panel-header-menu .panel-header-row.configured-button { color: var(--configured-button-color); }
 .panel-header-menu .panel-header-row:is(.note-delete, .pane-delete) { color: var(--red); }
 /* the note picker: the open note's name, how many notes this Place has, and a chevron */
 .note-picker { display: flex; min-width: 0; height: 1.9rem; align-items: center; gap: .35rem; padding: 0 .35rem 0 0; border: 0; background: transparent; color: var(--panel-accent); box-shadow: none; font: inherit; }
@@ -1256,6 +1261,18 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 .command-menu span { min-width: 0; overflow: hidden; font-size: .7rem; text-overflow: ellipsis; white-space: nowrap; }
 .command-menu-empty { padding: .5rem; color: var(--overlay-0); font: 600 .72rem var(--font-mono); }
 :is(.workspace-toolbar-actions, .empty-workspace-actions) { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: .375rem; }
+.configured-button-list { display: inline-flex; min-width: 0; align-items: center; gap: .375rem; }
+.configured-button:not(.panel-header-action) { position: relative; display: inline-flex; width: auto; min-width: var(--standard-control-size); min-height: var(--standard-control-size); align-items: center; justify-content: center; gap: .4rem; border-radius: var(--control-radius); padding: .4rem .65rem; color: var(--configured-button-color); font: 700 .72rem var(--font-mono); white-space: nowrap; }
+.configured-button-outline:not(.panel-header-action) { border: 1px solid color-mix(in srgb, var(--configured-button-color) 72%, var(--surface-1)); background: transparent; box-shadow: none; }
+.configured-button-solid:not(.panel-header-action) { border: 1px solid var(--configured-button-color); background: var(--configured-button-color); color: var(--crust); box-shadow: 0 0 .65rem color-mix(in srgb, var(--configured-button-color) 22%, transparent); }
+.configured-button:not(:disabled):hover { border-color: var(--configured-button-color); background: color-mix(in srgb, var(--configured-button-color) 16%, var(--mantle)); color: var(--configured-button-color); filter: brightness(1.08); }
+.configured-button:not(.panel-header-action):disabled { cursor: not-allowed; opacity: .55; }
+.configured-button-icon { display: block; flex: none; width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+.tab-row-lead .configured-button { height: var(--standard-control-size); min-height: var(--standard-control-size); }
+.configured-nav-menu { display: grid; width: 100%; gap: .08rem; }
+.configured-nav-menu .configured-button { width: 100%; min-height: 2.2rem; justify-content: flex-start; padding: .45rem .7rem; box-shadow: none; }
+.configured-nav-menu .configured-button-outline { background: transparent; color: var(--configured-button-color); }
+.configured-nav-menu .configured-button-solid { background: var(--configured-button-color); color: var(--crust); }
 :is(.workspace-toolbar-actions, .empty-workspace-actions) button, .project-open { box-sizing: border-box; height: var(--standard-control-size); border-radius: var(--control-radius); padding: .4rem .6rem; font-size: .75rem; font-weight: 700; box-shadow: none; transition: background-color .15s ease, border-color .15s ease, color .15s ease, filter .15s ease; }
 :is(.workspace-toolbar-actions, .empty-workspace-actions) .icon-button { display: inline-grid; flex: 0 0 var(--standard-control-size); width: var(--standard-control-size); height: var(--standard-control-size); padding: 0; place-items: center; }
 :is(.workspace-toolbar-actions, .empty-workspace-actions) .icon-button svg { display: block; width: 1rem; height: 1rem; }
@@ -1277,6 +1294,9 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 :is(.workspace-toolbar-actions, .empty-workspace-actions) .code-toggle { --toolbar-accent: var(--mauve); }
 :is(.workspace-toolbar-actions, .empty-workspace-actions) .toolbar-button.panel-open { border-color: color-mix(in srgb, var(--toolbar-accent) 70%, var(--surface-1)); background: color-mix(in srgb, var(--toolbar-accent) 12%, var(--mantle)); color: var(--toolbar-accent); }
 :is(.workspace-toolbar-actions, .empty-workspace-actions) :is(.more, .toolbar-button):disabled { opacity: .45; }
+.workspace-toolbar-actions .toolbar-button.configured-button-outline { border-color: color-mix(in srgb, var(--configured-button-color) 72%, var(--surface-1)); background: transparent; color: var(--configured-button-color); }
+.workspace-toolbar-actions .toolbar-button.configured-button-solid { border-color: var(--configured-button-color); background: var(--configured-button-color); color: var(--crust); }
+.workspace-toolbar-actions .toolbar-button.configured-button:not(:disabled):hover { border-color: var(--configured-button-color); background: color-mix(in srgb, var(--configured-button-color) 16%, var(--mantle)); color: var(--configured-button-color); }
 /* the Notes button's unread-queued alert outranks the neutral toolbar colours */
 :is(.workspace-toolbar-actions, .empty-workspace-actions) .notes-toggle.unread-queued-prompts { border-color: var(--red); color: var(--red); }
 /* a Place without git shows its folder where the git status would be */
@@ -1583,6 +1603,9 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .upstream-rebase-dismiss:hover { color: var(--text); }
 .dialog { position: fixed; inset: 0; background: color-mix(in srgb, var(--crust) 85%, transparent); display: grid; place-items: center; padding: 1rem; z-index: var(--layer-dialog); backdrop-filter: blur(5px); }
 .dialog > div { width: min(52rem, 100%); max-height: 90vh; overflow: auto; background: var(--base); border: 1px solid var(--surface-1); border-radius: var(--control-radius); padding: 1rem; box-shadow: 0 1.5rem 4rem color-mix(in srgb, var(--crust) 80%, transparent); }
+/* hide modal scrollbars without changing wheel, touch or keyboard scrolling */
+:is(.dialog, .client-settings-page, .fullscreen-card), :is(.dialog, .client-settings-page, .fullscreen-card) * { scrollbar-width: none; }
+:is(.dialog, .client-settings-page, .fullscreen-card)::-webkit-scrollbar, :is(.dialog, .client-settings-page, .fullscreen-card) ::-webkit-scrollbar { display: none; }
 .response-file-dialog { padding: 0; }
 .response-file-dialog > div { display: grid; width: 100vw; max-width: none; height: var(--app-height, 100dvh); max-height: none; min-height: 0; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 0; border-radius: 0; padding: 0; }
 .response-file-dialog header { display: flex; min-width: 0; min-height: 3rem; align-items: center; gap: .75rem; padding: .55rem .7rem; border-bottom: 1px solid var(--surface-1); }
@@ -1717,6 +1740,12 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .progress-green { --progress-ring-color: var(--green); --progress-ring-highlight: var(--teal); }
 .progress-teal { --progress-ring-color: var(--teal); --progress-ring-highlight: var(--sky); }
 .progress-pink { --progress-ring-color: var(--pink); --progress-ring-highlight: var(--rosewater); }
+.progress-rosewater { --progress-ring-color: var(--rosewater); --progress-ring-highlight: var(--flamingo); }
+.progress-flamingo { --progress-ring-color: var(--flamingo); --progress-ring-highlight: var(--rosewater); }
+.progress-maroon { --progress-ring-color: var(--maroon); --progress-ring-highlight: var(--red); }
+.progress-sky { --progress-ring-color: var(--sky); --progress-ring-highlight: var(--sapphire); }
+.progress-sapphire { --progress-ring-color: var(--sapphire); --progress-ring-highlight: var(--blue); }
+.progress-lavender { --progress-ring-color: var(--lavender); --progress-ring-highlight: var(--mauve); }
 /* let the glow escape while labels retain their own overflow clipping */
 .tabs button[role='tab'].progress-border, .workspace-sheet-row.progress-border { overflow: visible; }
 /* loading replaces attention pulses without moving the host or its contents */

@@ -47,12 +47,51 @@ const worktreeOverride: ProjectField = {
     hostname: optionalString
   }
 };
-const pushAction: ProjectField = {
+const buttonAction: ProjectField = {
+  type: 'union',
+  variants: [
+    { type: 'object', properties: { shellCommand: requiredString } },
+    { type: 'object', properties: { agentPrompt: requiredString } }
+  ]
+};
+const configuredButton: ProjectField = {
+  type: 'object',
+  properties: {
+    text: requiredString,
+    icon: optionalString,
+    color: requiredString,
+    style: requiredString,
+    action: buttonAction
+  }
+};
+const buttonList = optionalArray(configuredButton);
+const splitButtons: ProjectField = {
   type: 'object',
   optional: true,
+  omitWhenEmpty: true,
   properties: {
-    label: requiredString,
-    prompt: requiredString
+    agent: buttonList,
+    terminal: buttonList,
+    note: buttonList,
+    browser: buttonList,
+    files: buttonList,
+    code: buttonList,
+    review: buttonList,
+    stack: buttonList,
+    settings: buttonList
+  }
+};
+const projectButtons: ProjectField = {
+  type: 'object',
+  optional: true,
+  omitWhenEmpty: true,
+  properties: {
+    tabLead: buttonList,
+    leftNav: buttonList,
+    rightNav: buttonList,
+    navMenu: buttonList,
+    pullRequest: buttonList,
+    splits: splitButtons
   }
 };
 const project: ProjectField = {
@@ -71,7 +110,7 @@ const project: ProjectField = {
     hostname: optionalString,
     commands: projectCommands,
     newTask: optionalString,
-    push: pushAction
+    buttons: projectButtons
   }
 };
 const projectFields: ProjectField = {
@@ -85,8 +124,11 @@ const omitted = Symbol('omitted-project-field');
 // select the concrete union branch for a value
 function unionField(field: ProjectField, value: unknown): ProjectField | undefined {
   if (field.type !== 'union') return field;
-  // object process declarations use the structured branch
-  if (value !== null && typeof value === 'object' && !Array.isArray(value)) return field.variants?.find(variant => variant.type === 'object');
+  // object unions select the variant that owns the authored key
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    const keys = Object.keys(value);
+    return field.variants?.find(variant => variant.type === 'object' && keys.some(key => variant.properties?.[key] !== undefined));
+  }
   // scalar process declarations use the string branch
   if (typeof value === 'string') return field.variants?.find(variant => variant.type === 'string');
   return undefined;

@@ -22,6 +22,7 @@ import { SettingsSourceHandover, type SettingsHandoverChoices } from './source-h
 import { isTmuxSettingsChange, tmuxEnvironmentKeys, tmuxEnvironmentKeysForInstallation } from './tmux-settings.js';
 import { agentEnvironmentKeys, agentEnvironmentKeysForAdapter, agentEnvironmentKeysForInstallation, environmentKeysWithDedicatedControls, storageEnvironmentKeys, voiceEnvironmentKeys } from './environment-fields.js';
 import { SettingsSelect, type SettingsSelectOption } from './select.js';
+import { isConfiguredButtonPath, SettingsButtonColorSwatch, SettingsButtonFields, SettingsButtonPreview } from './button-fields.js';
 import { CloudflareSettings, useCloudflareSetupDraft } from './cloudflare-settings.js';
 import { editableIconSources, InstanceIconPreview, instanceIcons, isInstanceIconName } from './icon-preview.js';
 import { composeOptionSettings, environmentDescription, knownEnvironmentKeys, labels as sourceLabels, protectedSettingIdentity } from '../../../server/src/settings/catalog.js';
@@ -71,7 +72,7 @@ const pendingSourceFormats = { app: 'json', env: 'env', installation: 'installat
 // reuse the authoritative labels before the installation catalog arrives
 const pendingSourceNavigation: Pick<SettingsSource, 'id' | 'label' | 'format' | 'path'>[] = Object.entries(pendingSourceFormats).map(([id, format]) => ({ id, label: sourceLabels[id] ?? id, format }));
 // keep dedicated and automatically derived controls out of the application field tree
-const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'review', 'scratchDirectory', 'projects', 'proxy', 'integrations.multiInstance', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
+const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'review', 'scratchDirectory', 'projects', 'buttons', 'proxy', 'integrations.multiInstance', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
 // keep dedicated source selectors with their application and tmux consumers
 const dedicatedInstallationPaths = new Set(['version', 'sources']);
 
@@ -626,6 +627,7 @@ type CollectionEntryProps = {
   count: number;
   firstMovableIndex?: number;
   summary: CollectionSummary;
+  headerContent?: ReactNode;
   issues: SettingsIssue[];
   editing: boolean;
   permanentEditor?: boolean;
@@ -644,12 +646,12 @@ type CollectionEntryProps = {
 };
 
 // keep compact collection actions and confirmation inside one row
-function CollectionEntry({ label, itemLabel, visibleLabel, index, count, firstMovableIndex = 0, summary, issues, editing, permanentEditor = false, editorId, disabled, navigationDisabled, structuralReason, confirming, confirmProjectRemoval, onEdit, onMove, onRequestRemove, onCancelRemove, onRemove, children }: CollectionEntryProps) {
+function CollectionEntry({ label, itemLabel, visibleLabel, index, count, firstMovableIndex = 0, summary, headerContent, issues, editing, permanentEditor = false, editorId, disabled, navigationDisabled, structuralReason, confirming, confirmProjectRemoval, onEdit, onMove, onRequestRemove, onCancelRemove, onRemove, children }: CollectionEntryProps) {
   const structureDisabled = disabled || structuralReason !== undefined || confirming;
   const moveUpTitle = structuralReason ?? `Move ${label} ${index + 1} up`;
   const moveDownTitle = structuralReason ?? `Move ${label} ${index + 1} down`;
   const removeTitle = structuralReason ?? `Remove ${label} ${index + 1}`;
-  return <fieldset className="settings-collection-entry settings-array-entry" data-settings-collection-entry="array" data-settings-entry-index={index} data-settings-editing={editing ? 'true' : 'false'}><legend className="sr-only">{itemLabel}</legend><div className="settings-array-entry-header settings-collection-entry-header"><span className="settings-collection-entry-copy">{visibleLabel !== undefined && <strong>{visibleLabel}</strong>}<span className="settings-collection-summary" title={summary.primary}>{summary.primary}</span>{summary.secondary && <small>{summary.secondary}</small>}{issues.length > 0 && <span className="settings-collection-issue-badge" aria-label={`${issues.length} validation ${issues.length === 1 ? 'issue' : 'issues'}`}>{issues.length}</span>}</span><span className="settings-array-actions settings-collection-actions">
+  return <fieldset className="settings-collection-entry settings-array-entry" data-settings-collection-entry="array" data-settings-entry-index={index} data-settings-editing={editing ? 'true' : 'false'}><legend className="sr-only">{itemLabel}</legend><div className="settings-array-entry-header settings-collection-entry-header"><span className="settings-collection-entry-copy">{headerContent ?? <>{visibleLabel !== undefined && <strong>{visibleLabel}</strong>}<span className="settings-collection-summary" title={summary.primary}>{summary.primary}</span>{summary.secondary && <small>{summary.secondary}</small>}</>}{issues.length > 0 && <span className="settings-collection-issue-badge" aria-label={`${issues.length} validation ${issues.length === 1 ? 'issue' : 'issues'}`}>{issues.length}</span>}</span><span className="settings-array-actions settings-collection-actions">
     {!permanentEditor && <button type="button" className="settings-collection-edit" aria-label={`${editing ? 'Close' : 'Edit'} ${itemLabel}`} aria-expanded={editing} aria-controls={editorId} disabled={navigationDisabled || confirming} onClick={onEdit}><PanelIcon path={editing ? panelIcons.close : panelIcons.editor} /><span>{editing ? 'Close' : 'Edit'}</span></button>}
     <button type="button" aria-label={`Move ${label} ${index + 1} up`} title={moveUpTitle} disabled={structureDisabled || index <= firstMovableIndex} onClick={() => { /* move one collection entry earlier */ onMove(index - 1); }}><PanelIcon path={panelIcons.moveUp} /></button>
     <button type="button" aria-label={`Move ${label} ${index + 1} down`} title={moveDownTitle} disabled={structureDisabled || index === count - 1} onClick={() => { /* move one collection entry later */ onMove(index + 1); }}><PanelIcon path={panelIcons.moveDown} /></button>
@@ -740,8 +742,10 @@ function ArrayField({ source, schema, value, path, draft, issues, label, itemLab
       const entryLabel = `${itemLabel} ${index + 1}`;
       const editing = reviewPresets || openEntries.has(index);
       const editorId = collectionEditorId(source.id, entryPath);
+      // keep the same live button preview visible with or without its editor
+      const headerContent = source.id === 'app' && isConfiguredButtonPath(entryPath) ? <SettingsButtonPreview value={entry} schema={item} /> : undefined;
       const structuralReason = protectedDraft ? collectionProtectionReason : confirmingEntries.size > 0 && !confirmingEntries.has(index) ? 'Finish or cancel the pending Project removal before changing this list.' : undefined;
-      return <CollectionEntry key={`${path.join('.')}:${index}`} label={label} itemLabel={entryLabel} visibleLabel={projectCollection ? undefined : itemLabel} index={index} count={array.length} firstMovableIndex={pinnedCount} summary={collectionItemSummary(entry, item, projectCollection)} issues={collectionItemIssues(issues, source.id, entryPath)} editing={editing} permanentEditor={reviewPresets} editorId={editorId} disabled={disabled} navigationDisabled={navigationDisabled} structuralReason={structuralReason} confirming={confirmingEntries.has(index)} confirmProjectRemoval={confirmProjectRemoval} onEdit={() => { /* toggle this ordered editor */ toggle(index); }} onMove={to => { /* keep index state detached from moved data */ move(index, to); }} onRequestRemove={() => { /* confirm or remove this ordered entry */ requestRemove(index); }} onCancelRemove={() => { /* cancel project removal */ setConfirmingEntries(new Set()); }} onRemove={() => { /* confirm project removal */ remove(index); }}>{renderChild({ ...item, label: item.label ?? itemLabel }, entry, entryPath, String(index))}</CollectionEntry>;
+      return <CollectionEntry key={`${path.join('.')}:${index}`} label={label} itemLabel={entryLabel} visibleLabel={projectCollection ? undefined : itemLabel} index={index} count={array.length} firstMovableIndex={pinnedCount} summary={collectionItemSummary(entry, item, projectCollection)} headerContent={headerContent} issues={collectionItemIssues(issues, source.id, entryPath)} editing={editing} permanentEditor={reviewPresets} editorId={editorId} disabled={disabled} navigationDisabled={navigationDisabled} structuralReason={structuralReason} confirming={confirmingEntries.has(index)} confirmProjectRemoval={confirmProjectRemoval} onEdit={() => { /* toggle this ordered editor */ toggle(index); }} onMove={to => { /* keep index state detached from moved data */ move(index, to); }} onRequestRemove={() => { /* confirm or remove this ordered entry */ requestRemove(index); }} onCancelRemove={() => { /* cancel project removal */ setConfirmingEntries(new Set()); }} onRemove={() => { /* confirm project removal */ remove(index); }}>{renderChild({ ...item, label: item.label ?? itemLabel }, entry, entryPath, String(index))}</CollectionEntry>;
     })}</div><button type="button" className="settings-collection-add-button" aria-label={`+ Add ${itemLabel}`} disabled={disabled || array.length < pinnedCount} title={array.length < pinnedCount ? 'Configure the source files before adding additional entries.' : undefined} onClick={add}><span>+ Add {itemLabel}</span>{array.length === 0 && schema.placeholder && <span className="settings-collection-placeholder">{schema.placeholder}</span>}</button>
   </div>;
 }
@@ -766,19 +770,23 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   // retain lifecycle controls when their optional command is omitted
   const adapterLifecycleCommand = source.id === 'app' && path.length === 3 && path[0] === 'adapters' && ['setup', 'teardown'].includes(path[2]!);
   const adapterUpdateCommand = source.id === 'app' && path.length === 4 && path[0] === 'adapters' && path[2] === 'updates';
+  // keep optional button artwork visible and resettable through its blank field
+  const buttonItem = source.id === 'app' && isConfiguredButtonPath(path);
+  const buttonField = source.id === 'app' && isConfiguredButtonPath(path.slice(0, -1));
+  const buttonIcon = buttonField && path.at(-1) === 'icon';
   // hide host namespace overrides unless Docker mode is authoritative
   if (projectHostPath && installationKind !== 'compose') return null;
   // keep resettable fields visible while omission selects their default state
   const reviewField = source.id === 'app' && path[0] === 'review';
-  const permanentField = reviewField || adapterLifecycleCommand || source.id === 'app' && path.length === 1 && ['scratchDirectory', 'editor'].includes(path[0]!);
+  const permanentField = reviewField || adapterLifecycleCommand || buttonIcon || source.id === 'app' && path.length === 1 && ['scratchDirectory', 'editor'].includes(path[0]!);
   const removable = schema.optional && !hasSchemaDefault(schema) && !projectField && !permanentField;
   // seed only a deliberately edited missing container and retain exact leaf identity
   const stagePatch: SetPatch = (target, next, disclosureDerived) => {
     const ownValue = next.path.length === path.length && path.every((part, index) => next.path[index] === part);
     // preserve required preset validation while blank lifecycle commands restore omission
-    const reset = ownValue && (adapterUpdateCommand || permanentField && (!reviewField || schema.optional || hasSchemaDefault(schema))) && next.op === 'set' && typeof next.value === 'string' && (next.value === '' || adapterLifecycleCommand && next.value.trim() === '');
-    // clearing an already omitted default never authors missing container shells
-    if (reset && valueAt(source.value, next.path) === undefined) return;
+    const reset = ownValue && (adapterUpdateCommand || permanentField && (!reviewField || schema.optional || hasSchemaDefault(schema))) && next.op === 'set' && typeof next.value === 'string' && (next.value === '' || (adapterLifecycleCommand || buttonIcon) && next.value.trim() === '');
+    // skip absent resets while allowing inherited button artwork to be cleared
+    if (reset && valueAt(source.value, next.path) === undefined && !(buttonIcon && value !== undefined)) return;
     const updates = adapterUpdateCommand ? valueAt(source.value, path.slice(0, -1)) : undefined;
     // an empty triplet disables updates while a partial triplet remains invalid
     const resetUpdates = adapterUpdateCommand && updates !== null && typeof updates === 'object' && Object.entries(updates).every(([key, command]) => key === path.at(-1) || command === '');
@@ -852,6 +860,8 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
     const record = effectiveValue !== null && typeof effectiveValue === 'object' && !Array.isArray(effectiveValue) ? effectiveValue as Record<string, unknown> : {};
     const properties = schema.properties ?? Object.fromEntries(Object.entries(record).map(([key, current]) => [key, inferSchema(current)]));
     control = <div className="settings-object-fields">{Object.entries(properties).filter(([key]) => (source.id !== 'app' || !dedicatedApplicationPaths.has([...path, key].join('.'))) && (source.id !== 'installation' || !dedicatedInstallationPaths.has([...path, key].join('.')))).map(([key, next]) => child(next, value === undefined && defaulted && next.placeholder !== undefined ? undefined : record[key], [...path, key], key))}</div>;
+    // share live appearance with the preview and every palette option
+    if (buttonItem) control = <SettingsButtonFields value={record}>{control}</SettingsButtonFields>;
   // render ordered arrays with explicit insert, remove, and move operations
   } else if (schema.type === 'array') {
     const array = Array.isArray(effectiveValue) ? effectiveValue : [];
@@ -873,7 +883,7 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   // render enumerated strings without losing their exact value
   } else if (schema.type === 'enum') {
     const resettable = reviewField && (schema.optional || defaulted);
-    control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: option, ...(path.at(-1) === 'icon' && isInstanceIconName(option) ? { icon: <InstanceIconPreview name={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
+    control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: option, ...(buttonField && path.at(-1) === 'color' ? { icon: <SettingsButtonColorSwatch color={option} /> } : path.at(-1) === 'icon' && isInstanceIconName(option) ? { icon: <InstanceIconPreview name={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
   // render booleans as accessible switches
   } else if (schema.type === 'boolean') {
     control = <label className="client-settings-toggle"><input id={controlId} aria-label={label} type="checkbox" role="switch" checked={effectiveValue === true} disabled={disabled} onChange={event => stagePatch(source, { op: 'set', path, value: event.target.checked })} /><span className="client-settings-switch-state">{effectiveValue === true ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label>;
@@ -885,14 +895,14 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   // render only explicitly classified shell commands as source code
   } else if (schema.type === 'string' && schema.editor === 'shell') {
     control = <SettingsCodeEditor id={controlId} ariaLabel={label} value={typeof scalarValue === 'string' ? scalarValue : ''} placeholder={placeholder} singleLine={schema.singleLine} disabled={disabled} format="wrapper" onChange={next => { /* retain the exact command as an ordinary field draft */ stagePatch(source, { op: 'set', path, value: next }); }} />;
-  // keep review prose multiline even when it inherits its prompt
-  } else if ((reviewField && path.at(-1) === 'prompt') || typeof effectiveValue === 'string' && effectiveValue.includes('\n')) {
+  // keep declared prose multiline even when its current value has one line
+  } else if (schema.multiline === true || (reviewField && path.at(-1) === 'prompt') || typeof effectiveValue === 'string' && effectiveValue.includes('\n')) {
     control = <textarea id={controlId} value={typeof scalarValue === 'string' ? scalarValue : ''} placeholder={placeholder} disabled={disabled} onChange={event => stagePatch(source, { op: 'set', path, value: event.target.value })} />;
   } else {
     control = <input id={controlId} type="text" value={typeof scalarValue === 'string' ? scalarValue : ''} placeholder={placeholder} disabled={disabled} onChange={event => stagePatch(source, { op: 'set', path, value: event.target.value })} />;
   }
   // omit repeated application and collection headings
-  if (schema.type === 'object') return <section className={`settings-schema-section${unimplementedAdapter ? ' settings-unimplemented-field' : ''}`} aria-disabled={unimplementedAdapter || undefined} data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}>{!projectItem && !(source.id === 'app' && (path.length === 0 || path.length === 1 && path[0] === 'review')) && <header><div><h3>{label}</h3>{unimplementedAdapter && <small>Unimplemented</small>}{schema.description && <p>{schema.description}</p>}</div>{removable && <SettingsRemoveButton ariaLabel={`Remove ${label}`} title={`Remove ${label}`} disabled={disabled} label={adapterBlock ? `Remove ${label}` : 'Remove section'} onClick={() => { /* revoke adapter secrets before hiding their controls */ if (adapterBlock) onHideCollection?.(source, path); stagePatch(source, { op: 'remove', path }); }} />}</header>}{control}<FieldIssues issues={issues} sourceId={source.id} path={path} /></section>;
+  if (schema.type === 'object') return <section className={`settings-schema-section${unimplementedAdapter ? ' settings-unimplemented-field' : ''}`} aria-disabled={unimplementedAdapter || undefined} data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}>{!projectItem && !buttonItem && !(source.id === 'app' && (path.length === 0 || path.length === 1 && path[0] === 'review')) && <header><div><h3>{label}</h3>{unimplementedAdapter && <small>Unimplemented</small>}{schema.description && <p>{schema.description}</p>}</div>{removable && <SettingsRemoveButton ariaLabel={`Remove ${label}`} title={`Remove ${label}`} disabled={disabled} label={adapterBlock ? `Remove ${label}` : 'Remove section'} onClick={() => { /* revoke adapter secrets before hiding their controls */ if (adapterBlock) onHideCollection?.(source, path); stagePatch(source, { op: 'remove', path }); }} />}</header>}{control}<FieldIssues issues={issues} sourceId={source.id} path={path} /></section>;
   if (schema.type === 'union' || schema.type === 'json') return <div className="settings-field settings-field-union" data-settings-path={path.join('.')} data-settings-search-path={JSON.stringify(path)}><div className="settings-field-summary"><span className="settings-field-copy"><strong>{label}</strong>{schema.description && <small>{schema.description}</small>}</span><span className="settings-field-actions">{schema.nullable && <button type="button" aria-label={`Set ${label} to null`} disabled={disabled} onClick={() => stagePatch(source, { op: 'set', path, value: null })}>Set null</button>}{removable && <SettingsRemoveButton ariaLabel={`Remove ${label}`} title={`Remove ${label}`} disabled={disabled} onClick={() => stagePatch(source, { op: 'remove', path })} />}</span></div>{control}<FieldIssues issues={issues} sourceId={source.id} path={path} /></div>;
   // bind copy only to native controls that expose this generated id
   const ownsNativeControl = schema.type === 'boolean' || schema.type === 'number' || schema.type === 'string';
@@ -1134,7 +1144,7 @@ const sourceGroup = (source: Pick<SettingsSource, 'id' | 'format'>): string => {
 // flag backing sources and the dedicated pages that own their invalid controls
 function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
   const pages = new Set<string>();
-  const applicationPages: Record<string, string> = { adapters: 'agents', projects: 'projects', review: 'reviews', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
+  const applicationPages: Record<string, string> = { adapters: 'agents', projects: 'projects', review: 'reviews', buttons: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
   // route only authoritative issue identities never field values or error text
   for (const { sourceId, path } of issues) {
     pages.add(sourceId);
@@ -1174,6 +1184,7 @@ function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
 const sectionIcon = (id: string, format?: SettingsSource['format']): ReactNode => {
   const glyphs = {
     browser: 'M3 4h18v13H3zM8 21h8m-4-4v4',
+    interface: 'M3 4h18v16H3zM3 9h18M8 9v11m4-7h5m-5 3h3',
     keyboard: 'M2 5h20v14H2zM5 8h1m3 0h1m3 0h1m3 0h1M5 11h1m3 0h1m3 0h1m3 0h1M6 15h12',
     voice: 'M9 4a3 3 0 0 1 6 0v8a3 3 0 0 1-6 0zm-3 7v1a6 6 0 0 0 12 0v-1m-6 7v4m-3 0h6',
     agents: 'M12 3v3M5 7h14v13H5zM2 11v5m20-5v5M8 12h2m4 0h2m-7 4h6',
@@ -1190,7 +1201,7 @@ const sectionIcon = (id: string, format?: SettingsSource['format']): ReactNode =
     wrapper: 'M3 4h18v16H3zm3 5 3 3-3 3m6 0h4',
     svg: 'M3 3h18v18H3zM3 16l6-6 6 6 3-3 3 3M16 7h.01'
   };
-  return <PanelIcon path={id === 'cloudflare' ? glyphs.cloudflared : id === 'browser' || id === 'voice' || id === 'keyboard' || id === 'tmux' || id === 'projects' || id === 'agents' || id === 'reviews' || id === 'storage' ? glyphs[id] : glyphs[format ?? 'json']} />;
+  return <PanelIcon path={id === 'cloudflare' ? glyphs.cloudflared : id === 'browser' || id === 'interface' || id === 'voice' || id === 'keyboard' || id === 'tmux' || id === 'projects' || id === 'agents' || id === 'reviews' || id === 'storage' ? glyphs[id] : glyphs[format ?? 'json']} />;
 };
 
 // bind tmux controls and wrapper contents to their existing installed sources
@@ -1377,7 +1388,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
       // retain virtual pages and redirect removed standalone tabs
       setSelectedId(current => {
         const next = current === 'compose' ? 'compose-override' : current === 'wrapper' ? 'tmux' : current === 'cloudflared' || current === 'cloudflared-credentials' ? 'cloudflare' : current;
-        return next === 'browser' || next === 'voice' || next === 'keyboard' || next === 'tmux' || next === 'projects' || next === 'agents' || next === 'reviews' || next === 'storage' || next === 'cloudflare' || payload.sources.some(source => source.id === next) ? next : 'browser';
+        return next === 'browser' || next === 'interface' || next === 'voice' || next === 'keyboard' || next === 'tmux' || next === 'projects' || next === 'agents' || next === 'reviews' || next === 'storage' || next === 'cloudflare' || payload.sources.some(source => source.id === next) ? next : 'browser';
       });
       if (!preserveDrafts) { setDrafts({}); setIssues([]); setWarnings([]); setCatalogEditorEpoch(current => current + 1); }
       setError('');
@@ -1638,8 +1649,10 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'projects' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('projects');
   // keep review edits attached to their original application transaction
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'review' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('reviews');
-  // include browser-only drafts in the shared navigation and header
-  if (browserDraft.dirty) changedSourceIds.add('browser');
+  // surface application button drafts on their dedicated Interface page
+  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'buttons' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('interface');
+  // retain one browser transaction while marking each preference's visible page
+  for (const pageId of browserDraft.dirtyPageIds) changedSourceIds.add(pageId);
   // include setup entries and nested legacy edits in the unified dirty guard
   if (cloudflare.dirty || changes.some(change => change.sourceId === 'cloudflared' || change.sourceId === 'cloudflared-credentials')) changedSourceIds.add('cloudflare');
 
@@ -1857,6 +1870,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // reuse the original project schema and source identity without competing with raw edits
   const projectsSchema = voiceSource?.schema?.properties?.projects;
   const projectsEditor = <div className="settings-projects">
+    {browserDraft.projectsContent}
     {voiceSource === undefined ? <p role="note">Load Application configuration before editing projects.</p>
       : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing projects.</p>
         : projectsSchema === undefined ? <p role="note">Project settings are unavailable in this configuration.</p>
@@ -1866,6 +1880,23 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
             {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing projects.</p>}
             <SchemaField key={`projects:${catalogEditorEpoch}`} source={voiceSource} schema={projectsSchema} value={valueAt(voiceSource.value, ['projects'])} path={['projects']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} installationKind={snapshot?.installationKind} />
           </>}
+  </div>;
+  // keep browser appearance and server-owned button definitions on one Interface page
+  const buttonsSchema = voiceSource?.schema?.properties?.buttons;
+  const interfaceEditor = <div className="settings-interface">
+    {browserDraft.interfaceContent}
+    <section className="settings-schema-section" aria-label="Custom buttons"><header><h3>Custom buttons</h3></header>
+      {voiceSource === undefined ? <p role="note">Load Application configuration before editing custom buttons.</p>
+        : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing custom buttons.</p>
+          : buttonsSchema === undefined ? <p role="note">Custom buttons are unavailable in this configuration.</p>
+            : <>
+              {!voiceSource.writable && <p role="note">Custom buttons are read-only in this installation.</p>}
+              {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing custom buttons.</p>}
+              {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing custom buttons.</p>}
+              {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing custom buttons.</p>}
+              <SchemaField key={`interface:${catalogEditorEpoch}`} source={voiceSource} schema={buttonsSchema} value={valueAt(voiceSource.value, ['buttons'])} path={['buttons']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} />
+            </>}
+    </section>
   </div>;
   // project the same application review paths without creating default file values
   const reviewsSchema = voiceSource?.schema?.properties?.review;
@@ -1909,11 +1940,12 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
 
   // keep all preference pages in the shared save flow
   const preferences = [
-    { id: 'browser', group: 'Console', label: 'This browser', keywords: 'client rename theme dark light terminal font reduced motion notification sounds flyout markers dynamic worktrees', content: browserDraft.content },
+    { id: 'browser', group: 'Console', label: 'This browser', keywords: 'client browser device rename identity name', content: browserDraft.content },
     { id: 'voice', group: 'Console', label: 'Voice', keywords: `davo voice assistant name context enable write tools advanced OpenAI realtime MCP ${[...voiceEnvironmentKeys].join(' ')}`, content: <>{voiceEditor}{voiceFieldsEditor}{voiceEnvironmentEditor}</> },
     { id: 'keyboard', group: 'Console', label: 'Keyboard shortcuts', keywords: 'keyboard shortcuts bindings keys prefix terminal command', content: keyboardSettings },
+    { id: 'interface', group: 'Application', label: 'Interface', keywords: 'custom buttons actions slots shell command agent prompt appearance terminal font theme dark light reduced motion notification sounds audio mute flyout markers', content: interfaceEditor },
     { id: 'agents', group: 'Application', label: 'Agents', keywords: `adapters codex omx claude pi opencode program arguments environment setup teardown updates accounts usage cost ${[...agentEnvironmentKeys].join(' ')}`, content: agentsEditor },
-    { id: 'projects', group: 'Application', label: 'Projects', keywords: 'projects repositories directories worktrees paths overrides commands tasks push', content: projectsEditor },
+    { id: 'projects', group: 'Application', label: 'Projects', keywords: 'projects repositories directories dynamic worktrees launcher paths overrides commands tasks button overrides', content: projectsEditor },
     { id: 'reviews', group: 'Application', label: 'Reviews', keywords: 'review tours code review presets prompts model effort codex claude headless interactive', content: reviewsEditor },
     { id: 'tmux', group: 'Application', label: 'TMUX', keywords: `tmux polling pollIntervalMs wrapper executable connection discovery socket ${[...tmuxEnvironmentKeys].join(' ')} ${sources.find(source => source.id === 'wrapper')?.path ?? ''}`, content: <TmuxSettings sources={sources} installationKind={snapshot?.installationKind} drafts={drafts} disclosures={disclosures} issues={issues} disabled={loading || saving || !runtime.canMutate} navigationDisabled={loading || saving} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} /> },
     { id: 'storage', group: 'Application', label: 'Storage', keywords: `storage data .data files paths directories scratchDirectory scratch notes prompts history worktrees integrations previews ${[...storageEnvironmentKeys].join(' ')}`, content: storageEditor },
@@ -1932,9 +1964,9 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // share the concise application name with its header and scroll region
   const selectedLabel = selected?.id === 'app' ? 'Application' : selectedPreference?.label ?? selected?.label ?? 'This browser';
   // browser navigation never depends on the installation files
-  const sectionLoading = (id: string): boolean => loading && id !== 'browser';
+  const sectionLoading = (id: string): boolean => loading && id !== 'browser' && id !== 'interface' && id !== 'projects';
   // unavailable file placeholders cannot open an invented editor
-  const sectionDisabled = (id: string): boolean => sectionLoading(id) || snapshot === undefined && (id === 'tmux' || id === 'projects' || id === 'agents' || id === 'reviews' || id === 'storage' || id === 'cloudflare' || !preferences.some(preference => preference.id === id));
+  const sectionDisabled = (id: string): boolean => sectionLoading(id) || snapshot === undefined && (id === 'tmux' || id === 'agents' || id === 'reviews' || id === 'storage' || id === 'cloudflare' || !preferences.some(preference => preference.id === id));
   const issuePageIds = settingsIssuePageIds(issues);
   // announce validation failures before ordinary unsaved changes
   const navigationLabel = (id: string, label: string): string => `${label}${issuePageIds.has(id) ? ' · Validation issues' : changedSourceIds.has(id) ? ' · Unsaved changes' : ''}`;
@@ -1999,7 +2031,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   };
   // retain transaction status without a redundant page introduction
   return <section className="settings-center" aria-label="Settings center" aria-busy={saving}>
-    {snapshot === undefined && <div className={`settings-catalog-state${loading ? ' progress-border progress-blue' : ''}`} role={loading ? 'status' : 'alert'} aria-busy={loading || undefined}>{loading ? <><span className="update-progress-ring" aria-hidden="true" />Loading installation files…</> : <><span>Installation files are unavailable. Browser settings remain available; voice settings are read-only.</span><button type="button" onClick={() => { /* retry without discarding browser preferences */ void reloadFiles(); }}>Retry files</button></>}</div>}
+    {snapshot === undefined && <div className={`settings-catalog-state${loading ? ' progress-border progress-blue' : ''}`} role={loading ? 'status' : 'alert'} aria-busy={loading || undefined}>{loading ? <><span className="update-progress-ring" aria-hidden="true" />Loading installation files…</> : <><span>Installation files are unavailable. Browser preferences remain available in This browser, Interface, and Projects; file settings are unavailable.</span><button type="button" onClick={() => { /* retry without discarding browser preferences */ void reloadFiles(); }}>Retry files</button></>}</div>}
     <SettingsSearch index={searchIndex} onSelect={selectSearchResult} active={active} />
     <div className="settings-center-layout">
       <div className="settings-source-select"><span>Settings section</span><SettingsSelect label="Settings section" value={selectedId} options={navigationOptions} onChange={selectSection} /></div>

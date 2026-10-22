@@ -44,6 +44,7 @@ const baselineContent = `${JSON.stringify(baselineApp, null, 2)}\n`;
 // cover source and virtual issue routing
 const routedNavigationIssues: SettingsIssue[] = [
   { sourceId: "app", path: ["title"], code: "invalid_value", message: "Fix the application title." },
+  { sourceId: "app", path: ["buttons", "pullRequest", "0", "text"], code: "invalid_value", message: "Fix the custom button text." },
   { sourceId: "app", path: ["adapters", "codex", "program"], code: "invalid_value", message: "Fix the Codex program." },
   { sourceId: "app", path: ["projects", "0", "path"], code: "invalid_value", message: "Fix the project path." },
   { sourceId: "app", path: ["review", "tour", "prompt"], code: "invalid_value", message: "Fix the review prompt." },
@@ -59,6 +60,7 @@ const routedIssuePageLabels = [
   "Voice",
   "Keyboard shortcuts",
   "Application",
+  "Interface",
   "Agents",
   "Projects",
   "Reviews",
@@ -963,7 +965,7 @@ test("hides file actions for reverted raw bytes, collection order, and browser d
   await expectNoFileActions(settings);
   await expect(fileActions(settings).refresh).toBeEnabled();
 
-  await selectSection(settings, "browser", "This browser");
+  await selectSection(settings, "interface", "Interface");
   await settings
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();
@@ -1078,7 +1080,7 @@ test("marks desktop source and virtual page icons red until correction or discar
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const { settings, state } = await setupHeaderSettings(page);
-  await selectSection(settings, "browser", "This browser");
+  await selectSection(settings, "interface", "Interface");
   await settings
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();
@@ -1121,14 +1123,13 @@ test("marks desktop source and virtual page icons red until correction or discar
       button.getByLabel("Unsaved changes", { exact: true }),
     ).toHaveCount(0);
   }
-  const browser = navigation.getByRole("button", {
-    name: /^This browser/u,
+  const interfacePage = navigation.getByRole("button", {
+    name: /^Interface/u,
   });
-  await expect(browser).not.toHaveAttribute("data-has-issues", "true");
+  await expect(interfacePage).toHaveAttribute("data-has-issues", "true");
   await expect(
-    browser.getByLabel("Unsaved changes", { exact: true }),
+    interfacePage.getByLabel("Validation issues", { exact: true }),
   ).toBeVisible();
-  await expectThemeColor(browser, "i", "--yellow");
   await settings.screenshot({
     path: "/tmp/remoteagents-settings-validation-pages-desktop.png",
   });
@@ -1169,7 +1170,7 @@ test("shows mobile validation issue icons in the selected trigger and options", 
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const { settings, state } = await setupHeaderSettings(page);
-  await selectSection(settings, "browser", "This browser");
+  await selectSection(settings, "interface", "Interface");
   await settings
     .getByRole("radio", { name: "Light theme", exact: true })
     .click();
@@ -1208,12 +1209,12 @@ test("shows mobile validation issue icons in the selected trigger and options", 
   // prove each mobile option shares the red issue state
   for (const option of await issueOptions.all())
     await expectThemeColor(option, ".settings-select-option-icon", "--red");
-  const browser = listbox.locator(
-    '.settings-select-option[data-value="browser"]',
+  const interfacePage = listbox.locator(
+    '.settings-select-option[data-value="interface"]',
   );
-  await expect(browser).not.toHaveAttribute("data-has-issues", "true");
-  await expect(browser.locator(".settings-select-option-label")).toHaveText(
-    "This browser · Unsaved changes",
+  await expect(interfacePage).toHaveAttribute("data-has-issues", "true");
+  await expect(interfacePage.locator(".settings-select-option-label")).toHaveText(
+    "Interface · Validation issues",
   );
   await page.screenshot({
     path: "/tmp/remoteagents-settings-validation-pages-mobile.png",

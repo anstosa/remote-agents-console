@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import type { DiscoveryService } from '../discovery/service.js';
@@ -44,6 +44,8 @@ const composerRenderStableMs = 100;
 const submissionAcceptGraceMs = 4_000;
 // space retries within the acceptance deadline
 const submissionRetryAttempts: ReadonlySet<number> = new Set([6, 14, 30, 50, 70]);
+const trackedRequestTerminalTtlMs = 60 * 60 * 1_000;
+const maxTrackedTerminalRequests = 1_000;
 // the console never composes submission through an unknown kind
 type AdapterView = Pick<Adapter, 'stateSource' | 'submission' | 'turns' | 'questions' | 'completion' | 'newConversation'>;
 type CancelOutcome = 'ok' | 'unavailable' | 'not-working';
@@ -63,9 +65,11 @@ const normalizedPrompt = (value: string) => value.replace(/\s+/gu, ' ').trim();
 const normalizedTerminalText = (value: string) => normalizedPrompt(value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, ''));
 type PromptCompletion = 'completed' | 'failed' | 'pending';
 type PromptReconciliation = 'pending' | 'settled' | 'recorded';
+export type PromptRequestStatus = { id: string; agentId: string; state: 'queued' | 'running' | 'complete' | 'failed' | 'interrupted'; submitted: boolean; error?: string };
+type StoredPromptRequest = PromptRequestStatus & { terminalAt?: number; promptFingerprint: string };
 // retain a failed native draft until clearing succeeds or ownership is lost
 type FailedDraft = { agentId: string; target: DiscoveredTarget; prompt: string; submission: Adapter['submission'] };
-type PromptPhase = { state: 'awaiting-start' | 'working' | 'awaiting-answer' | 'halted'; changedAt: number; historyEntryId?: string; historyPrompt?: string; baselineCompletion?: string; rolloutBaseline?: CompletionBaseline; failedDraft?: FailedDraft };
+type PromptPhase = { state: 'awaiting-start' | 'working' | 'awaiting-answer' | 'halted'; changedAt: number; requestId?: string; historyEntryId?: string; historyPrompt?: string; baselineCompletion?: string; rolloutBaseline?: CompletionBaseline; failedDraft?: FailedDraft };
 type DiscoveredTarget = NonNullable<Awaited<ReturnType<DiscoveryService['target']>>> & { processId?: number };
 // pair the shared staging directory with its agent-visible host namespace
 export type AttachmentStagingWorkspace = { workspace: string; hostWorkspace: string | undefined };
@@ -75,6 +79,7 @@ type ConversationReset = ResetBoundary & { observed: PaneSnapshot[]; state: 'pen
 const paneSnapshot = (agent: Agent): PaneSnapshot => ({ title: agent.title, attention: agentAttentionState(agent), ...(agent.conversationId === undefined ? {} : { conversationId: agent.conversationId }) });
 export class PromptService {
   private readonly phases = new Map<string, PromptPhase>();
+  private readonly trackedRequests = new Map<string, StoredPromptRequest>();
   // retain the reset instant until the first real prompt anchors its fresh rollout
   private readonly conversationResets = new Map<string, ConversationReset>();
   // hydrate each scope once before input or observation can race its durable boundary
@@ -101,20 +106,43 @@ export class PromptService {
   // (a Run reusing a pane): it flows into the completion baseline so the answer is
   // read from the fresh thread's rollout, not the reset pane's stale one.
   async submit(agentId: string, prompt: string, attachments: PromptAttachment[] = [], resetAt?: number): Promise<boolean> {
-    if (!validPrompt(prompt, attachments)) return false;
+    return (await this.submitRequest(agentId, prompt, attachments, resetAt, false)).accepted;
+  }
+
+  // submit one prompt and expose its exact process-local lifecycle identity
+  async submitTracked(agentId: string, prompt: string, attachments: PromptAttachment[] = []): Promise<{ requestId: string } | undefined> {
+    const result = await this.submitRequest(agentId, prompt, attachments, undefined, true);
+    return result.accepted && result.requestId !== undefined ? { requestId: result.requestId } : undefined;
+  }
+
+  // return one immutable request lifecycle snapshot
+  requestStatus(requestId: string): PromptRequestStatus | undefined {
+    this.pruneTrackedRequests();
+    const request = this.trackedRequests.get(requestId);
+    if (request === undefined) return undefined;
+    const { terminalAt: _terminalAt, promptFingerprint: _promptFingerprint, ...status } = request;
+    return status;
+  }
+
+  // share ordinary and tracked prompt admission without changing legacy results
+  private async submitRequest(agentId: string, prompt: string, attachments: PromptAttachment[], resetAt: number | undefined, tracked: boolean): Promise<{ accepted: boolean; requestId?: string }> {
+    if (!validPrompt(prompt, attachments)) return { accepted: false };
     const releaseMutation = this.beginAgentMutation(agentId);
     const first = await this.discovery.target(agentId);
     // release reservations for vanished targets
     if (!first) {
       releaseMutation?.();
-      return false;
+      return { accepted: false };
     }
     const scope = promptScope(agentId);
     const origin: QueuedPromptOrigin = { home: first.agent.home, ...(first.agent.placeId === undefined ? {} : { placeId: first.agent.placeId }) };
     // queue work arriving during a restart handoff
     if (releaseMutation === undefined || this.restartLocks.has(scope)) {
       releaseMutation?.();
-      return this.queued !== undefined && await this.queued.enqueue(scope, prompt, attachments, origin) !== undefined;
+      const queued = await this.queued?.enqueue(scope, prompt, attachments, origin);
+      // retain exact queue identity through the restart handoff
+      if (tracked && queued !== undefined) this.trackQueuedRequest(queued.id, agentId, prompt);
+      return { accepted: queued !== undefined, ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) };
     }
     try {
       await this.restoreConversationReset(scope, agentId);
@@ -128,23 +156,73 @@ export class PromptService {
         const baselineCompletion = adopting ? await this.completionSignature(agentId) : undefined;
         const rolloutBaseline = adopting ? await this.captureRolloutBaseline(agentId, this.resolveAdapter(first.agent.kind)) : undefined;
         const queued = await this.queued.enqueue(scope, prompt, attachments, origin);
+        // register before any later observer can dispatch this queue item
+        if (tracked && queued !== undefined) this.trackQueuedRequest(queued.id, agentId, prompt);
         // track work that started outside the managed prompt flow
         if (queued !== undefined && adopting) this.phases.set(scope, { state: 'working', changedAt: Date.now(), ...(baselineCompletion === undefined ? {} : { baselineCompletion }), ...(rolloutBaseline === undefined ? {} : { rolloutBaseline }) });
-        return queued !== undefined;
+        return { accepted: queued !== undefined, ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) };
       }
       // persist direct work before attempting interactive delivery
       if (this.queued !== undefined) {
         const queued = await this.queued.enqueue(scope, prompt, attachments, origin);
         // stop before paste when durable storage is unavailable
-        if (queued === undefined) return false;
+        if (queued === undefined) return { accepted: false };
+        // publish identity before synchronous dispatch can advance it
+        if (tracked) this.trackQueuedRequest(queued.id, agentId, prompt);
         // delivery may remain queued without rejecting the accepted request
         await this.dispatch(agentId, scope, resetAt);
-        return true;
+        return { accepted: true, ...(tracked ? { requestId: queued.id } : {}) };
       }
-      return await this.send(agentId, prompt, attachments, first, 'queue', false, resetAt);
+      const requestId = tracked ? randomBytes(18).toString('base64url') : undefined;
+      // direct deployments still receive a unique process-local identity
+      if (requestId !== undefined) this.trackQueuedRequest(requestId, agentId, prompt);
+      const accepted = await this.send(agentId, prompt, attachments, first, 'queue', false, resetAt, requestId);
+      // failed direct delivery has no durable queue to retain it
+      if (!accepted && requestId !== undefined) this.settleTrackedRequest(requestId, 'failed', 'prompt submission failed');
+      return { accepted, ...(accepted && requestId !== undefined ? { requestId } : {}) };
     } finally {
       releaseMutation();
     }
+  }
+
+  // register one accepted tracked request before dispatch begins
+  private trackQueuedRequest(requestId: string, agentId: string, prompt: string): void {
+    this.pruneTrackedRequests();
+    this.trackedRequests.set(requestId, { id: requestId, agentId, state: 'queued', submitted: false, promptFingerprint: createHash('sha256').update(prompt).digest('base64url') });
+  }
+
+  // mark only the exact request whose submit receipt was confirmed
+  private markTrackedRequestSubmitted(requestId: string | undefined): void {
+    if (requestId === undefined) return;
+    const current = this.trackedRequests.get(requestId);
+    if (current === undefined || current.terminalAt !== undefined) return;
+    this.trackedRequests.set(requestId, { ...current, state: 'running', submitted: true });
+  }
+
+  // settle one exact request once and retain a bounded terminal snapshot
+  private settleTrackedRequest(requestId: string | undefined, state: 'complete' | 'failed' | 'interrupted', error?: string): void {
+    if (requestId === undefined) return;
+    const current = this.trackedRequests.get(requestId);
+    if (current === undefined || current.terminalAt !== undefined) return;
+    const next: StoredPromptRequest = { ...current, state, ...(error === undefined ? {} : { error }), terminalAt: Date.now() };
+    this.trackedRequests.set(requestId, next);
+    this.pruneTrackedRequests();
+  }
+
+  // retain every active request while bounding terminal memory
+  private pruneTrackedRequests(): void {
+    const now = Date.now();
+    const terminal: Array<[string, StoredPromptRequest]> = [];
+    // expire old terminal entries without touching active work
+    for (const entry of this.trackedRequests) {
+      const terminalAt = entry[1].terminalAt;
+      if (terminalAt === undefined) continue;
+      if (now - terminalAt >= trackedRequestTerminalTtlMs) this.trackedRequests.delete(entry[0]);
+      else terminal.push(entry);
+    }
+    terminal.sort((left, right) => (left[1].terminalAt ?? 0) - (right[1].terminalAt ?? 0));
+    // evict only the oldest terminal overflow
+    for (let index = 0; index < terminal.length - maxTrackedTerminalRequests; index += 1) this.trackedRequests.delete(terminal[index]![0]);
   }
 
   // Paste and submit a new-conversation reset command (`/clear`, `/new`) through the
@@ -249,7 +327,20 @@ export class PromptService {
 
   async updateQueued(agentId: string, promptId: string, text: string): Promise<QueuedPromptSummary | undefined> {
     const target = await this.discovery.target(agentId);
-    return target === undefined || this.queued === undefined ? undefined : await this.queued.update(promptScope(agentId), promptId, text);
+    if (target === undefined || this.queued === undefined) return undefined;
+    const prompt = await this.queued.update(promptScope(agentId), promptId, text);
+    const tracked = this.trackedRequests.get(promptId);
+    // changed configured bytes no longer represent the tracked action request
+    if (prompt !== undefined && tracked !== undefined && tracked.promptFingerprint !== createHash('sha256').update(text).digest('base64url')) this.settleTrackedRequest(promptId, 'failed', 'queue_updated');
+    return prompt;
+  }
+
+  // consume one queued prompt only after its external save succeeds
+  async consumeQueuedOnSuccess(agentId: string, promptId: string, use: (queued: QueuedPrompt) => Promise<boolean>): Promise<'missing' | 'failed' | 'consumed'> {
+    const result = await this.queued?.consumeOnSuccess(promptScope(agentId), promptId, use) ?? 'missing';
+    // a saved Note cannot later complete the original prompt action
+    if (result === 'consumed') this.settleTrackedRequest(promptId, 'failed', 'queue_saved');
+    return result;
   }
 
   async moveQueued(agentId: string, promptId: string, direction: 'earlier' | 'later'): Promise<QueuedPromptSummary[] | undefined> {
@@ -259,7 +350,10 @@ export class PromptService {
 
   async removeQueued(agentId: string, promptId: string): Promise<boolean> {
     const target = await this.discovery.target(agentId);
-    return target !== undefined && this.queued !== undefined && await this.queued.remove(promptScope(agentId), promptId) !== undefined;
+    const removed = target !== undefined && this.queued !== undefined && await this.queued.remove(promptScope(agentId), promptId) !== undefined;
+    // removed tracked work can never be dispatched
+    if (removed) this.settleTrackedRequest(promptId, 'failed', 'queue_removed');
+    return removed;
   }
 
   // advance managed prompt completion
@@ -348,7 +442,8 @@ export class PromptService {
       }
       // save the queue after failed, cancelled, or unrecordable work
       if (completion !== 'completed') {
-        this.phases.set(scope, { state: 'halted', changedAt: Date.now() });
+        this.settleTrackedRequest(phase.requestId, 'failed', 'prompt_failed');
+        this.phases.set(scope, { ...phase, state: 'halted', changedAt: Date.now() });
         // clear the halt after every queued prompt is durable
         if (await this.saveQueued(scope)) this.phases.delete(scope);
         return;
@@ -359,6 +454,7 @@ export class PromptService {
         if (!await this.reconciliationComplete(agent.id, scope)) return;
       }
       // release completed prompts
+      this.settleTrackedRequest(phase.requestId, 'complete');
       this.phases.delete(scope);
     }
     // recover answer tracking lost across restarts
@@ -390,11 +486,13 @@ export class PromptService {
       // fail the dispatch once the window elapses rather than release its queue
       if (reported && phase.state === 'awaiting-start') {
         if (Date.now() - phase.changedAt < reportedWorkingGraceMs) return;
-        this.phases.set(scope, { state: 'halted', changedAt: Date.now() });
+        this.settleTrackedRequest(phase.requestId, 'failed', 'prompt_did_not_start');
+        this.phases.set(scope, { ...phase, state: 'halted', changedAt: Date.now() });
         if (await this.saveQueued(scope)) this.phases.delete(scope);
         return;
       }
       // working -> finished: the prompt completed; its history entry stays answerless
+      this.settleTrackedRequest(phase.requestId, 'complete');
       this.phases.delete(scope);
     }
     await this.dispatch(agent.id, scope);
@@ -436,6 +534,12 @@ export class PromptService {
     const to = promptScope(toAgentId);
     // prompts that cannot move stay with the departed scope and drain into Notes
     if (this.queued !== undefined && !await this.queued.moveScope(from, to)) return;
+    // only queued requests have exact transfer identity during a restart handoff
+    for (const [requestId, request] of this.trackedRequests) {
+      if (request.agentId !== fromAgentId || request.terminalAt !== undefined) continue;
+      if (request.submitted) this.settleTrackedRequest(requestId, 'interrupted', 'agent_handover');
+      else this.trackedRequests.set(requestId, { ...request, agentId: toAgentId });
+    }
     await this.history?.moveScope(from, to);
     await this.queued?.resets.clear(from);
     this.forget(from);
@@ -443,6 +547,7 @@ export class PromptService {
 
   private forget(scope: string): void {
     this.departedSince.delete(scope);
+    this.settleTrackedRequest(this.phases.get(scope)?.requestId, 'interrupted', 'agent_departed');
     for (const state of [this.phases, this.conversationResets, this.restoredResets, this.reconciled, this.observedWorking, this.reconciliationPendingSince]) state.delete(scope);
   }
 
@@ -457,6 +562,8 @@ export class PromptService {
         if (prompt === undefined) return true;
         const result = await this.queued.consumeOnSuccess(scope, prompt.id, queued => this.drainUndelivered!(scope, queued));
         if (result === 'failed') return false;
+        // a durable note recovery is terminal failure for the requested action
+        if (result === 'consumed') this.settleTrackedRequest(prompt.id, 'failed', 'prompt_not_delivered');
       }
     } catch {
       return false;
@@ -473,8 +580,15 @@ export class PromptService {
     try {
       const prompt = await this.queued?.next(scope);
       // consume only after the adapter confirms submission
-      if (prompt !== undefined && await this.send(agentId, prompt.text, prompt.attachments ?? [], undefined, 'queue', true, resetAt, prompt.id)) {
-        await this.queued?.remove(scope, prompt.id);
+      if (prompt !== undefined) {
+        const submitted = await this.send(agentId, prompt.text, prompt.attachments ?? [], undefined, 'queue', true, resetAt, prompt.id);
+        // exact tracked failures halt instead of replaying on a later observation
+        if (!submitted && this.trackedRequests.has(prompt.id)) {
+          const phase = this.phases.get(scope);
+          this.settleTrackedRequest(prompt.id, 'failed', 'prompt_submission_failed');
+          this.phases.set(scope, { ...(phase ?? { state: 'halted' as const, changedAt: Date.now() }), state: 'halted', changedAt: Date.now(), requestId: prompt.id });
+        }
+        if (submitted) await this.queued?.remove(scope, prompt.id);
       }
     } finally { this.dispatching.delete(scope); }
   }
@@ -548,7 +662,7 @@ export class PromptService {
     // hold the scope so a quick second submit queues behind this one, then let the
     // Adapter-owned composer observation settle before the submit key
     if (settle) {
-      this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), historyPrompt: attachmentPrompt });
+      this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(queuedPromptId === undefined ? {} : { requestId: queuedPromptId }), historyPrompt: attachmentPrompt });
       // retain durable work instead of submitting an unrendered draft
       if (!await this.waitForComposerRender(agentId, second, composed.text, observeDraft)) {
         await this.clearFailedDraft(agentId, second, composed.text, adapter.submission);
@@ -562,7 +676,7 @@ export class PromptService {
     const previousReset = this.conversationResets.get(scope);
     const matchingReset = previousReset?.agentId === agentId ? previousReset : undefined;
     const baselineResetAt = resetAt ?? (matchingReset?.external ? undefined : matchingReset?.at);
-    const rolloutBaseline = this.queued === undefined || instant ? undefined : await this.captureRolloutBaseline(agentId, adapter, baselineResetAt, matchingReset?.external);
+    const rolloutBaseline = this.queued === undefined && queuedPromptId === undefined || instant ? undefined : await this.captureRolloutBaseline(agentId, adapter, baselineResetAt, matchingReset?.external);
     // refresh after every settle/baseline delay so key selection reflects send-time state
     let submitTarget = await this.submissionTarget(agentId, second).catch(() => undefined);
     // never submit through a replacement pane or native question
@@ -610,6 +724,8 @@ export class PromptService {
       // halt only when a durable prompt is still waiting
       await this.holdFailedSubmission(scope, failedDraft);
     } else if (instant) {
+      this.markTrackedRequestSubmitted(queuedPromptId);
+      this.settleTrackedRequest(queuedPromptId, 'complete');
       // release the provisional render phase instead of waiting for a nonexistent answer
       this.phases.delete(scope);
       // hold follow-ups through startup and anchor their completion on the new thread
@@ -617,13 +733,14 @@ export class PromptService {
         await this.rememberConversationReset(scope, { agentId, at: submittedAt, before: resetBefore, ...(queuedPromptId === undefined ? {} : { resetPromptId: queuedPromptId }) }, 'pending');
       }
     } else {
+      this.markTrackedRequestSubmitted(queuedPromptId);
       // consume the durable boundary only once a real post-reset prompt is accepted
       if (matchingReset !== undefined) await this.queued?.resets.clear(scope, matchingReset.id);
       this.conversationResets.delete(scope);
       // track real prompts and their answers rather than reset commands
       const entry = await this.history?.record(scope, attachmentPrompt).catch(() => undefined);
       // monitor managed prompt completion
-      if (this.queued !== undefined) this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), historyPrompt: attachmentPrompt, ...(entry === undefined ? {} : { historyEntryId: entry.id }), ...(rolloutBaseline === undefined ? {} : { rolloutBaseline }) });
+      if (this.queued !== undefined || queuedPromptId !== undefined) this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(queuedPromptId === undefined ? {} : { requestId: queuedPromptId }), historyPrompt: attachmentPrompt, ...(entry === undefined ? {} : { historyEntryId: entry.id }), ...(rolloutBaseline === undefined ? {} : { rolloutBaseline }) });
     }
     return submitted;
   }
@@ -872,8 +989,9 @@ export class PromptService {
   // halt redispatch only while durable queue state remains
   private async holdFailedSubmission(scope: string, failedDraft?: FailedDraft): Promise<void> {
     const waiting = await this.queued?.list(scope);
+    const requestId = this.phases.get(scope)?.requestId;
     // protect queued prompts from duplicate repaste
-    if ((waiting?.length ?? 0) > 0) this.phases.set(scope, { state: 'halted', changedAt: Date.now(), ...(failedDraft === undefined ? {} : { failedDraft }) });
+    if ((waiting?.length ?? 0) > 0) this.phases.set(scope, { state: 'halted', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), ...(failedDraft === undefined ? {} : { failedDraft }) });
     else this.phases.delete(scope);
   }
 
@@ -1296,7 +1414,10 @@ export class PromptService {
     // ourselves so the pane does not keep looking busy (Codex's title already stops)
     if (reportsOwnState(adapter)) await this.tmux.setReportedAttention(target.socket, target.agent.paneId, 'finished').catch(() => false);
     // record the in-flight prompt as interrupted: hold its queue rather than releasing it
-    if (this.queued !== undefined) this.phases.set(promptScope(agentId), { state: 'halted', changedAt: Date.now() });
+    const scope = promptScope(agentId);
+    const phase = this.phases.get(scope);
+    this.settleTrackedRequest(phase?.requestId, 'interrupted', 'prompt_interrupted');
+    if (this.queued !== undefined) this.phases.set(scope, { state: 'halted', changedAt: Date.now(), ...(phase?.requestId === undefined ? {} : { requestId: phase.requestId }) });
     return 'ok';
   }
   // stop one Agent by killing its pane; a kind with a configured teardown command
@@ -1305,6 +1426,10 @@ export class PromptService {
   async close(agentId: string): Promise<boolean> {
     const target = await this.discovery.target(agentId);
     if (target === undefined || !await this.tmux.close(target.socket, target.agent.paneId)) return false;
+    // closing the target makes every accepted tracked request terminal
+    for (const [requestId, request] of this.trackedRequests) {
+      if (request.agentId === agentId && request.terminalAt === undefined) this.settleTrackedRequest(requestId, 'interrupted', 'agent_closed');
+    }
     const teardown = this.teardownFor(target.agent.kind);
     if (teardown !== undefined) {
       const done = await this.tmux.runShell(target.socket, expandCommand(teardown, { identity: target.agent.home })).catch(() => false);

@@ -1,4 +1,5 @@
-import { createContext, isValidElement, type KeyboardEvent, type ReactElement, type ReactNode, type RefObject, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { createContext, isValidElement, type CSSProperties, type KeyboardEvent, type ReactElement, type ReactNode, type RefObject, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { ConfiguredButtonIcon, type ButtonSlot, useConfiguredButtons } from './configured-buttons.js';
 import { FlyoutPortal } from './flyout-portal.js';
 import { useViewportFlyout } from './viewport-flyout.js';
 
@@ -130,20 +131,22 @@ export function usePanelExpand(key: string) {
   return { expanded: context.expanded === key, anyExpanded: context.expanded !== undefined, toggle: () => context.toggle(key), restore: context.restore };
 }
 
-export type ProgressColor = 'blue' | 'yellow' | 'red' | 'peach' | 'green' | 'teal' | 'pink' | 'mauve';
+export type ProgressColor = 'rosewater' | 'flamingo' | 'pink' | 'mauve' | 'red' | 'maroon' | 'peach' | 'yellow' | 'green' | 'teal' | 'sky' | 'sapphire' | 'blue' | 'lavender';
 
 // One header action. Inline it is an icon button labelled by `label`; folded into the ⋮ it is a
 // row showing the icon and the label.
 export type PanelAction = {
   key: string;
   label: string;
-  icon: ReactNode;
+  icon?: ReactNode;
   onSelect: () => void;
   title?: string;
   className?: string;
   disabled?: boolean;
   pressed?: boolean;
   progress?: ProgressColor;
+  showLabel?: boolean;
+  style?: CSSProperties;
   // aria-expanded, for an action that opens a popup of its own
   popupOpen?: boolean;
 };
@@ -152,7 +155,7 @@ export type PanelAction = {
 const actionButton = (action: PanelAction, row = false) => {
   // keep the action glyph stable while its border reports progress
   const busy = action.progress !== undefined;
-  return <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}${busy ? ` progress-border progress-${action.progress}` : ''}`} disabled={action.disabled} aria-busy={busy || undefined} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onClick={action.onSelect}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{row && <span>{action.label}</span>}</button>;
+  return <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}${busy ? ` progress-border progress-${action.progress}` : ''}`} style={action.style} disabled={action.disabled} aria-busy={busy || undefined} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onClick={action.onSelect}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{(row || action.showLabel === true || action.icon === undefined) && <span>{action.label}</span>}</button>;
 };
 
 export function PanelIcon({ path }: { path: string }) {
@@ -174,6 +177,8 @@ type PanelHeaderProps = {
   // own (the agent panel's power menu)
   close?: PanelAction | ReactElement;
   expandDisabled?: boolean;
+  configuredSlot?: ButtonSlot;
+  configuredFilesDirectoryToken?: string;
 } & (
   // preserve the default left pill without accepting a second representation
   { title: ReactNode; titleControl?: never }
@@ -184,13 +189,27 @@ type PanelHeaderProps = {
 // The floating header every panel shares: a title pill top-left and an action pill top-right,
 // over the panel's content. No bar sits behind them. The action pill ends with expand (which
 // fills the Workspace with this panel) and the panel's close.
-export function PanelHeader({ panelKey, label, title, titleControl, actions, secondary = [], menuContent, close, expandDisabled = false }: PanelHeaderProps) {
+export function PanelHeader({ panelKey, label, title, titleControl, actions, secondary = [], menuContent, close, expandDisabled = false, configuredSlot, configuredFilesDirectoryToken }: PanelHeaderProps) {
   const expand = usePanelExpand(panelKey);
   const phone = usePhoneLayout();
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [folded, setFolded] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(moreOpen);
+  const automaticSlot = ['agent', 'note', 'browser', 'files', 'code', 'review', 'stack', 'settings'].includes(panelKey) ? `split:${panelKey}` as ButtonSlot : undefined;
+  const configured = useConfiguredButtons(configuredSlot ?? automaticSlot, configuredFilesDirectoryToken);
+  const configuredActions: PanelAction[] = configured.map(action => ({
+    key: `configured-${action.id}`,
+    label: action.text,
+    title: action.disabledReason ?? action.text,
+    icon: action.icon === undefined ? undefined : <ConfiguredButtonIcon path={action.icon} className="panel-header-icon" />,
+    className: `configured-button configured-button-${action.style} configured-button-${action.color}`,
+    style: { '--configured-button-color': `var(--${action.color})` } as CSSProperties,
+    disabled: action.disabled,
+    progress: action.busy ? action.color : undefined,
+    showLabel: true,
+    onSelect: action.run
+  }));
   // fold by the panel's own width, so a squeezed split column folds as a phone does
   useLayoutEffect(() => {
     const panel = wrapRef.current?.parentElement;
@@ -208,16 +227,19 @@ export function PanelHeader({ panelKey, label, title, titleControl, actions, sec
   useEffect(() => { if (!folded) setMoreOpen(false); }, [folded]);
   const closeMore = useCallback(() => setMoreOpen(false), []);
   // keep custom menu controls available at every panel width
-  const showMore = menuContent !== undefined || folded && secondary.length > 0;
+  const configuredMenuBusy = folded && configured.some(action => action.busy);
+  const configuredMenuColor = configured.find(action => action.busy)?.color;
+  const showMore = menuContent !== undefined || folded && (configuredActions.length > 0 || secondary.length > 0);
   return <div ref={wrapRef} className="panel-header">
     {titleControl ?? <div className="panel-header-pill panel-header-title">{title}</div>}
     <div className="panel-header-pill panel-header-actions" role="toolbar" aria-label={`${label[0].toUpperCase()}${label.slice(1)} actions`}>
+      {!folded && configuredActions.map(action => actionButton(action))}
       {actions}
       {!folded && secondary.map(action => actionButton(action))}
-      {showMore && <button ref={anchorRef} type="button" className={`panel-header-action panel-header-more${moreOpen ? ' active' : ''}`} aria-label={`More ${label} actions`} data-context-flyout aria-expanded={moreOpen} title="More" onClick={() => setMoreOpen(value => !value)} onKeyDown={event => { if (event.key === 'Escape' && moreOpen) { event.preventDefault(); event.stopPropagation(); closeMore(); } }}><svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg><span className="flyout-caret" aria-hidden="true" /></button>}
+      {showMore && <button ref={anchorRef} type="button" className={`panel-header-action panel-header-more${moreOpen ? ' active' : ''}${configuredMenuBusy && configuredMenuColor !== undefined ? ` progress-border progress-${configuredMenuColor}` : ''}`} aria-busy={configuredMenuBusy || undefined} aria-label={`More ${label} actions`} data-context-flyout aria-expanded={moreOpen} title="More" onClick={() => setMoreOpen(value => !value)} onKeyDown={event => { if (event.key === 'Escape' && moreOpen) { event.preventDefault(); event.stopPropagation(); closeMore(); } }}>{configuredMenuBusy && <span className="update-progress-ring" aria-hidden="true" />}<svg className="panel-header-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg><span className="flyout-caret" aria-hidden="true" /></button>}
       {expand !== undefined && <button type="button" className="panel-header-action panel-header-expand" disabled={expandDisabled} aria-label={`${expand.expanded ? 'Restore' : 'Expand'} ${label}`} aria-pressed={expand.expanded} title={phone ? expand.expanded ? 'Show the tabs and toolbar' : 'Full screen' : expand.expanded ? 'Restore the other panels' : 'Fill the Workspace'} onClick={expand.toggle}><PanelIcon path={expand.expanded ? panelIcons.restore : panelIcons.expand} /></button>}
       {close === undefined || isValidElement(close) ? close : actionButton(close)}
     </div>
-    {showMore && moreOpen && <FlyoutPortal onDismiss={closeMore}><div ref={flyoutRef} className="more-menu panel-header-menu" role="group" aria-label={`More ${label} actions`} style={style} onClick={closeMore} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); closeMore(); } }}>{folded && secondary.map(action => actionButton(action, true))}{menuContent?.(closeMore)}</div></FlyoutPortal>}
+    {showMore && moreOpen && <FlyoutPortal onDismiss={closeMore}><div ref={flyoutRef} className="more-menu panel-header-menu" role="group" aria-label={`More ${label} actions`} style={style} onClick={closeMore} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); closeMore(); } }}>{folded && configuredActions.map(action => actionButton(action, true))}{folded && secondary.map(action => actionButton(action, true))}{menuContent?.(closeMore)}</div></FlyoutPortal>}
   </div>;
 }

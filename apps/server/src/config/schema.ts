@@ -14,6 +14,7 @@ import { isIP } from 'node:net';
 import { defaultDavoContext, defaultDavoName } from '../integrations/realtime/settings.js';
 import { resolveReviewConfig, reviewConfigSchema, type ResolvedReviewConfig } from '../review-runs/config.js';
 import { parseKeysConfig, type KeysConfig } from './keys.js';
+import { applicationButtonsSchema, countButtonDefinitions, projectButtonsSchema, type ButtonSlots } from './buttons.js';
 
 const loopback = new Set(['127.0.0.1', '::1']);
 // wildcard binds expose every interface; require an explicit address instead
@@ -66,7 +67,8 @@ const worktreeOverride = z.object({
   port: previewPort.nullable().optional(),
   hostname: previewHostname.nullable().optional()
 }).strict();
-const pushAction = z.object({ label: z.string().trim().min(1).max(80), prompt: command }).strict().default({ label: 'Commit/Push', prompt: 'review, commit, and push' });
+const pushAction = z.object({ label: z.string().trim().min(1).max(80), prompt: command }).strict();
+const defaultPushAction = { label: 'Commit/Push', prompt: 'review, commit, and push' } as const;
 // accept branch names rather than options or revision expressions
 const defaultBranch = z.string().min(1).max(255).refine(value => value !== 'HEAD' && (!value.startsWith('refs/') || value.startsWith('refs/heads/') || value.startsWith('refs/remotes/')) && !value.startsWith('-') && !value.includes('..') && !value.includes('@{') && !/[\s\u0000-\u001f\u007f~^:?*\[\\]/u.test(value) && value !== '@' && value.split('/').every(part => part !== '' && !part.startsWith('.') && !part.endsWith('.') && !part.endsWith('.lock')), 'invalid default branch');
 const serverName = z.string().trim().min(1).max(80).refine(value => !value.includes('\0'), 'NUL is forbidden');
@@ -125,18 +127,22 @@ export const sourceSchema = z.object({
   integrations: integrationFeatures,
   // how the Review tour and the opt-in Code review run (ADR 0010); every field is optional
   review: reviewConfigSchema.optional(),
+  buttons: applicationButtonsSchema,
   // a repository the console manages; its checkouts are discovered from git, never
   // declared. `path` is any checkout (a bare repository included); `hostPath` maps the
   // Main worktree's container path to the host under Docker; `worktreesDirectory` is
   // where Add creates new checkouts (default `../<basename>-worktrees`, resolved
   // against the Main worktree). Scratch-only first runs omit `projects`.
-  projects: z.array(z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/).refine(value => value !== 'agent' && value !== 'scratch', 'project id `agent` and `scratch` are reserved'), label: z.string().max(120).optional(), defaultBranch: defaultBranch.optional(), path: z.string().min(1), hostPath: z.string().startsWith('/').optional(), worktreeOrder: z.array(z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden')).max(2000).optional(), worktreeOverrides: z.array(worktreeOverride).max(2000).optional(), worktreesDirectory: z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden').optional(), externalUrl: previewExternalUrl.optional(), port: previewPort.optional(), hostname: previewHostname.optional(), commands: stackCommands.optional(), newTask: command.optional(), push: pushAction }).strict()).max(100).default([])
-}).strict();
+  projects: z.array(z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/).refine(value => value !== 'agent' && value !== 'scratch', 'project id `agent` and `scratch` are reserved'), label: z.string().max(120).optional(), defaultBranch: defaultBranch.optional(), path: z.string().min(1), hostPath: z.string().startsWith('/').optional(), worktreeOrder: z.array(z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden')).max(2000).optional(), worktreeOverrides: z.array(worktreeOverride).max(2000).optional(), worktreesDirectory: z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden').optional(), externalUrl: previewExternalUrl.optional(), port: previewPort.optional(), hostname: previewHostname.optional(), commands: stackCommands.optional(), newTask: command.optional(), buttons: projectButtonsSchema.optional(), push: pushAction.optional() }).strict()).max(100).default([])
+}).strict().superRefine((config, context) => {
+  // include inherited presentations in the materialized dashboard safety bound
+  if (countButtonDefinitions(config.buttons, config.projects.map(project => project.buttons)) > 4_096) context.addIssue({ code: z.ZodIssueCode.custom, path: ['buttons'], message: 'configuration expands to at most 4096 buttons' });
+});
 export type ConfigInput = z.input<typeof sourceSchema>;
 export type RemoteServer = { url: URL; name?: string; icon?: InstanceIcon };
 export type IntegrationConfig = z.output<typeof integrationFeatures>;
 export type DavoSettings = z.output<typeof davoSettingsSchema>;
-export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; review: ResolvedReviewConfig; projects: Project[] };
+export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; review: ResolvedReviewConfig; buttons?: ButtonSlots; projects: Project[] };
 // how validation surfaces non-fatal facts: `warn` collects boot warnings (non-executable
 // programs, a crossed OMX/Codex program); `checkExecutables` runs the boot X_OK probe
 // and is skipped under the host bridge, where `program` is a host path the container
@@ -265,6 +271,8 @@ async function resolveProject(raw: ParsedProject): Promise<Project> {
     ...(raw.commands === undefined ? {} : { commands: raw.commands satisfies StackCommands }),
     ...(raw.newTask === undefined ? {} : { newTask: raw.newTask }),
     ...(raw.defaultBranch === undefined ? {} : { defaultBranch: raw.defaultBranch }),
+    ...(raw.buttons === undefined ? {} : { buttons: raw.buttons }),
+    push: raw.push ?? defaultPushAction,
     ...(hostPath === undefined ? {} : { hostPath: resolve(hostPath) }),
     ...preview
   };
@@ -272,19 +280,19 @@ async function resolveProject(raw: ParsedProject): Promise<Project> {
   // a path that does not resolve is unavailable: there is no directory to launch into
   if (canonical === undefined) {
     const base = resolve(raw.path);
-    return { id: raw.id, label, path: base, identity: base, mode: 'repository', available: false, unavailableReason: `path ${raw.path} was not found`, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, undefined, base), push: raw.push, ...optional };
+    return { id: raw.id, label, path: base, identity: base, mode: 'repository', available: false, unavailableReason: `path ${raw.path} was not found`, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, undefined, base), ...optional };
   }
   const identity = await gitCommonDir(canonical);
   // a real directory that is not a git checkout is an available `directory` Project: an
   // agent launches directly in it (no Worktrees), so its identity is just its own path
   if (identity === undefined) {
-    return { id: raw.id, label, path: canonical, identity: canonical, mode: 'directory', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, undefined, canonical), push: raw.push, ...optional };
+    return { id: raw.id, label, path: canonical, identity: canonical, mode: 'directory', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, undefined, canonical), ...optional };
   }
   // git lists the Main worktree first; a bare repository has none
   const entries = await listWorktrees(canonical);
   const mainEntry = entries?.find(entry => !entry.bare);
   const mainWorktree = mainEntry === undefined ? undefined : await realpath(mainEntry.path).catch(() => mainEntry.path);
-  return { id: raw.id, label, path: canonical, identity, mode: 'repository', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, mainWorktree, identity), push: raw.push, ...optional };
+  return { id: raw.id, label, path: canonical, identity, mode: 'repository', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, mainWorktree, identity), ...optional };
 }
 // the console now declares repositories as `projects[]`; a config that still carries the
 // retired `worktrees[]` key is refused with a pointer to the migration rather than a bare
@@ -403,5 +411,5 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
     else { if (identities.has(project.identity)) throw new Error('duplicate project identity'); identities.add(project.identity); }
     projects.push(project);
   }
-  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), review, projects };
+  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), review, buttons: parsed.buttons, projects };
 }
