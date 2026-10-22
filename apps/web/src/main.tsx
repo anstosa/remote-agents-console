@@ -410,6 +410,8 @@ const handoffPromptDraft = (from: string, to: string) => {
 };
 const terminalInputs = new Map<string, (value: string) => boolean>();
 const exitTerminalInput = new Map<string, () => void>();
+// bracketed paste into a mounted pane, by pane or agent id
+const terminalPasters = new Map<string, (text: string) => void>();
 // focus a mounted Terminal panel's xterm, by pane id
 const terminalFocusers = new Map<string, () => void>();
 // open a mounted Console shell panel's rename field, by pane id
@@ -2388,7 +2390,9 @@ function MobileTerminalKeys({ id }: { id: string }) {
   };
   // send one direct control character
   const mobileControl = (value: '\x1b'|'\x03') => { terminalInputs.get(id)?.(value); };
-  return <div className="mobile-terminal-keys" aria-label="Terminal keys"><div className="mobile-control-keys"><button type="button" aria-label="Esc" onPointerDown={event => { event.preventDefault(); mobileControl('\x1b'); }}>Esc</button><button type="button" aria-label="Ctrl+C" onPointerDown={event => { event.preventDefault(); mobileControl('\x03'); }}>Ctrl+C</button></div><div className="mobile-key-modifiers"><button type="button" aria-label="Tab" onPointerDown={event => { event.preventDefault(); mobileKey('tab'); }}>Tab</button><button type="button" className={shiftActive ? 'active' : ''} aria-pressed={shiftActive} onPointerDown={event => { event.preventDefault(); toggleModifier('shift'); }}>Shift</button><button type="button" className={ctrlActive ? 'active' : ''} aria-pressed={ctrlActive} onPointerDown={event => { event.preventDefault(); toggleModifier('ctrl'); }}>Ctrl</button><button type="button" className={altActive ? 'active' : ''} aria-pressed={altActive} onPointerDown={event => { event.preventDefault(); toggleModifier('alt'); }}>Alt</button><button type="button" className={`mobile-key-fn${fnActive ? ' active' : ''}`} aria-pressed={fnActive} title="Function keys: 1–9 for F1–F9, 0 for F10" onPointerDown={event => { /* preserve terminal focus while toggling fn */ event.preventDefault(); toggleModifier('fn'); }}>Fn</button></div><div className="mobile-arrow-keys"><button type="button" aria-label="Slash" onPointerDown={event => { event.preventDefault(); mobileKey('slash'); }}>/</button><button type="button" aria-label="Up arrow" onPointerDown={event => { event.preventDefault(); mobileKey('up'); }}><MobileKeyIcon name="up" /></button><button type="button" aria-label="Dollar" onPointerDown={event => { event.preventDefault(); mobileKey('dollar'); }}>$</button><button type="button" aria-label="Left arrow" onPointerDown={event => { event.preventDefault(); mobileKey('left'); }}><MobileKeyIcon name="left" /></button><button type="button" aria-label="Down arrow" onPointerDown={event => { event.preventDefault(); mobileKey('down'); }}><MobileKeyIcon name="down" /></button><button type="button" aria-label="Right arrow" onPointerDown={event => { event.preventDefault(); mobileKey('right'); }}><MobileKeyIcon name="right" /></button></div></div>;
+  // read on the click, not pointerdown: iOS only grants clipboard reads to a tap's activation
+  const mobilePaste = () => { void navigator.clipboard?.readText().then(text => { if (text) terminalPasters.get(id)?.(text); }, () => { /* dismissed or denied */ }); };
+  return <div className="mobile-terminal-keys" aria-label="Terminal keys"><div className="mobile-control-keys"><button type="button" aria-label="Esc" onPointerDown={event => { event.preventDefault(); mobileControl('\x1b'); }}>Esc</button><button type="button" aria-label="Ctrl+C" onPointerDown={event => { event.preventDefault(); mobileControl('\x03'); }}>Ctrl+C</button></div><div className="mobile-key-modifiers"><button type="button" aria-label="Tab" onPointerDown={event => { event.preventDefault(); mobileKey('tab'); }}>Tab</button><button type="button" className={shiftActive ? 'active' : ''} aria-pressed={shiftActive} onPointerDown={event => { event.preventDefault(); toggleModifier('shift'); }}>Shift</button><button type="button" className={ctrlActive ? 'active' : ''} aria-pressed={ctrlActive} onPointerDown={event => { event.preventDefault(); toggleModifier('ctrl'); }}>Ctrl</button><button type="button" className={altActive ? 'active' : ''} aria-pressed={altActive} onPointerDown={event => { event.preventDefault(); toggleModifier('alt'); }}>Alt</button><button type="button" className={`mobile-key-fn${fnActive ? ' active' : ''}`} aria-pressed={fnActive} title="Function keys: 1–9 for F1–F9, 0 for F10" onPointerDown={event => { /* preserve terminal focus while toggling fn */ event.preventDefault(); toggleModifier('fn'); }}>Fn</button></div><div className="mobile-arrow-keys"><button type="button" aria-label="Slash" onPointerDown={event => { event.preventDefault(); mobileKey('slash'); }}>/</button><button type="button" aria-label="Up arrow" onPointerDown={event => { event.preventDefault(); mobileKey('up'); }}><MobileKeyIcon name="up" /></button><button type="button" aria-label="Dollar" onPointerDown={event => { event.preventDefault(); mobileKey('dollar'); }}>$</button><button type="button" aria-label="Left arrow" onPointerDown={event => { event.preventDefault(); mobileKey('left'); }}><MobileKeyIcon name="left" /></button><button type="button" aria-label="Down arrow" onPointerDown={event => { event.preventDefault(); mobileKey('down'); }}><MobileKeyIcon name="down" /></button><button type="button" aria-label="Right arrow" onPointerDown={event => { event.preventDefault(); mobileKey('right'); }}><MobileKeyIcon name="right" /></button></div><button type="button" className="mobile-key-paste" aria-label="Paste" title="Paste" onPointerDown={event => event.preventDefault()} onClick={mobilePaste}><MobileKeyIcon name="paste" /></button></div>;
 }
 
 // render the agent panel's composer: prompt history above attach on the left, the prompt, and
@@ -2964,9 +2968,9 @@ function PreparingPrompt({ id, onOperationFeedback }: { id: string; onOperationF
   return <Prompt id={id} ready={false} history={[]} onHistoryChanged={async () => { /* no discovered history */ }} onPromptFocus={() => { /* retain local draft focus */ }} onOperationFeedback={onOperationFeedback} />;
 }
 
-type MobileKeyIconName = 'control'|'shift'|'tab'|'up'|'down'|'left'|'right';
+type MobileKeyIconName = 'control'|'shift'|'tab'|'up'|'down'|'left'|'right'|'paste';
 function MobileKeyIcon({ name }: { name: MobileKeyIconName }) {
-  const paths: Record<MobileKeyIconName, string> = { control: 'M8 5h8v4h3v6h-3v4H8v-4H5V9h3zm2 2v4H7v2h3v4h4v-4h3v-2h-3V7z', shift: 'm12 4 6 6h-4v8h-4v-8H6z', tab: 'M4 8h11m0 0-3-3m3 3-3 3M20 16H9m0 0 3 3m-3-3 3-3', up: 'm6 15 6-6 6 6', down: 'm6 9 6 6 6-6', left: 'm15 6-6 6 6 6', right: 'm9 6 6 6-6 6' };
+  const paths: Record<MobileKeyIconName, string> = { control: 'M8 5h8v4h3v6h-3v4H8v-4H5V9h3zm2 2v4H7v2h3v4h4v-4h3v-2h-3V7z', shift: 'm12 4 6 6h-4v8h-4v-8H6z', tab: 'M4 8h11m0 0-3-3m3 3-3 3M20 16H9m0 0 3 3m-3-3 3-3', up: 'm6 15 6-6 6 6', down: 'm6 9 6 6 6-6', left: 'm15 6-6 6 6 6', right: 'm9 6 6 6-6 6', paste: 'M9 4h6v3H9zM9 5H6v15h12V5h-3' };
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d={paths[name]} /></svg>;
 }
 
@@ -5546,8 +5550,8 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
   // the panel columns interleaved with resizers
   const laidOut = columns.flatMap((column, index) => {
     const isTerminal = splitPanelKind(column.key) === 'terminal';
-    // mount phone keys only for the visible Terminal so inactive splits keep no live controls
-    const node = isTerminal ? cloneElement(column.node as ReactElement<TerminalColumnProps>, { key: column.key, selectionActions, mobileActive: phone && carousel.visibleKey === column.key }) : <Fragment key={column.key}>{column.node}</Fragment>;
+    // a phone mounts keys only for the visible Terminal so inactive splits keep no live controls
+    const node = isTerminal ? cloneElement(column.node as ReactElement<TerminalColumnProps>, { key: column.key, selectionActions, mobileActive: !phone || carousel.visibleKey === column.key }) : <Fragment key={column.key}>{column.node}</Fragment>;
     return index === 0 ? [node] : [resizer(columns[index - 1].key, column.key), node];
   });
   const mobileView = carousel.visibleKey !== undefined ? ` mobile-${splitPanelKind(carousel.visibleKey)}-view` : '';
@@ -5879,6 +5883,7 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
     clearSelectionRef.current = selection.clear;
     const blur = () => handle.terminal.blur();
     terminalInputs.set(paneId, handle.sendInput);
+    terminalPasters.set(paneId, handle.paste);
     exitTerminalInput.set(paneId, blur);
     terminalFocusers.set(paneId, handle.focus);
     const onFocusIn = () => setFocused(true);
@@ -5898,6 +5903,7 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
       container.removeEventListener('focusout', onFocusOut);
       // only clear our own registrations, so a fast remount of the same pane id keeps the new one
       if (terminalInputs.get(paneId) === handle.sendInput) terminalInputs.delete(paneId);
+      if (terminalPasters.get(paneId) === handle.paste) terminalPasters.delete(paneId);
       if (exitTerminalInput.get(paneId) === blur) exitTerminalInput.delete(paneId);
       if (terminalFocusers.get(paneId) === handle.focus) terminalFocusers.delete(paneId);
       handle.dispose();
@@ -5937,7 +5943,7 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
       : <span className="pane-title" title={name}>{name}</span>}
     </>} />
     <div className="terminal-canvas" ref={canvas} aria-label={`Terminal ${name}`} />
-    {/* keep phone keys with their terminal instead of replacing the static toolbar */}
+    {/* keep helper keys with their terminal instead of replacing the static toolbar; CSS shows them on a phone or above a software keyboard */}
     {mobileActive && <MobileTerminalKeys id={paneId} />}
     {/* keep selection actions hidden with their terminal panel */}
     {selection && <div className="output-selection-toolbar" role="toolbar" aria-label={`Selection actions for terminal ${name}`} style={{ top: selection.top, left: selection.left }} onPointerDown={event => event.preventDefault()}>
@@ -6795,6 +6801,7 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
     // Helper keys, paste and the composer's blank-Enter forward reach the pane through
     // this; the composer's focus blurs it so keystrokes return to prompting.
     terminalInputs.set(id, handle.sendInput);
+    terminalPasters.set(id, handle.paste);
     const exitInput = () => terminal.blur();
     exitTerminalInput.set(id, exitInput);
     // The stream is live the moment the first bytes parse; the component owns the
@@ -6833,6 +6840,7 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
       canvas.current?.removeEventListener('focusin', onFocusIn);
       canvas.current?.removeEventListener('focusout', onFocusOut);
       if (terminalInputs.get(id) === handle.sendInput) terminalInputs.delete(id);
+      if (terminalPasters.get(id) === handle.paste) terminalPasters.delete(id);
       if (exitTerminalInput.get(id) === exitInput) exitTerminalInput.delete(id);
       if (answeredQuestionActions.get(id) === answeredQuestion) answeredQuestionActions.delete(id);
       if (terminalRef.current === terminal) terminalRef.current = undefined;
@@ -10373,7 +10381,13 @@ function App() {
       root.classList.toggle('software-keyboard-open', focused && keyboardInset >= Math.max(120, layoutHeight * .15));
     };
     const updateAfterFocus = () => window.requestAnimationFrame(updateHeight);
+    // A floating iPad keyboard leaves the viewport whole, so a key no on-screen keyboard can type
+    // is the only sign of a physical one; it retires the touch helper keys for this page load.
+    const notePhysicalKeyboard = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey || event.altKey || /^(?:Escape|Arrow|F\d)/u.test(event.key)) root.classList.add('physical-keyboard');
+    };
     updateHeight();
+    window.addEventListener('keydown', notePhysicalKeyboard, true);
     window.addEventListener('resize', updateHeight);
     viewport?.addEventListener('resize', updateHeight);
     viewport?.addEventListener('scroll', updateHeight);
@@ -10385,7 +10399,8 @@ function App() {
       viewport?.removeEventListener('scroll', updateHeight);
       document.removeEventListener('focusin', updateAfterFocus);
       document.removeEventListener('focusout', updateAfterFocus);
-      root.classList.remove('software-keyboard-open');
+      window.removeEventListener('keydown', notePhysicalKeyboard, true);
+      root.classList.remove('software-keyboard-open', 'physical-keyboard');
     };
   }, []);
   useEffect(() => {

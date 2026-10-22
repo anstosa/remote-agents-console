@@ -1704,13 +1704,13 @@ test('bottom controls share the static workspace surface without extra row gaps'
 
   expect(keyboardLayout.tabs).toBe('none');
   expect(keyboardLayout.toolbar).toBe('none');
-  expect(keyboardLayout.buttonCount).toBe(13);
+  expect(keyboardLayout.buttonCount).toBe(14);
   expect(keyboardLayout.rowCount).toBe(2);
   expect.soft(keyboardLayout.bottomGap).toBeCloseTo(6, 0);
   expect(keyboardLayout.documentWidth).toBeLessThanOrEqual(keyboardLayout.viewportWidth);
   expect(expandedLayout.tabs).toBe('none');
   expect(expandedLayout.toolbar).toBe('none');
-  expect(expandedLayout.buttonCount).toBe(13);
+  expect(expandedLayout.buttonCount).toBe(14);
   expect(expandedLayout.rowCount).toBe(2);
   expect.soft(expandedLayout.bottomGap).toBeCloseTo(6, 0);
   expect(expandedLayout.documentWidth).toBeLessThanOrEqual(expandedLayout.viewportWidth);
@@ -1769,6 +1769,68 @@ test('on a phone the helper keys drive the visible Terminal, and the Agent pane 
   await expect(page.locator('.log-output')).toHaveClass(/input-active/u);
   await page.getByRole('button', { name: 'Esc' }).click();
   await expect.poll(() => paneInputText(page, 'agent-1')).toContain(esc);
+});
+
+// a tablet without its keyboard is wide but types on a software keyboard
+test('on a wide screen the helper keys follow the software keyboard and Paste reaches the Terminal', async ({ context, page }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.setViewportSize({ width: 1180, height: 820 });
+  await installPaneMock(page);
+  await routeApi(page);
+  await page.goto('/');
+  await seedPaneSize(page, 'agent-1', 80, 24);
+
+  await openPicker(page);
+  await page.getByRole('menuitem', { name: /build/u }).click();
+  await seedPaneSize(page, '%5', 80, 24);
+  await pushBytes(page, '%5', '$ \r\n');
+
+  const column = page.locator('.terminal-pane[data-panel-key="%5"]');
+  const keys = column.getByLabel('Terminal keys');
+  await column.locator('.xterm-screen').click();
+  await expect(column).toHaveClass(/focused/u);
+  // a physical keyboard raises no software keyboard, so the keys stay hidden
+  await expect(keys).toBeHidden();
+
+  await page.evaluate(() => document.documentElement.classList.add('software-keyboard-open'));
+  await expect(keys).toBeVisible();
+  await page.evaluate(() => navigator.clipboard.writeText('echo pasted'));
+  await keys.getByRole('button', { name: 'Paste' }).click();
+  await expect.poll(() => paneInputText(page, '%5')).toContain('echo pasted');
+  // the tap keeps the terminal focused so the software keyboard stays up
+  await expect(column).toHaveClass(/focused/u);
+});
+
+// an iPad's floating keyboard leaves the viewport whole, so touch alone shows the keys
+test('on a wide touch screen the helper keys show until a physical keyboard key arrives', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL, hasTouch: true, viewport: { width: 1180, height: 820 } });
+  const page = await context.newPage();
+  await installPaneMock(page);
+  await routeApi(page);
+  await page.goto('/');
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
+
+  await openPicker(page);
+  await page.getByRole('menuitem', { name: /build/u }).click();
+  await seedPaneSize(page, '%5', 80, 24);
+  await pushBytes(page, '%5', '$ \r\n');
+
+  const column = page.locator('.terminal-pane[data-panel-key="%5"]');
+  const keys = column.getByLabel('Terminal keys');
+  // a coarse pointer turns on xterm's screen-reader layer, which takes the tap above the screen
+  await column.locator('.terminal-canvas').tap();
+  await expect(column).toHaveClass(/focused/u);
+  await expect(keys).toBeVisible();
+  // letters prove nothing; an arrow key only exists on a physical keyboard
+  await page.keyboard.type('ls');
+  await expect(keys).toBeVisible();
+  await page.keyboard.press('ArrowUp');
+  await expect(keys).toBeHidden();
+  // a docked on-screen keyboard brings them back after the physical one is detached
+  await page.evaluate(() => document.documentElement.classList.add('software-keyboard-open'));
+  await expect(keys).toBeVisible();
+  await context.close();
 });
 
 // verify Fn stays isolated and resets with unmounted phone controls

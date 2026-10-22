@@ -1647,29 +1647,43 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
   /* swap the prompt for the output keys without changing the static toolbar */
   .log-output.input-active > .agent-composer { display: none; }
   .log-split:not(.mobile-agent-view) > .log-output > .mobile-terminal-keys { display: none; }
-  /* match the prompt footer inside output and Terminal splits */
-  .log-output.input-active > .mobile-terminal-keys, .terminal-pane > .mobile-terminal-keys {
-    display: grid;
-    grid-template-columns: 3.15rem auto auto;
-    align-items: start;
-    justify-content: center;
-    gap: .45rem .7rem;
-    /* let the tab row supply the same gap as the prompt footer */
-    padding: .375rem .375rem 0;
-    border-top: 0;
-    background: var(--crust);
-  }
-  /* shrink modifier columns on narrow phones without adding a row */
-  .mobile-key-modifiers { display: grid; min-width: 0; grid-template-columns: repeat(3, minmax(0, 3.15rem)); gap: .2rem; }
-  .mobile-arrow-keys { display: grid; grid-template-columns: repeat(3, 2rem); gap: .2rem; }
-  .mobile-terminal-keys button { display: grid; width: 2rem; height: 2rem; padding: 0; place-items: center; border-color: var(--prompt-control-border); border-radius: var(--control-radius); background: var(--prompt-control-background); color: var(--prompt-control-foreground); box-shadow: none; }
-  .mobile-terminal-keys button:not(.active):hover { border-color: var(--prompt-control-hover-border); background: var(--prompt-control-hover-background); color: var(--prompt-control-hover-foreground); }
-  .mobile-key-modifiers button { width: 100%; font: 800 .65rem var(--font-mono); }
-  /* place fn beside both existing modifier rows */
-  .mobile-key-modifiers .mobile-key-fn { grid-column: 3; grid-row: 1 / 3; height: 100%; }
-  .mobile-terminal-keys button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
-  .mobile-terminal-keys button.active { border-color: var(--sky); background: color-mix(in srgb, var(--sky) 32%, var(--surface-0)); color: var(--sky); }
+  .log-output.input-active > .mobile-terminal-keys, .terminal-pane > .mobile-terminal-keys { display: grid; }
 }
+/* Wider layouts show the same keys while typing without a physical keyboard: a docked on-screen
+   keyboard shrinks the viewport, and a touch-first device (an iPad, whose floating keyboard does
+   not) counts as keyboardless until a key only a physical keyboard has arrives. */
+@media (min-width: 601px) {
+  html.software-keyboard-open .log-output.input-active > .agent-composer { display: none; }
+  html.software-keyboard-open :is(.log-output.input-active, .terminal-pane.focused) > .mobile-terminal-keys { display: grid; }
+}
+@media (min-width: 601px) and (pointer: coarse) {
+  html:not(.physical-keyboard) .log-output.input-active > .agent-composer { display: none; }
+  html:not(.physical-keyboard) :is(.log-output.input-active, .terminal-pane.focused) > .mobile-terminal-keys { display: grid; }
+}
+/* match the prompt footer inside output and Terminal splits */
+.mobile-terminal-keys {
+  grid-template-columns: 3.15rem auto auto 2rem;
+  align-items: start;
+  justify-content: center;
+  gap: .45rem .7rem;
+  /* let the tab row supply the same gap as the prompt footer */
+  padding: .375rem .375rem 0;
+  border-top: 0;
+  background: var(--crust);
+}
+/* shrink modifier columns on narrow phones without adding a row */
+.mobile-key-modifiers { display: grid; min-width: 0; grid-template-columns: repeat(3, minmax(0, 3.15rem)); gap: .2rem; }
+.mobile-arrow-keys { display: grid; grid-template-columns: repeat(3, 2rem); gap: .2rem; }
+.mobile-control-keys { display: grid; grid-template-columns: 3.15rem; gap: .2rem; }
+.mobile-terminal-keys button { display: grid; width: 2rem; height: 2rem; padding: 0; place-items: center; border-color: var(--prompt-control-border); border-radius: var(--control-radius); background: var(--prompt-control-background); color: var(--prompt-control-foreground); box-shadow: none; }
+.mobile-terminal-keys button:not(.active):hover { border-color: var(--prompt-control-hover-border); background: var(--prompt-control-hover-background); color: var(--prompt-control-hover-foreground); }
+.mobile-key-modifiers button { width: 100%; font: 800 .65rem var(--font-mono); }
+.mobile-control-keys button { width: 3.15rem; font: 800 .65rem var(--font-mono); }
+/* place fn beside both existing modifier rows */
+.mobile-key-modifiers .mobile-key-fn { grid-column: 3; grid-row: 1 / 3; height: 100%; }
+.mobile-terminal-keys .mobile-key-paste { align-self: stretch; height: auto; }
+.mobile-terminal-keys button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+.mobile-terminal-keys button.active { border-color: var(--sky); background: color-mix(in srgb, var(--sky) 32%, var(--surface-0)); color: var(--sky); }
 
 .tabs .new-agent-tab { position: relative; flex: 0 0 var(--standard-control-size); justify-content: center; height: var(--standard-control-size); min-height: var(--standard-control-size); margin: 0; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 88%, transparent); color: var(--subtext-0); white-space: nowrap; padding: 0; box-shadow: none; }
 .tabs .new-agent-tab svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -2156,10 +2170,6 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .prompt-attachments button:hover { color: var(--red); }
 .attachment-error { margin: 0; color: var(--red); font-size: .75rem; }
 
-@media (max-width: 600px) {
-  .mobile-control-keys { display: grid; grid-template-columns: 3.15rem; gap: .2rem; }
-  .mobile-control-keys button { width: 3.15rem; font: 800 .65rem var(--font-mono); }
-}
 .project-open { position: relative; }
 .project-open > i { width: var(--status-dot-size); height: var(--status-dot-size); border-radius: 50%; background: var(--peach); box-shadow: 0 0 .45rem color-mix(in srgb, var(--peach) 70%, transparent); }
 .project-open.status-healthy > i { background: var(--green); box-shadow: 0 0 .45rem color-mix(in srgb, var(--green) 75%, transparent); }
