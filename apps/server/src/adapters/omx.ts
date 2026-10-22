@@ -22,7 +22,7 @@ import type { Adapter } from './types.js';
  * app-server command catalog) stay keyed on `adapters.codex`; an OMX-only
  * configuration does without them.
  */
-export const omxAdapter: Adapter = {
+export const omxAdapter = {
   kind: 'omx',
   stateSource: 'title',
   // the console composes OMX's tmux policy itself; an operator copy is warned and dropped at boot
@@ -45,4 +45,4 @@ export const omxAdapter: Adapter = {
   newConversation: codexNewConversation,
   // team worker panes are hidden; orphan workers, HUD panes/processes and stale OMX panes are cleanup targets
   panes: { exclude: isOmxWorkerPane, classify: classifyOmxPane, classifyProcess: classifyOmxProcess },
-};
+} satisfies Adapter;

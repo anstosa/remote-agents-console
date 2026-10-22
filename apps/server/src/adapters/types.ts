@@ -66,6 +66,77 @@ export type LaunchMode = 'fresh' | 'continue' | 'resume';
 export type LaunchInput = { mode: LaunchMode; conversationId?: string; cwd: string; sandboxed: boolean; files?: Record<string, string> };
 /** The CLI arguments (and optional environment) for a launch; the console prepends the program. */
 export type LaunchSpec = { args: string[]; env?: Record<string, string> };
+/** How an operator flag dropped from a launch takes values: none, the next argument, or every argument up to the next flag. */
+export type ReplacedFlagValue = 'none' | 'one' | 'many';
+
+/** The model and effort one Review run asks for; absent leaves the CLI's own default. */
+export type ReviewRunSettings = { model?: string; effort?: string };
+/** One headless Review run: the Worktree it reads and the JSON Schema its reply must match. */
+export type HeadlessReviewRun = ReviewRunSettings & { workspace: string; schema: object };
+/** A headless run's private files: its schema, written for it, and where it may write its reply. */
+export type HeadlessRunFiles = { schema: string; output: string };
+/**
+ * A finished headless run as the console saw it: the exit code, a bounded stderr tail, stdout
+ * when it was kept and within its bound, and the output file when the run had one and wrote it.
+ */
+export type HeadlessRunOutcome = { code: number; diagnostics: string; stdout?: Buffer; output?: Buffer };
+/** Why a headless run's reply was refused; only a missing login is not worth retrying. */
+export type HeadlessRunFailure = 'authentication_required' | 'generation_failed' | 'malformed_result';
+/** A headless run's parsed reply, or why it failed. */
+export type HeadlessRunResult = { ok: true; value: unknown } | { ok: false; failure: HeadlessRunFailure };
+/**
+ * The pane an interactive Review run's reply is read from. Its Conversation is looked up only when
+ * asked, as that may rescan the panes; read its directory after that lookup to see the rescan.
+ */
+export type ReplyPane = { pid?: number; cwd?: string; conversationId(): Promise<string | undefined>; directory(): string | undefined };
+
+/**
+ * How the console runs a Review run on this kind (ADR 0010): pure descriptions of the CLI, so
+ * the console's headless and interactive engines perform every effect once for every kind. The
+ * reply readers are the exception ADR 0002 allows, reading the agent's own transcript.
+ */
+export type ReviewRuns = {
+  /** the effort levels the CLI accepts */
+  readonly efforts: readonly string[];
+  readonly headless: {
+    /** the CLI help the capability check reads, the flags it must list, and a login check that must exit 0 */
+    readonly probe: { readonly help: readonly string[]; readonly flags: readonly string[]; readonly login?: readonly string[] };
+    /** the arguments of one read-only, schema-constrained run, and the directory it runs in when not given by an argument */
+    command(run: HeadlessReviewRun, files: HeadlessRunFiles): { args: string[]; cwd?: string };
+    /** how much stdout to keep for a reply bounded at `outputBytes`; absent when stdout is not read */
+    stdoutBytes?(outputBytes: number): number;
+    /** the reply of a finished run, bounded at `outputBytes`, or why it failed */
+    result(outcome: HeadlessRunOutcome, outputBytes: number): HeadlessRunResult;
+  };
+  readonly interactive: {
+    /** the per-launch arguments: the read-only restrictions, the model and effort, and read access to `readDirectory` */
+    args(run: ReviewRunSettings & { readDirectory?: string }): string[];
+    /**
+     * The operator flags (`adapters.<kind>.args`) the launch drops: always the read-only ones (that
+     * its arguments replace or that would loosen its policy), the model and effort ones only when
+     * the run sets its own, so an operator's own model still applies to a run that names none
+     */
+    readonly readOnlyFlags: ReadonlyArray<readonly [string, ReplacedFlagValue]>;
+    readonly modelFlags: readonly string[];
+    readonly effortFlags: readonly string[];
+    /**
+     * MCP servers the launch must disable by name, for a CLI with no flag that drops them all: the
+     * arguments that list them as the launch would load them, the names in that listing (undefined
+     * when unreadable), and the arguments disabling them (undefined when a name cannot be addressed)
+     */
+    readonly mcp?: { readonly list: readonly string[]; servers(stdout: string): string[] | undefined; disable(names: string[]): string[] | undefined };
+    readonly reply: {
+      /** the transcript's position before a prompt */
+      mark(pane: ReplyPane): Promise<unknown>;
+      /**
+       * The final message of the newest finished turn past `mark` (from the start of the
+       * Conversation when `mark` is undefined), undefined while there is none; `maxBytes` bounds it,
+       * read one past so an over-long reply still reads as too long.
+       */
+      since(pane: ReplyPane, mark: unknown, maxBytes: number): Promise<string | undefined>;
+    };
+  };
+};
 
 /**
  * What the console hands an Adapter's `files` renderer at boot: the host-visible
@@ -347,6 +418,8 @@ export interface Adapter {
     classify(pane: Pane, scan: PaneScan): CleanupClassification | undefined;
     classifyProcess?(process: HostProcess, scan: PaneScan): CleanupClassification | undefined;
   };
+  /** How this kind runs a Review run; the kinds that can run one are the Adapters that have it. */
+  readonly reviewRuns?: ReviewRuns;
 }
 
 /**

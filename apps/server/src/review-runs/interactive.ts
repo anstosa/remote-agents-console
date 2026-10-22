@@ -6,8 +6,8 @@ import type { Agent } from '../domain/models.js';
 import { launchFresh, managedRunProgress, managedRunStartWindowMs, type ReadinessOutcome } from '../launch/managed-run.js';
 import type { ReviewRunLaunch } from '../launch/service.js';
 import { MAX_REVIEW_GENERATED_BYTES } from '../review-tour/contracts.js';
-import type { ReviewAgentKind } from './efforts.js';
-import { reviewReplacedFlags, reviewRunArgs } from './launch-args.js';
+import { reviewRunsFor, type ReviewAgentKind } from './kinds.js';
+import { reviewReplacedFlags } from './launch-args.js';
 import { ReviewRunError, unavailable, type ReviewRunCapability, type ReviewRunner, type ReviewRunRequest } from './runner.js';
 
 // What the console does for an interactive Review run, injected so the run's state machine is
@@ -163,6 +163,7 @@ export class InteractiveReviewRunner implements ReviewRunner {
     const maxBytes = request.maxOutputBytes ?? MAX_REVIEW_GENERATED_BYTES;
     const { text, file } = await this.composePrompt(runId, request);
     const settings = { ...(request.model === undefined ? {} : { model: request.model }), ...(request.effort === undefined ? {} : { effort: request.effort }) };
+    const { interactive } = reviewRunsFor(request.kind);
     let agent: Agent | undefined;
     let read: (() => Promise<string | undefined>) | undefined;
     let keepFile = false;
@@ -174,7 +175,7 @@ export class InteractiveReviewRunner implements ReviewRunner {
     try {
       const launched = await launchFresh({
         agentIds: () => this.host.agentIds(),
-        launch: () => this.host.launch(request.worktreeId, request.kind, { runId, label: request.label, extraArgs: reviewRunArgs(request.kind, { ...settings, readDirectory: this.options.promptDirectory }), replacedFlags: reviewReplacedFlags(request.kind, settings) }),
+        launch: () => this.host.launch(request.worktreeId, request.kind, { runId, label: request.label, extraArgs: interactive.args({ ...settings, readDirectory: this.options.promptDirectory }), replacedFlags: reviewReplacedFlags(interactive, settings) }),
         waitForNewAgent: before => this.host.waitForAgent(before, runId),
         waitForReadiness: candidate => this.host.waitForReadiness(candidate),
         close: id => this.host.close(id),

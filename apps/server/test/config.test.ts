@@ -4,7 +4,7 @@ import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ZodError } from 'zod';
-import { applyListenOverrides, validateConfig } from '../src/config/schema.js';
+import { applyListenOverrides, resolveAgentProgram, validateConfig } from '../src/config/schema.js';
 import { builtInCorrectnessPrompt, builtInTourPrompt } from '../src/review-runs/config.js';
 import { defaultDavoContext } from '../src/integrations/realtime/settings.js';
 import { run } from '../src/tmux/command.js';
@@ -533,6 +533,17 @@ describe('adapter configuration', () => {
     const config = await validateConfig({ ...scratch, adapters: { codex: { program: process.execPath, updates } } });
 
     expect(config.adapters?.codex?.updates).toEqual(updates);
+  });
+});
+
+describe('out-of-band agent programs', () => {
+  it('take each kind\'s own environment override, else its configured program', () => {
+    const config = { adapters: { codex: { program: '/opt/codex', args: [], env: {}, launchable: true }, claude: { program: '/opt/claude', args: [], env: {}, launchable: true } } };
+    expect(resolveAgentProgram(config, 'codex', {})).toBe('/opt/codex');
+    expect(resolveAgentProgram(config, 'claude', {})).toBe('/opt/claude');
+    expect(resolveAgentProgram(config, 'codex', { RAC_CODEX_BIN: '/env/codex', RAC_CLAUDE_BIN: '/env/claude' })).toBe('/env/codex');
+    expect(resolveAgentProgram(config, 'claude', { RAC_CODEX_BIN: '/env/codex', RAC_CLAUDE_BIN: '/env/claude' })).toBe('/env/claude');
+    expect(resolveAgentProgram({ adapters: {} }, 'claude', {})).toBeUndefined();
   });
 });
 

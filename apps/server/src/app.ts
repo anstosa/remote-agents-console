@@ -51,12 +51,12 @@ import { TemporaryPreviewAccess, temporaryPreviewCookie } from './temporary-prev
 import { TemporaryPreviewProxy } from './temporary-previews/proxy.js';
 import { TemporaryPreviewService } from './temporary-previews/service.js';
 import { ConfiguredReviewTourGenerator } from './review-tour/generator.js';
-import { CodexHeadlessReviewRunner } from './review-runs/codex-headless.js';
-import { ClaudeHeadlessReviewRunner } from './review-runs/claude-headless.js';
+import { HeadlessReviewRunner } from './review-runs/headless.js';
+import { byReviewAgentKind, reviewRunsFor } from './review-runs/kinds.js';
 import { ModeDispatchReviewRunner } from './review-runs/dispatch.js';
 import { beginReplyTurn, latestReply } from './review-runs/final-reply.js';
 import { InteractiveReviewRunner } from './review-runs/interactive.js';
-import { codexMcpDisableArgs, codexMcpServers } from './review-runs/launch-args.js';
+import { mcpDisableArgs } from './review-runs/launch-args.js';
 import { isReviewRunName, type ReviewRunner } from './review-runs/runner.js';
 import { CodeReviewer } from './code-review/reviewer.js';
 import { CodeReviewJobs } from './code-review/jobs.js';
@@ -73,7 +73,7 @@ import { mergeBaseChoices, saveMergeBase } from './git/comparison.js';
 import { loadInstanceIconSvg, isInstanceIcon, type InstanceIcon } from './instance-icon.js';
 import { instanceAttention, RemoteInstanceStatusPoller, validInstanceStatusRequest, type InstanceStatus } from './instance-status.js';
 import { createHmac, randomBytes } from 'node:crypto';
-import { integrationConfigForRemotes, parseDavoSettings, resolveClaudeProgram, resolveCodexProgram, reviewConfig } from './config/schema.js';
+import { integrationConfigForRemotes, parseDavoSettings, resolveAgentProgram, reviewConfig } from './config/schema.js';
 import { OrchestrationService } from './orchestration/index.js';
 import { IntegrationAuthService, registerIntegrationAuthServer, type IntegrationScope, type LocalIntegrationSubject } from './integrations/auth/index.js';
 import { IntegrationPolicyService } from './integrations/policy/service.js';
@@ -157,7 +157,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     workspace: serverCheckout(),
     hostWorkspace: serverCheckoutOnHost(config.projects, process.env.RAC_HOST_REPOSITORY?.trim() || process.env.RAC_HOST_WORKSPACE)
   };
-  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId)); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const prompts = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, kind => config.adapters[kind]?.teardown, attachmentStaging); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => config.projects); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveCodexProgram(config); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, { codex: new CodexHeadlessReviewRunner(codexProgram ?? ''), claude: new ClaudeHeadlessReviewRunner(resolveClaudeProgram(config) ?? '') }, interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
+  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId)); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const prompts = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, kind => config.adapters[kind]?.teardown, attachmentStaging); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => config.projects); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
   const temporaryPreviews = deps.temporaryPreviews ?? new TemporaryPreviewService();
   // create Files lazily so missing host prerequisites affect only Files requests
   const hostFiles = deps.hostFiles ?? createRuntimeHostFiles(config);
@@ -2091,13 +2091,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       },
       agentIds: async () => new Set((await discovery.dashboard()).agents.map(agent => agent.id)),
       launch: async (worktreeId, kind, review) => {
-        const codex = kind === 'codex' ? config.adapters.codex : undefined;
+        const { mcp } = reviewRunsFor(kind).interactive;
+        const adapter = config.adapters[kind];
         const worktree = configuredWorktree(worktreeId);
-        if (codex === undefined || worktree === undefined) return await launch.launchReviewRun(worktreeId, kind, review);
-        // a Codex run disables every MCP server it would load there; one it cannot list or address refuses the launch
-        const names = await codexMcpServers(codex.program, worktree.identity, codex.env);
-        const disabled = names === undefined ? undefined : codexMcpDisableArgs(names);
-        if (disabled === undefined) { console.warn(`[review] ${worktree.identity}: could not disable Codex MCP servers; the run is not launched`); return false; }
+        if (mcp === undefined || adapter === undefined || worktree === undefined) return await launch.launchReviewRun(worktreeId, kind, review);
+        // a kind that must disable its MCP servers by name disables every one it would load there; one it cannot list or address refuses the launch
+        const disabled = await mcpDisableArgs(mcp, adapter.program, worktree.identity, adapter.env);
+        if (disabled === undefined) { console.warn(`[review] ${worktree.identity}: could not disable ${kind} MCP servers; the run is not launched`); return false; }
         return await launch.launchReviewRun(worktreeId, kind, { ...review, extraArgs: [...review.extraArgs, ...disabled] });
       },
       waitForAgent: (before, runId) => waitForAgent(before, reviewRunAgent(runId)),

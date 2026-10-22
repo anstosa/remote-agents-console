@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from 'vitest';
 // the launch-profile store) is exercised; only Codex is registered in production today.
 // `adapterCapabilities` mirrors the real derivation for the two mocked kinds so
 // `launchResolutions` can read a skipped kind's `unavailableReason`.
-vi.mock('../src/adapters/registry.js', () => ({
+// the launch lookups are faked; the Review run kinds config validation reads stay real
+vi.mock('../src/adapters/registry.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/adapters/registry.js')>(),
   adapterFor: (kind: string) => (kind === 'codex' || kind === 'claude' ? { kind } : undefined),
   adapterCapabilities: (configs?: Record<string, { launchable?: boolean; unavailableReason?: string }>) =>
     Object.fromEntries(['codex', 'claude'].map(kind => [kind, {

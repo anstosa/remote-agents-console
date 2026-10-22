@@ -3,6 +3,7 @@ import { claudeConfigDir, claudeConversationLatestMessage, claudeConversationNam
 import { claudeSkillDirectories, claudeSlash } from './claude-commands.js';
 import { claudeFiles, claudeHooksFileName } from './claude-hooks.js';
 import { claudeNewConversation } from './claude-new-conversation.js';
+import { claudeReviewRuns } from './claude-review-runs.js';
 import { claudeQuestionTextAnswer, claudeQuestionTextEntry, reportedClaudeQuestion } from './claude-questions.js';
 import type { Adapter, TmuxKey } from './types.js';
 
@@ -47,7 +48,7 @@ const instantCommands = new Set(['/clear']);
  * hook payload (ADR 0006): the dialog draws options in payload order with the
  * highlight on the first, so `selectOption` navigates it by Down-key count.
  */
-export const claudeAdapter: Adapter = {
+export const claudeAdapter = {
   kind: 'claude',
   stateSource: 'reported',
   conflictingArgs: [...conflictingArgs],
@@ -98,4 +99,5 @@ export const claudeAdapter: Adapter = {
   },
   newConversation: claudeNewConversation,
   files: claudeFiles,
-};
+  reviewRuns: claudeReviewRuns,
+} satisfies Adapter;

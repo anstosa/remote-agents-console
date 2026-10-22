@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import type { ResolvedReviewTour } from '../review-runs/config.js';
-import { reviewEfforts } from '../review-runs/efforts.js';
+import { reviewEfforts } from '../review-runs/kinds.js';
 import { tourRunLabel, type ReviewRunner, type ReviewRunProgress } from '../review-runs/runner.js';
 import { generatedReviewTourJsonSchema, parseGeneratedReviewTourResult, REVIEW_GENERATION_TIMEOUT_MS, ReviewTourError, type GeneratedReviewTour, type ReviewComparison, type ReviewTourCapability } from './contracts.js';
 

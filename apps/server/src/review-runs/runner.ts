@@ -1,10 +1,6 @@
+import type { HeadlessRunFailure } from '../adapters/types.js';
 import { ReviewTourError } from '../review-tour/contracts.js';
-import type { ReviewAgentKind } from './efforts.js';
-
-// the only built-in tools a Claude Review run gets, headless or interactive: reading the
-// repository, plus Skill so a preset prompt can name an operator's skill. With Edit, Write and
-// Bash withheld, a skill can only read; one that runs a command or edits fails at that step
-export const claudeReviewTools = 'Read,Grep,Glob,Skill';
+import type { ReviewAgentKind } from './kinds.js';
 
 // the name an interactive run gives its conversation: "🗺 Tour · branch" or "🔍 Review · preset".
 // The Named conversations list recognises a run's conversation by this prefix and keeps it apart.
@@ -29,7 +25,7 @@ export type ReviewRunProgress = { onStarted?: (run: { agentId: string }) => void
 // `recovery` beside its pane, so a run a server restart orphans can still be finished from it
 // (`InteractiveReviewHost.recover`); headless runs ignore it.
 export type ReviewRunRequest = { kind: ReviewAgentKind; workspace: string; worktreeId: string; prompt: string; schema: object; model?: string; effort?: string; timeoutMs: number; label: string; maxOutputBytes?: number; validate?: (value: unknown) => string | undefined; recovery?: object } & ReviewRunProgress;
-export type ReviewRunErrorCode = 'capability_unavailable' | 'authentication_required' | 'generation_failed' | 'malformed_result' | 'timed_out' | 'cancelled';
+export type ReviewRunErrorCode = HeadlessRunFailure | 'capability_unavailable' | 'timed_out' | 'cancelled';
 
 // a typed Review run failure; a ReviewTourError, so tour and review jobs map it unchanged
 export class ReviewRunError extends ReviewTourError {
@@ -42,7 +38,7 @@ export interface ReviewRunner {
   run(request: ReviewRunRequest, signal: AbortSignal): Promise<unknown>;
 }
 
-// runs one kind's Review runs (a headless CLI); routed to by kind and mode
+// runs one kind's headless Review runs; routed to by kind and mode
 export interface KindReviewRunner {
   capability(): Promise<ReviewRunCapability>;
   run(request: ReviewRunRequest, signal: AbortSignal): Promise<unknown>;

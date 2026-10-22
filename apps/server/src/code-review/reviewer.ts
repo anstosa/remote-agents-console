@@ -1,5 +1,5 @@
 import type { ReviewPreset, ResolvedReviewConfig } from '../review-runs/config.js';
-import { acceptsReviewEffort, reviewEfforts } from '../review-runs/efforts.js';
+import { acceptsReviewEffort, reviewEfforts } from '../review-runs/kinds.js';
 import { reviewRunLabel, type ReviewRunner, type ReviewRunProgress } from '../review-runs/runner.js';
 import { ReviewTourError, type ReviewComparison } from '../review-tour/contracts.js';
 import { CODE_REVIEW_TIMEOUT_MS, codeReviewFrom, codeReviewReplyError, generatedCodeReviewJsonSchema, MAX_CODE_REVIEW_OUTPUT_BYTES, presetCapability, type CodeReview, type CodeReviewCapability, type CodeReviewOptions, type CodeReviewRecovery, type CodeReviewRun } from './contracts.js';

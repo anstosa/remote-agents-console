@@ -9,6 +9,7 @@ import { ModeDispatchReviewRunner } from '../src/review-runs/dispatch.js';
 import { beginReplyTurn, latestReply } from '../src/review-runs/final-reply.js';
 import { correctionPrompt, InteractiveReviewRunner, parseReply, readablePrompt, replyInstruction, type InteractiveReviewHost, type OrphanRecovery } from '../src/review-runs/interactive.js';
 import type { KindReviewRunner, ReviewRunRequest } from '../src/review-runs/runner.js';
+import { codexHome, fakeProc } from './helpers/codex-fixtures.js';
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
@@ -257,5 +258,28 @@ describe('interactive Review run reply turns', () => {
       await expect(latestReply(sources, { id: 'agent-9', kind: 'claude' }, 1_000)).resolves.toBe('{"ok":true}');
       expect(forced.at(-1)).toBe(true);
     } finally { if (saved === undefined) delete process.env.RAC_CLAUDE_CONFIG_DIR; else process.env.RAC_CLAUDE_CONFIG_DIR = saved; }
+  });
+
+  it('reads a Codex turn\'s reply past the rollout ordinal before the prompt, and an orphan\'s from the rollout\'s start', async () => {
+    const home = await codexHome();
+    process.env.CODEX_HOME = home;
+    const directory = join(home, 'sessions', '2026', '08', '30');
+    await mkdir(directory, { recursive: true });
+    const rollout = join(directory, 'rollout-2026-08-30T15-32-23-019e0a6c-3c51-7f22-9c8f-1d7f0a7e5b11.jsonl');
+    const record = (ordinal: number, payload: unknown) => `${JSON.stringify({ type: 'event_msg', ordinal, payload })}\n`;
+    const turn = (ordinal: number, answer: string) => `${record(ordinal, { type: 'task_started', turn_id: `t${ordinal}` })}${record(ordinal + 1, { type: 'task_complete', turn_id: `t${ordinal}`, last_agent_message: answer })}`;
+    await writeFile(rollout, `${JSON.stringify({ type: 'session_meta', ordinal: 0, payload: { id: '019e0a6c-3c51-7f22-9c8f-1d7f0a7e5b11', cwd: '/worktrees/cora', timestamp: '2026-08-30T15:32:23.000Z', originator: 'codex-tui' } })}\n${turn(1, 'Earlier answer')}`);
+    process.env.RAC_HOST_PROC = await fakeProc(321, [rollout]);
+    const sources = { target: async () => undefined, paneProcessId: () => 321, paneWorkingDirectory: () => undefined, paneDirectory: () => undefined };
+    const read = await beginReplyTurn(sources, { id: 'agent-9', kind: 'codex' }, 1_000);
+    // the turn before the prompt is not this turn's reply
+    await expect(read()).resolves.toBeUndefined();
+    await appendFile(rollout, turn(3, '{"ok":true}'));
+    await expect(read()).resolves.toBe('{"ok":true}');
+    // an orphan reads the newest finished turn from the rollout's start, one byte past the bound so an over-long reply still reads too long
+    await expect(latestReply(sources, { id: 'agent-9', kind: 'codex' }, 1_000)).resolves.toBe('{"ok":true}');
+    await expect(latestReply(sources, { id: 'agent-9', kind: 'codex' }, 3)).resolves.toBe('{"ok');
+    // a pane with no process has no reply
+    await expect(latestReply({ ...sources, paneProcessId: () => undefined }, { id: 'agent-9', kind: 'codex' }, 1_000)).resolves.toBeUndefined();
   });
 });

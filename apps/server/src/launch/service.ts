@@ -1,7 +1,7 @@
 import { mkdir, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { resolveCodexProgram, type ValidatedConfig } from '../config/schema.js';
+import { resolveAgentProgram, type ValidatedConfig } from '../config/schema.js';
 import { run, tmuxFormatLiteral, tmuxLiteralArg } from '../tmux/command.js';
 import { TmuxAdapter } from '../tmux/adapter.js';
 import { hostCommand, hostInteractiveShellPath, interactiveShellBootstrap, interactiveShellName, interactiveShellPath } from '../tmux/interactive-shell.js';
@@ -11,7 +11,7 @@ import { ProcSocketFinder, workspaceRoot, type SocketFinder } from '../discovery
 import { projectIdOf, worktreeHostRoot, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
 import { adapterCapabilities, adapterFor } from '../adapters/registry.js';
 import { renderAdapterFiles, type RenderedAdapterFiles } from '../adapters/files.js';
-import { agentKinds, type AgentKind, type LaunchInput, type LaunchMode } from '../adapters/types.js';
+import { agentKinds, type AgentKind, type LaunchInput, type LaunchMode, type ReplacedFlagValue } from '../adapters/types.js';
 import { resolveLaunchProfile, type LaunchResolution, type LaunchScope } from './resolution.js';
 import { WorktreeLaunchStore, scratchLaunchKey } from '../worktrees/store.js';
 import type { Pane, SocketRef, Worktree } from '../domain/models.js';
@@ -55,9 +55,6 @@ export function composeLaunch(program: string, adapterArgs: string[], operatorAr
   return setup === undefined ? launch : `eval ${shellQuote(setup)} && ${launch}`;
 }
 
-// how an operator flag a launch replaces takes its value: none, the next token, or every
-// following token up to the next flag (a variadic option)
-export type ReplacedFlagValue = 'none' | 'one' | 'many';
 // One Review run's launch (ADR 0010): its id, which marks the pane `@rac_review_run`, the
 // label the Agent's tab reads as, the run's own arguments (placed last), and the operator
 // flags those replace or that would loosen the run's read-only policy.
@@ -150,7 +147,7 @@ export class LaunchService {
     const hostProgram = process.env.RAC_HOST_CODEX_BIN?.trim();
     // host tmux cannot execute a container-only RAC_CODEX_BIN path
     if (this.hostSocket !== undefined) return hostProgram || this.config.adapters.codex?.program;
-    return resolveCodexProgram(this.config);
+    return resolveAgentProgram(this.config, 'codex');
   }
 
   private adapterFilesPromise: Promise<RenderedAdapterFiles> | undefined;

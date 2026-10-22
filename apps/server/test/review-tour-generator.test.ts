@@ -4,14 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_REVIEW_GENERATED_BYTES, ReviewTourError, type ReviewComparison } from '../src/review-tour/contracts.js';
 import { ConfiguredReviewTourGenerator } from '../src/review-tour/generator.js';
-import { CodexHeadlessReviewRunner } from '../src/review-runs/codex-headless.js';
+import { HeadlessReviewRunner } from '../src/review-runs/headless.js';
+import { reviewRunsFor } from '../src/review-runs/kinds.js';
 import { builtInTourPrompt, type ResolvedReviewTour } from '../src/review-runs/config.js';
 import type { ReviewRunner, ReviewRunRequest } from '../src/review-runs/runner.js';
 
 const roots: string[] = [];
 const defaultTour: ResolvedReviewTour = { agent: 'codex', prompt: builtInTourPrompt };
 // a tour generator on the headless Codex runner, as app.ts wires a headless Codex tour
-const codexGenerator = (binary: string, tour: ResolvedReviewTour = defaultTour) => new ConfiguredReviewTourGenerator(new CodexHeadlessReviewRunner(binary), tour);
+const codexGenerator = (binary: string, tour: ResolvedReviewTour = defaultTour) => new ConfiguredReviewTourGenerator(new HeadlessReviewRunner(reviewRunsFor('codex').headless, binary), tour);
 const change = { id: 'chg_12345678', file: 'src/feature.ts', category: 'implementation' as const, kind: 'hunk' as const, patch: '@@ -1 +1 @@\n-old\n+new' };
 type FakeCodexOptions = { delaySeconds?: number; supported?: boolean; authenticated?: boolean; stderrBytes?: number; failure?: string };
 

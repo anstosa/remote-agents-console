@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ReviewCategory } from '../git/change-classification.js';
 import { objectId } from '../git/comparison.js';
-import type { ReviewAgentKind } from '../review-runs/efforts.js';
+import type { ReviewAgentKind } from '../review-runs/kinds.js';
 import type { ReviewRunCapability } from '../review-runs/runner.js';
 
 // room for a Code review's 2000-character focus note in any script

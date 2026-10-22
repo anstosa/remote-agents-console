@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { digest } from '../git/comparison.js';
-import type { ReviewAgentKind } from '../review-runs/efforts.js';
+import { reviewAgentKinds, type ReviewAgentKind } from '../review-runs/kinds.js';
 import type { ReviewRunCapability } from '../review-runs/runner.js';
 import { commitMatchesScope, describeSchemaIssues, parseReviewTourInput, reviewScopeShape, type ReviewChange, type ReviewTourInput } from '../review-tour/contracts.js';
 
@@ -52,7 +52,7 @@ const findingSchema = generatedFindingSchema.extend({ id: findingId }).strict();
 const generalSchema = z.object({ id: findingId, severity, title, body, file: file.optional() }).strict();
 const codeReviewSchema = z.object({
   fingerprint: z.string().min(16).max(128),
-  preset: z.object({ id: presetId, label: z.string().min(1).max(80), agent: z.enum(['codex', 'claude']) }).strict(),
+  preset: z.object({ id: presetId, label: z.string().min(1).max(80), agent: z.enum(reviewAgentKinds) }).strict(),
   effort: z.string().min(1).max(20).optional(),
   focus: focus.optional(),
   findings: z.array(findingSchema).max(MAX_CODE_REVIEW_FINDINGS),

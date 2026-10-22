@@ -2,6 +2,7 @@ import { classifyCodexPane } from './codex-panes.js';
 import { isCodexCommand } from './codex-processes.js';
 import { codexQuestionTextEntry, queuedCodexQuestion } from './codex-questions.js';
 import { codexCommands, codexCompletion, codexConversations, codexInferState, codexNewConversation, codexSubmission, codexTurns, parseCodexQuestion } from './codex-tui.js';
+import { codexReviewRuns } from './codex-review-runs.js';
 import type { Adapter } from './types.js';
 
 /**
@@ -10,7 +11,7 @@ import type { Adapter } from './types.js';
  * `codex-tui.ts`, which the OMX Adapter shares by reference (ADR 0005). It
  * recognises plain Codex only: OMX is its own kind.
  */
-export const codexAdapter: Adapter = {
+export const codexAdapter = {
   kind: 'codex',
   stateSource: 'title',
   recognizes: ({ comm, argv }) => isCodexCommand(comm, argv),
@@ -33,4 +34,5 @@ export const codexAdapter: Adapter = {
   newConversation: codexNewConversation,
   // Codex hides no panes and runs no helper processes; its one cleanup rule is the stale agent
   panes: { classify: classifyCodexPane },
-};
+  reviewRuns: codexReviewRuns,
+} satisfies Adapter;

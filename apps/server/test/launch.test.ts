@@ -10,12 +10,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LaunchService, composeCommand, composeLaunch, expandCommand, expandHomeCommand, scratchLabel, withoutFlags, type TmuxSession } from '../src/launch/service.js';
 import { atPlace, inWorktree, reviewRunAgent } from '../src/launch/wait.js';
-import { codexMcpDisableArgs, codexMcpServers, reviewReplacedFlags, reviewRunArgs } from '../src/review-runs/launch-args.js';
+import { mcpDisableArgs, reviewReplacedFlags as replacedFlags } from '../src/review-runs/launch-args.js';
+import { reviewRunsFor, type ReviewAgentKind } from '../src/review-runs/kinds.js';
+import type { ReviewRunSettings } from '../src/adapters/types.js';
 import { hostCommand, interactiveShellBootstrap, interactiveShellPath } from '../src/tmux/interactive-shell.js';
 import { startNamedReplacementSession, worktreeSessionName } from '../src/tmux/session-name.js';
 import type { SocketRef, Worktree } from '../src/domain/models.js';
 import { testWorktree } from './helpers/config.js';
 import { worktreePlace } from '../src/places/places.js';
+
+// a kind's interactive Review run arguments and dropped flags, from its Adapter
+const reviewRunArgs = (kind: ReviewAgentKind, run: ReviewRunSettings & { readDirectory?: string }) => reviewRunsFor(kind).interactive.args(run);
+const reviewReplacedFlags = (kind: ReviewAgentKind, run: ReviewRunSettings) => replacedFlags(reviewRunsFor(kind).interactive, run);
+const codexMcp = reviewRunsFor('codex').interactive.mcp!;
+
 
 // worktrees are discovered and launched through a configured Adapter now; the legacy
 // per-worktree `command`/`resumeCommand` launch path is retired, so a worktree launch
@@ -1471,12 +1479,14 @@ describe('Review run launches', () => {
     // a fake Codex reporting its cwd and CODEX_HOME through the second listed server name
     await writeFile(binary, `#!/bin/sh\n[ "$1 $2 $3" = "mcp list --json" ] || exit 2\nprintf '[{"name":"docs","enabled":true},{"name":"%s","enabled":false}]' "$(basename "$PWD")-$CODEX_HOME"\n`);
     await chmod(binary, 0o700);
-    await expect(codexMcpServers(binary, root, { CODEX_HOME: 'alt' })).resolves.toEqual(['docs', `${root.split('/').at(-1)}-alt`]);
-    await expect(codexMcpServers(join(root, 'missing'), root, {})).resolves.toBeUndefined();
-    expect(codexMcpDisableArgs(['docs', 'git_hub-2'])).toEqual(['-c', 'mcp_servers.docs.enabled=false', '-c', 'mcp_servers.git_hub-2.enabled=false']);
-    expect(codexMcpDisableArgs([])).toEqual([]);
+    await expect(mcpDisableArgs(codexMcp, binary, root, { CODEX_HOME: 'alt' })).resolves.toEqual(['-c', 'mcp_servers.docs.enabled=false', '-c', `mcp_servers.${root.split('/').at(-1)}-alt.enabled=false`]);
+    await expect(mcpDisableArgs(codexMcp, join(root, 'missing'), root, {})).resolves.toBeUndefined();
+    expect(codexMcp.servers('[{"name":"docs","enabled":true},{"name":"git_hub-2"}]')).toEqual(['docs', 'git_hub-2']);
+    expect(codexMcp.servers('{"name":"docs"}')).toBeUndefined();
+    expect(codexMcp.disable(['docs', 'git_hub-2'])).toEqual(['-c', 'mcp_servers.docs.enabled=false', '-c', 'mcp_servers.git_hub-2.enabled=false']);
+    expect(codexMcp.disable([])).toEqual([]);
     // a name a dotted override cannot address refuses the run rather than leaving it enabled
-    expect(codexMcpDisableArgs(['docs', 'a.b'])).toBeUndefined();
+    expect(codexMcp.disable(['docs', 'a.b'])).toBeUndefined();
   });
 
   it('opens a marked, labelled window in the Workspace session, keeping the Claude hooks settings and idle shell untouched', async () => {

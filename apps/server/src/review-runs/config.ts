@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { acceptsReviewEffort, reviewAgentKinds, reviewEfforts, type ReviewAgentKind } from './efforts.js';
+import { acceptsReviewEffort, byReviewAgentKind, reviewAgentKinds, reviewEfforts, type ReviewAgentKind } from './kinds.js';
 
 export type ReviewRunMode = 'headless' | 'interactive';
 export type ResolvedReviewTour = { agent: ReviewAgentKind; model?: string; effort?: string; prompt: string };
@@ -30,10 +30,12 @@ const reviewModel = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,199}$/u
 const reviewEffort = z.string().min(1).max(20);
 const reviewAgent = z.enum(reviewAgentKinds);
 const reviewMode = z.object({ mode: z.enum(['headless', 'interactive']).default('headless') }).strict();
+// a run mode per Review run kind, each optional
+const reviewAgents = z.object(byReviewAgentKind(() => reviewMode.optional())).strict();
 const reviewTour = z.object({ agent: reviewAgent.optional(), model: reviewModel.optional(), effort: reviewEffort.optional(), prompt: reviewPrompt.optional() }).strict();
 const reviewPresetId = z.string().regex(/^[a-zA-Z0-9_-]{1,40}$/u, 'preset ids are 1-40 letters, digits, `_` and `-`');
 const reviewPreset = z.object({ id: reviewPresetId, label: z.string().trim().min(1).max(80).refine(value => !value.includes('\0'), 'NUL is forbidden'), agent: reviewAgent, model: reviewModel.optional(), effort: reviewEffort.optional(), prompt: reviewPrompt }).strict();
-export const reviewConfigSchema = z.object({ agents: z.object({ codex: reviewMode.optional(), claude: reviewMode.optional() }).strict().optional(), tour: reviewTour.optional(), presets: z.array(reviewPreset).max(20).optional(), defaultPreset: reviewPresetId.optional() }).strict();
+export const reviewConfigSchema = z.object({ agents: reviewAgents.optional(), tour: reviewTour.optional(), presets: z.array(reviewPreset).max(20).optional(), defaultPreset: reviewPresetId.optional() }).strict();
 type ParsedReviewConfig = z.output<typeof reviewConfigSchema>;
 
 // refuse an agent that is not configured under `adapters`, or an effort it does not accept
@@ -43,12 +45,13 @@ function checkRun(label: string, agent: ReviewAgentKind, effort: string | undefi
 }
 
 // fill the `review` section's defaults and cross-check it against the configured adapters:
-// the tour runs on Codex when it is configured, else Claude, else Codex (reported unavailable);
+// the tour runs on the first configured Review run kind in registry order (Codex, then Claude),
+// else the first kind (reported unavailable);
 // with no presets one built-in Correctness preset runs on the tour's agent
 export function resolveReviewConfig(parsed: ParsedReviewConfig | undefined, adapters: Partial<Record<string, unknown>>): ResolvedReviewConfig {
   const configured = (kind: ReviewAgentKind) => adapters[kind] !== undefined;
   const raw = parsed ?? {};
-  const agent = raw.tour?.agent ?? (configured('codex') ? 'codex' : configured('claude') ? 'claude' : 'codex');
+  const agent = raw.tour?.agent ?? reviewAgentKinds.find(configured) ?? reviewAgentKinds[0];
   checkRun('review.tour', agent, raw.tour?.effort, configured, raw.tour?.agent !== undefined);
   const tour: ResolvedReviewTour = { agent, prompt: raw.tour?.prompt ?? builtInTourPrompt, ...(raw.tour?.model === undefined ? {} : { model: raw.tour.model }), ...(raw.tour?.effort === undefined ? {} : { effort: raw.tour.effort }) };
   const ids = new Set<string>();
@@ -61,5 +64,5 @@ export function resolveReviewConfig(parsed: ParsedReviewConfig | undefined, adap
     ? raw.presets.map(preset => ({ id: preset.id, label: preset.label, agent: preset.agent, prompt: preset.prompt, ...(preset.model === undefined ? {} : { model: preset.model }), ...(preset.effort === undefined ? {} : { effort: preset.effort }) }))
     : [{ id: 'correctness', label: 'Correctness', agent, prompt: builtInCorrectnessPrompt }];
   if (raw.defaultPreset !== undefined && !presets.some(preset => preset.id === raw.defaultPreset)) throw new Error(`review.defaultPreset \`${raw.defaultPreset}\` names no preset`);
-  return { agents: { codex: { mode: raw.agents?.codex?.mode ?? 'headless' }, claude: { mode: raw.agents?.claude?.mode ?? 'headless' } }, tour, presets, defaultPreset: raw.defaultPreset ?? presets[0]!.id };
+  return { agents: byReviewAgentKind(kind => ({ mode: raw.agents?.[kind]?.mode ?? 'headless' })), tour, presets, defaultPreset: raw.defaultPreset ?? presets[0]!.id };
 }

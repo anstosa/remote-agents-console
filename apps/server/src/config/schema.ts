@@ -156,16 +156,14 @@ export function parseDavoSettings(value: unknown): DavoSettings | undefined {
   return parsed.success ? parsed.data : undefined;
 }
 
-// the Codex binary container-local or direct out-of-band services spawn: an explicit
-// RAC_CODEX_BIN override, else the configured adapters.codex program
-export function resolveCodexProgram(config: Pick<ValidatedConfig, 'adapters'>, env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return env.RAC_CODEX_BIN ?? config.adapters.codex?.program;
-}
+// the environment overrides of the kinds direct out-of-band services spawn
+const programOverrides = { codex: 'RAC_CODEX_BIN', claude: 'RAC_CLAUDE_BIN' } as const;
 
-// the Claude binary a headless Review run spawns: an explicit RAC_CLAUDE_BIN override, else
-// the configured adapters.claude program
-export function resolveClaudeProgram(config: Pick<ValidatedConfig, 'adapters'>, env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return env.RAC_CLAUDE_BIN ?? config.adapters.claude?.program;
+// the binary direct out-of-band services spawn for a kind (headless Review runs, Codex's
+// container-local launches and account management): its environment override, else the
+// configured adapters.<kind> program
+export function resolveAgentProgram(config: Pick<ValidatedConfig, 'adapters'>, kind: keyof typeof programOverrides, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env[programOverrides[kind]] ?? config.adapters[kind]?.program;
 }
 
 // the resolved `review` section, defaulted for fixtures that predate it

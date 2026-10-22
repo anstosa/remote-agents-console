@@ -2,7 +2,7 @@ import { codexAdapter } from './codex.js';
 import { omxAdapter } from './omx.js';
 import { claudeAdapter } from './claude.js';
 import type { Pane } from '../domain/models.js';
-import type { Adapter, AdapterCapability, AdapterConfigs, AgentKind } from './types.js';
+import type { Adapter, AdapterCapability, AdapterConfigs, AgentKind, ReviewRuns } from './types.js';
 
 /**
  * The closed registry. It is code, not plugins: adding a kind means adding an
@@ -17,7 +17,22 @@ import type { Adapter, AdapterCapability, AdapterConfigs, AgentKind } from './ty
  * a value (types are fine): the Codex and OMX Adapters both hold the `codex-tui.ts`
  * objects at load time, which only works while the graph stays acyclic.
  */
-export const adapters: readonly Adapter[] = [codexAdapter, omxAdapter, claudeAdapter];
+// Each Adapter is declared with `satisfies Adapter`, not `: Adapter`, so its literal `kind` and
+// whether it has `reviewRuns` survive into the types the Review run kinds are derived from.
+const registered = [codexAdapter, omxAdapter, claudeAdapter] as const;
+export const adapters: readonly Adapter[] = registered;
+
+type ReviewRunsAdapter = Extract<typeof registered[number], { readonly reviewRuns: ReviewRuns }>;
+/** The kinds that can run a Review run (ADR 0010): the Adapters that describe `reviewRuns`. */
+export type ReviewAgentKind = ReviewRunsAdapter['kind'];
+const reviewRunsAdapters = registered.filter((adapter): adapter is ReviewRunsAdapter => 'reviewRuns' in adapter);
+/** The Review run kinds in registry order, as a non-empty tuple for schema enums. */
+export const reviewAgentKinds = reviewRunsAdapters.map(adapter => adapter.kind) as [ReviewAgentKind, ...ReviewAgentKind[]];
+
+/** How one kind runs a Review run. */
+export function reviewRunsFor(kind: ReviewAgentKind): ReviewRuns {
+  return reviewRunsAdapters.find(adapter => adapter.kind === kind)!.reviewRuns;
+}
 
 export function adapterFor(kind: AgentKind): Adapter | undefined {
   return adapters.find((adapter) => adapter.kind === kind);

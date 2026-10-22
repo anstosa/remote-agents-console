@@ -1,5 +1,5 @@
 import type { ResolvedReviewConfig } from './config.js';
-import type { ReviewAgentKind } from './efforts.js';
+import type { ReviewAgentKind } from './kinds.js';
 import { ReviewRunError, type KindReviewRunner, type ReviewRunCapability, type ReviewRunner, type ReviewRunRequest } from './runner.js';
 
 // routes each Review run by its kind's configured mode: headless to that kind's CLI runner,
