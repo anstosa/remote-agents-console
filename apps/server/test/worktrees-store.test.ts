@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorktreeLaunchStore, scratchLaunchKey } from '../src/worktrees/store.js';
@@ -11,12 +11,48 @@ async function store() {
   const file = join(root, 'worktrees.json');
   return { file, store: new WorktreeLaunchStore({ file }) };
 }
-afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
+// restore process defaults and remove isolated storage
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  // clean up each temporary store
+  for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+});
 
 // a Worktree wire id keyed by `<projectId>:<realpath>`
 const cora = 'proj:/worktrees/cora';
 
 describe('WorktreeLaunchStore', () => {
+  // use the persistent checkout rather than the packaged server's working directory
+  it('defaults labels, pins and launch profiles to the server checkout', async () => {
+    const checkout = await mkdtemp(join(tmpdir(), 'rac-worktrees-checkout-'));
+    dirs.push(checkout);
+    const file = join(checkout, '.data/worktrees.json');
+    await mkdir(join(checkout, '.data'));
+    await writeFile(file, JSON.stringify({ [cora]: { label: 'Before', launchProfile: 'codex' } }));
+    vi.stubEnv('RAC_SERVER_CHECKOUT', checkout);
+    vi.stubEnv('RAC_WORKTREES_FILE', undefined);
+    const worktrees = new WorktreeLaunchStore();
+    // prove the read path before allowing any mutation
+    expect(await worktrees.labels()).toEqual({ [cora]: 'Before' });
+    await worktrees.setLabel(cora, 'After');
+    await worktrees.setPinned(cora, false);
+    expect(await new WorktreeLaunchStore().labels()).toEqual({ [cora]: 'After' });
+    expect(await new WorktreeLaunchStore().pins()).toEqual({ [cora]: false });
+    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ [cora]: { label: 'After', launchProfile: 'codex', pinned: false } });
+  });
+
+  // explicit file options and environment overrides retain their existing precedence
+  it('prefers an explicit file over the environment and the environment over the checkout', async () => {
+    const { file: envFile } = await store();
+    const { file: optionFile } = await store();
+    vi.stubEnv('RAC_WORKTREES_FILE', envFile);
+    vi.stubEnv('RAC_SERVER_CHECKOUT', '/unused-checkout');
+    await new WorktreeLaunchStore().setLabel(cora, 'Environment');
+    await new WorktreeLaunchStore({ file: optionFile }).setLabel(cora, 'Option');
+    expect(JSON.parse(await readFile(envFile, 'utf8'))).toEqual({ [cora]: { label: 'Environment' } });
+    expect(JSON.parse(await readFile(optionFile, 'utf8'))).toEqual({ [cora]: { label: 'Option' } });
+  });
+
   it('remembers and reads a per-worktree launch profile by wire id, persisting atomically', async () => {
     const { file, store: worktrees } = await store();
     expect(await worktrees.launchProfile(cora)).toBeUndefined();

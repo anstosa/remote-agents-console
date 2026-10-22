@@ -109,6 +109,7 @@ export function resolvedEnvironmentFallback(key: string, context: EnvironmentFal
     case 'HOST_TMUX_BIN': return from('/usr/bin/tmux', 'Docker bridge default');
     case 'RAC_FILE_FAVORITES_FILE': return from(join(checkout, '.data/file-favorites.json'), 'RAC checkout');
     case 'RAC_FILE_OPERATION_JOURNAL': return from(join(checkout, '.data/file-operation-journal.json'), 'RAC checkout');
+    case 'RAC_WORKTREES_FILE': return from(join(checkout, '.data/worktrees.json'), 'RAC checkout');
     case 'COMPOSE_FILE': return from(context.installation?.compose?.files.join(':'), 'current installation');
     case 'COMPOSE_ENV_FILES': return from(context.installation?.compose?.envFiles.join(','), 'current installation');
     case 'COMPOSE_PROJECT_NAME': return from(context.installation?.compose?.projectName, 'current installation');

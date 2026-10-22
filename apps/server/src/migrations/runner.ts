@@ -2,12 +2,13 @@ import { access, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/pr
 import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { gitCommonDir, type GitRun } from '../git/worktrees.js';
 import { run } from '../tmux/command.js';
 import { interactiveShellPath } from '../tmux/interactive-shell.js';
 import { validateConfig } from '../config/schema.js';
+import { serverCheckout } from '../workspaces/server-checkout.js';
 import {
   DataFileError,
   isLegacyConfig,
@@ -71,6 +72,7 @@ function storePath(key: keyof DataFilePaths, envVar: string, fallback: string, d
   return deps.dataFiles?.[key] ?? env[envVar] ?? fallback;
 }
 
+// match each runtime store's default without relying on the migration process cwd
 function stores(deps: MigrationDeps): Store[] {
   return [
     { key: 'notes', file: storePath('notes', 'RAC_NOTES_FILE', '.data/notes.json', deps), rewrite: (raw, plan) => rewriteListStore(raw, plan.keyMaps.notes) },
@@ -78,7 +80,7 @@ function stores(deps: MigrationDeps): Store[] {
     { key: 'queued-prompts', file: storePath('queued', 'RAC_QUEUED_PROMPTS_FILE', '.data/queued-prompts.json', deps), rewrite: (raw, plan) => rewriteListStore(raw, plan.keyMaps.queued) },
     { key: 'prompt-history', file: storePath('history', 'RAC_PROMPT_HISTORY_FILE', '.data/prompt-history.json', deps), rewrite: (raw, plan) => rewriteListStore(raw, plan.keyMaps.history) },
     { key: 'review-tours', file: storePath('reviewTours', 'RAC_REVIEW_TOURS_FILE', '.data/review-tours.json', deps), rewrite: (raw, plan, warnings) => rewriteReviewTours(raw, plan.keyMaps.reviewTours, warnings) },
-    { key: 'worktrees', file: storePath('worktrees', 'RAC_WORKTREES_FILE', '.data/worktrees.json', deps), rewrite: (raw, plan) => rewriteWorktreeRecords(raw, plan.keyMaps.worktrees, plan.pins, plan.labels), createForWorktreeState: true },
+    { key: 'worktrees', file: storePath('worktrees', 'RAC_WORKTREES_FILE', join(serverCheckout(deps.env), '.data/worktrees.json'), deps), rewrite: (raw, plan) => rewriteWorktreeRecords(raw, plan.keyMaps.worktrees, plan.pins, plan.labels), createForWorktreeState: true },
   ];
 }
 

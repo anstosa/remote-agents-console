@@ -33,6 +33,7 @@ describe('resolved settings placeholders', () => {
     ['RAC_HOST_TMUX_SOURCE', '/tmp/tmux-1200 (from RAC_HOST_UID)'],
     ['RAC_HOST_UNIX_SOCKETS', '/host-proc/net/unix (from RAC_HOST_PROC)'],
     ['RAC_CLAUDE_CONFIG_DIR', '/home/console/.claude (from HOME)'],
+    ['RAC_WORKTREES_FILE', '/console/.data/worktrees.json (from RAC checkout)'],
     ['TZ', 'America/Los_Angeles (from host time zone)'],
     ['RAC_TMUX_BIN', '/usr/bin/tmux (from built-in default)']
   ])('resolves %s without writing a configured value', (key, expected) => {

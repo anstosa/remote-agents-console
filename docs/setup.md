@@ -731,9 +731,11 @@ bare entry is never a Worktree, a Stale (git-prunable) checkout is hidden, a
 git-locked one is flagged, and a detached HEAD is labelled by its short SHA.
 Use **Rename worktree** from a launch row or agent menu to replace that generated
 Project/branch label with a stable operator name such as `Dave`. The alias is
-stored in `.data/worktrees.json`, follows the checkout path across launches, and
-does not rename the branch or directory. **Use branch name** clears the alias and
-restores the generated label.
+stored in `.data/worktrees.json` under the console's own checkout
+(`RAC_SERVER_CHECKOUT`, `/workspace` in Docker), follows the worktree path across
+launches, and does not rename the branch or directory. Set `RAC_WORKTREES_FILE`
+to keep using an existing file stored elsewhere. **Use branch name** clears the
+alias and restores the generated label.
 
 ### Creating Worktrees
 

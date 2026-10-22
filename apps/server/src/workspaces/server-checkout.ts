@@ -19,8 +19,8 @@ import type { Project } from '../domain/models.js';
 
 // the server's own checkout as this process sees it, canonicalised to match the
 // realpath'd `Project.path` the config loader records
-export function serverCheckout(): string {
-  const named = process.env.RAC_SERVER_CHECKOUT?.trim();
+export function serverCheckout(env: NodeJS.ProcessEnv = process.env): string {
+  const named = env.RAC_SERVER_CHECKOUT?.trim();
   const root = named !== undefined && named.length > 0 ? named : consoleRepositoryRoot();
   try { return realpathSync(root); } catch { return root; }
 }

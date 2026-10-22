@@ -46,6 +46,24 @@ const exists = (path: string) => readFile(path, 'utf8').then(() => true, () => f
 const readJson = async (path: string) => JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
 
 describe('runMigration', () => {
+  // keep migration and runtime defaults on the same persistent checkout
+  it('rekeys the default worktrees store under the injected server checkout', async () => {
+    const { root, repo } = await workspace();
+    const configPath = join(root, 'config.json');
+    await writeFile(configPath, JSON.stringify({ publicOrigin: 'https://x', worktrees: [{ id: 'a', path: repo, command: 'codex' }] }));
+    const file = join(repo, '.data/worktrees.json');
+    const record = { label: 'Custom name', pinned: false, launchProfile: 'codex' };
+    await mkdir(join(repo, '.data'));
+    await writeFile(file, JSON.stringify({ a: record }));
+    const migration = deps(configPath, { worktrees: undefined }, codex, { env: { RAC_SERVER_CHECKOUT: repo } });
+    // prove the default read path without risking a write to the process checkout
+    const { report, errors } = await dryRunMigration(migration);
+    expect(errors).toEqual([]);
+    expect(report.counts.worktrees).toBe(1);
+    await runMigration(migration);
+    expect(await readJson(file)).toEqual({ [`a:${repo}`]: record });
+  });
+
   it('migrates a full legacy config and re-keys the data files, leaving backups', async () => {
     const { root, repo } = await workspace();
     const wt = join(root, 'repo-wt');

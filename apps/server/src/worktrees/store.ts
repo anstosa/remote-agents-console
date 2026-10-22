@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { agentKinds, type AgentKind } from '../adapters/types.js';
+import { serverCheckout } from '../workspaces/server-checkout.js';
 
 /**
  * per-scope launch, pin and label state persisted outside the config file (ADR 0003).
@@ -39,9 +40,9 @@ export class WorktreeLaunchStore {
   private readonly file: string;
   private mutation = Promise.resolve();
 
-  // configure durable worktree launch storage
+  // keep default storage in the persistent checkout rather than the packaged cwd
   constructor(options: { file?: string } = {}) {
-    this.file = options.file ?? process.env.RAC_WORKTREES_FILE ?? '.data/worktrees.json';
+    this.file = options.file ?? process.env.RAC_WORKTREES_FILE ?? join(serverCheckout(), '.data/worktrees.json');
   }
 
   // the last Adapter kind launched under this key, if any is still recorded
