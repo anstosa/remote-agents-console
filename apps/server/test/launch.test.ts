@@ -15,6 +15,7 @@ import { reviewRunsFor, type ReviewAgentKind } from '../src/review-runs/kinds.js
 import type { ReviewRunSettings } from '../src/adapters/types.js';
 import { hostCommand, interactiveShellBootstrap, interactiveShellPath } from '../src/tmux/interactive-shell.js';
 import { startNamedReplacementSession, worktreeSessionName } from '../src/tmux/session-name.js';
+import { terminalColorFallbackArgv } from '../src/tmux/terminal-colors.js';
 import type { SocketRef, Worktree } from '../src/domain/models.js';
 import { testWorktree } from './helpers/config.js';
 import { worktreePlace } from '../src/places/places.js';
@@ -370,18 +371,18 @@ describe('LaunchService', () => {
 
     await expect(service.launch('cora')).resolves.toBe(true);
     const freshSession = run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[];
-    expect(freshSession.slice(0, 12)).toEqual(['-S', '/host-tmux/default', 'new-session', '-d', '-s', 'cora', '-c', '/home/ubuntu/cora', '-P', '-F', '#{pane_id}', '/usr/bin/zsh']);
-    expect(freshSession[12]).toBe('-lc');
+    expect(freshSession.slice(0, 11)).toEqual(['-S', '/host-tmux/default', 'new-session', '-d', '-s', 'cora', '-c', '/home/ubuntu/cora', '-P', '-F', '#{pane_id}']);
+    expect(freshSession.slice(11)).toEqual(terminalColorFallbackArgv('tmux', ['/usr/bin/zsh', '-lc', freshSession.at(-1)!]));
     // a fresh launch runs the configured program unchanged — no resume verb
-    expect(freshSession[13]).toContain('codex');
-    expect(freshSession[13]).not.toContain('resume');
+    expect(freshSession.at(-1)).toContain('codex');
+    expect(freshSession.at(-1)).not.toContain('resume');
 
     run.mockClear();
     run.mockResolvedValue({ code: 0, stdout: '', stderr: '' });
     await expect(service.resume('cora')).resolves.toBe(true);
     const continueSession = run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[];
     // continue appends the Adapter's args to the same program
-    expect(continueSession[13]).toContain('codex resume --last');
+    expect(continueSession.at(-1)).toContain('codex resume --last');
   });
 
   // nested checkouts still use the authenticated host account
@@ -595,9 +596,9 @@ describe('LaunchService', () => {
 
     await expect(service.startWorktreeShell(worktree)).resolves.toBe(true);
 
-    // a direct login shell in the checkout — no node runner, no descriptor, no fs
+    // initialize colors before the login shell without a node runner or descriptor
     const created = run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[];
-    expect(created).toEqual(['new-session', '-d', '-s', 'owen', '-c', '/worktrees/owen', '-P', '-F', '#{pane_id}', '/usr/bin/zsh', '-l']);
+    expect(created).toEqual(['new-session', '-d', '-s', 'owen', '-c', '/worktrees/owen', '-P', '-F', '#{pane_id}', ...terminalColorFallbackArgv('/usr/bin/tmux', ['/usr/bin/zsh', '-l'])]);
   });
 
   it('suffixes a local worktree launch past a session name an unrelated tmux session already holds', async () => {
@@ -614,7 +615,8 @@ describe('LaunchService', () => {
 
     // launched under a suffixed name via the node runner, never the taken base name
     const created = run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[];
-    expect(created.slice(0, 8)).toEqual(['new-session', '-d', '-s', 'owen-2', '-P', '-F', '#{pane_id}', process.execPath]);
+    expect(created.slice(0, 7)).toEqual(['new-session', '-d', '-s', 'owen-2', '-P', '-F', '#{pane_id}']);
+    expect(created.slice(7)).toEqual(terminalColorFallbackArgv('/usr/bin/tmux', [process.execPath, created.at(-2)!, created.at(-1)!]));
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['set-option', '-t', '%7', '@rac_place', 'owen']);
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['set-option', '-p', '-t', '%7', '@rac_console_managed', '1']);
   });
@@ -951,7 +953,7 @@ describe('LaunchService', () => {
       await expect(service.createConsoleShell(worktreePlace(worktree), 'build')).resolves.toBe('%9');
 
       const newWindow = run.mock.calls.find(call => call[1].includes('new-window'));
-      expect(newWindow?.[1]).toEqual(['-S', '/tmp/tmux/default', 'new-window', '-d', '-t', '$1', '-c', '/worktrees/alex', '-P', '-F', '#{pane_id}', '--', interactiveShellPath(), '-l']);
+      expect(newWindow?.[1]).toEqual(['-S', '/tmp/tmux/default', 'new-window', '-d', '-t', '$1', '-c', '/worktrees/alex', '-P', '-F', '#{pane_id}', '--', ...terminalColorFallbackArgv('/usr/bin/tmux', [interactiveShellPath(), '-l'])]);
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux/default', 'set-option', '-p', '-t', '%9', '@rac_role', 'shell']);
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux/default', 'set-option', '-p', '-t', '%9', '@rac_pane_name', 'build']);
     });
@@ -965,7 +967,7 @@ describe('LaunchService', () => {
       await expect(service.createConsoleShell(worktreePlace(worktree), 'nvim', '/usr/bin/nvim')).resolves.toBe('%9');
 
       const newWindow = run.mock.calls.find(call => call[1].includes('new-window'));
-      expect(newWindow?.[1].slice(-4)).toEqual(['--', interactiveShellPath(), '-lc', interactiveShellBootstrap('/usr/bin/nvim', '$HOME', interactiveShellPath(), true)]);
+      expect(newWindow?.[1].slice(12)).toEqual(terminalColorFallbackArgv('/usr/bin/tmux', [interactiveShellPath(), '-lc', interactiveShellBootstrap('/usr/bin/nvim', '$HOME', interactiveShellPath(), true)]));
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux/default', 'set-option', '-p', '-t', '%9', '@rac_pane_name', 'nvim']);
       // an operator's `remain-on-exit on` would otherwise keep the dead pane
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux/default', 'set-option', '-p', '-t', '%9', 'remain-on-exit', 'off']);
@@ -985,7 +987,7 @@ describe('LaunchService', () => {
       await expect(service.createConsoleShell(worktreePlace(worktree), '')).resolves.toBe('%5');
 
       const newSession = run.mock.calls.find(call => call[1].includes('new-session'));
-      expect(newSession?.[1]).toEqual(['new-session', '-d', '-s', 'alex', '-c', '/worktrees/alex', '-P', '-F', '#{pane_id}', '--', interactiveShellPath(), '-l']);
+      expect(newSession?.[1]).toEqual(['new-session', '-d', '-s', 'alex', '-c', '/worktrees/alex', '-P', '-F', '#{pane_id}', '--', ...terminalColorFallbackArgv('/usr/bin/tmux', [interactiveShellPath(), '-l'])]);
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['set-option', '-p', '-t', '%5', '@rac_role', 'shell']);
       // the new session is the Worktree's Workspace
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['set-option', '-t', '%5', '@rac_place', 'alex']);
@@ -1166,7 +1168,7 @@ describe('LaunchService', () => {
 
         await expect(launch.createConsoleShell({ id: 'scratch:/home/me/scratch', kind: 'scratch', projectId: 'scratch', home: '/home/me/scratch' }, '')).resolves.toBe('%9');
 
-        expect(createConsoleShellWindow).toHaveBeenCalledWith(socket, '$4', '/home/me/scratch', [interactiveShellPath(), '-l'], '');
+        expect(createConsoleShellWindow).toHaveBeenCalledWith(socket, '$4', '/home/me/scratch', terminalColorFallbackArgv('/usr/bin/tmux', [interactiveShellPath(), '-l']), '');
         expect(run.mock.calls.some(call => call[1].includes('new-session'))).toBe(false);
       });
     });
@@ -1334,7 +1336,9 @@ describe('LaunchService', () => {
 
       await expect(launch.launchHome()).resolves.toBe(true);
 
-      expect(tmuxCall('new-window')?.slice(0, 10)).toEqual(['-S', '/tmp/tmux-1000/default', 'new-window', '-d', '-t', '$7', '-P', '-F', '#{pane_id}', process.execPath]);
+      expect(tmuxCall('new-window')?.slice(0, 9)).toEqual(['-S', '/tmp/tmux-1000/default', 'new-window', '-d', '-t', '$7', '-P', '-F', '#{pane_id}']);
+      const created = tmuxCall('new-window')!;
+      expect(created.slice(9)).toEqual(terminalColorFallbackArgv('/usr/bin/tmux', [process.execPath, created.at(-2)!, created.at(-1)!]));
       expect(tmuxCall('new-window')?.join(' ')).not.toContain(codexProgram);
     });
 

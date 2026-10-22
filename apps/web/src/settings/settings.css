@@ -191,6 +191,8 @@
 .settings-array-list { display: grid; min-width: 0; gap: .55rem; }
 /* distinguish existing collection rows with solid transparent outlines */
 .settings-array-list > .settings-array-entry { display: grid; min-width: 0; gap: .65rem; margin: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .6rem; background: transparent; }
+/* leave argument fields and actions unframed */
+.settings-array-arguments > .settings-array-list > .settings-array-entry { border: 0; border-radius: 0; padding: 0; }
 .settings-array-entry-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .65rem; }
 .settings-array-actions { display: flex; flex: none; gap: .25rem; }
 .settings-array-actions button { min-width: 1.75rem; gap: .3rem; }

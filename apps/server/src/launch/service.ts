@@ -6,6 +6,7 @@ import { run, tmuxFormatLiteral, tmuxLiteralArg } from '../tmux/command.js';
 import { TmuxAdapter } from '../tmux/adapter.js';
 import { hostCommand, hostInteractiveShellPath, interactiveShellBootstrap, interactiveShellName, interactiveShellPath } from '../tmux/interactive-shell.js';
 import { availableSessionName, worktreeSessionName } from '../tmux/session-name.js';
+import { terminalColorFallbackArgv } from '../tmux/terminal-colors.js';
 import { processPaneRole } from '../tmux/stack-sessions.js';
 import { ProcSocketFinder, workspaceRoot, type SocketFinder } from '../discovery/service.js';
 import { projectIdOf, worktreeHostRoot, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
@@ -441,7 +442,7 @@ export class LaunchService {
     if (this.hostSocket !== undefined) created = await run(this.tmux, ['-S', this.hostSocket, 'new-session', '-d', '-s', tmuxFormatLiteral(session), '-c', tmuxFormatLiteral(site.cwd), '-P', '-F', '#{pane_id}', ...this.hostLaunchArgv(site, command)]);
     else {
       const { descriptor, runner } = await this.writeLaunchDescriptor(id, command, site);
-      created = await run(this.tmux, ['new-session', '-d', '-s', tmuxFormatLiteral(session), '-P', '-F', '#{pane_id}', process.execPath, runner, descriptor]);
+      created = await run(this.tmux, ['new-session', '-d', '-s', tmuxFormatLiteral(session), '-P', '-F', '#{pane_id}', ...terminalColorFallbackArgv(this.tmux, [process.execPath, runner, descriptor])]);
       // clean failed launch descriptors
       if (created.code !== 0) await unlink(descriptor).catch(() => {});
     }
@@ -449,9 +450,9 @@ export class LaunchService {
     return created.stdout.trim();
   }
 
-  // the host login shell running the composed launch at the site, through the interactive bootstrap
+  // establish headless colors before the host shell or agent starts
   private hostLaunchArgv(site: LaunchSite, command: string): string[] {
-    return [this.hostShell, '-lc', interactiveShellBootstrap(hostCommand(expandHomeCommand(command, site.cwd), site.home), site.home, this.hostShell)];
+    return terminalColorFallbackArgv('tmux', [this.hostShell, '-lc', interactiveShellBootstrap(hostCommand(expandHomeCommand(command, site.cwd), site.home), site.home, this.hostShell)]);
   }
 
   // where a worktree launch runs: its host root with its Project's account home on the bridge,
@@ -619,7 +620,7 @@ export class LaunchService {
       pane = created.stdout.trim();
     } else {
       const { descriptor, runner } = await this.writeLaunchDescriptor(id, command, site);
-      const created = await run(this.tmux, ['-S', socket.path, 'new-window', '-d', '-t', session, '-P', '-F', '#{pane_id}', process.execPath, runner, descriptor]);
+      const created = await run(this.tmux, ['-S', socket.path, 'new-window', '-d', '-t', session, '-P', '-F', '#{pane_id}', ...terminalColorFallbackArgv(this.tmux, [process.execPath, runner, descriptor])]);
       if (created.code !== 0) { logFailure(created); await unlink(descriptor).catch(() => {}); return undefined; }
       pane = created.stdout.trim();
     }
@@ -653,10 +654,10 @@ export class LaunchService {
       // keep credentials and CLI state rooted in the authenticated account
       const home = this.agentHome(worktree.projectId);
       // the bridge shell still needs the host HOME/PATH the launch bootstrap sets
-      const tail = ['-c', tmuxFormatLiteral(hostRoot), this.hostShell, '-lc', interactiveShellBootstrap(hostCommand('', home), home, this.hostShell)];
+      const tail = ['-c', tmuxFormatLiteral(hostRoot), ...terminalColorFallbackArgv('tmux', [this.hostShell, '-lc', interactiveShellBootstrap(hostCommand('', home), home, this.hostShell)])];
       return await this.markStartedShell(this.hostSocket, await run(this.tmux, ['-S', this.hostSocket, 'new-session', '-d', '-s', tmuxFormatLiteral(name), '-P', '-F', '#{pane_id}', ...tail]), worktree);
     }
-    return await this.markStartedShell(undefined, await run(this.tmux, ['new-session', '-d', '-s', tmuxFormatLiteral(name), '-c', tmuxFormatLiteral(worktree.identity), '-P', '-F', '#{pane_id}', this.localShell, '-l']), worktree);
+    return await this.markStartedShell(undefined, await run(this.tmux, ['new-session', '-d', '-s', tmuxFormatLiteral(name), '-c', tmuxFormatLiteral(worktree.identity), '-P', '-F', '#{pane_id}', ...terminalColorFallbackArgv(this.tmux, [this.localShell, '-l'])]), worktree);
   }
 
   // mark a started Worktree idle shell through its new pane id (a dotted session name is no tmux target)
@@ -680,10 +681,11 @@ export class LaunchService {
   // it is the operator's own shell, not the Agent's. A `command` (the configured editor) runs
   // through the interactive bootstrap once the shell is up, and the shell ends with it.
   private consoleShellCommand(place: ConsoleShellPlace, command: string): { cwd: string; argv: string[] } {
-    if (this.hostSocket === undefined) return { cwd: place.home, argv: command === '' ? [this.localShell, '-l'] : [this.localShell, '-lc', interactiveShellBootstrap(command, '$HOME', this.localShell, true)] };
+    // color setup precedes even operator login-shell startup files
+    if (this.hostSocket === undefined) return { cwd: place.home, argv: terminalColorFallbackArgv(this.tmux, command === '' ? [this.localShell, '-l'] : [this.localShell, '-lc', interactiveShellBootstrap(command, '$HOME', this.localShell, true)]) };
     // a Worktree launch exports its Project's account home; directory and Scratch launches the default one
     const home = this.agentHome(place.kind === 'worktree' ? place.projectId : undefined);
-    return { cwd: placeHostRoot(place), argv: [this.hostShell, '-lc', interactiveShellBootstrap(hostCommand(command, home), home, this.hostShell, command !== '')] };
+    return { cwd: placeHostRoot(place), argv: terminalColorFallbackArgv('tmux', [this.hostShell, '-lc', interactiveShellBootstrap(hostCommand(command, home), home, this.hostShell, command !== '')]) };
   }
 
   // Open a Console shell at the Place and return the new pane id, or undefined on failure.

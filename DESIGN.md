@@ -103,8 +103,14 @@ controls only after their adapter is added and hide them when it is removed. Kee
 visible for added adapters; blank commands remove their optional overrides. Keep
 service executable overrides separate from launch programs; show image-build settings
 only in Docker. Keep each adapter's Args and Updates sections visible while allowing
-individual arguments to be removed. Updates requires all three commands together, labeled Get current version
-command, Get latest version command and Update command. Name adapter removal actions
+individual arguments to be removed.
+Render each argument as an always-editable field in its row instead of a static
+command preview. Omit the repeated visible Arg title and Edit/Close control while
+retaining an accessible argument label and the reorder/remove actions.
+Keep argument rows unframed, without wrapper-card borders or padding; retain the
+input field's own outline.
+Updates requires all three commands together, labeled Get current version command,
+Get latest version command and Update command. Name adapter removal actions
 `Remove <adapter name>`.
 Application has a top-level Reviews page. Keep its optional fields and sections
 permanently visible without eagerly authoring configuration; blank optional values

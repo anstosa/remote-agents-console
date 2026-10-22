@@ -3807,6 +3807,64 @@ test("hides Environment rows represented by active structured settings", async (
   expect(consoleErrors).toEqual([]);
 });
 
+// keep launch arguments directly editable while preserving ordered argv values
+for (const width of [390, 1440]) {
+  // apply the same inline editor contract to each supported agent
+  for (const adapter of ["codex", "omx", "claude"]) {
+    test(`edits ${adapter} args inline at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      const { settings, sources, state } = await setupSettings(page);
+      const app = sources.find(source => source.id === "app")!;
+      const value = app.value as Record<string, unknown>;
+      const schema = app.schema as SettingsSchema;
+      app.value = { ...value, adapters: { [adapter]: { program: `/usr/bin/${adapter}`, args: ["--first", "--second"] } } };
+      app.schema = { ...schema, properties: { ...schema.properties, adapters: applicationSettingsSchema().properties!.adapters! } };
+      await settings.getByRole("button", { name: "Refresh files", exact: true }).click();
+      await selectSettingsSection(settings, "agents", "Agents");
+
+      const args = settings.locator(`[data-settings-path="adapters.${adapter}.args"]`);
+      const first = args.getByRole("textbox", { name: "Arg 1", exact: true });
+      await expect(first).toBeEditable();
+      await expect(first).toHaveValue("--first");
+      const row = args.locator(".settings-array-entry").first();
+      await expect(row).toHaveCSS("border-width", "0px");
+      await expect(row).toHaveCSS("border-radius", "0px");
+      await expect(row).toHaveCSS("padding", "0px");
+      await expect(first).toHaveCSS("border-top-width", "1px");
+      await expect(args.getByRole("button", { name: /^(?:Edit|Close) Arg/u })).toHaveCount(0);
+      await expect(args.getByText("Arg", { exact: true })).toHaveCount(0);
+      expect(state.saves).toEqual([]);
+
+      const argument = '  --model "quoted value"  ';
+      await first.fill(argument);
+      await args.getByRole("button", { name: "+ Add Arg", exact: true }).click();
+      const added = args.getByRole("textbox", { name: "Arg 3", exact: true });
+      await expect(added).toBeEditable();
+      await added.fill("--added");
+      await args.getByRole("button", { name: "Move Args 3 up", exact: true }).click();
+      await expect(args.getByRole("textbox", { name: "Arg 2", exact: true })).toHaveValue("--added");
+      await args.getByRole("button", { name: "Remove Args 3", exact: true }).click();
+      await expect(args.getByRole("textbox")).toHaveCount(2);
+      await expect(first).toBeEditable();
+      await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+      await expect.poll(() => state.saves.length).toBe(1);
+      expect((app.value as { adapters: Record<string, { args: string[] }> }).adapters[adapter]!.args).toEqual([argument, "--added"]);
+      await expect(first).toBeEditable();
+      await expect(first).toHaveValue(argument);
+
+      // announce each invalid inline value only once without committing it
+      await page.route("**/api/settings/validate", route => route.fulfill({
+        json: { valid: false, issues: [{ sourceId: "app", path: ["adapters", adapter, "args", "0"], code: "custom", message: "Argument value is invalid." }], warnings: [] },
+      }));
+      await first.fill("--invalid");
+      await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+      await expect(args.getByRole("alert")).toHaveCount(1);
+      await expect(args.getByRole("alert")).toHaveText("Argument value is invalid.");
+      expect(state.saves).toHaveLength(1);
+    });
+  }
+}
+
 // combine adapter configuration and its environment overrides without changing source ownership
 test("moves adapter settings into Agents and saves both backing sources together", async ({
   page,

@@ -147,6 +147,8 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('Console shells (r
     // created beside the fixture session, it is a login shell in the Worktree, marked and named
     const pane = await launch.createConsoleShell(worktreePlace(worktree), 'build');
     expect(pane).toMatch(/^%\d+$/);
+    // wait for the pre-exec color probe to hand control to the login shell
+    await vi.waitFor(async () => expect((await launch.placeConsoleShells(worktree))[0]?.command).toBe(interactiveShellName(loginShell!)));
     const shells = await launch.placeConsoleShells(worktree);
     expect(shells).toHaveLength(1);
     expect(shells[0]!.paneId).toBe(pane);
