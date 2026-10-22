@@ -1,7 +1,9 @@
 import { createPortal } from 'react-dom';
-import { type ContextType, lazy, Suspense, type UIEvent, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type ContextType, lazy, type ReactNode, Suspense, type UIEvent, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { PanelExpandContext, PanelHeader, PanelIcon, usePanelExpand, usePhoneLayout } from './panel-header.js';
-import type { ReviewDiffComment, ReviewDiffSide, ReviewDiffSuggestion } from './code-panel/review-diffs.js';
+import type { CommentAnchor, ReviewDiffComment, ReviewDiffSide, ReviewDiffSuggestion } from './code-panel/review-diffs.js';
+import { AskThreadView } from './ask-thread.js';
+import { useAskThreads } from './asks.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
 import { patchRowIndex, patchRows } from './code-panel/patch-rows.js';
 import { fetchComparisonFile, type ExpandedLines } from './code-panel/comparison.js';
@@ -668,6 +670,10 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
   const codeReviewProgress = useCodeReviewPoll(request, codeReviewJob, codeReviewSettled);
   const codeReviewElapsed = useJobElapsed(codeReviewJob, codeReviewProgress.startedAt);
 
+  // the Ask threads about the stored review's Findings, read once there is a review to ask
+  const askable = tour !== undefined && codeReview?.conversation !== undefined && !stale;
+  const { threads: askThreads, pending: askPending, failures: askFailures, ask } = useAskThreads(request, launch.worktreeId, tour?.fingerprint, codeReview?.conversation, askable);
+
   // a replacing Code review keeps the triage of the Findings it still holds
   useEffect(() => {
     if (codeReview === undefined) return;
@@ -779,12 +785,13 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     setOpenCommentIds(current => { const next = new Set(current); next.delete(id); return next; });
     setComments(current => current.filter(comment => comment.id !== id));
   };
-  // Keep a Finding: an ordinary inline comment on its lines, pre-filled with its title and body and
-  // open for rewording. Refused, with the limit notice, when it would pass the aggregate cap.
-  const keepFinding = (id: string) => {
+  // Keep a Finding: an ordinary inline comment on its lines, pre-filled with its title and body (and
+  // `extra`, an answer copied in) and open for rewording. Refused, with the limit notice, when it
+  // would pass the aggregate cap.
+  const keepFinding = (id: string, extra?: string) => {
     const finding = codeReview?.findings.find(candidate => candidate.id === id);
     if (finding === undefined) return;
-    const comment: ReviewDiffComment = { id: crypto.randomUUID(), changeId: finding.changeId, startSide: finding.side, startLine: finding.startLine, endSide: finding.side, endLine: finding.endLine, body: [finding.title.trim(), finding.body.trim()].filter(Boolean).join('\n\n').slice(0, maxFeedback) };
+    const comment: ReviewDiffComment = { id: crypto.randomUUID(), changeId: finding.changeId, startSide: finding.side, startLine: finding.startLine, endSide: finding.side, endLine: finding.endLine, body: [finding.title.trim(), finding.body.trim(), extra?.trim() ?? ''].filter(Boolean).join('\n\n').slice(0, maxFeedback) };
     const nextComments = [...comments, comment];
     if (feedbackLength(feedback, nextComments, orphanFeedback, generalNotes) > maxFeedbackTotal) { setLimitNotice(true); return; }
     setComments(nextComments);
@@ -937,6 +944,26 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
   };
   // open an interactive Review run's pane by selecting its Agent; the review panel stays open beside it
   const openRun = (run: ReviewRunLink) => onOpenAgent?.(run.agentId);
+  // Copy a reviewer's answer into its Finding's inline comment, keeping the Finding first when it is
+  // not kept yet; refused, with the limit notice, past the aggregate cap
+  const copyAnswer = (findingId: string, answer: string) => {
+    const entry = findingTriage(triage, comments, findingId);
+    const kept = entry?.state === 'kept' ? comments.find(comment => comment.id === entry.commentId) : undefined;
+    if (kept === undefined) { keepFinding(findingId, answer); return; }
+    const nextComments = comments.map(comment => comment.id === kept.id ? { ...comment, body: `${comment.body.trimEnd()}\n\n${answer.trim()}`.slice(0, maxFeedback) } : comment);
+    if (feedbackLength(feedback, nextComments, orphanFeedback, generalNotes) > maxFeedbackTotal) { setLimitNotice(true); return; }
+    setComments(nextComments);
+    openComment(kept.id);
+  };
+  // A Finding's Ask thread, under its suggested comment or the comment it was kept as, while its
+  // review kept a conversation to ask; a dismissed Finding's thread stays stored but out of view.
+  const findingOfComment = new Map(Object.entries(triage).flatMap(([findingId, entry]) => entry.state === 'kept' ? [[entry.commentId, findingId] as const] : []));
+  const threadFor = (anchor: CommentAnchor): ReactNode => {
+    if (!askable) return null;
+    const findingId = 'suggestionId' in anchor ? anchor.suggestionId : findingOfComment.get(anchor.commentId);
+    if (findingId === undefined) return null;
+    return <AskThreadView key={findingId} thread={askThreads.get(findingId)} pending={askPending.get(findingId)} failed={askFailures.get(findingId)} onAsk={question => ask(findingId, question)} onUseAnswer={answer => copyAnswer(findingId, answer)} {...(onOpenAgent === undefined ? {} : { onOpenRun: openRun })} />;
+  };
   // dismiss one stale durable review
   const dismiss = async () => {
     // prevent duplicate removal requests
@@ -1023,7 +1050,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     {tour && state === 'tour' && step && <><div className="review-tour-progress"><span>Step {current + 1} of {tour.steps.length}{stepUntriaged > 0 && <span className="review-tour-finding-count" title="AI review findings not yet kept or dismissed">{stepUntriaged} {stepUntriaged === 1 ? 'finding' : 'findings'}</span>}</span><span>{Object.values(statuses).filter(value => value === 'visited').length} visited · {Object.values(statuses).filter(value => value === 'skipped').length} skipped</span></div><main className="review-tour-step">{compact
       ? <><button ref={notesBar} type="button" className="review-tour-notes-bar" aria-label="Show step notes" aria-expanded={notesOpen} onClick={() => setNotesOpen(true)}><span><strong>{step.title}</strong><span>{step.explanation}</span></span>{current === 0 && untriagedGeneral > 0 ? <small className="has-feedback">{untriagedGeneral} general</small> : <small className={stepFeedback.trim() === '' ? undefined : 'has-feedback'}>{stepFeedback.trim() === '' ? 'Notes' : 'Feedback'}</small>}</button>
         {notesOpen && <><button type="button" className="review-tour-notes-backdrop" aria-label="Close step notes" onClick={closeNotes} /><section ref={notesDrawer} className="review-tour-narration review-tour-notes-drawer" onScroll={keepNarrationScroll} role="dialog" aria-label="Step notes" tabIndex={-1}><div className="review-tour-notes-head"><span>Step notes</span><button type="button" aria-label="Close step notes" title="Close" onClick={closeNotes}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></div>{narration}</section></>}</>
-      : <section className="review-tour-narration" onScroll={keepNarrationScroll}>{narration}</section>}<section className="review-tour-diffs" aria-label="Relevant changes"><Suspense fallback={<p className="review-tour-diff-loading progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading diff…</p>}><ReviewDiffs changes={changes} comments={comments} openCommentIds={openCommentIds} onCommentAdd={addComment} onCommentChange={updateComment} onCommentOpen={openComment} onCommentClose={closeComment} onCommentDelete={deleteComment} suggestions={suggestions} onSuggestionKeep={keepFinding} onSuggestionDismiss={dismissFinding} onSuggestionRestore={restoreFinding} loadFile={loadFile} onExpandError={expandError} scrollTop={scrolled.current.diffs} onScroll={scrollTop => { scrolled.current.diffs = scrollTop; }} expandedLines={expandedLines} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} /></Suspense></section></main><footer className="review-tour-actions"><button type="button" onClick={back}>Back</button><button type="button" onClick={skip}>Skip</button><span>{feedbackTotal >= maxFeedbackTotal || limitNotice ? `${maxFeedbackTotal.toLocaleString()} total feedback character limit reached` : null}</span>{complete && <button type="button" disabled={stale || feedbackTotal > maxFeedbackTotal} onClick={() => void summarize()}>Review summary</button>}{(!complete || current < tour.steps.length - 1) && <button type="button" onClick={next}>Next</button>}</footer></>}
+      : <section className="review-tour-narration" onScroll={keepNarrationScroll}>{narration}</section>}<section className="review-tour-diffs" aria-label="Relevant changes"><Suspense fallback={<p className="review-tour-diff-loading progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading diff…</p>}><ReviewDiffs changes={changes} comments={comments} openCommentIds={openCommentIds} onCommentAdd={addComment} onCommentChange={updateComment} onCommentOpen={openComment} onCommentClose={closeComment} onCommentDelete={deleteComment} suggestions={suggestions} onSuggestionKeep={keepFinding} onSuggestionDismiss={dismissFinding} onSuggestionRestore={restoreFinding} threadFor={threadFor} loadFile={loadFile} onExpandError={expandError} scrollTop={scrolled.current.diffs} onScroll={scrollTop => { scrolled.current.diffs = scrollTop; }} expandedLines={expandedLines} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} /></Suspense></section></main><footer className="review-tour-actions"><button type="button" onClick={back}>Back</button><button type="button" onClick={skip}>Skip</button><span>{feedbackTotal >= maxFeedbackTotal || limitNotice ? `${maxFeedbackTotal.toLocaleString()} total feedback character limit reached` : null}</span>{complete && <button type="button" disabled={stale || feedbackTotal > maxFeedbackTotal} onClick={() => void summarize()}>Review summary</button>}{(!complete || current < tour.steps.length - 1) && <button type="button" onClick={next}>Next</button>}</footer></>}
     {tour && state === 'summary' && <main className="review-tour-summary"><h3>Review complete</h3><ul>{tour.steps.map(candidate => <li key={candidate.id}><span className={statuses[candidate.id]}>{statuses[candidate.id]}</span><strong>{candidate.title}</strong>{(untriagedByStep.get(candidate.id) ?? 0) > 0 && <small className="review-tour-finding-count" title="AI review findings not yet kept or dismissed">{untriagedByStep.get(candidate.id)}</small>}</li>)}</ul>{untriagedTotal > 0 && <div className="review-tour-untriaged" role="status"><span><strong>{untriagedTotal} {untriagedTotal === 1 ? 'finding' : 'findings'} not reviewed</strong> Untriaged findings are not sent.</span><button type="button" onClick={reviewUntriaged}>Review findings</button></div>}{generalFindings}{orphanFeedback !== '' && <p>Feedback from regenerated steps is retained in the consolidated change request.</p>}{feedbackTotal === 0 ? <p>No feedback was recorded. You can finish without sending anything.</p> : <><label>Consolidated change request<textarea value={dispatch} maxLength={maxDispatch} onChange={event => { setDispatch(event.target.value); setDispatchEdited(true); }} />{dispatch.length >= maxDispatch && <span role="status">{maxDispatch.toLocaleString()} character limit reached</span>}</label>{dispatchEdited && dispatch !== builtDispatch && !sent && <div className="review-tour-rebuild"><span>Edited by hand, so feedback changes are not added.</span><button type="button" onClick={rebuildDispatch}>Rebuild from feedback</button></div>}</>}{error && <p ref={dispatchError} className="review-tour-error" role="alert" tabIndex={-1}>{error}</p>}{sent && <p className="review-tour-sent" role="status">Change request sent to the implementation agent.</p>}{pullRequestStatus}{postError !== undefined && <div ref={postErrorRef} className="review-tour-pr-error" role="alert" tabIndex={-1}><p className="review-tour-error">{postError.message}</p>{postError.retryable && <button type="button" disabled={posting || stale} onClick={() => void postToPullRequest(postError.retry)}>Try again</button>}</div>}<footer className="review-tour-actions"><button type="button" onClick={() => setState('tour')}>Back to tour</button><span>{limitNotice ? `${maxFeedbackTotal.toLocaleString()} total feedback character limit reached` : null}</span>{feedbackTotal > 0 && !sent && <button type="button" className={dispatching ? 'progress-border progress-blue' : undefined} aria-busy={dispatching || undefined} disabled={dispatching || dispatch.trim() === '' || dispatch.length > maxDispatch} onClick={() => void send()}>{dispatching && <span className="update-progress-ring" aria-hidden="true" />}{dispatching ? 'Sending…' : 'Send change request'}</button>}{canPost && (feedbackTotal > 0 || pullRequestPost !== undefined) && <button type="button" className={`review-tour-pr-button${posting ? ' progress-border progress-blue' : ''}`} aria-busy={posting || undefined} disabled={posting || stale || allPosted} title={allPosted ? 'Everything is posted' : `Post as your draft review on PR #${pullRequest.number}`} onClick={() => void postToPullRequest()}>{posting && <span className="update-progress-ring" aria-hidden="true" />}{posting ? 'Posting…' : allPosted && pullRequestPost !== undefined ? `Posted to PR #${pullRequest.number}` : `Post to PR #${pullRequest.number}`}</button>}<button type="button" onClick={onMinimize}>Finish</button></footer></main>}
     </div>
     <div className="review-tour-comparison"><span>{comparisonLabel}</span>{codeReviewChip}</div>

@@ -7,7 +7,7 @@ const MAX_REVIEW_DIAGNOSTIC_CHARACTERS = 16_384;
 
 export type ReviewProcessSpec = { binary: string; args: string[]; cwd?: string; stdin: string; timeoutMs: number; maxStdoutBytes?: number };
 // a finished process: its exit code, a bounded stderr tail, and stdout when it was captured
-// (`overflowed` once it passed `maxStdoutBytes`; the rest is drained, not kept)
+// (only its first `maxStdoutBytes`, `overflowed`, once it passed them; the rest is drained, not kept)
 export type ReviewProcessResult = { code: number; diagnostics: string; stdout: Buffer; overflowed: boolean };
 
 // terminate the full generation tree
@@ -40,8 +40,8 @@ function collectOutput(stream: Readable, limit: number): () => { stdout: Buffer;
   // stop keeping output past the bound, but keep reading so the child never blocks
   stream.on('data', (chunk: Buffer) => {
     if (overflowed) return;
+    if (size + chunk.length > limit) { overflowed = true; chunks.push(chunk.subarray(0, limit - size)); return; }
     size += chunk.length;
-    if (size > limit) { overflowed = true; chunks.length = 0; return; }
     chunks.push(chunk);
   });
   return () => ({ stdout: Buffer.concat(chunks), overflowed });

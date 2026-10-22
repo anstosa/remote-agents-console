@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { sameCodeReviewOptions, type CodeReviewOptions } from '../code-review/contracts.js';
+import type { AskJobs } from '../asks/jobs.js';
 import type { CodeReviewJobs } from '../code-review/jobs.js';
 import type { ReviewRunInfo, ReviewRunProgress } from '../review-runs/runner.js';
 import { publicReviewComparison, REVIEW_JOB_POLL_MS, REVIEW_JOB_TTL_MS, ReviewTourError, type PublicReviewComparison, type ReviewErrorCode, type ReviewTour, type ReviewTourInput } from './contracts.js';
@@ -40,8 +41,9 @@ export class ReviewTourJobs {
   private readonly persistenceVersions = new Map<string, number>();
   private readonly idempotentStarts = new Map<string, IdempotentStart>();
 
-  // `codeReviews` runs a Code review beside a tour that asks for one; every new tour supersedes it
-  constructor(private readonly service: ReviewTourService, private readonly store?: ReviewTourStore, private readonly onStored?: (review: CompletedReviewJob) => void | Promise<void>, private readonly codeReviews?: CodeReviewJobs) {}
+  // `codeReviews` runs a Code review beside a tour that asks for one; every new tour supersedes it,
+  // and the questions asked about the tour it replaces
+  constructor(private readonly service: ReviewTourService, private readonly store?: ReviewTourStore, private readonly onStored?: (review: CompletedReviewJob) => void | Promise<void>, private readonly codeReviews?: CodeReviewJobs, private readonly asks?: Pick<AskJobs, 'supersedeWorktree'>) {}
 
   // start one latest-wins generation, with a Code review of the same Comparison when requested
   async start(owner: string, agentId: string, input: ReviewTourInput, requestId?: string, codeReview?: CodeReviewOptions): Promise<ReviewJobStart> {
@@ -87,6 +89,7 @@ export class ReviewTourJobs {
     this.supersede(owner, prepared);
     // a new tour replaces the Worktree's Code review
     this.codeReviews?.supersedeWorktree(prepared.comparison.worktreeId);
+    void this.asks?.supersedeWorktree(prepared.comparison.worktreeId);
     // skip model generation for empty selections
     if (prepared.comparison.changes.length === 0) return { kind: 'empty', comparison: publicReviewComparison(prepared.comparison) };
     const id = randomBytes(18).toString('base64url');

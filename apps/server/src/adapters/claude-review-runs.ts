@@ -1,5 +1,5 @@
-import { claudeLastAssistantText } from './claude-conversations.js';
-import type { HeadlessRunResult, ReplyPane, ReviewRuns, ReviewRunSettings } from './types.js';
+import { claudeLastAssistantMessage, type ClaudeAssistantMessage } from './claude-conversations.js';
+import type { HeadlessRunResult, HeadlessRunConversation, ReplyPane, ReviewRuns, ReviewRunSettings } from './types.js';
 
 // the only built-in tools a Claude Review run gets, headless or interactive: reading the
 // repository, plus Skill so a preset prompt can name an operator's skill. With Edit, Write and
@@ -15,6 +15,8 @@ const authenticationFailure = /invalid api key|please run \/login|not logged in|
 
 type ClaudeResult = { type?: unknown; is_error?: unknown; result?: unknown; structured_output?: unknown };
 
+// a new conversation under the console's id, or the one resumed, which keeps its id
+const conversationArgs = (conversation: HeadlessRunConversation) => 'resume' in conversation ? ['--resume', conversation.resume] : ['--session-id', conversation.create];
 const modelArgs = (run: ReviewRunSettings) => [...(run.model === undefined ? [] : ['--model', run.model]), ...(run.effort === undefined ? [] : ['--effort', run.effort])];
 
 // the result object from `--output-format json` (one object; an array of messages under --verbose)
@@ -26,27 +28,30 @@ function resultEnvelope(stdout: Buffer | undefined): ClaudeResult | undefined {
   return candidate !== null && typeof candidate === 'object' && !Array.isArray(candidate) ? candidate as ClaudeResult : undefined;
 }
 
-// the last assistant message of the Claude session the pane reports
-async function lastAssistantText(pane: ReplyPane): Promise<string | undefined> {
+// the last assistant message of the Claude conversation the pane reports
+async function lastAssistantMessage(pane: ReplyPane): Promise<ClaudeAssistantMessage | undefined> {
   const conversationId = await pane.conversationId();
-  return conversationId === undefined ? undefined : await claudeLastAssistantText(conversationId, pane.directory());
+  return conversationId === undefined ? undefined : await claudeLastAssistantMessage(conversationId, pane.directory());
 }
 
 export const claudeReviewRuns: ReviewRuns = {
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   headless: {
-    probe: { help: ['--help'], flags: ['--json-schema', '--tools', '--output-format', '--effort', '--no-session-persistence', '--strict-mcp-config', '--setting-sources'] },
-    // print mode, read-only and unpersisted: only the read tools, no MCP servers and only the operator's settings, run in the Worktree
-    command: run => ({ args: ['-p', '--output-format', 'json', '--json-schema', JSON.stringify(run.schema), '--tools', claudeReviewTools, '--strict-mcp-config', ...settingSources, '--no-session-persistence', ...modelArgs(run)], cwd: run.workspace }),
+    probe: { help: ['--help'], flags: ['--json-schema', '--tools', '--output-format', '--effort', '--session-id', '--resume', '--strict-mcp-config', '--setting-sources'] },
+    // print mode and read-only: only the read tools, no MCP servers and only the operator's settings,
+    // run in the Worktree, in a conversation named before it starts so a later turn can resume it
+    command: run => ({ args: ['-p', '--output-format', 'json', ...(run.schema === undefined ? [] : ['--json-schema', JSON.stringify(run.schema)]), '--tools', claudeReviewTools, '--strict-mcp-config', ...settingSources, ...conversationArgs(run.conversation), ...modelArgs(run)], cwd: run.workspace, conversation: 'resume' in run.conversation ? run.conversation.resume : run.conversation.create }),
     // the result envelope carries the text result and usage beside the structured output
     stdoutBytes: outputBytes => 4 * outputBytes + 65_536,
-    result: (outcome, outputBytes): HeadlessRunResult => {
-      const envelope = resultEnvelope(outcome.stdout);
+    result: (outcome, { outputBytes, text }): HeadlessRunResult => {
+      const envelope = outcome.stdoutTruncated === true ? undefined : resultEnvelope(outcome.stdout);
       // a non-zero exit or an error result is a failed run, classified from its text: a missing or expired login is the operator's to fix
       if (outcome.code !== 0 || envelope?.is_error === true) {
-        const text = `${outcome.diagnostics}\n${typeof envelope?.result === 'string' ? envelope.result : ''}`;
-        return { ok: false, failure: authenticationFailure.test(text) ? 'authentication_required' : 'generation_failed' };
+        const said = `${outcome.diagnostics}\n${typeof envelope?.result === 'string' ? envelope.result : ''}`;
+        return { ok: false, failure: authenticationFailure.test(said) ? 'authentication_required' : 'generation_failed' };
       }
+      // a text reply is the result itself
+      if (text) return typeof envelope?.result === 'string' && envelope.result.trim() !== '' && Buffer.byteLength(envelope.result) <= outputBytes ? { ok: true, value: envelope.result } : { ok: false, failure: 'malformed_result' };
       const output = envelope?.structured_output;
       if (output === undefined || output === null || Buffer.byteLength(JSON.stringify(output)) > outputBytes) return { ok: false, failure: 'malformed_result' };
       return { ok: true, value: output };
@@ -61,10 +66,10 @@ export const claudeReviewRuns: ReviewRuns = {
     modelFlags: ['--model'],
     effortFlags: ['--effort'],
     reply: {
-      // the session's last assistant message before the prompt
-      mark: pane => lastAssistantText(pane),
-      // the last assistant message, once it differs from the one before the prompt
-      since: async (pane, mark) => { const text = await lastAssistantText(pane); return text === mark ? undefined : text; }
+      // the id of the conversation's last assistant message before the prompt
+      mark: async pane => (await lastAssistantMessage(pane))?.id,
+      // the last assistant message's text, once that message is a newer one than before the prompt
+      since: async (pane, mark) => { const message = await lastAssistantMessage(pane); return message === undefined || message.id === mark ? undefined : message.text; }
     }
   }
 };

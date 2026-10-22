@@ -25,7 +25,7 @@ import {
   claudeConversationLatestMessage,
   claudeConversationName,
   claudeConversationSummaries,
-  claudeLastAssistantText
+  claudeLastAssistantMessage
 } from '../../src/adapters/claude-conversations.js';
 import {
   codexConversationName,
@@ -92,8 +92,8 @@ describe('transcript parsed-result caches', () => {
     await expect(claudeConversationSummaries([claudeCwd], env)).resolves.toHaveLength(1);
     await expect(claudeConversationLatestMessage(pane, env)).resolves.toBe('Cached Claude answer');
     await expect(claudeConversationLatestMessage(pane, env)).resolves.toBe('Cached Claude answer');
-    await expect(claudeLastAssistantText(claudeId, claudeCwd, env)).resolves.toBe('Cached Claude answer');
-    await expect(claudeLastAssistantText(claudeId, claudeCwd, env)).resolves.toBe('Cached Claude answer');
+    await expect(claudeLastAssistantMessage(claudeId, claudeCwd, env)).resolves.toMatchObject({ text: 'Cached Claude answer' });
+    await expect(claudeLastAssistantMessage(claudeId, claudeCwd, env)).resolves.toMatchObject({ text: 'Cached Claude answer' });
 
     expect(callsFor(boundedReads.head, fixture.transcript)).toHaveLength(2);
     expect(callsFor(boundedReads.tail, fixture.transcript)).toHaveLength(2);

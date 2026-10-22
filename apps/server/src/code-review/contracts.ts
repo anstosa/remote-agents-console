@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { digest } from '../git/comparison.js';
-import { reviewAgentKinds, type ReviewAgentKind } from '../review-runs/kinds.js';
+import { reviewAgentKinds, validConversationId, type ReviewAgentKind } from '../review-runs/kinds.js';
 import type { ReviewRunCapability } from '../review-runs/runner.js';
 import { commitMatchesScope, describeSchemaIssues, parseReviewTourInput, reviewScopeShape, type ReviewChange, type ReviewTourInput } from '../review-tour/contracts.js';
 
@@ -21,7 +21,8 @@ export type Finding = { id: string; changeId: string; side: FindingSide; startLi
 // a concern that cannot anchor to a hunk; `file` names the Change's file when the model cited a known one
 export type GeneralFinding = { id: string; severity: FindingSeverity; title: string; body: string; file?: string };
 export type CodeReviewPresetRef = { id: string; label: string; agent: ReviewAgentKind };
-export type CodeReview = { fingerprint: string; preset: CodeReviewPresetRef; effort?: string; focus?: string; findings: Finding[]; general: GeneralFinding[]; completedAt: string };
+// `conversation` is the reviewer's own conversation, which an Ask about a Finding resumes
+export type CodeReview = { fingerprint: string; preset: CodeReviewPresetRef; effort?: string; focus?: string; findings: Finding[]; general: GeneralFinding[]; completedAt: string; conversation?: string };
 // the Comparison and settings one Code review run reviews, which its result carries
 export type CodeReviewRun = Pick<CodeReview, 'fingerprint' | 'preset' | 'effort' | 'focus'>;
 // what an interactive Code review run leaves beside its pane, so a run a restart orphans can still
@@ -40,6 +41,7 @@ const body = z.string().trim().min(1).max(MAX_FINDING_BODY);
 const file = z.string().min(1).max(4_096);
 const line = z.number().int().positive();
 const presetId = z.string().regex(/^[a-zA-Z0-9_-]{1,40}$/u);
+const conversationSchema = z.string().min(1).max(200);
 const focus = z.string().max(MAX_CODE_REVIEW_FOCUS).refine(value => !value.includes('\0'));
 const optionsShape = { preset: presetId, effort: z.string().min(1).max(20).optional(), focus: focus.optional() };
 const optionsSchema = z.object(optionsShape).strict();
@@ -50,16 +52,18 @@ const generatedSchema = z.object({ findings: z.array(generatedFindingSchema).max
 const findingId = z.string().min(1).max(64);
 const findingSchema = generatedFindingSchema.extend({ id: findingId }).strict();
 const generalSchema = z.object({ id: findingId, severity, title, body, file: file.optional() }).strict();
-const codeReviewSchema = z.object({
+const codeReviewShape = z.object({
   fingerprint: z.string().min(16).max(128),
   preset: z.object({ id: presetId, label: z.string().min(1).max(80), agent: z.enum(reviewAgentKinds) }).strict(),
   effort: z.string().min(1).max(20).optional(),
   focus: focus.optional(),
   findings: z.array(findingSchema).max(MAX_CODE_REVIEW_FINDINGS),
   general: z.array(generalSchema).max(MAX_CODE_REVIEW_GENERAL + MAX_CODE_REVIEW_FINDINGS),
-  completedAt: z.string().refine(value => Number.isFinite(Date.parse(value)))
+  completedAt: z.string().refine(value => Number.isFinite(Date.parse(value))),
+  conversation: conversationSchema.optional()
 }).strict();
-const recoverySchema = codeReviewSchema.pick({ fingerprint: true, preset: true, effort: true, focus: true }).extend({ kind: z.literal('code-review'), worktreeId: z.string().min(1).max(4_096), branch: z.string().min(1).max(1_024) }).strict();
+const codeReviewSchema = codeReviewShape.refine(review => review.conversation === undefined || validConversationId(review.preset.agent, review.conversation));
+const recoverySchema = codeReviewShape.pick({ fingerprint: true, preset: true, effort: true, focus: true }).extend({ kind: z.literal('code-review'), worktreeId: z.string().min(1).max(4_096), branch: z.string().min(1).max(1_024) }).strict();
 
 // drop a blank focus so it neither reaches the prompt nor the idempotency check
 function normalizedOptions(options: z.output<typeof optionsSchema>): CodeReviewOptions {
@@ -170,11 +174,13 @@ export function codeReviewReplyError(value: unknown): string | undefined {
   return parsed.success ? undefined : describeSchemaIssues(parsed.error);
 }
 
-// the Code review a run's structured output makes, its findings anchored in the reviewed Changes
-export function codeReviewFrom(output: unknown, changes: ReviewChange[], run: CodeReviewRun): CodeReview | undefined {
+// the Code review a run's structured output makes, its findings anchored in the reviewed Changes,
+// with the run's conversation when it is one its agent can resume
+export function codeReviewFrom(output: unknown, changes: ReviewChange[], run: CodeReviewRun, conversation?: string): CodeReview | undefined {
   const parsed = parseGeneratedCodeReview(output, changes);
   if (parsed === undefined) return undefined;
-  return { fingerprint: run.fingerprint, preset: run.preset, ...(run.effort === undefined ? {} : { effort: run.effort }), ...(run.focus === undefined ? {} : { focus: run.focus }), findings: parsed.findings, general: parsed.general, completedAt: new Date().toISOString() };
+  const resumable = conversation !== undefined && validConversationId(run.preset.agent, conversation);
+  return { fingerprint: run.fingerprint, preset: run.preset, ...(run.effort === undefined ? {} : { effort: run.effort }), ...(run.focus === undefined ? {} : { focus: run.focus }), findings: parsed.findings, general: parsed.general, completedAt: new Date().toISOString(), ...(resumable ? { conversation } : {}) };
 }
 
 // validate the recovery an orphaned Code review run left

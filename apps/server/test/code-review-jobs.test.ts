@@ -28,7 +28,9 @@ function controlledRunner() {
   const runs: Array<{ request: ReviewRunRequest; signal: AbortSignal; resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
   const runner: ReviewRunner = {
     capability: async () => ({ available: true }),
-    run: async (request, signal) => await new Promise((resolve, reject) => { runs.push({ request, signal, resolve, reject }); })
+    // a test settles a run with its reply, as a run returns it with no conversation
+    run: async (request, signal) => ({ value: await new Promise((resolve, reject) => { runs.push({ request, signal, resolve, reject }); }) }),
+    closeWorktree: async () => {}
   };
   return { runner, runs };
 }
@@ -204,8 +206,10 @@ describe('tour starts with a code review', () => {
     await expect(jobs.recover({ ...left, branch: 'other' }, 'agent-orphan')).resolves.toBeUndefined();
     const recovery = await jobs.recover(left, 'agent-orphan');
     expect(recovery?.validate?.({ findings: 'none' })).toEqual(expect.any(String));
-    await expect(recovery!.save(output)).resolves.toBe(true);
-    expect(await after.codeReview('cora', 'feature/review', tour.comparison.fingerprint)).toMatchObject({ preset: { id: preset.id }, effort: 'high', findings: [{ changeId: change.id, title: 'Unchecked value' }], general: [{ title: 'No test' }] });
+    const conversation = '6f1c2a90-1111-4222-8333-444455556666';
+    await expect(recovery!.save(output, conversation)).resolves.toBe(true);
+    // the orphan's review keeps the conversation the sweep read from its pane
+    expect(await after.codeReview('cora', 'feature/review', tour.comparison.fingerprint)).toMatchObject({ preset: { id: preset.id }, effort: 'high', findings: [{ changeId: change.id, title: 'Unchecked value' }], general: [{ title: 'No test' }], conversation });
     expect(settled).toMatchObject([{ agentId: 'agent-orphan', worktreeId: 'cora', state: { kind: 'ready' } }]);
     // a review begun since the restart supersedes the orphan's
     const later = restarted();

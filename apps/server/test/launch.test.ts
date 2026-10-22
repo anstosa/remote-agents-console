@@ -1535,6 +1535,22 @@ describe('Review run launches', () => {
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%7', '@rac_review_run', runId]);
   });
 
+  it('resumes a Review run\'s conversation through the Adapter\'s own resume launch, refusing an id it does not accept', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%7\n' : '', stderr: '' }));
+    const worktree = cora();
+    const service = new LaunchService(codex, { find: async () => [] }, undefined, undefined, undefined, () => [worktree]);
+    const thread = '019a0000-1111-7222-8333-444455556666';
+
+    await expect(service.launchReviewRun(worktree.id, 'codex', { runId, label: '💬 Ask · Correctness', extraArgs: reviewRunArgs('codex', {}), replacedFlags: reviewReplacedFlags('codex', {}), conversationId: thread })).resolves.toBe(true);
+    const session = run.mock.calls.map(call => call[1] as string[]).find(args => args.includes('new-session'));
+    expect(session?.join(' ')).toContain(`${codexProgram} resume ${thread} --sandbox read-only --ask-for-approval never`);
+
+    run.mockClear();
+    await expect(service.launchReviewRun(worktree.id, 'codex', { runId, label: '💬 Ask · Correctness', extraArgs: [], replacedFlags: reviewReplacedFlags('codex', {}), conversationId: '--last' })).resolves.toBe(false);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('kills a Review run pane it could not mark rather than leave it running unmarked', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
     run.mockImplementation(async (_binary: string, args: string[]) => ({ code: args.includes('@rac_review_run') ? 1 : 0, stdout: args.includes('new-window') ? '%9\n' : '', stderr: '' }));

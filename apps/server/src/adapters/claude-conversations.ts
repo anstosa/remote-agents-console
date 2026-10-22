@@ -326,15 +326,19 @@ export function latestClaudeMessageFromRecords(lines: Iterable<string>): string 
   return text === '' ? undefined : text;
 }
 
+/** The last assistant message of a transcript: its model message id, and its text when it has any. */
+export type ClaudeAssistantMessage = { id?: string; text?: string };
+
 /**
- * The text of the last assistant message among these transcript records. The transcript
- * format is Claude Code's internal one, so this is the single place that reads it: each
- * content block of one model message (thinking, text, tool use) is its own
- * `type: "assistant"` record carrying the same `message.id`, so the last message is the text
- * blocks of the records sharing the last assistant record's id, joined in order. Subagent
- * (sidechain) records are skipped. `undefined` when no assistant message has any text.
+ * The last assistant message among these transcript records. The transcript format is Claude
+ * Code's internal one, so this is the single place that reads it: each content block of one model
+ * message (thinking, text, tool use) is its own `type: "assistant"` record carrying the same
+ * `message.id`, so the last message is the text blocks of the records sharing the last assistant
+ * record's id, joined in order. Subagent (sidechain) records are skipped. `undefined` when there is
+ * no assistant message; `text` is absent when the last one has no text.
  */
-export function lastAssistantTextFromRecords(lines: Iterable<string>): string | undefined {
+export function lastAssistantMessageFromRecords(lines: Iterable<string>): ClaudeAssistantMessage | undefined {
+  let message: ClaudeAssistantMessage | undefined;
   let messageId: unknown;
   let texts: string[] = [];
   for (const line of lines) {
@@ -347,14 +351,15 @@ export function lastAssistantTextFromRecords(lines: Iterable<string>): string | 
     const content = record.message.content;
     if (typeof content === 'string') texts.push(content);
     else if (Array.isArray(content)) for (const block of content as Array<{ type?: unknown; text?: unknown }>) if (block?.type === 'text' && typeof block.text === 'string') texts.push(block.text);
+    const text = texts.join('\n\n');
+    message = { ...(typeof messageId === 'string' ? { id: messageId } : {}), ...(text.trim() === '' ? {} : { text }) };
   }
-  const text = texts.join('\n\n');
-  return text.trim() === '' ? undefined : text;
+  return message;
 }
 
 // reuse parsed final replies without retaining their bounded raw tails
-const lastAssistantTextCache = new FileChangeCache<string | undefined>(
-  async path => lastAssistantTextFromRecords(await readFileTail(path, maxFinalMessageScanBytes)),
+const lastAssistantMessageCache = new FileChangeCache<ClaudeAssistantMessage | undefined>(
+  async path => lastAssistantMessageFromRecords(await readFileTail(path, maxFinalMessageScanBytes)),
   { maxEntries: 512 }
 );
 
@@ -365,13 +370,13 @@ const latestMessageCache = new FileChangeCache<string | undefined>(
 );
 
 /**
- * The last assistant message's text of a known Claude Conversation (an interactive Review
- * run's reply, ADR 0010), read from a bounded tail of its transcript. `undefined` on an
- * invalid id, an unknown cwd, an unreadable transcript or a message with no text.
+ * The last assistant message of a known Claude Conversation (an interactive Review run's reply,
+ * ADR 0010), read from a bounded tail of its transcript. `undefined` on an invalid id, an unknown
+ * cwd, an unreadable transcript or one with no assistant message.
  */
-export async function claudeLastAssistantText(id: string, cwd: string | undefined, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+export async function claudeLastAssistantMessage(id: string, cwd: string | undefined, env: NodeJS.ProcessEnv = process.env): Promise<ClaudeAssistantMessage | undefined> {
   if (!validClaudeSessionId(id) || cwd === undefined) return undefined;
-  return lastAssistantTextCache.get(transcriptPath(id, cwd, env)).catch(() => undefined);
+  return lastAssistantMessageCache.get(transcriptPath(id, cwd, env)).catch(() => undefined);
 }
 
 /** read the latest unanswered message from claude's reported conversation */

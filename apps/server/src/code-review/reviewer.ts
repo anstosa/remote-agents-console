@@ -56,10 +56,11 @@ export class CodeReviewer {
     const run: CodeReviewRun = { fingerprint: comparison.fingerprint, preset: { id: preset.id, label: preset.label, agent: preset.agent }, ...(effort === undefined ? {} : { effort }), ...(focus === undefined ? {} : { focus }) };
     // only a branch-bound review is stored, so only one can be recovered
     const recovery: CodeReviewRecovery | undefined = comparison.branch === undefined ? undefined : { kind: 'code-review', worktreeId: comparison.worktreeId, branch: comparison.branch, ...run };
-    const output = await this.runner.run({ kind: preset.agent, workspace: comparison.workspace, worktreeId: comparison.worktreeId, prompt: codeReviewPrompt(preset.prompt, focus, comparison), schema: generatedCodeReviewJsonSchema, timeoutMs: CODE_REVIEW_TIMEOUT_MS, maxOutputBytes: MAX_CODE_REVIEW_OUTPUT_BYTES, label: reviewRunLabel(preset.label), validate: codeReviewReplyError, ...(recovery === undefined ? {} : { recovery }), ...progress, ...(preset.model === undefined ? {} : { model: preset.model }), ...(effort === undefined ? {} : { effort }) }, signal);
+    const output = await this.runner.run({ kind: preset.agent, workspace: comparison.workspace, worktreeId: comparison.worktreeId, prompt: codeReviewPrompt(preset.prompt, focus, comparison), reply: { kind: 'json', schema: generatedCodeReviewJsonSchema, validate: codeReviewReplyError }, timeoutMs: CODE_REVIEW_TIMEOUT_MS, maxOutputBytes: MAX_CODE_REVIEW_OUTPUT_BYTES, label: reviewRunLabel(preset.label), ...(recovery === undefined ? {} : { recovery }), ...progress, ...(preset.model === undefined ? {} : { model: preset.model }), ...(effort === undefined ? {} : { effort }) }, signal);
     // preserve caller cancellation
     if (signal.aborted) throw new ReviewTourError('cancelled', true);
-    const review = codeReviewFrom(output, comparison.changes, run);
+    // the review keeps the reviewer's conversation, which an Ask about a Finding resumes
+    const review = codeReviewFrom(output.value, comparison.changes, run, output.conversation);
     // reject output outside the contract
     if (review === undefined) throw new ReviewTourError('malformed_result', true);
     return review;

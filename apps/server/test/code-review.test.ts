@@ -16,9 +16,9 @@ const comparison: ReviewComparison = { agentId: 'agent-1', worktreeId: 'cora', w
 const preset: ReviewPreset = { id: 'correctness', label: 'Correctness', agent: 'claude', effort: 'high', prompt: 'Review these changes for correctness.' };
 
 // a fake runner that records its requests and answers with one output
-function fakeRunner(output: unknown, capability: ReviewRunCapability = { available: true }): ReviewRunner & { requests: ReviewRunRequest[] } {
+function fakeRunner(output: unknown, capability: ReviewRunCapability = { available: true }, conversation?: string): ReviewRunner & { requests: ReviewRunRequest[] } {
   const requests: ReviewRunRequest[] = [];
-  return { requests, capability: async () => capability, run: async request => { requests.push(request); return output; } };
+  return { requests, capability: async () => capability, run: async request => { requests.push(request); return { value: output, ...(conversation === undefined ? {} : { conversation }) }; }, closeWorktree: async () => {} };
 }
 
 describe('code review anchoring', () => {
@@ -133,16 +133,24 @@ describe('code reviewer', () => {
   });
 
   it('runs the preset on its agent and returns an anchored review', async () => {
-    const runner = fakeRunner({ findings: [finding(hunk.id, 'additions', 20, 20), finding(hunk.id, 'additions', 99, 99, 'Outside')], general: [] });
+    const conversation = '6f1c2a90-1111-4222-8333-444455556666';
+    const runner = fakeRunner({ findings: [finding(hunk.id, 'additions', 20, 20), finding(hunk.id, 'additions', 99, 99, 'Outside')], general: [] }, undefined, conversation);
     const reviewer = new CodeReviewer(runner, { presets: [{ ...preset, model: 'opus' }], defaultPreset: preset.id });
     const review = await reviewer.run(comparison, await reviewer.resolve({ preset: preset.id, focus: 'retries' }), new AbortController().signal);
-    expect(runner.requests[0]).toMatchObject({ kind: 'claude', workspace: '/worktrees/cora', model: 'opus', effort: 'high', timeoutMs: CODE_REVIEW_TIMEOUT_MS, maxOutputBytes: MAX_CODE_REVIEW_OUTPUT_BYTES, label: '🔍 Review · Correctness', schema: generatedCodeReviewJsonSchema });
+    expect(runner.requests[0]).toMatchObject({ kind: 'claude', workspace: '/worktrees/cora', model: 'opus', effort: 'high', timeoutMs: CODE_REVIEW_TIMEOUT_MS, maxOutputBytes: MAX_CODE_REVIEW_OUTPUT_BYTES, label: '🔍 Review · Correctness', reply: { kind: 'json', schema: generatedCodeReviewJsonSchema } });
     // an interactive run checks the output shape and quotes what failed in its one correction
-    expect(runner.requests[0]!.validate?.({ findings: [], general: [] })).toBeUndefined();
-    expect(runner.requests[0]!.validate?.({ findings: [] })).toBe('general: Required');
+    const { reply } = runner.requests[0]!;
+    const validate = reply.kind === 'json' ? reply.validate : undefined;
+    expect(validate?.({ findings: [], general: [] })).toBeUndefined();
+    expect(validate?.({ findings: [] })).toBe('general: Required');
     expect(runner.requests[0]!.prompt).toContain('Additional focus for this review: retries');
-    expect(review).toMatchObject({ fingerprint: comparison.fingerprint, preset: { id: 'correctness', label: 'Correctness', agent: 'claude' }, effort: 'high', focus: 'retries', findings: [{ startLine: 20 }], general: [{ title: 'Outside', file: hunk.file }] });
+    // the review keeps the reviewer's conversation for an Ask about a Finding
+    expect(review).toMatchObject({ fingerprint: comparison.fingerprint, preset: { id: 'correctness', label: 'Correctness', agent: 'claude' }, effort: 'high', focus: 'retries', findings: [{ startLine: 20 }], general: [{ title: 'Outside', file: hunk.file }], conversation });
     expect(parseCodeReview(review)).toEqual(review);
+    // a conversation the reviewer's agent could not resume is neither kept nor accepted from storage
+    const unresumable = await new CodeReviewer(fakeRunner({ findings: [], general: [] }, undefined, '--resume'), { presets: [preset], defaultPreset: preset.id }).run(comparison, { preset }, new AbortController().signal);
+    expect(unresumable).not.toHaveProperty('conversation');
+    expect(parseCodeReview({ ...review, conversation: 'not-a-conversation' })).toBeUndefined();
     await expect(new CodeReviewer(fakeRunner({ nope: true }), { presets: [preset], defaultPreset: preset.id }).run(comparison, { preset }, new AbortController().signal)).rejects.toMatchObject({ code: 'malformed_result', retryable: true });
   });
 });

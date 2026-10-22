@@ -1757,9 +1757,9 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 @keyframes progress-spinner { to { transform: rotate(360deg); } }
 .update-progress-ring::after { content: ''; display: var(--progress-spinner-display, none); position: absolute; top: .25rem; left: .25rem; box-sizing: border-box; width: .65rem; height: .65rem; border: 2px solid var(--progress-ring-color, var(--mauve)); border-left-color: transparent; border-radius: 50%; animation: var(--progress-spinner-animation, none); }
 /* loaders and small status pills have room for an inline spinner instead of a corner badge */
-:is(.loading-console, .log-loading, .agent-state-pill, .stack-process-state) > .update-progress-ring { position: var(--progress-inline-position, absolute); inset: var(--progress-inline-inset, -1px); width: var(--progress-inline-size, auto); height: var(--progress-inline-size, auto); flex: none; }
+:is(.loading-console, .log-loading, .agent-state-pill, .stack-process-state, .review-ask-pending) > .update-progress-ring { position: var(--progress-inline-position, absolute); inset: var(--progress-inline-inset, -1px); width: var(--progress-inline-size, auto); height: var(--progress-inline-size, auto); flex: none; }
 :is(.loading-console, .log-loading) > .update-progress-ring { width: var(--progress-loader-size, auto); height: var(--progress-loader-size, auto); margin: 0 auto; }
-:is(.loading-console, .log-loading, .agent-state-pill, .stack-process-state) > .update-progress-ring::after { inset: 0; width: 100%; height: 100%; }
+:is(.loading-console, .log-loading, .agent-state-pill, .stack-process-state, .review-ask-pending) > .update-progress-ring::after { inset: 0; width: 100%; height: 100%; }
 .agent-state-pill.progress-border::before { display: var(--progress-border-display, block); }
 /* reset hidden animations so live preference changes restart the visible treatment */
 @media (prefers-reduced-motion: reduce) {
@@ -2279,6 +2279,26 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-suggestion.dismissed > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-tour-suggestion.dismissed button { flex: none; border-color: transparent; background: transparent; color: var(--blue); }
 @media (pointer: coarse) { .review-tour-suggestion button { min-height: 2.2rem; padding-inline: .9rem; } }
+/* a Finding's Ask thread, under its suggested or kept comment: questions, the reviewer's Markdown answers and the next question */
+.review-ask-open { display: flex; justify-content: flex-end; margin: -.25rem .6rem .5rem; }
+.review-ask-open button { padding: .2rem .55rem; border-color: transparent; background: transparent; box-shadow: none; color: var(--mauve); font: 700 .66rem var(--font-mono); }
+.review-ask { display: grid; gap: .5rem; margin: -.15rem .6rem .5rem 1.4rem; padding: .5rem .65rem; border-left: 2px solid color-mix(in srgb, var(--mauve) 55%, var(--surface-2)); background: var(--mantle); color: var(--text); font: 500 .76rem/1.45 var(--font-mono); white-space: normal; }
+.review-ask-turn { display: grid; gap: .3rem; }
+.review-ask-question { margin: 0; color: var(--subtext-0); font-weight: 700; white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-ask-answer { padding: 0; overflow-wrap: anywhere; }
+/* Q and A marks hang in a gutter so wrapped lines and Markdown blocks stay aligned */
+.review-ask-question, .review-ask-answer { position: relative; padding-left: 1.4rem; }
+.review-ask-question::before, .review-ask-answer::before { position: absolute; top: 0; left: 0; color: var(--mauve); font: 700 .76rem/1.45 var(--font-mono); }
+.review-ask-question::before { content: "Q"; }
+.review-ask-answer::before { content: "A"; }
+.review-ask-error { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0; color: var(--red); }
+.review-ask-pending { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0; padding: .3rem .5rem; border-radius: var(--control-radius); color: var(--subtext-1); }
+.review-ask-compose { display: grid; gap: .35rem; }
+.review-ask-compose textarea { box-sizing: border-box; width: 100%; min-height: 3.2rem; resize: vertical; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .45rem; background: var(--crust); color: var(--text); font: inherit; }
+.review-ask-actions { display: flex; justify-content: flex-end; gap: .4rem; }
+.review-ask button { padding: .3rem .65rem; font-size: .68rem; box-shadow: none; }
+.review-ask-actions button:not([type="submit"]), .review-ask-error button, .review-ask-pending button { border-color: var(--surface-2); background: transparent; color: var(--subtext-0); }
+@media (pointer: coarse) { .review-ask button, .review-ask-open button { min-height: 2.2rem; padding-inline: .9rem; } }
 .review-tour-severity { flex: none; padding: .05rem .4rem; border: 1px solid currentColor; border-radius: 999px; color: var(--overlay-1); font: 800 .58rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
 .review-tour-severity.high { color: var(--red); }
 .review-tour-severity.medium { color: var(--peach); }

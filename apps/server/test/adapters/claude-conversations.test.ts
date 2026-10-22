@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
-import { claudeConfigDir, claudeConversationLatestMessage, claudeConversationName, claudeConversationSummaries, claudeLastAssistantText, latestClaudeMessageFromRecords, lastAssistantTextFromRecords, validClaudeSessionId } from '../../src/adapters/claude-conversations.js';
+import { claudeConfigDir, claudeConversationLatestMessage, claudeConversationName, claudeConversationSummaries, claudeLastAssistantMessage, latestClaudeMessageFromRecords, lastAssistantMessageFromRecords, validClaudeSessionId } from '../../src/adapters/claude-conversations.js';
 
 const cwd = '/tachi/code/remoteagents';
 const encoded = '-tachi-code-remoteagents';
@@ -269,21 +269,21 @@ describe('claude final assistant message', () => {
     await mkdir(join(configDir, 'projects', encoded), { recursive: true });
     await writeFile(join(configDir, 'projects', encoded, `${id}.jsonl`), await readFile(fixture, 'utf8'));
     // the sidechain reply and the earlier message's text are not the final message
-    await expect(claudeLastAssistantText(id, cwd, { RAC_CLAUDE_CONFIG_DIR: configDir } as NodeJS.ProcessEnv)).resolves.toBe('{"findings":[],"general":[]}');
+    await expect(claudeLastAssistantMessage(id, cwd, { RAC_CLAUDE_CONFIG_DIR: configDir } as NodeJS.ProcessEnv)).resolves.toMatchObject({ text: '{"findings":[],"general":[]}' });
   });
 
-  it('joins every text block of the final message and finds nothing without text', () => {
+  it('joins every text block of the final message, naming it by its id even without text', () => {
     const record = (messageId: string, content: unknown) => JSON.stringify({ type: 'assistant', message: { id: messageId, content } });
-    expect(lastAssistantTextFromRecords([record('a', [{ type: 'text', text: 'old' }]), record('b', [{ type: 'text', text: 'one' }]), record('b', [{ type: 'tool_use' }]), record('b', [{ type: 'text', text: 'two' }])])).toBe('one\n\ntwo');
-    expect(lastAssistantTextFromRecords([record('a', [{ type: 'text', text: 'old' }]), record('b', [{ type: 'tool_use' }])])).toBeUndefined();
-    expect(lastAssistantTextFromRecords(['not json', ''])).toBeUndefined();
+    expect(lastAssistantMessageFromRecords([record('a', [{ type: 'text', text: 'old' }]), record('b', [{ type: 'text', text: 'one' }]), record('b', [{ type: 'tool_use' }]), record('b', [{ type: 'text', text: 'two' }])])).toEqual({ id: 'b', text: 'one\n\ntwo' });
+    expect(lastAssistantMessageFromRecords([record('a', [{ type: 'text', text: 'old' }]), record('b', [{ type: 'tool_use' }])])).toEqual({ id: 'b' });
+    expect(lastAssistantMessageFromRecords(['not json', ''])).toBeUndefined();
   });
 
   it('refuses an invalid id, an unknown cwd and a missing transcript', async () => {
     const env = { RAC_CLAUDE_CONFIG_DIR: join(tmpdir(), 'rac-claude-missing') } as NodeJS.ProcessEnv;
-    await expect(claudeLastAssistantText('not-a-uuid', cwd, env)).resolves.toBeUndefined();
-    await expect(claudeLastAssistantText(id, undefined, env)).resolves.toBeUndefined();
-    await expect(claudeLastAssistantText(id, cwd, env)).resolves.toBeUndefined();
+    await expect(claudeLastAssistantMessage('not-a-uuid', cwd, env)).resolves.toBeUndefined();
+    await expect(claudeLastAssistantMessage(id, undefined, env)).resolves.toBeUndefined();
+    await expect(claudeLastAssistantMessage(id, cwd, env)).resolves.toBeUndefined();
   });
 
   it('reads the latest assistant message for the reported conversation and raw cwd', async () => {

@@ -27,7 +27,7 @@ async function fakeCodex(result: unknown, options: FakeCodexOptions = {}): Promi
   const root = await mkdtemp(join(tmpdir(), 'rac-review-generator-'));
   roots.push(root);
   const binary = join(root, 'codex');
-  const help = supported ? '--ephemeral --ignore-user-config --ignore-rules --sandbox --output-schema --output-last-message' : '--ephemeral';
+  const help = supported ? 'resume --json --ignore-user-config --ignore-rules --sandbox --output-schema --output-last-message' : '--ephemeral';
   const script = `#!/usr/bin/env bash
 set -eu
 if [[ "\${1:-}" == "exec" && "\${2:-}" == "--help" ]]; then printf '%s\\n' '${help}'; exit 0; fi
@@ -105,7 +105,7 @@ describe('configured review tour generator', () => {
   // a runner that records each request and answers with the generated tour
   const recording = () => {
     const requests: ReviewRunRequest[] = [];
-    const runner: ReviewRunner = { capability: async () => ({ available: false, reason: 'interactive_unavailable' }), run: async request => { requests.push(request); return generated; } };
+    const runner: ReviewRunner = { capability: async () => ({ available: false, reason: 'interactive_unavailable' }), run: async request => { requests.push(request); return { value: generated }; }, closeWorktree: async () => {} };
     return { runner, requests };
   };
 
@@ -116,13 +116,14 @@ describe('configured review tour generator', () => {
     await expect(generator.generate({ ...comparison('/worktrees/cora'), branch: 'feature/x' }, new AbortController().signal)).resolves.toEqual(generated);
     await generator.generate(comparison('/worktrees/cora'), new AbortController().signal, 'max');
     expect(requests.map(request => [request.kind, request.model, request.effort, request.label])).toEqual([['claude', 'opus', 'high', '🗺 Tour · feature/x'], ['claude', 'opus', 'max', '🗺 Tour · cora']]);
-    expect(requests[0]!.schema).toMatchObject({ required: ['title', 'overview', 'steps'] });
+    expect(requests[0]!.reply).toMatchObject({ kind: 'json', schema: { required: ['title', 'overview', 'steps'] } });
   });
 
   it('names the run for an interactive Agent and validates a reply with errors an agent can correct', async () => {
     const { runner, requests } = recording();
     await new ConfiguredReviewTourGenerator(runner, { agent: 'codex', prompt: builtInTourPrompt }).generate(comparison('/w'), new AbortController().signal);
-    const validate = requests[0]!.validate!;
+    const { reply } = requests[0]!;
+    const validate = reply.kind === 'json' ? reply.validate! : () => 'not json';
     expect(requests[0]!.worktreeId).toBe(comparison('/w').worktreeId);
     expect(validate(generated)).toBeUndefined();
     expect(validate({ ...generated, steps: [{ ...generated.steps[0]!, changeIds: ['chg_unknown01'] }] })).toBe('change ID "chg_unknown01" is not one of the provided change IDs');
@@ -150,7 +151,7 @@ describe('configured review tour generator', () => {
   });
 
   it('still rejects output that does not assign every change exactly once', async () => {
-    const runner: ReviewRunner = { capability: async () => ({ available: true }), run: async () => ({ ...generated, steps: [{ ...generated.steps[0], changeIds: ['chg_unknown0'] }] }) };
+    const runner: ReviewRunner = { capability: async () => ({ available: true }), run: async () => ({ value: { ...generated, steps: [{ ...generated.steps[0], changeIds: ['chg_unknown0'] }] } }), closeWorktree: async () => {} };
     await expect(new ConfiguredReviewTourGenerator(runner, defaultTour).generate(comparison('/w'), new AbortController().signal)).rejects.toMatchObject<ReviewTourError>({ code: 'malformed_result', retryable: true });
   });
 });

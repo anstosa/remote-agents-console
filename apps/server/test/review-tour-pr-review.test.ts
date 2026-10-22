@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { ReviewTourError, type ReviewComparison } from '../src/review-tour/contracts.js';
-import { ambiguousBatch, commentMarker, coveredRows, diffRows, fileThreadBody, orderedComment, parsePullRequestReviewInput, placedComments, placementProblem, PullRequestReviewError, PullRequestReviewService, appendSections, sectionMarker, sectionText, threadOutcomes, threadInput, threadMutation, type PullRequestReviewComment, type PullRequestReviewInput } from '../src/review-tour/pr-review.js';
+import { ambiguousBatch, commentMarker, coveredRows, fileThreadBody, orderedComment, parsePullRequestReviewInput, placedComments, placementProblem, PullRequestReviewError, PullRequestReviewService, appendSections, sectionMarker, sectionText, threadOutcomes, threadInput, threadMutation, type PullRequestReviewComment, type PullRequestReviewInput } from '../src/review-tour/pr-review.js';
+import { diffRows } from '../src/review-tour/diff-rows.js';
 import { testConfig } from './helpers/config.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 

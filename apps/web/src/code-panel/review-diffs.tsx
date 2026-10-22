@@ -9,7 +9,7 @@
 // are open, which the caller holds so Escape can close them from anywhere in the dialog. The only state it owns is visual: the Unified / Split choice,
 // which (rendered at the same spot for every step) carries across steps. The caller also keeps the scroll
 // position, handed back on mount so a remounted step returns to where it was read.
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CodeViewLineSelection, DiffLineAnnotation, FileDiffLoadedChangedFiles, FileDiffMetadata, SelectedLineRange } from '@pierre/diffs';
 import { CodeView, type CodeViewHandle, type CodeViewItem, type CodeViewReactOptions } from '@pierre/diffs/react';
 import { useColorTheme } from '../color-theme.js';
@@ -21,7 +21,7 @@ import type { ExpandedLines } from './comparison.js';
 import { patchRowIndex, patchRows } from './patch-rows.js';
 
 // an annotation is either an inline comment or a suggested comment (an untriaged or dismissed Finding)
-type CommentAnchor = { commentId: string } | { suggestionId: string };
+export type CommentAnchor = { commentId: string } | { suggestionId: string };
 type ReviewItem = CodeViewItem<CommentAnchor>;
 type ReviewOptions = CodeViewReactOptions<CommentAnchor, undefined>;
 
@@ -63,6 +63,8 @@ type ReviewDiffsProps = {
   onSuggestionKeep?: (id: string) => void;
   onSuggestionDismiss?: (id: string) => void;
   onSuggestionRestore?: (id: string) => void;
+  // what shows under a comment or an untriaged suggestion: its Ask thread, when it has one
+  threadFor?: (anchor: CommentAnchor) => ReactNode;
   // open a file at a line in the configured editor; the header button is hidden without it
   onOpenInEditor?: (target: EditorTarget) => void;
   // the working tree's text of a file, which lets the unchanged lines between hunks expand
@@ -218,7 +220,7 @@ function SuggestedComment({ suggestion, onKeep, onDismiss, onRestore }: { sugges
 }
 
 // render one tour step with current display settings
-export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll, expandedLines }: ReviewDiffsProps) {
+export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, threadFor, onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll, expandedLines }: ReviewDiffsProps) {
   const theme = useColorTheme();
   const codeView = useRef<CodeViewHandle<CommentAnchor, undefined>>(null);
   const initialScrollTop = useRef(scrollTop);
@@ -322,11 +324,11 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
     if (annotation.metadata !== undefined && 'suggestionId' in annotation.metadata) {
       const suggestion = suggestionsById.get(annotation.metadata.suggestionId);
       if (suggestion === undefined) return null;
-      return <SuggestedComment suggestion={suggestion} onKeep={() => onSuggestionKeep?.(suggestion.id)} onDismiss={() => onSuggestionDismiss?.(suggestion.id)} onRestore={() => onSuggestionRestore?.(suggestion.id)} />;
+      return <><SuggestedComment suggestion={suggestion} onKeep={() => onSuggestionKeep?.(suggestion.id)} onDismiss={() => onSuggestionDismiss?.(suggestion.id)} onRestore={() => onSuggestionRestore?.(suggestion.id)} />{!suggestion.dismissed && threadFor?.(annotation.metadata)}</>;
     }
     const comment = annotation.metadata === undefined ? undefined : commentsById.get(annotation.metadata.commentId);
     if (comment === undefined) return null;
-    return <InlineComment comment={comment} editing={openCommentIds.has(comment.id)} onEdit={() => onCommentOpen(comment.id)} onChange={body => onCommentChange(comment.id, body)} onDone={() => onCommentClose(comment.id)} onDelete={() => onCommentDelete(comment.id)} />;
+    return <><InlineComment comment={comment} editing={openCommentIds.has(comment.id)} onEdit={() => onCommentOpen(comment.id)} onChange={body => onCommentChange(comment.id, body)} onDone={() => onCommentClose(comment.id)} onDelete={() => onCommentDelete(comment.id)} />{threadFor?.(annotation.metadata!)}</>;
   };
 
   // Each file header's editor button opens the working tree's copy at the selected line when one is

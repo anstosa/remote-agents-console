@@ -1331,7 +1331,7 @@ const triageReview = { fingerprint: triageTour.fingerprint, preset: { id: 'corre
   { id: 'f-old', changeId: 'chg_route0001', side: 'deletions', startLine: 11, endLine: 11, severity: 'low', title: 'Lost value', body: 'b used to be 2.' },
   { id: 'f-service', changeId: 'chg_service01', side: 'additions', startLine: 4, endLine: 4, severity: 'medium', title: 'Service naming', body: 'Name the operation.' }
 ], general: [{ id: 'g-tests', severity: 'medium', title: 'No tests', body: 'Nothing covers the route.', file: 'src/route.ts' }] };
-async function openTriageTour(page: Page, { stored = { codeReview: triageReview } as Record<string, unknown>, codeReviewPoll }: { stored?: Record<string, unknown>; codeReviewPoll?: (route: Route) => Promise<void> } = {}): Promise<{ dialog: ReturnType<Page['getByRole']>; prompts: string[] }> {
+async function openTriageTour(page: Page, { stored = { codeReview: triageReview } as Record<string, unknown>, codeReviewPoll, extra }: { stored?: Record<string, unknown>; codeReviewPoll?: (route: Route) => Promise<void>; extra?: (route: Route, url: URL) => Promise<boolean> } = {}): Promise<{ dialog: ReturnType<Page['getByRole']>; prompts: string[] }> {
   const prompts: string[] = [];
   await installAgentWebSocket(page);
   await page.route('**/api/**', async route => {
@@ -1343,6 +1343,7 @@ async function openTriageTour(page: Page, { stored = { codeReview: triageReview 
     if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour: triageTour, ...stored } } });
     if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: triageTour.fingerprint } } });
     if (url.pathname.startsWith('/api/code-review/jobs/') && codeReviewPoll !== undefined) return codeReviewPoll(route);
+    if (extra !== undefined && await extra(route, url)) return;
     if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') { prompts.push((request.postDataJSON() as { prompt: string }).prompt); return route.fulfill({ status: 204 }); }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -1362,6 +1363,8 @@ test('shows AI review Findings as suggested comments to keep or dismiss', async 
   // each of the step's Findings shows on its lines with its severity, title, body and source
   const suggestion = diffPane.getByRole('group', { name: 'Suggested comment: Unchecked constant' });
   await expect(suggestion).toContainText('high');
+  // a review that kept no conversation offers nothing to ask
+  await expect(diffPane.getByRole('button', { name: 'Ask reviewer' })).toHaveCount(0);
   await expect(suggestion).toContainText('c is never validated.\nAdd a guard.');
   await expect(suggestion).toContainText('Line 12 · Correctness · Claude · high');
   await expect(diffPane.getByRole('group', { name: 'Suggested comment: Lost value' })).toContainText('low');
@@ -1416,6 +1419,45 @@ test('shows AI review Findings as suggested comments to keep or dismiss', async 
   expect(value).not.toMatch(/Lost value|Service naming|Correctness|Claude/u);
   await dialog.getByRole('button', { name: 'Send change request' }).click();
   await expect.poll(() => prompts).toEqual([value]);
+});
+
+test('asks the reviewer about a Finding, follows the answer to its pane, and copies it into the comment', async ({ page }) => {
+  const asked: unknown[] = [];
+  let answered = false;
+  let polls = 0;
+  const thread = { id: 'f-const', target: 'reviewer', kind: 'claude', conversation: 's-1', anchor: { findingId: 'f-const', title: 'Unchecked constant', changeId: 'chg_route0001', file: 'src/route.ts', side: 'additions', startLine: 12, endLine: 12, excerpt: '+const c = 4;' } };
+  const { dialog } = await openTriageTour(page, { stored: { codeReview: { ...triageReview, conversation: 's-1' } }, extra: async (route, url) => {
+    if (url.pathname === '/api/worktrees/owen/review-tour/asks' && route.request().method() === 'POST') { asked.push(route.request().postDataJSON()); await route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('ask-1'), threadId: 'f-const' } }); return true; }
+    if (url.pathname === '/api/worktrees/owen/review-tour/asks') { await route.fulfill({ json: { status: 'ready', threads: answered ? [{ ...thread, turns: [{ id: 'ask-1', question: 'Why does it matter?', askedAt: '2026-10-04T12:00:00.000Z', answer: 'Because **c** reaches the query unchecked.' }] }] : [], pending: [] } }); return true; }
+    if (url.pathname === '/api/review-tour/asks/jobs/ask-1') {
+      polls += 1;
+      if (polls < 3) { await route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('ask-1'), run: { agentId: 'agent-review', needsInput: false } } }); return true; }
+      answered = true;
+      await route.fulfill({ json: { status: 'ready' } });
+      return true;
+    }
+    return false;
+  } });
+  const diffPane = dialog.getByLabel('Relevant changes');
+  const suggestion = diffPane.getByRole('group', { name: 'Suggested comment: Unchecked constant' });
+  await expect(suggestion).toBeVisible();
+  await diffPane.getByRole('button', { name: 'Ask reviewer' }).first().click();
+  const questions = diffPane.getByRole('region', { name: 'Questions for the reviewer' });
+  await questions.getByLabel('Question for the reviewer').fill('Why does it matter?');
+  await questions.getByRole('button', { name: 'Ask' }).click();
+  await expect.poll(() => asked).toEqual([{ findingId: 'f-const', question: 'Why does it matter?', fingerprint: triageTour.fingerprint }]);
+  // while it answers, the thread links to the reviewer's pane
+  await expect(questions.getByRole('status')).toContainText('The reviewer is answering');
+  await expect(questions.getByRole('button', { name: 'Open pane' })).toBeVisible();
+  // the stored answer renders as Markdown
+  const answer = questions.locator('.review-ask-answer');
+  await expect(answer).toContainText('Because c reaches the query unchecked.');
+  await expect(answer.locator('strong')).toHaveText('c');
+  // copying it keeps the Finding as a comment holding the answer, and the thread follows the comment
+  await questions.getByRole('button', { name: 'Copy to comment' }).click();
+  await expect(dialog.getByLabel('Comment on line 12')).toHaveValue('Unchecked constant\n\nc is never validated.\nAdd a guard.\n\nBecause **c** reaches the query unchecked.');
+  await expect(suggestion).toHaveCount(0);
+  await expect(diffPane.getByRole('region', { name: 'Questions for the reviewer' }).locator('.review-ask-question')).toHaveText('Why does it matter?');
 });
 
 test('counts untriaged Findings per step and sends kept general Findings under General', async ({ page }) => {

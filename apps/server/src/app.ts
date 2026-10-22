@@ -61,6 +61,8 @@ import { isReviewRunName, type ReviewRunner } from './review-runs/runner.js';
 import { CodeReviewer } from './code-review/reviewer.js';
 import { CodeReviewJobs } from './code-review/jobs.js';
 import { parseCodeReviewAdd, parseReviewTourStart } from './code-review/contracts.js';
+import { AskJobs } from './asks/jobs.js';
+import { ASK_REQUEST_BODY_BYTES, parseAskRequest } from './asks/contracts.js';
 import { ReviewTourService } from './review-tour/service.js';
 import { parsePullRequestReviewInput, PR_REVIEW_REQUEST_BODY_BYTES, PullRequestReviewError, PullRequestReviewService } from './review-tour/pr-review.js';
 import { ReviewTourJobs, startedReviewJob } from './review-tour/jobs.js';
@@ -172,7 +174,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const deployedRevision = serverAdmin.revision();
   // a settled Code review refreshes the dashboard so its indicator follows
   const codeReviewer = new CodeReviewer(reviewRunner, review);
-  const codeReviews = new CodeReviewJobs(codeReviewer, reviewStore, async () => { await dashboardUpdates.refresh().catch(() => undefined); });
+  // questions about a stored tour's Findings, asked of the Code review's own conversation
+  const asks = new AskJobs(reviewRunner, reviewStore, () => review.presets);
+  // a review that lands replaces the one the Worktree's questions were asked of
+  const codeReviews = new CodeReviewJobs(codeReviewer, reviewStore, async settled => { if (settled.state.kind === 'ready') void asks.supersedeWorktree(settled.worktreeId); await dashboardUpdates.refresh().catch(() => undefined); });
   const reviewJobs = new ReviewTourJobs(reviewTours, reviewStore, async review => {
     const worktree = review.prepared.resolved.worktree;
     const projectName = config.projects.find(project => project.id === worktree.projectId)?.label ?? worktree.label;
@@ -181,7 +186,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       dashboardUpdates.refresh().then(() => undefined).catch(() => undefined),
       push.notify(reviewNotification(review.agentId, review.worktreeId, projectName, worktree.label)).then(() => undefined).catch(() => undefined)
     ]);
-  }, codeReviews);
+  }, codeReviews, asks);
   const reviewTourCapability = await reviewTours.capability();
   const codeReviewCapability = await codeReviewer.capability();
   const accountSpend = deps.accountSpend ?? new ApiKeySpendService();
@@ -2007,14 +2012,50 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const codeReviewJob = codeReviews.pending(owner, id, review.tour.fingerprint);
     return reply.code(200).send({ status: 'ready', review: { ...review, ...(codeReview === undefined ? {} : { codeReview }), ...(codeReviewJob === undefined ? {} : { codeReviewJob }) } });
   });
+  // ask the reviewer about one Finding of the Worktree's stored tour: a job polled to its answer
+  app.post('/api/worktrees/:id/review-tour/asks', { bodyLimit: ASK_REQUEST_BODY_BYTES }, async (request, reply) => {
+    const owner = controlled(request, true).id;
+    const id = (request.params as { id: string }).id;
+    const worktree = configuredWorktree(id);
+    if (worktree === undefined) return await nonWorktreeReply(id, reply, { missing: { status: 'error', error: { code: 'target_unavailable', retryable: false } }, refused: { status: 'error', error: { code: 'target_unavailable', retryable: false } } });
+    const input = parseAskRequest(request.body);
+    if (input === undefined) return reply.code(400).send({ status: 'error', error: { code: 'invalid_request', retryable: false } });
+    const branch = await reviewBranch(id);
+    if (branch === undefined) return reply.code(404).send({ status: 'error', error: { code: 'target_unavailable', retryable: false } });
+    try {
+      const started = await asks.ask(owner, { worktreeId: id, workspace: worktree.identity, branch }, input);
+      return reply.code(202).send({ status: 'pending', job: started.job, threadId: started.threadId });
+    } catch (error) { return reviewFailure(reply, error); }
+  });
+  // the stored tour's Ask threads, and the owner's questions still being answered
+  app.get('/api/worktrees/:id/review-tour/asks', async (request, reply) => {
+    const owner = controlled(request).id;
+    const id = (request.params as { id: string }).id;
+    if (configuredWorktree(id) === undefined) return await nonWorktreeReply(id, reply, { missing: { status: 'error', error: { code: 'target_unavailable', retryable: false } }, refused: { status: 'error', error: { code: 'target_unavailable', retryable: false } } });
+    const stored = await reviewStore.current(id, await reviewBranch(id));
+    const threads = stored === undefined ? [] : await reviewStore.askThreads(id, stored.branch, stored.tour.fingerprint);
+    return reply.code(200).send({ status: 'ready', threads, pending: stored === undefined ? [] : asks.pending(owner, id) });
+  });
+  app.get('/api/review-tour/asks/jobs/:jobId', async (request, reply) => {
+    const owner = controlled(request).id;
+    const job = asks.get(owner, (request.params as { jobId: string }).jobId);
+    // hide missing or cross-owner jobs
+    if (job === undefined) return reply.code(404).send({ status: 'error', error: { code: 'target_unavailable', retryable: false } });
+    // a pending turn names an interactive run's Agent, so the thread can open its pane
+    if (job.state.kind === 'pending') return reply.code(202).send({ status: 'pending', job: startedReviewJob(job), ...(job.state.run === undefined ? {} : { run: job.state.run }) });
+    if (job.state.kind === 'ready') return reply.code(200).send({ status: 'ready' });
+    if (job.state.kind === 'gone') return reply.code(410).send({ status: 'error', jobId: job.id, error: { code: job.state.code, retryable: true } });
+    return reply.code(reviewStatus(job.state.code)).send({ status: 'error', jobId: job.id, error: { code: job.state.code, retryable: job.state.retryable } });
+  });
   app.delete('/api/worktrees/:id/review-tour', async (request, reply) => {
     controlled(request, true);
     const id = (request.params as { id: string }).id;
     // require a configured worktree
     if (configuredWorktree(id) === undefined) return await nonWorktreeReply(id, reply, { missing: { status: 'error', error: { code: 'target_unavailable', retryable: false } }, refused: { status: 'error', error: { code: 'target_unavailable', retryable: false } } });
     await reviewStore.dismiss(id);
-    // the dismissed tour's Code review goes with it
+    // the dismissed tour's Code review and questions go with it
     codeReviews.supersedeWorktree(id);
+    void asks.supersedeWorktree(id);
     await dashboardUpdates.refresh().catch(() => undefined);
     return reply.code(204).send();
   });
@@ -2183,6 +2224,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // only a Code review leaves a recovery; an orphaned tour is handed back
       recover: async (recovery, agentId) => await codeReviews.recover(recovery, agentId),
       submit: (agentId, text) => submitConfirmed(agentId, text),
+      // the reported id, else the Adapter's own discovery (Codex reports none)
+      conversationId: agentId => discovery.conversationId(agentId),
       // the cached discovery snapshot (rescanned once over 2 s old, which the dashboard poll keeps it
       // under); an Agent missing from it is confirmed gone by a forced scan inside `target`
       attention: async agentId => { await discovery.refresh(); const target = await discovery.target(agentId); return target === undefined ? undefined : agentAttentionState(target.agent); },
@@ -3122,7 +3165,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const worktreeRemovalBlockers = async (worktree: Worktree, fresh = false): Promise<string[]> => {
     const blockers: string[] = [];
     // a Review run's Agent also reads the checkout, so it blocks too, named for what it is
-    const running = (await discovery.dashboard(fresh)).agents.filter(agent => agent.worktreeId === worktree.id);
+    // an Ask's Agent waiting for a follow-up is closed by the Remove itself
+    const idleKept = interactiveRunner.idleKeptAgents();
+    const running = (await discovery.dashboard(fresh)).agents.filter(agent => agent.worktreeId === worktree.id && !idleKept.has(agent.id));
     if (worktreeAgents(running, worktree.id).length > 0) blockers.push('a running agent');
     else if (running.length > 0) blockers.push('a Review run');
     if (await stackCommands.sessionRunning(worktree)) blockers.push('a running stack command');
@@ -3145,6 +3190,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // Shared by Remove (one Worktree) and Prune (each orphaned record).
   const deleteWorktreeRecords = async (worktreeId: string): Promise<void> => {
     codeReviews.supersedeWorktree(worktreeId);
+    void asks.supersedeWorktree(worktreeId);
     await Promise.all([
       worktreeStore.delete(worktreeId).catch(() => {}),
       reviewStore.invalidate(worktreeId).catch(() => {})
@@ -3220,6 +3266,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (worktree === undefined) return await nonWorktreeReply(id, reply);
     if (worktree.main) return reply.code(409).send({ error: 'the main worktree cannot be removed' });
     if (worktree.locked) return reply.code(409).send({ error: 'Locked worktrees cannot be removed' });
+    // the Agents kept for an Ask's follow-ups go first, so they do not refuse the Remove
+    await asks.supersedeWorktree(worktree.id);
     const refusal = await worktreeRemovalRefusal(worktree);
     if (refusal !== undefined) return reply.code(409).send({ error: refusal });
     const facts = await worktreeManagement.removal(worktree);
@@ -3620,7 +3668,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   // close owned Files transport and existing background services on shutdown
   // close both viewer-owned streams and server-owned dashboard connections
-  app.addHook('onClose', async () => { buttonActions.close(); scheduler.stop(); reviewJobs.close(); codeReviews.close(); await hostFiles.close(); await accounts.close(); await paneViewports.restoreAll(); paneStream.closeAll(); tmux.closeCommands?.(); dashboardUpdates.close(); });
+  app.addHook('onClose', async () => { buttonActions.close(); scheduler.stop(); reviewJobs.close(); codeReviews.close(); asks.close(); await hostFiles.close(); await accounts.close(); await paneViewports.restoreAll(); paneStream.closeAll(); tmux.closeCommands?.(); dashboardUpdates.close(); });
   // expose the scheduler on the instance (index.ts starts it; the HTTP-seam tests tick it)
   app.decorate('scheduler', scheduler);
   return app;

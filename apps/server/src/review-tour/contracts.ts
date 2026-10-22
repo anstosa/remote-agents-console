@@ -56,7 +56,7 @@ export type ReviewTourCapability = ReviewRunCapability & { agent: ReviewAgentKin
 export type StoredReviewTour = { worktreeId: string; branch: string; savedAt: string; tour: ReviewTour };
 // `codeReview` reports the tour's Code review (running, ready with `findings` counted, or failed)
 export type StoredReviewTourSummary = Pick<StoredReviewTour, 'worktreeId' | 'branch' | 'savedAt'> & Pick<ReviewTour, 'title' | 'scope' | 'commit' | 'includeTests' | 'includeDocs' | 'fingerprint'> & { codeReview?: 'running' | 'ready' | 'failed'; findings?: number };
-export type ReviewErrorCode = 'invalid_request' | 'capability_unavailable' | 'authentication_required' | 'target_unavailable' | 'configured_worktree_required' | 'scope_unavailable' | 'conflicted_unavailable' | 'too_large' | 'generation_failed' | 'malformed_result' | 'generation_rejected' | 'timed_out' | 'cancelled' | 'stale_during_generation';
+export type ReviewErrorCode = 'invalid_request' | 'capability_unavailable' | 'authentication_required' | 'target_unavailable' | 'configured_worktree_required' | 'scope_unavailable' | 'conflicted_unavailable' | 'too_large' | 'generation_failed' | 'malformed_result' | 'generation_rejected' | 'timed_out' | 'cancelled' | 'stale_during_generation' | 'busy' | 'agent_busy' | 'conversation_unavailable';
 export type PublicReviewComparison = Pick<ReviewComparison, 'scope' | 'commit' | 'base' | 'fingerprint' | 'includeTests' | 'includeDocs'>;
 
 export class ReviewTourError extends Error {

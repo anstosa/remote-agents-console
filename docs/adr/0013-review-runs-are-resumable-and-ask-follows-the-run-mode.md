@@ -1,0 +1,35 @@
+---
+status: accepted
+date: 2026-10-22
+---
+
+# Review runs are resumable, and Ask follows the run mode
+
+ADR 0010 made a Review run one prompt and one validated JSON reply, after which its Conversation was thrown away. Headless runs used `--no-session-persistence` and `--ephemeral`, and interactive panes closed on success. The operator now wants to ask questions inline while reviewing. A question about a **Finding** should go to the agent that wrote it, in the Conversation where it read the code, so the answer draws on that context instead of starting again. Later slices do the same for the tour's narrator and for diffs in the Code panel. That needs a Review run that can resume a Conversation, answer in prose and take follow-ups.
+
+We chose to widen the Review run seam rather than add a chat mechanism beside it. A run names a Conversation to `resume`, asks for a `json` or `text` reply, and can expect `followUps`. Every run returns the Conversation it ran in. An **Ask** is a Review run with a text reply that resumes the Conversation of the run being asked about. It follows the agent kind's configured mode, like any Review run.
+
+## Considered options
+
+- **Always ask headless.** This is simpler: no panes and no pool. But Claude bills `-p` use separately, which is why the operator runs Claude interactive (ADR 0010), and a headless resume of an interactive Conversation would be billed that way.
+- **A run-mode toggle per question.** The same answer would be chosen every time for a kind, and it would split one Conversation across two billing modes.
+- **Start a fresh Conversation per question, seeded with the Finding.** No Conversation needs keeping, but the answer would lose what the reviewer read, and every question would pay to re-read it.
+- **Keep the interactive pane open after the Code review.** That leaves a pane per review even when nothing is asked. Relaunching with the Adapter's own resume costs a few seconds per first question, and only when there is one.
+- **Store threads in the browser, like triage.** They would be lost on another device and on reload, yet an answer cost a run. Threads are stored on the server beside the tour.
+
+## Decisions
+
+- **Every Review run persists and reports its Conversation.** Headless Claude runs under a console-chosen `--session-id` (resumed with `--resume`). Headless Codex drops `--ephemeral`, adds `--json` and reads the thread id from the `thread.started` event at the head of its stdout. Interactive runs read the Conversation from the pane: Claude's reported id, or Codex's rollout thread id. A Conversation is kept only with a run that succeeds; a failed fresh run has nothing stored to attach one to. Headless Conversations stay out of the Named conversations list on their own: Claude's are `sdk-cli` transcripts, and Codex's have the `codex_exec` originator.
+- **Every turn, new or resumed, is read-only.** Tool limits apply per invocation, so a resumed turn re-applies them. `codex exec resume` has no `--sandbox` or `-C`, so it takes `-c sandbox_mode="read-only"` and runs in the Worktree. An interactive resume launches through the Adapter's own resume mode (`claude --resume <id>`, `codex resume <id>`), with the run's read-only arguments added. The id must pass the Adapter's `conversations.validId`.
+- **An interactive follow-up run keeps its Agent.** A run with `followUps` is not closed on success. Its Agent is kept for the Conversation's next turn, which is delivered to it, and closed after 15 idle minutes, when its tour is dismissed or regenerated, or when a replacing Code review lands. A resumed launch keeps the conversation's own name; its pane is labelled `💬 Ask · <preset>`. The recovery record beside a kept pane names its Conversation, so after a server restart the orphan sweep keeps an idle kept pane again rather than handing it back. A failed or blocked launch (an untrusted folder's safety check) fails the turn. A timeout hands the pane to the operator, as for any Review run.
+- **Turns on one Conversation run one at a time.** The mode dispatcher queues turns that resume the same Conversation. A thread takes one question at a time.
+- **The reply mark is a transcript position.** Claude's interactive reply was the last assistant text once it differed from the text before the prompt, so a resumed answer identical to the previous one was never seen. The mark is now the last assistant message's id.
+- **Asking the reviewer.** "Ask reviewer" on an anchored Finding opens its thread. Each question carries the Finding's id, title, file, side, line range and the hunk lines around it. It resumes the Code review's Conversation, with the review's preset model and effort. Answers are Markdown and can be copied into the Finding's inline comment; copying keeps the Finding when it is not yet kept. A review made before Conversations were kept offers no Ask.
+- **Threads are stored with the tour.** A third file beside the tour store holds each Worktree's threads for the tour's branch and Comparison. A turn is stored once it settles, answered or failed. A pending turn lives in its job, and the thread read joins the owner's pending ones, so a reload resumes polling. Threads are cleared with the tour. A reviewer thread is shown only while its Conversation is the stored Code review's Conversation, and a replacing review clears the old reviewer's threads.
+
+## Consequences
+
+- **The glossary's Review run now covers resumed turns** and text replies, not only one validated JSON reply.
+- **Headless Conversations accumulate on disk** in the agents' own stores (`~/.claude/projects`, `~/.codex/sessions`). The console does not prune them, and neither CLI lists them where the operator resumes conversations.
+- **A kept pane outlives a tour change only until it is idle.** Pool membership is in memory. A pane kept for a Conversation the console no longer knows about after a restart (a dismissed tour) closes after 15 idle minutes.
+- **General Findings cannot be asked about yet.** Only anchored Findings have the lines a question carries.

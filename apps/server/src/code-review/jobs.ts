@@ -91,8 +91,8 @@ export class CodeReviewJobs {
     const { kind: _kind, worktreeId, branch, ...reviewed } = run;
     return {
       validate: codeReviewReplyError,
-      save: async output => {
-        const review = codeReviewFrom(output, stored.tour.changes, reviewed);
+      save: async (output, conversation) => {
+        const review = codeReviewFrom(output, stored.tour.changes, reviewed, conversation);
         if (review === undefined || !await store.saveCodeReviewIfCurrent(worktreeId, branch, review, 0)) return false;
         await Promise.resolve(this.onSettled?.({ agentId, worktreeId, fingerprint: review.fingerprint, state: { kind: 'ready', review } })).catch(() => undefined);
         return true;

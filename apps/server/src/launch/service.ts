@@ -57,9 +57,10 @@ export function composeLaunch(program: string, adapterArgs: string[], operatorAr
 }
 
 // One Review run's launch (ADR 0010): its id, which marks the pane `@rac_review_run`, the
-// label the Agent's tab reads as, the run's own arguments (placed last), and the operator
-// flags those replace or that would loosen the run's read-only policy.
-export type ReviewRunLaunch = { runId: string; label: string; extraArgs: string[]; replacedFlags: ReadonlyMap<string, ReplacedFlagValue> };
+// label the Agent's tab reads as, the run's own arguments (placed last), the operator flags
+// those replace or that would loosen the run's read-only policy, and the conversation it resumes
+// through the Adapter's own resume launch, when it is not a new one.
+export type ReviewRunLaunch = { runId: string; label: string; extraArgs: string[]; replacedFlags: ReadonlyMap<string, ReplacedFlagValue>; conversationId?: string };
 // a Review run id: the random token the pane mark carries
 const reviewRunIdPattern = /^[A-Za-z0-9_-]{8,64}$/u;
 
@@ -466,8 +467,9 @@ export class LaunchService {
     return await this.launchWorktree(worktreeId, { mode: 'fresh', ...(kind === undefined ? {} : { kind }) });
   }
 
-  // launch a Review run's Agent (ADR 0010): a fresh `kind` pane in the Worktree's Workspace,
-  // always a new window, with the run's read-only arguments composed in. The pane is marked
+  // launch a Review run's Agent (ADR 0010): a `kind` pane in the Worktree's Workspace, fresh or
+  // resuming the run's conversation (an id its Adapter accepts), always a new window, with the
+  // run's read-only arguments composed in. The pane is marked
   // `@rac_review_run=<runId>` (so other launch flows and completion notifications
   // leave it alone) and labelled with the run. It joins the Place's session, else any session
   // marked as its Workspace, else starts one under a free name, never displacing another
@@ -476,12 +478,14 @@ export class LaunchService {
   // may launch together.
   async launchReviewRun(worktreeId: string, kind: AgentKind, review: ReviewRunLaunch): Promise<boolean> {
     const worktree = this.worktreeById(worktreeId);
-    if (worktree === undefined || !this.isLaunchableKind(kind) || !reviewRunIdPattern.test(review.runId)) { console.warn(`[launch] review run: cannot launch ${kind} in ${worktreeId}`); return false; }
+    const resumable = review.conversationId === undefined || adapterFor(kind)?.conversations?.validId(review.conversationId) === true;
+    if (worktree === undefined || !this.isLaunchableKind(kind) || !reviewRunIdPattern.test(review.runId) || !resumable) { console.warn(`[launch] review run: cannot launch ${kind} in ${worktreeId}`); return false; }
     if (!await this.waitForLaunchSlot(worktreeId)) { console.warn(`[launch] ${worktree.identity}: a review run waited too long for another launch`); return false; }
     this.pending.add(worktreeId);
     try {
       const files = await this.adapterFiles(kind);
-      const command = this.composeKindLaunch(kind, { mode: 'fresh', cwd: worktree.identity, sandboxed: false, ...(files === undefined ? {} : { files }) }, review);
+      const mode = review.conversationId === undefined ? { mode: 'fresh' as const } : { mode: 'resume' as const, conversationId: review.conversationId };
+      const command = this.composeKindLaunch(kind, { ...mode, cwd: worktree.identity, sandboxed: false, ...(files === undefined ? {} : { files }) }, review);
       if (command === undefined) return false;
       const id = randomBytes(18).toString('base64url');
       const site = this.worktreeSite(worktree);

@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { MAX_ASK_THREADS, MAX_ASK_TURNS, parseAskThread, type AskThread, type AskTurn } from '../asks/contracts.js';
 import { parseCodeReview, type CodeReview } from '../code-review/contracts.js';
 import { parseReviewTour, type ReviewTour, type StoredReviewTour, type StoredReviewTourSummary } from './contracts.js';
 
@@ -7,7 +8,12 @@ type StoredReviews = Record<string, StoredReviewTour>;
 // a completed Code review, kept beside (not inside) the tour record: it may finish before its tour
 export type StoredCodeReview = { worktreeId: string; branch: string; review: CodeReview };
 type StoredCodeReviews = Record<string, StoredCodeReview>;
-type Mutation<T> = { value: T; changed: boolean; codeReviewsChanged?: boolean };
+// a tour's Ask threads, kept beside the tour record for the branch and Comparison they were asked about
+export type StoredAsks = { worktreeId: string; branch: string; fingerprint: string; threads: AskThread[] };
+type StoredAskRecords = Record<string, StoredAsks>;
+// the records kept in their own files beside the tours
+type Sides = { codeReviews: StoredCodeReviews; asks: StoredAskRecords };
+type Mutation<T> = { value: T; changed: boolean; codeReviewsChanged?: boolean; asksChanged?: boolean };
 type BranchBinding = { worktreeId: string; branch?: string };
 
 const maxWorktrees = 100;
@@ -40,6 +46,16 @@ function parseStoredCodeReview(value: unknown, expectedWorktreeId: string): Stor
   return review === undefined ? undefined : { worktreeId: expectedWorktreeId, branch: stored.branch, review };
 }
 
+// validate one durable record of a tour's Ask threads
+function parseStoredAsks(value: unknown, expectedWorktreeId: string): StoredAsks | undefined {
+  // require a plain object
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const stored = value as { worktreeId?: unknown; branch?: unknown; fingerprint?: unknown; threads?: unknown };
+  if (stored.worktreeId !== expectedWorktreeId || typeof stored.branch !== 'string' || !validBranch(stored.branch) || typeof stored.fingerprint !== 'string' || !Array.isArray(stored.threads) || stored.threads.length > MAX_ASK_THREADS) return undefined;
+  const threads = stored.threads.map(parseAskThread);
+  return threads.every(thread => thread !== undefined) ? { worktreeId: expectedWorktreeId, branch: stored.branch, fingerprint: stored.fingerprint, threads: threads as AskThread[] } : undefined;
+}
+
 // the Code review joined to one stored tour: the same branch and Comparison fingerprint
 function joinedCodeReview(record: StoredCodeReview | undefined, branch: string, fingerprint: string): CodeReview | undefined {
   return record !== undefined && record.branch === branch && record.review.fingerprint === fingerprint ? record.review : undefined;
@@ -50,9 +66,53 @@ function summary(stored: StoredReviewTour, codeReview: CodeReview | undefined): 
   return { worktreeId: stored.worktreeId, branch: stored.branch, savedAt: stored.savedAt, title: stored.tour.title, scope: stored.tour.scope, ...(stored.tour.commit === undefined ? {} : { commit: stored.tour.commit }), includeTests: stored.tour.includeTests, includeDocs: stored.tour.includeDocs, fingerprint: stored.tour.fingerprint, ...(codeReview === undefined ? {} : { codeReview: 'ready' as const, findings: codeReview.findings.length + codeReview.general.length }) };
 }
 
-// the Code review file beside the tour file, so the tour file keeps its format
-function codeReviewFileFor(file: string): string {
-  return file.endsWith('.json') ? `${file.slice(0, -'.json'.length)}.code-reviews.json` : `${file}.code-reviews`;
+// a file beside the tour file, so the tour file keeps its format
+function sideFileFor(file: string, name: string): string {
+  return file.endsWith('.json') ? `${file.slice(0, -'.json'.length)}.${name}.json` : `${file}.${name}`;
+}
+
+// The records of one kind kept in their own file beside the tours, one per Worktree, read once and
+// cached; the store is the file's only writer. An unreadable or corrupt file reads as empty, with a
+// warning, so it never breaks the tour operations sharing the store; a corrupt file is rejected as
+// a whole.
+class SideRecords<T> {
+  private cached?: Record<string, T>;
+
+  constructor(readonly file: string, private readonly label: string, private readonly parse: (value: unknown, worktreeId: string) => T | undefined) {}
+
+  // the records as last read or written
+  async read(): Promise<Record<string, T>> {
+    this.cached ??= await this.load().catch((error: unknown) => {
+      console.warn(`[review] ignoring the unreadable ${this.label} file ${this.file}: ${error instanceof Error ? error.message : String(error)}`);
+      return {};
+    });
+    return this.cached;
+  }
+
+  // keep the records just written
+  wrote(records: Record<string, T>): void { this.cached = records; }
+
+  private async load(): Promise<Record<string, T>> {
+    let serialized: string;
+    try { serialized = await readFile(this.file, 'utf8'); }
+    catch (error) {
+      // treat a missing store as empty
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      throw error;
+    }
+    // reject oversized durable state
+    if (Buffer.byteLength(serialized) > maxStoredBytes) throw new Error(`${this.label} store exceeds storage limits`);
+    const raw = JSON.parse(serialized) as unknown;
+    // require a plain record within the worktree limit
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length > maxWorktrees) throw new Error(`invalid ${this.label} store`);
+    const records: Record<string, T> = {};
+    for (const [worktreeId, value] of Object.entries(raw)) {
+      const record = validWorktreeId(worktreeId) ? this.parse(value, worktreeId) : undefined;
+      if (record === undefined) throw new Error(`invalid ${this.label} store`);
+      records[worktreeId] = record;
+    }
+    return records;
+  }
 }
 
 export class ReviewTourStore {
@@ -60,10 +120,13 @@ export class ReviewTourStore {
   private readonly generations = new Map<string, number>();
   private readonly generationBranches = new Map<string, string>();
   private readonly codeReviewGenerations = new Map<string, number>();
-  // the Code reviews as last read or written; this store is the file's only writer
-  private codeReviews?: StoredCodeReviews;
+  private readonly codeReviews: SideRecords<StoredCodeReview>;
+  private readonly asks: SideRecords<StoredAsks>;
 
-  constructor(private readonly file = process.env.RAC_REVIEW_TOURS_FILE ?? '.data/review-tours.json', private readonly codeReviewFile = codeReviewFileFor(file)) {}
+  constructor(private readonly file = process.env.RAC_REVIEW_TOURS_FILE ?? '.data/review-tours.json', codeReviewFile = sideFileFor(file, 'code-reviews'), askFile = sideFileFor(file, 'asks')) {
+    this.codeReviews = new SideRecords(codeReviewFile, 'code review', parseStoredCodeReview);
+    this.asks = new SideRecords(askFile, 'ask thread', parseStoredAsks);
+  }
 
   // persist the latest tour for one branch
   async save(worktreeId: string, branch: string, tour: ReviewTour): Promise<StoredReviewTour | undefined> {
@@ -80,7 +143,7 @@ export class ReviewTourStore {
   // serialize one new generation identity
   async invalidate(worktreeId: string, branch?: string): Promise<number | undefined> {
     if (!validWorktreeId(worktreeId) || (branch !== undefined && !validBranch(branch))) return undefined;
-    return await this.mutate((stored, codeReviews) => {
+    return await this.mutate((stored, sides) => {
       const generation = (this.generations.get(worktreeId) ?? 0) + 1;
       this.generations.set(worktreeId, generation);
       // bind pending persistence to its observed branch
@@ -89,7 +152,7 @@ export class ReviewTourStore {
       const changed = stored[worktreeId] !== undefined;
       // remove the artifact invalidated by this generation
       if (changed) delete stored[worktreeId];
-      return { value: generation, changed, codeReviewsChanged: this.clearCodeReview(codeReviews, worktreeId) };
+      return { value: generation, changed, ...this.clearTour(sides, worktreeId) };
     });
   }
 
@@ -112,42 +175,44 @@ export class ReviewTourStore {
   // invalidate one still-current generation
   async invalidateIfCurrent(worktreeId: string, generation: number): Promise<boolean> {
     if (!validWorktreeId(worktreeId)) return false;
-    return await this.mutate(stored => {
+    return await this.mutate((stored, sides) => {
       // preserve a newer generation
       if (this.generations.get(worktreeId) !== generation) return { value: false, changed: false };
       this.generations.set(worktreeId, generation + 1);
       this.generationBranches.delete(worktreeId);
       const changed = stored[worktreeId] !== undefined;
       if (changed) delete stored[worktreeId];
-      return { value: true, changed };
-    }, false);
+      return { value: true, changed, asksChanged: this.clearAsks(sides.asks, worktreeId) };
+    });
   }
 
   // read only a review from the current branch
   async current(worktreeId: string, branch: string | undefined): Promise<StoredReviewTour | undefined> {
     if (!validWorktreeId(worktreeId) || branch === undefined || !validBranch(branch)) return undefined;
-    return await this.mutate((stored, codeReviews) => {
+    return await this.mutate((stored, sides) => {
       const review = stored[worktreeId];
       const generationBranch = this.generationBranches.get(worktreeId);
-      // drop a Code review left on another branch
-      const codeReviewsChanged = codeReviews[worktreeId] !== undefined && codeReviews[worktreeId].branch !== branch && this.clearCodeReview(codeReviews, worktreeId);
+      // drop a Code review and Ask threads left on another branch
+      const left = this.clearOtherBranch(sides, worktreeId, branch);
       // return a current branch match
-      if ((generationBranch === undefined || generationBranch === branch) && (review === undefined || review.branch === branch)) return { value: review, changed: false, codeReviewsChanged };
+      if ((generationBranch === undefined || generationBranch === branch) && (review === undefined || review.branch === branch)) return { value: review, changed: false, ...left };
       // invalidate pending and durable reviews after branch changes
       this.generations.set(worktreeId, (this.generations.get(worktreeId) ?? 0) + 1);
       this.generationBranches.set(worktreeId, branch);
       const changed = review !== undefined;
       if (changed) delete stored[worktreeId];
-      return { value: undefined, changed, codeReviewsChanged };
+      return { value: undefined, changed, ...left };
     });
   }
 
   // expose current-branch summaries and prune branch changes
   async summaries(bindings: BranchBinding[]): Promise<StoredReviewTourSummary[]> {
     const branches = new Map(bindings.filter(binding => validWorktreeId(binding.worktreeId) && binding.branch !== undefined && validBranch(binding.branch)).map(binding => [binding.worktreeId, binding.branch!]));
-    return await this.mutate((stored, codeReviews) => {
+    return await this.mutate((stored, sides) => {
+      const { codeReviews } = sides;
       let changed = false;
       let codeReviewsChanged = false;
+      let asksChanged = false;
       const reviews: StoredReviewTourSummary[] = [];
       // invalidate pending generations observed on another branch
       for (const [worktreeId, branch] of branches) {
@@ -166,26 +231,27 @@ export class ReviewTourStore {
         if (branch !== review.branch) { delete stored[worktreeId]; this.generations.set(worktreeId, (this.generations.get(worktreeId) ?? 0) + 1); this.generationBranches.set(worktreeId, branch); changed = true; continue; }
         reviews.push(summary(review, joinedCodeReview(codeReviews[worktreeId], branch, review.tour.fingerprint)));
       }
-      // prune Code reviews left on another branch
-      for (const [worktreeId, record] of Object.entries(codeReviews)) {
-        const branch = branches.get(worktreeId);
-        if (branch !== undefined && branch !== record.branch) codeReviewsChanged = this.clearCodeReview(codeReviews, worktreeId) || codeReviewsChanged;
+      // prune Code reviews and Ask threads left on another branch
+      for (const [worktreeId, branch] of branches) {
+        const left = this.clearOtherBranch(sides, worktreeId, branch);
+        codeReviewsChanged ||= left.codeReviewsChanged;
+        asksChanged ||= left.asksChanged;
       }
-      return { value: reviews, changed, codeReviewsChanged };
+      return { value: reviews, changed, codeReviewsChanged, asksChanged };
     });
   }
 
   // dismiss one durable review
   async dismiss(worktreeId: string): Promise<boolean> {
     if (!validWorktreeId(worktreeId)) return false;
-    return await this.mutate((stored, codeReviews) => {
+    return await this.mutate((stored, sides) => {
       const existed = stored[worktreeId] !== undefined;
       // invalidate pending generation even without an artifact
       this.generations.set(worktreeId, (this.generations.get(worktreeId) ?? 0) + 1);
       this.generationBranches.delete(worktreeId);
       // remove only an existing record
       if (existed) delete stored[worktreeId];
-      return { value: existed, changed: existed, codeReviewsChanged: this.clearCodeReview(codeReviews, worktreeId) };
+      return { value: existed, changed: existed, ...this.clearTour(sides, worktreeId) };
     });
   }
 
@@ -207,21 +273,57 @@ export class ReviewTourStore {
   // is a review begun before this process: current while nothing has begun or cleared one since.
   async saveCodeReviewIfCurrent(worktreeId: string, branch: string, review: CodeReview, generation: number): Promise<StoredCodeReview | false | undefined> {
     if (!validWorktreeId(worktreeId) || !validBranch(branch) || parseCodeReview(review) === undefined) return undefined;
-    return await this.mutate<StoredCodeReview | false | undefined>((_stored, codeReviews) => {
+    return await this.mutate<StoredCodeReview | false | undefined>((_stored, { codeReviews, asks }) => {
       // reject a superseded review inside the serialized mutation
       if ((this.codeReviewGenerations.get(worktreeId) ?? 0) !== generation) return { value: false, changed: false };
       // cap distinct configured worktrees
       if (codeReviews[worktreeId] === undefined && Object.keys(codeReviews).length >= maxWorktrees) return { value: undefined, changed: false };
       const record = { worktreeId, branch, review };
       codeReviews[worktreeId] = record;
-      return { value: record, changed: false, codeReviewsChanged: true };
+      // threads asked of a replaced review's reviewer go with it
+      return { value: record, changed: false, codeReviewsChanged: true, asksChanged: this.clearReviewerThreads(asks, worktreeId, review.conversation) };
     });
   }
 
   // read the Code review of one stored tour: the same branch and Comparison fingerprint
   async codeReview(worktreeId: string, branch: string, fingerprint: string): Promise<CodeReview | undefined> {
     if (!validWorktreeId(worktreeId) || !validBranch(branch)) return undefined;
-    return await this.mutate((_stored, codeReviews) => ({ value: joinedCodeReview(codeReviews[worktreeId], branch, fingerprint), changed: false }));
+    return await this.mutate((_stored, { codeReviews }) => ({ value: joinedCodeReview(codeReviews[worktreeId], branch, fingerprint), changed: false }));
+  }
+
+  // The Ask threads of one stored tour: those asked on its branch and Comparison, with a reviewer
+  // thread only while it is on the conversation of the tour's Code review.
+  async askThreads(worktreeId: string, branch: string, fingerprint: string): Promise<AskThread[]> {
+    if (!validWorktreeId(worktreeId) || !validBranch(branch)) return [];
+    return await this.mutate((stored, sides) => ({ value: this.joinedThreads(stored, sides, worktreeId, branch, fingerprint), changed: false }));
+  }
+
+  // Add one settled turn to its thread, starting the thread with it, while the stored tour is still
+  // the one asked about and, for a reviewer thread, its Code review is still on the thread's
+  // conversation. Only the latest turns of a thread are kept. Resolves whether the turn was kept.
+  async saveAskTurn(worktreeId: string, branch: string, fingerprint: string, thread: Omit<AskThread, 'turns'>, turn: AskTurn): Promise<boolean> {
+    if (!validWorktreeId(worktreeId) || !validBranch(branch) || parseAskThread({ ...thread, turns: [turn] }) === undefined) return false;
+    return await this.mutate((stored, sides) => {
+      const tour = stored[worktreeId];
+      const review = tour === undefined ? undefined : joinedCodeReview(sides.codeReviews[worktreeId], branch, fingerprint);
+      if (tour?.branch !== branch || tour.tour.fingerprint !== fingerprint || review?.conversation !== thread.conversation) return { value: false, changed: false };
+      const threads = this.joinedThreads(stored, sides, worktreeId, branch, fingerprint);
+      const existing = threads.find(candidate => candidate.id === thread.id);
+      if (existing === undefined && threads.length >= MAX_ASK_THREADS) return { value: false, changed: false };
+      if (sides.asks[worktreeId] === undefined && Object.keys(sides.asks).length >= maxWorktrees) return { value: false, changed: false };
+      const updated = { ...thread, turns: [...existing?.turns ?? [], turn].slice(-MAX_ASK_TURNS) };
+      sides.asks[worktreeId] = { worktreeId, branch, fingerprint, threads: existing === undefined ? [...threads, updated] : threads.map(candidate => candidate === existing ? updated : candidate) };
+      return { value: true, changed: false, asksChanged: true };
+    });
+  }
+
+  // a tour's threads that still apply to it, as `askThreads` reads them
+  private joinedThreads(stored: StoredReviews, sides: Sides, worktreeId: string, branch: string, fingerprint: string): AskThread[] {
+    const record = sides.asks[worktreeId];
+    const tour = stored[worktreeId];
+    if (record === undefined || tour?.branch !== branch || tour.tour.fingerprint !== fingerprint || record.branch !== branch || record.fingerprint !== fingerprint) return [];
+    const conversation = joinedCodeReview(sides.codeReviews[worktreeId], branch, fingerprint)?.conversation;
+    return record.threads.filter(thread => thread.target !== 'reviewer' || thread.conversation === conversation);
   }
 
   // forget one worktree's Code review and refuse saves already running for it
@@ -232,17 +334,45 @@ export class ReviewTourStore {
     return existed;
   }
 
-  // Serialize all file mutations. A change that leaves the Code reviews alone (`withCodeReviews`
-  // false) gets an empty record it must not modify. The others get a copy of the cached Code
-  // reviews (a change only adds, replaces or deletes whole records), cached again once written.
-  private async mutate<T>(change: (stored: StoredReviews, codeReviews: StoredCodeReviews) => Mutation<T>, withCodeReviews = true): Promise<T> {
+  // forget everything kept beside one worktree's tour, as the tour goes
+  private clearTour(sides: Sides, worktreeId: string): Pick<Mutation<unknown>, 'codeReviewsChanged' | 'asksChanged'> {
+    return { codeReviewsChanged: this.clearCodeReview(sides.codeReviews, worktreeId), asksChanged: this.clearAsks(sides.asks, worktreeId) };
+  }
+
+  // forget the Code review and Ask threads one worktree left on a branch it is no longer on
+  private clearOtherBranch(sides: Sides, worktreeId: string, branch: string): { codeReviewsChanged: boolean; asksChanged: boolean } {
+    const codeReviewsChanged = sides.codeReviews[worktreeId] !== undefined && sides.codeReviews[worktreeId].branch !== branch && this.clearCodeReview(sides.codeReviews, worktreeId);
+    const asksChanged = sides.asks[worktreeId] !== undefined && sides.asks[worktreeId].branch !== branch && this.clearAsks(sides.asks, worktreeId);
+    return { codeReviewsChanged, asksChanged };
+  }
+
+  private clearAsks(asks: StoredAskRecords, worktreeId: string): boolean {
+    const existed = asks[worktreeId] !== undefined;
+    if (existed) delete asks[worktreeId];
+    return existed;
+  }
+
+  // forget one worktree's reviewer threads that are not on `conversation`, the conversation of its Code review now
+  private clearReviewerThreads(asks: StoredAskRecords, worktreeId: string, conversation: string | undefined): boolean {
+    const record = asks[worktreeId];
+    const kept = record?.threads.filter(thread => thread.target !== 'reviewer' || thread.conversation === conversation);
+    if (record === undefined || kept!.length === record.threads.length) return false;
+    asks[worktreeId] = { ...record, threads: kept! };
+    return true;
+  }
+
+  // Serialize all file mutations. A change that leaves the side records alone (`withSides` false)
+  // gets empty ones it must not modify. The others get copies of the cached side records (a change
+  // only adds, replaces or deletes whole records), cached again once written.
+  private async mutate<T>(change: (stored: StoredReviews, sides: Sides) => Mutation<T>, withSides = true): Promise<T> {
     const operation = this.mutation.then(async () => {
-      const [stored, cached] = await Promise.all([this.read(), withCodeReviews ? this.cachedCodeReviews() : {}]);
-      const codeReviews = { ...cached };
-      const result = change(stored, codeReviews);
+      const [stored, codeReviews, asks] = await Promise.all([this.read(), withSides ? this.codeReviews.read() : {}, withSides ? this.asks.read() : {}]);
+      const sides = { codeReviews: { ...codeReviews }, asks: { ...asks } };
+      const result = change(stored, sides);
       // avoid writes for pure reads
       if (result.changed) await this.write(this.file, stored);
-      if (withCodeReviews && result.codeReviewsChanged === true) { await this.write(this.codeReviewFile, codeReviews); this.codeReviews = codeReviews; }
+      if (withSides && result.codeReviewsChanged === true) { await this.write(this.codeReviews.file, sides.codeReviews); this.codeReviews.wrote(sides.codeReviews); }
+      if (withSides && result.asksChanged === true) { await this.write(this.asks.file, sides.asks); this.asks.wrote(sides.asks); }
       return result.value;
     });
     this.mutation = operation.then(() => undefined, () => undefined);
@@ -277,44 +407,8 @@ export class ReviewTourStore {
     return stored;
   }
 
-  // the Code reviews, read from the file once; an unreadable or corrupt file reads as empty, with a
-  // warning, so it never breaks the tour operations sharing the store
-  private async cachedCodeReviews(): Promise<StoredCodeReviews> {
-    if (this.codeReviews !== undefined) return this.codeReviews;
-    this.codeReviews = await this.readCodeReviews().catch((error: unknown) => {
-      console.warn(`[review] ignoring the unreadable Code reviews file ${this.codeReviewFile}: ${error instanceof Error ? error.message : String(error)}`);
-      return {};
-    });
-    return this.codeReviews;
-  }
-
-  // read and validate the durable Code reviews, rejecting a corrupt file as a whole
-  private async readCodeReviews(): Promise<StoredCodeReviews> {
-    let serialized: string;
-    try { serialized = await readFile(this.codeReviewFile, 'utf8'); }
-    catch (error) {
-      // treat a missing store as empty
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
-      throw error;
-    }
-    // reject oversized durable state
-    if (Buffer.byteLength(serialized) > maxStoredBytes) throw new Error('code review store exceeds storage limits');
-    const raw = JSON.parse(serialized) as unknown;
-    // require a plain record within the worktree limit
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length > maxWorktrees) throw new Error('invalid code review store');
-    const stored: StoredCodeReviews = {};
-    // validate every stored worktree
-    for (const [worktreeId, value] of Object.entries(raw)) {
-      const review = validWorktreeId(worktreeId) ? parseStoredCodeReview(value, worktreeId) : undefined;
-      // reject corrupt state
-      if (review === undefined) throw new Error('invalid code review store');
-      stored[worktreeId] = review;
-    }
-    return stored;
-  }
-
   // atomically replace one durable file
-  private async write(file: string, value: StoredReviews | StoredCodeReviews): Promise<void> {
+  private async write(file: string, value: StoredReviews | StoredCodeReviews | StoredAskRecords): Promise<void> {
     const serialized = JSON.stringify(value);
     // enforce the aggregate storage boundary
     if (Buffer.byteLength(serialized) > maxStoredBytes) throw new Error('review tour store exceeds storage limits');

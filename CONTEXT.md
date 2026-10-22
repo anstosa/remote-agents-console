@@ -204,8 +204,12 @@ A configured agent, model, effort and prompt for a Code review, picked when the 
 _Avoid_: Review profile, reviewer
 
 **Review run**:
-One prompt sent to one agent in a Worktree that must answer with validated JSON — the tour's narration or a Code review. Headless or interactive, by the agent kind's configured mode.
+One turn sent to an agent in a Worktree, in a new Conversation or a resumed one, answered with validated JSON (the tour's narration, a Code review) or Markdown text (an Ask). Headless or interactive, by the agent kind's configured mode.
 _Avoid_: Review job (a job is the server's tracking of one run's result)
+
+**Ask**:
+A question about a Finding, sent as a Review run that resumes the Conversation of the run that wrote it. The questions about one Finding form its Ask thread, stored with the tour.
+_Avoid_: Chat (a Conversation is the agent's own transcript)
 
 **Pull request**:
 The GitHub pull request a Worktree's branch is open as, found through the Worktree's `origin`. The operator picks it when posting a Review tour, and the console checks it is open and from this branch.

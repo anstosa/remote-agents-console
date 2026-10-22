@@ -399,9 +399,11 @@ console validates (ADR 0010). Only `codex` and `claude` can run one. The optiona
 Every field is optional.
 
 - `agents.<kind>.mode` is `headless` (the default) or `interactive`. A headless
-  run is a child process with schema-constrained output: `codex exec --sandbox
-  read-only`, or `claude -p --tools Read,Grep,Glob,Skill --setting-sources user
-  --no-session-persistence`. Claude Review runs load only your user settings, never
+  run is a child process with schema-constrained output: `codex exec --json
+  --sandbox read-only`, or `claude -p --tools Read,Grep,Glob,Skill
+  --setting-sources user --session-id <id>`. Each run keeps its conversation so an
+  Ask can resume it (ADR 0013); neither CLI lists these where you resume
+  conversations. Claude Review runs load only your user settings, never
   the reviewed Worktree's `.claude/settings*.json`, whose hooks and `env` would run
   whatever the tool limits say.
   Claude bills `-p` use separately from interactive use, which is why the mode is
@@ -427,6 +429,14 @@ Every field is optional.
     agent asks a question (the run keeps waiting, and the operator answers in the
     pane), when the run times out, and when the reply fails validation twice. A
     pane left open behaves as an ordinary Agent from then on.
+- **Ask reviewer** on a Finding in a guided review asks the Code review's own
+  conversation a question, in that kind's mode (ADR 0013). Headless, it resumes the
+  conversation (`claude -p --resume <id>`, `codex exec resume <id>` with
+  `-c sandbox_mode="read-only"`). Interactive, it relaunches the conversation with the
+  agent's own resume (`claude --resume <id>`, `codex resume <id>`) and the same
+  read-only restrictions, in a pane labelled `💬 Ask · <preset>`. That pane is kept
+  for follow-up questions and closes after 15 idle minutes, or when the tour is
+  dismissed or regenerated. Threads are stored with the tour and cleared with it.
   - A question notifies as usual, but a finished run does not, because the
     tour's ready state covers it. A run never takes focus. The tour and review
     job polls name the run's Agent (`run: { agentId, needsInput }`) so the browser

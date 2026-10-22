@@ -71,19 +71,28 @@ export type ReplacedFlagValue = 'none' | 'one' | 'many';
 
 /** The model and effort one Review run asks for; absent leaves the CLI's own default. */
 export type ReviewRunSettings = { model?: string; effort?: string };
-/** One headless Review run: the Worktree it reads and the JSON Schema its reply must match. */
-export type HeadlessReviewRun = ReviewRunSettings & { workspace: string; schema: object };
-/** A headless run's private files: its schema, written for it, and where it may write its reply. */
-export type HeadlessRunFiles = { schema: string; output: string };
 /**
- * A finished headless run as the console saw it: the exit code, a bounded stderr tail, stdout
- * when it was kept and within its bound, and the output file when the run had one and wrote it.
+ * The conversation a headless Review run joins: one it resumes, or a new one, under the id the console
+ * chose for a CLI that takes one (`create`; a CLI that names its own ignores it).
  */
-export type HeadlessRunOutcome = { code: number; diagnostics: string; stdout?: Buffer; output?: Buffer };
+export type HeadlessRunConversation = { resume: string } | { create: string };
+/**
+ * One headless Review run: the Worktree it reads, its conversation, and the JSON Schema its reply must
+ * match; without a schema the reply is Markdown text.
+ */
+export type HeadlessReviewRun = ReviewRunSettings & { workspace: string; schema?: object; conversation: HeadlessRunConversation };
+/** A headless run's private files: its schema when it has one, written for it, and where it may write its reply. */
+export type HeadlessRunFiles = { schema?: string; output: string };
+/**
+ * A finished headless run as the console saw it: the exit code, a bounded stderr tail, stdout when
+ * it was kept (only its head, with `stdoutTruncated`, once it passed its bound), and the output
+ * file when the run had one and wrote it.
+ */
+export type HeadlessRunOutcome = { code: number; diagnostics: string; stdout?: Buffer; stdoutTruncated?: boolean; output?: Buffer };
 /** Why a headless run's reply was refused; only a missing login is not worth retrying. */
 export type HeadlessRunFailure = 'authentication_required' | 'generation_failed' | 'malformed_result';
-/** A headless run's parsed reply, or why it failed. */
-export type HeadlessRunResult = { ok: true; value: unknown } | { ok: false; failure: HeadlessRunFailure };
+/** A headless run's parsed reply and, when the run reported it, its conversation; or why it failed. */
+export type HeadlessRunResult = { ok: true; value: unknown; conversation?: string } | { ok: false; failure: HeadlessRunFailure };
 /**
  * The pane an interactive Review run's reply is read from. Its Conversation is looked up only when
  * asked, as that may rescan the panes; read its directory after that lookup to see the rescan.
@@ -101,12 +110,15 @@ export type ReviewRuns = {
   readonly headless: {
     /** the CLI help the capability check reads, the flags it must list, and a login check that must exit 0 */
     readonly probe: { readonly help: readonly string[]; readonly flags: readonly string[]; readonly login?: readonly string[] };
-    /** the arguments of one read-only, schema-constrained run, and the directory it runs in when not given by an argument */
-    command(run: HeadlessReviewRun, files: HeadlessRunFiles): { args: string[]; cwd?: string };
+    /**
+     * The arguments of one read-only run, the directory it runs in when not given by an argument,
+     * and its conversation when that is known before it runs (one it resumes, or one it was told to create)
+     */
+    command(run: HeadlessReviewRun, files: HeadlessRunFiles): { args: string[]; cwd?: string; conversation?: string };
     /** how much stdout to keep for a reply bounded at `outputBytes`; absent when stdout is not read */
     stdoutBytes?(outputBytes: number): number;
-    /** the reply of a finished run, bounded at `outputBytes`, or why it failed */
-    result(outcome: HeadlessRunOutcome, outputBytes: number): HeadlessRunResult;
+    /** the reply of a finished run (JSON, or `text`), bounded at `outputBytes`, or why it failed */
+    result(outcome: HeadlessRunOutcome, reply: { outputBytes: number; text: boolean }): HeadlessRunResult;
   };
   readonly interactive: {
     /** the per-launch arguments: the read-only restrictions, the model and effort, and read access to `readDirectory` */
@@ -126,7 +138,7 @@ export type ReviewRuns = {
      */
     readonly mcp?: { readonly list: readonly string[]; servers(stdout: string): string[] | undefined; disable(names: string[]): string[] | undefined };
     readonly reply: {
-      /** the transcript's position before a prompt */
+      /** the transcript's position before a prompt, so a reply equal to the previous one is still seen */
       mark(pane: ReplyPane): Promise<unknown>;
       /**
        * The final message of the newest finished turn past `mark` (from the start of the

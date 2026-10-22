@@ -11,8 +11,8 @@ export type CodeReviewAgent = 'codex' | 'claude';
 export type Finding = { id: string; changeId: string; side: 'additions' | 'deletions'; startLine: number; endLine: number; severity: CodeReviewSeverity; title: string; body: string };
 // a Finding with no anchor in the tour's diffs (an unknown Change or lines outside its hunk)
 export type GeneralFinding = { id: string; severity: CodeReviewSeverity; title: string; body: string; file?: string };
-// a completed Code review of the tour's Comparison
-export type CodeReview = { fingerprint: string; preset: { id: string; label: string; agent: CodeReviewAgent }; effort?: string; focus?: string; findings: Finding[]; general: GeneralFinding[]; completedAt: string };
+// a completed Code review of the tour's Comparison; `conversation` is present when its reviewer can be asked about it
+export type CodeReview = { fingerprint: string; preset: { id: string; label: string; agent: CodeReviewAgent }; effort?: string; focus?: string; findings: Finding[]; general: GeneralFinding[]; completedAt: string; conversation?: string };
 // what one Code review run asks for: a preset id, an effort it accepts, and an optional extra focus
 export type CodeReviewOptions = { preset: string; effort?: string; focus?: string };
 // one Review preset as the dashboard lists it; an unavailable one says why
@@ -41,7 +41,7 @@ export function isGeneralFinding(value: unknown): value is GeneralFinding {
 
 // validate a completed Code review
 export function isCodeReview(value: unknown): value is CodeReview {
-  return isRecord(value) && typeof value.fingerprint === 'string' && typeof value.completedAt === 'string' && optionalString(value.effort) && optionalString(value.focus)
+  return isRecord(value) && typeof value.fingerprint === 'string' && typeof value.completedAt === 'string' && optionalString(value.effort) && optionalString(value.focus) && optionalString(value.conversation)
     && isRecord(value.preset) && typeof value.preset.id === 'string' && typeof value.preset.label === 'string' && isAgent(value.preset.agent)
     && Array.isArray(value.findings) && value.findings.every(isFinding) && Array.isArray(value.general) && value.general.every(isGeneralFinding);
 }
@@ -172,7 +172,7 @@ export function codeReviewErrorMessage(code: string | undefined, status: number)
 }
 
 // a gateway or proxy failure without a typed code, worth polling through
-const transientFailure = (response: Response, code: string | undefined) => code === undefined && (response.status === 502 || response.status === 503 || response.status === 504 || response.status >= 520 && response.status <= 530);
+export const transientFailure = (response: Response, code: string | undefined) => code === undefined && (response.status === 502 || response.status === 503 || response.status === 504 || response.status >= 520 && response.status <= 530);
 
 // Poll one Code review job until it settles, then report its outcome once. Polling stops when the
 // job changes or the caller unmounts; it never cancels the job. Returns what the job's latest pending

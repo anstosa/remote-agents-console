@@ -1594,8 +1594,11 @@ describe('code review API', () => {
       prepare: async () => { prepares += 1; return { comparison, resolved: { worktree } }; },
       generate: async (_prepared: unknown, _signal: AbortSignal, progress?: ReviewRunProgress) => { tourProgress = progress; return await new Promise<ReviewTour>(resolve => { finishTour = resolve; }); }
     };
-    const runs: Array<{ request: { label: string; effort?: string; prompt: string } & ReviewRunProgress; signal: AbortSignal; resolve: (value: unknown) => void }> = [];
-    const reviewRunner = { capability: async () => ({ available: true }), run: async (request: { label: string; prompt: string }, signal: AbortSignal) => await new Promise(resolve => { runs.push({ request, signal, resolve }); }) };
+    const runs: Array<{ request: { label: string; effort?: string; prompt: string; resume?: string; reply?: unknown; followUps?: true } & ReviewRunProgress; signal: AbortSignal; resolve: (value: unknown) => void }> = [];
+    // each run answers in the reviewer's own conversation, which an Ask resumes
+    const conversation = '019a0000-1111-7222-8333-444455556666';
+    const closedWorktrees: string[] = [];
+    const reviewRunner = { capability: async () => ({ available: true }), run: async (request: { label: string; prompt: string }, signal: AbortSignal) => ({ value: await new Promise(resolve => { runs.push({ request, signal, resolve }); }), conversation }), closeWorktree: async (worktreeId: string) => { closedWorktrees.push(worktreeId); } };
     const review = resolveReviewConfig({ presets: [{ id: 'correctness', label: 'Correctness', agent: 'codex', effort: 'high', prompt: 'Review for correctness.' }, { id: 'security', label: 'Security', agent: 'codex', prompt: 'Review for security.' }] }, { codex: {} });
     const reviewStore = new ReviewTourStore(join(directory, 'reviews.json'));
     const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [{ id: 'cora', label: 'Cora', available: true, worktrees: [{ id: 'cora', projectId: 'cora', label: 'Cora', path: '/worktrees/cora', available: true, pinned: false, main: true, detached: false, locked: false, order: 0, branch: 'feature/review' }] }] }) };
@@ -1652,6 +1655,25 @@ describe('code review API', () => {
       expect(dashboard.json().codeReview).toEqual({ defaultPreset: 'correctness', presets: [{ id: 'correctness', label: 'Correctness', agent: 'codex', effort: 'high', efforts: ['minimal', 'low', 'medium', 'high', 'xhigh'], available: true }, { id: 'security', label: 'Security', agent: 'codex', efforts: ['minimal', 'low', 'medium', 'high', 'xhigh'], available: true }] });
       expect(dashboard.json().reviews).toEqual([expect.objectContaining({ worktreeId: 'cora', codeReview: 'ready', findings: 1 })]);
 
+      // ask the reviewer about its Finding: a job resuming the review's conversation, stored on the thread once answered
+      const findingId = stored.json().review.codeReview.findings[0].id as string;
+      const badAsk = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/asks', headers: mutationHeaders, payload: JSON.stringify({ findingId, question: '   ', fingerprint: comparison.fingerprint }) });
+      expect(badAsk.statusCode).toBe(400);
+      const asked = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/asks', headers: mutationHeaders, payload: JSON.stringify({ findingId, question: 'Why skip it?', fingerprint: comparison.fingerprint }) });
+      expect(asked.statusCode).toBe(202);
+      expect(asked.json()).toMatchObject({ status: 'pending', threadId: findingId, job: { id: expect.any(String) } });
+      expect(runs[1]!.request).toMatchObject({ label: '💬 Ask · Correctness', resume: conversation, reply: { kind: 'text' }, followUps: true, effort: 'high' });
+      const askJob = asked.json().job.id as string;
+      expect((await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/asks', headers })).json()).toEqual({ status: 'ready', threads: [], pending: [{ threadId: findingId, question: 'Why skip it?', job: asked.json().job }] });
+      runs[1]!.request.onStarted?.({ agentId: 'agent-ask' });
+      expect((await reviewApp.inject({ method: 'GET', url: `/api/review-tour/asks/jobs/${askJob}`, headers })).json()).toMatchObject({ status: 'pending', run: { agentId: 'agent-ask', needsInput: false } });
+      expect((await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/asks', headers: mutationHeaders, payload: JSON.stringify({ findingId, question: 'And?', fingerprint: comparison.fingerprint }) })).json()).toEqual({ status: 'error', error: { code: 'busy', retryable: true } });
+      runs[1]!.resolve('Because **validation** happens later.');
+      await until(async () => (await reviewApp.inject({ method: 'GET', url: `/api/review-tour/asks/jobs/${askJob}`, headers })).statusCode === 200);
+      const threads = (await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/asks', headers })).json();
+      expect(threads).toMatchObject({ status: 'ready', pending: [], threads: [{ id: findingId, target: 'reviewer', conversation, anchor: { findingId, file: 'src/route.ts', side: 'additions', startLine: 2, endLine: 2 }, turns: [{ question: 'Why skip it?', answer: 'Because **validation** happens later.' }] }] });
+      runs.splice(1, 1);
+
       // "Add AI review" to the stored tour
       const stale = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/code-review/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, fingerprint: 'other-fingerprint-1234', preset: 'security' }) });
       expect(stale.statusCode).toBe(409);
@@ -1673,9 +1695,12 @@ describe('code review API', () => {
       expect(gone.json()).toMatchObject({ status: 'error', error: { code: 'job_cancelled' } });
       expect((await reviewApp.inject({ method: 'DELETE', url: '/api/code-review/jobs/unknown', headers: deleteHeaders })).statusCode).toBe(404);
 
-      // dismissing the tour clears its review
+      // dismissing the tour clears its review and its threads, and closes the Agents its questions kept
+      closedWorktrees.length = 0;
       expect((await reviewApp.inject({ method: 'DELETE', url: '/api/worktrees/cora/review-tour', headers: deleteHeaders })).statusCode).toBe(204);
       expect(await reviewStore.codeReview('cora', 'feature/review', comparison.fingerprint)).toBeUndefined();
+      expect(await reviewStore.askThreads('cora', 'feature/review', comparison.fingerprint)).toEqual([]);
+      expect(closedWorktrees).toEqual(['cora']);
     } finally { await reviewApp.close(); await rm(directory, { recursive: true, force: true }); }
   }, 15_000);
 });

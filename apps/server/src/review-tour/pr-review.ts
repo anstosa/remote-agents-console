@@ -4,6 +4,7 @@ import { gitStatusSummary } from '../git/comparison.js';
 import { at, GithubClient, GithubRequestError, githubErrorMessage, githubRepository, githubToken, graphqlError, type Command, type GithubRepository, type GraphqlPayload, type Request, type Token } from '../pull-requests/github.js';
 import { run } from '../tmux/command.js';
 import { ReviewTourError, type ReviewComparison, type ReviewTourInput } from './contracts.js';
+import { diffRows, type DiffRow } from './diff-rows.js';
 
 // Posts a Review tour's feedback to one GitHub pull request of the branch as the operator's draft
 // review (GitHub's PENDING review), which they finish on GitHub; the console never submits it
@@ -85,27 +86,6 @@ export function parsePullRequestReviewInput(value: unknown): PullRequestReviewIn
 // ---- Pure diff helpers ----------------------------------------------------------------------
 
 // one row of a unified diff: its hunk, its old and/or new line number, and its text without the prefix
-export type DiffRow = { hunk: number; old?: number; new?: number; text: string };
-
-// number a unified patch's rows; anything before the first hunk header (a file header) is skipped,
-// so this reads both a tour Change's patch and GitHub's header-less `patch`
-export function diffRows(patch: string): DiffRow[] {
-  const rows: DiffRow[] = [];
-  let hunk = -1;
-  let oldLine = 0;
-  let newLine = 0;
-  for (const line of patch.split('\n')) {
-    const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(line);
-    if (header !== null) { hunk += 1; oldLine = Number(header[1]); newLine = Number(header[2]); continue; }
-    if (hunk < 0) continue;
-    const text = line.slice(1);
-    if (line.startsWith('-')) rows.push({ hunk, old: oldLine++, text });
-    else if (line.startsWith('+')) rows.push({ hunk, new: newLine++, text });
-    else if (line.startsWith(' ')) rows.push({ hunk, old: oldLine++, new: newLine++, text });
-  }
-  return rows;
-}
-
 const lineOn = (side: ReviewDiffSide, row: DiffRow) => side === 'deletions' ? row.old : row.new;
 const rowIndexes = (rows: DiffRow[], comment: CommentRange) => [rows.findIndex(row => lineOn(comment.startSide, row) === comment.startLine), rows.findIndex(row => lineOn(comment.endSide, row) === comment.endLine)] as const;
 
