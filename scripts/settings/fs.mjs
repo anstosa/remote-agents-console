@@ -54,9 +54,14 @@ export function assertAllowedSource(path, allowedRoots, options = {}) {
   if (!isAbsolute(path)) {
     throw safeError("unsafe-source");
   }
+  let parent = dirname(path);
+  // optional sources may sit below directories that do not exist yet
+  while (!existsSync(path) && lstatSync(parent, { throwIfNoEntry: false }) === undefined) {
+    parent = dirname(parent);
+  }
   const canonical = existsSync(path)
     ? inspectOwnedPath(path, options).path
-    : resolve(inspectOwnedPath(dirname(path), { regular: false }).path, path.slice(dirname(path).length + 1));
+    : resolve(inspectOwnedPath(parent, { regular: false }).path, relative(parent, path));
   const allowed = allowedRoots.some((root) => {
     const canonicalRoot = realpathSync(root);
     return isPathInside(canonicalRoot, canonical);

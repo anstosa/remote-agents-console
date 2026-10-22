@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
-import { atomicWriteFile, readBoundedFile, unlinkIfIdentity } from "./fs.mjs";
+import { assertAllowedSource, atomicWriteFile, readBoundedFile, unlinkIfIdentity } from "./fs.mjs";
 import { sha256 } from "./crypto.mjs";
 
 // reject deterministic final-symlink swaps before reading source bytes
@@ -13,6 +13,20 @@ test("bounded reads reject a source symlink swap", () => {
     const source = resolve(root, "source"); const outside = resolve(root, "outside");
     writeFileSync(source, "allowed", { mode: 0o600 }); writeFileSync(outside, "private outside", { mode: 0o600 });
     assert.throws(() => readBoundedFile(source, 1024, { beforeOpen: () => { renameSync(source, `${source}.old`); symlinkSync(outside, source); } }), { code: "source-conflict" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// accept optional sources whose directories have not been created yet
+test("allowed sources may sit below missing directories but not outside the roots", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "rac-settings-allowed-"));
+  try {
+    const allowed = resolve(root, "allowed");
+    mkdirSync(allowed, { mode: 0o700 });
+    const nested = resolve(allowed, "config/instance-icons/heart.svg");
+    assert.equal(assertAllowedSource(nested, [allowed]), nested);
+    assert.throws(() => assertAllowedSource(resolve(root, "outside/missing/heart.svg"), [allowed]), { code: "outside-allowed-root" });
+    symlinkSync(resolve(allowed, "absent"), resolve(allowed, "dangling"));
+    assert.throws(() => assertAllowedSource(resolve(allowed, "dangling/heart.svg"), [allowed]), { code: "unsafe-source" });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
