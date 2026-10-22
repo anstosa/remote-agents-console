@@ -60,7 +60,7 @@ function describeButtonSettings(schema: SettingsSchema): void {
     }
     const splits = buttons.properties.splits;
     if (splits?.properties === undefined) return;
-    Object.assign(splits, { label: 'Split buttons', default: {} });
+    Object.assign(splits, { label: 'Panel buttons', default: {} });
     // annotate every split-kind slot
     for (const [key, list] of Object.entries(splits.properties)) {
       Object.assign(list, { label: `${key[0]!.toUpperCase()}${key.slice(1)}`, default: [] });
