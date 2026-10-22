@@ -103,7 +103,7 @@ type FakeClaudeOptions = { stdout?: string; exit?: number; stderr?: string; dela
 
 // a fake Claude recording its arguments, working directory and prompt, then printing `stdout`
 async function fakeClaude(options: FakeClaudeOptions = {}): Promise<{ root: string; binary: string }> {
-  const { stdout = '', exit = 0, stderr = '', delaySeconds = 0, help = '--json-schema --tools --output-format --effort --no-session-persistence --strict-mcp-config' } = options;
+  const { stdout = '', exit = 0, stderr = '', delaySeconds = 0, help = '--json-schema --tools --output-format --effort --no-session-persistence --strict-mcp-config --setting-sources' } = options;
   return await fakeCli('claude', `if [[ "\${1:-}" == "--help" ]]; then echo ${JSON.stringify(help)}; exit 0; fi
 printf '%s\\n' "$@" >"$ROOT/args"
 pwd >"$ROOT/cwd"
@@ -124,7 +124,7 @@ describe('headless Claude Review runner', () => {
     await expect(runner.capability()).resolves.toEqual({ available: true });
     await expect(runner.run(request(fixture.root, { kind: 'claude' }), new AbortController().signal)).resolves.toEqual({ answer: 'yes' });
     const args = (await readFile(join(fixture.root, 'args'), 'utf8')).trim().split('\n');
-    expect(args).toEqual(['-p', '--output-format', 'json', '--json-schema', JSON.stringify(schema), '--tools', 'Read,Grep,Glob,Skill', '--strict-mcp-config', '--no-session-persistence']);
+    expect(args).toEqual(['-p', '--output-format', 'json', '--json-schema', JSON.stringify(schema), '--tools', 'Read,Grep,Glob,Skill', '--strict-mcp-config', '--setting-sources', 'user', '--no-session-persistence']);
     expect((await readFile(join(fixture.root, 'cwd'), 'utf8')).trim()).toBe(fixture.root);
     expect(await readFile(join(fixture.root, 'prompt'), 'utf8')).toBe('Explain the change.');
   });
@@ -163,6 +163,9 @@ describe('headless Claude Review runner', () => {
     await expect(claudeRunner('/nonexistent/claude').capability()).resolves.toEqual({ available: false, reason: 'generator_unavailable' });
     const old = await fakeClaude({ help: '--output-format --tools' });
     await expect(claudeRunner(old.binary).capability()).resolves.toEqual({ available: false, reason: 'unsupported_cli' });
+    // a CLI that cannot keep a Worktree's own settings out never runs a Review run
+    const unconfined = await fakeClaude({ help: '--json-schema --tools --output-format --effort --no-session-persistence --strict-mcp-config' });
+    await expect(claudeRunner(unconfined.binary).capability()).resolves.toEqual({ available: false, reason: 'unsupported_cli' });
   });
 
   it('times out and cancels delayed process groups', async () => {

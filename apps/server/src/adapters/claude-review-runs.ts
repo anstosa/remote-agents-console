@@ -6,6 +6,11 @@ import type { HeadlessRunResult, ReplyPane, ReviewRuns, ReviewRunSettings } from
 // Bash withheld, a skill can only read; one that runs a command or edits fails at that step
 const claudeReviewTools = 'Read,Grep,Glob,Skill';
 
+// Only the operator's own settings: a reviewed Worktree's `.claude/settings*.json` is content under
+// review (a pull request may add it), and its hooks, `env` or `apiKeyHelper` would run commands or
+// redirect credentials whatever the tool limits say. Flag settings (`--settings`) still apply.
+const settingSources = ['--setting-sources', 'user'];
+
 const authenticationFailure = /invalid api key|please run \/login|not logged in|authentication_error|oauth token (?:has )?expired/iu;
 
 type ClaudeResult = { type?: unknown; is_error?: unknown; result?: unknown; structured_output?: unknown };
@@ -30,9 +35,9 @@ async function lastAssistantText(pane: ReplyPane): Promise<string | undefined> {
 export const claudeReviewRuns: ReviewRuns = {
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   headless: {
-    probe: { help: ['--help'], flags: ['--json-schema', '--tools', '--output-format', '--effort', '--no-session-persistence', '--strict-mcp-config'] },
-    // print mode, read-only and unpersisted: only the read tools and no MCP servers, run in the Worktree
-    command: run => ({ args: ['-p', '--output-format', 'json', '--json-schema', JSON.stringify(run.schema), '--tools', claudeReviewTools, '--strict-mcp-config', '--no-session-persistence', ...modelArgs(run)], cwd: run.workspace }),
+    probe: { help: ['--help'], flags: ['--json-schema', '--tools', '--output-format', '--effort', '--no-session-persistence', '--strict-mcp-config', '--setting-sources'] },
+    // print mode, read-only and unpersisted: only the read tools, no MCP servers and only the operator's settings, run in the Worktree
+    command: run => ({ args: ['-p', '--output-format', 'json', '--json-schema', JSON.stringify(run.schema), '--tools', claudeReviewTools, '--strict-mcp-config', ...settingSources, '--no-session-persistence', ...modelArgs(run)], cwd: run.workspace }),
     // the result envelope carries the text result and usage beside the structured output
     stdoutBytes: outputBytes => 4 * outputBytes + 65_536,
     result: (outcome, outputBytes): HeadlessRunResult => {
@@ -48,11 +53,11 @@ export const claudeReviewRuns: ReviewRuns = {
     }
   },
   interactive: {
-    // only the read tools and Skill, and no MCP servers, plus read access to the run's prompt
-    // directory; the Adapter's own `--settings` (the state-reporting hooks) stays in place
-    args: run => ['--tools', claudeReviewTools, '--strict-mcp-config', ...(run.readDirectory === undefined ? [] : ['--add-dir', run.readDirectory]), ...modelArgs(run)],
+    // only the read tools and Skill, no MCP servers and only the operator's settings, plus read access
+    // to the run's prompt directory; the Adapter's own `--settings` (the state-reporting hooks) stays in place
+    args: run => ['--tools', claudeReviewTools, '--strict-mcp-config', ...settingSources, ...(run.readDirectory === undefined ? [] : ['--add-dir', run.readDirectory]), ...modelArgs(run)],
     // the ones that would loosen its read-only policy
-    readOnlyFlags: [['--tools', 'many'], ['--strict-mcp-config', 'none'], ['--mcp-config', 'many']],
+    readOnlyFlags: [['--tools', 'many'], ['--strict-mcp-config', 'none'], ['--mcp-config', 'many'], ['--setting-sources', 'one']],
     modelFlags: ['--model'],
     effortFlags: ['--effort'],
     reply: {

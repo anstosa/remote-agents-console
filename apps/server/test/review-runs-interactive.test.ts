@@ -59,7 +59,7 @@ describe('interactive Review runner', () => {
     const runner = new InteractiveReviewRunner(world.host, { promptDirectory: '/tmp/runs' });
     await expect(runner.run(request({ onStarted: run => started.push(run.agentId) }), new AbortController().signal)).resolves.toEqual({ ok: true });
     expect(world.calls).toEqual(['launch:proj:/w:claude', 'name:🔍 Review · Correctness', 'close:agent-9']);
-    expect(world.launches[0]).toMatchObject({ label: '🔍 Review · Correctness', extraArgs: ['--tools', 'Read,Grep,Glob,Skill', '--strict-mcp-config', '--add-dir', '/tmp/runs', '--effort', 'high'] });
+    expect(world.launches[0]).toMatchObject({ label: '🔍 Review · Correctness', extraArgs: ['--tools', 'Read,Grep,Glob,Skill', '--strict-mcp-config', '--setting-sources', 'user', '--add-dir', '/tmp/runs', '--effort', 'high'] });
     expect(world.submitted).toEqual([`Review the change.\n\n${replyInstruction(schema)}`]);
     expect(replyInstruction(schema)).toContain('When you are done, reply with ONLY one JSON object matching this JSON Schema as your final message — no prose, no code fences:');
     expect(started).toEqual(['agent-9']);

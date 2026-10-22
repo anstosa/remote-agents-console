@@ -391,14 +391,18 @@ Every field is optional.
 
 - `agents.<kind>.mode` is `headless` (the default) or `interactive`. A headless
   run is a child process with schema-constrained output: `codex exec --sandbox
-  read-only`, or `claude -p --tools Read,Grep,Glob,Skill --no-session-persistence`.
+  read-only`, or `claude -p --tools Read,Grep,Glob,Skill --setting-sources user
+  --no-session-persistence`. Claude Review runs load only your user settings, never
+  the reviewed Worktree's `.claude/settings*.json`, whose hooks and `env` would run
+  whatever the tool limits say.
   Claude bills `-p` use separately from interactive use, which is why the mode is
   set per kind. An interactive run is a fresh, visible Agent of that kind in the
   Worktree's Workspace, named `🗺 Tour · <branch>` or `🔍 Review · <preset>`:
   - It launches in a new window of the Workspace session, never in an idle shell,
     with the same read-only restrictions added to that launch only. Codex gets
     `--sandbox read-only --ask-for-approval never`. Claude gets `--tools
-    Read,Grep,Glob,Skill --strict-mcp-config` and keeps the console's hooks settings.
+    Read,Grep,Glob,Skill --strict-mcp-config --setting-sources user` and keeps the
+    console's hooks settings.
     The run's `model` and `effort` are added too. Operator `adapters.<kind>.args`
     still apply, except the flags these replace or that would loosen them (for
     example `--sandbox`, `--model` or Codex's
