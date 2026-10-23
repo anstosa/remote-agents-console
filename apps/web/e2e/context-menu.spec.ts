@@ -247,7 +247,8 @@ test('Davo context action preserves newer file-backed identity and context', asy
   await expect(call).toHaveCount(0);
 });
 
-test('workspace tab actions target inactive workspaces, jump to splits and close without ending processes', async ({ page }) => {
+// retain workspace and agent actions across responsive layouts
+test('workspace actions target inactive tabs, restore splits and keep responsive launch counts anchored', async ({ page }) => {
   const fixture = await mountConsole(page);
   await openWorkspaceSplits(page);
   const idleTab = page.getByRole('tab', { name: /^Idle —/u });
@@ -308,6 +309,38 @@ test('workspace tab actions target inactive workspaces, jump to splits and close
   await page.getByRole('button', { name: 'Minimize agent output' }).click();
   await expect(page.locator('.log-output')).toHaveCount(0);
   await expect(toolbar.locator('.launch-minimized-count')).toHaveText('1');
+  let phoneAnchor: { top: number; right: number } | undefined;
+  // cover both the label breakpoint and the separate responsive launch branch
+  for (const width of [390, 600, 601, 768, 769, 1440]) {
+    // label the failing viewport without duplicating the fixture
+    await test.step(`${width}px minimized launcher`, async () => {
+      await page.setViewportSize({ width, height: 900 });
+      const menuOnly = width <= 768;
+      const launch = toolbar.locator('.launch-split');
+      const primary = launch.locator(menuOnly ? ':scope > .launch-menu-trigger' : ':scope > .launch-primary');
+      const badge = launch.locator('.launch-minimized-count');
+      await expect(primary).toHaveAccessibleName('Show agent');
+      await expect(launch.locator(':scope > button')).toHaveCount(menuOnly ? 1 : 2);
+      await expect(primary.locator('.launch-menu-trigger-label, .launch-primary-label')).toBeVisible({ visible: width > 600 });
+      await expect(badge).toHaveText('1');
+      await expect(badge).toBeInViewport({ ratio: 1 });
+      const [ownerBox, badgeBox] = await Promise.all([launch.boundingBox(), badge.boundingBox()]);
+      // require rendered controls before comparing their edges
+      if (ownerBox === null || badgeBox === null) throw new Error('Expected a visible launch control and count');
+      expect(badgeBox.y).toBeLessThan(ownerBox.y);
+      expect(badgeBox.y + badgeBox.height).toBeGreaterThan(ownerBox.y);
+      expect(badgeBox.x).toBeLessThan(ownerBox.x + ownerBox.width);
+      expect(badgeBox.x + badgeBox.width).toBeGreaterThan(ownerBox.x + ownerBox.width);
+      // icon-only launchers stay square while labels expand the control
+      if (width <= 600) expect(Math.abs(ownerBox.width - ownerBox.height)).toBeLessThanOrEqual(1);
+      else expect(ownerBox.width).toBeGreaterThan(ownerBox.height);
+      const anchor = { top: badgeBox.y - ownerBox.y, right: ownerBox.x + ownerBox.width - badgeBox.x - badgeBox.width };
+      // retain the first phone anchor across both responsive dom branches
+      phoneAnchor ??= anchor;
+      expect(anchor.top).toBeCloseTo(phoneAnchor.top, 1);
+      expect(anchor.right).toBeCloseTo(phoneAnchor.right, 1);
+    });
+  }
   await toolbar.getByRole('button', { name: 'Show agent' }).click();
   await expect(page.locator('.log-output')).toBeVisible();
   expect(fixture.mutations.some(entry => entry.method === 'DELETE' || entry.path.endsWith('/deactivate') || entry.path.endsWith('/launch'))).toBe(false);

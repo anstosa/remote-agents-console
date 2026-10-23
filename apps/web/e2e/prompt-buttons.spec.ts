@@ -101,48 +101,28 @@ test('uses consistent Workspace toolbar styles, tints an open panel’s button a
   await expect(queue).toHaveCSS('filter', 'brightness(1.08)');
 });
 
-// keep standard and split-button counts pinned to the same corners
-test('keeps terminal and launch counts on their mobile corner anchors', async ({ page }) => {
+// keep standard button counts pinned to the same corners
+test('keeps terminal counts on their mobile corner anchors', async ({ page }) => {
   await page.goto('/');
   await page.setContent(`
     <link rel="stylesheet" href="/src/styles.css">
     <section class="workspace-toolbar-actions">
-      <span class="launch-split quiet" role="group" aria-label="Launch agent"><button class="queue launch-primary" aria-label="Show agent"><svg viewBox="0 0 24 24"></svg><span class="launch-primary-label">Show agent</span><span class="saved-prompts-count launch-minimized-count">4</span></button><button class="launch-chevron" aria-label="Choose agent"><svg viewBox="0 0 24 24"></svg></button></span>
       <button class="terminal-picker-toggle toolbar-button" aria-label="Terminal"><svg viewBox="0 0 24 24"></svg><span class="toolbar-label">Terminal</span><span class="saved-prompts-count">2</span></button>
     </section>
   `);
 
   const terminal = page.getByRole('button', { name: 'Terminal' });
-  const launch = page.locator('.launch-split');
-  const decorators = [
-    { owner: terminal, locator: terminal.locator('.saved-prompts-count') },
-    { owner: launch, locator: launch.locator('.launch-minimized-count') }
-  ] as const;
-  const measurements: CornerOffsets[][] = [];
+  const badge = terminal.locator('.saved-prompts-count');
+  let phoneOffsets: CornerOffsets | undefined;
   // cover phones, the breakpoint edges and a wide desktop
   for (const width of [390, 600, 601, 1440]) {
     await page.setViewportSize({ width, height: 880 });
     await expect(terminal.locator('.toolbar-label')).toBeVisible({ visible: width > 600 });
-    await expect(launch.locator('.launch-primary-label')).toBeVisible();
-    // preserve the labelled desktop split's adaptive width
-    if (width > 600) {
-      const launchBox = await launch.boundingBox();
-      // require a visible launch control before comparing its shape
-      if (launchBox === null) throw new Error('Expected a visible launch control');
-      expect(launchBox.width).toBeGreaterThan(launchBox.height);
-    }
-    // every decorator stays absolute instead of joining the labelled desktop row
-    for (const decorator of decorators) {
-      await expect(decorator.locator).toHaveCSS('position', 'absolute');
-    }
-    const current = await Promise.all(decorators.map(decorator => { /* measure one anchored decorator */ return cornerOffsets(decorator.owner, decorator.locator); }));
-    measurements.push(current);
-  }
-  // compare every viewport with the original phone anchors
-  for (const current of measurements.slice(1)) {
-    current.forEach((offsets, index) => { // compare one decorator with its phone origin
-      expect(offsets.top).toBeCloseTo(measurements[0]![index]!.top, 1);
-      expect(offsets.right).toBeCloseTo(measurements[0]![index]!.right, 1);
-    });
+    await expect(badge).toHaveCSS('position', 'absolute');
+    const current = await cornerOffsets(terminal, badge);
+    // compare every viewport with the original phone anchor
+    phoneOffsets ??= current;
+    expect(current.top).toBeCloseTo(phoneOffsets.top, 1);
+    expect(current.right).toBeCloseTo(phoneOffsets.right, 1);
   }
 });
