@@ -17,6 +17,7 @@ import type { Agent, Dashboard, DashboardPlace, DashboardProject, DashboardWorkt
 import { addUntrackedLineStats, comparisonAgainst, prComparisonCandidates, workingStatus } from '../git/comparison.js';
 import { isUpdateAdvisorLabel } from '../update-advisor.js';
 import { configuredPlaces, markedPlace, placeForRoot, scratchHome, scratchProjectId, type Place } from '../places/places.js';
+import { implicitProject } from '../config/schema.js';
 
 export interface SocketFinder { find(): Promise<SocketRef[]>; }
 export class ProcSocketFinder implements SocketFinder {
@@ -150,6 +151,8 @@ export class DiscoveryService {
   private dashboardSnapshot?: { refreshedAt: number; value: Dashboard };
   private dashboardRefreshInFlight?: Promise<Dashboard>;
   private worktreeSnapshot: Worktree[] = [];
+  // the configured Projects followed by the implicit ones the last Worktree scan resolved
+  private projectList?: readonly Project[];
   // the Prune-eligible checkout paths per Project (git's prunable entries plus console
   // records git lists nowhere), published atomically with the worktree snapshot (ADR 0003)
   private staleSnapshot = new Map<string, string[]>();
@@ -168,9 +171,8 @@ export class DiscoveryService {
   private readonly workspaceRoots = new Map<string, RootLookup>();
   // expire PR comparisons with their metadata snapshot, including checkout invalidation
   private readonly gitPrComparisons = new WeakMap<GitMeta, Map<string, Promise<GitComparisonSummary | undefined>>>();
-  // a workspace's common git dir (null = none); Projects are static, so repository
-  // membership never changes in a session — cache it so a persistent Scratch pane does
-  // not re-spawn `git rev-parse` on every poll
+  // a workspace's common git dir (null = none), cached so a persistent Scratch pane does not
+  // re-spawn `git rev-parse` on every poll; invalidateWorktrees() clears it
   private readonly commonDirCache = new Map<string, string | null>();
   private static readonly refreshCacheMs = 2_000;
   private static readonly gitMetadataCacheMs = 30_000;
@@ -178,7 +180,7 @@ export class DiscoveryService {
   constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly pullRequests: PullRequestLookup = new PullRequestService(), private readonly adapters: AdapterConfigs = {}, private readonly configuredProjects: readonly Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string) {}
   // every Project the console knows right now; the list may change between calls, so callers
   // read it each time rather than keeping it
-  projectsNow(): readonly Project[] { return this.configuredProjects; }
+  projectsNow(): readonly Project[] { return this.projectList ?? this.configuredProjects; }
   // every configured Place over this Worktree set: the Worktrees, the directory Projects and the Scratch folder
   private async places(worktrees: readonly Worktree[]): Promise<Place[]> {
     this.scratchHomeValue ??= scratchHome(this.scratchDirectory, this.configuredProjects);
@@ -192,24 +194,61 @@ export class DiscoveryService {
   // Claim each unmarked session the last scan saw, once: a session the console did not create
   // (one running before marks, or the operator's own with an agent started by hand) is marked
   // with the nearest Place of its Agent, else its Console shell, else a console-managed pane.
+  // A git checkout in no configured Place, or below the configured Scratch folder, is marked
+  // with its own Worktree instead: its implicit Project's (ADR 0014).
   // It is never re-derived, so a shell that later `cd`s elsewhere stays in the Workspace. A
   // session with none of these (the operator's own shells, `rac-stack-*` runs) stays unmarked.
   // Only the dashboard claims, over its settled Worktree set: a claim against a Worktree list
-  // not yet scanned would mark a Worktree's session as Scratch for good.
-  private async claimSessions(agents: readonly Agent[], places: readonly Place[]): Promise<void> {
+  // not yet scanned would mark a Worktree's session as Scratch for good. Answers whether a claim
+  // named a Worktree that set does not list yet, which the caller re-scans for.
+  private async claimSessions(agents: readonly Agent[], places: readonly Place[]): Promise<boolean> {
+    let unlisted = false;
     const agentHomes = new Map(agents.filter(agent => !isUpdateAdvisorLabel(agent.displayLabel)).map(agent => [agent.id, agent.home]));
     await Promise.all([...this.unmarkedSessions].map(async ([key, sessionPanes]) => {
       const agentHome = sessionPanes.map(pane => agentHomes.get(`${pane.socket.fingerprint}:${pane.paneId}`)).find(home => home !== undefined);
       const claimant = sessionPanes.find(pane => pane.role === 'shell') ?? sessionPanes.find(pane => pane.consoleManaged === true);
       const root = agentHome ?? (claimant === undefined ? undefined : await this.cachedWorkspaceRoot(claimant.path));
       if (root === undefined) return;
-      const place = placeForRoot(places, root);
+      const nearest = placeForRoot(places, root);
+      const checkout = nearest.adhoc === true || (nearest.kind === 'scratch' && nearest.home !== root) ? await this.checkoutWorktreeId(root) : undefined;
+      const placeId = checkout ?? nearest.id;
+      if (checkout !== undefined && !places.some(place => place.id === checkout)) unlisted = true;
       const { socket, sessionId } = sessionPanes[0]!;
       // the claim holds until the next scan even if the write fails; that scan claims again
-      await this.tmux.markSessionPlace(socket, sessionId, place.id).catch(() => false);
-      this.sessionMarks.set(key, place.id);
+      await this.tmux.markSessionPlace(socket, sessionId, placeId).catch(() => false);
+      this.sessionMarks.set(key, placeId);
       this.unmarkedSessions.delete(key);
     }));
+    return unlisted;
+  }
+  // The Worktree id of a git checkout root no configured Place holds: the Worktree of the
+  // configured Project managing its repository (one created since the last scan), else of its
+  // implicit Project. Undefined when the root is no checkout git lists, such as a `.git` folder.
+  private async checkoutWorktreeId(root: string): Promise<string | undefined> {
+    const project = await implicitProject(root);
+    if (project === undefined) return undefined;
+    const entries = await this.listWorktreesImpl(root);
+    const listed = await Promise.all((entries ?? []).filter(entry => !entry.bare).map(entry => realpath(entry.path).catch(() => entry.path)));
+    if (!listed.includes(root)) return undefined;
+    const configured = this.configuredProjects.find(candidate => candidate.available && candidate.identity === project.identity);
+    return worktreeWireId((configured ?? project).id, root);
+  }
+  // The implicit Projects these Place ids name (ADR 0014): `<id>:<path>` whose id no configured
+  // Project has, whose path is a git checkout deriving that same id, and whose repository no
+  // configured Project manages. Rebuilt on every Worktree scan, so a Project that no session mark
+  // or pin names any more drops out, taking its Worktrees with it.
+  private async resolveImplicitProjects(placeIds: Iterable<string>): Promise<void> {
+    const configuredIds = new Set(this.configuredProjects.map(project => project.id));
+    const configuredIdentities = new Set(this.configuredProjects.filter(project => project.available).map(project => project.identity));
+    const found = new Map<string, Project>();
+    for (const placeId of new Set(placeIds)) {
+      const id = projectIdOf(placeId);
+      const path = worktreePathOf(placeId);
+      if (path === undefined || id === scratchProjectId || configuredIds.has(id) || found.has(id)) continue;
+      const project = await implicitProject(path);
+      if (project?.id === id && !configuredIdentities.has(project.identity)) found.set(id, project);
+    }
+    this.projectList = found.size === 0 ? undefined : [...this.configuredProjects, ...found.values()];
   }
   // reuse socket discovery across adjacent requests
   private async sockets(force = false): Promise<SocketRef[]> {
@@ -497,6 +536,7 @@ export class DiscoveryService {
     const labels = (await this.pinStore?.labels?.()) ?? {};
     // every stored key, so a worktree key git lists nowhere counts as an orphaned record
     const storeKeys = (await this.pinStore?.keys?.()) ?? [];
+    await this.resolveImplicitProjects([...this.sessionMarks.values(), ...Object.keys(pins).filter(id => pins[id] === true)]);
     const worktrees: Worktree[] = [];
     const stale = new Map<string, string[]>();
     for (const project of this.projectsNow()) {
@@ -531,7 +571,8 @@ export class DiscoveryService {
         usable.push({
           id, projectId: project.id, label, ...(customLabel === undefined ? {} : { customLabel: true }), path, identity: path,
           ...(main && project.hostPath !== undefined ? { hostPath: project.hostPath } : {}),
-          available: true, pinned: pins[id] ?? main, main, detached: entry.detached, locked: entry.locked,
+          // an implicit Project's Main worktree starts unpinned, so a repository an agent once ran in keeps no tab
+          available: true, pinned: pins[id] ?? (main && project.implicit !== true), main, detached: entry.detached, locked: entry.locked,
           ...(entry.locked && entry.lockedReason !== undefined ? { lockedReason: entry.lockedReason } : {}),
           ...(entry.branch === undefined ? {} : { branch: entry.branch }),
           ...(entry.detached && sha !== undefined ? { sha } : {}),
@@ -693,8 +734,8 @@ export class DiscoveryService {
     };
     // re-place every agent against this (possibly fresher) Worktree set, publishing the
     // console-side Place home; a Worktree's Agents take its git identity as before
-    const places = await this.places(worktrees);
-    await this.claimSessions(discovered, places);
+    let places = await this.places(worktrees);
+    if (await this.claimSessions(discovered, places)) { worktrees = await this.worktrees(true); places = await this.places(worktrees); }
     const worktreeById = new Map(worktrees.map(worktree => [worktree.id, worktree] as const));
     // the stable tab order follows configured checkout order and discovery defaults
     const orderOf = new Map(worktrees.map((worktree, index) => [worktree.id, index] as const));
@@ -749,7 +790,7 @@ export class DiscoveryService {
     for (const view of worktreeViews) { const list = byProject.get(view.projectId) ?? []; list.push(view); byProject.set(view.projectId, list); }
     const projects: DashboardProject[] = this.projectsNow().map(project => {
       const management = worktreeManagementAvailability(project);
-      return { id: project.id, label: project.label, mode: project.mode, available: project.available, ...(project.unavailableReason === undefined ? {} : { unavailableReason: project.unavailableReason }), manageWorktrees: management.available, ...(management.reason === undefined ? {} : { manageWorktreesReason: management.reason }), stalePaths: this.staleSnapshot.get(project.id) ?? [], ...(project.commands?.setup === undefined ? {} : { setup: true }), worktrees: byProject.get(project.id) ?? [] };
+      return { id: project.id, ...(project.implicit === true ? { implicit: true as const } : {}), label: project.label, mode: project.mode, available: project.available, ...(project.unavailableReason === undefined ? {} : { unavailableReason: project.unavailableReason }), manageWorktrees: management.available, ...(management.reason === undefined ? {} : { manageWorktreesReason: management.reason }), stalePaths: this.staleSnapshot.get(project.id) ?? [], ...(project.commands?.setup === undefined ? {} : { setup: true }), worktrees: byProject.get(project.id) ?? [] };
     });
     const listed = this.listPlaces(places, [...discovered.flatMap(agent => this.placeOf(agent, places) ?? []), ...shellPlaces, ...await this.pinnedScratchPlaces(places)]);
     this.listedPlaces = new Map(listed.map(place => [place.id, place]));
@@ -812,7 +853,7 @@ export class DiscoveryService {
     return false;
   }
 
-  // the workspace's common git dir, memoised (Projects are static, so the answer is stable)
+  // the workspace's common git dir, memoised until the next invalidateWorktrees()
   private async cachedCommonDir(workspace: string): Promise<string | undefined> {
     const cached = this.commonDirCache.get(workspace);
     if (cached !== undefined) return cached ?? undefined;

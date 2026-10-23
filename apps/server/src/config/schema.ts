@@ -1,5 +1,6 @@
 import { access, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import type { Project, StackCommands, WorktreeOverride } from '../domain/models.js';
@@ -132,8 +133,9 @@ export const sourceSchema = z.object({
   // declared. `path` is any checkout (a bare repository included); `hostPath` maps the
   // Main worktree's container path to the host under Docker; `worktreesDirectory` is
   // where Add creates new checkouts (default `../<basename>-worktrees`, resolved
-  // against the Main worktree). Scratch-only first runs omit `projects`.
-  projects: z.array(z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/).refine(value => value !== 'agent' && value !== 'scratch', 'project id `agent` and `scratch` are reserved'), label: z.string().max(120).optional(), defaultBranch: defaultBranch.optional(), path: z.string().min(1), hostPath: z.string().startsWith('/').optional(), worktreeOrder: z.array(z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden')).max(2000).optional(), worktreeOverrides: z.array(worktreeOverride).max(2000).optional(), worktreesDirectory: z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden').optional(), externalUrl: previewExternalUrl.optional(), port: previewPort.optional(), hostname: previewHostname.optional(), commands: stackCommands.optional(), newTask: command.optional(), buttons: projectButtonsSchema.optional(), push: pushAction.optional() }).strict()).max(100).default([])
+  // against the Main worktree). `id` defaults to the derived id an implicit Project of the same
+  // repository carries. Scratch-only first runs omit `projects`.
+  projects: z.array(z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/).refine(value => value !== 'agent' && value !== 'scratch', 'project id `agent` and `scratch` are reserved').optional(), label: z.string().max(120).optional(), defaultBranch: defaultBranch.optional(), path: z.string().min(1), hostPath: z.string().startsWith('/').optional(), worktreeOrder: z.array(z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden')).max(2000).optional(), worktreeOverrides: z.array(worktreeOverride).max(2000).optional(), worktreesDirectory: z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden').optional(), externalUrl: previewExternalUrl.optional(), port: previewPort.optional(), hostname: previewHostname.optional(), commands: stackCommands.optional(), newTask: command.optional(), buttons: projectButtonsSchema.optional(), push: pushAction.optional() }).strict()).max(100).default([])
 }).strict().superRefine((config, context) => {
   // include inherited presentations in the materialized dashboard safety bound
   if (countButtonDefinitions(config.buttons, config.projects.map(project => project.buttons)) > 4_096) context.addIssue({ code: z.ZodIssueCode.custom, path: ['buttons'], message: 'configuration expands to at most 4096 buttons' });
@@ -216,7 +218,7 @@ function resolvePreview(raw: ParsedPreview, label: string, inherited: ResolvedPr
   return { projectUrl: `https://${raw.hostname}`, projectPort: raw.port };
 }
 // resolve complete settings once for exact checkout matching during discovery
-async function resolveWorktreeOverrides(raw: ParsedProject, projectPreview: ResolvedPreview): Promise<WorktreeOverride[] | undefined> {
+async function resolveWorktreeOverrides(raw: ParsedProject, name: string, projectPreview: ResolvedPreview): Promise<WorktreeOverride[] | undefined> {
   // preserve configurations without checkout overrides
   if (raw.worktreeOverrides === undefined) return undefined;
   const overrides: WorktreeOverride[] = [];
@@ -226,10 +228,10 @@ async function resolveWorktreeOverrides(raw: ParsedProject, projectPreview: Reso
     const absolute = resolve(raw.path, override.path);
     const path = await realpath(absolute).catch(() => absolute);
     // aliases must not create conflicting settings for one checkout
-    if (paths.has(path)) throw new Error(`project ${raw.id} has duplicate worktree override path ${path}`);
+    if (paths.has(path)) throw new Error(`project ${name} has duplicate worktree override path ${path}`);
     paths.add(path);
     const commands = override.commands ?? raw.commands;
-    const preview = resolvePreview(override, `project ${raw.id} worktree override ${override.path}`, projectPreview);
+    const preview = resolvePreview(override, `project ${name} worktree override ${override.path}`, projectPreview);
     overrides.push({
       path,
       ...(commands === undefined ? {} : { commands }),
@@ -247,17 +249,28 @@ function resolveWorktreesDirectory(configured: string | undefined, mainWorktree:
   const anchor = mainWorktree ?? identity;
   return resolve(dirname(anchor), `${basename(anchor)}-worktrees`);
 }
+// The id of a Project configured without one, and of an implicit Project: a slug of the folder's
+// basename and 8 hex of the identity's hash. A config entry added later for an implicit Project's
+// repository, with no `id`, so keeps the id that its Notes, pins and launch profile are keyed by.
+export function derivedProjectId(identity: string, folder: string): string {
+  const slug = basename(folder).replace(/\.git$/, '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'project';
+  return `${slug}-${createHash('sha256').update(identity).digest('hex').slice(0, 8)}`;
+}
+// the label a Project with no configured one shows: its id when configured, else its folder's name
+function folderLabel(folder: string): string {
+  return basename(folder).replace(/\.git$/, '') || folder;
+}
 // resolve one configured Project. A git checkout canonicalises to its common git
 // directory identity and resolves a Worktrees directory (`repository` mode). A path that
 // exists but is not a git checkout loads as an available `directory` Project — an agent
 // launches directly in it, like Scratch, with no Worktrees — keyed by its own realpath.
 // Only a path that does not resolve at all loads unavailable with a reason, rather than
-// failing the whole boot (ADR 0003).
-async function resolveProject(raw: ParsedProject): Promise<Project> {
+// failing the whole boot (ADR 0003); with no `id` to key it by, it does not load at all.
+async function resolveProject(raw: ParsedProject): Promise<Project | undefined> {
+  const name = raw.id ?? raw.path;
   if (raw.newTask !== undefined) validateNewTask(raw.newTask);
-  const label = raw.label ?? raw.id;
-  const preview = resolvePreview(raw, `project ${raw.id}`);
-  const worktreeOverrides = await resolveWorktreeOverrides(raw, preview);
+  const preview = resolvePreview(raw, `project ${name}`);
+  const worktreeOverrides = await resolveWorktreeOverrides(raw, name, preview);
   // canonical checkout paths keep ordering independent of labels and branches
   const worktreeOrder = raw.worktreeOrder === undefined ? undefined : await Promise.all(raw.worktreeOrder.map(async path => {
     const absolute = resolve(raw.path, path);
@@ -279,20 +292,27 @@ async function resolveProject(raw: ParsedProject): Promise<Project> {
   const canonical = await realpath(raw.path).catch(() => undefined);
   // a path that does not resolve is unavailable: there is no directory to launch into
   if (canonical === undefined) {
+    if (raw.id === undefined) return undefined;
     const base = resolve(raw.path);
-    return { id: raw.id, label, path: base, identity: base, mode: 'repository', available: false, unavailableReason: `path ${raw.path} was not found`, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, undefined, base), ...optional };
+    return { id: raw.id, label: raw.label ?? raw.id, path: base, identity: base, mode: 'repository', available: false, unavailableReason: `path ${raw.path} was not found`, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, undefined, base), ...optional };
   }
   const identity = await gitCommonDir(canonical);
   // a real directory that is not a git checkout is an available `directory` Project: an
   // agent launches directly in it (no Worktrees), so its identity is just its own path
   if (identity === undefined) {
-    return { id: raw.id, label, path: canonical, identity: canonical, mode: 'directory', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, undefined, canonical), ...optional };
+    return { id: raw.id ?? derivedProjectId(canonical, canonical), label: raw.label ?? raw.id ?? folderLabel(canonical), path: canonical, identity: canonical, mode: 'directory', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, undefined, canonical), ...optional };
   }
   // git lists the Main worktree first; a bare repository has none
   const entries = await listWorktrees(canonical);
   const mainEntry = entries?.find(entry => !entry.bare);
   const mainWorktree = mainEntry === undefined ? undefined : await realpath(mainEntry.path).catch(() => mainEntry.path);
-  return { id: raw.id, label, path: canonical, identity, mode: 'repository', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, mainWorktree, identity), ...optional };
+  return { id: raw.id ?? derivedProjectId(identity, mainWorktree ?? identity), label: raw.label ?? raw.id ?? folderLabel(mainWorktree ?? identity), path: canonical, identity, mode: 'repository', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, mainWorktree, identity), ...optional };
+}
+// The implicit Project of an unconfigured git checkout: the Project a config entry naming only
+// its path would load, marked implicit. Undefined when the folder is gone or not a git checkout.
+export async function implicitProject(checkout: string): Promise<Project | undefined> {
+  const project = await resolveProject({ path: checkout });
+  return project?.mode === 'repository' ? { ...project, implicit: true } : undefined;
 }
 // the console now declares repositories as `projects[]`; a config that still carries the
 // retired `worktrees[]` key is refused with a pointer to the migration rather than a bare
@@ -402,8 +422,10 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
   }
   const projects: Project[] = []; const ids = new Set<string>(); const identities = new Set<string>();
   for (const raw of parsed.projects) {
-    if (ids.has(raw.id)) throw new Error('duplicate project id'); ids.add(raw.id);
     const project = await resolveProject(raw);
+    // with no `id` to key its state by, a Project whose path is missing does not load
+    if (project === undefined) { warn(`projects: ${raw.path} was not found, and a Project with no id needs its path to derive one`); continue; }
+    if (ids.has(project.id)) throw new Error('duplicate project id'); ids.add(project.id);
     // a missing or non-git checkout loads unavailable with a boot warning, never a crash
     if (!project.available) warn(`projects.${project.id}: ${project.unavailableReason}`);
     // two Projects that resolve to the same repository split state between them; refuse it.

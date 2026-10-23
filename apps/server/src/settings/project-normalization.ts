@@ -97,7 +97,7 @@ const projectButtons: ProjectField = {
 const project: ProjectField = {
   type: 'object',
   properties: {
-    id: requiredString,
+    id: optionalString,
     label: optionalString,
     defaultBranch: optionalString,
     path: requiredString,

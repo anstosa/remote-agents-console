@@ -1279,7 +1279,6 @@ describe('settings save and validation', () => {
 
   // retain scalar zero and fail required project blanks instead of silently restoring old values
   it.each([
-    { path: ['projects', '0', 'id'], value: '' },
     { path: ['projects', '0', 'path'], value: '' },
     { path: ['projects', '0', 'port'], value: 0 }
   ])('keeps invalid required or numeric Project input for validation at $path', async ({ path, value }) => {

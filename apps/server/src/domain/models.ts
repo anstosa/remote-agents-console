@@ -77,9 +77,11 @@ export const agentTmuxSession = (agent: Pick<Agent, 'sessionId' | 'socketFingerp
  * unavailable only when it is missing at boot, which loads the Project as
  * `available: false` rather than failing to boot. stack commands and preview settings
  * are defaults; canonical worktree overrides replace them for individual checkouts.
- * discovered worktrees denormalise the resolved settings for convenience.
+ * discovered worktrees denormalise the resolved settings for convenience. An `implicit`
+ * Project is an unconfigured git checkout the console was opened in or found an Agent in,
+ * loaded as a config entry naming only its path would be; it is never written to config.
  */
-export type Project = { id: string; label: string; defaultBranch?: string; path: string; identity: string; mode: 'repository' | 'directory'; hostPath?: string; worktreeOrder?: string[]; worktreeOverrides?: WorktreeOverride[]; worktreesDirectory: string; available: boolean; unavailableReason?: string; commands?: StackCommands; newTask?: string; buttons?: ProjectButtons; push: PromptAction; projectUrl?: string; projectPort?: number };
+export type Project = { id: string; implicit?: true; label: string; defaultBranch?: string; path: string; identity: string; mode: 'repository' | 'directory'; hostPath?: string; worktreeOrder?: string[]; worktreeOverrides?: WorktreeOverride[]; worktreesDirectory: string; available: boolean; unavailableReason?: string; commands?: StackCommands; newTask?: string; buttons?: ProjectButtons; push: PromptAction; projectUrl?: string; projectPort?: number };
 /**
  * One checkout of a Project as `git worktree list` reports it, keyed by the wire id
  * `<projectId>:<realpath>` (ADR 0003). `identity` equals the checkout's realpath
@@ -111,7 +113,7 @@ export type DashboardWorktree = { id: string; projectId: string; label: string; 
 // the confirm lists them by path. Empty when nothing is stale. `setup` is true only when
 // the Project configures a `commands.setup`: the web shows a "running setup" notice while a
 // new Worktree is being created, without ever receiving the (shell) command itself.
-export type DashboardProject = { id: string; label: string; mode: 'repository' | 'directory'; available: boolean; unavailableReason?: string; manageWorktrees: boolean; manageWorktreesReason?: string; stalePaths: string[]; setup?: boolean; worktrees: DashboardWorktree[] };
+export type DashboardProject = { id: string; implicit?: true; label: string; mode: 'repository' | 'directory'; available: boolean; unavailableReason?: string; manageWorktrees: boolean; manageWorktreesReason?: string; stalePaths: string[]; setup?: boolean; worktrees: DashboardWorktree[] };
 // One directory-Project or Scratch Place on the wire, beside the Worktrees `projects[]` already
 // lists (a Worktree is a Place too, with the same id). Lists every available directory Project,
 // the configured Scratch folder, and any other Scratch Place holding an Agent or a Console shell.

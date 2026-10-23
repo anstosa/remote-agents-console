@@ -123,7 +123,7 @@ function describeApplicationPlaceholders(schema: SettingsSchema, presentation: A
   application.editor!.placeholder = 'Disabled when unset';
   application.publicOrigin!.placeholder = 'Required; no default';
   const project = application.projects!.items!.properties!;
-  project.id!.placeholder = 'Required; no default';
+  project.id!.placeholder = 'Derived from the folder name when unset';
   project.path!.placeholder = 'Required; no default';
   project.externalUrl!.placeholder = 'No preview when unset';
   project.newTask!.placeholder = 'No New Task action when unset';
@@ -203,7 +203,7 @@ function describeProjectSettings(schema: SettingsSchema): void {
   delete project.properties.hostname;
   delete project.properties.port;
   const descriptions: Record<string, string> = {
-    id: 'Stable Project key used for saved state and Worktree IDs. Use 1–80 letters, numbers, underscores, or dashes.',
+    id: 'Stable Project key used for saved state and Worktree IDs. Use 1–80 letters, numbers, underscores, or dashes. Leave unset to keep the id the console gave this folder when it was opened without configuration.',
     label: 'Display name for this Project.',
     defaultBranch: 'Comparison branch for Worktree changes.',
     path: 'Path to any checkout, bare repository, or plain directory to manage. Missing paths load unavailable; non-Git directories launch in place.',

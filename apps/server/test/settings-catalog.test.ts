@@ -265,7 +265,7 @@ describe('settings schema metadata', () => {
     expect(schema.properties?.editor?.placeholder).toBe('Disabled when unset');
     expect(schema.properties?.publicOrigin?.placeholder).toBe('Required; no default');
     expect(project?.properties).toMatchObject({
-      id: { placeholder: 'Required; no default' },
+      id: { placeholder: 'Derived from the folder name when unset' },
       path: { placeholder: 'Required; no default' },
       externalUrl: { placeholder: 'No preview when unset' },
       newTask: { placeholder: 'No New Task action when unset' }
@@ -376,7 +376,7 @@ describe('settings schema metadata', () => {
     ];
 
     expect(described.every(node => typeof node?.description === 'string' && node.description.length >= 24)).toBe(true);
-    expect(project?.properties?.id?.description).toBe('Stable Project key used for saved state and Worktree IDs. Use 1–80 letters, numbers, underscores, or dashes.');
+    expect(project?.properties?.id?.description).toBe('Stable Project key used for saved state and Worktree IDs. Use 1–80 letters, numbers, underscores, or dashes. Leave unset to keep the id the console gave this folder when it was opened without configuration.');
     expect(project?.properties?.defaultBranch).toMatchObject({ type: 'string', optional: true });
     expect(project?.properties?.label).toMatchObject({ placeholder: 'Unavailable (from Project ID)', description: 'Display name for this Project.' });
     expect(project?.properties?.defaultBranch).toMatchObject({ placeholder: 'Unavailable (from resolved branch)', description: 'Comparison branch for Worktree changes.' });

@@ -34,7 +34,10 @@ configured Project (an Agent started by hand, a terminal) belongs to it, and its
 notes and terminals are shared. With `scratchDirectory` unset that folder is the
 home directory itself, so every such pane anywhere under it lands in the one
 Scratch Place; set `scratchDirectory` to keep it narrow. A pane outside both the
-Scratch folder and every Project is a Scratch Place of its own. Before
+Scratch folder and every Project is a Scratch Place of its own. A git repository
+is the exception: an agent started by hand in an unconfigured repository, inside
+the Scratch folder or anywhere else, gets its own tab as an **implicit Project**
+(see [Projects](#projects)). Before
 publishing the console, replace `publicOrigin` with its canonical HTTPS origin.
 
 Set the top-level `editor` to a command line such as `"/usr/bin/nvim"` to add
@@ -487,6 +490,18 @@ under `projects`; its **Worktrees** are discovered from `git worktree list` and
 are never declared, so a checkout created in a terminal appears on the dashboard
 within a tick — no config edit or restart.
 
+A repository does not need to be configured to work in it. When an agent or
+Console shell runs in an unconfigured git checkout (one started by hand in
+tmux, for example), the console treats the repository as an **implicit
+Project** and the checkout gets a tab as one of its Worktrees, with the Code
+panel, review tour, conversations and branch flyout. An implicit Project has no
+stack commands, preview or Project buttons, and is not listed in the launcher.
+It lasts while a tmux session runs in one of its Worktrees or one of them is
+pinned; its Main worktree starts unpinned. To give it commands or a preview,
+add a `projects[]` entry with its `path` and no `id`: the derived id matches, so
+its notes and pins carry over. A session already marked as a Scratch Place keeps
+that mark. See ADR 0014.
+
 ```json
 {
   "projects": [
@@ -507,7 +522,11 @@ within a tick — no config edit or restart.
 ```
 
 - `id` — `[A-Za-z0-9_-]{1,80}`, the key for Project-wide state (`agent` and
-  `scratch` are reserved). `label` defaults to `id`.
+  `scratch` are reserved). Optional: when omitted, the id is derived from the
+  repository (the Main worktree's folder name and a short hash), the same id the
+  repository has as an implicit Project, so its notes and pins carry over. A
+  Project with no `id` whose `path` is missing is skipped with a boot warning.
+  `label` defaults to `id`, or to the folder name when `id` is omitted.
 - `path` — **any checkout of the repository** (a Linked worktree or a bare
   repository included). Its identity is the realpath of the common git
   directory, so two Projects pointing at the same repository are refused as

@@ -10,6 +10,10 @@ A self-hosted browser console that watches and drives coding-agent CLIs running 
 A configured git repository. Owns everything that is true for the whole repository: label, stack commands, new-task and push actions, the Worktrees directory, and the preview URL.
 _Avoid_: Repo entry, workspace
 
+**Implicit Project**:
+An unconfigured git repository the console treats as a Project, as a config entry naming only its path would load it: no stack commands, preview or Project buttons. It exists while a tmux session is marked with one of its Worktrees or one is Pinned, and its id is derived from the repository so a later config entry without an `id` keeps it (ADR 0014).
+_Avoid_: Unconfigured project, ad-hoc project, auto-project
+
 **Worktree**:
 One checkout of a Project as reported by `git worktree list`, the main checkout included. Discovered from git, never declared in config.
 _Avoid_: Worktree entry (Workspace is a different thing: the Panels open at a Place)
@@ -39,11 +43,11 @@ The explicit per-Project action that clears a Project's Stale worktrees, both gi
 _Avoid_: Cleanup (reserved for agents), garbage collection, auto-prune
 
 **Scratch**:
-A folder that belongs to no configured Project, seen as a Place. The console launches into one configured Scratch folder, but any unconfigured folder an agent runs in is a Scratch of its own.
+A folder that belongs to no Project, seen as a Place. The console launches into one configured Scratch folder, but any other folder an agent runs in is a Scratch of its own, unless it is a git checkout, which is an Implicit Project's Worktree.
 _Avoid_: Unconfigured worktree, scratch pane
 
 **Place**:
-Where a Workspace lives and what its panes belong to: a Worktree, a directory Project, or a Scratch folder. Each has a home folder. A pane belongs to the Place its tmux session is marked with, wherever its shell has `cd`'d; a session the console did not create is claimed once, by the nearest Place whose home contains its Agent or Console shell.
+Where a Workspace lives and what its panes belong to: a Worktree, a directory Project, or a Scratch folder. Each has a home folder. A pane belongs to the Place its tmux session is marked with, wherever its shell has `cd`'d; a session the console did not create is claimed once, by the nearest Place whose home contains its Agent or Console shell, or by an Implicit Project's Worktree when that is an unconfigured git checkout.
 _Avoid_: Location, target, context
 
 ### Agents
