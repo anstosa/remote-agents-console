@@ -9062,7 +9062,14 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const currentAgentOf = (entry: DashboardItem | undefined): Agent | undefined => entry === undefined ? undefined : entry.agents.find(agent => agent.id === agentChoice[entry.key]) ?? entry.agents[0];
   const tabKey = items.map(item => item.key).join('\u0000');
   const selectedIndex = selectedItemKey.current === undefined ? -1 : items.findIndex(candidate => candidate.key === selectedItemKey.current);
-  const visibleActive = selectedIndex >= 0 ? selectedIndex : Math.min(active, Math.max(items.length - 1, 0));
+  // return phones to the first populated workspace when the selected tab disappears
+  const firstNonEmpty = phone && selectedItemKey.current !== undefined && selectedIndex < 0
+    ? items.findIndex(entry => entry.agents.length > 0 || entry.pendingLaunch !== undefined || (entry.worktree?.consoleShells ?? entry.place?.consoleShells ?? 0) > 0)
+    : -1;
+  // preserve the initial, empty-only and desktop fallback
+  const fallbackIndex = firstNonEmpty >= 0 ? firstNonEmpty : Math.min(active, Math.max(items.length - 1, 0));
+  // keep surviving tabs selected regardless of fallback policy
+  const visibleActive = selectedIndex >= 0 ? selectedIndex : fallbackIndex;
   const activeItemKey = items[visibleActive]?.key;
   // establish the first visible selection
   if (selectedItemKey.current === undefined) selectedItemKey.current = activeItemKey;
