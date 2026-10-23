@@ -6,7 +6,7 @@
 // them in — so it stays free of any network code and easy to drive in isolation. What the view owns
 // itself is purely visual: the diff mode (Hunks / Full context / Plain file), unified vs split, and
 // the changed-file rail/drawer.
-import { type MouseEvent as ReactMouseEvent, type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { closeOnMiddleClick } from '../middle-click.js';
 import { FlyoutPortal } from '../flyout-portal.js';
 import { useViewportFlyout } from '../viewport-flyout.js';
@@ -39,6 +39,17 @@ const RAIL_BREAKPOINT = SPLIT_MIN_WIDTH;
 // Below this (narrower) width the title pill drops the branch so the title reads.
 const COMPACT_BREAKPOINT = 480;
 
+// The rail's dragged width, remembered on this browser; unset leaves the stylesheet's default. The
+// stylesheet also caps the rail at half the panel, so a width saved on a wide panel fits a narrower one.
+const railWidthKey = 'rac.code-rail-width';
+const RAIL_MIN_WIDTH = 160;
+const readRailWidth = (): number | undefined => {
+  try { const width = Number(localStorage.getItem(railWidthKey)); return width >= RAIL_MIN_WIDTH ? width : undefined; }
+  catch { return undefined; }
+};
+const saveRailWidth = (width: number): void => {
+  try { localStorage.setItem(railWidthKey, String(width)); } catch { /* private-mode storage is non-fatal */ }
+};
 
 export type CodePanelProps = {
   // the Comparison the panel shows: Working tree vs HEAD, or the whole PR
@@ -186,6 +197,8 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   // keep file collapse separate from cached diff content and version each toggle for CodeView
   const [fileCollapse, setFileCollapse] = useState<CodePanelView['fileCollapse']>(savedView?.fileCollapse ?? {});
   const [railCollapsed, setRailCollapsed] = useState(savedView?.railCollapsed ?? false);
+  const [railWidth, setRailWidth] = useState(readRailWidth);
+  const railDragRef = useRef<{ pointerId: number; startX: number; startWidth: number; width: number } | undefined>(undefined);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // Changes the reviewer pulled in with "Load anyway", keyed by path; they render as ordinary diff
   // items alongside the rest.
@@ -530,6 +543,34 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   // The rail is a persistent column on a wide panel unless the reviewer collapsed it; a narrow panel
   // uses the drawer instead.
   const railVisible = !narrow && !railCollapsed;
+  const clampRail = (width: number) => Math.round(Math.max(RAIL_MIN_WIDTH, Math.min(panelWidth / 2, width)));
+  // drag the rail's right edge, or step it with the arrow keys
+  const startRailResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const startWidth = event.currentTarget.parentElement!.getBoundingClientRect().width;
+    railDragRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth, width: startWidth };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+  const moveRailResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = railDragRef.current;
+    if (drag?.pointerId !== event.pointerId) return;
+    drag.width = clampRail(drag.startWidth + event.clientX - drag.startX);
+    setRailWidth(drag.width);
+  };
+  const stopRailResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = railDragRef.current;
+    if (drag?.pointerId !== event.pointerId) return;
+    railDragRef.current = undefined;
+    if (drag.width !== drag.startWidth) saveRailWidth(drag.width);
+  };
+  const keyboardRailResize = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    const width = clampRail(event.currentTarget.parentElement!.getBoundingClientRect().width + (event.key === 'ArrowLeft' ? -16 : 16));
+    setRailWidth(width);
+    saveRailWidth(width);
+    event.preventDefault();
+  };
   // The Plain-mode fetch state for the file on screen (undefined unless Plain mode shows this file).
   const plainForSelected = selectedPath !== undefined && effectiveMode === 'plain' && plain?.path === selectedPath ? plain : undefined;
 
@@ -596,7 +637,8 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
       <PanelHeader panelKey="code" label="code panel" title={title} actions={actions} menuContent={viewMenu} close={{ key: 'close', label: 'Close code changes', title: 'Close', icon: <PanelIcon path={panelIcons.close} />, onSelect: onClose }} />
       <div className="code-pane-main">
         {state === 'ready' && fileCount > 0 && railVisible && (
-          <aside className="code-pane-rail">
+          <aside className="code-pane-rail" style={railWidth === undefined ? undefined : { flexBasis: railWidth }}>
+            <div className="code-pane-rail-resizer" role="separator" aria-label="Resize changed files" aria-orientation="vertical" aria-valuenow={railWidth} aria-valuemin={RAIL_MIN_WIDTH} aria-valuemax={Math.round(panelWidth / 2)} tabIndex={0} onPointerDown={startRailResize} onPointerMove={moveRailResize} onPointerUp={stopRailResize} onPointerCancel={stopRailResize} onKeyDown={keyboardRailResize} />
             <div className="code-pane-rail-head">
               <span>Files<span className="code-pane-count">{fileCount}</span></span>
               <button type="button" className="code-pane-rail-collapse" aria-label="Hide changed files" title="Hide files" onClick={() => setRailCollapsed(true)}>

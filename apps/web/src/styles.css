@@ -981,7 +981,10 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 .code-pane-main { position: relative; display: flex; min-width: 0; min-height: 0; }
 .code-pane-body { display: flex; min-width: 0; min-height: 0; flex: 1 1 auto; flex-direction: column; }
 /* the changed-file rail (wide panel) and drawer (narrow panel) share one file list */
-.code-pane-rail { display: flex; flex: 0 0 13rem; min-height: 0; flex-direction: column; border-right: 1px solid var(--surface-1); background: color-mix(in srgb, var(--mantle) 70%, var(--crust)); }
+.code-pane-rail { position: relative; z-index: 1; display: flex; flex: 0 0 13rem; min-width: 0; max-width: 50%; min-height: 0; flex-direction: column; border-right: 1px solid var(--surface-1); background: color-mix(in srgb, var(--mantle) 70%, var(--crust)); }
+.code-pane-rail-resizer { position: absolute; top: 0; right: -.25rem; bottom: 0; width: .45rem; cursor: col-resize; touch-action: none; outline: 0; }
+.code-pane-rail-resizer::after { position: absolute; inset: 0 calc(50% - .5px); content: ''; transition: background .12s ease, box-shadow .12s ease; }
+.code-pane-rail-resizer:is(:hover, :focus-visible)::after { background: var(--blue); box-shadow: 0 0 .5rem color-mix(in srgb, var(--blue) 48%, transparent); }
 .code-pane-rail-head { display: flex; align-items: center; justify-content: space-between; padding: .35rem .3rem .35rem .6rem; color: var(--subtext-0); font-size: .68rem; letter-spacing: .04em; text-transform: uppercase; }
 .code-pane-count { margin-left: .4rem; padding: 0 .35rem; border-radius: 999px; background: var(--surface-1); color: var(--subtext-1); font: 800 .62rem var(--font-mono); letter-spacing: 0; }
 .code-pane-rail-collapse { display: grid; width: 1.6rem; height: 1.6rem; padding: 0; place-items: center; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--subtext-0); }

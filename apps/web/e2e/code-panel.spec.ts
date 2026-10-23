@@ -825,6 +825,41 @@ test('restores the diff mode and hidden file rail after a Workspace switch', asy
   await expect(await codeViewOption(region, 'Full ctx')).toHaveAttribute('aria-pressed', 'true');
 });
 
+test('resizes the file rail by drag and arrow keys, between its minimum and half the panel, and remembers it', async ({ page }) => {
+  // a long file name must not hold the rail open past its width
+  const files = [trackedFile('src/a.ts'), trackedFile(`src/${'long-file-name-'.repeat(12)}.ts`)];
+  await mountPanel(page, patchOf(files), {}, false, 1000);
+  const rail = page.locator('.code-pane-rail');
+  const handle = page.getByRole('separator', { name: 'Resize changed files' });
+  const railWidth = () => rail.evaluate(element => element.getBoundingClientRect().width);
+  const start = await railWidth();
+  const box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 120, box.y + 100, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(railWidth).toBeCloseTo(start + 120, 0);
+  await handle.press('ArrowLeft');
+  await expect.poll(railWidth).toBeCloseTo(start + 104, 0);
+  // a drag past half the panel stops there
+  const moved = (await handle.boundingBox())!;
+  await page.mouse.move(moved.x + moved.width / 2, moved.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(moved.x + 800, moved.y + 100, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(railWidth).toBeCloseTo(500, 0);
+
+  await mountPanel(page, patchOf(files), {}, false, 1000);
+  await expect.poll(railWidth).toBeCloseTo(500, 0);
+  // and a drag past the minimum stops there
+  const wide = (await handle.boundingBox())!;
+  await page.mouse.move(wide.x + wide.width / 2, wide.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(wide.x - 600, wide.y + 100, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(railWidth).toBeCloseTo(160, 0);
+});
+
 test('restores expanded hidden lines after a Workspace switch', async ({ page }) => {
   await mountController(page, patchOf([bigFile]));
   await openController(page);
