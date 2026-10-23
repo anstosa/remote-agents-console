@@ -175,11 +175,14 @@ export class DiscoveryService {
   private static readonly refreshCacheMs = 2_000;
   private static readonly gitMetadataCacheMs = 30_000;
   // accept only the PR operations used by discovery
-  constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly pullRequests: PullRequestLookup = new PullRequestService(), private readonly adapters: AdapterConfigs = {}, private readonly projects: Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string) {}
+  constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly pullRequests: PullRequestLookup = new PullRequestService(), private readonly adapters: AdapterConfigs = {}, private readonly configuredProjects: readonly Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string) {}
+  // every Project the console knows right now; the list may change between calls, so callers
+  // read it each time rather than keeping it
+  projectsNow(): readonly Project[] { return this.configuredProjects; }
   // every configured Place over this Worktree set: the Worktrees, the directory Projects and the Scratch folder
   private async places(worktrees: readonly Worktree[]): Promise<Place[]> {
-    this.scratchHomeValue ??= scratchHome(this.scratchDirectory, this.projects);
-    return configuredPlaces(worktrees, this.projects, await this.scratchHomeValue);
+    this.scratchHomeValue ??= scratchHome(this.scratchDirectory, this.configuredProjects);
+    return configuredPlaces(worktrees, this.projectsNow(), await this.scratchHomeValue);
   }
   // the Place a discovered agent belongs to: its session's; a modal update advisor is never placed
   private placeOf(agent: Agent, places: readonly Place[]): Place | undefined {
@@ -496,7 +499,7 @@ export class DiscoveryService {
     const storeKeys = (await this.pinStore?.keys?.()) ?? [];
     const worktrees: Worktree[] = [];
     const stale = new Map<string, string[]>();
-    for (const project of this.projects) {
+    for (const project of this.projectsNow()) {
       if (!project.available) continue;
       const entries = await this.listWorktreesImpl(project.path);
       if (entries === undefined) continue;
@@ -705,7 +708,7 @@ export class DiscoveryService {
       // where the pane runs, read through the console-side path when that is the Worktree itself
       const home = worktree?.identity ?? discoveredAgent.home;
       const questionFolder = worktree !== undefined && worktreeMatchesWorkspace(worktree, discoveredAgent.home) ? worktree.identity : discoveredAgent.home;
-      const defaultBranch = worktree?.defaultBranch ?? this.projects.find(project => project.id === place?.projectId)?.defaultBranch;
+      const defaultBranch = worktree?.defaultBranch ?? this.projectsNow().find(project => project.id === place?.projectId)?.defaultBranch;
       const [meta, question] = await Promise.all([
         metadataFor(home, defaultBranch),
         this.agentQuestion(agent, questionFolder)
@@ -744,7 +747,7 @@ export class DiscoveryService {
     }));
     const byProject = new Map<string, DashboardWorktree[]>();
     for (const view of worktreeViews) { const list = byProject.get(view.projectId) ?? []; list.push(view); byProject.set(view.projectId, list); }
-    const projects: DashboardProject[] = this.projects.map(project => {
+    const projects: DashboardProject[] = this.projectsNow().map(project => {
       const management = worktreeManagementAvailability(project);
       return { id: project.id, label: project.label, mode: project.mode, available: project.available, ...(project.unavailableReason === undefined ? {} : { unavailableReason: project.unavailableReason }), manageWorktrees: management.available, ...(management.reason === undefined ? {} : { manageWorktreesReason: management.reason }), stalePaths: this.staleSnapshot.get(project.id) ?? [], ...(project.commands?.setup === undefined ? {} : { setup: true }), worktrees: byProject.get(project.id) ?? [] };
     });
@@ -804,7 +807,7 @@ export class DiscoveryService {
       seen.add(root);
       if (worktrees.some(worktree => worktreeMatchesWorkspace(worktree, root))) continue;
       const common = await this.cachedCommonDir(root);
-      if (common !== undefined && this.projects.some(project => project.available && project.identity === common)) return true;
+      if (common !== undefined && this.projectsNow().some(project => project.available && project.identity === common)) return true;
     }
     return false;
   }

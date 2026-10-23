@@ -95,7 +95,7 @@ export class WorktreeManagementService {
   private readonly chains = new Map<string, Promise<unknown>>();
 
   // share exact-head PR evidence between suggestions and guarded deletion
-  constructor(private readonly projects: () => Project[], private readonly git: GitExec = defaultGit, private readonly pullRequests: Pick<PullRequestService, 'cleanupHead'> = new PullRequestService()) {}
+  constructor(private readonly projects: () => readonly Project[], private readonly git: GitExec = defaultGit, private readonly pullRequests: Pick<PullRequestService, 'cleanupHead'> = new PullRequestService()) {}
 
   private project(projectId: string): Project | undefined {
     return this.projects().find(project => project.id === projectId);

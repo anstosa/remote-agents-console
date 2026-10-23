@@ -36,7 +36,7 @@ const config = await acquireConfig(process.env, undefined, (content, migration) 
 // (Conversations replace bookmarks; ADR 0007). A missing file is a no-op, so this fires once.
 await retireBookmarks();
 // dashboard commands share a quiet connection independently of browser viewers
-const tmux = new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = new WorktreeLaunchStore(); const discovery = new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const push = new PushService(); const worktreeManagement = new WorktreeManagementService(() => config.projects); const cleanup = new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement);
+const tmux = new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = new WorktreeLaunchStore(); const discovery = new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const push = new PushService(); const worktreeManagement = new WorktreeManagementService(() => discovery.projectsNow()); const cleanup = new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement);
 // generate or import the durable push identity without blocking console recovery
 await push.initialize().catch(() => { process.stderr.write('[push] VAPID storage unavailable; push alerts disabled until storage is writable and valid.\n'); });
 const dashboardPollMs = config.pollIntervalMs;
