@@ -16,7 +16,7 @@ import type { Adapter, AdapterConfigs, AgentKind, AttentionState, Conversation, 
 import type { Agent, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree, GitComparisonSummary, GitStatusSummary, GitUpstreamSummary, Pane, Project, SocketRef, Worktree } from '../domain/models.js';
 import { addUntrackedLineStats, comparisonAgainst, prComparisonCandidates, workingStatus } from '../git/comparison.js';
 import { isUpdateAdvisorLabel } from '../update-advisor.js';
-import { configuredPlaces, markedPlace, placeForRoot, scratchHome, scratchProjectId, type Place } from '../places/places.js';
+import { adhocScratchPlace, configuredPlaces, markedPlace, placeForRoot, scratchHome, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
 import { implicitProject } from '../config/schema.js';
 
 export interface SocketFinder { find(): Promise<SocketRef[]>; }
@@ -153,6 +153,9 @@ export class DiscoveryService {
   private worktreeSnapshot: Worktree[] = [];
   // the configured Projects followed by the implicit ones the last Worktree scan resolved
   private projectList?: readonly Project[];
+  // the Worktrees opened as folders this run, which name their implicit Projects until a session
+  // mark or pin does (ADR 0014)
+  private readonly openedWorktreeIds = new Set<string>();
   // the Prune-eligible checkout paths per Project (git's prunable entries plus console
   // records git lists nowhere), published atomically with the worktree snapshot (ADR 0003)
   private staleSnapshot = new Map<string, string[]>();
@@ -227,6 +230,22 @@ export class DiscoveryService {
     const nearest = placeForRoot(places, root);
     if (nearest.adhoc !== true && (nearest.kind !== 'scratch' || nearest.home === root)) return nearest.id;
     return await this.checkoutWorktreeId(root) ?? (ownFolder ? worktreeWireId(scratchProjectId, root) : nearest.id);
+  }
+  // The Place a folder opens as (Open folder): the Place of its root by the claim rule, except
+  // that a folder that is no git checkout is its own Scratch Place even below the configured
+  // Scratch folder. A Worktree no scan lists yet (an implicit Project's, or a new checkout of a
+  // configured one) is re-scanned for, and stays listed for this run. Undefined only when that
+  // scan still does not list it.
+  async openFolder(folder: string): Promise<Place | undefined> {
+    const root = await this.cachedWorkspaceRoot(folder);
+    const places = await this.places(await this.worktrees());
+    const placeId = await this.rootPlaceId(root, places, true);
+    const listed = places.find(place => place.id === placeId);
+    if (listed !== undefined) return listed;
+    if (projectIdOf(placeId) === scratchProjectId) return adhocScratchPlace(root);
+    this.openedWorktreeIds.add(placeId);
+    const worktree = (await this.worktrees(true)).find(candidate => candidate.id === placeId);
+    return worktree === undefined ? undefined : worktreePlace(worktree);
   }
   // The Worktree id of a git checkout root no configured Place holds: the Worktree of the
   // configured Project managing its repository (one created since the last scan), else of its
@@ -544,7 +563,7 @@ export class DiscoveryService {
     const labels = (await this.pinStore?.labels?.()) ?? {};
     // every stored key, so a worktree key git lists nowhere counts as an orphaned record
     const storeKeys = (await this.pinStore?.keys?.()) ?? [];
-    const projects = await this.resolveImplicitProjects([...this.sessionMarks.values(), ...Object.keys(pins).filter(id => pins[id] === true)]);
+    const projects = await this.resolveImplicitProjects([...this.sessionMarks.values(), ...Object.keys(pins).filter(id => pins[id] === true), ...this.openedWorktreeIds]);
     const worktrees: Worktree[] = [];
     const stale = new Map<string, string[]>();
     for (const project of projects ?? this.configuredProjects) {

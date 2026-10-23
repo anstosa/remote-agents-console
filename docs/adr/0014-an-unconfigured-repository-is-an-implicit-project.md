@@ -17,9 +17,17 @@ Discovery rebuilds the implicit Projects on every Worktree scan, from the Place 
 
 ADR 0009's claim of an unmarked session changes in two ways when the root (git toplevel, else cwd) is a checkout git lists. A root in no configured Place is marked with its implicit Project's Worktree instead of `scratch:<root>`. A root below the configured Scratch folder is treated the same way. With `scratchDirectory` unset, the Scratch folder is the account home, and it would otherwise swallow every repository. A Scratch folder that is itself a repository (a dotfiles home, say) stays Scratch. A root whose repository is a configured Project, but whose checkout the last scan did not list, is marked with that Project's Worktree. A claim naming a Worktree not listed yet re-scans the Worktrees once, in the same dashboard build. Marks already written are never re-derived: a repository first seen as `scratch:<root>` stays that Scratch Place for that session.
 
+## Open folder
+
+Any folder can be opened as a Workspace, by path or from a list of recent folders. It opens at the Place of its root by the claim rule, so a subfolder of a repository opens that repository's Worktree. One exception: a folder that is no git checkout is its own Scratch Place (`scratch:<realpath>`) even below the configured Scratch folder, where a claim would put it in the Scratch folder itself. A session marked with such a folder belongs to it, though no claim ever writes that mark. Opening launches an Agent, opens a Console shell, or pins the Place. An Agent can therefore launch in an ad-hoc Scratch folder, but only from Open folder: Runs, Schedules and Buttons still refuse one. Opening a Worktree that no scan lists names it for the rest of the run, so it is listed before anything runs there. After a restart its session mark or pin names it, as any implicit Project's does.
+
+A first launch in a folder the agent has not seen may stop on the agent's own trust prompt (Claude's defaults to "No, exit"). Open folder reports that as needing the operator, who answers it in the Workspace, rather than as a failed launch.
+
+The recent folders live in `.data`: at most 50, newest first, one per realpath. A folder that no longer exists is left out of the list but kept, and Forget removes only the entry. Recent folders do not name implicit Projects. An implicit Project kept alive by every recent repository would scan each one's git state on every poll.
+
 ## Considered options
 
-- **Auto-discover repositories** under configured roots. ADR 0003 rejected this because a Project carries trusted stack commands and push actions (push actions are now Buttons). An implicit Project carries neither, but scanning would still list every repository on disk. Implicit Projects exist only where the operator ran something, pinned something, or (later) opened a folder.
+- **Auto-discover repositories** under configured roots. ADR 0003 rejected this because a Project carries trusted stack commands and push actions (push actions are now Buttons). An implicit Project carries neither, but scanning would still list every repository on disk. Implicit Projects exist only where the operator ran something, pinned something, or opened a folder.
 - **Give git routes to ad-hoc Scratch Places.** Every git route would grow a second, Place-shaped path. An implicit Project reuses the Worktree path unchanged.
 - **Key an implicit Project by its path.** The id would change with every checkout of the repository, and Project-wide state (Notes) would split between them.
 

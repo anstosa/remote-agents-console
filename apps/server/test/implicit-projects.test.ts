@@ -199,3 +199,57 @@ describe('implicit Projects', () => {
     expect(dashboard.projects).toEqual([]);
   });
 });
+
+describe('opening a folder', () => {
+  it("opens a subfolder of an unconfigured repository as its implicit Main worktree, listed before anything runs there", async () => {
+    const { repo } = await gitRepo();
+    const sub = join(repo, 'src');
+    await mkdir(sub);
+    const id = (await implicitProject(repo))!.id;
+    const { service } = discovery(repo, { panes: [] });
+
+    const place = await service.openFolder(sub);
+
+    expect(place).toMatchObject({ id: `${id}:${repo}`, kind: 'worktree', home: repo });
+    expect((await service.dashboard(true)).projects).toEqual([expect.objectContaining({ id, implicit: true, worktrees: [expect.objectContaining({ id: `${id}:${repo}` })] })]);
+  });
+
+  it('opens a folder inside a configured Worktree as that Worktree', async () => {
+    const { repo } = await gitRepo();
+    const sub = join(repo, 'src');
+    await mkdir(sub);
+    const configured = (await validateConfig({ publicOrigin: 'https://agents.example.com', projects: [{ id: 'ferry', path: repo }] })).projects[0]!;
+    const { service } = discovery(repo, { panes: [], projects: [configured] });
+
+    expect(await service.openFolder(sub)).toMatchObject({ id: `ferry:${repo}`, kind: 'worktree' });
+  });
+
+  it('opens a folder that is no git checkout as its own Scratch Place, below the configured Scratch folder too', async () => {
+    const { root } = await gitRepo();
+    const folder = join(root, 'notes');
+    await mkdir(folder);
+    const { service } = discovery(folder, { panes: [], scratchDirectory: root });
+
+    expect(await service.openFolder(folder)).toMatchObject({ id: `scratch:${folder}`, kind: 'scratch', home: folder, label: 'notes', adhoc: true });
+  });
+
+  it('places a session marked with a folder below the configured Scratch folder in that folder, not the Scratch folder', async () => {
+    const { root } = await gitRepo();
+    const folder = join(root, 'notes');
+    await mkdir(folder);
+    const { service } = discovery(folder, { mark: `scratch:${folder}`, scratchDirectory: root });
+
+    const dashboard = await service.dashboard();
+
+    expect(dashboard.agents[0]?.placeId).toBe(`scratch:${folder}`);
+    expect(dashboard.places.map(place => place.id)).toContain(`scratch:${folder}`);
+  });
+
+  it('opens the configured Scratch folder itself as the Scratch folder', async () => {
+    const { root } = await gitRepo();
+    const { service } = discovery(root, { panes: [], scratchDirectory: root });
+
+    expect(await service.openFolder(root)).toMatchObject({ id: `scratch:${root}`, kind: 'scratch' });
+    expect((await service.openFolder(root))?.adhoc).toBeUndefined();
+  });
+});

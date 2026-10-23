@@ -38,9 +38,10 @@ export function worktreePlace(worktree: Worktree): Place {
   return { id: worktree.id, kind: 'worktree', projectId: worktree.projectId, label: worktree.label, home: worktree.identity, ...(worktree.hostPath === undefined ? {} : { hostPath: worktree.hostPath }) };
 }
 
-// the Scratch Place of a folder inside no configured Place, labelled with its basename; `adhoc`
-// tells it from the configured Scratch folder, which alone has a launch of its own
-function adhocScratchPlace(root: string): Place {
+// the Scratch Place of a folder inside no configured Place, or opened below the configured Scratch
+// folder, labelled with its basename; `adhoc` tells it from the configured Scratch folder, which
+// alone has a launch of its own
+export function adhocScratchPlace(root: string): Place {
   return { id: worktreeWireId(scratchProjectId, root), kind: 'scratch', projectId: scratchProjectId, label: basename(root) || root, home: root, adhoc: true };
 }
 
@@ -74,7 +75,8 @@ export function placeForRoot(places: readonly Place[], root: string): Place {
 }
 
 // The Place a tmux session's `@rac_place` mark names: a configured Place by id, else the ad-hoc
-// Scratch Place of a `scratch:<root>` whose root still lies in no configured Place. Undefined for
+// Scratch Place of a `scratch:<root>` whose root still lies in no configured Place, or only in the
+// configured Scratch folder (a folder opened there, which a claim never marks). Undefined for
 // a mark naming no Place now (a Worktree the snapshot has not caught up to, or one since removed):
 // its session belongs nowhere until the mark resolves, and is never re-claimed.
 export function markedPlace(places: readonly Place[], mark: string): Place | undefined {
@@ -83,7 +85,8 @@ export function markedPlace(places: readonly Place[], mark: string): Place | und
   const root = worktreePathOf(mark);
   if (projectIdOf(mark) !== scratchProjectId || root === undefined) return undefined;
   const place = placeForRoot(places, root);
-  return place.id === mark ? place : undefined;
+  if (place.id === mark) return place;
+  return place.kind === 'scratch' && place.adhoc !== true ? adhocScratchPlace(root) : undefined;
 }
 
 // The notes key of a folder that is no Worktree: `scratch_<hash>`, never the Place id, since a

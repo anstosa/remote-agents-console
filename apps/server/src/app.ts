@@ -24,6 +24,7 @@ import { LaunchService, type TmuxSession } from './launch/service.js';
 import { launchFresh, managedRunProgress, type FreshLaunchFailure, type ReadinessOutcome } from './launch/managed-run.js';
 import { atPlace, createAgentWaiter, inWorktree, reviewRunAgent, launchPollAttempts, launchPollDelay as defaultLaunchPollDelay, launchReadyTimeoutSeconds } from './launch/wait.js';
 import { scratchLaunchKey, WorktreeLaunchStore } from './worktrees/store.js';
+import { OpenedFolderStore, resolveFolderPath } from './places/opened-folders.js';
 import { folderNoteKey, placeLaunchScope, placeNoteKey, worktreePlace, type Place } from './places/places.js';
 import { safeEnv } from './tmux/command.js';
 import { PushService } from './push-service.js';
@@ -107,7 +108,7 @@ import { ConfiguredButtonCatalog } from './button-actions/catalog.js';
 import { ButtonActionError, ButtonActionService, buttonActionInputSchema } from './button-actions/service.js';
 import { HostCommandRunner } from './button-actions/host-command-runner.js';
 
-export type Dependencies = { buttonActions?: ButtonActionService; settings?: SettingsService; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider };
+export type Dependencies = { buttonActions?: ButtonActionService; settings?: SettingsService; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use.
 declare module 'fastify' {
@@ -156,6 +157,9 @@ const promptAttachments = (value: unknown): PromptAttachment[] | undefined => {
 };
 // allow one maximum attachment request plus json/base64 overhead
 const noteAttachmentBodyLimit = Math.ceil(maxPromptAttachmentBytes * 1.4);
+// how long Open folder looks for a first screen blocking its launch (Claude draws its trust
+// prompt within about two seconds): ten seconds of the launch poll
+const openFolderReadinessAttempts = 40;
 // build the console server
 export async function buildApp(config: ValidatedConfig, deps: Dependencies = {}): Promise<FastifyInstance> {
   // stage bridged scratch attachments in the existing shared checkout
@@ -163,7 +167,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     workspace: serverCheckout(),
     hostWorkspace: serverCheckoutOnHost(config.projects, process.env.RAC_HOST_REPOSITORY?.trim() || process.env.RAC_HOST_WORKSPACE)
   };
-  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId)); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const prompts = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, kind => config.adapters[kind]?.teardown, attachmentStaging); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow()); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
+  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId)); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const prompts = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, kind => config.adapters[kind]?.teardown, attachmentStaging); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow()); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
   const temporaryPreviews = deps.temporaryPreviews ?? new TemporaryPreviewService();
   // publish only boot-opaque presentations of trusted configured actions
   const buttonCatalog = deps.buttonActions?.catalog ?? new ConfiguredButtonCatalog(config);
@@ -880,7 +884,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const outcome = await launchFresh({
         agentIds: async () => new Set((await discovery.dashboard()).agents.map(agent => agent.id)),
         // preserve remembered Worktree, Project and Scratch launch profiles
-        launch: async () => place.kind === 'worktree' ? await launch.launch(place.id) : place.kind === 'directory' ? await launch.launchProjectDirectory(place.projectId) : (await launch.scratchPlace()).id === place.id && await launch.launchHome(),
+        launch: async () => await launch.launchAt(place),
         waitForNewAgent: async before => await waitForAgent(before, atPlace(place.id)),
         waitForReadiness,
         close: async agentId => await prompts.close(agentId),
@@ -2217,11 +2221,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // wait for a freshly launched pane to become ready for its first prompt, reading the
   // launching Adapter's `ready` rule over the pane's snapshot and capture (Scheduled
   // prompts). A kind without a new-conversation capability takes its first prompt at once.
-  const waitForReadiness = async (agent: Agent): Promise<ReadinessOutcome> => {
+  const waitForReadiness = async (agent: Agent, attempts = launchPollAttempts): Promise<ReadinessOutcome> => {
     const ready = adapterFor(agent.kind)?.newConversation?.ready;
     // no readiness rule: the fresh launch may take its first prompt immediately
     if (ready === undefined) return { state: 'ready' };
-    for (let attempt = 0; attempt < launchPollAttempts; attempt += 1) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       // force a fresh read each poll so the reported id/title/attention (and a vanished pane)
       // reflect this instant, not the ~2s background snapshot — mirrors the prompt service
       const target = await discovery.target(agent.id, true);
@@ -2233,7 +2237,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (readiness.state === 'ready') return { state: 'ready' };
       if (readiness.state === 'blocked') return { state: 'blocked', reason: readiness.reason };
       // pause before retrying
-      if (attempt + 1 < launchPollAttempts) await launchPollDelay();
+      if (attempt + 1 < attempts) await launchPollDelay();
     }
     return { state: 'timed-out' };
   };
@@ -3411,6 +3415,54 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // report a true timeout
     if (!agent) return reply.code(504).send({ error: `The new session started, but Codex did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
     return reply.code(201).send({ agentId: agent.id });
+  });
+  // Open folder (ADR 0014): open any folder as a Workspace at the Place it resolves to, the claim
+  // rule's (a configured Place, else its checkout's Worktree, else its own Scratch Place), by
+  // launching an Agent there, opening a Terminal, or pinning it empty; then record it as recent.
+  // A launch in a folder the agent has not seen may stop on its trust prompt, which the operator
+  // answers in the Workspace, so that is reported as needing them rather than as a failure.
+  app.post('/api/folders/open', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
+    controlled(request, true);
+    const { path, action } = body(request);
+    const kind = requestedKind(request);
+    if (action !== 'agent' && action !== 'terminal' && action !== 'empty') return reply.code(400).send({ error: 'invalid action' });
+    if (kind.invalid) return reply.code(400).send({ error: 'invalid agent kind' });
+    const folder = await resolveFolderPath(path);
+    if ('error' in folder) return reply.code(400).send({ error: folder.error });
+    const place = await discovery.openFolder(folder.path);
+    if (place === undefined) return reply.code(409).send({ error: 'That folder could not be opened.' });
+    let opened: { agentId?: string; paneId?: string; needsOperator?: string };
+    if (action === 'agent') {
+      const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
+      if (!await launch.launchAt(place, kind.kind)) return reply.code(409).send({ error: 'Could not start an agent in that folder.' });
+      const agent = await waitForAgent(before, place.kind === 'worktree' ? inWorktree(place.id) : atPlace(place.id));
+      if (agent === undefined) return reply.code(504).send({ error: `The session started, but the agent did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
+      // a short look for a blocking first screen; an agent still starting is left to start
+      const readiness = await waitForReadiness(agent, openFolderReadinessAttempts);
+      if (readiness.state === 'blocked' && await discovery.target(agent.id, true) === undefined) return reply.code(409).send({ error: 'The agent closed as it started.' });
+      opened = { agentId: agent.id, ...(readiness.state === 'blocked' ? { needsOperator: readiness.reason } : {}) };
+    } else if (action === 'terminal') {
+      const paneId = await launch.createConsoleShell(place, '');
+      if (paneId === undefined) return reply.code(500).send({ error: 'could not open a terminal' });
+      opened = { paneId };
+    } else {
+      await worktreeStore.setPinned(place.id, true);
+      discovery.invalidateWorktrees();
+      opened = {};
+    }
+    await openedFolders.record(folder.path).catch(() => undefined);
+    await dashboardUpdates.refresh().catch(() => undefined);
+    return reply.code(201).send({ placeId: place.id, ...opened });
+  });
+  // the recently opened folders that still exist, newest first
+  app.get('/api/folders/recent', async request => { controlled(request); return { folders: await openedFolders.list() }; });
+  // forget one recent folder; its Place and anything running there are left alone
+  app.post('/api/folders/forget', async (request, reply) => {
+    controlled(request, true);
+    const { path } = body(request);
+    if (typeof path !== 'string') return reply.code(400).send({ error: 'invalid path' });
+    await openedFolders.forget(path);
+    return reply.code(204).send();
   });
   app.post('/api/agents/:id/tickets', async (request, reply) => { const s = controlled(request, true); const kind = body(request).kind; if (kind !== 'pane') return reply.code(400).send({ error: 'invalid ticket type' }); const target = await discovery.target((request.params as { id: string }).id); if (!target) return reply.code(404).send({ error: 'target unavailable' }); return { ticket: tickets.mint(s.id, 'pane', target.agent.id).id }; });
   // a `pane` ticket for a Place target (a Console shell or another pane at the Place); the

@@ -377,6 +377,20 @@ export class LaunchService {
     return launched;
   }
 
+  // launch a fresh agent at any Place through its own launch: a Worktree's, a directory
+  // Project's, the Scratch folder's, or in place in an ad-hoc Scratch folder, remembering the kind
+  // under that folder's own scope. Only Open folder launches in an ad-hoc folder.
+  async launchAt(place: Place, kind?: AgentKind): Promise<boolean> {
+    if (place.kind === 'worktree') return await this.launch(place.id, kind);
+    if (place.kind === 'directory') return await this.launchProjectDirectory(place.projectId, kind);
+    if (place.adhoc !== true) return await this.launchHome(kind);
+    const resolved = await this.resolveLaunchKind(place.id, kind);
+    if (resolved === undefined) return false;
+    const launched = await this.launchInPlace(place, resolved);
+    if (launched) await this.worktreeStore.rememberLaunchProfile(place.id, resolved).catch(() => {});
+    return launched;
+  }
+
   // launch one dedicated advisor in a fixed server-owned checkout
   async launchUpdateAdvisor(repository: string, targetSha: string): Promise<boolean> {
     // reject malformed internal paths

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { mkdtemp as mkdtempAsync, realpath, rm as rmAsync } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
@@ -15,7 +15,7 @@ import { run } from '../src/tmux/command.js';
 import { interactiveShellName, interactiveShellPath } from '../src/tmux/interactive-shell.js';
 import type { SocketRef, Worktree } from '../src/domain/models.js';
 import { testConfig, testProject, testWorktree } from './helpers/config.js';
-import { worktreePlace } from '../src/places/places.js';
+import { adhocScratchPlace, worktreePlace } from '../src/places/places.js';
 
 // The Console-shell lifecycle against a throwaway tmux server on a private socket: the adapter
 // creating a marked shell window, the markers showing in a real `list-panes`, a rename writing
@@ -240,7 +240,8 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('Console shells (r
   // A directory-Project or Scratch launch joins its Place the way a Worktree launch does. The
   // fixture pane runs `cat`, so there is no adoptable shell; the launched window's bootstrap leaves
   // an interactive shell behind, so the window stays to read its label from.
-  for (const kind of ['directory', 'scratch'] as const) {
+  // An ad-hoc Scratch folder launches the same way, through Open folder's `launchAt`.
+  for (const kind of ['directory', 'scratch', 'adhoc'] as const) {
     it(`joins the session holding a ${kind} Place's Console shells and labels the launched pane`, async () => {
       const fixture = await fixtureSession();
       const home = await realpath(fixture.worktreeDir);
@@ -251,18 +252,18 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('Console shells (r
 
       const store = { rememberLaunchProfile: async () => {}, launchProfiles: async () => ({}) } as never;
       const notes = testProject({ id: 'notes', label: 'Notes', mode: 'directory', path: home, identity: home });
-      const config = testConfig({ adapters: { codex: { program: '/bin/echo', args: [], env: {}, launchable: true } }, ...(kind === 'directory' ? { projects: [notes] } : { projects: [], scratchDirectory: home }) } as never);
+      const config = testConfig({ adapters: { codex: { program: '/bin/echo', args: [], env: {}, launchable: true } }, ...(kind === 'directory' ? { projects: [notes] } : { projects: [], scratchDirectory: kind === 'scratch' ? home : '/nonexistent-scratch' }) } as never);
       bridgeToFixture(fixture);
       const launch = new LaunchService(config as never, { find: async () => [fixture.socket] }, new TmuxAdapter(), undefined, store, () => [], () => new Set());
 
-      expect(kind === 'directory' ? await launch.launchProjectDirectory('notes') : await launch.launchHome()).toBe(true);
+      expect(kind === 'directory' ? await launch.launchProjectDirectory('notes') : kind === 'scratch' ? await launch.launchHome() : await launch.launchAt(adhocScratchPlace(home))).toBe(true);
 
       // a window in the shells' session rather than a new session, labelled with the Place
       const after = await windowIds();
       expect(after).toHaveLength(before.length + 1);
       const added = after.find(id => !before.includes(id))!;
       const label = (await run(tmux, ['-S', fixture.socketPath, 'display-message', '-p', '-t', added, '#{@rac_display_label}'])).stdout.trim();
-      expect(label).toBe(kind === 'directory' ? 'Notes' : '~ Scratch');
+      expect(label).toBe(kind === 'directory' ? 'Notes' : kind === 'scratch' ? '~ Scratch' : basename(home));
       expect((await run(tmux, ['-S', fixture.socketPath, 'list-sessions', '-F', '#{session_name}'])).stdout.trim().split('\n')).toEqual([fixture.session]);
     });
   }
