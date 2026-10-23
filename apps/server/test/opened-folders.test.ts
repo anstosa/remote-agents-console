@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OpenedFolderStore } from '../src/places/opened-folders.js';
@@ -19,18 +19,18 @@ async function folders(...names: string[]): Promise<{ file: string; paths: strin
 describe('the opened-folders store', () => {
   it('lists folders newest first, once each, and keeps them across a restart', async () => {
     const { file, paths: [a, b] } = await folders('a', 'b');
-    const store = new OpenedFolderStore(file);
+    const store = new OpenedFolderStore({ file });
     await store.record(a!, 1);
     await store.record(b!, 2);
     await store.record(a!, 3);
 
-    expect(await new OpenedFolderStore(file).list()).toEqual([{ path: a, openedAt: 3, kind: 'folder' }, { path: b, openedAt: 2, kind: 'folder' }]);
+    expect(await new OpenedFolderStore({ file }).list()).toEqual([{ path: a, openedAt: 3, kind: 'folder' }, { path: b, openedAt: 2, kind: 'folder' }]);
   });
 
   it('keeps the 50 newest', async () => {
     const names = Array.from({ length: 52 }, (_, index) => `f${index}`);
     const { file, paths } = await folders(...names);
-    const store = new OpenedFolderStore(file);
+    const store = new OpenedFolderStore({ file });
     for (const [index, path] of paths.entries()) await store.record(path, index);
 
     const listed = await store.list();
@@ -42,7 +42,7 @@ describe('the opened-folders store', () => {
 
   it('forgets one folder', async () => {
     const { file, paths: [a, b] } = await folders('a', 'b');
-    const store = new OpenedFolderStore(file);
+    const store = new OpenedFolderStore({ file });
     await store.record(a!, 1);
     await store.record(b!, 2);
 
@@ -53,7 +53,7 @@ describe('the opened-folders store', () => {
 
   it('leaves out a folder that no longer exists without deleting its entry', async () => {
     const { file, paths: [a, b] } = await folders('a', 'b');
-    const store = new OpenedFolderStore(file);
+    const store = new OpenedFolderStore({ file });
     await store.record(a!, 1);
     await store.record(b!, 2);
     await rm(b!, { recursive: true });
@@ -62,10 +62,21 @@ describe('the opened-folders store', () => {
     expect(JSON.parse(await readFile(file, 'utf8'))).toHaveLength(2);
   });
 
+  it('starts a damaged list again rather than refusing every later open', async () => {
+    const { file, paths: [a] } = await folders('a');
+    await mkdir(join(file, '..'), { recursive: true });
+    await writeFile(file, '{"not": "a list"}');
+    const store = new OpenedFolderStore({ file });
+
+    expect(await store.list()).toEqual([]);
+    await store.record(a!, 1);
+    expect((await store.list()).map(entry => entry.path)).toEqual([a]);
+  });
+
   it('marks a folder in a git checkout as git', async () => {
     const { file, paths: [repo] } = await folders('repo');
     await run('/usr/bin/git', ['-C', repo!, 'init', '-q']);
-    const store = new OpenedFolderStore(file);
+    const store = new OpenedFolderStore({ file });
     await store.record(repo!, 1);
 
     expect(await store.list()).toEqual([{ path: repo, openedAt: 1, kind: 'git' }]);

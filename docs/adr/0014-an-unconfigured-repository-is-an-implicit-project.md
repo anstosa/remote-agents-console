@@ -23,7 +23,7 @@ Any folder can be opened as a Workspace, by path or from a list of recent folder
 
 A first launch in a folder the agent has not seen may stop on the agent's own trust prompt (Claude's defaults to "No, exit"). Open folder reports that as needing the operator, who answers it in the Workspace, rather than as a failed launch.
 
-The recent folders live in `.data`: at most 50, newest first, one per realpath. A folder that no longer exists is left out of the list but kept, and Forget removes only the entry. Recent folders do not name implicit Projects. An implicit Project kept alive by every recent repository would scan each one's git state on every poll.
+The recent folders live in `.data`: at most 50, newest first, one per realpath. A folder that no longer exists is left out of the list but kept, and Forget removes only the entry. A damaged list starts again rather than refusing every later open. Recent folders do not name implicit Projects. An implicit Project kept alive by every recent repository would scan each one's git state on every poll.
 
 ## Considered options
 

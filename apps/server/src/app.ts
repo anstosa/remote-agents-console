@@ -22,7 +22,7 @@ import { promptAttachmentBytes, promptAttachmentData, promptAttachmentName, vali
 import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin } from './prompts/queue.js';
 import { LaunchService, type TmuxSession } from './launch/service.js';
 import { launchFresh, managedRunProgress, type FreshLaunchFailure, type ReadinessOutcome } from './launch/managed-run.js';
-import { atPlace, createAgentWaiter, inWorktree, reviewRunAgent, launchPollAttempts, launchPollDelay as defaultLaunchPollDelay, launchReadyTimeoutSeconds } from './launch/wait.js';
+import { atPlace, createAgentWaiter, inWorktree, reviewRunAgent, launchPollAttempts, launchPollDelay as defaultLaunchPollDelay, launchPollIntervalMs, launchReadyTimeoutSeconds } from './launch/wait.js';
 import { scratchLaunchKey, WorktreeLaunchStore } from './worktrees/store.js';
 import { OpenedFolderStore, resolveFolderPath } from './places/opened-folders.js';
 import { folderNoteKey, placeLaunchScope, placeNoteKey, worktreePlace, type Place } from './places/places.js';
@@ -159,7 +159,7 @@ const promptAttachments = (value: unknown): PromptAttachment[] | undefined => {
 const noteAttachmentBodyLimit = Math.ceil(maxPromptAttachmentBytes * 1.4);
 // how long Open folder looks for a first screen blocking its launch (Claude draws its trust
 // prompt within about two seconds): ten seconds of the launch poll
-const openFolderReadinessAttempts = 40;
+const openFolderReadinessAttempts = 10_000 / launchPollIntervalMs;
 // build the console server
 export async function buildApp(config: ValidatedConfig, deps: Dependencies = {}): Promise<FastifyInstance> {
   // stage bridged scratch attachments in the existing shared checkout
@@ -3416,18 +3416,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (!agent) return reply.code(504).send({ error: `The new session started, but Codex did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
     return reply.code(201).send({ agentId: agent.id });
   });
-  // Open folder (ADR 0014): open any folder as a Workspace at the Place it resolves to, the claim
-  // rule's (a configured Place, else its checkout's Worktree, else its own Scratch Place), by
-  // launching an Agent there, opening a Terminal, or pinning it empty; then record it as recent.
-  // A launch in a folder the agent has not seen may stop on its trust prompt, which the operator
-  // answers in the Workspace, so that is reported as needing them rather than as a failure.
+  // Open folder (ADR 0014): open any folder as a Workspace by launching an Agent at its Place,
+  // opening a Console shell there, or pinning it; then record it as recent. A first launch in a
+  // folder may stop on the agent's trust prompt, which is reported as needing the operator.
   app.post('/api/folders/open', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
     controlled(request, true);
     const { path, action } = body(request);
     const kind = requestedKind(request);
     if (action !== 'agent' && action !== 'terminal' && action !== 'empty') return reply.code(400).send({ error: 'invalid action' });
     if (kind.invalid) return reply.code(400).send({ error: 'invalid agent kind' });
-    const folder = await resolveFolderPath(path);
+    const folder = await resolveFolderPath(path, launch.agentHome());
     if ('error' in folder) return reply.code(400).send({ error: folder.error });
     const place = await discovery.openFolder(folder.path);
     if (place === undefined) return reply.code(409).send({ error: 'That folder could not be opened.' });
@@ -3435,7 +3433,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (action === 'agent') {
       const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
       if (!await launch.launchAt(place, kind.kind)) return reply.code(409).send({ error: 'Could not start an agent in that folder.' });
-      const agent = await waitForAgent(before, place.kind === 'worktree' ? inWorktree(place.id) : atPlace(place.id));
+      await openedFolders.record(folder.path).catch(() => undefined);
+      const agent = await waitForAgent(before, atPlace(place.id));
       if (agent === undefined) return reply.code(504).send({ error: `The session started, but the agent did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
       // a short look for a blocking first screen; an agent still starting is left to start
       const readiness = await waitForReadiness(agent, openFolderReadinessAttempts);
@@ -3448,14 +3447,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     } else {
       await worktreeStore.setPinned(place.id, true);
       discovery.invalidateWorktrees();
+      // the store refuses a key it cannot hold, such as one past its size limits
+      if ((await worktreeStore.pins())[place.id] !== true) return reply.code(409).send({ error: 'Could not pin that folder.' });
       opened = {};
     }
-    await openedFolders.record(folder.path).catch(() => undefined);
+    if (action !== 'agent') await openedFolders.record(folder.path).catch(() => undefined);
     await dashboardUpdates.refresh().catch(() => undefined);
     return reply.code(201).send({ placeId: place.id, ...opened });
   });
   // the recently opened folders that still exist, newest first
-  app.get('/api/folders/recent', async request => { controlled(request); return { folders: await openedFolders.list() }; });
+  app.get('/api/folders/recent', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async request => { controlled(request); return { folders: await openedFolders.list() }; });
   // forget one recent folder; its Place and anything running there are left alone
   app.post('/api/folders/forget', async (request, reply) => {
     controlled(request, true);

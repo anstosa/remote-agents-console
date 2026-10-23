@@ -1,5 +1,4 @@
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { gitCommonDir } from '../git/worktrees.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
@@ -14,12 +13,12 @@ const isEntry = (value: unknown): value is OpenedFolder => value !== null && typ
 
 /**
  * A folder path from the browser, as the folder it names: a string of at most 4096 characters
- * with no NUL, a leading `~` expanded against the account home, absolute, realpath'd, and a
- * directory. Otherwise the reason it is refused.
+ * with no control characters, a leading `~` expanded against the account home, absolute,
+ * realpath'd, and a directory. Otherwise the reason it is refused.
  */
-export async function resolveFolderPath(input: unknown): Promise<{ path: string } | { error: string }> {
-  if (typeof input !== 'string' || input.length === 0 || input.length > 4096 || input.includes('\0')) return { error: 'That is not a valid path.' };
-  const expanded = input === '~' || input.startsWith('~/') ? join(homedir(), input.slice(1)) : input;
+export async function resolveFolderPath(input: unknown, home: string): Promise<{ path: string } | { error: string }> {
+  if (typeof input !== 'string' || input.length === 0 || input.length > 4096 || /[\0-\x1f\x7f]/u.test(input)) return { error: 'That is not a valid path.' };
+  const expanded = input === '~' || input.startsWith('~/') ? join(home, input.slice(1)) : input;
   if (!isAbsolute(expanded)) return { error: 'The path must be absolute.' };
   const path = await realpath(expanded).catch(() => undefined);
   if (path === undefined) return { error: 'That folder does not exist.' };
@@ -31,9 +30,12 @@ export async function resolveFolderPath(input: unknown): Promise<{ path: string 
  * persisted in `.data`. Callers record a folder only once it has opened.
  */
 export class OpenedFolderStore {
+  private readonly file: string;
   private mutation = Promise.resolve();
 
-  constructor(private readonly file = process.env.RAC_OPENED_FOLDERS_FILE ?? join(serverCheckout(), '.data/opened-folders.json')) {}
+  constructor(options: { file?: string } = {}) {
+    this.file = options.file ?? join(serverCheckout(), '.data/opened-folders.json');
+  }
 
   // the folders that still exist, newest first; one since removed is left out but kept, so it
   // returns if its folder does
@@ -70,8 +72,10 @@ export class OpenedFolderStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
     }
-    const raw = JSON.parse(serialized) as unknown;
-    if (!Array.isArray(raw) || raw.length > maxFolders || !raw.every(isEntry)) throw new Error('invalid opened folders file');
+    let raw: unknown;
+    try { raw = JSON.parse(serialized); } catch { raw = undefined; }
+    // a damaged list is only recents: start it again rather than refuse every open from now on
+    if (!Array.isArray(raw) || raw.length > maxFolders || !raw.every(isEntry)) { console.warn(`[folders] ${this.file} is not a valid recent folders list; starting it again`); return []; }
     return raw;
   }
 

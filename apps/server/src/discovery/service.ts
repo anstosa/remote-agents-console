@@ -231,21 +231,29 @@ export class DiscoveryService {
     if (nearest.adhoc !== true && (nearest.kind !== 'scratch' || nearest.home === root)) return nearest.id;
     return await this.checkoutWorktreeId(root) ?? (ownFolder ? worktreeWireId(scratchProjectId, root) : nearest.id);
   }
-  // The Place a folder opens as (Open folder): the Place of its root by the claim rule, except
-  // that a folder that is no git checkout is its own Scratch Place even below the configured
-  // Scratch folder. A Worktree no scan lists yet (an implicit Project's, or a new checkout of a
-  // configured one) is re-scanned for, and stays listed for this run. Undefined only when that
-  // scan still does not list it.
+  // The Place a folder opens as (Open folder): the Place of its root by the claim rule, over a
+  // fresh scan so a checkout added since the last one is a Place of its own, except that a folder
+  // that is no git checkout is its own Scratch Place even below the configured Scratch folder. A
+  // Worktree is returned once the published snapshot, which a launch reads, lists it; one no scan
+  // listed before names its implicit Project for the rest of this run. Undefined when none does.
   async openFolder(folder: string): Promise<Place | undefined> {
-    const root = await this.cachedWorkspaceRoot(folder);
-    const places = await this.places(await this.worktrees());
+    const toplevel = await this.cachedWorkspaceRoot(folder);
+    // git can name a toplevel the folder is not in (`core.worktree`); the folder itself opens then
+    const root = folder === toplevel || folder.startsWith(`${toplevel}/`) ? toplevel : folder;
+    const places = await this.places(await this.worktrees(true));
     const placeId = await this.rootPlaceId(root, places, true);
     const listed = places.find(place => place.id === placeId);
-    if (listed !== undefined) return listed;
+    if (listed !== undefined && listed.kind !== 'worktree') return listed;
     if (projectIdOf(placeId) === scratchProjectId) return adhocScratchPlace(root);
-    this.openedWorktreeIds.add(placeId);
-    const worktree = (await this.worktrees(true)).find(candidate => candidate.id === placeId);
-    return worktree === undefined ? undefined : worktreePlace(worktree);
+    if (listed === undefined) this.openedWorktreeIds.add(placeId);
+    for (let attempt = 0; ; attempt += 1) {
+      const worktree = this.worktreesNow().find(candidate => candidate.id === placeId);
+      if (worktree !== undefined) return worktreePlace(worktree);
+      if (attempt === 2) break;
+      await this.worktrees(true);
+    }
+    this.openedWorktreeIds.delete(placeId);
+    return undefined;
   }
   // The Worktree id of a git checkout root no configured Place holds: the Worktree of the
   // configured Project managing its repository (one created since the last scan), else of its
@@ -837,8 +845,9 @@ export class DiscoveryService {
   }
 
   // the pinned ad-hoc Scratch Places: a pinned `scratch:<root>` whose folder still resolves to that
-  // root (not removed, not swapped for a symlink) and lies inside no configured Place, where a
-  // folder since made part of a directory Project would otherwise linger as a Place of its own
+  // root (not removed, not swapped for a symlink) and lies inside no configured Place but the
+  // Scratch folder, where a folder since made part of a directory Project would otherwise linger
+  // as a Place of its own
   private async pinnedScratchPlaces(configured: readonly Place[]): Promise<Place[]> {
     const pinned = await Promise.all(Object.entries(this.pinSnapshot).map(async ([id, isPinned]) => {
       const root = worktreePathOf(id);

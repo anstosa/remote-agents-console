@@ -344,19 +344,12 @@ export class LaunchService {
   // label a pane (or a session's active pane) so its tab reads as its Place or modal flow
   private async labelPane(socketPath: string | undefined, target: string, label: string): Promise<boolean> {
     const socket = socketPath === undefined ? [] : ['-S', socketPath];
-    return (await run(this.tmux, [...socket, 'set-option', '-p', '-t', target, '@rac_display_label', label])).code === 0;
+    return (await run(this.tmux, [...socket, 'set-option', '-p', '-t', target, '@rac_display_label', tmuxLiteralArg(label)])).code === 0;
   }
   // launch one ordinary scratch agent of the resolved (or requested) kind at the Scratch Place:
   // the configured Scratch directory when set, else the account home
   async launchHome(kind?: AgentKind): Promise<boolean> {
-    const resolved = await this.resolveLaunchKind(scratchLaunchKey, kind);
-    // refuse an unconfigured or unlaunchable kind
-    if (resolved === undefined) return false;
-    const launched = await this.launchInPlace(await this.scratchPlace(), resolved);
-    // remember the Scratch group's last-used kind
-    // persisting the profile is best-effort; a storage failure never fails a live launch
-    if (launched) await this.worktreeStore.rememberLaunchProfile(scratchLaunchKey, resolved).catch(() => {});
-    return launched;
+    return await this.launchRemembering(await this.scratchPlace(), scratchLaunchKey, kind);
   }
 
   // launch one agent directly in a non-git `directory` Project — the same in-place spawn
@@ -367,14 +360,7 @@ export class LaunchService {
   // unavailable one has nothing to launch into. Remembers the kind under the Project scope.
   async launchProjectDirectory(projectId: string, kind?: AgentKind): Promise<boolean> {
     const place = await this.directoryPlace(projectId);
-    if (place === undefined) return false;
-    const resolved = await this.resolveLaunchKind(projectId, kind);
-    // refuse an unconfigured or unlaunchable kind
-    if (resolved === undefined) return false;
-    const launched = await this.launchInPlace(place, resolved);
-    // remember the Project group's last-used kind; storage failure never fails a live launch
-    if (launched) await this.worktreeStore.rememberLaunchProfile(projectId, resolved).catch(() => {});
-    return launched;
+    return place !== undefined && await this.launchRemembering(place, projectId, kind);
   }
 
   // launch a fresh agent at any Place through its own launch: a Worktree's, a directory
@@ -383,11 +369,17 @@ export class LaunchService {
   async launchAt(place: Place, kind?: AgentKind): Promise<boolean> {
     if (place.kind === 'worktree') return await this.launch(place.id, kind);
     if (place.kind === 'directory') return await this.launchProjectDirectory(place.projectId, kind);
-    if (place.adhoc !== true) return await this.launchHome(kind);
-    const resolved = await this.resolveLaunchKind(place.id, kind);
+    return place.adhoc === true ? await this.launchRemembering(place, place.id, kind) : await this.launchHome(kind);
+  }
+
+  // launch in place at a directory-Project or Scratch Place with the resolved (or requested) kind,
+  // remembering it under `scope`; a storage failure never fails a live launch
+  private async launchRemembering(place: Place, scope: string, kind?: AgentKind): Promise<boolean> {
+    const resolved = await this.resolveLaunchKind(scope, kind);
+    // refuse an unconfigured or unlaunchable kind
     if (resolved === undefined) return false;
     const launched = await this.launchInPlace(place, resolved);
-    if (launched) await this.worktreeStore.rememberLaunchProfile(place.id, resolved).catch(() => {});
+    if (launched) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
     return launched;
   }
 
@@ -734,7 +726,8 @@ export class LaunchService {
     const created = await run(this.tmux, [...socketArgs, 'new-session', '-d', '-s', tmuxFormatLiteral(session), '-c', tmuxFormatLiteral(cwd), '-P', '-F', '#{pane_id}', '--', ...argv]);
     if (created.code !== 0) return undefined;
     const pane = created.stdout.trim();
-    if (await this.markPaneConsoleShell(this.hostSocket, pane, name) && await this.markSessionPlace(this.hostSocket, pane, place.id)) return pane;
+    // the Place mark first: a session with a Console shell and no mark is one a claim would mark
+    if (await this.markSessionPlace(this.hostSocket, pane, place.id) && await this.markPaneConsoleShell(this.hostSocket, pane, name)) return pane;
     // tear down an unmarked session rather than leak it
     await run(this.tmux, [...socketArgs, 'kill-session', '-t', session]);
     return undefined;
@@ -752,7 +745,7 @@ export class LaunchService {
   // pane opened in it belongs there; `target` is one of its pane ids
   private async markSessionPlace(socketPath: string | undefined, target: string, placeId: string): Promise<boolean> {
     const socket = socketPath === undefined ? [] : ['-S', socketPath];
-    return (await run(this.tmux, [...socket, 'set-option', '-t', target, '@rac_place', placeId])).code === 0;
+    return (await run(this.tmux, [...socket, 'set-option', '-t', target, '@rac_place', tmuxLiteralArg(placeId)])).code === 0;
   }
 
   // mark panes the console deliberately owns, so retained OMX workers remain launchable

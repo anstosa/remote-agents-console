@@ -224,6 +224,27 @@ describe('opening a folder', () => {
     expect(await service.openFolder(sub)).toMatchObject({ id: `ferry:${repo}`, kind: 'worktree' });
   });
 
+  it('opens a linked worktree added inside a configured one since the last scan as itself', async () => {
+    const { repo } = await gitRepo();
+    const configured = (await validateConfig({ publicOrigin: 'https://agents.example.com', projects: [{ id: 'ferry', path: repo }] })).projects[0]!;
+    const { service } = discovery(repo, { panes: [], projects: [configured] });
+    await service.dashboard();
+    const nested = join(repo, '.worktrees', 'feature');
+    await git(repo, 'worktree', 'add', '-q', '-b', 'feature', nested);
+
+    expect(await service.openFolder(nested)).toMatchObject({ id: `ferry:${nested}`, kind: 'worktree' });
+  });
+
+  it('opens the folder itself when git names a toplevel the folder is not in', async () => {
+    const { root, repo } = await gitRepo();
+    const elsewhere = join(root, 'elsewhere');
+    await mkdir(elsewhere);
+    await git(repo, 'config', 'core.worktree', elsewhere);
+    const { service } = discovery(repo, { panes: [] });
+
+    expect((await service.openFolder(repo))?.home).toBe(repo);
+  });
+
   it('opens a folder that is no git checkout as its own Scratch Place, below the configured Scratch folder too', async () => {
     const { root } = await gitRepo();
     const folder = join(root, 'notes');

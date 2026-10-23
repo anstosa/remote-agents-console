@@ -15,7 +15,7 @@ import { zeroPollDelay } from './helpers/run.js';
 // pinned empty Workspace), recording it among the recent folders the operator can list and forget.
 
 const dirs: string[] = [];
-afterEach(async () => { vi.unstubAllEnvs(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
 const auth = { unsign: () => 'session', get: () => ({ id: 'session', csrf: 'csrf' }), csrf: () => true } as never;
 const control = { connect: () => true } as never;
@@ -37,7 +37,7 @@ async function start(options: { place?: (folder: string) => Place | undefined; l
   const folder = join(root, 'repo');
   await mkdir(join(folder, 'src'), { recursive: true });
   const worktreeStore = new WorktreeLaunchStore({ file: join(root, 'worktrees.json') });
-  const openedFolders = new OpenedFolderStore(join(root, 'opened-folders.json'));
+  const openedFolders = new OpenedFolderStore({ file: join(root, 'opened-folders.json') });
   let calls = 0;
   const openFolder = vi.fn(async (path: string) => (options.place ?? (() => ({ id: `ferry-1:${folder}`, kind: 'worktree', projectId: 'ferry-1', label: 'ferry', home: folder })))(path));
   const invalidateWorktrees = vi.fn();
@@ -48,7 +48,7 @@ async function start(options: { place?: (folder: string) => Place | undefined; l
     dashboard: async () => options.dashboard?.(calls++, folder) ?? idleDashboard,
     target: async (id: string) => options.target?.(id),
   };
-  const launch = { launchResolutions: async () => new Map(), ...options.launch };
+  const launch = { launchResolutions: async () => new Map(), agentHome: () => root, ...options.launch };
   const app = await buildApp(testConfig({ publicOrigin: new URL(`https://${host}`) }), {
     auth, control, dashboardUpdates, launchPollDelay: zeroPollDelay, worktreeStore, openedFolders,
     discovery: discovery as never, launch: launch as never, tmux: (options.tmux ?? {}) as never,
@@ -64,12 +64,12 @@ describe('opening a folder', () => {
     await writeFile(join(root, 'file.txt'), 'hi');
     try {
       const reasons = [];
-      for (const path of ['repo', join(root, 'missing'), join(root, 'file.txt'), `${root}/re\0po`, `/${'a'.repeat(4096)}`, 42]) {
+      for (const path of ['repo', join(root, 'missing'), join(root, 'file.txt'), `${root}/re\0po`, `${root}/re\npo`, `/${'a'.repeat(4096)}`, 42]) {
         const response = await app.inject(open({ path, action: 'empty' }));
         expect(response.statusCode).toBe(400);
         reasons.push(response.json().error);
       }
-      expect(reasons).toEqual(['The path must be absolute.', 'That folder does not exist.', 'That is not a folder.', 'That is not a valid path.', 'That is not a valid path.', 'That is not a valid path.']);
+      expect(reasons).toEqual(['The path must be absolute.', 'That folder does not exist.', 'That is not a folder.', 'That is not a valid path.', 'That is not a valid path.', 'That is not a valid path.', 'That is not a valid path.']);
       expect(openFolder).not.toHaveBeenCalled();
     } finally { await app.close(); }
   });
@@ -83,8 +83,7 @@ describe('opening a folder', () => {
   });
 
   it('expands a leading ~ against the account home and opens the realpath', async () => {
-    const { app, root, folder, openFolder } = await start();
-    vi.stubEnv('HOME', root);
+    const { app, folder, openFolder } = await start();
     try {
       const response = await app.inject(open({ path: '~/repo/src/../src', action: 'empty' }));
       expect(response.statusCode).toBe(201);
@@ -136,7 +135,7 @@ describe('opening a folder', () => {
   });
 
   it('reports a Claude trust prompt in the opened folder as needing the operator, not as a failed launch', async () => {
-    const claude = (folder: string) => ({ ...stated({ id: 'socket:%3', paneId: '%3', title: 'Claude Code', worktreeId: `ferry-1:${folder}` }), kind: 'claude' });
+    const claude = (folder: string) => ({ ...stated({ id: 'socket:%3', paneId: '%3', title: 'Claude Code', placeId: `ferry-1:${folder}`, worktreeId: `ferry-1:${folder}` }), kind: 'claude' });
     const capture = vi.fn(async () => 'Quick safety check: Is this a project you created or one you trust?\n❯ 1. Yes, I trust this folder\n  2. No, exit');
     let opened = '';
     const { app, folder } = await start({
@@ -156,7 +155,7 @@ describe('opening a folder', () => {
   it('refuses a launch whose agent closes as it starts', async () => {
     const { app, folder } = await start({
       launch: { launchAt: async () => true },
-      dashboard: (call, folder) => call === 0 ? idleDashboard : { ...idleDashboard, agents: [stated({ id: 'socket:%3', paneId: '%3', title: 'Ready', worktreeId: `ferry-1:${folder}` })] },
+      dashboard: (call, folder) => call === 0 ? idleDashboard : { ...idleDashboard, agents: [stated({ id: 'socket:%3', paneId: '%3', title: 'Ready', placeId: `ferry-1:${folder}`, worktreeId: `ferry-1:${folder}` })] },
       target: () => undefined,
     });
     try {

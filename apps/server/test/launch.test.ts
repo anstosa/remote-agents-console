@@ -185,6 +185,20 @@ describe('LaunchService', () => {
     expect(run.mock.calls.some(call => (call[1] as string[]).some(arg => arg.includes('pane_title') || arg === 'select-pane'))).toBe(false);
   });
 
+  it('launches in place in an ad-hoc Scratch folder, marked and labelled as that folder, remembering the kind under it', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_bin: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%5' : '', stderr: '' }));
+    const rememberLaunchProfile = vi.fn(async () => {});
+    const service = new LaunchService(codex, { find: async () => [] }, undefined, undefined, { launchProfiles: async () => ({}), rememberLaunchProfile } as never);
+
+    await expect(service.launchAt({ id: 'scratch:/srv/tools', kind: 'scratch', projectId: 'scratch', label: 'tools', home: '/srv/tools', adhoc: true })).resolves.toBe(true);
+
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['new-session', '-c', '/srv/tools']));
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-t', '%5', '@rac_place', 'scratch:/srv/tools']);
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%5', '@rac_display_label', 'tools']);
+    expect(rememberLaunchProfile).toHaveBeenCalledWith('scratch:/srv/tools', 'codex');
+  });
+
   it('launches a scratch agent in the configured scratchDirectory while HOME stays the account home', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
     run.mockResolvedValue({ code: 0, stdout: '', stderr: '' });
