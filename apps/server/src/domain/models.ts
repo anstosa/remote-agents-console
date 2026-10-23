@@ -78,7 +78,7 @@ export const agentTmuxSession = (agent: Pick<Agent, 'sessionId' | 'socketFingerp
  * `available: false` rather than failing to boot. stack commands and preview settings
  * are defaults; canonical worktree overrides replace them for individual checkouts.
  * discovered worktrees denormalise the resolved settings for convenience. An `implicit`
- * Project is an unconfigured git checkout the console was opened in or found an Agent in,
+ * Project is an unconfigured git repository that a tmux session mark or a pin names (ADR 0014),
  * loaded as a config entry naming only its path would be; it is never written to config.
  */
 export type Project = { id: string; implicit?: true; label: string; defaultBranch?: string; path: string; identity: string; mode: 'repository' | 'directory'; hostPath?: string; worktreeOrder?: string[]; worktreeOverrides?: WorktreeOverride[]; worktreesDirectory: string; available: boolean; unavailableReason?: string; commands?: StackCommands; newTask?: string; buttons?: ProjectButtons; push: PromptAction; projectUrl?: string; projectPort?: number };

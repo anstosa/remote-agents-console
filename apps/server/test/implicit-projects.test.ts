@@ -104,6 +104,17 @@ describe('implicit Projects', () => {
     expect(dashboard.agents[0]?.worktreeId).toBeUndefined();
   });
 
+  it('hands a marked session to a config entry for the same repository that omits its id', async () => {
+    const { repo } = await gitRepo();
+    const configured = (await validateConfig({ publicOrigin: 'https://agents.example.com', projects: [{ path: repo }] })).projects[0]!;
+    const { service } = discovery(repo, { mark: `${configured.id}:${repo}`, projects: [configured] });
+
+    const dashboard = await service.dashboard();
+
+    expect(dashboard.projects).toEqual([expect.not.objectContaining({ implicit: true })]);
+    expect(dashboard.agents[0]).toMatchObject({ worktreeId: `${configured.id}:${repo}`, projectId: configured.id });
+  });
+
   it('claims a repository below the configured Scratch folder as its implicit Worktree, not as Scratch', async () => {
     const { root, repo } = await gitRepo();
     const id = (await implicitProject(repo))!.id;

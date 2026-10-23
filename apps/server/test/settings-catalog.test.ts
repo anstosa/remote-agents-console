@@ -378,7 +378,7 @@ describe('settings schema metadata', () => {
     expect(described.every(node => typeof node?.description === 'string' && node.description.length >= 24)).toBe(true);
     expect(project?.properties?.id?.description).toBe('Stable Project key used for saved state and Worktree IDs. Use 1–80 letters, numbers, underscores, or dashes. Leave unset to keep the id the console gave this folder when it was opened without configuration.');
     expect(project?.properties?.defaultBranch).toMatchObject({ type: 'string', optional: true });
-    expect(project?.properties?.label).toMatchObject({ placeholder: 'Unavailable (from Project ID)', description: 'Display name for this Project.' });
+    expect(project?.properties?.label).toMatchObject({ placeholder: 'Unavailable (from Project ID, else the folder name)', description: 'Display name for this Project.' });
     expect(project?.properties?.defaultBranch).toMatchObject({ placeholder: 'Unavailable (from resolved branch)', description: 'Comparison branch for Worktree changes.' });
     expect(project?.properties?.hostPath).toMatchObject({ placeholder: 'Unavailable (from Project Path)', description: 'Host path for the Main checkout when RAC runs in Docker.' });
     expect(project?.properties?.worktreeOrder).toMatchObject({ placeholder: 'Unavailable (from discovered Worktree order)', description: 'Checkout paths to show first, in this order. Relative paths resolve from the Project path.' });

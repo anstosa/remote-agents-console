@@ -250,13 +250,14 @@ function resolveWorktreesDirectory(configured: string | undefined, mainWorktree:
   return resolve(dirname(anchor), `${basename(anchor)}-worktrees`);
 }
 // The id of a Project configured without one, and of an implicit Project: a slug of the folder's
-// basename and 8 hex of the identity's hash. A config entry added later for an implicit Project's
-// repository, with no `id`, so keeps the id that its Notes, pins and launch profile are keyed by.
+// basename and 8 hex of the identity's hash. Both derive it the same way, so a config entry with
+// no `id` added later for an implicit Project's repository keeps the id its Notes, pins and
+// launch profile are keyed by.
 export function derivedProjectId(identity: string, folder: string): string {
   const slug = basename(folder).replace(/\.git$/, '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'project';
   return `${slug}-${createHash('sha256').update(identity).digest('hex').slice(0, 8)}`;
 }
-// the label a Project with no configured one shows: its id when configured, else its folder's name
+// a folder's name as a label, without a bare repository's `.git` suffix
 function folderLabel(folder: string): string {
   return basename(folder).replace(/\.git$/, '') || folder;
 }
@@ -267,10 +268,10 @@ function folderLabel(folder: string): string {
 // Only a path that does not resolve at all loads unavailable with a reason, rather than
 // failing the whole boot (ADR 0003); with no `id` to key it by, it does not load at all.
 async function resolveProject(raw: ParsedProject): Promise<Project | undefined> {
-  const name = raw.id ?? raw.path;
+  const errorLabel = raw.id ?? raw.path;
   if (raw.newTask !== undefined) validateNewTask(raw.newTask);
-  const preview = resolvePreview(raw, `project ${name}`);
-  const worktreeOverrides = await resolveWorktreeOverrides(raw, name, preview);
+  const preview = resolvePreview(raw, `project ${errorLabel}`);
+  const worktreeOverrides = await resolveWorktreeOverrides(raw, errorLabel, preview);
   // canonical checkout paths keep ordering independent of labels and branches
   const worktreeOrder = raw.worktreeOrder === undefined ? undefined : await Promise.all(raw.worktreeOrder.map(async path => {
     const absolute = resolve(raw.path, path);

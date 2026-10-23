@@ -221,7 +221,7 @@ function describeProjectSettings(schema: SettingsSchema): void {
     const field = project.properties[key];
     if (field !== undefined) field.description = description;
   }
-  Object.assign(project.properties.label!, { placeholder: 'Unavailable (from Project ID)' });
+  Object.assign(project.properties.label!, { placeholder: 'Unavailable (from Project ID, else the folder name)' });
   Object.assign(project.properties.defaultBranch!, { placeholder: 'Unavailable (from resolved branch)' });
   Object.assign(project.properties.hostPath!, { placeholder: 'Unavailable (from Project Path)' });
   Object.assign(project.properties.worktreeOrder!, { placeholder: 'Unavailable (from discovered Worktree order)' });
