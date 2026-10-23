@@ -14,6 +14,71 @@ function captureBrowserErrors(errors: BrowserErrors, page: Page) {
 // report whether overlays leave a control pointer-actionable
 const isPointerActionable = (locator: Locator) => locator.click({ trial: true, timeout: 1_500 }).then(() => true, () => false);
 
+// keep flyout controls and outside dismissal above shared notices
+async function expectFlyoutAboveToasts(page: Page, toastRegion: Locator, reload: Locator, width: number) {
+  await page.setViewportSize({ width, height: 900 });
+  await page.locator('.tabs .server-selector').click();
+  const flyout = page.getByRole('group', { name: 'Remote Agents servers', exact: true });
+  const rename = flyout.getByRole('button', { name: 'Rename Server', exact: true });
+  await expect(rename).toBeVisible();
+  const bounds = await rename.boundingBox();
+  // require a real flyout control for the overlap probe
+  if (bounds === null) throw new Error('Server rename control has no layout bounds');
+  const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  // force overlap without overriding either production stacking layer
+  const positioning = await page.addStyleTag({ content: `.toast-region { top: ${point.y - 16}px !important; left: 8px !important; right: auto !important; width: min(24rem, calc(100vw - 1.2rem)) !important; }` });
+  await expect.poll(() => toastRegion.evaluate((element, point) => {
+    const toast = element.querySelector('.toast')!.getBoundingClientRect();
+    return point.x > toast.left && point.x < toast.right && point.y > toast.top && point.y < toast.bottom;
+  }, point)).toBe(true);
+  await expect.poll(() => flyout.evaluate((element, point) => element.contains(document.elementFromPoint(point.x, point.y)), point)).toBe(true);
+  await expect(rename).toBeEnabled();
+  await rename.click({ trial: true });
+  await page.screenshot({ path: `/tmp/flyout-above-toast-${width}.png`, fullPage: true });
+  await positioning.evaluate(element => element.remove());
+
+  // separate phone geometry before testing outside dismissal over the toast
+  const bottomPositioning = await page.addStyleTag({ content: '.toast-region { top: auto !important; bottom: 8px !important; } .server-menu { top: 8px !important; bottom: auto !important; }' });
+  const reloadBounds = await reload.boundingBox();
+  // require a visible toast action outside the flyout
+  if (reloadBounds === null) throw new Error('Reload action has no layout bounds');
+  const reloadPoint = { x: reloadBounds.x + reloadBounds.width / 2, y: reloadBounds.y + reloadBounds.height / 2 };
+  await expect.poll(() => page.evaluate(point => document.elementFromPoint(point.x, point.y)?.classList.contains('flyout-backdrop'), reloadPoint)).toBe(true);
+  await page.mouse.click(reloadPoint.x, reloadPoint.y);
+  await expect(flyout).toHaveCount(0);
+  await expect(page.locator('.fullscreen-loader')).toHaveCount(0);
+  await reload.click({ trial: true });
+  await bottomPositioning.evaluate(element => element.remove());
+}
+
+// keep settings search results usable above overlapping notices
+async function expectSettingsSearchAboveToasts(page: Page, toastRegion: Locator, width: number) {
+  await page.getByRole('button', { name: 'Global settings', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await settings.getByRole('searchbox', { name: 'Search settings', exact: true }).fill('Interface');
+  const results = page.getByRole('listbox', { name: 'Settings search results', exact: true });
+  const result = results.getByRole('option').first();
+  await expect(result).toBeVisible();
+  const bounds = await result.boundingBox();
+  // require a real search result for the overlap probe
+  if (bounds === null) throw new Error('Settings search result has no layout bounds');
+  const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  const left = Math.max(8, Math.min(point.x - 32, width - 392));
+  // move only toast geometry while preserving both production layers
+  const positioning = await page.addStyleTag({ content: `.toast-region { top: ${point.y - 16}px !important; left: ${left}px !important; right: auto !important; width: min(24rem, calc(100vw - 1.2rem)) !important; }` });
+  await expect.poll(() => toastRegion.evaluate((element, point) => {
+    const toast = element.querySelector('.toast')!.getBoundingClientRect();
+    return point.x > toast.left && point.x < toast.right && point.y > toast.top && point.y < toast.bottom;
+  }, point)).toBe(true);
+  await expect.poll(() => results.evaluate((element, point) => element.contains(document.elementFromPoint(point.x, point.y)), point)).toBe(true);
+  await page.screenshot({ path: `/tmp/settings-search-above-toast-${width}.png`, fullPage: true });
+  await result.click();
+  await expect(results).toHaveCount(0);
+  await expect(settings.getByRole('heading', { name: 'Interface', exact: true })).toBeVisible();
+  await positioning.evaluate(element => element.remove());
+  await settings.getByRole('button', { name: 'Close settings' }).click();
+}
+
 // keep one latched reload notice across layouts and dismissal attempts
 test('keeps a stale UI reload toast visible in the shared upper-right stack', async ({ page }) => {
   const browserErrors: BrowserErrors = [];
@@ -98,6 +163,13 @@ test('keeps a stale UI reload toast visible in the shared upper-right stack', as
   expect(desktopLayout.left).toBeGreaterThan(desktopLayout.width / 2);
   expect(desktopLayout.bottom).toBeLessThanOrEqual(desktopLayout.height);
   await page.screenshot({ path: '/tmp/client-update-toast-desktop.png', fullPage: true });
+
+  // preserve flyout interaction on desktop and phone
+  for (const width of [1440, 390]) {
+    await expectFlyoutAboveToasts(page, toastRegion, reload, width);
+    await expectSettingsSearchAboveToasts(page, toastRegion, width);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
 
   // matching later checks cannot clear the latched notice
   uiVersion = currentVersion;

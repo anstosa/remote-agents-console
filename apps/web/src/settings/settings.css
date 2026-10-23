@@ -11,8 +11,8 @@
 .settings-search { display: grid; min-width: 0; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
 .settings-search input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .52rem .62rem; background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); color: var(--text); font: 600 .7rem var(--font-mono); }
 .settings-search input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-/* keep attached results above split content without moving its layout */
-.settings-search-results { z-index: 220; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .3rem; background: var(--mantle); box-shadow: 0 .5rem 1.5rem #0005; color: var(--text); font: 500 .68rem/1.5 var(--font-mono); }
+/* share the flyout layer above notices without moving split content */
+.settings-search-results { z-index: var(--layer-popover); box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .3rem; background: var(--mantle); box-shadow: 0 .5rem 1.5rem #0005; color: var(--text); font: 500 .68rem/1.5 var(--font-mono); }
 .settings-search-result { display: grid; min-width: 0; gap: .16rem; border: 1px solid transparent; border-radius: .3rem; padding: .48rem .6rem; cursor: pointer; }
 .settings-search-result[aria-selected='true'] { border-color: var(--mauve); background: color-mix(in srgb, var(--mauve) 12%, var(--mantle)); }
 .settings-search-result[aria-disabled='true'] { cursor: default; opacity: .55; }

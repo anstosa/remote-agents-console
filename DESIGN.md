@@ -1,7 +1,7 @@
 # Design
 
 ## Source of truth
-Status: Active. Updated: 2026-10-20. Scope: Settings page headers, navigation, search, Cloudflare setup and notices.
+Status: Active. Updated: 2026-10-22. Scope: Settings page headers, navigation, search, Cloudflare setup and notices.
 Evidence: existing Settings forms and split confirmation, `compose.yaml`, the
 host settings queue/applier, and Cloudflare's official Tunnel setup documentation.
 
@@ -86,6 +86,9 @@ Show dismissible proved success or recovery-warning
 toasts after completion; recovery does not silently discard pending saved edits.
 Settings saves use the shared toast stack: success expires after five seconds;
 errors have no expiry and can be dismissed. Keep field-level validation inline.
+Layer toasts below all flyouts, including Settings search results, and their
+dismissal backdrops so notices cannot cover controls or intercept outside
+dismissal. Keep modal dialogs and blocking loaders above both.
 Validate the captured transaction on Save only; omit a separate Validate action.
 Keep Save busy through validation and commit. Failed validation retains drafts and
 marks affected source and dedicated-page navigation icons red on desktop and mobile;

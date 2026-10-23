@@ -1806,7 +1806,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* Float the transient console notices in the top-right corner instead of a strip below the tab bar. */
 /* toasts sit below the panels' floating header pills, so they never cover a panel's actions */
 /* scroll crowded notices while leaving most of the settings surface available */
-.toast-region { --toast-region-top: max(calc(var(--panel-header-clearance) + .6rem + env(safe-area-inset-top, 0px)), var(--settings-header-toast-clearance, 0px)); position: fixed; top: var(--toast-region-top); right: calc(.6rem + env(safe-area-inset-right, 0px)); z-index: calc(var(--layer-dialog) + 1); display: flex; flex-direction: column; gap: .5rem; width: min(24rem, calc(100vw - 1.2rem)); max-height: min(calc(var(--app-height, 100dvh) * .4), max(0px, calc(var(--app-height, 100dvh) - var(--toast-region-top) - .6rem - env(safe-area-inset-bottom, 0px)))); overflow-y: auto; pointer-events: none; }
+/* keep flyouts and their dismissal backdrop above passive notices */
+.toast-region { --toast-region-top: max(calc(var(--panel-header-clearance) + .6rem + env(safe-area-inset-top, 0px)), var(--settings-header-toast-clearance, 0px)); position: fixed; top: var(--toast-region-top); right: calc(.6rem + env(safe-area-inset-right, 0px)); z-index: calc(var(--layer-popover) - 2); display: flex; flex-direction: column; gap: .5rem; width: min(24rem, calc(100vw - 1.2rem)); max-height: min(calc(var(--app-height, 100dvh) * .4), max(0px, calc(var(--app-height, 100dvh) - var(--toast-region-top) - .6rem - env(safe-area-inset-bottom, 0px)))); overflow-y: auto; pointer-events: none; }
 .toast { position: relative; flex-shrink: 0; pointer-events: auto; animation: toast-in .18s ease-out; }
 /* reserve a thin countdown beneath timed notices without shifting their controls */
 .toast:has(.toast-timer-bar) { padding-bottom: .8rem; }
