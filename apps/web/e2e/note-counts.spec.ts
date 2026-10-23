@@ -82,8 +82,9 @@ const mockNoteCounts = async (page: Page, fixture: NoteCountsFixture) => {
 // require one rendered rectangle
 const renderedBounds = async (locator: Locator) => {
   const bounds = await locator.boundingBox();
-  expect(bounds).not.toBeNull();
-  return bounds!;
+  // fail clearly when the target has no rendered box
+  if (bounds === null) throw new Error('Expected a visible note count control');
+  return bounds;
 };
 
 // verify exclusive category text and accessible totals
@@ -139,30 +140,34 @@ test('splits note totals into shared, locked and other corner circles', async ({
     expect(groupBox.x).toBeLessThan(buttonBox.x + buttonBox.width);
     expect(groupBox.y).toBeLessThan(buttonBox.y);
     expect(groupBox.y + groupBox.height).toBeGreaterThan(buttonBox.y);
-    const badgeBoxes = await Promise.all((await badges.all()).map(badge => { /* measure one category circle */ return renderedBounds(badge); }));
+    let previousRight: number | undefined;
     // keep every two-digit value readable in a round badge
-    for (const [index, badge] of (await badges.all()).entries()) {
-      const bounds = badgeBoxes[index]!;
+    for (const badge of await badges.all()) {
+      const bounds = await renderedBounds(badge);
       expect(Math.abs(bounds.width - bounds.height)).toBeLessThanOrEqual(1);
       const content = await badge.evaluate(element => { // inspect one badge for clipping
         return { clientWidth: element.clientWidth, scrollWidth: element.scrollWidth, clientHeight: element.clientHeight, scrollHeight: element.scrollHeight };
       });
       expect(content.scrollWidth).toBeLessThanOrEqual(content.clientWidth);
       expect(content.scrollHeight).toBeLessThanOrEqual(content.clientHeight);
-    }
-    // overlap each later circle by about one fifth of a rem
-    for (let index = 1; index < badgeBoxes.length; index += 1) {
-      const overlap = badgeBoxes[index - 1]!.x + badgeBoxes[index - 1]!.width - badgeBoxes[index]!.x;
-      expect(overlap).toBeGreaterThanOrEqual(2);
-      expect(overlap).toBeLessThanOrEqual(4);
+      // overlap each circle slightly with its previous neighbor
+      if (previousRight !== undefined) {
+        const overlap = previousRight - bounds.x;
+        expect(overlap).toBeGreaterThanOrEqual(2);
+        expect(overlap).toBeLessThanOrEqual(4);
+      }
+      previousRight = bounds.x + bounds.width;
     }
     await expect(button.locator('.notes-count-shared')).toHaveCSS('background-color', 'rgb(166, 173, 200)');
     await expect(button.locator('.notes-count-locked')).toHaveCSS('background-color', 'rgb(249, 226, 175)');
     await expect(button.locator('.notes-count-other')).toHaveCSS('background-color', 'rgb(203, 166, 247)');
     await page.screenshot({ path: testInfo.outputPath(`note-counts-${width}.png`), fullPage: true });
   }
-  expect(anchors[1]!.top).toBeCloseTo(anchors[0]!.top, 1);
-  expect(anchors[1]!.right).toBeCloseTo(anchors[0]!.right, 1);
+  const [phoneAnchor, desktopAnchor] = anchors;
+  // require both layouts before comparing their corner placement
+  if (phoneAnchor === undefined || desktopAnchor === undefined) throw new Error('Expected phone and desktop note count anchors');
+  expect(desktopAnchor.top).toBeCloseTo(phoneAnchor.top, 1);
+  expect(desktopAnchor.right).toBeCloseTo(phoneAnchor.right, 1);
 
   await button.click();
   await page.getByRole('button', { name: 'Other note 1', exact: true }).click();
