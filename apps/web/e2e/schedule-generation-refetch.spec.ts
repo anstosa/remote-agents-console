@@ -118,7 +118,7 @@ test('refreshes the open note pane\'s Last run footnote on a generation change',
 });
 
 // queued-note attention survives refreshes but ends only when the notes list is visible
-test('keeps queued-note badges red until notes are opened and shares acknowledgements across worktrees', async ({ page }) => {
+test('keeps queued-note controls red until notes are opened and shares acknowledgements across worktrees', async ({ page }) => {
   test.setTimeout(60_000);
   await installDashboardSocket(page);
   const agents = [
@@ -165,30 +165,27 @@ test('keeps queued-note badges red until notes are opened and shares acknowledge
 
   await page.goto('/');
   const toggle = page.getByRole('button', { name: /^Notes \(/u });
-  const badge = page.locator('.notes-count');
+  const badge = toggle.locator('.notes-count-other');
   await expect(toggle).toHaveAccessibleName('Notes (1)');
-  await expect(badge).not.toHaveClass(/unread/u);
   await expectNoNoteAlert(toggle);
 
   await recoverPrompt('Queued prompt in Cora · 1:05 PM');
   await expect(toggle).toHaveAccessibleName('Notes (2)');
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-  await expect(badge).toHaveClass(/unread/u);
-  await expect(badge).toHaveCSS('background-color', 'rgb(243, 139, 168)');
+  await expect(badge).toHaveCSS('background-color', 'rgb(203, 166, 247)');
+  await expect(toggle).toHaveCSS('color', noteAlertRed);
   await expectAnimatedNoteAlert(toggle);
   await page.locator('.notes-control').screenshot({ path: test.info().outputPath('queued-note-unread.png') });
 
   // background reloads must not acknowledge the recovered prompt
   await page.reload();
-  await expect(badge).toHaveClass(/unread/u);
+  await expectStaticNoteAlert(toggle);
   await toggle.click();
   await expect(page.getByLabel('Worktree notes')).toContainText('Queued prompt in Cora · 1:05 PM');
-  await expect(badge).not.toHaveClass(/unread/u);
   await expectNoNoteAlert(toggle);
   await page.locator('.flyout-backdrop').click();
   await page.reload();
   await expect(toggle).toHaveAccessibleName('Notes (2)');
-  await expect(badge).not.toHaveClass(/unread/u);
   await expectNoNoteAlert(toggle);
 
   // a different open note pane is not an acknowledgement of a new queued note
@@ -197,28 +194,23 @@ test('keeps queued-note badges red until notes are opened and shares acknowledge
   await expect(page.getByRole('dialog', { name: 'Note' })).toBeVisible();
   await recoverPrompt('A renamed recovered prompt');
   await expect(toggle).toHaveAccessibleName('Notes (3)');
-  await expect(badge).toHaveClass(/unread/u);
   await expectAnimatedNoteAlert(toggle);
   await toggle.click();
-  await expect(badge).not.toHaveClass(/unread/u);
   await expectNoNoteAlert(toggle);
 
   // entries arriving in the visible list are already seen
   await recoverPrompt('Queued prompt in Cora · 1:07 PM');
   await expect(page.getByLabel('Worktree notes')).toContainText('Queued prompt in Cora · 1:07 PM');
   await expect(toggle).toHaveAccessibleName('Notes (4)');
-  await expect(badge).not.toHaveClass(/unread/u);
   await expectNoNoteAlert(toggle);
   await page.locator('.flyout-backdrop').click();
 
   // project-shared notes stay acknowledged in another worktree
   await page.getByRole('tab', { name: 'Owen — Prompt done' }).click();
   await expect(toggle).toHaveAccessibleName('Notes (4)');
-  await expect(badge).not.toHaveClass(/unread/u);
   await expectNoNoteAlert(toggle);
   await page.reload();
   await expect(toggle).toHaveAccessibleName('Notes (4)');
-  await expect(badge).not.toHaveClass(/unread/u);
   await expectNoNoteAlert(toggle);
 
   // restarting the server may reuse a numeric revision but must still reveal new notes
@@ -228,7 +220,6 @@ test('keeps queued-note badges red until notes are opened and shares acknowledge
   await expect.poll(() => dashboardSocketReady(page)).toBe(true);
   await emitGeneration(page, generation, agents, [], notesRevision, serverStartedAt);
   await expect(toggle).toHaveAccessibleName('Notes (5)');
-  await expect(badge).toHaveClass(/unread/u);
   await expectAnimatedNoteAlert(toggle);
 
   // reduced motion keeps the red alert visible without pulsing
@@ -292,20 +283,22 @@ test('merges queued-note acknowledgements across browser tabs', async ({ page, c
   await page.goto('/');
   await other.goto('/');
   await other.getByRole('tab', { name: 'Owen — Prompt done' }).click();
-  await expect(page.locator('.notes-count')).toHaveClass(/unread/u);
-  await expect(other.locator('.notes-count')).toHaveClass(/unread/u);
+  const toggle = page.getByRole('button', { name: /^Notes \(/u });
+  const otherToggle = other.getByRole('button', { name: /^Notes \(/u });
+  await expectStaticNoteAlert(toggle);
+  await expectStaticNoteAlert(otherToggle);
   await page.getByRole('button', { name: 'Notes (1)' }).click();
-  await expect(page.locator('.notes-count')).not.toHaveClass(/unread/u);
+  await expectNoNoteAlert(toggle);
   await other.getByRole('button', { name: 'Notes (1)' }).click();
-  await expect(other.locator('.notes-count')).not.toHaveClass(/unread/u);
+  await expectNoNoteAlert(otherToggle);
 
   // the second tab's write must retain the first tab's acknowledgement
   await page.reload();
   await page.getByRole('tab', { name: 'Cora — Prompt done' }).click();
   await expect(page.getByRole('button', { name: 'Notes (1)' })).toBeEnabled();
-  await expect(page.locator('.notes-count')).not.toHaveClass(/unread/u);
+  await expectNoNoteAlert(toggle);
 
-  // reading a new note in one tab also clears the other live tab's badge
+  // reading a new note in one tab also clears the other live tab's attention
   await other.locator('.flyout-backdrop').click();
   await other.getByRole('tab', { name: 'Cora — Prompt done' }).click();
   coraNotes.unshift({ id: 'queued-cora-002', text: 'Another project prompt', source: 'queued-prompt' });
@@ -313,11 +306,11 @@ test('merges queued-note acknowledgements across browser tabs', async ({ page, c
   await expect.poll(() => dashboardSocketReady(other)).toBe(true);
   await emitGeneration(page, 1, agents, [], 1);
   await emitGeneration(other, 1, agents, [], 1);
-  await expect(page.locator('.notes-count')).toHaveClass(/unread/u);
-  await expect(other.locator('.notes-count')).toHaveClass(/unread/u);
+  await expectStaticNoteAlert(toggle);
+  await expectStaticNoteAlert(otherToggle);
   await page.getByRole('button', { name: 'Notes (2)' }).click();
-  await expect(page.locator('.notes-count')).not.toHaveClass(/unread/u);
-  await expect(other.locator('.notes-count')).not.toHaveClass(/unread/u);
+  await expectNoNoteAlert(toggle);
+  await expectNoNoteAlert(otherToggle);
 });
 
 // late mount responses must not overwrite newer manual and dashboard refreshes
@@ -383,7 +376,7 @@ test('keeps a queued note when the initial notes response arrives last', async (
   // let the released response reach react before checking the latest snapshot
   await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   await expect(toggle).toHaveAccessibleName('Notes (2)');
-  await expect(page.locator('.notes-count')).toHaveClass(/unread/u);
+  await expectStaticNoteAlert(toggle);
   await toggle.click();
   await expect(page.getByLabel('Worktree notes')).toContainText('Recovered queue entry');
 });

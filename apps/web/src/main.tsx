@@ -4499,8 +4499,11 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const noteCounts = { shared: 0, locked: 0, other: 0 };
   // count each note once, with sharing taking precedence over locking
   for (const note of notes ?? []) {
-    const category = note.allWorkspaces ? 'shared' : note.locked ? 'locked' : 'other';
-    noteCounts[category] += 1;
+    // shared notes win over locked notes
+    if (note.allWorkspaces) noteCounts.shared += 1;
+    // only local locked notes belong in yellow
+    else if (note.locked) noteCounts.locked += 1;
+    else noteCounts.other += 1;
   }
   const noteCountsDescription = `${noteCounts.shared} shared across worktrees, ${noteCounts.locked} locked and not shared, ${noteCounts.other} other notes`;
   const substantialResponse = latestSubstantialResponse(latestAssistantMessage, promptHistory);
