@@ -209,10 +209,8 @@ export class DiscoveryService {
       const claimant = sessionPanes.find(pane => pane.role === 'shell') ?? sessionPanes.find(pane => pane.consoleManaged === true);
       const root = agentHome ?? (claimant === undefined ? undefined : await this.cachedWorkspaceRoot(claimant.path));
       if (root === undefined) return;
-      const nearest = placeForRoot(places, root);
-      const checkout = nearest.adhoc === true || (nearest.kind === 'scratch' && nearest.home !== root) ? await this.checkoutWorktreeId(root) : undefined;
-      const placeId = checkout ?? nearest.id;
-      if (checkout !== undefined && !places.some(place => place.id === checkout)) unlisted = true;
+      const placeId = await this.rootPlaceId(root, places, false);
+      if (projectIdOf(placeId) !== scratchProjectId && !places.some(place => place.id === placeId)) unlisted = true;
       const { socket, sessionId } = sessionPanes[0]!;
       // the claim holds until the next scan even if the write fails; that scan claims again
       await this.tmux.markSessionPlace(socket, sessionId, placeId).catch(() => false);
@@ -220,6 +218,15 @@ export class DiscoveryService {
       this.unmarkedSessions.delete(key);
     }));
     return unlisted;
+  }
+  // The Place id a root (git toplevel, else the folder) belongs to, the one rule claims and Open
+  // folder share: the nearest configured Place holding it, except that a root in none, or below
+  // the configured Scratch folder, is the Worktree of its git checkout (ADR 0014). A root that is
+  // no checkout joins that Scratch folder for a claim, but is its own Place when `ownFolder`.
+  private async rootPlaceId(root: string, places: readonly Place[], ownFolder: boolean): Promise<string> {
+    const nearest = placeForRoot(places, root);
+    if (nearest.adhoc !== true && (nearest.kind !== 'scratch' || nearest.home === root)) return nearest.id;
+    return await this.checkoutWorktreeId(root) ?? (ownFolder ? worktreeWireId(scratchProjectId, root) : nearest.id);
   }
   // The Worktree id of a git checkout root no configured Place holds: the Worktree of the
   // configured Project managing its repository (one created since the last scan), else of its
