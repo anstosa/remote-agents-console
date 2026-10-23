@@ -118,12 +118,15 @@ test('manages waiting prompts from the queue-add control connected to Queue', as
   expect(requested).toContain('POST /api/agents/agent-1/queued-prompts/queued-prompt-002/save');
   // dismiss through the click-blocking backdrop, then open Notes: the saved prompt is now a note
   await page.locator('.flyout-backdrop').click({ position: { x: 4, y: 4 } });
-  const notesBadge = page.locator('.notes-count');
-  await expect(notesBadge).toHaveClass(/unread/u);
-  await expect(notesBadge).toHaveCSS('background-color', 'rgb(243, 139, 168)');
-  await page.getByRole('button', { name: /^Notes \(/u }).click();
+  const notesButton = page.getByRole('button', { name: /^Notes \(/u });
+  const notesBadge = notesButton.locator('.notes-count-other');
+  await expect(notesButton).toHaveClass(/unread-queued-prompts/u);
+  await expect(notesButton).toHaveCSS('color', 'rgb(243, 139, 168)');
+  await expect(notesBadge).toHaveCSS('background-color', 'rgb(203, 166, 247)');
+  await notesButton.click();
   await expect(page.getByLabel('Worktree notes')).toContainText("10/18 7:37pm in 🥔 Flowchart: 'Edited queued prompt'");
-  await expect(notesBadge).not.toHaveClass(/unread/u);
+  await expect(notesButton).not.toHaveClass(/unread-queued-prompts/u);
+  await expect(notesBadge).toHaveCSS('background-color', 'rgb(203, 166, 247)');
 
   await page.locator('.flyout-backdrop').click({ position: { x: 4, y: 4 } });
   await page.getByRole('textbox', { name: 'Prompt' }).fill('Third queued prompt');

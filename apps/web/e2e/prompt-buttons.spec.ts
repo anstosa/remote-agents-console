@@ -17,6 +17,23 @@ const readStyle = async (locator: Locator): Promise<ControlStyle> => locator.eva
   };
 });
 
+type CornerOffsets = { top: number; right: number };
+
+// measure one decorator against its owning control
+const cornerOffsets = async (owner: Locator, decorator: Locator): Promise<CornerOffsets> => {
+  const [ownerBox, decoratorBox] = await Promise.all([owner.boundingBox(), decorator.boundingBox()]);
+  // require visible controls before measuring their shared edges
+  if (ownerBox === null || decoratorBox === null) throw new Error('Expected a visible toolbar control and count');
+  expect(decoratorBox.y).toBeLessThan(ownerBox.y);
+  expect(decoratorBox.y + decoratorBox.height).toBeGreaterThan(ownerBox.y);
+  expect(decoratorBox.x).toBeLessThan(ownerBox.x + ownerBox.width);
+  expect(decoratorBox.x + decoratorBox.width).toBeGreaterThan(ownerBox.x + ownerBox.width);
+  return {
+    top: decoratorBox.y - ownerBox.y,
+    right: ownerBox.x + ownerBox.width - decoratorBox.x - decoratorBox.width
+  };
+};
+
 test('uses consistent Workspace toolbar styles, tints an open panel’s button and keeps the composer send gradient', async ({ page }) => {
   await page.goto('/');
   await page.setContent(`
@@ -84,32 +101,48 @@ test('uses consistent Workspace toolbar styles, tints an open panel’s button a
   await expect(queue).toHaveCSS('filter', 'brightness(1.08)');
 });
 
-// preserve inline desktop counts while pinning icon-mode badges to button corners
-test('places phone toolbar counts and git status over their icon buttons', async ({ page }) => {
+// keep standard and split-button counts pinned to the same corners
+test('keeps terminal and launch counts on their mobile corner anchors', async ({ page }) => {
   await page.goto('/');
   await page.setContent(`
     <link rel="stylesheet" href="/src/styles.css">
     <section class="workspace-toolbar-actions">
+      <span class="launch-split quiet" role="group" aria-label="Launch agent"><button class="queue launch-primary" aria-label="Show agent"><svg viewBox="0 0 24 24"></svg><span class="launch-primary-label">Show agent</span><span class="saved-prompts-count launch-minimized-count">4</span></button><button class="launch-chevron" aria-label="Choose agent"><svg viewBox="0 0 24 24"></svg></button></span>
       <button class="terminal-picker-toggle toolbar-button" aria-label="Terminal"><svg viewBox="0 0 24 24"></svg><span class="toolbar-label">Terminal</span><span class="saved-prompts-count">2</span></button>
-      <button class="notes-toggle toolbar-button" aria-label="Notes"><svg viewBox="0 0 24 24"></svg><span class="toolbar-label">Notes</span><span class="saved-prompts-count notes-count">3</span></button>
-      <span class="git-status-wrap"><button class="git-status-summary dirty" aria-label="Git status"><svg class="git-branch-icon" viewBox="0 0 24 24"></svg><span class="git-status-dot"></span><span class="git-branch">main</span><span class="git-status-separator">·</span><span class="git-worktree-state">Changed</span></button></span>
     </section>
   `);
-  await expect(page.getByRole('button', { name: 'Terminal' }).locator('.saved-prompts-count')).toHaveCSS('position', 'static');
-  await expect(page.locator('.git-status-dot')).toBeHidden();
 
-  await page.setViewportSize({ width: 428, height: 880 });
-  const buttons = [page.getByRole('button', { name: 'Terminal' }), page.getByRole('button', { name: 'Notes' }), page.getByRole('button', { name: 'Git status' })];
-  // check each badge against its own button, not the toolbar row
-  for (const button of buttons) {
-    const badge = button.locator('.saved-prompts-count, .git-status-dot');
-    await expect(badge).toHaveCSS('position', 'absolute');
-    const [buttonBox, badgeBox, iconBox] = await Promise.all([button.boundingBox(), badge.boundingBox(), button.locator('svg').boundingBox()]);
-    expect(buttonBox).not.toBeNull();
-    expect(badgeBox).not.toBeNull();
-    expect(iconBox).not.toBeNull();
-    expect(badgeBox!.x).toBeGreaterThan(buttonBox!.x + buttonBox!.width / 2);
-    expect(badgeBox!.y).toBeLessThan(buttonBox!.y + buttonBox!.height / 4);
-    expect(Math.abs(iconBox!.x + iconBox!.width / 2 - (buttonBox!.x + buttonBox!.width / 2))).toBeLessThanOrEqual(1);
+  const terminal = page.getByRole('button', { name: 'Terminal' });
+  const launch = page.locator('.launch-split');
+  const decorators = [
+    { owner: terminal, locator: terminal.locator('.saved-prompts-count') },
+    { owner: launch, locator: launch.locator('.launch-minimized-count') }
+  ] as const;
+  const measurements: CornerOffsets[][] = [];
+  // cover phones, the breakpoint edges and a wide desktop
+  for (const width of [390, 600, 601, 1440]) {
+    await page.setViewportSize({ width, height: 880 });
+    await expect(terminal.locator('.toolbar-label')).toBeVisible({ visible: width > 600 });
+    await expect(launch.locator('.launch-primary-label')).toBeVisible();
+    // preserve the labelled desktop split's adaptive width
+    if (width > 600) {
+      const launchBox = await launch.boundingBox();
+      // require a visible launch control before comparing its shape
+      if (launchBox === null) throw new Error('Expected a visible launch control');
+      expect(launchBox.width).toBeGreaterThan(launchBox.height);
+    }
+    // every decorator stays absolute instead of joining the labelled desktop row
+    for (const decorator of decorators) {
+      await expect(decorator.locator).toHaveCSS('position', 'absolute');
+    }
+    const current = await Promise.all(decorators.map(decorator => { /* measure one anchored decorator */ return cornerOffsets(decorator.owner, decorator.locator); }));
+    measurements.push(current);
+  }
+  // compare every viewport with the original phone anchors
+  for (const current of measurements.slice(1)) {
+    current.forEach((offsets, index) => { // compare one decorator with its phone origin
+      expect(offsets.top).toBeCloseTo(measurements[0]![index]!.top, 1);
+      expect(offsets.right).toBeCloseTo(measurements[0]![index]!.right, 1);
+    });
   }
 });

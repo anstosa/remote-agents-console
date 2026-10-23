@@ -4496,6 +4496,13 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   // hide notes without any persistence context
   if (resourceBase === undefined) return { active: false, appendToActive, canAppendToActive, canCreate: false, canClose: false, close, control: null, createWithText: create, pane: null, toggleMenu: undefined };
   const noteCount = notes?.length ?? 0;
+  const noteCounts = { shared: 0, locked: 0, other: 0 };
+  // count each note once, with sharing taking precedence over locking
+  for (const note of notes ?? []) {
+    const category = note.allWorkspaces ? 'shared' : note.locked ? 'locked' : 'other';
+    noteCounts[category] += 1;
+  }
+  const noteCountsDescription = `${noteCounts.shared} shared across worktrees, ${noteCounts.locked} locked and not shared, ${noteCounts.other} other notes`;
   const substantialResponse = latestSubstantialResponse(latestAssistantMessage, promptHistory);
   const latestResponseAvailable = notes !== undefined && substantialResponse !== undefined && !notes.some(note => note.text === substantialResponse);
   const highlightLatestResponse = latestResponseAvailable && substantialResponse === latestAssistantMessage && latestAssistantMessageOverflows;
@@ -4503,7 +4510,14 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const noteMenuBusy = attachmentPending || noteMetadataPending || deleteBusy || renameBusy || menuRunningId !== undefined;
   // retain recovered-prompt attention while the notes list acknowledges it
   const control = <div className="notes-control" ref={anchorRef}>
-    <button ref={triggerRef} className={`log-control page-arrow notes-toggle toolbar-button${unreadQueuedNotes ? ' unread-queued-prompts' : ''}${menuOpen || activeNote !== undefined ? ' active' : ''}${activeNote !== undefined ? ' panel-open' : ''}${dirtyCount > 0 ? ' unsaved' : ''}${highlightLatestResponse ? ' latest-response-available' : ''}${progressBorder(loading, 'blue')}`} aria-busy={loading || undefined} aria-label={notesLabel} title={`${notesLabel}${unreadQueuedNotes ? ' — unread queued prompts' : ''}`} data-context-flyout aria-expanded={menuOpen} disabled={loading} onPointerDown={event => event.preventDefault()} onClick={() => void toggle()}><ProgressRing busy={loading} /><span className="flyout-caret" aria-hidden="true" /><svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="notes-icon-sheet" d="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M15 21v-6h6" /></svg><span className="toolbar-label">Notes</span>{noteCount > 0 && <span className={`saved-prompts-count notes-count${unreadQueuedNotes ? ' unread' : ''}`} aria-hidden="true">{noteCount}</span>}</button>
+    <button ref={triggerRef} className={`log-control page-arrow notes-toggle toolbar-button${unreadQueuedNotes ? ' unread-queued-prompts' : ''}${menuOpen || activeNote !== undefined ? ' active' : ''}${activeNote !== undefined ? ' panel-open' : ''}${dirtyCount > 0 ? ' unsaved' : ''}${highlightLatestResponse ? ' latest-response-available' : ''}${progressBorder(loading, 'blue')}`} aria-busy={loading || undefined} aria-label={notesLabel} aria-description={noteCount > 0 ? noteCountsDescription : undefined} title={`${notesLabel}${noteCount > 0 ? ` — ${noteCountsDescription}` : ''}${unreadQueuedNotes ? ' — unread queued prompts' : ''}`} data-context-flyout aria-expanded={menuOpen} disabled={loading} onPointerDown={event => event.preventDefault()} onClick={() => void toggle()}><ProgressRing busy={loading} /><span className="flyout-caret" aria-hidden="true" /><svg className="notes-icon" viewBox="0 0 24 24" aria-hidden="true"><path className="notes-icon-sheet" d="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M15 21v-6h6" /></svg><span className="toolbar-label">Notes</span>
+      {/* omit empty categories while preserving shared-first order */}
+      {noteCount > 0 && <span className="notes-counts" aria-hidden="true">
+        {noteCounts.shared > 0 && <span className="saved-prompts-count notes-count notes-count-shared">{noteCounts.shared}</span>}
+        {noteCounts.locked > 0 && <span className="saved-prompts-count notes-count notes-count-locked">{noteCounts.locked}</span>}
+        {noteCounts.other > 0 && <span className="saved-prompts-count notes-count notes-count-other">{noteCounts.other}</span>}
+      </span>}
+    </button>
     {menuOpen && <FlyoutPortal onDismiss={() => setMenuOpen(false)}><div ref={flyoutRef} className="notes-menu" style={flyoutStyle} aria-label={worktreeId === undefined ? 'Scratch notes' : 'Worktree notes'}>
       <div className="note-capture-actions">
         <button className="log-control save-latest-response" disabled={!latestResponseAvailable || noteMenuBusy || menuRenameDraft !== undefined} onClick={() => {

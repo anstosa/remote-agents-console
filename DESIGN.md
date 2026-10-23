@@ -1,9 +1,11 @@
 # Design
 
 ## Source of truth
-Status: Active. Updated: 2026-10-22. Scope: Settings page headers, navigation, search, Cloudflare setup and notices.
+Status: Active. Updated: 2026-10-23. Scope: Settings page headers, navigation, search, Cloudflare setup, notices and workspace toolbar decorators.
 Evidence: existing Settings forms and split confirmation, `compose.yaml`, the
 host settings queue/applier, and Cloudflare's official Tunnel setup documentation.
+Toolbar evidence: `apps/web/src/styles.css`, browser layout regressions, and the
+requirement to retain mobile decorator placement at every viewport width.
 
 ## Brand
 Practical administration, clear ownership, and truthful status. Avoid decorative
@@ -62,7 +64,18 @@ polite progress and assertive errors. Mask token inputs. Use the existing modal'
 focus management. Do not communicate connection state with color alone.
 
 ## Responsive behavior
-Always one form column. Support desktop navigation and the mobile selector.
+Workspace toolbar decorators keep the same corner anchors on phones and desktops:
+counts above the top-right edge, git status dots inside the top-right corner, and
+compact PR status icons inside the bottom-right corner. Only labels and control
+widths adapt; do not move decorators into the centered content row. PR cards keep
+their separate inline status presentation.
+Notes use a slightly overlapping upper-right row of circular counts, ordered
+gray for shared notes, yellow for locked non-shared notes, and purple for all
+remaining notes. Shared status takes precedence over locking; omit empty categories.
+Keep category colors even for unread queued notes, using the button's existing red
+attention treatment instead. Describe the categories accessibly alongside the total.
+
+Settings stay in one form column. Support desktop navigation and the mobile selector.
 Keep action labels and copyable URLs usable at 390px and in narrow splits.
 Settings code editors use natural content height: a one-line file occupies one code
 line plus field padding. Include every source line and leave vertical scrolling to

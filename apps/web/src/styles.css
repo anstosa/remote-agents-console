@@ -551,8 +551,13 @@ html.software-keyboard-open .tabs { display: none; }
 .notes-toggle.unsaved::after { position: absolute; right: .25rem; bottom: .25rem; width: var(--status-dot-size); height: var(--status-dot-size); border-radius: 50%; background: var(--red); box-shadow: 0 0 .55rem color-mix(in srgb, var(--red) 75%, transparent); content: ''; }
 .notes-toggle.latest-response-available::before { position: absolute; top: .22rem; left: .22rem; width: var(--status-dot-size); height: var(--status-dot-size); border-radius: 50%; background: var(--blue); box-shadow: 0 0 .65rem color-mix(in srgb, var(--blue) 80%, transparent); content: ''; }
 .notes-toggle .notes-icon-sheet { fill: color-mix(in srgb, currentColor 18%, transparent); }
-/* queued notes stay red until the notes list is opened */
-.notes-toggle .notes-count.unread { background: var(--red); }
+/* overlap category circles at the shared upper-right anchor */
+.notes-counts { position: absolute; top: -.4rem; right: -.35rem; display: flex; align-items: flex-start; pointer-events: none; }
+.notes-counts > .notes-count { position: relative; top: auto; right: auto; flex: none; width: max-content; height: auto; min-height: 1.05rem; aspect-ratio: 1; padding: 0 .1rem; }
+.notes-counts > .notes-count + .notes-count { margin-left: -.15rem; }
+/* shared notes stay gray even when locked or newly recovered */
+.notes-counts > .notes-count-shared { background: var(--subtext-0); }
+.notes-counts > .notes-count-locked { background: var(--yellow); }
 .notes-menu { position: absolute; z-index: var(--layer-popover); top: 0; right: calc(100% + .45rem); display: grid; width: max-content; max-width: calc(100vw - 1rem); max-height: min(22rem, 70vh, var(--flyout-available-height, 100vh)); gap: .35rem; overflow: auto; padding: .4rem; border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 94%, transparent); box-shadow: 0 .8rem 2rem color-mix(in srgb, var(--crust) 80%, transparent); backdrop-filter: blur(10px); }
 .notes-menu .log-control { display: block; width: 100%; min-height: 2.6rem; overflow: hidden; padding: .55rem .65rem; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .note-row { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: color-mix(in srgb, var(--surface-0) 52%, transparent); }
@@ -1284,11 +1289,10 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 :is(.workspace-toolbar-actions, .empty-workspace-actions) :is(.more, .toolbar-button, .outline-button):not(:disabled):hover, :is(.workspace-toolbar-actions, .empty-workspace-actions) .project-open:hover { border-color: var(--prompt-control-hover-border); background: var(--prompt-control-hover-background); color: var(--prompt-control-hover-foreground); filter: none; }
 :is(.workspace-toolbar-actions, .empty-workspace-actions) :is(.more, .toolbar-button)[aria-expanded='true'], :is(.workspace-toolbar-actions, .empty-workspace-actions) .outline-button.active { border-color: var(--prompt-control-hover-border); background: var(--prompt-control-hover-background); color: var(--prompt-control-hover-foreground); }
 .toolbar-spacer { flex: 1; }
-/* a labelled toolbar button: its glyph, its name and, inline, its count. `--toolbar-accent` is the
+/* a labelled toolbar button: its glyph, its name and a corner count. `--toolbar-accent` is the
    colour of the panel it opens, which tints the button while that panel is open */
 :is(.workspace-toolbar-actions, .empty-workspace-actions) .toolbar-button { --toolbar-accent: var(--lavender); position: relative; display: inline-flex; flex: none; width: auto; min-width: var(--standard-control-size); height: var(--standard-control-size); align-items: center; justify-content: center; gap: .4rem; padding: 0 .6rem; overflow: visible; white-space: nowrap; }
 :is(.workspace-toolbar-actions, .empty-workspace-actions) .toolbar-button svg { display: block; flex: none; width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
-:is(.workspace-toolbar-actions, .empty-workspace-actions) .toolbar-button .saved-prompts-count { position: static; box-shadow: none; }
 .toolbar-label { font-size: .74rem; font-weight: 700; }
 :is(.workspace-toolbar-actions, .empty-workspace-actions) .terminal-picker-toggle { --toolbar-accent: var(--green); }
 :is(.workspace-toolbar-actions, .empty-workspace-actions) .notes-toggle { --toolbar-accent: var(--yellow); }
@@ -1307,8 +1311,16 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 /* the git status reads as one more toolbar button */
 .workspace-toolbar-actions .git-status-wrap, .workspace-toolbar-actions .git-status-wrap.expanded { flex: 0 1 auto; min-width: 0; max-width: 24rem; margin-left: 0; }
 .workspace-toolbar-actions .git-branch-icon { display: block; flex: none; width: 1rem; height: 1rem; }
-.workspace-toolbar-actions .git-status-summary { height: var(--standard-control-size); border: 1px solid var(--prompt-control-border); border-radius: var(--control-radius); padding: 0 .6rem; background: var(--prompt-control-background); }
+.workspace-toolbar-actions .git-status-summary { position: relative; height: var(--standard-control-size); overflow: visible; border: 1px solid var(--prompt-control-border); border-radius: var(--control-radius); padding: 0 .6rem; background: var(--prompt-control-background); }
 .workspace-toolbar-actions .git-status-summary:hover, .workspace-toolbar-actions .git-status-summary[aria-expanded='true'] { border-color: var(--prompt-control-hover-border); background: var(--prompt-control-hover-background); }
+/* keep git and pr decorators in their mobile corners at every viewport width */
+.workspace-toolbar-actions .git-status-summary > .git-status-dot { position: absolute; top: .2rem; right: .2rem; display: block; }
+.workspace-toolbar-actions .git-status-summary > .pull-request-issues { position: absolute; right: .2rem; bottom: .2rem; flex-direction: row-reverse; gap: .1rem; padding: 0; }
+.workspace-toolbar-actions .git-status-summary > .pull-request-issues :is(.pull-request-issue, .pull-request-checks, svg) { width: .5rem; height: .5rem; }
+.git-status-summary.clean > .git-status-dot { color: var(--green); }
+.git-status-summary.dirty > .git-status-dot { color: var(--yellow); }
+.git-status-summary.conflicted > .git-status-dot { color: var(--red); }
+.git-status-summary.unavailable > .git-status-dot { color: var(--overlay-0); }
 /* keep review progress on the branch control instead of a second toolbar button */
 .workspace-toolbar-actions .git-status-summary.review-ready { border-color: color-mix(in srgb, var(--blue) 68%, var(--surface-2)); }
 .workspace-toolbar-actions .git-status-summary.review-stale { border-color: color-mix(in srgb, var(--yellow) 72%, var(--surface-2)); }
@@ -1321,7 +1333,8 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 .workspace-toolbar-actions .launch-split.quiet:has(> button:not(:disabled):hover) { box-shadow: inset 0 0 0 1px var(--prompt-control-hover-border); background: var(--prompt-control-hover-background); filter: none; }
 .workspace-toolbar-actions .launch-split.quiet > button:not(:disabled):hover { color: var(--prompt-control-hover-foreground); }
 .workspace-toolbar-actions .launch-split.quiet .launch-lock { stroke: currentColor; }
-.workspace-toolbar-actions .launch-split .launch-minimized-count { position: static; box-shadow: none; }
+/* anchor the shared corner count without clipping it on either launch layout */
+.workspace-toolbar-actions .launch-split:has(.launch-minimized-count) { position: relative; overflow: visible; }
 /* show directional flyout carets only for opted-in browsers */
 button:has(> .flyout-caret) { position: relative; }
 button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 3.5'%3E%3Cpath d='M1 .75 5 2.8 9 .75' fill='none' stroke='white' stroke-width='1.1' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); position: absolute; bottom: .1rem; left: 50%; z-index: 1; display: none; width: .625rem; min-width: .625rem; height: .21875rem; padding: 0; overflow: visible; background: var(--overlay-1); -webkit-mask: var(--caret-mask) center / 100% 100% no-repeat; mask: var(--caret-mask) center / 100% 100% no-repeat; pointer-events: none; transform: translateX(-50%); }
@@ -1360,25 +1373,13 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
   :is(.workspace-toolbar-actions, .empty-workspace-actions) .editor-launch { display: none; }
   /* keep prompt-control gaps within each group while reserving the split area */
   .workspace-toolbar-actions { flex-wrap: nowrap; justify-content: flex-start; gap: .375rem; }
-  /* float icon-mode counts above their buttons */
-  .workspace-toolbar-actions .toolbar-button .saved-prompts-count { position: absolute; top: -.4rem; right: -.35rem; box-shadow: 0 .2rem .55rem color-mix(in srgb, var(--crust) 60%, transparent); }
-  .workspace-toolbar-actions .launch-split:has(.launch-minimized-count) { position: relative; overflow: visible; }
-  .workspace-toolbar-actions .launch-split .launch-minimized-count { position: absolute; top: -.4rem; right: -.35rem; box-shadow: 0 .2rem .55rem color-mix(in srgb, var(--crust) 60%, transparent); }
   /* one square trigger replaces the phone's direct-launch segment and separate chevron */
   .workspace-toolbar-actions .launch-menu-only .launch-menu-trigger { width: var(--standard-control-size); padding: 0 .25rem; }
   .workspace-toolbar-actions .launch-menu-trigger-label { display: none; }
   .workspace-toolbar-actions .git-status-wrap { flex: none; width: var(--standard-control-size); }
   /* keep the git status mark centered beneath its corner dot */
-  .workspace-toolbar-actions .git-status-summary { position: relative; width: var(--standard-control-size); justify-content: center; overflow: visible; padding: 0; }
+  .workspace-toolbar-actions .git-status-summary { width: var(--standard-control-size); justify-content: center; padding: 0; }
   .workspace-toolbar-actions .git-status-summary > :is(.git-branch, .git-status-separator, .git-worktree-state) { display: none; }
-  .workspace-toolbar-actions .git-status-summary > .git-status-dot { position: absolute; top: .2rem; right: .2rem; display: block; }
-  /* overlay compact pr health from the bottom right without shifting the branch glyph */
-  .workspace-toolbar-actions .git-status-summary > .pull-request-issues { position: absolute; right: .2rem; bottom: .2rem; flex-direction: row-reverse; gap: .1rem; padding: 0; }
-  .workspace-toolbar-actions .git-status-summary > .pull-request-issues :is(.pull-request-issue, .pull-request-checks, svg) { width: .5rem; height: .5rem; }
-  .git-status-summary.clean > .git-status-dot { color: var(--green); }
-  .git-status-summary.dirty > .git-status-dot { color: var(--yellow); }
-  .git-status-summary.conflicted > .git-status-dot { color: var(--red); }
-  .git-status-summary.unavailable > .git-status-dot { color: var(--overlay-0); }
 }
 @media (max-width: 600px) { .workspace-toolbar-actions :is(.toolbar-label, .project-stack-status-text) { display: none; } .workspace-toolbar-actions .toolbar-button { padding: 0; width: var(--standard-control-size); } .toolbar-path { display: none; } }
 .prompt-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: .375rem; }
