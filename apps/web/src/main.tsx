@@ -2221,8 +2221,12 @@ function ControlScreen({ session, claimed }: { session: SessionInfo; claimed: (n
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const [deviceName, setDeviceName] = useState('');
+  // include updates detected while a control request is in flight
+  const claimedRef = useRef(claimed);
+  claimedRef.current = claimed;
   const needsName = session.deviceName === undefined;
   const namingOnly = session.active && needsName;
+  // complete the explicit claim with the latest update state
   const takeControl = async () => {
     if (pending || (needsName && !deviceName.trim())) return;
     setPending(true); setError('');
@@ -2232,7 +2236,8 @@ function ControlScreen({ session, claimed }: { session: SessionInfo; claimed: (n
         const payload = await response.json().catch(() => undefined) as { error?: unknown } | undefined;
         throw new Error(typeof payload?.error === 'string' ? payload.error : 'Unable to take control. Try again.');
       }
-      claimed(await response.json() as SessionInfo);
+      const current = await response.json() as SessionInfo;
+      claimedRef.current(current);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to take control. Try again.');
       setPending(false);
@@ -10084,6 +10089,15 @@ function App() {
     if (!await beginFullscreenAction('reload')) return;
     location.reload();
   }, [beginFullscreenAction]);
+  // reload stale clients after control succeeds without opening the old console
+  const claimSession = useCallback((current: SessionInfo) => {
+    // keep ready-only work paused until the fresh document restores ownership
+    if (current.active && clientUpdateAvailable) {
+      void reloadClient();
+      return;
+    }
+    applySession(current);
+  }, [applySession, clientUpdateAvailable, reloadClient]);
   // begin one restart after the shared cover is fully painted
   const beforeRestart = useCallback(() => beginFullscreenAction('restart'), [beginFullscreenAction]);
   // release the restart cover only after a proved settled status
@@ -10546,7 +10560,7 @@ function App() {
       : state === 'ready'
         ? <NoteFeedbackProvider><DashboardView onUnauthorized={handleUnauthorized} onInactive={handleInactive} updateError={agentUpdateError} onDismissUpdateError={() => { /* dismiss only the agent update failure */ setAgentUpdateError(''); }} /></NoteFeedbackProvider>
         : (state === 'inactive' || state === 'naming') && sessionInfo !== undefined
-          ? <ControlScreen session={sessionInfo} claimed={applySession} />
+          ? <ControlScreen session={sessionInfo} claimed={claimSession} />
           : <Login initialError={error} done={applySession} />;
   // expose settings without a manual server update bypass
   const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
