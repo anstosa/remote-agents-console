@@ -980,3 +980,85 @@ test('closing the Code panel forgets its view state', async ({ page }) => {
   await expect(region.locator('.code-pane-count')).toHaveText('8');
   await expect(region).not.toHaveAttribute('data-wrap-lines', 'true');
 });
+
+test('asks about lines of a Code panel diff from the gutter, with follow-ups, and keeps the thread across a reload', async ({ page }) => {
+  // wide enough for the panel beside the agent to offer the split layout
+  await page.setViewportSize({ width: 1800, height: 900 });
+  await installPaneMock(page);
+  const asked: Array<{ query: string; body: unknown }> = [];
+  let turns: Array<{ id: string; question: string; askedAt: string; answer: string }> = [];
+  let polls = 0;
+  const anchor = { changeId: 'src/app.ts', file: 'src/app.ts', side: 'additions', startLine: 2, endLine: 2, excerpt: ' const a = 1;\n-const b = 2;\n+const b = 3;\n const c = 4;' };
+  const comparison = patchOf([trackedFile('src/app.ts')]);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', worktreeId: 'cora', sessionId: 'socket:$1', home: '/worktrees/cora', branch: 'feature/code-panel', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0, changes: [{ code: ' M', path: 'src/app.ts', additions: 1, deletions: 1 }] }, title: 'Ready' }], projects: [] } });
+    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
+    if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
+    if (url.pathname === '/api/agents/agent-1/message-files') return route.fulfill({ json: { files: [] } });
+    if (url.pathname === '/api/worktrees/cora/comparison') return route.fulfill({ json: comparison });
+    // the Working Comparison's questions, kept by scope
+    if (url.pathname === '/api/worktrees/cora/comparison/asks' && request.method() === 'POST') {
+      asked.push({ query: url.search, body: request.postDataJSON() });
+      polls = 0;
+      return route.fulfill({ status: 202, json: { status: 'pending', job: { id: `ask-${asked.length}`, expiresAt: '2099-01-01T00:00:00.000Z', retryAfterMs: 250 }, threadId: 'ask_d1' } });
+    }
+    if (url.pathname === '/api/worktrees/cora/comparison/asks') return route.fulfill({ json: { status: 'ready', threads: turns.length === 0 ? [] : [{ id: 'ask_d1', target: 'diff', kind: 'claude', conversation: 's-1', anchor, turns }], pending: [] } });
+    if (url.pathname.startsWith('/api/review-tour/asks/jobs/')) {
+      polls += 1;
+      const id = url.pathname.split('/').at(-1)!;
+      if (polls < 3) return route.fulfill({ status: 202, json: { status: 'pending', job: { id, expiresAt: '2099-01-01T00:00:00.000Z', retryAfterMs: 250 } } });
+      const { question } = asked.at(-1)!.body as { question: string };
+      turns = [...turns, { id, question, askedAt: '2026-10-22T12:00:00.000Z', answer: question === 'Why 3?' ? 'It was **off by one**.' : 'Because tests expect it.' }];
+      return route.fulfill({ json: { status: 'ready' } });
+    }
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  await seedPaneSize(page, 'agent-1');
+  await pushBytes(page, 'agent-1', 'Ready\n');
+  await page.getByRole('button', { name: /^Git status:/u }).click();
+  await page.getByRole('button', { name: 'View changes', exact: true }).click();
+  await expect(diffHeaders(page)).toHaveCount(1);
+
+  // the gutter "+" opens a question box under the picked line; Cancel drops it
+  await panel(page).getByText('const b = 3;').hover();
+  await panel(page).locator('[data-utility-button]').click();
+  const questions = panel(page).getByRole('region', { name: 'Questions for the agent' });
+  await expect(questions.getByLabel('Question for the agent')).toBeFocused();
+  await questions.getByRole('button', { name: 'Cancel' }).click();
+  await expect(questions).toHaveCount(0);
+  await panel(page).getByText('const b = 3;').hover();
+  await panel(page).locator('[data-utility-button]').click();
+  await questions.getByLabel('Question for the agent').fill('Why 3?');
+  await questions.getByRole('button', { name: 'Ask' }).click();
+  await expect.poll(() => asked).toEqual([{ query: '?kind=working', body: { lines: { changeId: 'src/app.ts', side: 'additions', startLine: 2, endLine: 2 }, question: 'Why 3?', fingerprint: comparison.fingerprint } }]);
+  await expect(questions.getByRole('status')).toContainText('The agent is answering');
+  await expect(questions.locator('.review-ask-answer')).toContainText('It was off by one.');
+  // the Code panel has no comments to copy an answer into
+  await expect(questions.getByRole('button', { name: 'Copy to comment' })).toHaveCount(0);
+  // a follow-up names its thread
+  await questions.getByLabel('Question for the agent').fill('And the tests?');
+  await questions.getByRole('button', { name: 'Ask' }).click();
+  await expect.poll(() => asked.at(-1)?.body).toEqual({ threadId: 'ask_d1', question: 'And the tests?', fingerprint: comparison.fingerprint });
+  await expect(questions.locator('.review-ask-answer')).toHaveCount(2);
+
+  // the thread is the server's, so a reload shows it again under its line
+  await page.reload();
+  await seedPaneSize(page, 'agent-1');
+  await expect(panel(page).getByRole('region', { name: 'Questions for the agent' }).locator('.review-ask-answer')).toHaveText(['It was off by one.', 'Because tests expect it.']);
+
+  // in the split layout, a removed line is asked about on the old side
+  await (await openCodeViewMenu(panel(page))).getByRole('group', { name: 'Diff layout' }).getByRole('button', { name: 'Split' }).click();
+  await panel(page).getByText('const b = 2;').hover();
+  await panel(page).locator('[data-utility-button]').click();
+  const draft = panel(page).getByPlaceholder('Ask about these lines');
+  await draft.fill('Why drop 2?');
+  await draft.press('Control+Enter');
+  await expect.poll(() => asked.at(-1)?.body).toEqual({ lines: { changeId: 'src/app.ts', side: 'deletions', startLine: 2, endLine: 2 }, question: 'Why drop 2?', fingerprint: comparison.fingerprint });
+});

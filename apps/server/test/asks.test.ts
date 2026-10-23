@@ -141,7 +141,7 @@ describe('Ask jobs', () => {
     const { runner, turns, closed } = controlledRunner();
     const jobs = new AskJobs(runner, store, () => []);
     const started = await jobs.ask('owner', target, ask());
-    await jobs.supersedeWorktree('cora');
+    await jobs.supersedeWorktree('cora', 'tour');
     expect(turns[0]!.signal.aborted).toBe(true);
     expect(jobs.get('owner', started.job.id)?.state).toEqual({ kind: 'gone', code: 'job_superseded' });
     expect(closed).toEqual(['cora']);

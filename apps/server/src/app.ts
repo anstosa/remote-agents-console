@@ -62,7 +62,8 @@ import { CodeReviewer } from './code-review/reviewer.js';
 import { CodeReviewJobs } from './code-review/jobs.js';
 import { parseCodeReviewAdd, parseReviewTourStart } from './code-review/contracts.js';
 import { AskJobs } from './asks/jobs.js';
-import { ASK_REQUEST_BODY_BYTES, parseAskRequest } from './asks/contracts.js';
+import { ASK_REQUEST_BODY_BYTES, parseAskRequest, parseChangeAskRequest } from './asks/contracts.js';
+import { ChangeAsks, ChangeAskStore } from './asks/changes.js';
 import { ReviewTourService } from './review-tour/service.js';
 import { parsePullRequestReviewInput, PR_REVIEW_REQUEST_BODY_BYTES, PullRequestReviewError, PullRequestReviewService } from './review-tour/pr-review.js';
 import { ReviewTourJobs, startedReviewJob } from './review-tour/jobs.js';
@@ -106,7 +107,7 @@ import { ConfiguredButtonCatalog } from './button-actions/catalog.js';
 import { ButtonActionError, ButtonActionService, buttonActionInputSchema } from './button-actions/service.js';
 import { HostCommandRunner } from './button-actions/host-command-runner.js';
 
-export type Dependencies = { buttonActions?: ButtonActionService; settings?: SettingsService; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider };
+export type Dependencies = { buttonActions?: ButtonActionService; settings?: SettingsService; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use.
 declare module 'fastify' {
@@ -127,8 +128,8 @@ const editorCommand = (editor: string, file?: string, line?: number): string => 
   return line === undefined ? `${editor} ${path}` : `${editor} +${line} ${path}`;
 };
 // the requested Comparison kind, or undefined when the body names neither Working nor All PR
-const comparisonScope = (request: FastifyRequest): ComparisonScope | undefined => {
-  const { kind, commit } = body(request);
+const comparisonScope = (request: FastifyRequest, from: Record<string, unknown> = body(request)): ComparisonScope | undefined => {
+  const { kind, commit } = from;
   if (kind === 'working' || kind === 'pr') return kind;
   return kind === 'commit' && typeof commit === 'string' ? { commit } : undefined;
 };
@@ -176,6 +177,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const codeReviewer = new CodeReviewer(reviewRunner, review);
   // questions about a stored tour's Findings, asked of the Code review's own conversation
   const asks = new AskJobs(reviewRunner, reviewStore, () => review.presets);
+  // questions about a Code panel's Comparison, asked of the tour guide or the scope's own diff conversation
+  const changeAskStore = deps.changeAskStore ?? new ChangeAskStore();
+  const changeAsks = new ChangeAsks(asks, changeAskStore, () => review.tour);
   // a review that lands replaces the one the Worktree's questions were asked of
   const codeReviews = new CodeReviewJobs(codeReviewer, reviewStore, async settled => { if (settled.state.kind === 'ready') void asks.supersedeWorktree(settled.worktreeId, 'reviewer'); await dashboardUpdates.refresh().catch(() => undefined); });
   const reviewJobs = new ReviewTourJobs(reviewTours, reviewStore, async review => {
@@ -2047,6 +2051,43 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (job.state.kind === 'gone') return reply.code(410).send({ status: 'error', jobId: job.id, error: { code: job.state.code, retryable: true } });
     return reply.code(reviewStatus(job.state.code)).send({ status: 'error', jobId: job.id, error: { code: job.state.code, retryable: job.state.retryable } });
   });
+  // The tour guide's conversation while the Worktree's stored tour covers a file of a Code panel scope:
+  // the same scope, a file among the tour's Changes, and a Comparison that still has the tour's fingerprint
+  const coveringGuide = async (worktreeId: string, branch: string, scope: ComparisonScope, file: string) => {
+    const tour = (await reviewStore.current(worktreeId, branch))?.tour;
+    const sameScope = typeof scope === 'object' ? tour?.scope === 'commit' && tour.commit === scope.commit : tour?.scope === scope;
+    if (tour?.guide === undefined || !sameScope || !tour.changes.some(change => change.file === file)) return undefined;
+    const agent = (await discovery.dashboard()).agents.find(candidate => candidate.worktreeId === worktreeId);
+    const current = agent === undefined ? undefined : await reviewTours.current(agent.id, { scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), includeTests: tour.includeTests, includeDocs: tour.includeDocs }).catch(() => undefined);
+    return current?.fingerprint === tour.fingerprint ? tour.guide : undefined;
+  };
+  // ask about lines of a Code panel's Comparison (the query's `kind`, and `commit`): a job polled to its answer
+  app.post('/api/worktrees/:id/comparison/asks', { bodyLimit: ASK_REQUEST_BODY_BYTES }, async (request, reply) => {
+    const owner = controlled(request, true).id;
+    const id = (request.params as { id: string }).id;
+    const worktree = configuredWorktree(id);
+    if (worktree === undefined) return await nonWorktreeReply(id, reply, { missing: { status: 'error', error: { code: 'target_unavailable', retryable: false } }, refused: { status: 'error', error: { code: 'target_unavailable', retryable: false } } });
+    const scope = comparisonScope(request, request.query as Record<string, unknown>);
+    const input = parseChangeAskRequest(request.body);
+    if (scope === undefined || input === undefined) return reply.code(400).send({ status: 'error', error: { code: 'invalid_request', retryable: false } });
+    const branch = await reviewBranch(id);
+    if (branch === undefined) return reply.code(404).send({ status: 'error', error: { code: 'target_unavailable', retryable: false } });
+    try {
+      const started = await changeAsks.ask(owner, { worktreeId: id, workspace: worktree.identity, branch, scope, branchNow: async () => await reviewBranch(id), patch: async () => { const result = await comparison.patch(worktree, scope); return result.ok ? result.patch : undefined; }, guide: async file => await coveringGuide(id, branch, scope, file) }, input);
+      return reply.code(202).send({ status: 'pending', job: started.job, threadId: started.threadId, target: started.target });
+    } catch (error) { return reviewFailure(reply, error); }
+  });
+  // a Code panel Comparison's Ask threads, and the owner's questions about it still being answered
+  app.get('/api/worktrees/:id/comparison/asks', async (request, reply) => {
+    const owner = controlled(request).id;
+    const id = (request.params as { id: string }).id;
+    if (configuredWorktree(id) === undefined) return await nonWorktreeReply(id, reply, { missing: { status: 'error', error: { code: 'target_unavailable', retryable: false } }, refused: { status: 'error', error: { code: 'target_unavailable', retryable: false } } });
+    const scope = comparisonScope(request, request.query as Record<string, unknown>);
+    if (scope === undefined) return reply.code(400).send({ status: 'error', error: { code: 'invalid_request', retryable: false } });
+    const branch = await reviewBranch(id);
+    const threads = branch === undefined ? [] : await changeAsks.threads({ worktreeId: id, branch, scope });
+    return reply.code(200).send({ status: 'ready', threads, pending: changeAsks.pending(owner, id, scope) });
+  });
   app.delete('/api/worktrees/:id/review-tour', async (request, reply) => {
     controlled(request, true);
     const id = (request.params as { id: string }).id;
@@ -2055,7 +2096,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await reviewStore.dismiss(id);
     // the dismissed tour's Code review and questions go with it
     codeReviews.supersedeWorktree(id);
-    void asks.supersedeWorktree(id);
+    void asks.supersedeWorktree(id, 'tour');
     await dashboardUpdates.refresh().catch(() => undefined);
     return reply.code(204).send();
   });
@@ -3190,10 +3231,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // Shared by Remove (one Worktree) and Prune (each orphaned record).
   const deleteWorktreeRecords = async (worktreeId: string): Promise<void> => {
     codeReviews.supersedeWorktree(worktreeId);
-    void asks.supersedeWorktree(worktreeId);
+    void asks.supersedeWorktree(worktreeId, 'all');
     await Promise.all([
       worktreeStore.delete(worktreeId).catch(() => {}),
-      reviewStore.invalidate(worktreeId).catch(() => {})
+      reviewStore.invalidate(worktreeId).catch(() => {}),
+      changeAskStore.forget(worktreeId).catch(() => {})
     ]);
   };
   // after a Prune, delete the console records whose path git now lists nowhere for this
@@ -3267,7 +3309,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (worktree.main) return reply.code(409).send({ error: 'the main worktree cannot be removed' });
     if (worktree.locked) return reply.code(409).send({ error: 'Locked worktrees cannot be removed' });
     // the Agents kept for an Ask's follow-ups go first, so they do not refuse the Remove
-    await asks.supersedeWorktree(worktree.id);
+    await asks.supersedeWorktree(worktree.id, 'all');
     const refusal = await worktreeRemovalRefusal(worktree);
     if (refusal !== undefined) return reply.code(409).send({ error: refusal });
     const facts = await worktreeManagement.removal(worktree);

@@ -61,13 +61,16 @@ export function AskThreadView({ role, thread, pending, failed, onAsk, onUseAnswe
   );
 }
 
+// what useLineAsks gives a diff renderer: the lines with a thread, picking lines, and each thread
+export type LineAsks = { lineAsks: ReviewDiffAsk[]; start: (lines: AskLines) => void; threadFor: (id: string) => ReactNode };
+
 // The Ask threads under lines of a diff rather than a Finding: lines just picked, which show a thread's
 // box until its first question starts it, then the threads stored, starting with a pending first
 // question, or left unstored by a failed first question (asked again as new lines). `role` asks the
 // picked lines, and `target` is what the endpoint is told it asks, when it asks more than one; only
 // threads of `targets` are line threads. Picked lines belong to the `scope` they were picked in, and
 // drop out of view when it changes. `onUseAnswer` copies an answer near its thread's anchor.
-export function useLineAsks(asks: AskThreads, { role, target, targets, enabled, scope, onUseAnswer, onOpenRun }: { role: AskRole; target?: 'guide'; targets?: readonly AskRole[]; enabled: boolean; scope: string; onUseAnswer?: (threadId: string, anchor: AskAnchor, answer: string) => void; onOpenRun?: (run: ReviewRunLink) => void }): { lineAsks: ReviewDiffAsk[]; start: (lines: AskLines) => void; threadFor: (id: string) => ReactNode } {
+export function useLineAsks(asks: AskThreads, { role, target, targets, enabled, scope, onUseAnswer, onOpenRun }: { role: AskRole; target?: 'guide'; targets?: readonly AskRole[]; enabled: boolean; scope: string; onUseAnswer?: (threadId: string, anchor: AskAnchor, answer: string) => void; onOpenRun?: (run: ReviewRunLink) => void }): LineAsks {
   const { threads, pending, failures, ask } = asks;
   const [picked, setPicked] = useState<Array<{ id: string; scope: string; lines: AskLines }>>([]);
   const drafts = picked.filter(draft => draft.scope === scope);

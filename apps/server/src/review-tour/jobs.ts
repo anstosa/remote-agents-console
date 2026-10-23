@@ -89,7 +89,7 @@ export class ReviewTourJobs {
     this.supersede(owner, prepared);
     // a new tour replaces the Worktree's Code review
     this.codeReviews?.supersedeWorktree(prepared.comparison.worktreeId);
-    void this.asks?.supersedeWorktree(prepared.comparison.worktreeId);
+    void this.asks?.supersedeWorktree(prepared.comparison.worktreeId, 'tour');
     // skip model generation for empty selections
     if (prepared.comparison.changes.length === 0) return { kind: 'empty', comparison: publicReviewComparison(prepared.comparison) };
     const id = randomBytes(18).toString('base64url');

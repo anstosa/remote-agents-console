@@ -19,6 +19,7 @@ import { QueuedPromptService } from '../src/prompts/queue.js';
 import { PromptHistoryService } from '../src/prompt-history/service.js';
 import { WorktreeNoteService } from '../src/notes/service.js';
 import { ReviewTourStore } from '../src/review-tour/store.js';
+import { ChangeAskStore } from '../src/asks/changes.js';
 import type { ReviewTour } from '../src/review-tour/contracts.js';
 import { PullRequestLookupError } from '../src/pull-requests/service.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from '../src/dashboard/updates.js';
@@ -1576,6 +1577,75 @@ describe('review tour capability', () => {
       expect(dashboard.json().reviewTour).toEqual({ available: false, reason: 'configuration_invalid', agent: 'codex', efforts: ['minimal', 'low', 'medium', 'high', 'xhigh'] });
     } finally { await capabilityApp.close(); if (saved !== undefined) process.env.RAC_CODEX_BIN = saved; }
   }, 15_000);
+});
+
+describe('Code panel Ask API', () => {
+  it('asks about a Code panel scope in its own diff session, or of the guide while the stored tour covers it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-change-ask-api-'));
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const worktree = { id: 'cora', projectId: 'cora', label: 'Cora', path: '/worktrees/cora', identity: '/worktrees/cora', available: true, pinned: false };
+    const routePatch = 'diff --git a/src/route.ts b/src/route.ts\n@@ -1 +1,2 @@\n-old\n+new\n+more\n';
+    const testPatch = 'diff --git a/src/route.test.ts b/src/route.test.ts\n@@ -1 +1,2 @@\n-old\n+new\n+more\n';
+    const patch = { base: 'HEAD', gitBase: 'abc123', fingerprint: 'panel-fingerprint-0001', truncated: false, files: [{ change: { path: 'src/route.ts', code: ' M', additions: 2, deletions: 1 }, kind: 'tracked', patch: routePatch, capped: false }, { change: { path: 'src/route.test.ts', code: ' M', additions: 2, deletions: 1 }, kind: 'tracked', patch: testPatch, capped: false }] };
+    const comparison = { patch: async () => ({ ok: true, kind: 'working', patch }) };
+    const session = '019a0000-1111-7222-8333-444455556666';
+    const guideConversation = '019a0000-2222-7222-8333-444455556666';
+    const runs: Array<{ request: { label: string; prompt: string; resume?: string }; resolve: (value: unknown) => void }> = [];
+    const reviewRunner = { capability: async () => ({ available: true }), run: async (request: { label: string; prompt: string; resume?: string }) => ({ value: await new Promise(resolve => { runs.push({ request, resolve }); }), conversation: request.resume ?? session }), closeWorktree: async () => undefined };
+    const review = resolveReviewConfig({ tour: { agent: 'codex' } }, { codex: {} });
+    // the stored tour covers All PR, whose Comparison it still matches
+    const change = { id: 'chg_route0001', file: 'src/route.ts', category: 'implementation' as const, kind: 'hunk' as const, oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, patch: '@@ -1 +1,2 @@\n-old\n+new\n+more' };
+    const tour: ReviewTour = { title: 'Route tour', overview: 'Follow the route.', steps: [{ id: 'route', title: 'Route', explanation: 'The route changes.', changeIds: [change.id] }], scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'review-fingerprint-1234', changes: [change], guide: { agent: 'codex', conversation: guideConversation } };
+    const reviewStore = new ReviewTourStore(join(directory, 'reviews.json'));
+    await reviewStore.save('cora', 'feature/review', tour);
+    // the tour's Comparison as captured again, which may have moved on since
+    let tourNow = tour.fingerprint;
+    const reviewTours = { capability: async () => ({ available: true, agent: 'codex', efforts: [] }), current: async () => ({ fingerprint: tourNow }) };
+    const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [{ id: 'agent-1', worktreeId: 'cora', branch: 'feature/review' }], projects: [{ id: 'cora', label: 'Cora', available: true, worktrees: [{ id: 'cora', projectId: 'cora', label: 'Cora', path: '/worktrees/cora', available: true, pinned: false, main: true, detached: false, locked: false, order: 0, branch: 'feature/review' }] }] }) };
+    const askApp = await buildApp({ ...config, review }, { auth: new AuthService(hash, Buffer.alloc(32, 23).toString('base64url')), discovery: discovery as never, comparison: comparison as never, reviewStore, changeAskStore: new ChangeAskStore(join(directory, 'change-asks.json')), reviewTours: reviewTours as never, reviewRunner: reviewRunner as never, push: { notify: async () => undefined } as never });
+    const until = async (check: () => Promise<boolean>) => { for (let index = 0; index < 100 && !await check(); index += 1) await new Promise(resolve => setTimeout(resolve, 10)); };
+    try {
+      const boot = await askApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
+      const login = await askApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
+      const headers = { host: 'agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0] };
+      const mutationHeaders = { ...headers, origin: 'https://agents.example.com', 'x-csrf-token': login.json().csrfToken, 'content-type': 'application/json' };
+      const lines = { changeId: 'src/route.ts', side: 'additions', startLine: 1, endLine: 2 };
+      const askAbout = async (kind: string, payload: object) => await askApp.inject({ method: 'POST', url: `/api/worktrees/cora/comparison/asks?kind=${kind}`, headers: mutationHeaders, payload: JSON.stringify(payload) });
+
+      expect((await askAbout('elsewhere', { lines, question: 'Why?', fingerprint: patch.fingerprint })).statusCode).toBe(400);
+      expect((await askAbout('working', { lines, question: 'Why?', fingerprint: 'panel-fingerprint-0002' })).json()).toEqual({ status: 'error', error: { code: 'stale_during_generation', retryable: true } });
+      // Working changes are not the tour's: the first question starts their diff session
+      const working = await askAbout('working', { lines, question: 'What changed?', fingerprint: patch.fingerprint });
+      expect(working.statusCode).toBe(202);
+      expect(runs[0]!.request).toMatchObject({ label: '💬 Ask · Working changes' });
+      expect(runs[0]!.request.resume).toBeUndefined();
+      expect((await askApp.inject({ method: 'GET', url: '/api/worktrees/cora/comparison/asks?kind=working', headers })).json()).toMatchObject({ status: 'ready', threads: [], pending: [{ threadId: working.json().threadId, target: 'diff', question: 'What changed?' }] });
+      runs[0]!.resolve('It adds **more**.');
+      await until(async () => (await askApp.inject({ method: 'GET', url: `/api/review-tour/asks/jobs/${working.json().job.id as string}`, headers })).statusCode === 200);
+      expect((await askApp.inject({ method: 'GET', url: '/api/worktrees/cora/comparison/asks?kind=working', headers })).json().threads).toMatchObject([{ id: working.json().threadId, target: 'diff', conversation: session, turns: [{ answer: 'It adds **more**.' }] }]);
+      // All PR is what the stored tour covers, so its questions go to the guide
+      const pr = await askAbout('pr', { lines, question: 'Why?', fingerprint: patch.fingerprint });
+      expect(pr.statusCode).toBe(202);
+      expect(runs[1]!.request).toMatchObject({ label: '💬 Ask · Tour guide', resume: guideConversation });
+      expect((await askApp.inject({ method: 'GET', url: '/api/worktrees/cora/comparison/asks?kind=pr', headers })).json().pending).toMatchObject([{ target: 'guide' }]);
+      expect((await askApp.inject({ method: 'GET', url: '/api/worktrees/cora/comparison/asks?kind=working', headers })).json().pending).toEqual([]);
+      // a file the tour left out (a test, here) is not the guide's, so it starts All PR's own conversation
+      const excluded = await askAbout('pr', { lines: { ...lines, changeId: 'src/route.test.ts' }, question: 'And the test?', fingerprint: patch.fingerprint });
+      expect(excluded.json()).toMatchObject({ status: 'pending', target: 'diff' });
+      expect(runs[2]!.request).toMatchObject({ label: '💬 Ask · All PR changes' });
+      expect(runs[2]!.request.resume).toBeUndefined();
+      runs[2]!.resolve('It tests more.');
+      await until(async () => (await askApp.inject({ method: 'GET', url: `/api/review-tour/asks/jobs/${excluded.json().job.id as string}`, headers })).statusCode === 200);
+      // once the changes move past the tour, its lines go to that conversation too
+      tourNow = 'review-fingerprint-moved';
+      const moved = await askAbout('pr', { lines, question: 'Still the guide?', fingerprint: patch.fingerprint });
+      expect(moved.json()).toMatchObject({ target: 'diff' });
+      expect(runs[3]!.request).toMatchObject({ label: '💬 Ask · All PR changes', resume: session });
+    } finally {
+      await askApp.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('code review API', () => {

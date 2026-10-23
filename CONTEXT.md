@@ -208,7 +208,7 @@ One turn sent to an agent in a Worktree, in a new Conversation or a resumed one,
 _Avoid_: Review job (a job is the server's tracking of one run's result)
 
 **Ask**:
-A question about a tour, sent as a Review run that resumes the Conversation of the run being asked: the reviewer's about one of its Findings, or the tour guide's (the agent that narrated the tour) about some of its diff lines. The questions about one Finding, or one set of picked lines, form an Ask thread, stored with the tour.
+A question about changed code, sent as a Review run that resumes the Conversation of the run being asked: the reviewer's about one of its Findings, or the tour guide's (the agent that narrated the tour) about some of its diff lines. In the Code panel it goes to the tour guide while the stored tour covers the panel's Comparison and the asked-about file, and otherwise to that Comparison's diff conversation, which its first question starts on the tour's agent. The questions about one Finding, or one set of picked lines, form an Ask thread, stored with the tour, or for the Code panel per Worktree and scope.
 _Avoid_: Chat (a Conversation is the agent's own transcript)
 
 **Pull request**:

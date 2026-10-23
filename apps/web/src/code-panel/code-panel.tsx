@@ -10,7 +10,7 @@ import { type MouseEvent as ReactMouseEvent, type CSSProperties, useCallback, us
 import { closeOnMiddleClick } from '../middle-click.js';
 import { FlyoutPortal } from '../flyout-portal.js';
 import { useViewportFlyout } from '../viewport-flyout.js';
-import type { CodeViewLineSelection } from '@pierre/diffs';
+import type { CodeViewLineSelection, DiffLineAnnotation, SelectedLineRange } from '@pierre/diffs';
 import { CodeView, type CodeViewHandle, type CodeViewItem, type CodeViewReactOptions, type FileDiffMetadata } from '@pierre/diffs/react';
 import { openSelectionContextMenu, preserveContextMenuPress, useSelectionActions, type SelectionActions, type SelectionContextMode } from '../selection-context-menu.js';
 import { useColorTheme } from '../color-theme.js';
@@ -19,11 +19,16 @@ import { useTerminalFontSize } from '../terminal-font-size.js';
 import { groupComparisonFiles, type CodePanelCommit, type CodePanelMode, type CodePanelState, type CodePanelView, type CodePanelViewMode, type ExpandedLines, type ScrollAnchor, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView } from './comparison.js';
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, isPlaceRelativePath, type EditorTarget } from './editor-jump.js';
-import { codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, loadedFilesFromContents, rememberExpandedLines } from './items.js';
+import { annotatedItem, codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, hunkLinesOnlyCSS, loadedFilesFromContents, rememberExpandedLines } from './items.js';
+import { orderedRange, patchRowIndex, patchRows } from './patch-rows.js';
+import { askLines } from '../asks.js';
+import type { LineAsks } from '../ask-thread.js';
 
-type PanelItem = CodeViewItem<undefined>;
-type PanelOptions = CodeViewReactOptions<undefined, undefined>;
-type PanelHandle = CodeViewHandle<undefined, undefined>;
+// an annotation is the Ask thread under some lines
+type PanelAnnotation = { askId: string } | undefined;
+type PanelItem = CodeViewItem<PanelAnnotation>;
+type PanelOptions = CodeViewReactOptions<PanelAnnotation, undefined>;
+type PanelHandle = CodeViewHandle<PanelAnnotation, undefined>;
 
 // Below this panel width the changed-file list is a slide-over drawer rather than a persistent left
 // rail, and the split layout is unavailable — one width rule (shared with the Review tour) covers both
@@ -72,6 +77,9 @@ export type CodePanelProps = {
   // back as the panel unmounts
   savedView?: CodePanelView;
   onSaveView?: (view: CodePanelView) => void;
+  // When given, the gutter "+" asks about the picked lines of a diff, and each Ask thread shows under
+  // the last of its lines while the file's patch still holds them.
+  ask?: LineAsks;
 };
 
 // Start (or reopen) the guided review of a Comparison; `unavailable` says why it cannot start.
@@ -164,7 +172,7 @@ function codeContextMenu(event: ReactMouseEvent<HTMLElement>, actions: Selection
   });
 }
 
-export default function CodePanel({ mode, commit, state, patch, selectedPath, filePreview, prAvailable, branch, review, loadFile, onSelectFile, onClearFile, onSetMode, loadCommits, onSelectCommit, onCloseFile, onClose, onRetry, onOpenInEditor, savedView, onSaveView }: CodePanelProps) {
+export default function CodePanel({ mode, commit, state, patch, selectedPath, filePreview, prAvailable, branch, review, loadFile, onSelectFile, onClearFile, onSetMode, loadCommits, onSelectCommit, onCloseFile, onClose, onRetry, onOpenInEditor, savedView, onSaveView, ask }: CodePanelProps) {
   const selectionActions = useSelectionActions();
   const theme = useColorTheme();
   const fontSize = useTerminalFontSize();
@@ -351,15 +359,24 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     return { items: nextItems, placeholders: nextPlaceholders, missing: false, overrideNeeds: needs };
   }, [patch, selectedPath, effectiveMode, plain, groups, supportingExpanded, loaded, fullOverrides]);
 
-  // only toggled files get new item versions; unchanged files retain their cache identity
+  // The asked-about lines, each under its last line while its file's patch holds it. `askKey` stands
+  // in for them, covering every field read, so a render that moves no thread re-lays out nothing.
+  const lineAsks = ask?.lineAsks ?? [];
+  const askKey = lineAsks.map(entry => `${entry.id}@${entry.changeId}:${entry.side}:${entry.endLine}`).join('|');
+  // only toggled or asked-about files get new item versions; unchanged files retain their cache identity
   const visibleItems = useMemo(() => items.map(item => {
     // plain files and untouched diffs keep their original instance
     if (item.type !== 'diff') return item;
-    const collapse = fileCollapse[item.id.slice(5)];
+    const path = item.id.slice(5);
+    const collapse = fileCollapse[path];
     // an untouched diff keeps its original instance too
-    if (collapse === undefined) return item;
-    return { ...item, collapsed: collapse.collapsed, version: (item.version ?? 0) + collapse.revision };
-  }), [items, fileCollapse]);
+    const shown = collapse === undefined ? item : { ...item, collapsed: collapse.collapsed, version: (item.version ?? 0) + collapse.revision };
+    const asked = lineAsks.filter(entry => entry.changeId === path);
+    const rows = asked.length === 0 ? [] : patchRows(patch?.files.find(file => file.change.path === path)?.patch ?? '');
+    return annotatedItem(shown, asked.filter(entry => patchRowIndex(rows, entry.side, entry.endLine) >= 0).map(entry => ({ key: entry.id, annotation: { side: entry.side, lineNumber: entry.endLine, metadata: { askId: entry.id } } as DiffLineAnnotation<PanelAnnotation> })));
+    // askKey stands in for lineAsks
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [items, fileCollapse, askKey, patch]);
   // the library keeps a collapsed item's header mounted, so this controls its body in place
   const toggleFileCollapse = useCallback((path: string) => {
     setFileCollapse(current => ({ ...current, [path]: { collapsed: !current[path]?.collapsed, revision: (current[path]?.revision ?? 0) + 1 } }));
@@ -393,8 +410,25 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overrideSignature, loadFile]);
 
+  // the gutter "+" picks lines of a diff to ask about; it is offered only inside the diff's hunks, the
+  // lines a question carries
+  const startAsk = ask?.start;
+  const asking = startAsk === undefined || effectiveMode === 'plain' ? {} : {
+    enableGutterUtility: true,
+    unsafeCSS: hunkLinesOnlyCSS,
+    onGutterUtilityClick: (range: SelectedLineRange, context: { item: { id: string } }) => {
+      const path = context.item.id.slice(5);
+      const file = context.item.id.startsWith('diff:') ? patchRef.current?.files.find(candidate => candidate.change.path === path) : undefined;
+      // a question carries its hunk, so a file whose patch was withheld (shown with Load anyway) has none to ask about
+      if (file === undefined || file.capped || file.patch === '') return;
+      startAsk(askLines({ changeId: path, ...orderedRange(range, file.patch) }));
+      // the library commits the picked range as the selection after this callback returns
+      window.setTimeout(() => setSelection(null), 0);
+    }
+  };
   const options = useMemo<PanelOptions>(() => ({
     ...codeViewBaseOptions(theme === 'latte' ? 'light' : 'dark', fontSize),
+    ...asking,
     overflow: wrapLines ? 'wrap' : 'scroll',
     diffStyle: effectiveSplit ? 'split' : 'unified',
     // Full context expands the unchanged lines, hydrating each partial patch through loadDiffFiles.
@@ -405,7 +439,9 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     expandUnchanged: effectiveMode === 'full',
     loadDiffFiles,
     onPostRender: rememberExpandedLines(expandedLines)
-  }), [theme, fontSize, wrapLines, effectiveSplit, effectiveMode, loadDiffFiles, expandedLines]);
+    // `asking` follows startAsk and effectiveMode
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [theme, fontSize, wrapLines, effectiveSplit, effectiveMode, loadDiffFiles, expandedLines, startAsk]);
 
   // The topmost item and how far into it we have scrolled: the last rendered item whose top has
   // passed the viewport top.
@@ -474,8 +510,9 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     setLoadStatus(current => { const next = { ...current }; delete next[path]; return next; });
   };
 
-  // The selected line range, which the file headers' editor buttons open at. The library owns the
-  // selection (clicking a line number selects it); the panel only listens.
+  // The selected line range, which the file headers' editor buttons open at (clicking a line number
+  // selects it). Held here so picking lines to ask about can clear it: while a range is selected the
+  // library pins the "+" to it.
   const [selection, setSelection] = useState<CodeViewLineSelection | null>(null);
   // Each file header's editor button opens the working tree's copy at the selected line when one is
   // selected in that file, else at its first change (a plain file at its top). A deleted file has
@@ -599,7 +636,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
               </ul>
             )}
             {/* add one disclosure control to each diff header */}
-            <CodeView ref={viewRef} className="code-pane-view" options={options} items={visibleItems} renderHeaderPrefix={item => item.type === 'diff' ? <button type="button" className="code-pane-file-collapse" aria-label={`${item.collapsed ? 'Expand' : 'Collapse'} ${item.fileDiff.name}`} aria-expanded={!item.collapsed} title={item.collapsed ? 'Expand file' : 'Collapse file'} onClick={() => toggleFileCollapse(item.id.slice(5))}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg></button> : null} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} onSelectedLinesChange={setSelection} disableWorkerPool />
+            <CodeView ref={viewRef} className="code-pane-view" options={options} items={visibleItems} renderHeaderPrefix={item => item.type === 'diff' ? <button type="button" className="code-pane-file-collapse" aria-label={`${item.collapsed ? 'Expand' : 'Collapse'} ${item.fileDiff.name}`} aria-expanded={!item.collapsed} title={item.collapsed ? 'Expand file' : 'Collapse file'} onClick={() => toggleFileCollapse(item.id.slice(5))}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg></button> : null} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} renderAnnotation={annotation => annotation.metadata === undefined ? null : ask?.threadFor(annotation.metadata.askId) ?? null} selectedLines={selection} onSelectedLinesChange={setSelection} disableWorkerPool />
           </>}
         </div>
         {narrow && drawerOpen && state === 'ready' && fileCount > 0 && (
