@@ -1,8 +1,9 @@
 import { createPortal } from 'react-dom';
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
 import { FlyoutPortal } from '../flyout-portal.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand, usePhoneLayout } from '../panel-header.js';
 import { useViewportFlyout } from '../viewport-flyout.js';
+import { OpenFolderContext } from '../open-folder.js';
 import type { FileSortColumn, FilesController } from './controller.js';
 import { formatFileSize, formatModifiedAt } from './format.js';
 import { FileIcon } from './file-icon.js';
@@ -146,6 +147,7 @@ function FavoriteMenuRow({ favorite, busy, onOpen, onAcknowledge }: { favorite: 
 // the full host files panel for one place
 export function FilesPanel({ controller, onOpenFile }: { controller: FilesController; onOpenFile: (entry: FileEntry) => void | Promise<void> }) {
   const phone = usePhoneLayout();
+  const openFolder = useContext(OpenFolderContext);
   const expanded = usePanelExpand('files')?.expanded === true;
   const [location, setLocation] = useState(controller.listing?.path ?? '');
   const [nameDialog, setNameDialog] = useState<NameDialog>();
@@ -473,6 +475,7 @@ export function FilesPanel({ controller, onOpenFile }: { controller: FilesContro
     const folder = one !== undefined && isDirectory(one) ? one : undefined;
     return <>
       {one !== undefined && (isDirectory(one) || isPreviewable(one)) && <MenuItem onSelect={() => activate(one)}>Open</MenuItem>}
+      {folder !== undefined && openFolder !== undefined && <MenuItem onSelect={() => { closeMenus(); openFolder(folder.hostPath); }}>Open as Workspace</MenuItem>}
       {folder !== undefined && <><MenuItem disabled={busy} onSelect={() => void openCreate('create-file', folder)}>New file here</MenuItem><MenuItem disabled={busy} onSelect={() => void openCreate('create-folder', folder)}>New folder here</MenuItem><MenuItem disabled={busy} onSelect={() => void openUpload(folder)}>Upload files here</MenuItem><MenuItem disabled={busy || controller.clipboard === undefined} onSelect={() => void paste(folder)}>Paste here</MenuItem><hr className="more-menu-divider" role="separator" /></>}
       {one !== undefined && <MenuItem disabled={busy} onSelect={() => openRename(one)}>Rename</MenuItem>}
       <MenuItem disabled={entries.length === 0 || busy} onSelect={() => { closeMenus(); controller.copyEntries(entries, 'copy'); }}>Copy</MenuItem>

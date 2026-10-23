@@ -57,6 +57,7 @@ import { SettingsHeaderActionsContext } from './settings/header-actions.js';
 import { isSettingsSnapshot, settingsResponseError } from './settings/contracts.js';
 import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
 import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, useSettingsRestartNoticeVisible } from './settings/runtime.js';
+import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, OpenFolderDialog, type FolderAction, type FolderOpened, type ListedFolder } from './open-folder.js';
 import './styles.css';
 
 // preserve both middle-click and context-menu presses
@@ -7084,7 +7085,7 @@ function MoreMenuIcon({ name }: { name: MoreMenuIconName }) {
 }
 
 // the glyphs on a launcher row's icon controls
-const launcherRowIcons = { pin: 'M9 4h6l-1 6 3 3v2H7v-2l3-3-1-6ZM12 15v5', rename: actionIconPaths.pencil, trash: actionIconPaths.trash, terminal: 'M4 5h16v14H4V5Zm3 4 3 3-3 3m5 0h4', editor: actionIconPaths.pencil, add: 'M12 5v14M5 12h14' };
+const launcherRowIcons = { pin: 'M9 4h6l-1 6 3 3v2H7v-2l3-3-1-6ZM12 15v5', rename: actionIconPaths.pencil, trash: actionIconPaths.trash, terminal: terminalIconPath, editor: actionIconPaths.pencil, add: 'M12 5v14M5 12h14' };
 // render launcher actions at the shared line-icon size and stroke
 const LauncherRowIcon = ({ name }: { name: keyof typeof launcherRowIcons }) => <svg className="launcher-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={launcherRowIcons[name]} /></svg>;
 
@@ -8093,7 +8094,7 @@ function TabKindStack({ entry }: { entry: DashboardItem }) {
   const shells = (entry.worktree?.consoleShells ?? entry.place?.consoleShells ?? 0) > 0;
   return <span className="tab-kind-stack" aria-hidden="true">{shells
     ? <span className="tab-place-mark shells" title="Terminals only"><LauncherRowIcon name="terminal" /></span>
-    : <span className="tab-place-mark empty" title="Empty workspace"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" strokeDasharray="3 3" /></svg></span>}</span>;
+    : <span className="tab-place-mark empty" title="Empty workspace"><EmptyWorkspaceIcon /></span>}</span>;
 }
 
 // The Agents outside `current` that wait on the operator: those with a question, and those with
@@ -8623,6 +8624,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const [removeWorktreeId, setRemoveWorktreeId] = useState<string>();
   const [renameWorktreeId, setRenameWorktreeId] = useState<string>();
   const [pruneProjectId, setPruneProjectId] = useState<string>();
+  // the Other locations modal, with the folder path it opened with
+  const [openFolderPath, setOpenFolderPath] = useState<string>();
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const [cleanupTargets, setCleanupTargets] = useState<CleanupTarget[]>([]);
   const [cleanupChecked, setCleanupChecked] = useState<Set<string>>(() => new Set());
@@ -9817,7 +9820,28 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   }} />;
   const pruneProject = pruneProjectId === undefined ? undefined : data.projects.find(project => project.id === pruneProjectId);
   const pruneDialog = pruneProject === undefined ? null : <PruneWorktreesDialog project={pruneProject} request={request} onClose={() => setPruneProjectId(undefined)} onPruned={() => void worktreesPruned()} />;
-  const worktreeManagementDialogs = <>{renameWorkspace !== undefined && <RenameWorkspaceDialog key={renameWorkspace.key} workspace={renameWorkspace} onClose={() => setRenameWorkspace(undefined)} />}{newWorktreeDialog}{removeWorktreeDialog}{renameWorktreeDialog}{pruneDialog}</>;
+  // open Other locations from the Scratch row or a Files panel folder
+  const showOpenFolder = (path?: string) => { closeLauncher(); setOpenFolderPath(path ?? ''); };
+  // a listed Place at exactly this folder lends its label and Launch profile to a recent entry
+  const listedFolder = (path: string): ListedFolder | undefined => {
+    const worktree = worktrees.find(candidate => candidate.path === path);
+    if (worktree !== undefined) return { label: worktree.label, resolution: worktree.launch };
+    const place = data.places?.find(candidate => candidate.home === path);
+    return place === undefined ? undefined : { label: place.label, resolution: place.launch };
+  };
+  // a folder just opened: close the modal and switch to its Place, the Agent or Terminal it started there
+  const folderOpened = async (opened: FolderOpened, action: FolderAction, label: string) => {
+    setOpenFolderPath(undefined);
+    await refresh();
+    if (opened.agentId !== undefined) setActivateAgentId(opened.agentId);
+    else if (action === 'empty') openEmptyWorkspace(opened.placeId);
+    else openPlace(opened.placeId);
+    if (opened.paneId !== undefined) requestTerminalFocus(opened.placeId, { paneId: opened.paneId, name: 'shell' });
+    if (opened.needsOperator !== undefined) showOperationFeedback({ tone: 'error', message: `${label} is waiting for you`, detail: opened.needsOperator, worktreeId: opened.placeId });
+    else if (action === 'agent') showOperationFeedback({ tone: 'success', message: `${label} is starting`, detail: 'The new session is ready and its output is connecting.', worktreeId: opened.placeId });
+  };
+  const openFolderDialog = openFolderPath === undefined ? null : <OpenFolderDialog initialPath={openFolderPath} request={request} placeFor={listedFolder} onClose={() => setOpenFolderPath(undefined)} onOpened={folderOpened} />;
+  const worktreeManagementDialogs = <>{renameWorkspace !== undefined && <RenameWorkspaceDialog key={renameWorkspace.key} workspace={renameWorkspace} onClose={() => setRenameWorkspace(undefined)} />}{newWorktreeDialog}{removeWorktreeDialog}{renameWorktreeDialog}{pruneDialog}{openFolderDialog}</>;
   // the reviewed branch's open or draft pull request, which an All PR tour can post its feedback to
   const reviewPullRequest = reviewLaunch === undefined ? undefined : [data.agents.find(candidate => candidate.id === reviewLaunch.agentId)?.pullRequest, worktrees.find(candidate => candidate.id === reviewLaunch.worktreeId)?.pullRequest].find(pullRequest => pullRequest !== undefined && pullRequest.status !== 'merged');
   const reviewPanel = reviewLaunch === undefined ? null : <ReviewTourPanel key={`${reviewLaunch.worktreeId}:${reviewInitialTour?.fingerprint ?? `start-${reviewStarts}`}`} launch={reviewLaunch} request={request} slot={reviewSlot} initialTour={reviewInitialTour} tourAgent={data.reviewTour?.agent} {...(reviewInitialTour === undefined ? {} : { initialCodeReview: reviewInitialCodeReview.review, initialCodeReviewJob: reviewInitialCodeReview.job })} codeReviewCapability={codeReviewCapability(data.codeReview)} pullRequest={reviewPullRequest} onMinimize={minimizeReview} onDismiss={dismissReview} onIndicatorChange={setReviewIndicator} onReady={notifyReviewReady} onOpenAgent={setActivateAgentId} onError={(message, detail) => showOperationFeedback({ tone: 'error', message, detail, worktreeId: reviewLaunch.worktreeId })} {...(data.editor === true ? { onOpenInEditor: (target: EditorTarget) => void openEditorAt(reviewLaunch.worktreeId, target) } : {})} />;
@@ -9829,7 +9853,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   // append workspace actions after each place's agent choices
   const placeEntries = (place: { id: string; label: string; consoleShells?: number } | undefined): LaunchMenuEntry[] => place === undefined ? [] : [
     { key: 'terminal', label: 'Terminal', detail: (place.consoleShells ?? 0) > 0 ? 'Focus its shell' : 'Open the Workspace with a new shell', icon: <LauncherRowIcon name="terminal" />, onSelect: () => void openTerminalAt(place.id, place.label) },
-    { key: 'empty', label: 'Empty workspace', detail: placeTabIndex(place.id) >= 0 ? 'Already open: focuses it' : 'No panels; add them from the toolbar', icon: <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" strokeDasharray="3 3" /></svg>, onSelect: () => openEmptyWorkspace(place.id) }
+    { key: 'empty', label: 'Empty workspace', detail: placeTabIndex(place.id) >= 0 ? 'Already open: focuses it' : 'No panels; add them from the toolbar', icon: <EmptyWorkspaceIcon />, onSelect: () => openEmptyWorkspace(place.id) }
   ];
   // a + row's control while an Agent runs at its Place: Open selects it, and a kind from the menu
   // launches another beside it through `endpoint`, held back as the toolbar's launch-another is
@@ -10027,12 +10051,12 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const keyboardOverlays = <><KeyboardLayer keys={data.keys} />{keyPicker !== undefined && <KeyPicker title={keyPicker === 'tree' ? 'Workspaces and panels' : 'Workspaces'} options={keyPickerOptions(keyPicker === 'tree')} onClose={() => setKeyPicker(undefined)} />}</>;
   const configuredButtonContext = { placeId: item?.placeId, projectId: activeProject?.id ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined), agentId: agent?.id, worktreeId: activeWorktreeId };
   // retain configured action state above every workspace-owned flyout and split
-  const withConfiguredButtons = (content: ReactNode) => <ConfiguredButtonsProvider catalog={data.buttons} serverStartedAt={data.serverStartedAt} context={configuredButtonContext} request={request} onFeedback={showOperationFeedback}>{content}</ConfiguredButtonsProvider>;
+  const withConfiguredButtons = (content: ReactNode) => <ConfiguredButtonsProvider catalog={data.buttons} serverStartedAt={data.serverStartedAt} context={configuredButtonContext} request={request} onFeedback={showOperationFeedback}><OpenFolderContext.Provider value={showOpenFolder}>{content}</OpenFolderContext.Provider></ConfiguredButtonsProvider>;
   // separate status text from each tab background and indicator
   const tabBar = <><nav className={`tabs${phone ? ' workspace-dropdown-row' : ''}`} ref={tabsRef} role="tablist" aria-label="Agents and worktrees"><TabRowLead />{phone ? <WorkspaceDropdown items={items} current={visibleActive} onSelect={index => select(index)} onNewWorkspace={() => setLauncherOpen(true)} onRenameWorktree={setRenameWorktreeId} renameDisabled={creatingAgent} onContextMenu={workspaceContextMenu} onTurnOff={entry => void turnOffWorkspace(entry)} /> : items.map((entry, index) => {
     const { transition, label, className, progress, busy } = tabStatus(entry);
     return <button key={entry.key} id={`tab-${index}`} role="tab" aria-selected={index === visibleActive} aria-controls={`panel-${index}`} tabIndex={index === visibleActive ? 0 : -1} className={`${index === visibleActive ? 'active ' : ''}${className}`} title={label} aria-label={`${entry.label} — ${label}`} aria-busy={busy || undefined} onPointerDownCapture={preserveWorkspacePress} onMouseDownCapture={preserveWorkspacePress} onContextMenu={event => workspaceContextMenu(event, entry)} onAuxClickCapture={event => closeOnMiddleClick(event, () => void turnOffWorkspace(entry))} onClick={() => select(index)}><ProgressRing busy={progress !== undefined} /><TabKindStack entry={entry} />{entry.worktree?.locked === true && <span className="tab-git-lock" aria-hidden="true" title="Git has locked this worktree">🔒</span>}{transition !== undefined ? <span className="tab-transition-label"><span>{entry.label}</span><small>{transition}…</small></span> : <span className="tab-label" aria-hidden="true">{entry.label}</span>}</button>;
-  })}<NotificationControl /><span className="launcher" ref={launcherRef}><button ref={plusRef} className={`new-agent-tab${progressBorder(creatingAgent, 'blue')}`} type="button" disabled={creatingAgent} aria-busy={creatingAgent || undefined} aria-label={creatingAgent ? 'Starting agent' : 'Launch agent'} data-context-flyout aria-expanded={launcherOpen} onClick={() => { /* toggle the launcher */ if (launcherOpen) closeLauncher(); else setLauncherOpen(true); }}><ProgressRing busy={creatingAgent} /><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button></span>{launcherOpen && <FlyoutPortal onDismiss={closeLauncher}><div className="launcher-menu more-menu flyout-menu" ref={launcherMenuRef} style={launcherStyle} role="group" aria-label="Agent launcher"><div className="launcher-row"><span className="launcher-row-label launcher-symbol-label"><LauncherLabelIcon /><span>Scratch</span></span>{launcherPlaceControls(scratchPlace)}{launcherPlaceSplit('~ Scratch', scratchPlace, data.scratchLaunch, '/api/agents/launch', choice => void createAgent(choice))}</div>{data.projects.filter(project => project.implicit !== true).map(launcherProject)}</div></FlyoutPortal>}{plusAlone && <span className="tab-spacer" aria-hidden="true" />}{clientSettings && <ClientSettingsTrigger />}</nav>{agent === undefined && item?.worktree === undefined && renderNotifications()}</>;
+  })}<NotificationControl /><span className="launcher" ref={launcherRef}><button ref={plusRef} className={`new-agent-tab${progressBorder(creatingAgent, 'blue')}`} type="button" disabled={creatingAgent} aria-busy={creatingAgent || undefined} aria-label={creatingAgent ? 'Starting agent' : 'Launch agent'} data-context-flyout aria-expanded={launcherOpen} onClick={() => { /* toggle the launcher */ if (launcherOpen) closeLauncher(); else setLauncherOpen(true); }}><ProgressRing busy={creatingAgent} /><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button></span>{launcherOpen && <FlyoutPortal onDismiss={closeLauncher}><div className="launcher-menu more-menu flyout-menu" ref={launcherMenuRef} style={launcherStyle} role="group" aria-label="Agent launcher"><div className="launcher-row"><span className="launcher-row-label launcher-symbol-label"><LauncherLabelIcon /><span>Scratch</span></span><button type="button" className="launcher-icon launcher-open-folder" aria-label="Other locations" title="Other locations" onClick={() => showOpenFolder()}><FolderIcon /></button>{launcherPlaceControls(scratchPlace)}{launcherPlaceSplit('~ Scratch', scratchPlace, data.scratchLaunch, '/api/agents/launch', choice => void createAgent(choice))}</div>{data.projects.filter(project => project.implicit !== true).map(launcherProject)}</div></FlyoutPortal>}{plusAlone && <span className="tab-spacer" aria-hidden="true" />}{clientSettings && <ClientSettingsTrigger />}</nav>{agent === undefined && item?.worktree === undefined && renderNotifications()}</>;
   const consoleClass = `console${davo.enabled && voiceOpen ? ' voice-visible' : ''}`;
   // preserve editor availability when no workspace can own a terminal yet
   if (items.length === 0) return withConfiguredButtons(<EditorConfiguredContext.Provider value={data.editor === true}><AdaptersContext.Provider value={data.adapters}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey="dashboard"><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<article className="agent-view cleanup-empty-view"><section className="log-shell"><div className="log inactive-log"><ResizableLogSplit withSettings empty={<div className="empty-workspace"><h2>No sessions</h2></div>} /></div></section>{tabBar}<WorkspaceToolbar cleanupControl={cleanupControl} />{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</article></main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></AdaptersContext.Provider></EditorConfiguredContext.Provider>);

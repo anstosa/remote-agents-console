@@ -47,7 +47,7 @@ A folder that belongs to no Project, seen as a Place. The console launches into 
 _Avoid_: Unconfigured worktree, scratch pane
 
 **Open folder**:
-Opening any folder on the host as a Workspace, with an Agent, a Terminal, or empty and Pinned. The folder opens as the Place a claim would give it, except that a folder that is no git checkout is a Scratch of its own even inside the configured Scratch folder. The console keeps the recent folders, newest first, so they can be opened again.
+Opening any folder on the host as a Workspace, with an Agent, a Terminal, or empty and Pinned. The folder opens as the Place a claim would give it, except that a folder that is no git checkout is a Scratch of its own even inside the configured Scratch folder. The console keeps the recent folders, newest first, so they can be opened again. Its modal is titled **Other locations**, reached from the Scratch row of the + flyout or a Files panel folder's **Open as Workspace**.
 _Avoid_: Open project, add folder
 
 **Place**:
