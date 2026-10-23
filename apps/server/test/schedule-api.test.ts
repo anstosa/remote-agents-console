@@ -24,6 +24,7 @@ const scratchAgent = stated({ id: 'agent-scratch', paneId: '%3', sessionId: 'soc
 const discoveryStub = () => ({
   invalidateWorktrees: () => {},
   worktreesNow: () => [worktree],
+  projectsNow: () => [],
   worktrees: async () => [worktree],
   place: async () => undefined,
   target: async (id: string) => id === scratchAgent.id ? { agent: scratchAgent, socket } : undefined,

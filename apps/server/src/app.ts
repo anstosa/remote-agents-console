@@ -1000,7 +1000,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (typeof raw.kind !== 'string' || !(agentKinds as readonly string[]).includes(raw.kind)) return 'unknown agent kind';
     const target = raw.target;
     if (!validScheduleTarget(target)) return 'invalid schedule target';
-    if ('worktreeId' in target && configuredWorktree(target.worktreeId) === undefined) return 'target worktree not found';
+    if ('worktreeId' in target) {
+      const worktree = configuredWorktree(target.worktreeId);
+      if (worktree === undefined) return 'target worktree not found';
+      // an implicit Project lasts only while something runs there or it is pinned (ADR 0014)
+      if (discovery.projectsNow().some(project => project.id === worktree.projectId && project.implicit === true)) return 'target worktree is not in a configured project';
+    }
     if ('projectId' in target) {
       const projectId = target.projectId;
       const project = config.projects.find(candidate => candidate.id === projectId);

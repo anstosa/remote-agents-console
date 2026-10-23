@@ -9742,6 +9742,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     // directory row, grouped by Project with the main worktree marked
     const targets: ScheduleTargetOption[] = [{ target: { scratch: true }, label: 'Scratch', available: true, kind: fallbackKind(data.scratchLaunch?.kind), origin: originFor(data.scratchLaunch) }];
     for (const project of data.projects) {
+      if (project.implicit === true) continue;
       if (project.mode === 'directory') {
         targets.push({ target: { projectId: project.id }, label: project.label, sublabel: 'directory', group: project.label, available: project.available, ...(project.available ? {} : { unavailableReason: project.unavailableReason ?? 'Project unavailable' }), kind: fallbackKind(project.launch?.kind), origin: originFor(project.launch) });
         continue;

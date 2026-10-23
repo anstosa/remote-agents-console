@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { implicitProject, validateConfig } from '../src/config/schema.js';
+import { derivedProjectId, implicitProject, validateConfig } from '../src/config/schema.js';
 import { DiscoveryService } from '../src/discovery/service.js';
 import { run } from '../src/tmux/command.js';
 import type { Pane } from '../src/domain/models.js';
@@ -39,6 +39,11 @@ function discovery(path: string, options: { mark?: string; projects?: Parameters
 }
 
 describe('a Project configured without an id', () => {
+  it('derives a fixed id from the repository identity alone, a bare repository included', () => {
+    expect(derivedProjectId('/code/ferry/.git')).toBe('ferry-167c8de4');
+    expect(derivedProjectId('/code/ferry.git')).toBe('ferry-d0e4e870');
+  });
+
   it('derives the id an implicit Project of the same repository carries, and is labelled by its folder', async () => {
     const { repo } = await gitRepo();
     const config = await validateConfig({ publicOrigin: 'https://agents.example.com', projects: [{ path: repo }] });
@@ -92,6 +97,54 @@ describe('implicit Projects', () => {
     expect(unpinned.projects).toEqual([]);
   });
 
+  it('resolves a pin on a Linked worktree to the same implicit Project as its Main worktree', async () => {
+    const { root, repo } = await gitRepo();
+    const linked = join(root, 'ferry-feature');
+    await git(repo, 'worktree', 'add', '-q', '-b', 'feature', linked);
+    const id = (await implicitProject(repo))!.id;
+
+    const dashboard = await discovery(repo, { panes: [], pins: { [`${id}:${linked}`]: true } }).service.dashboard();
+
+    expect(dashboard.projects).toEqual([expect.objectContaining({ id, worktrees: [expect.objectContaining({ id: `${id}:${repo}`, pinned: false }), expect.objectContaining({ id: `${id}:${linked}`, pinned: true })] })]);
+  });
+
+  it('ignores a mark whose id the repository does not derive', async () => {
+    const { repo } = await gitRepo();
+
+    const dashboard = await discovery(repo, { mark: `ferry:${repo}` }).service.dashboard();
+
+    expect(dashboard.projects).toEqual([]);
+  });
+
+  it('drops an implicit Project once nothing names it', async () => {
+    const { repo } = await gitRepo();
+    const id = (await implicitProject(repo))!.id;
+    const panes: Partial<Pane>[] = [{ paneId: '%1', sessionId: '$0', pid: 123, path: repo, title: 'Agent' }];
+    const { service } = discovery(repo, { mark: `${id}:${repo}`, panes });
+    expect((await service.dashboard()).projects.map(project => project.id)).toEqual([id]);
+
+    panes.length = 0;
+
+    expect((await service.dashboard(true)).projects).toEqual([]);
+  });
+
+  it('marks a Console shell in a new checkout of a configured repository with that Project', async () => {
+    const { root, repo } = await gitRepo();
+    const configured = (await validateConfig({ publicOrigin: 'https://agents.example.com', projects: [{ id: 'ferry', path: repo }] })).projects[0]!;
+    const panes: Partial<Pane>[] = [];
+    const tmux = paneLister(panes);
+    const service = new DiscoveryService(socketFinder(), tmux as never, processInspector({ codex: false }), noPullRequests as never, undefined, [configured], { pins: async () => ({}) } as never, undefined, '/nonexistent-scratch');
+    await service.dashboard();
+    const linked = join(root, 'ferry-feature');
+    await git(repo, 'worktree', 'add', '-q', '-b', 'feature', linked);
+    panes.push({ paneId: '%2', sessionId: '$1', pid: 124, path: linked, title: 'zsh', role: 'shell' });
+
+    const dashboard = await service.dashboard(false, true);
+
+    expect(tmux.marks.get('$1')).toBe(`ferry:${linked}`);
+    expect(dashboard.projects.flatMap(project => project.worktrees).map(worktree => worktree.id)).toContain(`ferry:${linked}`);
+  });
+
   it('defers to a configured Project of the same repository', async () => {
     const { repo } = await gitRepo();
     const configured = (await validateConfig({ publicOrigin: 'https://agents.example.com', projects: [{ id: 'ferry', path: repo }] })).projects[0]!;
@@ -123,6 +176,15 @@ describe('implicit Projects', () => {
     await service.dashboard();
 
     expect(tmux.marks.get('$0')).toBe(`${id}:${repo}`);
+  });
+
+  it('leaves a Scratch folder that is itself a repository as Scratch', async () => {
+    const { repo } = await gitRepo();
+    const { service, tmux } = discovery(repo, { scratchDirectory: repo });
+
+    await service.dashboard();
+
+    expect(tmux.marks.get('$0')).toBe(`scratch:${repo}`);
   });
 
   it('leaves a folder that is not a git checkout its own Scratch Place', async () => {

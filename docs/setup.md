@@ -497,7 +497,8 @@ Project** and the checkout gets a tab as one of its Worktrees, with the Code
 panel, review tour, conversations and branch flyout. An implicit Project has no
 stack commands, preview or Project buttons, and is not listed in the launcher.
 It lasts while a tmux session runs in one of its Worktrees or one of them is
-pinned; its Main worktree starts unpinned. To give it commands or a preview,
+pinned; its Main worktree starts unpinned. It cannot be a Schedule target and
+is left out of branch cleanup. To give it commands or a preview,
 add a `projects[]` entry with its `path` and no `id`: the derived id matches, so
 its notes and pins carry over. A session already marked as a Scratch Place keeps
 that mark. See ADR 0014.

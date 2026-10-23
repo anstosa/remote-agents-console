@@ -256,8 +256,8 @@ export class WorktreeManagementService {
     // share one request budget across projects using the same GitHub credentials
     for (const project of this.projects()) {
       const availability = worktreeManagementAvailability(project);
-      // skip unmanaged repositories
-      if (!availability.available) continue;
+      // skip unmanaged repositories, and implicit ones the operator never opted into (ADR 0014)
+      if (!availability.available || project.implicit === true) continue;
       const defaultBranch = await this.defaultBranch(project.path);
       // require one protected merge target
       if (defaultBranch === undefined) continue;

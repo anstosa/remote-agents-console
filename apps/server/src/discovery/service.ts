@@ -237,7 +237,7 @@ export class DiscoveryService {
   // Project has, whose path is a git checkout deriving that same id, and whose repository no
   // configured Project manages. Rebuilt on every Worktree scan, so a Project that no session mark
   // or pin names any more drops out, taking its Worktrees with it.
-  private async resolveImplicitProjects(placeIds: Iterable<string>): Promise<void> {
+  private async resolveImplicitProjects(placeIds: Iterable<string>): Promise<readonly Project[] | undefined> {
     const configuredIds = new Set(this.configuredProjects.map(project => project.id));
     const configuredIdentities = new Set(this.configuredProjects.filter(project => project.available).map(project => project.identity));
     const found = new Map<string, Project>();
@@ -248,7 +248,7 @@ export class DiscoveryService {
       const project = await implicitProject(path);
       if (project?.id === id && !configuredIdentities.has(project.identity)) found.set(id, project);
     }
-    this.projectList = found.size === 0 ? undefined : [...this.configuredProjects, ...found.values()];
+    return found.size === 0 ? undefined : [...this.configuredProjects, ...found.values()];
   }
   // reuse socket discovery across adjacent requests
   private async sockets(force = false): Promise<SocketRef[]> {
@@ -492,13 +492,14 @@ export class DiscoveryService {
     // so a scan that started under the old pins can never satisfy it
     if (!force && this.worktreesRefreshInFlight !== undefined && this.worktreesInFlightEpoch === this.worktreesEpoch) return this.worktreesRefreshInFlight;
     const epoch = this.worktreesEpoch;
-    const refresh = this.discoverWorktrees().then(({ worktrees, stale, pins }) => {
+    const refresh = this.discoverWorktrees().then(({ worktrees, stale, pins, projects }) => {
       // publish only when this is still the newest scan and no invalidation raced it, so a
       // stale scan's completion never re-stamps the cache over a fresher pin/worktree set
       if (this.worktreesRefreshInFlight === refresh && this.worktreesEpoch === epoch) {
         this.worktreeSnapshot = worktrees;
         this.staleSnapshot = stale;
         this.pinSnapshot = pins;
+        this.projectList = projects;
         this.worktreesRefreshedAt = Date.now();
       }
       return worktrees;
@@ -531,15 +532,15 @@ export class DiscoveryService {
     this.pullRequests.invalidateRepositories();
   }
 
-  private async discoverWorktrees(): Promise<{ worktrees: Worktree[]; stale: Map<string, string[]>; pins: Record<string, boolean> }> {
+  private async discoverWorktrees(): Promise<{ worktrees: Worktree[]; stale: Map<string, string[]>; pins: Record<string, boolean>; projects: readonly Project[] | undefined }> {
     const pins = (await this.pinStore?.pins()) ?? {};
     const labels = (await this.pinStore?.labels?.()) ?? {};
     // every stored key, so a worktree key git lists nowhere counts as an orphaned record
     const storeKeys = (await this.pinStore?.keys?.()) ?? [];
-    await this.resolveImplicitProjects([...this.sessionMarks.values(), ...Object.keys(pins).filter(id => pins[id] === true)]);
+    const projects = await this.resolveImplicitProjects([...this.sessionMarks.values(), ...Object.keys(pins).filter(id => pins[id] === true)]);
     const worktrees: Worktree[] = [];
     const stale = new Map<string, string[]>();
-    for (const project of this.projectsNow()) {
+    for (const project of projects ?? this.configuredProjects) {
       if (!project.available) continue;
       const entries = await this.listWorktreesImpl(project.path);
       if (entries === undefined) continue;
@@ -596,7 +597,7 @@ export class DiscoveryService {
       });
       worktrees.push(...usable);
     }
-    return { worktrees, stale, pins };
+    return { worktrees, stale, pins, projects };
   }
 
   // build or reuse one dashboard view; freshAgents bypasses pane snapshots only

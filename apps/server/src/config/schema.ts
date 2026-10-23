@@ -249,17 +249,20 @@ function resolveWorktreesDirectory(configured: string | undefined, mainWorktree:
   const anchor = mainWorktree ?? identity;
   return resolve(dirname(anchor), `${basename(anchor)}-worktrees`);
 }
-// The id of a Project configured without one, and of an implicit Project: a slug of the folder's
-// basename and 8 hex of the identity's hash. Both derive it the same way, so a config entry with
-// no `id` added later for an implicit Project's repository keeps the id its Notes, pins and
-// launch profile are keyed by.
-export function derivedProjectId(identity: string, folder: string): string {
-  const slug = basename(folder).replace(/\.git$/, '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'project';
-  return `${slug}-${createHash('sha256').update(identity).digest('hex').slice(0, 8)}`;
-}
-// a folder's name as a label, without a bare repository's `.git` suffix
-function folderLabel(folder: string): string {
+// The name a Project with no `id` or `label` goes by, read from its identity alone so adding or
+// removing a checkout never changes it: `<repo>/.git` → `repo`, a bare `repo.git` → `repo`, a
+// directory → its own name
+function identityName(identity: string): string {
+  const folder = basename(identity) === '.git' ? dirname(identity) : identity;
   return basename(folder).replace(/\.git$/, '') || folder;
+}
+// The id of a Project configured without one, and of an implicit Project: a slug of its name and
+// 8 hex of its identity's hash. Both derive it the same way, so a config entry with no `id` added
+// later for an implicit Project's repository keeps the id its Notes, pins and launch profile are
+// keyed by.
+export function derivedProjectId(identity: string): string {
+  const slug = identityName(identity).replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'project';
+  return `${slug}-${createHash('sha256').update(identity).digest('hex').slice(0, 8)}`;
 }
 // resolve one configured Project. A git checkout canonicalises to its common git
 // directory identity and resolves a Worktrees directory (`repository` mode). A path that
@@ -301,13 +304,13 @@ async function resolveProject(raw: ParsedProject): Promise<Project | undefined> 
   // a real directory that is not a git checkout is an available `directory` Project: an
   // agent launches directly in it (no Worktrees), so its identity is just its own path
   if (identity === undefined) {
-    return { id: raw.id ?? derivedProjectId(canonical, canonical), label: raw.label ?? raw.id ?? folderLabel(canonical), path: canonical, identity: canonical, mode: 'directory', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, undefined, canonical), ...optional };
+    return { id: raw.id ?? derivedProjectId(canonical), label: raw.label ?? raw.id ?? identityName(canonical), path: canonical, identity: canonical, mode: 'directory', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, undefined, canonical), ...optional };
   }
   // git lists the Main worktree first; a bare repository has none
   const entries = await listWorktrees(canonical);
   const mainEntry = entries?.find(entry => !entry.bare);
   const mainWorktree = mainEntry === undefined ? undefined : await realpath(mainEntry.path).catch(() => mainEntry.path);
-  return { id: raw.id ?? derivedProjectId(identity, mainWorktree ?? identity), label: raw.label ?? raw.id ?? folderLabel(mainWorktree ?? identity), path: canonical, identity, mode: 'repository', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, mainWorktree, identity), ...optional };
+  return { id: raw.id ?? derivedProjectId(identity), label: raw.label ?? raw.id ?? identityName(identity), path: canonical, identity, mode: 'repository', available: true, worktreesDirectory: resolveWorktreesDirectory(raw.worktreesDirectory, mainWorktree, identity), ...optional };
 }
 // The implicit Project of an unconfigured git checkout: the Project a config entry naming only
 // its path would load, marked implicit. Undefined when the folder is gone or not a git checkout.

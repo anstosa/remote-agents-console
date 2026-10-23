@@ -3,7 +3,6 @@ import { applyAuthoredProjectPatch } from '../src/settings/project-normalization
 
 describe('authored Project patch normalization', () => {
   // retain real scalar values and unknown fields in a whole authored row
-  // a blank id is omitted, so the Project derives one (ADR 0014)
   it('preserves false, zero, unknown values, and required blanks', () => {
     const value = applyAuthoredProjectPatch({}, {
       op: 'set',
@@ -11,7 +10,7 @@ describe('authored Project patch normalization', () => {
       value: [{ id: '', path: '', port: 0, customFlag: false, customCount: 0, label: '' }]
     });
 
-    expect(value).toEqual({ projects: [{ path: '', port: 0, customFlag: false, customCount: 0 }] });
+    expect(value).toEqual({ projects: [{ id: '', path: '', port: 0, customFlag: false, customCount: 0 }] });
   });
 
   // prune only semantically empty optional containers from authored values
