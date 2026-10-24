@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="apps/web/public/favicon.svg" width="72" alt="Remote Agent Console icon">
-</p>
-
 <h1 align="center">Remote Agent Console</h1>
+
+<img width="1731" height="909" alt="image" src="https://github.com/user-attachments/assets/9689c21d-56a0-4998-8182-6c42d6bd2232" />
 
 <p align="center">
   <strong>A terminal-native control plane for human-supervised AI software engineering</strong>
@@ -39,10 +37,6 @@ execution effects explicit, bounded, and attributable**. The project applies tha
 principle from byte-level terminal transport to AI-output validation, authorization,
 and deployment recovery. Its intended operating environment is one trusted
 operator managing their own engineering infrastructure—not a multi-tenant service.
-
-![Remote Agent Console with agent output, an interactive terminal, Markdown notes, and an embedded project preview](docs/images/console-workspace.png)
-
-*Agent, terminal, notes, and project-preview panels in a single workspace.*
 
 ## 1. Problem statement and design constraints
 
