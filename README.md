@@ -1,33 +1,23 @@
-<h1 align="center">Remote Agent Console</h1>
+# Remote Agent Console
+
+**A terminal-native control plane for human-supervised AI software engineering**
 
 <img width="1731" height="909" alt="image" src="https://github.com/user-attachments/assets/9689c21d-56a0-4998-8182-6c42d6bd2232" />
 
-<p align="center">
-  <strong>A terminal-native control plane for human-supervised AI software engineering</strong>
-</p>
+**Technical white paper · Ansel Santosa**
 
-<p align="center">
-  Technical white paper · TypeScript · React · Fastify · tmux · MCP
-</p>
-
-<p align="center">
-  <a href="USAGE.md">Installation &amp; usage</a> ·
-  <a href="docs/adr">Architecture decisions</a> ·
-  <a href="SECURITY.md">Security model</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a>
-</p>
+[Usage guide](USAGE.md) · [Architecture](#2-system-architecture) · [Verification](#9-verification-strategy) · [Development](USAGE.md#development)
 
 ## At a glance
 
-**Product:** A self-hosted browser control plane for supervising concurrent AI coding agents, their terminals, worktrees, prompt queues, and reviews.
+| | |
+| --- | --- |
+| **Product** | A self-hosted browser control plane for supervising concurrent AI coding agents, terminals, worktrees, queues, and reviews. |
+| **Engineering challenge** | Preserve execution identity, intent, and user control across long-lived terminal processes and unreliable AI responses. |
+| **Technical scope** | TypeScript, React, Fastify, tmux, Git worktrees, MCP, and durable orchestration. |
+| **Design principle** | Keep model reasoning replaceable while making execution effects bounded, explicit, and attributable. |
 
-**Engineering problem:** Maintain agent identity and reliable execution boundaries through browser disconnects, long-lived terminals, and imperfect model output while retaining human control.
-
-**Technical scope:** TypeScript, React, Fastify, tmux, Git worktrees, MCP, and durable orchestration.
-
-**Read more:** [Architecture](#2-system-architecture) · [Terminal integration](#4-the-terminal-data-plane) · [Durable orchestration](#5-durable-intent-across-an-unreliable-terminal-boundary) · [Security](#7-security-and-operational-safety).
-
-The white paper below examines design decisions, failure modes, security boundaries, and intentional limitations. [Usage instructions](USAGE.md) are maintained separately.
+The sections below document design decisions, implementation evidence, and known limitations.
 
 ## Abstract
 
@@ -364,7 +354,7 @@ supervision surface. The project treats AI fluency as an engineering discipline�
 understanding where models add leverage and building explicit systems around the
 places where they cannot provide guarantees.
 
-## Further reading
+## Resources
 
 - [Installation, configuration, controls, and development](USAGE.md)
 - [Architecture decision records](docs/adr)
