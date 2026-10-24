@@ -5,383 +5,365 @@
 <h1 align="center">Remote Agent Console</h1>
 
 <p align="center">
-  A self-hosted browser console for running Codex and OMX sessions across tmux worktrees.
+  <strong>A terminal-native control plane for human-supervised AI software engineering</strong>
 </p>
 
 <p align="center">
-  <strong>Live output</strong> · <strong>Persistent prompt queues</strong> · <strong>Worktree context</strong> · <strong>Desktop and mobile</strong>
+  Technical white paper · TypeScript · React · Fastify · tmux · MCP
 </p>
 
-![Remote Agent Console showing live agent output, worktree tabs, Git status, pull request state, notes, and prompt controls](docs/images/console-overview.png)
+<p align="center">
+  <a href="USAGE.md">Installation &amp; usage</a> ·
+  <a href="docs/adr">Architecture decisions</a> ·
+  <a href="SECURITY.md">Security model</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-Remote Agent Console turns the Codex sessions already running in tmux into one
-focused, authenticated workspace. Watch several agents, move between
-worktrees, queue follow-up prompts, retain project notes, and inspect branch or
-pull-request state without losing the terminal-native workflow underneath.
+## Abstract
 
-> [!IMPORTANT]
-> This is a **single trusted operator** console. It can send input to terminals
-> and execute worktree commands as the host account. Bind it to loopback and
-> publish it only through an authenticated HTTPS proxy or tunnel.
+AI coding agents can generate changes, execute tools, and reason over large
+repositories, but concurrent agents introduce an orchestration problem that a chat
+interface alone does not solve. An operator must know which process owns a task,
+which checkout it can affect, whether it is working or awaiting input, and whether
+a queued instruction actually reached the intended agent.
 
-## Highlights
+Remote Agent Console addresses this problem with a self-hosted, full-stack control
+plane over terminal-native coding agents. It unifies live terminals, Git worktrees,
+durable prompt queues, code review, project previews, and conversational control
+without replacing the underlying CLI workflows. Codex, OMX, and Claude Code are
+implemented through a capability-oriented adapter boundary; browser, MCP, and
+Realtime voice interfaces reuse server-owned orchestration and policy.
 
-| Area | Capabilities |
+The central design principle is to **keep model reasoning replaceable while making
+execution effects explicit, bounded, and attributable**. The project applies that
+principle from byte-level terminal transport to AI-output validation, authorization,
+and deployment recovery. Its intended operating environment is one trusted
+operator managing their own engineering infrastructure—not a multi-tenant service.
+
+![Remote Agent Console with agent output, an interactive terminal, Markdown notes, and an embedded project preview](docs/images/console-workspace.png)
+
+*Agent, terminal, notes, and project-preview panels in a single workspace.*
+
+## 1. Problem statement and design constraints
+
+The difficult part of supervising several coding agents is not starting more
+processes. It is preserving identity, intent, and context as those processes and
+their working directories change independently of the browser.
+
+| Constraint | Engineering consequence |
 | --- | --- |
-| **Agent overview** | Discover Codex/OMX descendants in tmux, see working/ready/action-required state, unread activity, and launch configured or scratch agents. |
-| **Live output** | Stream the active pane, page through history, open detected links, copy selected output, answer guided questions, and temporarily switch to an interactive terminal. |
-| **Prompt workflow** | Use per-agent prompt history, arrow-key recall, saved drafts, attachments, skill/slash-command autocomplete, press-and-hold voice dictation, and persistent queued prompt management. |
-| **Worktree context** | Show branch and full Git status, changed filenames, pull-request checks and review issues, GitHub Actions, project links, and trusted stack commands. |
-| **Conversations and notes** | Name, list and resume each agent's own Conversations from the console, and keep autosaved Markdown notes with reusable file attachments beside output. Both are shared automatically across a Project's worktrees. A note's **Show in all workspaces** option also makes it available in other Projects and Scratch. |
-| **Guided review** | Generate an AI-narrated tour of active Working or All PR implementation changes, visit or skip each logical step, and send consolidated feedback to the agent. |
-| **Operations** | Install as a browser app, enable notifications, review stale runtime cleanup targets, and deploy with Docker Compose plus an optional Cloudflare Tunnel. |
-| **Files** | Browse the ordinary host account's filesystem from any Place, open files in the configured editor or browser Code fallback, manage files with explicit delete/conflict confirmation, download files or ZIPs, and save favorites per exact Place. |
-| **Conversational control** | Connect ChatGPT through scoped remote MCP or use the built-in OpenAI Realtime voice dialog to inspect and direct the same agents. |
+| Agents already run in terminals | Integrate with tmux and the CLI's own conversations rather than inventing a replacement runtime. |
+| Several agents can share a checkout | Bind prompts and history to the exact agent, not merely the worktree. |
+| Browsers disconnect; processes continue | Separate execution lifetime from presentation lifetime and support reconnect and recovery. |
+| Terminal output and AI replies are untrusted inputs | Bound parsers and buffers; validate structured results before publication. |
+| Browser actions can exercise host-account privileges | Revalidate identity and authority immediately before side effects. |
+| A single operator maintains the installation | Prefer inspectable local state and portable deployment over distributed infrastructure. |
 
-### Review implementation changes
+These constraints favor a focused developer-infrastructure system: a durable
+execution substrate, explicit domain identities, a responsive supervision surface,
+and deterministic boundaries around probabilistic AI components.
 
-Open the branch-status flyout, choose **Working** or **All PR**, then select
-**Review**. The console captures a fresh Git snapshot and generates a narrated
-tour that explains how related implementation changes fit together. Tests and
-documentation are excluded by default and can be included with the tour
-toggles, which regenerates the snapshot.
-
-The tour is explanatory rather than an automated code review: it does not
-produce findings, verdicts, or patches. Visit or skip every logical step, add
-feedback where useful, then optionally send one editable consolidated change
-request to the active agent. Generation runs as a bounded, cancellable job and
-the tour requires regeneration if the underlying changes move.
-
-### Manage follow-up prompts
-
-Prompts submitted while an agent is busy are stored per worktree. The clock
-attached to **Queue** opens an oldest-first list where prompts can be reordered,
-edited, or cancelled before they are dispatched.
-
-![Queued prompt management flyout with reorder, edit, and cancel controls](docs/images/queued-prompts.png)
-
-### Keep context beside the output
-
-Notes are persistent, autosaved, and rendered as Markdown. On wider screens
-they share the output area; on narrow screens the layout adapts vertically.
-
-![Live agent output beside a Markdown worktree note](docs/images/worktree-notes.png)
-
-### Clipboard access in project previews
-
-Managed project previews forward `navigator.clipboard.readText()`, `writeText()`,
-`read()`, and `write()` through the console, like location and notifications.
-The prompt identifies the requesting origin and separates clipboard reading
-from writing. Choose **Allow once**, **allow always**, or **deny**; **Reset preview
-permissions** removes the origin's saved approvals. Other previews and standalone
-pages retain their native clipboard APIs.
-
-Browser permission, focus, and activation requirements still apply. A saved
-approval can require another consent click when activation has expired, and
-native denials are returned without retrying. Reset or navigation suppresses late
-results but cannot undo a native write already started. Rich reads use the browser's
-default sanitization and return a snapshot; read options are not supported.
-Transfers are limited to 1,048,576 text characters, four items, eight formats per
-item, and 4 MiB of rich data. Native format and multi-item support still depend
-on the browser and operating system. See the [Clipboard API security
-requirements](https://developer.mozilla.org/en-US/docs/Web/API/Clipboard_API#security_considerations).
-
-### Browse and manage files
-
-Open **Files** from the desktop Workspace toolbar or the mobile three-dot menu.
-It starts at the selected Place's host folder and can navigate outside it.
-Click a filename to open it in the configured editor, or in Code when no editor
-is configured or an editor terminal cannot be opened. This also works outside
-the worktree. Click the rest of its row to select it. Ctrl/Command toggles
-selection and Shift selects a range; mobile row taps toggle multiple entries.
-Rows include owner, permissions, modification time, and readable size. Sort any
-metadata column; Name starts ascending with
-directories first. The titlebar path field follows navigation and accepts an
-absolute path with Enter.
-
-The upper-right controls contain Parent, New, Upload, and Favorites. Row
-three-dot menus act only on that row. Right-click a selected row to act on the
-selection, an unselected row to act on that item, or unused space to act on the
-current directory. These menus provide rename, copy/cut/paste, and file or ZIP
-downloads. Deletes are permanent and require confirmation; collisions require
-**Replace**, **Skip**, or **Keep both**. Favorites persist on the server for
-each exact Place, independently of other worktrees in its Project. Docker's
-full-host Files access requires the private host-user broker described in the
-[Docker guide](docs/docker.md#full-host-files-access).
-
-Listings show up to 10,000 entries. Recursive operations and downloads are
-bounded to 10,000 objects and 1 GiB; uploads allow up to 100 files, 1 GiB per
-file and 2 GiB per batch. Code previews read up to 5 MiB. Operations report
-explicit limit errors and identify any partially completed work.
-
-<details>
-<summary><strong>Mobile layout</strong></summary>
-
-![Remote Agent Console mobile layout](docs/images/mobile-console.png)
-
-</details>
-
-## How it works
+## 2. System architecture
 
 ```mermaid
-flowchart LR
-    B[Authenticated browser] <-- HTTPS / WebSocket --> S[Remote Agent Console]
-    S <-- tmux socket --> T[Host tmux server]
-    T --> A1[Codex / OMX agent]
-    T --> A2[Codex / OMX agent]
-    S --> G[Git + GitHub CLI]
-    S --> D[(Local JSON state)]
+flowchart TB
+    Web[React browser console]
+    MCP[Remote MCP client]
+    Voice[Browser voice UI]
+    Realtime[OpenAI Realtime API - external]
+
+    Web <-->|HTTPS and WebSocket| API[Fastify API and browser authorization]
+    MCP --> Gateway[Scoped MCP gateway]
+    Voice <-->|Audio and events| Realtime
+    Realtime -->|Remote tools| Gateway
+    API -->|Short-lived credential| Voice
+    Gateway --> Core[Typed orchestration services]
+    API --> Core
+
+    Core --> Adapters[Agent capability adapters]
+    Core <--> Runtime[tmux and process boundary]
+    Adapters -.->|Describe| Runtime
+    Runtime <--> Agents[Codex / OMX / Claude Code]
+    Core --> Git[Git and GitHub CLI]
+    Core --> State[(Private local state)]
+    Core --> Review[Adapter-configured review runners]
+    Adapters -.->|Describe| Review
+    Review -->|Interactive| Runtime
+    Review -->|Headless| Child[Read-only Codex / Claude processes]
 ```
 
-The server discovers tmux panes, verifies that their process trees belong to
-Codex/OMX, and streams each pane's raw output to the browser over one tmux
-control-mode client per session (see `docs/adr/0008`). Prompts and terminal input
-are sent only to the pane selected through a freshly validated agent target.
-Persistent state—console-named conversations, notes, prompt history, queues,
-device names, and optional push subscriptions—stays in local JSON files.
+The server owns discovery, target resolution, prompt delivery, persistence, and
+integrations. The React client owns presentation and interaction, including xterm
+rendering, responsive panels, selection, reconnect behavior, and permission UI.
+Agent adapters describe CLI-specific behavior; a shared runtime layer performs
+terminal and process effects.
 
-Each agent CLI the console understands is described by one **Adapter**: a module
-that says how to recognise its processes, read its state, compose a launch,
-submit a prompt, and find its conversations, while the console performs every
-side effect through its single tmux and `/proc` layer. Each agent CLI is
-configured once under [`adapters`](docs/setup.md#adapters); the console composes
-each launch as `[program, …adapter.launch(input).args, …operator args]` with the
-operator's environment and runs it through the operator's interactive shell. An
-entry may also carry `setup`/`teardown` lifecycle commands, run before each
-launch (aborting it on failure) and best-effort after each console-driven
-stop, plus `updates` commands that move version checks and explicit upgrades
-into Global settings. See
-[ADR 0002](docs/adr/0002-adapters-describe-the-console-acts.md) for why adapters
-describe and the console acts; the [`docs/adr/`](docs/adr) directory records the
-other architecture decisions.
+The domain model deliberately distinguishes objects that have different lifetimes:
 
-## Requirements
-
-- Linux with `/proc`
-- Node.js 22+ and pnpm
-- tmux
-- An installed and authenticated Codex CLI
-- A C/C++ build toolchain for the native `argon2` dependency when running outside Docker
-- An HTTPS reverse proxy or tunnel for access beyond the local machine
-
-Docker Compose is the recommended deployment because it packages Node, Codex,
-tmux, and the native build/runtime dependencies. It starts in an isolated
-scratch-only mode; connecting to a host tmux server and adding a public tunnel
-are separate opt-in steps.
-
-## Quick start
-
-### 1. Install and create configuration
-
-```bash
-git clone https://github.com/anstosa/remoteagents.git
-cd remoteagents
-pnpm install
-
-cp .env.example .env
-cp config/remote-agent-console.example.json ~/remote-agent-console.json
-```
-
-Generate the two required secrets:
-
-```bash
-node -e "require('argon2').hash('choose-a-long-password',{type:require('argon2').argon2id}).then(console.log)"
-node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
-```
-
-Set `RAC_PASSWORD_HASH`, `RAC_SESSION_SECRET`, and `RAC_CONFIG` in `.env`, then
-validate the scratch-only starter configuration:
-
-```bash
-pnpm config:check ~/remote-agent-console.json
-```
-
-### 2. Run directly
-
-```bash
-pnpm build
-pnpm start
-```
-
-Open `http://127.0.0.1:8787`. Loopback HTTP is accepted only for local use;
-every non-loopback deployment still requires canonical HTTPS.
-
-### Or run with Docker Compose
-
-Copy the scratch-only configuration into the ignored Compose location, then
-start the console:
-
-```bash
-cp config/remote-agent-console.example.json config/remote-agent-console.docker.json
-pnpm config:check --compose config/remote-agent-console.docker.json
-docker compose up -d --build
-docker compose ps
-```
-
-The default stack runs only the console and manages its own container-local
-tmux sessions. Enable the optional Cloudflare sidecar with
-`docker compose --profile tunnel up -d --build`.
-
-After startup, use **Global settings → Add account** to connect one or more
-ChatGPT accounts through device-code login and select the active Codex login.
-Failed account queries offer **Re-login** without changing the active account.
-Use **Rename** beside any saved account or API key to change its display name
-without switching credentials. API-key rows show spending for today and this
-week when optional [OpenAI billing access](docs/accounts.md#api-key-spending) is
-configured; missing billing data is shown as unavailable, never as zero.
-
-Connecting Docker to existing host tmux sessions requires host-specific bind
-mounts, worktree paths, and runtime settings. Follow the
-[Docker Compose guide](docs/docker.md) for that optional bridge and for tunnel
-setup. Keep host values in ignored `.env`, `compose.override.yaml`, and
-`config/` files.
-
-### Or run with systemd
-
-To run directly as the host user, use the portable user-unit installer in the
-[systemd deployment guide](docs/systemd.md). Native execution connects to the
-user's tmux socket and Codex configuration without Docker bind mounts.
-
-## Configuration
-
-The `projects` array may be empty or omitted for scratch-only use. Each Project
-is a git repository with a stable ID, canonical path, and label; its Worktrees
-are discovered from `git worktree list`. Optional fields expose project links,
-stack actions, new-task flows, and customized prompt actions, plus a
-`commands.setup` that prepares each freshly created Worktree (for example
-`pnpm install`) before its agent launches. Agents launch by
-Adapter kind — `codex`, `omx`, `claude`, and later `pi` and `opencode` —
-configured once under `adapters`; Codex and OMX are separate kinds, so a
-deployment can run plain Codex in some worktrees and OMX in others.
-
-```json
-{
-  "listen": { "host": "127.0.0.1", "port": 8787 },
-  "name": "My server",
-  "publicOrigin": "https://agents.example.com",
-  "remoteServers": [
-    { "url": "https://other-agents.example.com" }
-  ],
-  "adapters": {
-    "codex": {
-      "program": "/usr/local/bin/codex",
-      "args": ["-c", "check_for_update_on_startup=false"],
-      "updates": {
-        "current": "/usr/local/bin/codex --version | awk '{print $2}'",
-        "latest": "npm view @openai/codex version",
-        "run": "/usr/local/bin/codex update"
-      }
-    },
-    "omx": {
-      "program": "/absolute/path/to/omx",
-      "args": ["-c", "check_for_update_on_startup=false"],
-      "env": { "OMX_AUTO_UPDATE": "0" },
-      "updates": {
-        "current": "/absolute/path/to/omx version | sed -n '1s/^oh-my-codex v//p'",
-        "latest": "npm view oh-my-codex version",
-        "run": "/absolute/path/to/omx update --stable"
-      }
-    }
-  },
-  "projects": [
-    {
-      "id": "my-project",
-      "label": "My project",
-      "path": "/absolute/path/to/project",
-      "newTask": "detach && new {taskId}",
-      "push": { "label": "Finish and PR", "prompt": "$finish" }
-    }
-  ]
-}
-```
-
-`name` identifies the current Remote Agents server. Remote entries require their
-canonical URL and may include optional local `name` and `icon` overrides. Without
-an override, each server's identity comes from its authenticated peer-status API.
-In Application settings, leave Name blank or select **Server Default** for Icon
-to remove the corresponding override; the controls remain visible and show the
-published defaults. Save changes persists these choices to config, and a RAC
-restart applies them to navigation. Overrides affect only this console's display
-of the remote, never the remote server's own published identity.
-
-Only the terminal icon is bundled. Custom `heart` and `potato` SVGs are
-server-local files named `heart.svg` and `potato.svg` in an `instance-icons/`
-directory beside the file selected by `RAC_CONFIG`. The favicon and server menu
-load those files at request time; a missing file uses the terminal icon instead.
-Keep custom artwork out of Git and provision it separately on each host. The
-Compose checkout's `config/instance-icons/` directory is ignored by Git and
-excluded from the build context; its runtime bind mount makes the files available
-without baking them into the image.
-
-Upgrading from an older `worktrees[]` configuration is automatic: start the
-console once and it migrates the config and its `.data` stores to Projects,
-leaving `*.pre-projects.bak` backups. Preview the plan with
-`pnpm config:check "$RAC_CONFIG"`, or migrate a read-only config in place with
-`pnpm config:migrate "$RAC_CONFIG"`. See
-[Migrating from `worktrees[]`](docs/setup.md#migrating-from-worktrees).
-
-See [the setup reference](docs/setup.md) for the full security boundary,
-Projects and Worktrees, browser capabilities, and operational checks.
-
-## Everyday controls
-
-| Control | Action |
+| Entity | Identity and responsibility |
 | --- | --- |
-| `Enter` | Queue the current prompt |
-| `Shift+Enter` / `Ctrl+Enter` / `⌘+Enter` | Insert a newline |
-| `↑` / `↓` | Recall older/newer prompt history when the cursor is on the first line |
-| `Ctrl+S` / `⌘+S` | Save the current prompt as a draft |
-| `Tab` | Insert a tab in the prompt; in terminal mode, send Tab to the pane |
-| `$` or `/` | Open skill or slash-command completion |
-| `Ctrl+C` with selected output | Copy the selection; without a selection in terminal mode, interrupt the process |
+| **Project** | Operator-configured repository or directory with trusted commands and settings. |
+| **Worktree** | Git-discovered checkout; repository identity is resolved through its common Git directory. |
+| **Place** | A worktree, directory project, or scratch folder that anchors navigation. |
+| **Workspace** | The panels at a Place, with pane membership anchored by a marked tmux session. |
+| **Agent** | A live, recognized process tree in a specific tmux pane. |
+| **Conversation** | The agent CLI's resumable transcript, independent of the live pane. |
 
-## Development
+This separation prevents a renamed branch, a shell's `cd`, or a replaced process
+from silently becoming a different authorization or delivery target. Worktrees
+come from Git rather than duplicated configuration, while workspace membership
+comes from tmux session metadata rather than repeatedly inferred working
+directories. [ADR 0003](docs/adr/0003-worktrees-are-discovered-and-state-is-keyed-by-path.md)
+and [ADR 0009](docs/adr/0009-a-workspace-is-its-tmux-session.md) record the identity
+model and its evolution.
 
-```bash
-pnpm install
-pnpm dev
+## 3. Runtime integration without duplicated effects
 
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
-```
+### 3.1 Adapters describe; the console acts
 
-Browser behavior is covered with Playwright specs under `apps/web/e2e`.
-README screenshots are deterministic and use synthetic data:
+An adapter recognizes a CLI's processes, composes launch arguments, prepares
+prompt submission, interprets attention state, and exposes supported conversation
+or review operations. It does not independently implement tmux input, socket
+selection, or process discovery.
 
-```bash
-pnpm --filter @rac/web screenshots:readme
-```
+Capabilities are derived from implemented interfaces rather than optimistic flags.
+The browser can distinguish an agent that supports inline questions or conversation
+naming from one that does not. The registry is a closed, type-checked set—not an
+unrestricted runtime plugin loader—and shared fixture tests exercise real process
+identities, prompts, and terminal captures.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before changing discovery, authentication,
-tmux input, or worktree command boundaries.
+The payoff is a single place to enforce target validation, input ordering, and
+bracketed-paste behavior as agent support expands. Filesystem-dependent readers
+remain behind injectable roots so their parsing can be tested independently of a
+live operator environment. See the [adapter contract](apps/server/src/adapters/types.ts),
+[registered implementations](apps/server/src/adapters/registry.ts), and
+[ADR 0002](docs/adr/0002-adapters-describe-the-console-acts.md).
 
-## Repository layout
+### 3.2 Reported state before heuristics
 
-```text
-apps/server/   Fastify API, tmux discovery/input, persistence, and integrations
-apps/web/      React/Vite browser UI and Playwright coverage
-config/        Example application and Cloudflare Tunnel configuration
-docs/          Deployment guides and README screenshots
-compose.yaml   Local production stack
-```
+An agent's attention state is not assumed to be a reliable property of its screen
+title. Where lifecycle hooks are available, the agent reports state through tmux
+pane options. That report is valid only while the reporting agent remains alive;
+inline-question detection and adapter-specific title inference provide fallback
+signals.
 
-## Documentation
+This preserves compatibility with hand-started CLIs while making uncertainty
+explicit. An adapter without a reliable title signal does not invent one.
+[ADR 0001](docs/adr/0001-agent-state-via-tmux-pane-options.md) explains why the
+reporting channel uses tmux metadata instead of introducing a credentialed hook
+endpoint or another state-file convention.
 
-- [Setup, configuration, and browser capabilities](docs/setup.md)
-- [Docker Compose deployment](docs/docker.md)
-- [systemd deployment](docs/systemd.md)
-- [Using an existing Cloudflare Tunnel](docs/cloudflare-tunnel.md)
-- [ChatGPT, MCP, Realtime voice, and federation](docs/integrations.md)
-- [Security policy and deployment expectations](SECURITY.md)
-- [Contributing and validation](CONTRIBUTING.md)
+## 4. The terminal data plane
 
-## Scope
+The live view is a streaming transport, not a repeated screenshot of terminal text.
+One lazily created tmux control-mode client serves the viewers of a session and is
+released when no viewers remain. Raw pane bytes travel to xterm over binary
+WebSocket frames; typed JSON frames carry sizing, metadata, acknowledgments, and
+recovery events.
 
-Remote Agent Console is intentionally not a general-purpose web terminal or a
-multi-user collaboration service. It is a focused remote control surface for
-one operator's Codex/OMX worktrees. Authentication, strict Host/Origin checks,
-short-lived WebSocket tickets, bounded caches, and target revalidation reduce
-risk, but the console still inherits the privileges of the host account that
-runs it.
+Several details make this more than a WebSocket wrapper:
+
+- **Byte fidelity.** Control-protocol octal escapes are decoded before UTF-8
+  interpretation, preserving output split across transport chunks.
+- **Ordered initialization.** A captured seed establishes terminal state before
+  subsequent live bytes are applied; reconnects rebuild the view rather than
+  appending to an unknown screen.
+- **Backpressure recovery.** A slow viewer acknowledges consumed bytes. When it
+  falls behind, the server drops output for that viewer and later reseeds instead
+  of indefinitely buffering or pausing the shared tmux pipe.
+- **Viewport arbitration.** Browser size claims yield to smaller attached terminals;
+  the UI conforms to the actual size tmux grants.
+- **Bounded failure.** Command correlation, reply caps, timeouts, and connection
+  teardown turn a stalled control client into a reconnect rather than a permanent
+  frozen view.
+- **Browser-side terminal policy.** Escape sequences that could generate implicit
+  input replies or excessive parser work are intercepted. Rendering raw program
+  output is not treated as permission to trust its control sequences.
+
+The implementation spans the [tmux control client](apps/server/src/tmux/control.ts),
+[protocol parser](apps/server/src/tmux/control-protocol.ts),
+[browser wire contract](apps/web/src/pane-stream.ts), and
+[xterm safety layer](apps/web/src/pane-safety.ts).
+[ADR 0008](docs/adr/0008-pane-output-streams-over-one-control-mode-client-per-session.md)
+records the trade study and incremental migration from capture polling to streaming.
+Dashboard discovery remains a separate observation path; display caches do not
+replace fresh lifecycle checks.
+
+## 5. Durable intent across an unreliable terminal boundary
+
+Sending a prompt to a TUI is not equivalent to completing an HTTP transaction.
+A successful paste can leave text in the composer without submitting it; a pane
+can be replaced between discovery and input; an idle sibling can be mistaken for
+the intended agent. Remote Agent Console treats delivery as a staged workflow
+rather than assuming that sending keystrokes proves acceptance.
+
+The prompt service persists queued intent, serializes mutations, revalidates the
+socket/pane/process target, and uses adapter-specific composer observations and
+transcript receipts where available. Completion is correlated with a pre-submit
+baseline instead of accepting any recently visible assistant response. Recovery
+clears drafts only when the console can establish ownership.
+
+Queue and history ownership is **per agent**, including when multiple agents share
+a worktree. A managed restart hands state to the replacement agent. If an agent
+disappears beyond a discovery grace period, undelivered prompts are preserved as
+operator-visible Notes rather than offered to an arbitrary sibling. Queue, history,
+and note stores use bounded records, private file permissions, and atomic file
+replacement.
+
+This is recoverable local coordination, not a claim of distributed exactly-once
+execution. The important contract is that uncertainty is handled explicitly and
+undelivered intent has a recovery path. The [prompt service](apps/server/src/prompts/service.ts)
+and [ADR 0012](docs/adr/0012-queued-prompts-and-history-belong-to-the-agent.md) describe
+the delivery and ownership boundaries.
+
+## 6. AI as a constrained systems component
+
+### 6.1 Code understanding with deterministic acceptance criteria
+
+The review subsystem separates two jobs: a **Review tour** explains related changes;
+an optional **Code review** proposes findings for human triage. Neither is treated
+as an authoritative correctness verdict.
+
+The server captures a bounded Git comparison, assigns content-derived change
+identifiers, and owns the response schema and semantic rules. A tour must account
+for the expected changes rather than silently omitting inconvenient files. Tour
+output is parsed and validated, then checked against fresh worktree identity and a
+comparison fingerprint before publication. Code review findings can finish against
+the stored comparison after the worktree changes; content-derived IDs constrain
+their anchors, and the tour's stale state signals when regeneration is needed.
+
+Configured Codex or Claude runs can execute headlessly or in visible terminal panes.
+Review conversations are retained so questions can resume the original reviewer's
+context. Turns on the same conversation are serialized, read-only restrictions
+are reapplied on resume, and pending work and retained threads are bounded.
+
+The engineering boundary is deliberate: prompts guide the model; schemas,
+capability restrictions, freshness checks, and human triage govern what the
+application accepts. See the [review contracts](apps/server/src/review-tour/contracts.ts),
+[review service](apps/server/src/review-tour/service.ts), and
+[resumable-run decision](docs/adr/0013-review-runs-are-resumable-and-ask-follows-the-run-mode.md).
+
+### 6.2 One orchestration core, multiple AI interfaces
+
+Remote MCP and Realtime voice expose the same typed orchestration operations
+instead of introducing separate execution backends. The shared gateway validates
+tool arguments, exact scopes, deployment feature gates, mutation authorization,
+and idempotency request IDs, and produces redacted audit records. Integrations are
+optional and disabled by default; they do not expose an arbitrary shell or raw
+terminal-input tool.
+
+Voice clients receive short-lived Realtime credentials rather than the server's
+standard API key. Voice audio and session events flow to OpenAI's Realtime service,
+which invokes the console's MCP endpoint. Mutations additionally depend on an
+active browser voice-control gate. Cross-instance requests use signed, timestamped
+delegation; the originating OAuth bearer is not forwarded, and the destination
+rechecks its own policy.
+Interrupted mutation effects are recorded as unknown outcomes rather than blindly
+replayed.
+
+The [orchestration contracts](apps/server/src/orchestration/contracts.ts),
+[MCP gateway](apps/server/src/integrations/mcp/gateway.ts), and
+[integration reference](docs/integrations.md) show how conversational interfaces
+reuse—not bypass—the application's authority boundaries.
+
+## 7. Security and operational safety
+
+The threat model starts with an explicit limitation: a controlled console can act
+with the Unix account's privileges. Authentication does not turn that account into
+a sandbox or make the service suitable for untrusted tenants.
+
+Within the single-operator boundary, defenses are layered:
+
+| Boundary | Implemented controls |
+| --- | --- |
+| Browser admission | Argon2id password verification, signed HttpOnly sessions, rate limiting, canonical Host checks, and HTTPS deployment expectations. |
+| Browser mutations | Canonical Origin and CSRF validation plus an explicit single-controller lease. |
+| WebSocket admission | Short-lived, single-use tickets bound to the session, capability kind, and target. |
+| Agent prompt and lifecycle effects | Fresh target resolution, mutation serialization, and rejection of replaced or drifted identities. |
+| MCP and Realtime tools | Scoped typed operations, deployment gates, redaction, idempotency, and auditing. |
+| Resource consumption | Bounded request bodies, frames, retained state, file operations, and model-run output. |
+
+Operational safety extends to configuration changes. The settings apply/recovery
+path checks the source/runtime baseline, publishes files atomically, and requires
+a newly booted healthy listener. An independent watchdog provides a recovery path
+when a restart fails. This matters particularly for a remote administration tool:
+a configuration UI must not assume that the process applying its settings will
+survive to repair them.
+
+The [security policy](SECURITY.md), [authorization code](apps/server/src/auth), and
+[settings recovery implementation](scripts/settings) document these boundaries.
+
+## 8. Full-stack product and deployment engineering
+
+The browser is a supervision workspace rather than a terminal embedded in a page.
+It brings agent output, notes, code comparisons, project previews, files, stack
+processes, and GitHub state into a shared context. Desktop panels and mobile
+navigation serve the same workflows, including prompt queues, attachments,
+structured questions, voice, and resumable review threads.
+
+The technical work crosses the UI/API boundary: terminal selection and touch
+scrolling, keyboard routing, stale async-result handling, reconnection, file
+operation limits, permission mediation for managed previews, and server-persisted
+state. These concerns are implemented in React/TypeScript over a Fastify server
+with runtime-validated contracts, not delegated to an agent framework.
+
+Deployment supports native execution, systemd, and Docker Compose. The default
+Compose topology is scratch-only; host tmux access and an external tunnel are
+explicit additions. Installation-specific paths, mounts, origins, and credentials
+stay outside tracked configuration. Local JSON persistence keeps the deployment
+inspectable without requiring a database or message broker; it is not intended to
+provide multi-writer coordination or high availability.
+
+Installation and operating procedures live in **[USAGE.md](USAGE.md)**.
+
+## 9. Verification strategy
+
+The repository tests boundaries at several levels rather than relying solely on
+mocked happy paths:
+
+| Layer | Representative evidence |
+| --- | --- |
+| Agent contracts | [Adapter fixtures and contract tests](apps/server/test/adapters) for process recognition, state, questions, and conversations. |
+| Authorization | [Authentication](apps/server/test/auth.test.ts), [bounded authorization state](apps/server/test/bounds.test.ts), and [integration policy](apps/server/test/integration-policy.test.ts) tests. |
+| Terminal transport | [Control-protocol tests](apps/server/test/control-protocol.test.ts) and [real tmux/WebSocket tests](apps/server/test/pane-socket-tmux.test.ts). |
+| Prompt recovery | [Submission recovery](apps/server/test/prompt-submit-recovery.test.ts) and [queue behavior](apps/server/test/queued-prompts.test.ts) tests. |
+| AI result handling | [Review generation](apps/server/test/review-tour-generator.test.ts) and [review-run](apps/server/test/review-runs.test.ts) tests. |
+| Rendered UX | Playwright specs for [streamed terminals](apps/web/e2e/streamed-terminal.spec.ts), [mobile layouts](apps/web/e2e/responsive-layout.spec.ts), and [prompt queues](apps/web/e2e/queued-prompts.spec.ts). |
+| Operations | [Deployment portability](apps/server/test/portable-deployment.test.ts) and [settings/recovery tests](scripts/settings). |
+
+Type checking and builds cover both applications. Server tests use Vitest; browser
+behavior uses Playwright, including scripted transport fixtures and real rendered
+xterm interactions. These are inspectable verification assets, not a claim of
+exhaustive coverage, independently audited security, or measured production-scale
+throughput. Validation commands are in [USAGE.md](USAGE.md#development).
+
+## 10. Tradeoffs and limits
+
+- **Linux and tmux are intentional dependencies.** They preserve existing agent
+  workflows and execution lifetime at the cost of platform portability.
+- **CLI compatibility remains a maintenance surface.** Hooks and native transcripts
+  improve observation, but TUI parsing and process inspection can still degrade
+  when upstream agents change or the host restricts `/proc` access.
+- **Local persistence favors operational simplicity.** Atomic replacement does not
+  make several files a distributed transaction or enable horizontal scaling.
+- **Single-operator control is not tenant isolation.** Multiple devices do not imply
+  multiple mutually untrusted users.
+- **AI assistance is not a verification oracle.** Read-only review runs, validated
+  structure, and fresh comparisons constrain behavior; they do not prove that an
+  explanation is correct or that a patch is safe to merge.
+
+The architectural contribution is the integration: terminal execution, durable
+intent, identity-aware authorization, bounded AI workflows, and a usable full-stack
+supervision surface. The project treats AI fluency as an engineering discipline—
+understanding where models add leverage and building explicit systems around the
+places where they cannot provide guarantees.
+
+## Further reading
+
+- [Installation, configuration, controls, and development](USAGE.md)
+- [Architecture decision records](docs/adr)
+- [Domain vocabulary](CONTEXT.md)
+- [Setup and capability reference](docs/setup.md)
+- [MCP, Realtime voice, and federation](docs/integrations.md)
+- [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
