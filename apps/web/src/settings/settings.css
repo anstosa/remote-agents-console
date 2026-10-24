@@ -336,6 +336,8 @@ button.settings-installation-file-link:disabled { background: transparent; color
 .settings-restart-notice { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .65rem; min-width: 0; border: 1px solid color-mix(in srgb, var(--yellow) 62%, var(--surface-1)); border-radius: var(--control-radius); padding: .58rem .7rem; background: color-mix(in srgb, var(--mantle) 92%, var(--yellow)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent); }
 .settings-restart-notice.failed { border-color: color-mix(in srgb, var(--red) 68%, var(--surface-1)); background: color-mix(in srgb, var(--mantle) 90%, var(--red)); }
 .settings-restart-icon { display: grid; width: 1.4rem; height: 1.4rem; place-items: center; border: 1px solid currentColor; border-radius: 50%; color: var(--yellow); font: 900 .78rem var(--font-mono); }
+/* center the restart mark independently of font metrics */
+.settings-restart-icon > svg { display: block; width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .settings-restart-notice.failed .settings-restart-icon { color: var(--red); }
 .settings-restart-copy { display: grid; min-width: 0; gap: .14rem; }
 .settings-restart-copy strong { color: var(--text); font: 800 .73rem var(--font-mono); }

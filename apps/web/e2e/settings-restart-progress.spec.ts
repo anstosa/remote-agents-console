@@ -168,6 +168,30 @@ for (const width of [390, 1440]) {
   });
 }
 
+// keep the restart symbol optically centered at every responsive width
+for (const width of [390, 1440]) test(`centers the pending restart symbol at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  await setup(page);
+  const notice = page.getByRole('status', { name: 'Restart pending', exact: true });
+  const icon = notice.locator('.settings-restart-icon');
+  await expect(icon).toBeVisible();
+  await notice.screenshot({ path: `/tmp/remoteagents-restart-pending-${width}.png` });
+  // compare the symbol and circle centers directly
+  const geometry = await icon.evaluate(element => {
+    const iconBounds = element.getBoundingClientRect();
+    const symbol = element.querySelector('svg');
+    // fail clearly when the restart symbol is missing
+    if (symbol === null) throw new Error('The pending restart symbol is missing');
+    const symbolBounds = symbol.getBoundingClientRect();
+    return {
+      xOffset: Math.abs(symbolBounds.left + symbolBounds.width / 2 - (iconBounds.left + iconBounds.width / 2)),
+      yOffset: Math.abs(symbolBounds.top + symbolBounds.height / 2 - (iconBounds.top + iconBounds.height / 2))
+    };
+  });
+  expect(geometry.xOffset).toBeLessThanOrEqual(.5);
+  expect(geometry.yOffset).toBeLessThanOrEqual(.5);
+});
+
 // failed preflight must restore the actionable console instead of trapping the loader
 test('releases the fullscreen loader after an explicit restart rejection', async ({ page }) => {
   const { state, startRestart } = await setup(page);
