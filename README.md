@@ -17,6 +17,18 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
+## At a glance
+
+**Product:** A self-hosted browser control plane for supervising concurrent AI coding agents, their terminals, worktrees, prompt queues, and reviews.
+
+**Engineering problem:** Maintain agent identity and reliable execution boundaries through browser disconnects, long-lived terminals, and imperfect model output while retaining human control.
+
+**Technical scope:** TypeScript, React, Fastify, tmux, Git worktrees, MCP, and durable orchestration.
+
+**Read more:** [Architecture](#2-system-architecture) · [Terminal integration](#4-the-terminal-data-plane) · [Durable orchestration](#5-durable-intent-across-an-unreliable-terminal-boundary) · [Security](#7-security-and-operational-safety).
+
+The white paper below examines design decisions, failure modes, security boundaries, and intentional limitations. [Usage instructions](USAGE.md) are maintained separately.
+
 ## Abstract
 
 AI coding agents can generate changes, execute tools, and reason over large
