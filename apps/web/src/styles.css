@@ -2586,15 +2586,23 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .new-worktree-fields input, .new-worktree-fields select { padding: .4rem .5rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); color: var(--text); font-size: .82rem; }
 .new-worktree-open { display: grid; grid-template-columns: auto repeat(4, minmax(0, 1fr)); align-items: center; gap: .35rem; color: var(--subtext-0); font-size: .7rem; }
 .new-worktree-open label { position: relative; padding: .35rem .3rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); color: var(--text); font-size: .74rem; text-align: center; cursor: pointer; }
-:is(.new-worktree-open, .new-worktree-prs .switch-pr-select) input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: inherit; }
-:is(.new-worktree-open label, .new-worktree-prs .switch-pr-select):has(input:checked) { border-color: color-mix(in srgb, var(--lavender) 60%, transparent); background: color-mix(in srgb, var(--lavender) 16%, transparent); }
-:is(.new-worktree-open label, .new-worktree-prs .switch-pr-select):has(input:focus-visible) { outline: 2px solid var(--lavender); outline-offset: 1px; }
-:is(.new-worktree-open label, .new-worktree-prs .switch-pr-select):has(input:disabled) { opacity: .45; cursor: not-allowed; }
+.new-worktree-open input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: inherit; }
+.new-worktree-open label:has(input:checked) { border-color: color-mix(in srgb, var(--lavender) 60%, transparent); background: color-mix(in srgb, var(--lavender) 16%, transparent); }
+.new-worktree-open label:has(input:focus-visible) { outline: 2px solid var(--lavender); outline-offset: 1px; }
+.new-worktree-open label:has(input:disabled) { opacity: .45; cursor: not-allowed; }
 .new-worktree-prs { border: 1px solid var(--surface-1); border-radius: var(--control-radius); }
 .new-worktree-prs .git-status-switch-list { max-height: min(22rem, 45vh); }
-/* a pull request's Select is a radio styled as the row's action button */
-.new-worktree-prs .switch-pr-select { position: relative; cursor: pointer; }
-.new-worktree-prs .switch-pr-select:has(input:checked) { color: var(--text); }
+/* a pull request's Select is a radio drawn as a checkbox (one pick, so radio semantics);
+   the label pads it out to a row-action-sized hit target */
+.new-worktree-prs .switch-pr-select { display: inline-grid; place-items: center; min-width: 1.85rem; min-height: 1.85rem; cursor: pointer; }
+.new-worktree-prs .switch-pr-select:has(input:disabled) { cursor: not-allowed; }
+.new-worktree-prs .switch-pr-select input { display: grid; place-content: center; width: 1.05rem; height: 1.05rem; margin: 0; padding: 0; border: 1px solid var(--surface-2); border-radius: .25rem; appearance: none; background: var(--mantle); cursor: inherit; }
+.new-worktree-prs .switch-pr-select input::before { content: ''; width: .28rem; height: .55rem; border: solid var(--base); border-width: 0 2px 2px 0; transform: translateY(-.06rem) rotate(45deg); visibility: hidden; }
+.new-worktree-prs .switch-pr-select input:checked { border-color: var(--lavender); background: var(--lavender); }
+.new-worktree-prs .switch-pr-select input:checked::before { visibility: visible; }
+.new-worktree-prs .switch-pr-select:hover input:not(:disabled) { border-color: var(--lavender); }
+.new-worktree-prs .switch-pr-select input:focus-visible { outline: 2px solid var(--lavender); outline-offset: 2px; }
+.new-worktree-prs .switch-pr-select input:disabled { opacity: .45; }
 .new-worktree-loading, .new-worktree-empty { display: flex; align-items: center; gap: .4rem; color: var(--subtext-0); font-size: .76rem; }
 .new-worktree-error { margin: 0; color: var(--red); font-size: .74rem; }
 .new-worktree-status { display: flex; align-items: center; gap: .4rem; margin: 0; color: var(--subtext-0); font-size: .74rem; }

@@ -249,7 +249,6 @@ test('creates a worktree from a pull request chosen in the Pull request tab', as
   const choice = own.getByRole('radio', { name: 'Select #12' });
   await choice.check();
   await expect(choice).toBeChecked();
-  await expect(own).toContainText('Selected');
   await dialog.getByRole('button', { name: 'Create worktree' }).click();
 
   // the PR is named by number alone; the server resolves its branch
