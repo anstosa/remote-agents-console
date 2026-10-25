@@ -2193,7 +2193,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .git-status-panel .switch-pr-actions > .switch-pr-checkout:not(:disabled):hover { border-color: var(--green); color: var(--green); }
 /* an unavailable target reads as plainly inert: dashed muted outline, no accent colour, no hover lift */
 :is(.git-status-panel, .new-worktree-prs) .switch-pr-actions > .switch-pr-action:disabled { opacity: 1; border-style: dashed; border-color: var(--surface-1); background: transparent; color: var(--surface-2); }
-.git-status-panel .switch-pr-actions > .switch-branch-delete { width: 1.85rem; padding: 0; color: var(--red); }
+.git-status-panel .switch-pr-actions > :is(.switch-branch-delete, .switch-pr-new-worktree) { width: 1.85rem; padding: 0; }
+.git-status-panel .switch-pr-actions > .switch-branch-delete { color: var(--red); }
 .git-status-panel .switch-pr-actions > .switch-branch-delete:not(:disabled):hover { border-color: var(--red); color: var(--red); }
 
 .more-menu-divider { height: 1px; margin: .25rem .35rem; border: 0; background: color-mix(in srgb, var(--surface-2) 72%, transparent); }

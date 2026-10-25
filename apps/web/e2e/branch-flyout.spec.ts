@@ -963,3 +963,95 @@ test('lists and checks out branches in a worktree with no agent', async ({ page 
   await prs.getByRole('group', { name: 'feature/solo' }).getByRole('button', { name: 'Checkout' }).click();
   await expect.poll(() => checkedOut).toEqual({ branch: 'feature/solo' });
 });
+
+// a Project whose worktrees can be managed: its main checkout and one worktree with no agent
+const newWorktreeProject = { id: 'repo', label: 'Repo', available: true, manageWorktrees: true, worktrees: [
+  { id: 'main', projectId: 'repo', label: 'Repo', path: '/repo', main: true, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'main' },
+  { id: 'idle', projectId: 'repo', label: 'Idle', path: '/repo/wts/idle', main: false, detached: false, locked: false, branch: 'feature/idle', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, available: true, pinned: true, order: 1 }
+] };
+
+// stub one worktree's flyout list and the New worktree dialog's Project lists
+async function stubNewWorktreeFromFlyout(page: Page, { agents, worktreeId, list, onCreate }: { agents: unknown[]; worktreeId: string; list: unknown; onCreate: (body: unknown) => void }) {
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents, projects: [newWorktreeProject] } });
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: false } });
+    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
+    if (url.pathname === `/api/worktrees/${worktreeId}/switch-prs` || url.pathname === '/api/projects/repo/switch-prs') return route.fulfill({ json: list });
+    if (url.pathname === '/api/projects/repo/branches') return route.fulfill({ json: { branches: [
+      { name: 'main', ref: 'main', remote: false, checkedOut: true },
+      { name: 'feature/aaa', ref: 'feature/aaa', remote: false, checkedOut: false },
+      { name: 'feature/solo', ref: 'feature/solo', remote: false, checkedOut: false }
+    ], defaultBranch: 'main' } });
+    if (url.pathname === '/api/projects/repo/worktrees' && request.method() === 'POST') { onCreate(request.postDataJSON()); return route.fulfill({ status: 201, json: { worktreeId: 'created' } }); }
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+}
+
+test('opens New worktree on a pull request from its flyout row while the worktree is dirty', async ({ page }) => {
+  let created: unknown;
+  await stubNewWorktreeFromFlyout(page, {
+    agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/repo/wts/cora', projectId: 'repo', worktreeId: 'cora', worktreeLabel: 'Cora', branch: 'feature/current', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0 }, title: 'Ready' }],
+    worktreeId: 'cora',
+    list: { enabled: false, pullRequests: [
+      { number: 299, title: 'Earlier work', branch: 'feature/earlier', draft: false, url: 'https://github.com/acme/repo/pull/299', checkedOut: false },
+      { number: 300, title: 'Review me', branch: 'feature/review', draft: false, url: 'https://github.com/acme/repo/pull/300', checkedOut: false },
+      { number: 301, title: 'Held in Idle', branch: 'feature/idle', draft: false, url: 'https://github.com/acme/repo/pull/301', checkedOut: true, openIn: { worktreeId: 'idle', worktreeName: 'Idle' } }
+    ], otherPullRequests: [], branches: [], pullRequestsSupported: true },
+    onCreate: body => { created = body; }
+  });
+
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^Cora/u }).click();
+  const menu = await openBranchTab(page, 'PRs');
+  const row = menu.getByRole('group', { name: '#300: Review me; Open', exact: true });
+  // checkout needs a clean worktree; a new worktree does not
+  await expect(row.getByRole('button', { name: 'Checkout' })).toBeDisabled();
+  // a PR another worktree holds offers only its Open in link
+  await expect(menu.getByRole('group', { name: '#301: Held in Idle; Open', exact: true }).getByRole('button', { name: /^New worktree/u })).toHaveCount(0);
+  await row.getByRole('button', { name: 'New worktree from #300' }).click();
+
+  await expect(menu).toBeHidden();
+  const dialog = page.getByRole('dialog', { name: 'New worktree' });
+  await expect(dialog.getByRole('tab', { name: 'Pull request' })).toHaveAttribute('aria-selected', 'true');
+  await expect(dialog.getByRole('radio', { name: 'Select #300' })).toBeChecked();
+  await dialog.getByRole('button', { name: 'Create worktree' }).click();
+  await expect.poll(() => created).toEqual({ mode: 'pull-request', number: 300, open: 'agent' });
+});
+
+test('opens New worktree on a branch from its flyout row in a worktree with no agent', async ({ page }) => {
+  let created: unknown;
+  await stubNewWorktreeFromFlyout(page, {
+    agents: [],
+    worktreeId: 'idle',
+    list: { enabled: true, pullRequests: [], otherPullRequests: [], pullRequestsSupported: true, branches: [
+      { branch: 'feature/solo', checkedOut: false },
+      { branch: 'main', checkedOut: true, openIn: { worktreeId: 'main', worktreeName: 'Repo' } }
+    ] },
+    onCreate: body => { created = body; }
+  });
+
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^Idle/u }).click();
+  await page.setViewportSize({ width: 360, height: 760 });
+  const menu = await openBranchTab(page, 'Branches');
+  // a branch another worktree holds offers only its Open in link
+  await expect(menu.getByRole('group', { name: 'main', exact: true }).getByRole('button', { name: /^New worktree/u })).toHaveCount(0);
+  const solo = menu.getByRole('group', { name: 'feature/solo', exact: true });
+  // on a phone the row's three actions (new worktree, delete, checkout) still share one line
+  const tops = await solo.locator('.switch-pr-action').evaluateAll(elements => elements.map(element => Math.round(element.getBoundingClientRect().top)));
+  expect(tops).toHaveLength(3);
+  expect(new Set(tops).size).toBe(1);
+  await solo.getByRole('button', { name: 'New worktree from feature/solo' }).click();
+
+  await expect(menu).toBeHidden();
+  const dialog = page.getByRole('dialog', { name: 'New worktree' });
+  await expect(dialog.getByRole('tab', { name: 'Existing branch' })).toHaveAttribute('aria-selected', 'true');
+  await expect(dialog.getByLabel('Branch', { exact: true })).toHaveValue('feature/solo');
+  await dialog.getByRole('button', { name: 'Create worktree' }).click();
+  await expect.poll(() => created).toEqual({ mode: 'existing', branch: 'feature/solo', open: 'agent' });
+});
