@@ -8695,6 +8695,23 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     window.addEventListener('hashchange', openFromHash);
     return () => window.removeEventListener('hashchange', openFromHash);
   }, []);
+  // the linked Worktrees whose pull request merged or closed, by id, read each time the
+  // launcher opens (the server asks GitHub, so it stays off the dashboard)
+  const [closedPullRequestWorktrees, setClosedPullRequestWorktrees] = useState<ReadonlyMap<string, 'merged' | 'closed'>>(() => new Map());
+  useEffect(() => {
+    if (!launcherOpen) return;
+    let cancelled = false;
+    // a previous opening's offers may be out of date, and a failed read must not keep them
+    setClosedPullRequestWorktrees(new Map());
+    void (async () => {
+      const response = await request('/api/worktrees/closed-pull-requests').catch(() => undefined);
+      const payload: unknown = response?.ok === true ? await response.json().catch(() => undefined) : undefined;
+      const listed = (payload as { worktrees?: unknown } | undefined)?.worktrees;
+      if (cancelled || !Array.isArray(listed)) return;
+      setClosedPullRequestWorktrees(new Map(listed.flatMap((entry: { worktreeId?: unknown; reason?: unknown }) => typeof entry?.worktreeId === 'string' && (entry.reason === 'merged' || entry.reason === 'closed') ? [[entry.worktreeId, entry.reason] as const] : [])));
+    })();
+    return () => { cancelled = true; };
+  }, [launcherOpen]);
   const phone = usePhoneLayout();
   // Places opened from + (Terminal, Empty workspace) that keep a tab while the operator is on it
   // though nothing keeps them yet (no Agent, shell, pin or draft); leaving one closes it
@@ -9973,7 +9990,11 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     if (openAgent !== undefined) action = openAgentSplit(worktree, openAgent, worktree.launch, `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, { worktreeId: worktree.id, unavailable: !worktree.available });
     // launch one inactive worktree
     else action = <LaunchSplitButton label={worktree.label} resolution={worktree.launch} compact placeActions alwaysShowMenu launchDisabled={creatingAgent || pendingOperations.has(launchOperationKey(worktree.id))} entries={placeEntries(worktree)} onLaunch={choice => void launchWorktree(worktree, choice)} />;
-    return <><PlaceShellsAndPin place={worktree} noun="worktree" onTogglePin={() => void togglePin(worktree)} /><button type="button" className="launcher-icon launcher-rename" disabled={creatingAgent} aria-label={`Rename ${worktree.label}`} title="Rename worktree" onClick={() => setRenameWorktreeId(worktree.id)}><LauncherRowIcon name="rename" /></button><button type="button" className="launcher-icon launcher-remove" disabled={creatingAgent || openAgent !== undefined || removeReason !== undefined} aria-label={`Remove ${worktree.label}`} title={openAgent === undefined ? removeReason ?? 'Remove worktree' : 'Turn off the agents here before removing this worktree'} onClick={() => setRemoveWorktreeId(worktree.id)}><LauncherRowIcon name="trash" /></button>{action}</>;
+    const removeBlocked = openAgent === undefined ? removeReason : 'Turn off the agents here before removing this worktree';
+    const closedPullRequest = closedPullRequestWorktrees.get(worktree.id);
+    // a closed pull request only offers the Remove dialog, which keeps its own safeguards
+    const closedPullRequestOffer = closedPullRequest === undefined ? null : <button type="button" className="launcher-prune launcher-closed-pr" disabled={creatingAgent || removeBlocked !== undefined} aria-label={`PR ${closedPullRequest} · Remove ${worktree.label}`} title={removeBlocked ?? `Its pull request ${closedPullRequest}. Remove this worktree`} onClick={() => setRemoveWorktreeId(worktree.id)}>PR {closedPullRequest} · Remove</button>;
+    return <>{closedPullRequestOffer}<PlaceShellsAndPin place={worktree} noun="worktree" onTogglePin={() => void togglePin(worktree)} /><button type="button" className="launcher-icon launcher-rename" disabled={creatingAgent} aria-label={`Rename ${worktree.label}`} title="Rename worktree" onClick={() => setRenameWorktreeId(worktree.id)}><LauncherRowIcon name="rename" /></button><button type="button" className="launcher-icon launcher-remove" disabled={creatingAgent || removeBlocked !== undefined} aria-label={`Remove ${worktree.label}`} title={removeBlocked ?? 'Remove worktree'} onClick={() => setRemoveWorktreeId(worktree.id)}><LauncherRowIcon name="trash" /></button>{action}</>;
   };
   // the shell count and pin toggle a directory-Project or Scratch launcher row shows before its Launch
   const launcherPlaceControls = (place: Place | undefined): ReactNode => place === undefined ? null : <PlaceShellsAndPin place={place} onTogglePin={() => void togglePin(place)} />;

@@ -1,7 +1,7 @@
 import { access, mkdir, realpath } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import type { Project, Worktree } from '../domain/models.js';
-import { PullRequestService } from '../pull-requests/service.js';
+import { PullRequestService, forkCheckoutNumber } from '../pull-requests/service.js';
 import type { PullRequestSwitchService } from '../pull-requests/switch-service.js';
 import { run } from '../tmux/command.js';
 
@@ -55,6 +55,8 @@ export type BranchRemovalFacts = { branch: string; checkedOut: boolean; dirtyCou
 export type BranchRemovalResult = { ok: true; facts: BranchRemovalFacts } | { ok: false; status: number; error: string };
 export type GuardedBranchDeleteResult = { ok: true } | { ok: false; status: number; error: string };
 export type CleanupBranch = { projectId: string; projectLabel: string; branch: string; reason: 'merged' | 'closed' };
+// a linked Worktree whose branch's pull request merged or closed at (or past) the checked-out head
+export type ClosedPullRequestWorktree = { worktreeId: string; reason: CleanupBranch['reason'] };
 export type PruneOutcome = { ok: true } | { ok: false; status: number; error: string };
 
 /**
@@ -304,25 +306,67 @@ export class WorktreeManagementService {
           eligible.set(branch, { projectId: project.id, projectLabel: project.label, branch, reason: 'merged' });
         }
       }
-      const listed = await this.git(['-C', project.path, 'for-each-ref', '--format=%(refname:strip=2)\t%(objectname)\t%(worktreepath)', 'refs/heads']);
+      const heads = await this.branchHeads(project.path);
       // preserve ancestry results if the remaining refs cannot be read
-      if (listed.code !== 0) { byProject.push([...eligible.values()]); continue; }
+      if (heads === undefined) { byProject.push([...eligible.values()]); continue; }
       // only consult GitHub for inactive branches not already proven merged locally
-      const candidates = listed.stdout.split('\n').map(line => {
-        const [branch = '', head = '', checkout = ''] = line.split('\t');
-        return { branch, head, checkout };
-      }).filter(({ branch, head, checkout }) => branch !== '' && branch !== defaultBranch && checkout === '' && !eligible.has(branch) && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head));
-      // bound requests per repository instead of flooding GitHub for large branch lists
-      for (let offset = 0; offset < candidates.length; offset += 4) {
-        await Promise.all(candidates.slice(offset, offset + 4).map(async ({ branch, head }) => {
-          const reason = await this.pullRequests.cleanupHead(project.path, branch, head).catch(() => undefined);
-          // preserve the distinction between merged and closed-unmerged work
-          if (reason !== undefined) eligible.set(branch, { projectId: project.id, projectLabel: project.label, branch, reason });
-        }));
-      }
+      const candidates = heads.filter(({ branch, checkout }) => branch !== defaultBranch && checkout === '' && !eligible.has(branch));
+      // preserve the distinction between merged and closed-unmerged work
+      for (const [branch, reason] of await this.pullRequestReasons(project, candidates)) eligible.set(branch, { projectId: project.id, projectLabel: project.label, branch, reason });
       byProject.push([...eligible.values()]);
     }
     return byProject.flat().sort((left, right) => left.projectLabel.localeCompare(right.projectLabel) || left.branch.localeCompare(right.branch));
+  }
+
+  // the linked Worktrees whose checked-out branch sits at, or behind, a merged or closed pull
+  // request's final head, to offer for removal. Only pull request evidence counts: a fresh
+  // branch off the default is already its ancestor. Read-only; the Remove dialog decides with
+  // fresh facts and still guards unpushed work.
+  async closedPullRequestWorktrees(worktrees: readonly Worktree[]): Promise<ClosedPullRequestWorktree[]> {
+    const closed: ClosedPullRequestWorktree[] = [];
+    for (const project of this.projects()) {
+      const linked = worktrees.filter(worktree => worktree.projectId === project.id && !worktree.main && worktree.branch !== undefined);
+      // skip unmanaged repositories, and implicit ones the operator never opted into (ADR 0014)
+      if (linked.length === 0 || !worktreeManagementAvailability(project).available || project.implicit === true) continue;
+      const defaultBranch = await this.defaultBranch(project.path);
+      const heads = defaultBranch === undefined ? undefined : await this.branchHeads(project.path);
+      if (heads === undefined) continue;
+      // the live head of each Worktree's branch, while that Worktree still holds it
+      const candidates = linked.flatMap(worktree => {
+        const ref = heads.find(candidate => candidate.branch === worktree.branch);
+        return ref === undefined || ref.branch === defaultBranch || (ref.checkout !== worktree.path && ref.checkout !== worktree.identity) ? [] : [{ ...ref, worktreeId: worktree.id }];
+      });
+      const reasons = await this.pullRequestReasons(project, candidates, true);
+      for (const { branch, worktreeId } of candidates) {
+        const reason = reasons.get(branch);
+        if (reason !== undefined) closed.push({ worktreeId, reason });
+      }
+    }
+    return closed;
+  }
+
+  // every local branch with its commit and the checkout holding it ('' when none)
+  private async branchHeads(path: string): Promise<{ branch: string; head: string; checkout: string }[] | undefined> {
+    const listed = await this.git(['-C', path, 'for-each-ref', '--format=%(refname:strip=2)\t%(objectname)\t%(worktreepath)', 'refs/heads']);
+    if (listed.code !== 0) return undefined;
+    return listed.stdout.split('\n').map(line => {
+      const [branch = '', head = '', checkout = ''] = line.split('\t');
+      return { branch, head, checkout };
+    }).filter(({ branch, head }) => branch !== '' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head));
+  }
+
+  // the pull request cleanup reason of each branch head that has one; `acceptAncestor` also takes
+  // a head behind a closed pull request's final head, which only a worktree offer may
+  private async pullRequestReasons(project: Project, candidates: readonly { branch: string; head: string }[], acceptAncestor = false): Promise<Map<string, CleanupBranch['reason']>> {
+    const reasons = new Map<string, CleanupBranch['reason']>();
+    // bound requests per repository instead of flooding GitHub for large branch lists
+    for (let offset = 0; offset < candidates.length; offset += 4) {
+      await Promise.all(candidates.slice(offset, offset + 4).map(async ({ branch, head }) => {
+        const reason = await (acceptAncestor ? this.pullRequests.cleanupHead(project.path, branch, head, false, true) : this.pullRequests.cleanupHead(project.path, branch, head)).catch(() => undefined);
+        if (reason !== undefined) reasons.set(branch, reason);
+      }));
+    }
+    return reasons;
   }
 
   // read fresh loss-prevention facts for one local branch
@@ -413,7 +457,11 @@ export class WorktreeManagementService {
     // pushed; git marks it `[gone]` in the upstream track field. `@{upstream}` itself no longer
     // resolves in that state, so read the branch's track field rather than rev-parse it.
     if (branch === undefined) return false;
-    const track = await this.git(['-C', path, 'for-each-ref', '--format=%(upstream:track)', `refs/heads/${branch}`]);
+    // a fork pull request's checkout is held on GitHub as refs/pull/<n>/head, which the
+    // console fetched into refs/rac/pull/<n>
+    const forkNumber = forkCheckoutNumber(branch);
+    if (forkNumber !== undefined && (await this.git(['-C', path, 'merge-base', '--is-ancestor', ref, `refs/rac/pull/${forkNumber}`])).code === 0) return true;
+    const track =await this.git(['-C', path, 'for-each-ref', '--format=%(upstream:track)', `refs/heads/${branch}`]);
     return track.code === 0 && track.stdout.includes('[gone]');
   }
 

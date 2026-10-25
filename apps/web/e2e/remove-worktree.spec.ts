@@ -18,7 +18,7 @@ const dashboard = {
 
 const facts = { main: false, detached: false, locked: false, branch: 'feat', dirtyCount: 2, pushed: true, merged: false, ahead: 1, behind: 0, blockers: [], stopsProcesses: [] };
 
-async function stub(page: import('@playwright/test').Page, handlers: { onDelete?: (body: unknown) => void; onPrune?: (contentType: string | undefined) => void; removal?: unknown } = {}) {
+async function stub(page: import('@playwright/test').Page, handlers: { onDelete?: (body: unknown) => void; onPrune?: (contentType: string | undefined) => void; removal?: unknown; closedPullRequests?: unknown } = {}) {
   await page.route('**/api/**', async route => {
     const request = route.request();
     // the Worktree wire id carries `:` and `/`, so decode the encoded path before matching
@@ -26,6 +26,7 @@ async function stub(page: import('@playwright/test').Page, handlers: { onDelete?
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (path === '/api/dashboard') return route.fulfill({ json: dashboard });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (path === '/api/worktrees/closed-pull-requests') return route.fulfill({ json: { worktrees: handlers.closedPullRequests ?? [] } });
     if (path === '/api/worktrees/repo:/repo/wts/feat/removal') return route.fulfill({ json: handlers.removal ?? facts });
     if (path === '/api/worktrees/repo:/repo/wts/feat' && request.method() === 'DELETE') {
       handlers.onDelete?.(request.postDataJSON());
@@ -139,6 +140,31 @@ test('prunes a project\'s stale checkouts from the launcher header', async ({ pa
   // "Body cannot be empty when content-type is set to 'application/json'"
   expect(pruned?.contentType).toBeUndefined();
   await expect(dialog).toBeHidden();
+});
+
+// a worktree whose pull request merged or closed is offered for removal, never removed
+test('offers a closed pull request worktree for removal through the Remove dialog', async ({ page }) => {
+  let deleted: unknown;
+  await stub(page, { closedPullRequests: [{ worktreeId: 'repo:/repo/wts/feat', reason: 'merged' }, { worktreeId: 'repo:/repo/wts/held', reason: 'closed' }], onDelete: body => { deleted = body; } });
+  await page.goto('/');
+  await page.locator('.new-agent-tab').click();
+  const launcher = page.getByRole('group', { name: 'Agent launcher' });
+
+  // each closed pull request worktree's row says why; a locked one cannot be removed, so it says why not
+  const merged = launcher.getByRole('button', { name: 'PR merged · Remove Repo · feat', exact: true });
+  await expect(merged).toHaveText('PR merged · Remove');
+  await expect(merged).toBeEnabled();
+  const closed = launcher.getByRole('button', { name: 'PR closed · Remove Repo · held', exact: true });
+  await expect(closed).toBeDisabled();
+  await expect(closed).toHaveAttribute('title', 'Locked worktrees cannot be removed');
+  await expect(launcher.getByRole('button', { name: /PR (merged|closed)/u })).toHaveCount(2);
+
+  await merged.click();
+  const dialog = page.getByRole('dialog', { name: 'Remove worktree' });
+  await expect(dialog).toBeVisible();
+  // the dialog's own safeguards still apply: the dirty tree needs the discard tick
+  await expect(dialog.getByRole('button', { name: 'Remove worktree', exact: true })).toBeDisabled();
+  expect(deleted).toBeUndefined();
 });
 
 test('lists every running Stack process the removal stops', async ({ page }) => {

@@ -2601,6 +2601,10 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .launcher-prune { border: 1px solid color-mix(in srgb, var(--peach) 45%, transparent); border-radius: var(--control-radius); padding: .18rem .5rem; background: transparent; color: var(--peach); font-size: .62rem; letter-spacing: 0; text-transform: none; cursor: pointer; white-space: nowrap; }
 .launcher-prune:not(:disabled):hover { background: color-mix(in srgb, var(--peach) 16%, transparent); }
 .launcher-prune:disabled { opacity: .45; cursor: not-allowed; }
+/* a row's closed-pull-request offer keeps its own width beside the row's controls */
+.more-menu .launcher-closed-pr { flex: none; width: auto; }
+/* a phone row has no room for it, so it wraps below the controls rather than splitting them */
+@media (max-width: 600px) { .more-menu .launcher-closed-pr { order: 1; margin-left: auto; } }
 
 /* a row's Pin and Remove icons, in fixed columns between the name and Launch. Both are the
    same size (Remove's border is transparent) so the columns hold on every row. */

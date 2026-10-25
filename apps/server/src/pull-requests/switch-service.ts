@@ -7,7 +7,7 @@ import { cleanWorkingTree, type GitCommand } from '../git/worktree-state.js';
 import { branchCommitSummary, type BranchCommitSummary } from '../git/comparison.js';
 import { worktreeById, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
 import { agentAttentionState } from '../notifications.js';
-import { PullRequestService, type PullRequestChoice } from './service.js';
+import { PullRequestService, forkCheckoutBranch, type PullRequestChoice } from './service.js';
 import type { PullRequestComments, Worktree } from '../domain/models.js';
 
 // bound the local-branch list folded into the availability payload
@@ -153,7 +153,7 @@ export class PullRequestSwitchService {
     const pullRequests = pullRequestsSupported ? await this.pullRequests.open(anchor.identity) : { own: [], others: [] };
     // apply worktree availability around each checkout branch
     const switchable = (choices: PullRequestChoice[]): SwitchablePullRequest[] => choices.map(pullRequest => {
-      const branch = pullRequest.headOnOrigin ? pullRequest.branch : this.pullRequestBranch(pullRequest);
+      const branch = pullRequest.headOnOrigin ? pullRequest.branch : forkCheckoutBranch(pullRequest);
       return { ...pullRequest, checkoutBranch: branch, ...this.checkoutAnnotation(branch, checkedOut) };
     });
     const own = switchable(pullRequests.own);
@@ -474,9 +474,6 @@ export class PullRequestSwitchService {
     // verify both branch coordinates after best-effort rollback
     return recovered && currentTarget?.commit === targetHead.commit && currentTarget.branch === targetHead.branch && currentSource.code === 0 && currentSource.stdout.trim() === branch && targetStatus.code === 0 && !targetStatus.stdout.trim();
   }
-
-  // derive one app-owned local branch
-  private pullRequestBranch(pullRequest: PullRequestChoice): string { return `rac/pr/${pullRequest.number}/${pullRequest.headSha.slice(0, 12)}`; }
 
   // switch one existing local branch without touching origin
   private async switchLocalBranch(workspace: string, branch: string): Promise<string | undefined> {

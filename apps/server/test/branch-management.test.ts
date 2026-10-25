@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { run } from '../src/tmux/command.js';
 import { WorktreeManagementService } from '../src/worktrees/management.js';
 import type { PullRequestService } from '../src/pull-requests/service.js';
-import { testProject } from './helpers/config.js';
+import { testProject, testWorktree } from './helpers/config.js';
 
 const directories: string[] = [];
 // remove every temporary repository
@@ -266,5 +266,86 @@ describe('guarded branch deletion', () => {
     await expect(service.branchRemoval('proj', 'occupied')).resolves.toEqual({ ok: true, facts: { branch: 'occupied', checkedOut: true, dirtyCount: 1, pushed: false, merged: true, defaultBranch: false } });
     await expect(service.deleteBranchGuarded('proj', 'occupied', true)).resolves.toMatchObject({ ok: false, error: expect.stringContaining('uncommitted changes') });
     await expect(git(root, 'show-ref', '--verify', 'refs/heads/occupied')).resolves.toContain('refs/heads/occupied');
+  });
+});
+
+describe('closed pull request worktrees', () => {
+  // a linked checkout of one branch, as discovery lists it
+  const linked = async (root: string, branch: string, leaf = branch) => {
+    const path = `${root}-worktrees/${leaf}`;
+    await git(root, 'worktree', 'add', '-q', path, branch);
+    return testWorktree({ id: `proj:${path}`, projectId: 'proj', path, identity: path, main: false, branch });
+  };
+  const mainWorktree = (root: string) => testWorktree({ id: `proj:${root}`, projectId: 'proj', path: root, identity: root, main: true, branch: 'main' });
+
+  // the checkout's own branch decides, whatever the worktree is called
+  it('offers a worktree whose branch head is a merged or closed pull request head', async () => {
+    let mergedSha = '';
+    const cleanupHead = vi.fn(async (_path: string, branch: string, sha: string) => sha !== mergedSha ? undefined : branch === 'feature' ? 'merged' as const : branch === 'abandoned' ? 'closed' as const : undefined);
+    const { root, service } = await repository({ cleanupHead });
+    mergedSha = await unmergedFeature(root);
+    await git(root, 'branch', 'abandoned', mergedSha);
+    const merged = await linked(root, 'feature', 'review-this');
+    const closed = await linked(root, 'abandoned');
+
+    await expect(service.closedPullRequestWorktrees([mainWorktree(root), merged, closed])).resolves.toEqual([
+      { worktreeId: merged.id, reason: 'merged' },
+      { worktreeId: closed.id, reason: 'closed' }
+    ]);
+  });
+
+  // the main checkout and the default branch are never offered, whatever GitHub says
+  it('never offers the main checkout or a checkout of the default branch', async () => {
+    const { root, service } = await repository({ cleanupHead: async () => 'merged' });
+    await unmergedFeature(root);
+    // origin names the default, so it stays main while the main checkout holds feature
+    await git(root, 'update-ref', 'refs/remotes/origin/main', 'main');
+    await git(root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+    await git(root, 'checkout', '-q', 'feature');
+    const main = testWorktree({ id: `proj:${root}`, projectId: 'proj', path: root, identity: root, main: true, branch: 'feature' });
+    const defaultCheckout = await linked(root, 'main');
+
+    await expect(service.closedPullRequestWorktrees([main, defaultCheckout])).resolves.toEqual([]);
+  });
+
+  // a fresh branch off the default is its ancestor, yet nothing about it is finished
+  it('needs pull request evidence, not ancestry of the default branch', async () => {
+    const cleanupHead = vi.fn(async () => undefined);
+    const { root, service } = await repository({ cleanupHead });
+    await git(root, 'branch', 'fresh');
+    const fresh = await linked(root, 'fresh');
+
+    await expect(service.closedPullRequestWorktrees([mainWorktree(root), fresh])).resolves.toEqual([]);
+    // the offer accepts a head behind the pull request's final head
+    expect(cleanupHead).toHaveBeenCalledWith(root, 'fresh', await git(root, 'rev-parse', 'fresh'), false, true);
+  });
+
+  // a fork's commits live on GitHub as refs/pull/<n>/head, fetched into refs/rac/pull/<n>
+  it('counts a fork pull request checkout held by its pinned pull request ref as pushed', async () => {
+    const { root, service } = await repository();
+    const sha = await unmergedFeature(root);
+    const branch = `rac/pr/9/${sha.slice(0, 12)}`;
+    await git(root, 'branch', branch, sha);
+    const fork = await linked(root, branch, 'pr-9');
+    expect(await service.removal(fork)).toMatchObject({ ok: true, facts: { pushed: false } });
+
+    await git(root, 'update-ref', 'refs/rac/pull/9', sha);
+    expect(await service.removal(fork)).toMatchObject({ ok: true, facts: { pushed: true } });
+    // another pull request's ref proves nothing
+    await git(root, 'update-ref', '-d', 'refs/rac/pull/9');
+    await git(root, 'update-ref', 'refs/rac/pull/10', sha);
+    expect(await service.removal(fork)).toMatchObject({ ok: true, facts: { pushed: false } });
+  });
+
+  // discovery's branch can be stale; the worktree must still hold the branch when asked
+  it('never offers a worktree that has switched away from the finished branch', async () => {
+    const cleanupHead = vi.fn(async () => 'merged' as const);
+    const { root, service } = await repository({ cleanupHead });
+    await unmergedFeature(root);
+    const stale = await linked(root, 'feature');
+    await git(stale.path, 'switch', '-q', '--detach');
+
+    await expect(service.closedPullRequestWorktrees([mainWorktree(root), stale])).resolves.toEqual([]);
+    expect(cleanupHead).not.toHaveBeenCalled();
   });
 });

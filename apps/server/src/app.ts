@@ -3294,6 +3294,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await dashboardUpdates.refresh().catch(() => undefined);
     return reply.code(204).send();
   });
+  // the linked Worktrees whose pull request merged or closed at or past their checked-out head,
+  // which the launcher offers to Remove. It asks GitHub, so it is read on demand, off the dashboard.
+  app.get('/api/worktrees/closed-pull-requests', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async request => {
+    controlled(request);
+    return { worktrees: await worktreeManagement.closedPullRequestWorktrees(discovery.worktreesNow()) };
+  });
   // the fresh facts the Remove dialog decides with, plus the runtime blockers and the running
   // Stack process a Remove would stop (a GET is a read, so it never mutates and stays off the
   // 10/min mutation budget)

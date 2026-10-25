@@ -12,6 +12,20 @@ export type PullRequestChoice = { number: number; title: string; branch: string;
 export type OpenPullRequestChoices = { own: PullRequestChoice[]; others: PullRequestChoice[] };
 const cacheTtlMs = 60_000;
 const repositoryCacheTtlMs = 30_000;
+
+// the console-owned local branch a fork pull request checks out as, since its head branch
+// lives in another repository; `forkCheckoutNumber` reads the number back from one
+export const forkCheckoutBranch = (pullRequest: Pick<PullRequestChoice, 'number' | 'headSha'>): string => `rac/pr/${pullRequest.number}/${pullRequest.headSha.slice(0, 12)}`;
+export function forkCheckoutNumber(branch: string): number | undefined {
+  const match = /^rac\/pr\/([1-9]\d{0,9})\/[a-f0-9]{12}$/u.exec(branch);
+  return match === null ? undefined : Number(match[1]);
+}
+// how a closed pull request ended, from GitHub's `merged_at`; anything but null or a timestamp
+// is an incomplete marker that proves nothing
+function closedStatus(mergedAt: unknown): PullRequestCleanupStatus | undefined {
+  if (mergedAt === null) return 'closed';
+  return typeof mergedAt === 'string' && mergedAt.trim() !== '' ? 'merged' : undefined;
+}
 const commentsQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){
   id author{login __typename} body createdAt url
   reviewThreads(first:100){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine comments(first:50){nodes{id author{login __typename} body createdAt url diffHunk}}}}
@@ -46,6 +60,8 @@ function githubAuthenticationFailure(error: unknown): boolean {
 export class PullRequestService {
   private readonly cache = new Map<string, { expiresAt: number; value?: PullRequestSummary; pending?: Promise<PullRequestSummary | undefined> }>();
   private readonly cleanupHeads = new Map<string, { branch: string; headSha: string; expiresAt?: number; pending: Promise<PullRequestCleanupStatus | undefined> }>();
+  // bound the final heads one branch's ancestry check compares against
+  private static readonly maxAncestorCompares = 3;
   private readonly repositories = new Map<string, { expiresAt?: number; pending: Promise<GithubRepository | undefined> }>();
   private token?: Promise<string | undefined>;
   private viewer?: Promise<string>;
@@ -166,8 +182,10 @@ export class PullRequestService {
     return await this.cleanupHead(workspace, branch, headSha, fresh) === 'merged';
   }
 
-  // classify one exact branch head with no open successor
-  async cleanupHead(workspace: string, branch: string, headSha: string, fresh = false): Promise<PullRequestCleanupStatus | undefined> {
+  // classify one exact branch head with no open successor. `acceptAncestor` (for offering a
+  // worktree's removal, never for deleting a branch) also takes a head that GitHub shows is
+  // behind a closed pull request's final head, as when the author pushed past the checkout.
+  async cleanupHead(workspace: string, branch: string, headSha: string, fresh = false, acceptAncestor = false): Promise<PullRequestCleanupStatus | undefined> {
     // reject incomplete identities before touching git or GitHub
     if (branch.trim() === '' || !/^[a-f0-9]{40}$/iu.test(headSha)) return undefined;
     // fresh proof cannot fall back to any earlier origin or cleanup success
@@ -188,7 +206,7 @@ export class PullRequestService {
     }
     // unsupported and missing origins cannot prove cleanup eligibility
     if (repository === undefined) return undefined;
-    const key = `${repository.owner.toLowerCase()}/${repository.name.toLowerCase()}:${branch}:${headSha.toLowerCase()}`;
+    const key = `${repository.owner.toLowerCase()}/${repository.name.toLowerCase()}:${branch}:${headSha.toLowerCase()}${acceptAncestor ? ':ancestor' : ''}`;
     const now = this.now();
     // discard completed expired identities on each cache miss
     for (const [cachedKey, entry] of this.cleanupHeads) {
@@ -198,7 +216,7 @@ export class PullRequestService {
     // share pending work and completed results inside the bounded window
     if (!fresh && cached !== undefined) return await cached.pending;
     const entry: { branch: string; headSha: string; expiresAt?: number; pending: Promise<PullRequestCleanupStatus | undefined> } = { branch, headSha: headSha.toLowerCase(), pending: Promise.resolve(undefined) };
-    entry.pending = this.lookupCleanupHead(repository, branch, headSha).catch((error: unknown) => {
+    entry.pending = this.lookupCleanupHead(repository, branch, headSha, acceptAncestor).catch((error: unknown) => {
       // rejected credentials must be rediscovered on the next lookup
       if (githubAuthenticationFailure(error)) {
         this.token = undefined;
@@ -311,7 +329,7 @@ export class PullRequestService {
   }
 
   // scan every bounded result page so a later open pull request can veto cleanup
-  private async lookupCleanupHead(repository: GithubRepository, branch: string, headSha: string): Promise<PullRequestCleanupStatus | undefined> {
+  private async lookupCleanupHead(repository: GithubRepository, branch: string, headSha: string, acceptAncestor: boolean): Promise<PullRequestCleanupStatus | undefined> {
     this.token ??= this.getToken();
     let token: string | undefined;
     try {
@@ -323,8 +341,12 @@ export class PullRequestService {
     }
     // retry missing token discovery later while allowing public repositories
     if (token === undefined) this.token = undefined;
+    const forkNumber = forkCheckoutNumber(branch);
+    if (forkNumber !== undefined) return await this.lookupCleanupNumber(repository, forkNumber, headSha, token, acceptAncestor);
     const origin = `${repository.owner}/${repository.name}`;
     let status: PullRequestCleanupStatus | undefined;
+    // the closed pull requests' other final heads, merged first, that an ancestor check may accept
+    const finals: { sha: string; status: PullRequestCleanupStatus }[] = [];
     // cap pagination while preserving later-page open-branch vetoes
     for (let page = 1; page <= 100; page += 1) {
       const query = new URLSearchParams({ state: 'all', head: `${repository.owner}:${branch}`, per_page: '100', page: String(page) });
@@ -347,19 +369,44 @@ export class PullRequestService {
         if (value.state === 'open') return undefined;
         // unexpected states cannot prove the branch is closed
         if (value.state !== 'closed') return undefined;
-        const mergedAt = value.merged_at;
-        // require GitHub's complete closed-state marker
-        if (mergedAt !== null && (typeof mergedAt !== 'string' || mergedAt.trim() === '')) return undefined;
+        const closed = closedStatus(value.merged_at);
+        if (closed === undefined) return undefined;
         // only the exact commit proves this checkout can be cleaned up
-        if (sha.toLowerCase() !== headSha.toLowerCase()) continue;
+        if (sha.toLowerCase() !== headSha.toLowerCase()) {
+          if (closed === 'merged') finals.unshift({ sha, status: closed }); else finals.push({ sha, status: closed });
+          continue;
+        }
         // a merged proof outranks a closed-unmerged proof for the same commit
-        if (typeof mergedAt === 'string') status = 'merged';
+        if (closed === 'merged') status = 'merged';
         else if (status === undefined) status = 'closed';
       }
       // a short page proves there are no later vetoes
-      if (pulls.length < 100) return status;
+      if (pulls.length < 100) return status ?? (acceptAncestor ? await this.ancestorStatus(repository, headSha, finals, token) : undefined);
     }
     // a full final page leaves possible later vetoes unknown
+    return undefined;
+  }
+
+  // a fork checkout's branch is the console's own, so its pull request is read by number; only
+  // that pull request's exact final head (or, with `acceptAncestor`, an ancestor of it) proves the checkout finished
+  private async lookupCleanupNumber(repository: GithubRepository, number: number, headSha: string, token: string | undefined, acceptAncestor: boolean): Promise<PullRequestCleanupStatus | undefined> {
+    const response = await this.github.get(`https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls/${number}`, token, 'GitHub could not verify the branch cleanup status');
+    const value = await response.json().catch(() => undefined) as { state?: unknown; merged_at?: unknown; head?: { sha?: unknown } } | null | undefined;
+    const sha = value?.head?.sha;
+    const status = value?.state === 'closed' ? closedStatus(value.merged_at) : undefined;
+    if (status === undefined || typeof sha !== 'string' || !/^[a-f0-9]{40}$/iu.test(sha)) return undefined;
+    if (sha.toLowerCase() === headSha.toLowerCase()) return status;
+    return acceptAncestor ? await this.ancestorStatus(repository, headSha, [{ sha, status }], token) : undefined;
+  }
+
+  // the status of the first closed pull request whose final head GitHub shows `headSha` is behind
+  // (or identical to); any failure proves nothing
+  private async ancestorStatus(repository: GithubRepository, headSha: string, finals: readonly { sha: string; status: PullRequestCleanupStatus }[], token: string | undefined): Promise<PullRequestCleanupStatus | undefined> {
+    for (const final of finals.slice(0, PullRequestService.maxAncestorCompares)) {
+      const response = await this.github.get(`https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/compare/${final.sha.toLowerCase()}...${headSha.toLowerCase()}`, token, 'GitHub could not compare the checkout with its pull request').catch(() => undefined);
+      const compared = await response?.json().catch(() => undefined) as { status?: unknown } | null | undefined;
+      if (compared?.status === 'behind' || compared?.status === 'identical') return final.status;
+    }
     return undefined;
   }
 

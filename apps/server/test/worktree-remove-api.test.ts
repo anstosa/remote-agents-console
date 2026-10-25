@@ -387,3 +387,17 @@ describe('POST /api/projects/:id/worktrees/prune', () => {
     } finally { await server.close(); }
   });
 });
+
+describe('GET /api/worktrees/closed-pull-requests', () => {
+  it('lists the discovered worktrees whose pull request merged or closed', async () => {
+    let asked: unknown;
+    const worktreeManagement = { closedPullRequestWorktrees: async (worktrees: unknown) => { asked = worktrees; return [{ worktreeId: linked.id, reason: 'merged' }]; } } as never;
+    const server = await app({ discovery: discoveryStub(), worktreeManagement, ...(await stores()) });
+    try {
+      const response = await server.inject({ method: 'GET', url: '/api/worktrees/closed-pull-requests', headers: readHeaders });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ worktrees: [{ worktreeId: linked.id, reason: 'merged' }] });
+      expect(asked).toEqual([linked]);
+    } finally { await server.close(); }
+  });
+});

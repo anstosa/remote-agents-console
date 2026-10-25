@@ -82,6 +82,54 @@ describe('merged pull request evidence', () => {
     await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
   });
 
+  // a fork PR checks out as `rac/pr/<n>/<sha12>`, a name GitHub never lists as a head branch
+  it.each([
+    ['merged', { mergedAt: '2026-10-10T12:00:00Z' }, 'merged'],
+    ['closed', { mergedAt: null }, 'closed'],
+    ['open', { state: 'open', mergedAt: null }, undefined],
+    ['moved on', { sha: otherSha, mergedAt: null }, undefined]
+  ] as const)('classifies a console fork checkout by its pull request number when %s', async (_name, options, expected) => {
+    const requests: string[] = [];
+    const github = service(async (url) => {
+      requests.push(url);
+      return response({ number: 42, ...pull({ ...options, branch: 'contributor-branch', repository: 'someone/fork' }) as object });
+    });
+
+    await expect(github.cleanupHead('/workspace', `rac/pr/42/${mergedSha.slice(0, 12)}`, mergedSha)).resolves.toBe(expected);
+    expect(requests).toEqual(['https://api.github.com/repos/octo/repo/pulls/42']);
+  });
+
+  // a worktree offer also takes a checkout the author pushed past before the pull request closed;
+  // branch deletion keeps requiring the exact final head
+  it.each([
+    ['behind', 'merged'],
+    ['identical', 'merged'],
+    ['ahead', undefined],
+    ['diverged', undefined]
+  ] as const)('accepts a head behind a closed pull request\'s final head for a worktree offer only when GitHub compares it %s', async (status, expected) => {
+    const compares: string[] = [];
+    const github = service(async (url) => {
+      if (url.includes('/compare/')) { compares.push(url); return response({ status }); }
+      return response([pull({ sha: otherSha })]);
+    });
+
+    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha, false, true)).resolves.toBe(expected);
+    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha, false, true)).resolves.toBe(expected);
+    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    // cached like the exact-head check
+    expect(compares).toEqual([`https://api.github.com/repos/octo/repo/compare/${otherSha}...${mergedSha}`]);
+  });
+
+  it('accepts a fork checkout behind its pull request\'s final head, and fails closed when GitHub cannot compare', async () => {
+    const fork = `rac/pr/42/${mergedSha.slice(0, 12)}`;
+    let compare: ResponseLike = response({ status: 'behind' });
+    const github = service(async (url) => url.includes('/compare/') ? compare : response({ number: 42, ...pull({ sha: otherSha, mergedAt: null, branch: 'contributor-branch', repository: 'someone/fork' }) as object }));
+
+    await expect(github.cleanupHead('/workspace', fork, mergedSha, false, true)).resolves.toBe('closed');
+    compare = response({ message: 'Not Found' }, 404);
+    await expect(github.cleanupHead('/workspace', fork, mergedSha, true, true)).resolves.toBeUndefined();
+  });
+
   it('replaces cached closed evidence when fresh validation finds the branch open', async () => {
     let open = false;
     let requests = 0;
