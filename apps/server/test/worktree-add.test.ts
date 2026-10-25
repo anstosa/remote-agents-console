@@ -251,7 +251,7 @@ describe('WorktreeManagementService.add — from a pull request', () => {
     const { project, draftSha } = await pullRequestRepository();
     const result = await service(project, [{ number: 7, branch: 'feature/draft', headSha: draftSha, headOnOrigin: true }]).add('proj', { mode: 'pull-request', number: 7 });
     const path = join(project.worktreesDirectory, 'pr-7');
-    expect(result).toEqual({ ok: true, path, label: 'Proj · pr-7' });
+    expect(result).toEqual({ ok: true, path });
     expect(await git(path, 'branch', '--show-current')).toBe('feature/draft');
     expect(await git(path, 'rev-parse', 'HEAD')).toBe(draftSha);
     expect(await git(path, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/feature/draft');
@@ -275,7 +275,8 @@ describe('WorktreeManagementService.add — from a pull request', () => {
     const { project, forkSha } = await pullRequestRepository();
     const result = await service(project, [{ number: 8, branch: 'main', headSha: forkSha, headOnOrigin: false }]).add('proj', { mode: 'pull-request', number: 8 });
     const path = join(project.worktreesDirectory, 'pr-8');
-    expect(result).toEqual({ ok: true, path, label: 'Proj · pr-8' });
+    // a fork's code is marked so the caller runs no setup in it
+    expect(result).toEqual({ ok: true, path, fork: true });
     expect(await git(path, 'branch', '--show-current')).toBe(`rac/pr/8/${forkSha.slice(0, 12)}`);
     expect(await git(path, 'rev-parse', 'HEAD')).toBe(forkSha);
     expect((await run('/usr/bin/git', ['-C', path, 'rev-parse', '--abbrev-ref', '@{upstream}'])).code).not.toBe(0);
@@ -305,12 +306,32 @@ describe('WorktreeManagementService.add — from a pull request', () => {
     expect(await management.add('proj', { mode: 'pull-request', number: 7 })).toEqual({ ok: false, status: 409, error: 'feature/draft is already checked out in Proj · review.' });
 
     await mkdir(join(project.worktreesDirectory, 'pr-8'));
-    expect(await management.add('proj', { mode: 'pull-request', number: 8 })).toEqual({ ok: false, status: 409, error: 'the target worktree path already exists' });
+    expect(await management.add('proj', { mode: 'pull-request', number: 8 })).toEqual({ ok: false, status: 409, error: 'Pull request #8 already has a worktree at pr-8.' });
 
     // origin's PR ref moved past the listed head
     await git(origin, 'update-ref', 'refs/pull/9/head', draftSha);
     expect(await management.add('proj', { mode: 'pull-request', number: 9 })).toEqual({ ok: false, status: 409, error: 'Pull request #9 changed on GitHub after it was listed. Reopen the list and try again.' });
     expect(await management.add('proj', { mode: 'pull-request', number: 10 })).toEqual({ ok: false, status: 409, error: 'Pull request #10 is no longer open.' });
     expect(await git(checkout, 'worktree', 'list', '--porcelain')).not.toContain('pr-9');
+  });
+
+  it('refuses a fork pull request asked to open an agent, before fetching or adding anything', async () => {
+    const { project, checkout, forkSha } = await pullRequestRepository();
+    const result = await service(project, [{ number: 8, branch: 'main', headSha: forkSha, headOnOrigin: false }]).add('proj', { mode: 'pull-request', number: 8, openAgent: true });
+    expect(result).toEqual({ ok: false, status: 409, error: 'Fork pull requests open without setup or an agent. Choose Terminal or Nothing.' });
+    expect((await run('/usr/bin/git', ['-C', checkout, 'rev-parse', '--verify', '--quiet', 'refs/rac/pull/8'])).code).not.toBe(0);
+    expect(await git(checkout, 'worktree', 'list', '--porcelain')).not.toContain('pr-8');
+  });
+
+  it('refuses a pull request a worktree holds at an earlier fork head, read live from git rather than the dashboard', async () => {
+    const { project, checkout, forkSha } = await pullRequestRepository();
+    // a worktree outside pr-8 still holds #8 at the head the author has since replaced
+    const base = await git(checkout, 'rev-parse', 'origin/main');
+    const older = join(project.worktreesDirectory, 'older-review');
+    await mkdir(project.worktreesDirectory);
+    await git(checkout, 'worktree', 'add', '-q', '-b', `rac/pr/8/${base.slice(0, 12)}`, older, base);
+    const result = await service(project, [{ number: 8, branch: 'main', headSha: forkSha, headOnOrigin: false }]).add('proj', { mode: 'pull-request', number: 8 });
+    expect(result).toEqual({ ok: false, status: 409, error: `Pull request #8 is already checked out at ${older}.` });
+    expect(await git(checkout, 'worktree', 'list', '--porcelain')).not.toContain('pr-8');
   });
 });

@@ -21,7 +21,9 @@ const pullRequest = (number: number, title: string, branch: string, extra = {}) 
 const switchPrs = {
   pullRequests: [
     pullRequest(12, 'Fix login redirect', 'fix-login'),
-    pullRequest(15, 'Dark mode', 'dark-mode', { checkedOut: true, openIn: { worktreeId: 'repo:/repo/wts/dark-mode', worktreeName: 'Repo · dark-mode' } })
+    pullRequest(15, 'Dark mode', 'dark-mode', { checkedOut: true, openIn: { worktreeId: 'repo:/repo/wts/dark-mode', worktreeName: 'Repo · dark-mode' } }),
+    pullRequest(16, 'Held elsewhere', 'held', { checkedOut: true }),
+    pullRequest(30, 'Fork fix', 'patch', { headOnOrigin: false })
   ],
   otherPullRequests: [pullRequest(20, 'Contributor docs', 'docs')],
   branches: [],
@@ -272,11 +274,54 @@ test('hides the Pull request tab for a Project without a GitHub origin', async (
   await stub(page, () => {});
   await page.route('**/api/projects/repo/switch-prs', route => route.fulfill({ json: { ...switchPrs, pullRequests: [], otherPullRequests: [], pullRequestsSupported: false } }));
   await page.goto('/');
-  const listed = page.waitForResponse('**/api/projects/repo/switch-prs');
   const dialog = await openNewWorktree(page);
-  await listed;
+  // the source tabs stop being busy once the pull request list has settled
+  await expect(dialog.getByRole('tablist', { name: 'Branch source' })).toHaveAttribute('aria-busy', 'false');
   await expect(dialog.getByRole('tab', { name: 'Existing branch' })).toBeVisible();
   await expect(dialog.getByRole('tab', { name: 'Pull request' })).toHaveCount(0);
+});
+
+test('hides the Pull request tab when the Project has no repository list', async ({ page }) => {
+  await stub(page, () => {});
+  await page.route('**/api/projects/repo/switch-prs', route => route.fulfill({ status: 404, json: { error: 'repository branch list unavailable' } }));
+  await page.goto('/');
+  const dialog = await openNewWorktree(page);
+  await expect(dialog.getByRole('tablist', { name: 'Branch source' })).toHaveAttribute('aria-busy', 'false');
+  await expect(dialog.getByRole('tab', { name: 'Pull request' })).toHaveCount(0);
+});
+
+test('marks a fork pull request and opens it with only a Terminal or Nothing', async ({ page }) => {
+  let created: unknown;
+  await stub(page, body => { created = body; });
+  await page.goto('/');
+  const dialog = await openNewWorktree(page);
+  await dialog.getByRole('tab', { name: 'Pull request' }).click();
+  const open = dialog.getByRole('radiogroup', { name: 'Open in the new worktree' });
+  await expect(open.getByRole('radio', { name: 'Agent' })).toBeChecked();
+
+  const fork = dialog.getByRole('group', { name: '#30: Fork fix; Open' });
+  await expect(fork.getByText('Fork', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('group', { name: '#12: Fix login redirect; Open' }).getByText('Fork', { exact: true })).toHaveCount(0);
+  await fork.getByRole('radio', { name: 'Select #30' }).check();
+
+  // a fork's code runs no setup or agent, so the choice falls back to Terminal and says why
+  await expect(open.getByRole('radio', { name: 'Agent' })).toBeDisabled();
+  await expect(open.getByRole('radio', { name: 'Review' })).toBeDisabled();
+  await expect(open.getByRole('radio', { name: 'Terminal' })).toBeChecked();
+  await expect(open.getByTitle('Fork pull requests open without setup or an agent')).toHaveCount(2);
+  await expect(dialog.getByRole('status').filter({ hasText: 'Fork pull requests open without setup or an agent' })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Create worktree' }).click();
+  await expect.poll(() => created).toEqual({ mode: 'pull-request', number: 30, open: 'terminal' });
+});
+
+test('says a held pull request whose worktree is unresolved is already open elsewhere', async ({ page }) => {
+  await stub(page, () => {});
+  await page.goto('/');
+  const dialog = await openNewWorktree(page);
+  await dialog.getByRole('tab', { name: 'Pull request' }).click();
+  const held = dialog.getByRole('group', { name: '#16: Held elsewhere; Open' });
+  await expect(held).toContainText('Already open in another worktree');
+  await expect(held.getByRole('radio')).toHaveCount(0);
 });
 
 test('keeps the Pull request tab when the list fails to load, saying so', async ({ page }) => {

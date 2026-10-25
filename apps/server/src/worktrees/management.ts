@@ -25,9 +25,10 @@ const addTimeoutMs = 120_000;
  */
 export type BranchOption = { name: string; ref: string; remote: boolean; checkedOut: boolean };
 export type BranchesResult = { ok: true; branches: BranchOption[]; defaultBranch?: string } | { ok: false; status: number; error: string };
-export type AddInput = { mode: 'new' | 'existing'; branch: string; base?: string } | { mode: 'pull-request'; number: number };
-// `label` is the display label the new Worktree should carry when its branch name would not do
-export type AddResult = { ok: true; path: string; label?: string } | { ok: false; status: number; error: string };
+// `openAgent` asks for an Agent in the new checkout, which a fork pull request refuses
+export type AddInput = { mode: 'new' | 'existing'; branch: string; base?: string } | { mode: 'pull-request'; number: number; openAgent?: boolean };
+// `fork` marks a checkout of a fork pull request's code, in which no setup or Agent runs
+export type AddResult = { ok: true; path: string; fork?: true } | { ok: false; status: number; error: string };
 
 /**
  * The fresh facts the Remove dialog decides with (ADR 0003): the structural flags from
@@ -167,8 +168,7 @@ export class WorktreeManagementService {
     if (!availability.available) return { ok: false, status: 409, error: availability.reason! };
     if (input.mode === 'pull-request') {
       if (!Number.isSafeInteger(input.number) || input.number < 1) return { ok: false, status: 400, error: 'invalid pull request number' };
-      const leaf = `pr-${input.number}`;
-      return await this.serialize(projectId, () => this.runPullRequestAdd(project, input.number, worktreePath(project.worktreesDirectory, leaf)!, `${project.label} · ${leaf}`));
+      return await this.serialize(projectId, () => this.runPullRequestAdd(project, input.number, input.openAgent === true));
     }
     if (input.mode !== 'new' && input.mode !== 'existing') return { ok: false, status: 400, error: 'invalid worktree mode' };
     const branchIssue = invalidBranchReason(input.branch);
@@ -180,20 +180,26 @@ export class WorktreeManagementService {
 
   // check out one open pull request at `pr-<number>`, on the local branch the switch service names
   // for it, from the head it fetched and verified against the listed SHA
-  private async runPullRequestAdd(project: Project, number: number, path: string, label: string): Promise<AddResult> {
+  private async runPullRequestAdd(project: Project, number: number, openAgent: boolean): Promise<AddResult> {
     if (this.pullRequestHeads === undefined) return { ok: false, status: 409, error: 'pull request worktrees are unavailable' };
-    if (await this.pathExists(path)) return { ok: false, status: 409, error: 'the target worktree path already exists' };
-    const head = await this.pullRequestHeads.fetchForWorktree(project.id, number);
+    const leaf = `pr-${number}`;
+    const path = worktreePath(project.worktreesDirectory, leaf)!;
+    if (await this.pathExists(path)) return { ok: false, status: 409, error: `Pull request #${number} already has a worktree at ${leaf}.` };
+    const head = await this.pullRequestHeads.fetchForWorktree(project.id, number, openAgent);
     if ('error' in head) return { ok: false, status: 409, error: head.error };
-    // a new branch starts at the verified SHA, not the fetched ref, which another fetch could move after the check
+    // the switch service's holders come from the cached dashboard, so recheck them live: a fork
+    // pull request is also held by a checkout of its earlier head
+    const holder = (await this.branchHeads(project.path))?.find(({ branch, checkout }) => checkout !== '' && (branch === head.branch || forkCheckoutNumber(branch) === number));
+    if (holder !== undefined) return { ok: false, status: 409, error: `Pull request #${number} is already checked out at ${holder.checkout}.` };
     const added = await this.addCheckout(project, path, head.existing ? [path, head.branch] : ['--no-track', '-b', head.branch, path, head.sha]);
     if (!added.ok) return added;
-    if (!head.existing && head.track) {
-      const tracked = await this.git(['-C', path, 'branch', '--set-upstream-to', head.startPoint]);
+    if (head.fork) return { ...added, fork: true };
+    if (!head.existing) {
+      const tracked = await this.git(['-C', path, 'branch', '--set-upstream-to', head.upstream]);
       // the checkout stands without its upstream; only pull and push lose their default
-      if (tracked.code !== 0) console.warn(`[worktrees] ${path}: could not track ${head.startPoint}: ${tracked.stderr.trim()}`);
+      if (tracked.code !== 0) console.warn(`[worktrees] ${path}: could not track ${head.upstream}: ${tracked.stderr.trim()}`);
     }
-    return { ...added, label };
+    return added;
   }
 
   // run `git worktree add` with the given arguments, returning the realpath'd root

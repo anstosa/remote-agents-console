@@ -912,6 +912,20 @@ describe('DiscoveryService dashboard', () => {
     ]);
   });
 
+  it('labels a linked pr-<number> checkout by its folder, whatever branch it holds, under the current Project label', async () => {
+    const pins = { pins: async () => ({}), labels: async () => ({}) };
+    const scan = (label: string) => new DiscoveryService(socketFinder(), paneLister([]) as never, processInspector({ codex: false }), undefined, undefined, [testProject({ id: 'app', label, path: '/repo' })], pins, listImpl({ '/repo': [
+      entry('/repo', 'main'),
+      entry('/repo/wts/pr-7', 'feature/draft'),
+      entry('/repo/wts/pr-8', `rac/pr/8/${'b'.repeat(12)}`),
+      entry('/repo/wts/pr-x', 'feature/other')
+    ] }));
+
+    expect((await scan('App').dashboard()).projects[0]!.worktrees.map(view => [view.label, view.customLabel === true])).toEqual([['App', false], ['App · pr-7', false], ['App · feature/other', false], ['App · pr-8', false]]);
+    // a renamed Project renames the generated label with it
+    expect((await scan('Shop').dashboard()).projects[0]!.worktrees.map(view => view.label)).toContain('Shop · pr-7');
+  });
+
   // checkout runtime settings stay separate from project grouping and discovery
   it('publishes distinct worktree previews and replacement commands without inventing checkouts', async () => {
     const commands = { start: 'full up', stop: 'full stop', migrate: 'full migrate' };

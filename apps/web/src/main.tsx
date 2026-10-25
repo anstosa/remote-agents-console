@@ -81,7 +81,8 @@ const actionIconPaths = {
 // also carries targetPaneId for its own keystroke targeting, which the web ignores
 type InlineQuestion = { id: string; text: string; choices: string[]; descriptions?: string[]; source: 'structured' | 'parsed' };
 type Stack = { actions: StackAction[]; running?: boolean; transition?: 'starting'|'migrating'; operation?: StackAction; tunnel?: boolean; processes?: StackProcessState[] };
-type PullRequestChoice = { number: number; title: string; branch: string; draft: boolean; url: string } & Pick<PullRequestSummary, 'checks' | 'issues'>;
+// `headOnOrigin` false marks a fork pull request, whose code the console opens without setup or an agent
+type PullRequestChoice = { number: number; title: string; branch: string; draft: boolean; url: string; headOnOrigin?: boolean } & Pick<PullRequestSummary, 'checks' | 'issues'>;
 type PullRequestWorktree = { worktreeId: string; worktreeName: string; agentId?: string };
 type SwitchablePullRequest = PullRequestChoice & { checkedOut: boolean; openIn?: PullRequestWorktree };
 type SwitchableBranch = { branch: string; checkedOut: boolean; openIn?: PullRequestWorktree; commitSummary?: { subject: string; count: number } };
@@ -7170,7 +7171,7 @@ function PullRequestChoiceRow({ pullRequest, here, pending, onSelectTarget, chil
   const status = pullRequest.draft ? 'draft' : 'open';
   const statusLabel = pullRequest.draft ? 'Draft' : 'Open';
   const label = `#${pullRequest.number}: ${pullRequest.title}`;
-  return <div className="switch-pr-option" role="group" aria-label={`${label}; ${statusLabel}`}><div className="switch-pr-main"><a className="switch-pr" href={pullRequest.url} target="_blank" rel="noreferrer" title={`Open ${label} in GitHub`} aria-label={label}><span className="switch-pr-copy"><span><strong className={`status-${status}`}>#{pullRequest.number}</strong><span>: {pullRequest.title}</span></span></span></a></div><span className="switch-pr-actions"><PullRequestIndicators checks={pullRequest.checks} issues={pullRequest.issues} />{children}</span>{pullRequest.checkedOut && <div className="switch-pr-owner"><SwitchOpenInLine openIn={pullRequest.openIn} here={here} operationPending={pending} onSelectTarget={onSelectTarget} /></div>}</div>;
+  return <div className="switch-pr-option" role="group" aria-label={`${label}; ${statusLabel}`}><div className="switch-pr-main"><a className="switch-pr" href={pullRequest.url} target="_blank" rel="noreferrer" title={`Open ${label} in GitHub`} aria-label={label}><span className="switch-pr-copy"><span><strong className={`status-${status}`}>#{pullRequest.number}</strong><span>: {pullRequest.title}</span></span></span></a>{pullRequest.headOnOrigin === false && <small className="switch-pr-fork" title="This pull request comes from a fork">Fork</small>}</div><span className="switch-pr-actions"><PullRequestIndicators checks={pullRequest.checks} issues={pullRequest.issues} />{children}</span>{pullRequest.checkedOut && <div className="switch-pr-owner"><SwitchOpenInLine openIn={pullRequest.openIn} here={here} operationPending={pending} onSelectTarget={onSelectTarget} /></div>}</div>;
 }
 
 // the git flyout's secondary action that opens the New worktree dialog on one PR or branch row
@@ -8324,6 +8325,8 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
   </div>, document.body);
 }
 
+// whether a Project offers New worktree, from the launcher and the git flyout's rows alike
+const offersNewWorktree = (project: Project, dynamicWorktrees: boolean): boolean => dynamicWorktrees && project.manageWorktrees !== false;
 // the source and preselected PR or branch the New worktree dialog can open on
 type NewWorktreeSelection = { mode: 'pull-request'; number: number } | { mode: 'existing'; branch: string };
 // what a successful worktree creation hands back to the launcher
@@ -8340,6 +8343,8 @@ const worktreeOpenChoices: WorktreeOpenChoice[] = [
   { value: 'terminal', label: 'Terminal', failed: 'Worktree created, terminal did not open', ready: () => 'The new worktree is ready with a terminal.' },
   { value: 'empty', label: 'Nothing', failed: 'Worktree created, but it could not be found', ready: () => 'The new worktree is ready; nothing was opened in it.' }
 ];
+// a fork pull request's code is a stranger's, so the server runs no setup or agent in it
+const forkOpenReason = 'Fork pull requests open without setup or an agent';
 const worktreeOpenKey = (projectId: string) => `rac.new-worktree-open:${projectId}`;
 const savedWorktreeOpen = (projectId: string): WorktreeOpenChoice => {
   const fallback = worktreeOpenChoices[0]!;
@@ -8474,6 +8479,10 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
     })();
     return () => { cancelled = true; };
   }, [project.id]);
+  // a dialog opened on a pull request falls back to a branch source once the Project turns out to list none
+  useEffect(() => {
+    if (mode === 'pull-request' && pullRequests === 'unsupported') setMode('new');
+  }, [mode, pullRequests]);
   // a Worktree already holds a checked-out branch, so only the base picker offers those
   const existingOptions = branches?.filter(option => !option.checkedOut);
   // an unlisted base (git named a default branch it did not list) stays selectable
@@ -8484,6 +8493,10 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
   const selectedPullRequest = allPullRequests.find(candidate => candidate.number === pullRequestNumber && !candidate.checkedOut);
   // explain an initial pull request that can no longer be chosen, until another is
   const initialPullRequest = initial?.mode === 'pull-request' ? allPullRequests.find(candidate => candidate.number === initial.number) : undefined;
+  // a fork pull request opens only a Terminal or Nothing; the operator's own choice returns with another source
+  const forkSelected = mode === 'pull-request' && selectedPullRequest?.headOnOrigin === false;
+  const agentOpen = (choice: WorktreeOpenChoice) => choice.value === 'agent' || choice.value === 'review';
+  const opened = forkSelected && agentOpen(openChoice) ? worktreeOpenChoices.find(choice => choice.value === 'terminal')! : openChoice;
   const initialNotice = initial?.mode === 'pull-request' && pullRequestNumber === initial.number && pullRequestList !== undefined && selectedPullRequest === undefined
     ? initialPullRequest === undefined ? `Pull request #${initial.number} is no longer open.` : `Pull request #${initial.number} is already open in ${initialPullRequest.openIn?.worktreeName ?? 'another worktree'}.`
     : undefined;
@@ -8503,7 +8516,7 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
     setPending(true);
     try {
       // an empty base falls to the Project's default branch on the server
-      const response = await request(`/api/projects/${encodeURIComponent(project.id)}/worktrees`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...source, open: openChoice.value === 'review' ? 'agent' : openChoice.value }) }).catch(() => undefined);
+      const response = await request(`/api/projects/${encodeURIComponent(project.id)}/worktrees`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...source, open: opened.value === 'review' ? 'agent' : opened.value }) }).catch(() => undefined);
       if (response === undefined) return setError('Unable to reach the console.');
       if (!response.ok) {
         const payload = await response.json().catch(() => undefined) as { error?: string } | undefined;
@@ -8511,13 +8524,13 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
       }
       const payload = await response.json() as WorktreeCreated;
       saveWorktreeOpen(project.id, openChoice.value);
-      onCreated(payload, openChoice);
+      onCreated(payload, opened);
     } finally { setPending(false); }
   };
   const noExisting = existingOptions !== undefined && existingOptions.length === 0;
   return createPortal(<div className="dialog new-worktree-dialog" role="dialog" aria-modal="true" aria-labelledby="new-worktree-title"><div>
     <header className="new-worktree-header"><div><h2 id="new-worktree-title">New worktree</h2><p>{project.label}</p></div><button className="new-worktree-close" type="button" aria-label="Close new worktree" disabled={pending} onClick={onClose}><PanelIcon path={panelIcons.close} /></button></header>
-    <div className="new-worktree-modes" role="tablist" aria-label="Branch source">
+    <div className="new-worktree-modes" role="tablist" aria-label="Branch source" aria-busy={pullRequests === undefined}>
       {sources.map(source => <button key={source.mode} type="button" role="tab" aria-selected={mode === source.mode} className={mode === source.mode ? 'active' : ''} onClick={() => setMode(source.mode)}>{source.label}</button>)}
     </div>
     {mode === 'new'
@@ -8529,10 +8542,11 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
         : pullRequestList === undefined ? <p className="new-worktree-error" role="alert">Could not load pull requests.</p>
         : <>{initialNotice !== undefined && <p className="new-worktree-empty" role="status">{initialNotice}</p>}{allPullRequests.length === 0 ? <p className="new-worktree-empty">This Project has no open pull requests.</p> : <div className="new-worktree-prs"><PullRequestChoiceList list={pullRequestList} pending={pending} othersOpen={initial?.mode === 'pull-request' && pullRequestList.otherPullRequests.some(candidate => candidate.number === initial.number)} onSelectTarget={onSelectTarget} actions={candidate => candidate.checkedOut ? null : <label className="switch-pr-action switch-pr-select"><input type="radio" name="new-worktree-pull-request" aria-label={`Select #${candidate.number}`} checked={candidate === selectedPullRequest} disabled={pending} onChange={() => setPullRequestNumber(candidate.number)} />{candidate === selectedPullRequest ? 'Selected' : 'Select'}</label>} /></div>}</>}
     <div className="new-worktree-open" role="radiogroup" aria-label="Open in the new worktree"><span aria-hidden="true">Open</span>{worktreeOpenChoices.map(choice => {
-      const reason = choice.value === 'review' ? reviewUnavailable : undefined;
-      return <label key={choice.value} title={reason}><input type="radio" name="new-worktree-open" value={choice.value} checked={openChoice === choice} disabled={reason !== undefined} onChange={() => setOpenChoice(choice)} />{choice.label}</label>;
+      const reason = forkSelected && agentOpen(choice) ? forkOpenReason : choice.value === 'review' ? reviewUnavailable : undefined;
+      return <label key={choice.value} title={reason}><input type="radio" name="new-worktree-open" value={choice.value} checked={opened === choice} disabled={reason !== undefined} onChange={() => setOpenChoice(choice)} />{choice.label}</label>;
     })}</div>
-    {pending && project.setup && <p className="new-worktree-status progress-border progress-blue" role="status" aria-busy="true"><ProgressRing busy />Running the setup command in the new worktree — this can take a minute.</p>}
+    {forkSelected && <p className="new-worktree-empty" role="status">{forkOpenReason}.</p>}
+    {pending && project.setup && !forkSelected && <p className="new-worktree-status progress-border progress-blue" role="status" aria-busy="true"><ProgressRing busy />Running the setup command in the new worktree — this can take a minute.</p>}
     {error && <p className="new-worktree-error" role="alert">{error}</p>}
     <footer className="new-worktree-actions"><button type="button" className="outline-button" disabled={pending} onClick={onClose}>Cancel</button><button type="button" className={pending ? 'progress-border progress-blue' : undefined} aria-busy={pending || undefined} disabled={pending || (mode === 'existing' && (existingOptions === undefined || noExisting)) || (mode === 'pull-request' && selectedPullRequest === undefined)} onClick={() => void submit()}><ProgressRing busy={pending} />{pending ? 'Creating…' : 'Create worktree'}</button></footer>
   </div></div>, document.body);
@@ -9920,7 +9934,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   // the git flyout's rows open the dialog on their Project, unless it cannot manage worktrees here
   const openNewWorktreeFor = (projectId: string | undefined) => {
     const project = data.projects.find(candidate => candidate.id === projectId);
-    return project === undefined || project.manageWorktrees === false ? undefined : (initial: NewWorktreeSelection) => setNewWorktree({ projectId: project.id, initial });
+    return project === undefined || !offersNewWorktree(project, dynamicWorktrees) ? undefined : (initial: NewWorktreeSelection) => setNewWorktree({ projectId: project.id, initial });
   };
   const newWorktreeDialog = newWorktreeProject === undefined ? null : <NewWorktreeDialog project={newWorktreeProject} request={request} initial={newWorktree?.initial} reviewUnavailable={reviewTourUnavailableText(data.reviewTour)} onClose={() => setNewWorktree(undefined)} onCreated={(result, opened) => void worktreeCreated(result, opened)} onSelectTarget={target => { setNewWorktree(undefined); closeLauncher(); selectTarget(target); }} />;
   const removeWorktreeTarget = removeWorktreeId === undefined ? undefined : allWorktrees(data).find(worktree => worktree.id === removeWorktreeId);
@@ -10024,7 +10038,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const staleCount = project.stalePaths?.length ?? 0;
     // render every non-compacted worktree row
     const rows = visibleWorktrees.map(worktree => <div key={worktree.id} className="launcher-row"><span className="launcher-row-label">{launcherRowLabel(worktree, project)}</span>{launcherWorktreeControls(worktree, project)}</div>);
-    return <div key={project.id} className="launcher-project" role="group" aria-label={project.label}><div className={`launcher-project-header${inlineWorktree === undefined ? '' : ' inline-worktree'}`}><span>{project.label}</span>{staleCount > 0 && <button type="button" className="launcher-prune" disabled={creatingAgent || project.manageWorktrees === false} title={project.manageWorktrees === false ? project.manageWorktreesReason : undefined} onClick={() => setPruneProjectId(project.id)}>{staleCount} stale · Prune</button>}{inlineWorktree !== undefined && <div className="launcher-project-worktree-controls" role="group" aria-label={`${project.label} worktree controls`}>{launcherWorktreeControls(inlineWorktree, project)}</div>}{dynamicWorktrees && <button type="button" className="launcher-icon launcher-new-worktree" disabled={creatingAgent || project.manageWorktrees === false} aria-label="New worktree…" title={project.manageWorktrees === false ? project.manageWorktreesReason : 'New worktree…'} onClick={() => setNewWorktree({ projectId: project.id })}><LauncherRowIcon name="add" /></button>}</div>{rows}{project.mode === 'directory' && <div className="launcher-row"><span className="launcher-row-label">{project.label}</span>{launcherPlaceControls(directoryPlace(project.id))}{launcherPlaceSplit(project.label, directoryPlace(project.id), project.launch, `/api/projects/${encodeURIComponent(project.id)}/launch`, choice => void launchProjectDirectory(project, choice))}</div>}</div>;
+    return <div key={project.id} className="launcher-project" role="group" aria-label={project.label}><div className={`launcher-project-header${inlineWorktree === undefined ? '' : ' inline-worktree'}`}><span>{project.label}</span>{staleCount > 0 && <button type="button" className="launcher-prune" disabled={creatingAgent || project.manageWorktrees === false} title={project.manageWorktrees === false ? project.manageWorktreesReason : undefined} onClick={() => setPruneProjectId(project.id)}>{staleCount} stale · Prune</button>}{inlineWorktree !== undefined && <div className="launcher-project-worktree-controls" role="group" aria-label={`${project.label} worktree controls`}>{launcherWorktreeControls(inlineWorktree, project)}</div>}{dynamicWorktrees && <button type="button" className="launcher-icon launcher-new-worktree" disabled={creatingAgent || !offersNewWorktree(project, dynamicWorktrees)} aria-label="New worktree…" title={project.manageWorktrees === false ? project.manageWorktreesReason : 'New worktree…'} onClick={() => setNewWorktree({ projectId: project.id })}><LauncherRowIcon name="add" /></button>}</div>{rows}{project.mode === 'directory' && <div className="launcher-row"><span className="launcher-row-label">{project.label}</span>{launcherPlaceControls(directoryPlace(project.id))}{launcherPlaceSplit(project.label, directoryPlace(project.id), project.launch, `/api/projects/${encodeURIComponent(project.id)}/launch`, choice => void launchProjectDirectory(project, choice))}</div>}</div>;
   };
   // offer one Scratch launch even before any Workspace has been opened
   const globalLaunch: ToolbarLaunch = { label: 'Scratch', resolution: data.scratchLaunch, pending: creatingAgent, start: choice => createAgent(choice) };

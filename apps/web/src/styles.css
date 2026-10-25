@@ -2169,6 +2169,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .switch-pr-option { display: flex; flex-wrap: wrap; min-width: 0; align-items: center; gap: .25rem .6rem; padding: .5rem .9rem; border-radius: calc(var(--control-radius) - .15rem); }
 .switch-pr-option:hover { background: var(--surface-0); }
 .switch-pr-main { flex: 1 1 11rem; min-width: 0; }
+/* a fork pull request's badge, after its title */
+.switch-pr-fork { margin-left: .4rem; padding: .05rem .35rem; border: 1px solid color-mix(in srgb, var(--peach) 45%, transparent); border-radius: var(--control-radius); color: var(--peach); font: 650 .6rem/1.2 var(--font-mono); vertical-align: middle; white-space: nowrap; }
 :is(.git-status-panel, .new-worktree-prs) .switch-pr-main > a.switch-pr { display: inline-block; max-width: 100%; min-width: 0; border-radius: var(--control-radius); color: var(--text); line-height: 1.25; overflow-wrap: anywhere; text-align: left; text-decoration: none; white-space: normal; }
 :is(.git-status-panel, .new-worktree-prs) .switch-pr-main > a.switch-pr:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
 .switch-pr-copy { display: grid; min-width: 0; gap: .18rem; }

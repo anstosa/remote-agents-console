@@ -346,6 +346,22 @@ describe('pull request switching', () => {
     await expect(service.branchList('absent')).resolves.toBeUndefined();
   });
 
+  it('marks a pull request held by its pr-<number> worktree or by an older checkout of the same fork pull request', async () => {
+    const forkSha = 'b'.repeat(40);
+    const fork = { number: 8, title: 'Fork work', branch: 'main', headSha: forkSha, headOnOrigin: false, draft: false, url: 'https://github.com/octo/repo/pull/8' };
+    // pr-7 switched to another branch; echo holds #8 at a head the author has since replaced
+    const prFolder = { ...worktree, id: 'cora:/wts/pr-7', label: 'Cora · pr-7', path: '/wts/pr-7', identity: '/wts/pr-7', main: false, branch: 'feature/elsewhere' };
+    const echoView = { id: 'echo', projectId: 'cora', label: 'Echo', path: '/worktrees/echo', available: true, pinned: false, main: false, detached: false, locked: false, order: 1, branch: `rac/pr/8/${'c'.repeat(12)}` };
+    const discovery = { worktreesNow: () => [worktree, prFolder], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [{ id: 'cora', label: 'Cora', available: true, worktrees: [echoView] }] }) };
+    const pulls = { supports: async () => true, open: async () => ({ own: [choices[0], fork], others: [] }) };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand(''));
+
+    expect((await service.branchList('cora'))?.pullRequests).toEqual([
+      { ...choices[0], checkoutBranch: 'feature/draft', checkedOut: true, openIn: { worktreeId: prFolder.id, worktreeName: 'Cora · pr-7' } },
+      { ...fork, checkoutBranch: `rac/pr/8/${forkSha.slice(0, 12)}`, checkedOut: true, openIn: { worktreeId: 'echo', worktreeName: 'Echo' } }
+    ]);
+  });
+
   it('returns local branches with pull requests unsupported when there is no GitHub origin', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
     // fail closed if the GitHub-only path is ever queried
@@ -555,6 +571,70 @@ describe('pull request switching', () => {
       await expect(run('/usr/bin/git', ['-C', repository.targetPath, 'rev-parse', 'HEAD'])).resolves.toMatchObject({ stdout: `${repository.prSha}\n` });
       // a pull-request-ref checkout is detached from origin tracking (--no-track)
       await expect(run('/usr/bin/git', ['-C', repository.targetPath, 'config', '--get', `branch.${checkoutBranch}.remote`])).resolves.toMatchObject({ code: 1, stdout: '' });
+    } finally {
+      await rm(repository.root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('creates the pull request branch at the verified head even when the fetched ref moves right after the check', async () => {
+    const repository = await createSwitchRepository();
+    try {
+      const base = (await run('/usr/bin/git', ['-C', repository.targetPath, 'rev-parse', 'origin/main'])).stdout.trim();
+      // another fetch lands between the SHA check and the branch creation
+      const command: GitCommand = async (binary, args) => {
+        const result = await run(binary, args);
+        if (args.includes('refs/remotes/origin/feature/draft^{commit}')) await run('/usr/bin/git', ['-C', repository.targetPath, 'update-ref', 'refs/remotes/origin/feature/draft', base]);
+        return result;
+      };
+      const { service, targetWorktree } = switchService(repository, { number: 7, branch: 'feature/draft', headSha: repository.draftSha, headOnOrigin: true }, 'finished', command);
+
+      await expect(service.switch(targetWorktree.id, 7)).resolves.toBe('switched');
+
+      await expect(run('/usr/bin/git', ['-C', repository.targetPath, 'rev-parse', 'HEAD'])).resolves.toMatchObject({ stdout: `${repository.draftSha}\n` });
+      await expect(run('/usr/bin/git', ['-C', repository.targetPath, 'rev-parse', '--abbrev-ref', '@{upstream}'])).resolves.toMatchObject({ stdout: 'origin/feature/draft\n' });
+    } finally {
+      await rm(repository.root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('refuses an origin pull request whose head branch name git cannot safely fetch or check out', async () => {
+    const repository = await createSwitchRepository();
+    try {
+      const fetched: string[][] = [];
+      const command: GitCommand = async (binary, args) => {
+        if (args.includes('fetch')) fetched.push(args);
+        return await run(binary, args);
+      };
+      for (const branch of ['HEAD', '-upload-pack=evil', 'bad..name', 'trailing.lock']) {
+        const { service, targetWorktree } = switchService(repository, { number: 7, branch, headSha: repository.draftSha, headOnOrigin: true }, 'finished', command);
+        await expect(service.switch(targetWorktree.id, 7)).resolves.toEqual({ error: 'Pull request #7 has a head branch name git cannot check out.' });
+      }
+      expect(fetched).toEqual([]);
+      await expect(run('/usr/bin/git', ['-C', repository.targetPath, 'branch', '--show-current'])).resolves.toMatchObject({ stdout: 'main\n' });
+    } finally {
+      await rm(repository.root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('refuses a new-worktree pull request fetch while a branch checkout holds the shared lock', async () => {
+    const repository = await createSwitchRepository();
+    try {
+      let started!: () => void;
+      const startedPromise = new Promise<void>(resolve => { started = resolve; });
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      let blocked = false;
+      const command: GitCommand = async (binary, args) => {
+        if (!blocked && args[2] === 'switch' && args.at(-1) === 'feature/solo') { blocked = true; started(); await gate; }
+        return await run(binary, args);
+      };
+      const { service, targetWorktree } = switchService(repository, { number: 7, branch: 'feature/draft', headSha: repository.draftSha, headOnOrigin: true }, 'finished', command);
+
+      const switching = service.switchBranch(targetWorktree.id, 'feature/solo');
+      await startedPromise;
+      await expect(service.fetchForWorktree('cora', 7)).resolves.toEqual({ error: 'Another branch checkout or move is already running. Try again when it finishes.' });
+      release();
+      await expect(switching).resolves.toBe('switched');
     } finally {
       await rm(repository.root, { recursive: true, force: true });
     }

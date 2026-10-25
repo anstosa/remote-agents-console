@@ -598,7 +598,9 @@ export class DiscoveryService {
         const main = path === mainPath;
         const id = worktreeWireId(project.id, path);
         const sha = entry.head === undefined ? undefined : entry.head.slice(0, 7);
-        const generatedLabel = main ? project.label : entry.branch !== undefined ? `${project.label} · ${entry.branch}` : `${project.label} · ${sha ?? path.split('/').pop() ?? path}`;
+        const leaf = path.split('/').pop() ?? path;
+        // a pull request's checkout is named for its folder, since the PR's branch can be any name (or a fork's rac/pr/…)
+        const generatedLabel = main ? project.label : /^pr-[1-9]\d*$/u.test(leaf) ? `${project.label} · ${leaf}` : entry.branch !== undefined ? `${project.label} · ${entry.branch}` : `${project.label} · ${sha ?? leaf}`;
         const customLabel = labels[id];
         const label = customLabel ?? generatedLabel;
         // use exact checkout settings without leaking defaults into disabled stacks

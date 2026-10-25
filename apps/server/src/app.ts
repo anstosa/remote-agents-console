@@ -1798,8 +1798,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   // a Worktree's pull requests and local branches, whether or not an Agent runs there
   app.get('/api/worktrees/:id/switch-prs', async (request, reply) => { controlled(request); const availability = await prSwitch.available((request.params as { id: string }).id); return availability === undefined ? reply.code(404).send({ error: 'pull request switching unavailable' }) : availability; });
-  // the same list for the whole repository, with no worktree's checkout overlaid
-  app.get('/api/projects/:id/switch-prs', async (request, reply) => { controlled(request); const list = await prSwitch.branchList((request.params as { id: string }).id); return list === undefined ? reply.code(404).send({ error: 'repository branch list unavailable' }) : list; });
+  // the same list for the whole repository, with no worktree's checkout overlaid; it asks GitHub, so it shares the branch list's budget
+  app.get('/api/projects/:id/switch-prs', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => { controlled(request); const list = await prSwitch.branchList((request.params as { id: string }).id); return list === undefined ? reply.code(404).send({ error: 'repository branch list unavailable' }) : list; });
   app.get('/api/agents/:id/github-actions', async (request, reply) => { controlled(request); const url = await prSwitch.actionsUrl((request.params as { id: string }).id); return url === undefined ? reply.code(404).send({ error: 'GitHub Actions unavailable' }) : { url }; });
   // a Worktree's GitHub Actions, for the Workspace toolbar's menu whether or not an Agent runs there
   app.get('/api/worktrees/:id/github-actions', async (request, reply) => {
@@ -3024,7 +3024,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     controlled(request, true);
     const projectId = (request.params as { id: string }).id;
     const requestBody = body(request);
-    const { mode, branch, base, number, open = 'agent' } = requestBody;
+    // a stale client's `launch: false` predates the open choice and meant the idle shell alone
+    const { mode, branch, base, number, open = requestBody.launch === false ? 'terminal' : 'agent' } = requestBody;
     // hand-validate the body before any git runs
     // structural validation only; the service owns branch-name legality (a 409)
     if (mode !== 'new' && mode !== 'existing' && mode !== 'pull-request') return reply.code(400).send({ error: 'invalid worktree mode' });
@@ -3033,10 +3034,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (mode !== 'pull-request' && (typeof branch !== 'string' || branch.length === 0)) return reply.code(400).send({ error: 'invalid branch name' });
     if (base !== undefined && (typeof base !== 'string' || base.length > 255)) return reply.code(400).send({ error: 'invalid base' });
     if (open !== 'agent' && open !== 'terminal' && open !== 'empty') return reply.code(400).send({ error: 'invalid open choice' });
-    const outcome = await worktreeManagement.add(projectId, mode === 'pull-request' ? { mode, number: number as number } : { mode, branch: branch as string, ...(typeof base === 'string' ? { base } : {}) });
+    // the service refuses an Agent for a fork pull request, which it resolves from its own list
+    const outcome = await worktreeManagement.add(projectId, mode === 'pull-request' ? { mode, number: number as number, openAgent: open === 'agent' } : { mode, branch: branch as string, ...(typeof base === 'string' ? { base } : {}) });
     if (!outcome.ok) return reply.code(outcome.status).send({ error: outcome.error });
-    // store a service-chosen label before discovery reads it, so the shell and agent panes carry it
-    if (outcome.label !== undefined) await worktreeStore.setLabel(worktreeWireId(projectId, outcome.path), outcome.label).catch(() => {});
     // republish discovery so the new checkout is keyed and resolvable before pin and launch
     discovery.invalidateWorktrees();
     const worktree = (await discovery.worktrees(true)).find(candidate => candidate.identity === outcome.path);
@@ -3048,15 +3048,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // once it is up, else starts the agent's own session), and `empty` opens nothing — the pin
     // alone keeps its tab. Setup runs once here in every mode (a no-op when unconfigured) and
     // blocks until it finishes; a setup failure never fails the creation but does gate the
-    // agent, so none starts into a half-prepared worktree. The creation stands regardless: any
-    // failure past this point is a setupError and/or launchError, never a non-201.
+    // agent, so none starts into a half-prepared worktree. A fork pull request's code never runs
+    // setup (and the service already refused an agent for it). The creation stands regardless:
+    // any failure past this point is a setupError and/or launchError, never a non-201.
     let agentId: string | undefined;
     let launchError: string | undefined;
     let setupError: string | undefined;
     if (worktree === undefined) {
       launchError = 'The worktree was created, but it could not be resolved to prepare or open it.';
     } else {
-      const setup = await stackCommands.runSetup(worktree);
+      const setup = outcome.fork === true ? { ok: true as const } : await stackCommands.runSetup(worktree);
       if (!setup.ok) {
         setupError = 'The worktree was created, but its setup command failed.';
         // the operator sees a generic banner; the host log (kept only on failure) carries the output

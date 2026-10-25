@@ -971,7 +971,7 @@ const newWorktreeProject = { id: 'repo', label: 'Repo', available: true, manageW
 ] };
 
 // stub one worktree's flyout list and the New worktree dialog's Project lists
-async function stubNewWorktreeFromFlyout(page: Page, { agents, worktreeId, list, onCreate }: { agents: unknown[]; worktreeId: string; list: unknown; onCreate: (body: unknown) => void }) {
+async function stubNewWorktreeFromFlyout(page: Page, { agents, worktreeId, list, projectListMissing = false, onCreate }: { agents: unknown[]; worktreeId: string; list: unknown; projectListMissing?: boolean; onCreate: (body: unknown) => void }) {
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -981,6 +981,7 @@ async function stubNewWorktreeFromFlyout(page: Page, { agents, worktreeId, list,
     if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: false } });
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
+    if (url.pathname === '/api/projects/repo/switch-prs' && projectListMissing) return route.fulfill({ status: 404, json: { error: 'repository branch list unavailable' } });
     if (url.pathname === `/api/worktrees/${worktreeId}/switch-prs` || url.pathname === '/api/projects/repo/switch-prs') return route.fulfill({ json: list });
     if (url.pathname === '/api/projects/repo/branches') return route.fulfill({ json: { branches: [
       { name: 'main', ref: 'main', remote: false, checkedOut: true },
@@ -1054,4 +1055,33 @@ test('opens New worktree on a branch from its flyout row in a worktree with no a
   await expect(dialog.getByLabel('Branch', { exact: true })).toHaveValue('feature/solo');
   await dialog.getByRole('button', { name: 'Create worktree' }).click();
   await expect.poll(() => created).toEqual({ mode: 'existing', branch: 'feature/solo', open: 'agent' });
+});
+
+// the dirty Cora worktree's flyout, listing one pull request free to open in a new worktree
+const coraAgent = { id: 'agent-1', sessionId: 'socket:$1', home: '/repo/wts/cora', projectId: 'repo', worktreeId: 'cora', worktreeLabel: 'Cora', branch: 'feature/current', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0 }, title: 'Ready' };
+const reviewList = { enabled: false, pullRequests: [{ number: 300, title: 'Review me', branch: 'feature/review', draft: false, url: 'https://github.com/acme/repo/pull/300', checkedOut: false }], otherPullRequests: [], branches: [], pullRequestsSupported: true };
+
+test('falls back from the Pull request tab when the Project\'s list turns out to be missing', async ({ page }) => {
+  await stubNewWorktreeFromFlyout(page, { agents: [coraAgent], worktreeId: 'cora', list: reviewList, projectListMissing: true, onCreate: () => {} });
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^Cora/u }).click();
+  const menu = await openBranchTab(page, 'PRs');
+  await menu.getByRole('group', { name: '#300: Review me; Open', exact: true }).getByRole('button', { name: 'New worktree from #300' }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'New worktree' });
+  await expect(dialog.getByRole('tablist', { name: 'Branch source' })).toHaveAttribute('aria-busy', 'false');
+  await expect(dialog.getByRole('tab', { name: 'Pull request' })).toHaveCount(0);
+  await expect(dialog.getByRole('tab', { name: 'New branch' })).toHaveAttribute('aria-selected', 'true');
+  await expect(dialog.getByLabel('Branch name')).toBeVisible();
+});
+
+test('offers no New worktree action on flyout rows when the launcher offers none', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('rac.dynamic-worktrees', 'disabled'));
+  await stubNewWorktreeFromFlyout(page, { agents: [coraAgent], worktreeId: 'cora', list: reviewList, onCreate: () => {} });
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^Cora/u }).click();
+  const menu = await openBranchTab(page, 'PRs');
+  const row = menu.getByRole('group', { name: '#300: Review me; Open', exact: true });
+  await expect(row.getByRole('button', { name: 'Checkout' })).toBeVisible();
+  await expect(row.getByRole('button', { name: /^New worktree/u })).toHaveCount(0);
 });
