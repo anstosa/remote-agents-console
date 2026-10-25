@@ -111,6 +111,13 @@ type MergeBaseChoices = { branch?: string; configured?: string; branches: string
 // The opt-in AI Code review is unchecked on every open; `codeReview` absent hides it.
 export function ReviewStartSheet({ target, prBase, request, tour, codeReview, onStart, onCancel }: { target: ReviewTarget; prBase?: string; request: (url: string, init?: RequestInit) => Promise<Response>; tour?: ReviewTourCapability; codeReview?: CodeReviewCapability; onStart: (launch: ReviewLaunch) => void; onCancel: () => void }) {
   const [scope, setScope] = useState<ReviewScope>(target.scope === 'commit' ? 'commit' : target.scope === 'pr' && prBase !== undefined ? 'pr' : 'working');
+  // a just-launched Agent's PR base can arrive after the sheet opens; take the asked-for All PR then
+  const awaitingPrBase = useRef(target.scope === 'pr' && prBase === undefined);
+  useEffect(() => {
+    if (!awaitingPrBase.current || prBase === undefined) return;
+    awaitingPrBase.current = false;
+    setScope(current => current === 'working' ? 'pr' : current);
+  }, [prBase]);
   const [includeTests, setIncludeTests] = useState(false);
   const [includeDocs, setIncludeDocs] = useState(false);
   const tourEfforts = effortList(tour?.efforts);

@@ -2581,7 +2581,12 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .new-worktree-fields { display: grid; gap: .55rem; }
 .new-worktree-fields label { display: grid; gap: .25rem; color: var(--subtext-0); font-size: .7rem; }
 .new-worktree-fields input, .new-worktree-fields select { padding: .4rem .5rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); color: var(--text); font-size: .82rem; }
-.new-worktree-launch { display: flex; align-items: center; gap: .45rem; color: var(--text); font-size: .76rem; }
+.new-worktree-open { display: grid; grid-template-columns: auto repeat(4, minmax(0, 1fr)); align-items: center; gap: .35rem; color: var(--subtext-0); font-size: .7rem; }
+.new-worktree-open label { position: relative; padding: .35rem .3rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); color: var(--text); font-size: .74rem; text-align: center; cursor: pointer; }
+.new-worktree-open input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: inherit; }
+.new-worktree-open label:has(input:checked) { border-color: color-mix(in srgb, var(--lavender) 60%, transparent); background: color-mix(in srgb, var(--lavender) 16%, transparent); }
+.new-worktree-open label:has(input:focus-visible) { outline: 2px solid var(--lavender); outline-offset: 1px; }
+.new-worktree-open label:has(input:disabled) { opacity: .45; cursor: not-allowed; }
 .new-worktree-loading, .new-worktree-empty { display: flex; align-items: center; gap: .4rem; color: var(--subtext-0); font-size: .76rem; }
 .new-worktree-error { margin: 0; color: var(--red); font-size: .74rem; }
 .new-worktree-status { margin: 0; color: var(--subtext-0); font-size: .74rem; }

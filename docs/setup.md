@@ -797,12 +797,19 @@ worktree…** control that opens a dialog with two modes:
 The checkout is created under the Project's `worktreesDirectory` at a leaf named
 for the branch (`/` flattened to `-`); you never type a path. The console pins
 the new Worktree so it keeps its tab, runs the Project's [`commands.setup`](#projects)
-(when configured) to prepare the checkout, gives it an idle shell, and — unless
-you clear **Launch agent** — launches the Project's last-used kind in it. Setup
-runs to completion before the agent starts and gates it: the dialog shows that it
-is preparing the Worktree while it runs, and a setup failure leaves the Worktree
-standing with its idle shell but launches no agent. The Worktree is created even
-if setup or that launch fails; the error is reported and the tab stands. Refusals
+(when configured) to prepare the checkout, then opens what you chose under
+**Open** (the dialog remembers the last choice per Project):
+
+- **Agent** (the default) — an idle shell plus the Project's last-used kind.
+- **Review** — an Agent as above, then the guided review start sheet for it.
+- **Terminal** — the idle shell only.
+- **Nothing** — no shell or agent; the pin keeps its tab.
+
+Setup runs in every mode, to completion, before anything opens, and gates the
+agent: the dialog shows that it is preparing the Worktree while it runs, and a
+setup failure under Agent or Review leaves the Worktree with its idle shell but
+launches no agent. The Worktree is created even if setup or the launch fails;
+the error is reported and the tab stands. Refusals
 (an existing branch name, an unresolvable base, a branch already checked out
 elsewhere, or a target path that exists) are reported before git runs.
 

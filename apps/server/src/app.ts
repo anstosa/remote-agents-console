@@ -3024,7 +3024,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     controlled(request, true);
     const projectId = (request.params as { id: string }).id;
     const requestBody = body(request);
-    const { mode, branch, base, number, launch: launchAgent } = requestBody;
+    const { mode, branch, base, number, open = 'agent' } = requestBody;
     // hand-validate the body before any git runs
     // structural validation only; the service owns branch-name legality (a 409)
     if (mode !== 'new' && mode !== 'existing' && mode !== 'pull-request') return reply.code(400).send({ error: 'invalid worktree mode' });
@@ -3032,7 +3032,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (mode === 'pull-request' && (typeof number !== 'number' || !Number.isSafeInteger(number) || number < 1)) return reply.code(400).send({ error: 'invalid pull request number' });
     if (mode !== 'pull-request' && (typeof branch !== 'string' || branch.length === 0)) return reply.code(400).send({ error: 'invalid branch name' });
     if (base !== undefined && (typeof base !== 'string' || base.length > 255)) return reply.code(400).send({ error: 'invalid base' });
-    if (launchAgent !== undefined && typeof launchAgent !== 'boolean') return reply.code(400).send({ error: 'invalid launch flag' });
+    if (open !== 'agent' && open !== 'terminal' && open !== 'empty') return reply.code(400).send({ error: 'invalid open choice' });
     const outcome = await worktreeManagement.add(projectId, mode === 'pull-request' ? { mode, number: number as number } : { mode, branch: branch as string, ...(typeof base === 'string' ? { base } : {}) });
     if (!outcome.ok) return reply.code(outcome.status).send({ error: outcome.error });
     // store a service-chosen label before discovery reads it, so the shell and agent panes carry it
@@ -3043,18 +3043,18 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const worktreeId = worktree?.id ?? worktreeWireId(projectId, outcome.path);
     // a created checkout keeps its tab from the start
     await worktreeStore.setPinned(worktreeId, true).catch(() => {});
-    // Prepare the fresh checkout, then give it its idle shell so it has a tab even without an
-    // agent; then, unless the operator opted out, launch the Project's last-used kind — the
-    // launch path adopts that idle shell once it is up, else starts the agent's own session.
-    // Setup runs once here (a no-op when unconfigured) and blocks until it finishes; a setup
-    // failure never fails the creation but does gate the launch, so no agent starts into a
-    // half-prepared worktree. The creation stands regardless: any failure past this point is a
-    // setupError and/or launchError, never a non-201.
+    // Prepare the fresh checkout, then open what the operator chose: `terminal` gives it its idle
+    // shell, `agent` adds the Project's last-used kind (the launch path adopts that idle shell
+    // once it is up, else starts the agent's own session), and `empty` opens nothing — the pin
+    // alone keeps its tab. Setup runs once here in every mode (a no-op when unconfigured) and
+    // blocks until it finishes; a setup failure never fails the creation but does gate the
+    // agent, so none starts into a half-prepared worktree. The creation stands regardless: any
+    // failure past this point is a setupError and/or launchError, never a non-201.
     let agentId: string | undefined;
     let launchError: string | undefined;
     let setupError: string | undefined;
     if (worktree === undefined) {
-      launchError = 'The worktree was created, but it could not be resolved to launch an agent.';
+      launchError = 'The worktree was created, but it could not be resolved to prepare or open it.';
     } else {
       const setup = await stackCommands.runSetup(worktree);
       if (!setup.ok) {
@@ -3062,10 +3062,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         // the operator sees a generic banner; the host log (kept only on failure) carries the output
         if (setup.log !== undefined) console.error(`[worktrees] setup failed for ${worktreeId}; see ${setup.log}`);
       }
-      if (launchAgent === false || !setup.ok) {
-        // a prepared or opted-out worktree still gets its idle shell, and thus a tab
+      if (open === 'terminal' || (open === 'agent' && !setup.ok)) {
+        // a Terminal, or an Agent whose setup failed, gets the idle shell alone
         if (!await launch.startWorktreeShell(worktree)) launchError = 'The worktree was created, but its shell could not be started.';
-      } else {
+      } else if (open === 'agent') {
         await launch.startWorktreeShell(worktree);
         const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
         // report the agent when it appears, but never fail the creation on a slow launch

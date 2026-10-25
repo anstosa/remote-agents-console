@@ -82,19 +82,49 @@ describe('POST /api/projects/:id/worktrees', () => {
     } finally { await server.close(); }
   });
 
-  it('creates without launching when launch is off, but still starts the idle shell', async () => {
+  it('opens a Terminal: starts the idle shell but launches no agent', async () => {
     const launched: string[] = [];
     const shells: string[] = [];
     const worktreeManagement = { add: async () => ({ ok: true, path: '/repo/wts/feat' }) } as never;
     const launch = { startWorktreeShell: async (w: { id: string }) => { shells.push(w.id); return true; }, launch: async (id: string) => { launched.push(id); return true; } } as never;
     const server = await app({ discovery: discoveryStub(), worktreeManagement, launch, worktreeStore: await store() });
     try {
-      const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'new', branch: 'feat', base: 'main', launch: false } });
+      const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'new', branch: 'feat', base: 'main', open: 'terminal' } });
       expect(response.statusCode).toBe(201);
       expect(response.json()).toEqual({ worktreeId: 'proj:/repo/wts/feat' });
       // the checkout still gets its idle shell (so it has a tab); no agent is launched
       expect(shells).toEqual(['proj:/repo/wts/feat']);
       expect(launched).toEqual([]);
+    } finally { await server.close(); }
+  });
+
+  it('opens Nothing: runs setup and pins, but starts neither the shell nor an agent', async () => {
+    const events: string[] = [];
+    const worktreeStore = await store();
+    const worktreeManagement = { add: async () => ({ ok: true, path: '/repo/wts/feat' }) } as never;
+    const launch = { startWorktreeShell: async () => { events.push('shell'); return true; }, launch: async () => { events.push('launch'); return true; } } as never;
+    const worktreeCommands = { runSetup: async () => { events.push('setup'); return { ok: true }; } } as never;
+    const server = await app({ discovery: discoveryStub(), worktreeManagement, launch, worktreeCommands, worktreeStore });
+    try {
+      const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'existing', branch: 'feat', open: 'empty' } });
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toEqual({ worktreeId: 'proj:/repo/wts/feat' });
+      // the pin alone keeps its tab
+      expect(events).toEqual(['setup']);
+      expect(await worktreeStore.pins()).toEqual({ 'proj:/repo/wts/feat': true });
+    } finally { await server.close(); }
+  });
+
+  it('rejects an unknown open choice before adding', async () => {
+    const added: unknown[] = [];
+    const worktreeManagement = { add: async (_id: string, input: unknown) => { added.push(input); return { ok: true, path: '/repo/wts/feat' }; } } as never;
+    const server = await app({ discovery: discoveryStub(), worktreeManagement, launch: { startWorktreeShell: async () => true, launch: async () => true } as never, worktreeStore: await store() });
+    try {
+      for (const open of ['review', 'none', true]) {
+        const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'new', branch: 'feat', open } });
+        expect(response.statusCode).toBe(400);
+      }
+      expect(added).toEqual([]);
     } finally { await server.close(); }
   });
 
@@ -183,7 +213,7 @@ describe('POST /api/projects/:id/worktrees', () => {
         const invalid = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload });
         expect(invalid.statusCode).toBe(400);
       }
-      const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'pull-request', number: 7, launch: false } });
+      const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'pull-request', number: 7, open: 'terminal' } });
       expect(response.statusCode).toBe(201);
       // client-supplied branch names never reach a pull-request add
       expect(added).toEqual([{ mode: 'pull-request', number: 7 }]);

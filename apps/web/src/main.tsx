@@ -8316,6 +8316,28 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
 // what a successful worktree creation hands back to the launcher
 type WorktreeCreated = { worktreeId: string; agentId?: string; launchError?: string; setupError?: string };
 
+// What opens in a new Worktree: an Open folder action, or Review. A guided review is bound to a
+// live Agent, so Review asks the server for an Agent and the client then opens the review start
+// sheet for it.
+type WorktreeOpen = FolderAction | 'review';
+type WorktreeOpenChoice = { value: WorktreeOpen; label: string; failed: string; ready: (agentId?: string) => string };
+const worktreeOpenChoices: WorktreeOpenChoice[] = [
+  { value: 'agent', label: 'Agent', failed: 'Worktree created, agent did not start', ready: agentId => agentId === undefined ? 'The agent is still starting in the new worktree.' : 'The new agent session is ready and its output is connecting.' },
+  { value: 'review', label: 'Review', failed: 'Worktree created, review agent did not start', ready: agentId => agentId === undefined ? 'Its agent is still starting; start the review from its git status once it is up.' : 'Its agent is ready; choose what to review.' },
+  { value: 'terminal', label: 'Terminal', failed: 'Worktree created, terminal did not open', ready: () => 'The new worktree is ready with a terminal.' },
+  { value: 'empty', label: 'Nothing', failed: 'Worktree created, but it could not be found', ready: () => 'The new worktree is ready; nothing was opened in it.' }
+];
+const worktreeOpenKey = (projectId: string) => `rac.new-worktree-open:${projectId}`;
+const savedWorktreeOpen = (projectId: string): WorktreeOpenChoice => {
+  const fallback = worktreeOpenChoices[0]!;
+  try { return worktreeOpenChoices.find(choice => choice.value === localStorage.getItem(worktreeOpenKey(projectId))) ?? fallback; }
+  catch { return fallback; }
+};
+const saveWorktreeOpen = (projectId: string, open: WorktreeOpen) => {
+  try { localStorage.setItem(worktreeOpenKey(projectId), open); }
+  catch { /* the choice still holds for this creation */ }
+};
+
 // Password managers offer to fill a lone text field in a dialog, reading a branch name as a
 // username; `autoComplete="off"` alone does not stop them, so opt out per vendor as well.
 const noAutofill = { autoComplete: 'off', autoCorrect: 'off', autoCapitalize: 'off', spellCheck: false, 'data-1p-ignore': 'true', 'data-lpignore': 'true', 'data-bwignore': 'true', 'data-form-type': 'other' } as const;
@@ -8388,9 +8410,10 @@ function BranchSelect({ label, options, value, failed, empty, onChange }: { labe
 
 // The "New worktree…" dialog: create a checkout for a new branch (name + a base chosen
 // from the Project's branches, pre-selected to its default) or an existing local /
-// remote-only branch, launching the Project's last-used kind by default. One dialog from
-// branch to prompting.
-function NewWorktreeDialog({ project, request, onClose, onCreated }: { project: Project; request: (url: string, init?: RequestInit) => Promise<Response>; onClose: () => void; onCreated: (result: WorktreeCreated) => void }) {
+// remote-only branch, and choose what opens in it: the Project's last choice, else an Agent
+// of its last-used kind. One dialog from branch to prompting. `reviewUnavailable` disables
+// Review with its reason.
+function NewWorktreeDialog({ project, request, reviewUnavailable, onClose, onCreated }: { project: Project; request: (url: string, init?: RequestInit) => Promise<Response>; reviewUnavailable?: string; onClose: () => void; onCreated: (result: WorktreeCreated, opened: WorktreeOpenChoice) => void }) {
   const [mode, setMode] = useState<'new' | 'existing'>('new');
   const [branches, setBranches] = useState<BranchOption[] | undefined>(undefined);
   const [branchesFailed, setBranchesFailed] = useState(false);
@@ -8398,7 +8421,10 @@ function NewWorktreeDialog({ project, request, onClose, onCreated }: { project: 
   // both pickers hold the selected option's ref, not its branch name
   const [base, setBase] = useState('');
   const [existingRef, setExistingRef] = useState('');
-  const [launchAgent, setLaunchAgent] = useState(true);
+  const [openChoice, setOpenChoice] = useState(() => {
+    const saved = savedWorktreeOpen(project.id);
+    return saved.value === 'review' && reviewUnavailable !== undefined ? worktreeOpenChoices[0]! : saved;
+  });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   // fetch the offerable branches and default base once the dialog opens
@@ -8432,14 +8458,15 @@ function NewWorktreeDialog({ project, request, onClose, onCreated }: { project: 
     setPending(true);
     try {
       // an empty base falls to the Project's default branch on the server
-      const response = await request(`/api/projects/${encodeURIComponent(project.id)}/worktrees`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode, branch, ...(mode === 'new' && base !== '' ? { base } : {}), launch: launchAgent }) }).catch(() => undefined);
+      const response = await request(`/api/projects/${encodeURIComponent(project.id)}/worktrees`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode, branch, ...(mode === 'new' && base !== '' ? { base } : {}), open: openChoice.value === 'review' ? 'agent' : openChoice.value }) }).catch(() => undefined);
       if (response === undefined) return setError('Unable to reach the console.');
       if (!response.ok) {
         const payload = await response.json().catch(() => undefined) as { error?: string } | undefined;
         return setError(payload?.error ?? 'The worktree could not be created.');
       }
       const payload = await response.json() as WorktreeCreated;
-      onCreated(payload);
+      saveWorktreeOpen(project.id, openChoice.value);
+      onCreated(payload, openChoice);
     } finally { setPending(false); }
   };
   const noExisting = existingOptions !== undefined && existingOptions.length === 0;
@@ -8452,7 +8479,10 @@ function NewWorktreeDialog({ project, request, onClose, onCreated }: { project: 
     {mode === 'new'
       ? <div className="new-worktree-fields"><label>Branch name<input aria-label="Branch name" type="text" name="worktree-branch-name" value={newBranch} onChange={event => setNewBranch(event.target.value)} placeholder="feature/dark-mode" autoFocus {...noAutofill} /></label><BranchSelect label="Base" options={baseOptions} value={base} failed={branchesFailed} empty="No branches are available as a base." onChange={setBase} /></div>
       : <div className="new-worktree-fields"><BranchSelect label="Branch" options={existingOptions} value={existingRef} failed={branchesFailed} empty="No branches are available to check out." onChange={setExistingRef} /></div>}
-    <label className="new-worktree-launch"><input type="checkbox" checked={launchAgent} onChange={event => setLaunchAgent(event.target.checked)} />Launch agent in the new worktree</label>
+    <div className="new-worktree-open" role="radiogroup" aria-label="Open in the new worktree"><span aria-hidden="true">Open</span>{worktreeOpenChoices.map(choice => {
+      const reason = choice.value === 'review' ? reviewUnavailable : undefined;
+      return <label key={choice.value} title={reason}><input type="radio" name="new-worktree-open" value={choice.value} checked={openChoice === choice} disabled={reason !== undefined} onChange={() => setOpenChoice(choice)} />{choice.label}</label>;
+    })}</div>
     {pending && project.setup && <p className="new-worktree-status progress-border progress-blue" role="status" aria-busy="true"><ProgressRing busy />Running the setup command in the new worktree — this can take a minute.</p>}
     {error && <p className="new-worktree-error" role="alert">{error}</p>}
     <footer className="new-worktree-actions"><button type="button" className="outline-button" disabled={pending} onClick={onClose}>Cancel</button><button type="button" className={pending ? 'progress-border progress-blue' : undefined} aria-busy={pending || undefined} disabled={pending || (mode === 'existing' && (existingOptions === undefined || noExisting))} onClick={() => void submit()}><ProgressRing busy={pending} />{pending ? 'Creating…' : 'Create worktree'}</button></footer>
@@ -9645,17 +9675,21 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     void refresh();
   };
   // a worktree just created from the launcher: close everything, refresh, and select its
-  // new tab (its agent when one launched, else the idle worktree)
-  const worktreeCreated = async (result: WorktreeCreated) => {
+  // new tab (its agent when one launched, its shell as a Terminal panel when Terminal was
+  // chosen, else the worktree), then open the review start sheet when Review was chosen and
+  // its agent is up
+  const worktreeCreated = async (result: WorktreeCreated, opened: WorktreeOpenChoice) => {
     setNewWorktreeProjectId(undefined);
     closeLauncher();
     await refresh();
     if (result.agentId !== undefined) setActivateAgentId(result.agentId);
+    else if (opened.value === 'terminal' && result.launchError === undefined) void openTerminalAt(result.worktreeId, 'the new worktree');
     else setActivateWorktreeId(result.worktreeId);
-    // a failed setup gates the launch, so it is the reason no agent started — report it first
+    if (opened.value === 'review' && result.agentId !== undefined) setReviewStart({ agentId: result.agentId, worktreeId: result.worktreeId, scope: 'pr' });
+    // a failed setup gates the agent, so it is the reason none started — report it first
     if (result.setupError !== undefined) showOperationFeedback({ tone: 'error', message: 'Worktree created, setup failed', detail: result.setupError });
-    else if (result.launchError !== undefined) showOperationFeedback({ tone: 'error', message: 'Worktree created, agent did not start', detail: result.launchError });
-    else showOperationFeedback({ tone: 'success', message: 'Worktree created', detail: result.agentId === undefined ? 'The new worktree is ready.' : 'The new agent session is ready and its output is connecting.' });
+    else if (result.launchError !== undefined) showOperationFeedback({ tone: 'error', message: opened.failed, detail: result.launchError });
+    else showOperationFeedback({ tone: 'success', message: 'Worktree created', detail: opened.ready(result.agentId) });
   };
   // a worktree just removed from a tab or the launcher: close everything and refresh
   const worktreeRemoved = async (message: string) => {
@@ -9817,7 +9851,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     setReviewMinimized(false);
   };
   const newWorktreeProject = newWorktreeProjectId === undefined ? undefined : data.projects.find(project => project.id === newWorktreeProjectId);
-  const newWorktreeDialog = newWorktreeProject === undefined ? null : <NewWorktreeDialog project={newWorktreeProject} request={request} onClose={() => setNewWorktreeProjectId(undefined)} onCreated={result => void worktreeCreated(result)} />;
+  const newWorktreeDialog = newWorktreeProject === undefined ? null : <NewWorktreeDialog project={newWorktreeProject} request={request} reviewUnavailable={reviewTourUnavailableText(data.reviewTour)} onClose={() => setNewWorktreeProjectId(undefined)} onCreated={(result, opened) => void worktreeCreated(result, opened)} />;
   const removeWorktreeTarget = removeWorktreeId === undefined ? undefined : allWorktrees(data).find(worktree => worktree.id === removeWorktreeId);
   const removeWorktreeDialog = removeWorktreeTarget === undefined ? null : <RemoveWorktreeDialog worktree={removeWorktreeTarget} request={request} onClose={() => setRemoveWorktreeId(undefined)} onRemoved={message => void worktreeRemoved(message)} />;
   const renameWorktreeTarget = renameWorktreeId === undefined ? undefined : allWorktrees(data).find(worktree => worktree.id === renameWorktreeId);
