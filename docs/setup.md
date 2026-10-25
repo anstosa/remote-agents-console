@@ -782,36 +782,26 @@ alias and restores the generated label.
 
 ### Creating Worktrees
 
-The `+` launcher lists one section per Project. Each header carries a **New
-worktree…** control that opens a dialog with two modes:
+The `+` launcher lists one section per Project. Each header carries a **New worktree…** control that opens a dialog with three sources:
 
-- **New branch** — a branch name plus a base picked from the Project's branches,
-  pre-selected to its default branch (`origin/HEAD` when the remote publishes one,
-  else the checkout's current branch). A branch another Worktree already holds is
-  still offered here — the default branch usually is one. The console creates the
-  branch with `git worktree add --no-track -b <name> <path> <base>`.
-- **Existing branch** — the same picker over the branches that can still be checked
-  out: local branches checked out nowhere plus remote-only branches (marked); git
-  creates the tracking branch for the latter.
+- **New branch** — a branch name plus a base picked from the Project's branches, pre-selected to its default branch (`origin/HEAD` when the remote publishes one, else the checkout's current branch). A branch another Worktree already holds is still offered here — the default branch usually is one. The console creates the branch with `git worktree add --no-track -b <name> <path> <base>`.
+- **Existing branch** — the same picker over the branches that can still be checked out: local branches checked out nowhere plus remote-only branches (marked); git creates the tracking branch for the latter.
+- **Pull request** — the Project's open pull requests, yours first and others' folded below, shown when the Project has a GitHub origin. A pull request a Worktree already holds offers only a link to that Worktree. The dialog sends only the number; the server resolves the pull request from its own list, fetches its head into a pinned ref, and refuses it if the head changed on GitHub since it was listed (reopen the dialog and try again).
 
-The checkout is created under the Project's `worktreesDirectory` at a leaf named
-for the branch (`/` flattened to `-`); you never type a path. The console pins
-the new Worktree so it keeps its tab, runs the Project's [`commands.setup`](#projects)
-(when configured) to prepare the checkout, then opens what you chose under
-**Open** (the dialog remembers the last choice per Project):
+The git flyout's **PRs** and **Branches** rows also carry a **New worktree** action beside **Checkout**. It opens the same dialog with that pull request or branch preselected, and works while the current Worktree has uncommitted changes, when **Checkout** is disabled. It is offered wherever the launcher offers **New worktree…**.
+
+A branch's checkout is created under the Project's `worktreesDirectory` at a leaf named for the branch (`/` flattened to `-`); you never type a path. A pull request's checkout is always named `pr-<number>`, and its label reads `<Project> · pr-<number>` whatever branch it holds. A pull request whose head branch lives on origin is checked out on that branch, tracking `origin/<branch>`. A fork pull request's head lives in another repository, so it is checked out on a console-owned branch, `rac/pr/<number>/<first 12 of its head SHA>`, with no upstream. A pull request counts as held by its `pr-<number>` Worktree and, for a fork, by any checkout of an earlier `rac/pr/<number>/…` head.
+
+The console pins the new Worktree so it keeps its tab, runs the Project's [`commands.setup`](#projects) (when configured) to prepare the checkout, then opens what you chose under **Open** (the dialog remembers the last choice per Project):
 
 - **Agent** (the default) — an idle shell plus the Project's last-used kind.
 - **Review** — an Agent as above, then the guided review start sheet for it.
 - **Terminal** — the idle shell only.
 - **Nothing** — no shell or agent; the pin keeps its tab.
 
-Setup runs in every mode, to completion, before anything opens, and gates the
-agent: the dialog shows that it is preparing the Worktree while it runs, and a
-setup failure under Agent or Review leaves the Worktree with its idle shell but
-launches no agent. The Worktree is created even if setup or the launch fails;
-the error is reported and the tab stands. Refusals
-(an existing branch name, an unresolvable base, a branch already checked out
-elsewhere, or a target path that exists) are reported before git runs.
+Setup runs in every mode, to completion, before anything opens, and gates the agent: the dialog shows that it is preparing the Worktree while it runs, and a setup failure under Agent or Review leaves the Worktree with its idle shell but launches no agent. The Worktree is created even if setup or the launch fails; the error is reported and the tab stands. Refusals (an existing branch name, an unresolvable base, a branch already checked out elsewhere, a pull request that is held, closed, or changed, or a target path that exists) are reported before git creates the checkout.
+
+**Fork pull requests run no setup and no agent.** Their code comes from outside the repository, so a Worktree created from one opens only **Terminal** or **Nothing**, and setup never runs in it. The dialog marks fork pull requests **Fork** (as the git flyout does), disables Agent and Review when one is selected, and falls back to Terminal; the server enforces this itself from the resolved pull request and refuses an Agent or Review request with a 409. Checking a fork pull request out into the current Worktree from the git flyout is not affected: an Agent already running there keeps running, now in the fork's code.
 
 ### Removing Worktrees
 
@@ -830,6 +820,8 @@ is ahead of or behind its upstream:
   deleting it discards its commits for good, but the tick stays yours to make.
   It force-deletes the branch after the checkout is removed; if that delete
   fails, the removal still stands and the failure is reported.
+
+A Worktree whose pull request has merged or closed shows a **PR merged · Remove** or **PR closed · Remove** chip on its launcher row, read from GitHub each time the launcher opens. It only opens the Remove dialog above, with all its safeguards. The checkout's branch must still be checked out there and sit at the pull request's final head, or behind it (as when the author pushed more commits after the Worktree was created); a lookup failure offers nothing. For a fork pull request's `rac/pr/<number>/…` branch, the Remove dialog counts commits the fetched `refs/rac/pull/<number>` contains as pushed, since GitHub holds them.
 
 Removing a Worktree kills its idle shell, removes the checkout, and deletes its
 console records (pin, last-used kind, review tour). It never
