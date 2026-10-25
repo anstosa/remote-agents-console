@@ -16,6 +16,18 @@ const dashboard = {
   ]
 };
 
+// the Project's repository-wide list: own PRs, others' PRs, and who already holds each
+const pullRequest = (number: number, title: string, branch: string, extra = {}) => ({ number, title, branch, draft: false, url: `https://github.com/acme/repo/pull/${number}`, checkedOut: false, ...extra });
+const switchPrs = {
+  pullRequests: [
+    pullRequest(12, 'Fix login redirect', 'fix-login'),
+    pullRequest(15, 'Dark mode', 'dark-mode', { checkedOut: true, openIn: { worktreeId: 'repo:/repo/wts/dark-mode', worktreeName: 'Repo · dark-mode' } })
+  ],
+  otherPullRequests: [pullRequest(20, 'Contributor docs', 'docs')],
+  branches: [],
+  pullRequestsSupported: true
+};
+
 async function stub(page: import('@playwright/test').Page, onCreate: (body: unknown) => void) {
   await page.route('**/api/**', async route => {
     const request = route.request();
@@ -28,12 +40,20 @@ async function stub(page: import('@playwright/test').Page, onCreate: (body: unkn
       { name: 'feature', ref: 'feature', remote: false, checkedOut: false },
       { name: 'hotfix', ref: 'origin/hotfix', remote: true, checkedOut: false }
     ], defaultBranch: 'main' } });
+    if (url.pathname === '/api/projects/repo/switch-prs') return route.fulfill({ json: switchPrs });
     if (url.pathname === '/api/projects/repo/worktrees' && request.method() === 'POST') {
       onCreate(request.postDataJSON());
       return route.fulfill({ status: 201, json: { worktreeId: 'repo:/repo/wts/feature-login' } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
+}
+
+// open the Repo Project's New worktree dialog from the launcher
+async function openNewWorktree(page: import('@playwright/test').Page) {
+  await page.locator('.new-agent-tab').click();
+  await page.getByRole('group', { name: 'Agent launcher' }).getByRole('group', { name: 'Repo' }).getByRole('button', { name: 'New worktree…' }).click();
+  return page.getByRole('dialog', { name: 'New worktree' });
 }
 
 test('creates a worktree for a new branch with the default base pre-filled', async ({ page }) => {
@@ -76,9 +96,7 @@ test('bases a new branch on a chosen branch, sending the ref that resolves it', 
   let created: unknown;
   await stub(page, body => { created = body; });
   await page.goto('/');
-  await page.locator('.new-agent-tab').click();
-  await page.getByRole('group', { name: 'Agent launcher' }).getByRole('group', { name: 'Repo' }).getByRole('button', { name: 'New worktree…' }).click();
-  const dialog = page.getByRole('dialog', { name: 'New worktree' });
+  const dialog = await openNewWorktree(page);
 
   await dialog.getByLabel('Branch name').fill('feature/login');
   await dialog.getByLabel('Base').selectOption('origin/hotfix');
@@ -96,9 +114,7 @@ test('explains that setup is running while a create blocks on it', async ({ page
     return route.fulfill({ status: 201, json: { worktreeId: 'repo:/repo/wts/feature-login' } });
   });
   await page.goto('/');
-  await page.locator('.new-agent-tab').click();
-  await page.getByRole('group', { name: 'Agent launcher' }).getByRole('group', { name: 'Repo' }).getByRole('button', { name: 'New worktree…' }).click();
-  const dialog = page.getByRole('dialog', { name: 'New worktree' });
+  const dialog = await openNewWorktree(page);
 
   await dialog.getByLabel('Branch name').fill('feature/login');
   await dialog.getByRole('button', { name: 'Create worktree' }).click();
@@ -115,9 +131,7 @@ test('surfaces a setup failure returned alongside the created worktree', async (
     return route.fulfill({ status: 201, json: { worktreeId: 'repo:/repo/wts/feature-login', setupError: 'setup command exited with status 1' } });
   });
   await page.goto('/');
-  await page.locator('.new-agent-tab').click();
-  await page.getByRole('group', { name: 'Agent launcher' }).getByRole('group', { name: 'Repo' }).getByRole('button', { name: 'New worktree…' }).click();
-  const dialog = page.getByRole('dialog', { name: 'New worktree' });
+  const dialog = await openNewWorktree(page);
 
   await dialog.getByLabel('Branch name').fill('feature/login');
   await dialog.getByRole('button', { name: 'Create worktree' }).click();
@@ -157,12 +171,7 @@ test('opens nothing, and remembers that choice for the Project', async ({ page }
   let created: unknown;
   await stub(page, body => { created = body; });
   await page.goto('/');
-  const openDialog = async () => {
-    await page.locator('.new-agent-tab').click();
-    await page.getByRole('group', { name: 'Agent launcher' }).getByRole('group', { name: 'Repo' }).getByRole('button', { name: 'New worktree…' }).click();
-    return page.getByRole('dialog', { name: 'New worktree' });
-  };
-  let dialog = await openDialog();
+  let dialog = await openNewWorktree(page);
   await dialog.getByLabel('Branch name').fill('feature/login');
   await dialog.getByRole('radio', { name: 'Nothing' }).click();
   await dialog.getByRole('button', { name: 'Create worktree' }).click();
@@ -171,7 +180,7 @@ test('opens nothing, and remembers that choice for the Project', async ({ page }
   await expect(dialog).toBeHidden();
   await expect(page.getByText('The new worktree is ready; nothing was opened in it.')).toBeVisible();
   // the next New worktree for this Project starts from the last choice
-  dialog = await openDialog();
+  dialog = await openNewWorktree(page);
   await expect(dialog.getByRole('radio', { name: 'Nothing' })).toBeChecked();
 });
 
@@ -182,9 +191,7 @@ test('names the Terminal when it fails to open', async ({ page }) => {
     return route.fulfill({ status: 201, json: { worktreeId: 'repo:/repo/wts/feature-login', launchError: 'The worktree was created, but its shell could not be started.' } });
   });
   await page.goto('/');
-  await page.locator('.new-agent-tab').click();
-  await page.getByRole('group', { name: 'Agent launcher' }).getByRole('group', { name: 'Repo' }).getByRole('button', { name: 'New worktree…' }).click();
-  const dialog = page.getByRole('dialog', { name: 'New worktree' });
+  const dialog = await openNewWorktree(page);
   await dialog.getByLabel('Branch name').fill('feature/login');
   await dialog.getByRole('radio', { name: 'Terminal' }).click();
   await dialog.getByRole('button', { name: 'Create worktree' }).click();
@@ -204,9 +211,7 @@ test('Review launches an agent, then opens the guided review start sheet for it'
   const agent = { id: 'agent-new', sessionId: 'socket:$9', home: '/repo/wts/feature', projectId: 'repo', worktreeId: 'repo:/repo/wts/feature', worktreeLabel: 'feature', branch: 'feature', title: 'Ready', gitPrStatus: { base: 'origin/main', files: 1 } };
   await page.route('**/api/dashboard', route => route.fulfill({ json: created === undefined ? dashboard : { ...dashboard, agents: [agent] } }));
   await page.goto('/');
-  await page.locator('.new-agent-tab').click();
-  await page.getByRole('group', { name: 'Agent launcher' }).getByRole('group', { name: 'Repo' }).getByRole('button', { name: 'New worktree…' }).click();
-  const dialog = page.getByRole('dialog', { name: 'New worktree' });
+  const dialog = await openNewWorktree(page);
   await dialog.getByRole('tab', { name: 'Existing branch' }).click();
   await dialog.getByRole('radio', { name: 'Review' }).click();
   await dialog.getByRole('button', { name: 'Create worktree' }).click();
@@ -223,9 +228,63 @@ test('disables Review when guided review is unavailable', async ({ page }) => {
   await stub(page, () => {});
   await page.route('**/api/dashboard', route => route.fulfill({ json: { ...dashboard, reviewTour: undefined } }));
   await page.goto('/');
-  await page.locator('.new-agent-tab').click();
-  await page.getByRole('group', { name: 'Agent launcher' }).getByRole('group', { name: 'Repo' }).getByRole('button', { name: 'New worktree…' }).click();
-  const dialog = page.getByRole('dialog', { name: 'New worktree' });
+  const dialog = await openNewWorktree(page);
   await expect(dialog.getByRole('radio', { name: 'Review' })).toBeDisabled();
   await expect(dialog.getByTitle('Guided review unavailable on this server')).toHaveText('Review');
+});
+
+test('creates a worktree from a pull request chosen in the Pull request tab', async ({ page }) => {
+  let created: unknown;
+  await stub(page, body => { created = body; });
+  await page.goto('/');
+  const dialog = await openNewWorktree(page);
+  await dialog.getByRole('tab', { name: 'Pull request' }).click();
+
+  // the operator's own PRs come first; others' fold below
+  const own = dialog.getByRole('group', { name: '#12: Fix login redirect; Open' });
+  await expect(own).toBeVisible();
+  await expect(dialog.getByText('Pull requests by others')).toBeVisible();
+  const choice = own.getByRole('radio', { name: 'Select #12' });
+  await choice.check();
+  await expect(choice).toBeChecked();
+  await expect(own).toContainText('Selected');
+  await dialog.getByRole('button', { name: 'Create worktree' }).click();
+
+  // the PR is named by number alone; the server resolves its branch
+  await expect.poll(() => created).toEqual({ mode: 'pull-request', number: 12, open: 'agent' });
+  await expect(dialog).toBeHidden();
+});
+
+test('offers a pull request another worktree holds only as a link to that worktree', async ({ page }) => {
+  await stub(page, () => {});
+  await page.goto('/');
+  const dialog = await openNewWorktree(page);
+  await dialog.getByRole('tab', { name: 'Pull request' }).click();
+
+  const held = dialog.getByRole('group', { name: '#15: Dark mode; Open' });
+  await expect(held.getByRole('radio')).toHaveCount(0);
+  await held.getByRole('button', { name: 'Switch to Repo · dark-mode' }).click();
+  // following the link leaves the dialog for that worktree
+  await expect(dialog).toBeHidden();
+});
+
+test('hides the Pull request tab for a Project without a GitHub origin', async ({ page }) => {
+  await stub(page, () => {});
+  await page.route('**/api/projects/repo/switch-prs', route => route.fulfill({ json: { ...switchPrs, pullRequests: [], otherPullRequests: [], pullRequestsSupported: false } }));
+  await page.goto('/');
+  const listed = page.waitForResponse('**/api/projects/repo/switch-prs');
+  const dialog = await openNewWorktree(page);
+  await listed;
+  await expect(dialog.getByRole('tab', { name: 'Existing branch' })).toBeVisible();
+  await expect(dialog.getByRole('tab', { name: 'Pull request' })).toHaveCount(0);
+});
+
+test('keeps the Pull request tab when the list fails to load, saying so', async ({ page }) => {
+  await stub(page, () => {});
+  await page.route('**/api/projects/repo/switch-prs', route => route.fulfill({ status: 502, json: { error: 'GitHub is unreachable' } }));
+  await page.goto('/');
+  const dialog = await openNewWorktree(page);
+  await dialog.getByRole('tab', { name: 'Pull request' }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Could not load pull requests.');
+  await expect(dialog.getByRole('button', { name: 'Create worktree' })).toBeDisabled();
 });

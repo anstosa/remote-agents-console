@@ -2169,8 +2169,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .switch-pr-option { display: flex; flex-wrap: wrap; min-width: 0; align-items: center; gap: .25rem .6rem; padding: .5rem .9rem; border-radius: calc(var(--control-radius) - .15rem); }
 .switch-pr-option:hover { background: var(--surface-0); }
 .switch-pr-main { flex: 1 1 11rem; min-width: 0; }
-.git-status-panel .switch-pr-main > a.switch-pr { display: inline-block; max-width: 100%; min-width: 0; border-radius: var(--control-radius); color: var(--text); line-height: 1.25; overflow-wrap: anywhere; text-align: left; text-decoration: none; white-space: normal; }
-.git-status-panel .switch-pr-main > a.switch-pr:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+:is(.git-status-panel, .new-worktree-prs) .switch-pr-main > a.switch-pr { display: inline-block; max-width: 100%; min-width: 0; border-radius: var(--control-radius); color: var(--text); line-height: 1.25; overflow-wrap: anywhere; text-align: left; text-decoration: none; white-space: normal; }
+:is(.git-status-panel, .new-worktree-prs) .switch-pr-main > a.switch-pr:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
 .switch-pr-copy { display: grid; min-width: 0; gap: .18rem; }
 .switch-pr-copy strong.status-draft { color: var(--overlay-2); }
 .switch-pr-copy strong.status-open { color: var(--green); }
@@ -2182,17 +2182,17 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .switch-branch-summary > .switch-branch-summary-more { flex-shrink: 0; }
 .switch-pr-owner { flex-basis: 100%; min-width: 0; }
 .switch-pr-open-in { display: inline-block; max-width: 100%; color: var(--blue); font: 650 .64rem/1.2 var(--font-mono); letter-spacing: normal; overflow-wrap: anywhere; }
-.git-status-panel button.switch-pr-open-in-link { width: auto; min-height: 0; padding: 0; border: 0; border-radius: 0; gap: .15rem; background: none; box-shadow: none; color: var(--blue); white-space: normal; }
-.git-status-panel .switch-pr-owner button.switch-pr-open-in-link:not(:disabled):hover { background: none; color: var(--blue); text-decoration: underline; }
-.git-status-panel button.switch-pr-open-in-link:disabled { opacity: .55; text-decoration: none; }
+:is(.git-status-panel, .new-worktree-prs) button.switch-pr-open-in-link { width: auto; min-height: 0; padding: 0; border: 0; border-radius: 0; gap: .15rem; background: none; box-shadow: none; color: var(--blue); white-space: normal; }
+:is(.git-status-panel, .new-worktree-prs) .switch-pr-owner button.switch-pr-open-in-link:not(:disabled):hover { background: none; color: var(--blue); text-decoration: underline; }
+:is(.git-status-panel, .new-worktree-prs) button.switch-pr-open-in-link:disabled { opacity: .55; text-decoration: none; }
 .switch-pr-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: .4rem; margin-left: auto; }
 .switch-pr-actions > .pull-request-issues { gap: .2rem; padding: 0; }
-.git-status-panel .switch-pr-actions > .switch-pr-action { display: inline-flex; width: auto; min-height: 1.85rem; align-items: center; justify-content: center; gap: .35rem; padding: .3rem .55rem; border: 1px solid var(--surface-2); border-radius: calc(var(--control-radius) - .05rem); background: transparent; box-shadow: none; color: var(--subtext-0); font-size: .68rem; font-weight: 700; line-height: 1; text-decoration: none; white-space: nowrap; }
+:is(.git-status-panel, .new-worktree-prs) .switch-pr-actions > .switch-pr-action { display: inline-flex; width: auto; min-height: 1.85rem; align-items: center; justify-content: center; gap: .35rem; padding: .3rem .55rem; border: 1px solid var(--surface-2); border-radius: calc(var(--control-radius) - .05rem); background: transparent; box-shadow: none; color: var(--subtext-0); font-size: .68rem; font-weight: 700; line-height: 1; text-decoration: none; white-space: nowrap; }
 .git-status-panel .switch-pr-actions > .switch-pr-checkout { color: var(--green); }
-.git-status-panel .switch-pr-actions > .switch-pr-action:not(:disabled):hover { border-color: var(--blue); background: var(--surface-1); color: var(--blue); }
+:is(.git-status-panel, .new-worktree-prs) .switch-pr-actions > .switch-pr-action:not(:disabled):hover { border-color: var(--blue); background: var(--surface-1); color: var(--blue); }
 .git-status-panel .switch-pr-actions > .switch-pr-checkout:not(:disabled):hover { border-color: var(--green); color: var(--green); }
 /* an unavailable target reads as plainly inert: dashed muted outline, no accent colour, no hover lift */
-.git-status-panel .switch-pr-actions > .switch-pr-action:disabled { opacity: 1; border-style: dashed; border-color: var(--surface-1); background: transparent; color: var(--surface-2); }
+:is(.git-status-panel, .new-worktree-prs) .switch-pr-actions > .switch-pr-action:disabled { opacity: 1; border-style: dashed; border-color: var(--surface-1); background: transparent; color: var(--surface-2); }
 .git-status-panel .switch-pr-actions > .switch-branch-delete { width: 1.85rem; padding: 0; color: var(--red); }
 .git-status-panel .switch-pr-actions > .switch-branch-delete:not(:disabled):hover { border-color: var(--red); color: var(--red); }
 
@@ -2583,10 +2583,15 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .new-worktree-fields input, .new-worktree-fields select { padding: .4rem .5rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); color: var(--text); font-size: .82rem; }
 .new-worktree-open { display: grid; grid-template-columns: auto repeat(4, minmax(0, 1fr)); align-items: center; gap: .35rem; color: var(--subtext-0); font-size: .7rem; }
 .new-worktree-open label { position: relative; padding: .35rem .3rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); color: var(--text); font-size: .74rem; text-align: center; cursor: pointer; }
-.new-worktree-open input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: inherit; }
-.new-worktree-open label:has(input:checked) { border-color: color-mix(in srgb, var(--lavender) 60%, transparent); background: color-mix(in srgb, var(--lavender) 16%, transparent); }
-.new-worktree-open label:has(input:focus-visible) { outline: 2px solid var(--lavender); outline-offset: 1px; }
-.new-worktree-open label:has(input:disabled) { opacity: .45; cursor: not-allowed; }
+:is(.new-worktree-open, .new-worktree-prs .switch-pr-select) input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: inherit; }
+:is(.new-worktree-open label, .new-worktree-prs .switch-pr-select):has(input:checked) { border-color: color-mix(in srgb, var(--lavender) 60%, transparent); background: color-mix(in srgb, var(--lavender) 16%, transparent); }
+:is(.new-worktree-open label, .new-worktree-prs .switch-pr-select):has(input:focus-visible) { outline: 2px solid var(--lavender); outline-offset: 1px; }
+:is(.new-worktree-open label, .new-worktree-prs .switch-pr-select):has(input:disabled) { opacity: .45; cursor: not-allowed; }
+.new-worktree-prs { border: 1px solid var(--surface-1); border-radius: var(--control-radius); }
+.new-worktree-prs .git-status-switch-list { max-height: min(22rem, 45vh); }
+/* a pull request's Select is a radio styled as the row's action button */
+.new-worktree-prs .switch-pr-select { position: relative; cursor: pointer; }
+.new-worktree-prs .switch-pr-select:has(input:checked) { color: var(--text); }
 .new-worktree-loading, .new-worktree-empty { display: flex; align-items: center; gap: .4rem; color: var(--subtext-0); font-size: .76rem; }
 .new-worktree-error { margin: 0; color: var(--red); font-size: .74rem; }
 .new-worktree-status { margin: 0; color: var(--subtext-0); font-size: .74rem; }
