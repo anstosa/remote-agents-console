@@ -1,25 +1,46 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { dropPane, installPaneMock, pushBytes, seedPaneSize } from './pane-stream-mock.js';
+
+// share stable responses while leaving scenario-specific state at each call site
+async function mockConsoleRoutes(page: Page, available: () => boolean, overrides: Record<string, (route: Route) => Promise<void>> = {}) {
+  await page.route('**/healthz', async route => {
+    // model reachability independently of ownership
+    if (!available()) return route.abort('failed');
+    return route.fulfill({ status: 200, body: 'ok' });
+  });
+  await page.route('**/api/**', async route => {
+    // keep every endpoint offline with the console transport
+    if (!available()) return route.abort('failed');
+    const path = new URL(route.request().url()).pathname;
+    const override = overrides[path];
+    // apply only the endpoint behavior supplied by the scenario
+    if (override !== undefined) return override(route);
+    // retain the current controlling browser by default
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // provide one visible controlled session
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Ready' }], projects: [] } });
+    // disable push enrollment
+    if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    // authorize the mocked pane stream
+    if (path === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    // leave saved prompts empty
+    if (path === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+}
 
 // restore the opaque client status while retaining mounted console panes
 test('blocks the console with a reconnecting overlay until the tunnel recovers', async ({ page }) => {
   test.setTimeout(60_000);
   await installPaneMock(page);
   let tunnelAvailable = true;
-  await page.route('**/healthz', async route => {
-    if (!tunnelAvailable) return route.abort('failed');
-    return route.fulfill({ status: 200, body: 'ok' });
-  });
-  await page.route('**/api/**', async route => {
-    if (!tunnelAvailable) return route.abort('failed');
-    const request = route.request();
-    const url = new URL(request.url());
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Ready' }], projects: [] } });
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  let takeoverRequests = 0;
+  await mockConsoleRoutes(page, () => tunnelAvailable, {
+    // observe accidental ownership claims during recovery
+    '/api/auth/take-control': async route => {
+      takeoverRequests += 1;
+      return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    }
   });
 
   await page.goto('/');
@@ -84,25 +105,76 @@ test('blocks the console with a reconnecting overlay until the tunnel recovers',
   await pushBytes(page, 'agent-1', 'FRESH-OUTPUT\r\n');
   await expect(output).toContainText('FRESH-OUTPUT');
   await expect(paneStatus).toBeHidden();
+  expect(takeoverRequests).toBe(0);
 });
 
+// keep a displaced client blocked through every passive recovery path
+test('requires an explicit takeover after a disconnected controller is displaced', async ({ page }) => {
+  test.setTimeout(60_000);
+  await installPaneMock(page);
+  let tunnelAvailable = true;
+  let hasControl = true;
+  let sessionRequests = 0;
+  let takeoverRequests = 0;
+  await mockConsoleRoutes(page, () => tunnelAvailable, {
+    // publish the ownership held by the current browser session
+    '/api/auth/session': async route => {
+      sessionRequests += 1;
+      return route.fulfill({ json: { csrfToken: 'csrf-token', active: hasControl, deviceName: 'Test device', ...(hasControl ? {} : { controllingDeviceName: 'Other device' }) } });
+    },
+    // restore ownership only after the user clicks take control
+    '/api/auth/take-control': async route => {
+      takeoverRequests += 1;
+      hasControl = true;
+      return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    }
+  });
+
+  await page.goto('/');
+  const agentTab = page.getByRole('tab', { name: /^Ready/u });
+  const overlay = page.getByRole('alert', { name: 'Reconnecting to console' });
+  const takeControl = page.getByRole('button', { name: 'Take control', exact: true });
+  await expect(agentTab).toBeVisible();
+
+  tunnelAvailable = false;
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(overlay).toBeVisible();
+  hasControl = false;
+  tunnelAvailable = true;
+  await expect(overlay).toBeHidden({ timeout: 5_000 });
+  await expect(takeControl).toBeVisible();
+  await expect(page.getByText('Other device is active', { exact: true })).toBeVisible();
+  expect(takeoverRequests).toBe(0);
+
+  const sessionsBeforeFocus = sessionRequests;
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect.poll(() => sessionRequests).toBeGreaterThan(sessionsBeforeFocus);
+  await expect(takeControl).toBeVisible();
+  expect(takeoverRequests).toBe(0);
+
+  await page.reload();
+  await expect(takeControl).toBeVisible();
+  await expect(agentTab).toHaveCount(0);
+  expect(takeoverRequests).toBe(0);
+
+  tunnelAvailable = false;
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(overlay).toBeVisible();
+  tunnelAvailable = true;
+  await expect(overlay).toBeHidden({ timeout: 5_000 });
+  await expect(takeControl).toBeVisible();
+  expect(takeoverRequests).toBe(0);
+
+  await takeControl.click();
+  await expect.poll(() => takeoverRequests).toBe(1);
+  await expect(agentTab).toBeVisible();
+});
+
+// resume initial authentication when reachability returns
 test('restores the session automatically when the tunnel is down during startup', async ({ page }) => {
   test.setTimeout(60_000);
   let tunnelAvailable = false;
-  await page.route('**/healthz', async route => {
-    if (!tunnelAvailable) return route.abort('failed');
-    return route.fulfill({ status: 200, body: 'ok' });
-  });
-  await page.route('**/api/**', async route => {
-    if (!tunnelAvailable) return route.abort('failed');
-    const url = new URL(route.request().url());
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Ready' }], projects: [] } });
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
-  });
+  await mockConsoleRoutes(page, () => tunnelAvailable);
 
   await page.goto('/');
   const overlay = page.getByRole('alert', { name: 'Reconnecting to console' });
@@ -114,26 +186,21 @@ test('restores the session automatically when the tunnel is down during startup'
   await expect(page.getByText('Unable to connect to the console')).toHaveCount(0);
 });
 
+// distinguish a slow refresh from a disconnected console
 test('keeps the console visible when a dashboard refresh times out', async ({ page }) => {
   test.setTimeout(30_000);
   let dashboardRequests = 0;
-  await page.route('**/healthz', route => route.fulfill({ status: 200, body: 'ok' }));
-  await page.route('**/api/**', async route => {
-    const request = route.request();
-    const url = new URL(request.url());
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') {
+  await mockConsoleRoutes(page, () => true, {
+    // hold only later dashboard responses past the client request deadline
+    '/api/dashboard': async route => {
       dashboardRequests += 1;
+      // leave the initial dashboard responsive
       if (dashboardRequests > 1) {
         await new Promise(resolve => setTimeout(resolve, 9_000));
         return route.fulfill({ json: { generation: dashboardRequests, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Ready' }], projects: [] } }).catch(() => undefined);
       }
       return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Ready' }], projects: [] } });
     }
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
   await page.goto('/');

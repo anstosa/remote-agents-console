@@ -4,6 +4,21 @@
 
 This is a **single trusted operator** console: terminal and prompt access execute code as the Unix account running the server. It binds only to loopback; never expose it directly to the Internet. Loopback HTTP is supported for local evaluation only. Publish the console beyond the local machine only through an HTTPS reverse proxy or tunnel that preserves the configured Host and Origin.
 
+### Browser control and reconnection
+
+Only one authenticated browser controls a console at a time. Losing a connection,
+letting a device sleep, or restarting RAC does not release that ownership: the
+same browser reconnects automatically. If another browser takes control, the
+previous browser must click **Take control** before it can use the console again.
+Signing out releases control only when that browser still owns it.
+
+RAC keeps the last controller in `.data/control-owner.json` under its server
+checkout (`RAC_SERVER_CHECKOUT` when configured). The private record stores no
+credentials or live connection lease. Keep it with the checkout's other runtime
+state across deployments. On the first upgrade to this behavior, an existing
+signed-in browser must take control once to establish the record. Invalid or
+unreadable records prevent startup rather than silently forgetting ownership.
+
 ## Prerequisites
 
 Linux with `/proc`, tmux, Node 22+ (Node 24 is supported), pnpm, a C/C++ build toolchain for the native `argon2` dependency, and an existing agent CLI (Codex by default). Configure each CLI the console launches under [`adapters`](#adapters).

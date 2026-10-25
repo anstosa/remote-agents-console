@@ -436,7 +436,8 @@ describe('client control', () => {
   // require deliberate takeover even after a browser stops sending heartbeats
   it('automatically activates the first client and lets another client take control', async () => {
     let now = 1_000;
-    const control = new ControlService(() => now, 100);
+    const ownerFile = join(queueDirectory!, 'control-owner.json');
+    const control = await ControlService.persisted(ownerFile, () => now, 100);
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const names = new Map<string, string>();
     const devices = {
@@ -496,16 +497,42 @@ describe('client control', () => {
     expect((await controlApp.inject({ method: 'GET', url: '/api/auth/session', headers: firstHeaders })).json().active).toBe(false);
     expect((await controlApp.inject({ method: 'GET', url: '/api/auth/session', headers: secondHeaders })).json().active).toBe(true);
     await controlApp.close();
-    // restored cookies cannot claim an unowned console after server restart
-    const restartedApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 5).toString('base64url')), devices: devices as never });
+    // reconnect only the persisted owner after a server restart
+    const restartedControl = await ControlService.persisted(ownerFile, () => now, 100);
+    const restartedApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 5).toString('base64url')), control: restartedControl, devices: devices as never });
     try {
-      const restored = await restartedApp.inject({ method: 'GET', url: '/api/auth/session', headers: secondHeaders });
-      expect(restored.json()).toMatchObject({ active: false, deviceName: 'Kitchen iPad' });
+      // a displaced browser arriving first cannot claim the disconnected owner
+      expect((await restartedApp.inject({ method: 'GET', url: '/api/auth/session', headers: firstHeaders })).json().active).toBe(false);
       expect((await restartedApp.inject({ method: 'POST', url: '/api/dashboard/ticket', headers: firstHeaders })).statusCode).toBe(423);
-      const reclaimed = await restartedApp.inject({ method: 'POST', url: '/api/auth/take-control', headers: secondHeaders });
-      expect(reclaimed.json()).toMatchObject({ active: true, controllingDeviceName: 'Kitchen iPad' });
+      const restored = await restartedApp.inject({ method: 'GET', url: '/api/auth/session', headers: secondHeaders });
+      expect(restored.json()).toMatchObject({ active: true, deviceName: 'Kitchen iPad', controllingDeviceName: 'Kitchen iPad' });
+      expect((await restartedApp.inject({ method: 'POST', url: '/api/dashboard/ticket', headers: secondHeaders })).statusCode).toBe(200);
+      // the displaced client must explicitly take control again
+      const reclaimed = await restartedApp.inject({ method: 'POST', url: '/api/auth/take-control', headers: firstHeaders });
+      expect(reclaimed.json()).toMatchObject({ active: true, controllingDeviceName: 'Studio Display' });
+      expect((await restartedApp.inject({ method: 'GET', url: '/api/auth/session', headers: secondHeaders })).json().active).toBe(false);
     } finally { await restartedApp.close(); }
   }, 15_000);
+
+  // signing out must not retain the cookie when the ownership store is unavailable
+  it('clears authentication even when releasing durable ownership fails', async () => {
+    const auth = new AuthService('$argon2id$unused', Buffer.alloc(32, 5).toString('base64url'));
+    const current = { id: 'a'.repeat(43), csrf: 'csrf-token' };
+    const control = new ControlService();
+    await control.take(current.id);
+    vi.spyOn(control, 'release').mockRejectedValue(new Error('ownership storage unavailable'));
+    const controlApp = await buildApp(config, { auth, control });
+    // close the isolated app even if the failure response regresses
+    try {
+      const response = await controlApp.inject({ method: 'POST', url: '/api/auth/logout', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${auth.sign(current)}`, 'x-csrf-token': current.csrf } });
+      expect(response.statusCode).toBe(500);
+      expect(response.headers['set-cookie']).toContain('__Host-rac=;');
+      expect(response.headers['set-cookie']).toContain('Expires=Thu, 01 Jan 1970');
+      expect(control.release).toHaveBeenCalledWith(current.id);
+    } finally {
+      await controlApp.close();
+    }
+  });
 
   it('registers every authenticated client without pushing silent notification dismissals', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });

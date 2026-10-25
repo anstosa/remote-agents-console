@@ -6,6 +6,7 @@ type ConsoleScenario = {
   rejectTakeover: boolean;
   takeoverGate: Promise<void>;
   takeoverRequests: number;
+  uiVersionChecks: number;
   serverUpdateChecks: number;
   navigations: number;
   browserErrors: string[];
@@ -20,7 +21,7 @@ function responseGate() {
 
 // share boundary responses while keeping scenario choices visible in each test
 async function mockConsole(page: Page) {
-  const scenario: ConsoleScenario = { active: false, rejectTakeover: false, takeoverGate: Promise.resolve(), takeoverRequests: 0, serverUpdateChecks: 0, navigations: 0, browserErrors: [] };
+  const scenario: ConsoleScenario = { active: false, rejectTakeover: false, takeoverGate: Promise.resolve(), takeoverRequests: 0, uiVersionChecks: 0, serverUpdateChecks: 0, navigations: 0, browserErrors: [] };
   page.on('pageerror', error => scenario.browserErrors.push(error.message));
   page.on('console', message => {
     // allow only the deliberately rejected takeover response
@@ -48,7 +49,10 @@ async function mockConsole(page: Page) {
       return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', controllingDeviceName: 'Test device' } });
     }
     // expose the scenario's deployed bundle version
-    if (path === '/api/ui-version') return route.fulfill({ json: { version: scenario.version } });
+    if (path === '/api/ui-version') {
+      scenario.uiVersionChecks += 1;
+      return route.fulfill({ json: { version: scenario.version } });
+    }
     // observe ready-only host checks without starting an update
     if (path === '/api/server/update-available') {
       scenario.serverUpdateChecks += 1;
@@ -75,10 +79,17 @@ async function mockConsole(page: Page) {
 const settleBrowserFrames = (page: Page) => page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 
 // complete the version check in the browser before changing takeover state
-async function checkUiVersion(page: Page) {
+async function checkUiVersion(page: Page, scenario: ConsoleScenario) {
+  const previousChecks = scenario.uiVersionChecks;
   const response = page.waitForResponse('**/api/ui-version');
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-  await (await response).finished();
+  await Promise.all([
+    // retry the trigger until the polling effect has installed its listener
+    expect.poll(async () => {
+      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+      return scenario.uiVersionChecks;
+    }).toBeGreaterThan(previousChecks),
+    response.then(current => current.finished())
+  ]);
   await settleBrowserFrames(page);
 }
 
@@ -127,12 +138,17 @@ async function expectReload(page: Page, reload: Awaited<ReturnType<typeof holdRe
     await expect.poll(() => reload.visible).toBe(true);
     await expect.poll(() => reload.requests).toBe(1);
     expect(scenario.serverUpdateChecks).toBe(previousHostChecks);
+    // await the new document's session restoration before checking its dashboard
+    const restored = page.waitForResponse('**/api/auth/session');
+    reload.release();
+    await (await restored).finished();
+    await settleBrowserFrames(page);
+    await expect(page.getByRole('heading', { name: 'No sessions' })).toBeVisible();
+    expect(scenario.browserErrors).toEqual([]);
   } finally {
     // release navigation even when an assertion fails
     reload.release();
   }
-  await expect(page.getByRole('heading', { name: 'No sessions' })).toBeVisible();
-  expect(scenario.browserErrors).toEqual([]);
 }
 
 // reload a stale inactive client only after explicit control succeeds
@@ -143,7 +159,7 @@ test('reloads a stale inactive client only after successful explicit takeover', 
   scenario.takeoverGate = takeover.promise;
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Take control', exact: true })).toBeVisible();
-  await checkUiVersion(page);
+  await checkUiVersion(page, scenario);
   await refreshSession(page);
   expect(scenario.takeoverRequests).toBe(0);
   expect(scenario.navigations).toBe(1);
@@ -164,7 +180,7 @@ test('reloads a stale client retained from the previously active console', async
   scenario.version = '/assets/index-new.js';
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'No sessions' })).toBeVisible();
-  await checkUiVersion(page);
+  await checkUiVersion(page, scenario);
   await expect(page.getByRole('status', { name: 'UI update available' })).toBeVisible();
 
   scenario.active = false;
@@ -186,7 +202,7 @@ test('does not reload a stale inactive client when explicit takeover fails', asy
   scenario.rejectTakeover = true;
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Take control', exact: true })).toBeVisible();
-  await checkUiVersion(page);
+  await checkUiVersion(page, scenario);
   await page.getByRole('button', { name: 'Take control', exact: true }).click();
   await expect.poll(() => scenario.takeoverRequests).toBe(1);
   await expect(page.getByRole('alert')).toHaveText('Other device still controls this console.');
@@ -205,7 +221,7 @@ test('reloads when the UI becomes stale during an in-flight takeover', async ({ 
   await page.getByRole('button', { name: 'Take control', exact: true }).click();
   await expect.poll(() => scenario.takeoverRequests).toBe(1);
   scenario.version = '/assets/index-new.js';
-  await checkUiVersion(page);
+  await checkUiVersion(page, scenario);
   await expect(page.getByRole('alert', { name: 'Reloading UI' })).toHaveCount(0);
   expect(reload.requests).toBe(0);
   takeover.release();
@@ -222,7 +238,7 @@ test('does not reload after passive checks or successful takeover on the current
     return script === null ? undefined : new URL(script.src).pathname;
   });
   expect(scenario.version).toBeTruthy();
-  await checkUiVersion(page);
+  await checkUiVersion(page, scenario);
   await refreshSession(page);
   expect(scenario.takeoverRequests).toBe(0);
   expect(scenario.navigations).toBe(1);

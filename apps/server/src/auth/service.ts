@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import argon2 from 'argon2';
+import { createSessionId } from './session-id.js';
 export type Session = { id: string; csrf: string };
 const token = () => randomBytes(32).toString('base64url');
 export class AuthService {
@@ -10,7 +11,8 @@ export class AuthService {
   }
   private prunePreauth(): void { const now = this.now(); for (const [value, expires] of this.preauth) if (expires < now) this.preauth.delete(value); while (this.preauth.size >= 1_024) this.preauth.delete(this.preauth.keys().next().value!); }
   bootstrap(): string { this.prunePreauth(); const value = token(); this.preauth.set(value, this.now() + 300_000); return value; }
-  async login(password: string, preauth: string): Promise<Session | undefined> { const expiry = this.preauth.get(preauth); this.preauth.delete(preauth); if (!expiry || expiry < this.now()) return undefined; const ok = await argon2.verify(this.passwordHash, password).catch(() => false); return ok ? { id: token(), csrf: token() } : undefined; }
+  // issue browser identities from the same contract used by durable ownership
+  async login(password: string, preauth: string): Promise<Session | undefined> { const expiry = this.preauth.get(preauth); this.preauth.delete(preauth); if (!expiry || expiry < this.now()) return undefined; const ok = await argon2.verify(this.passwordHash, password).catch(() => false); return ok ? { id: createSessionId(), csrf: token() } : undefined; }
   get(session: Session | undefined): Session | undefined { return session; }
   logout(_id?: string): void { /* persistent signed sessions are cleared by the browser cookie */ }
   sign(session: Session): string { const payload = `${session.id}.${session.csrf}`; const mac = createHmac('sha256', this.secret).update(payload).digest('base64url'); return `${payload}.${mac}`; }

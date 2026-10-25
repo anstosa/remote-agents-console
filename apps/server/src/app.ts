@@ -288,7 +288,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   function controlled(request: FastifyRequest, mutation = false): Session {
     const s = session(request, mutation);
     // require explicit takeover when no controller has been established
-    if (!control.connect(s.id, false)) throw inactiveClient();
+    if (!control.connect(s.id)) throw inactiveClient();
     return s;
   }
   // serve one authenticated expiring preview
@@ -609,7 +609,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.get('/', async (request, reply) => { browser(request); return reply.sendFile('index.html'); });
   app.get('/api/ui-version', async (request) => { browser(request); return { version: await uiVersion() }; });
   // restore authentication without silently claiming an unowned console
-  app.get('/api/auth/session', async (request) => { const s = session(request); return await sessionState(s, control.connect(s.id, false)); });
+  app.get('/api/auth/session', async (request) => { const s = session(request); return await sessionState(s, control.connect(s.id)); });
   // issue bootstrap without waiting for peers
   app.get('/api/auth/bootstrap', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request) => { browser(request); void refreshRemoteServers().catch(() => undefined); return { csrfToken: auth.bootstrap(), server }; });
   // aggregate configured instance attention for authenticated clients
@@ -620,7 +620,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return { servers: [{ url: config.publicOrigin.origin, name: server.name, ...(server.icon === undefined ? {} : { icon: server.icon }), attention: localAttention }, ...remotes.map(publishedRemoteStatus)] };
   });
   // explicit sign-in may establish initial ownership without displacing another client
-  app.post('/api/auth/login', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => { browser(request, true); const data = body(request); const preauth = request.headers['x-csrf-token']; if (typeof data.password !== 'string' || typeof preauth !== 'string') return reply.code(401).send({ error: 'invalid credentials' }); const s = await auth.login(data.password, preauth); if (!s) return reply.code(401).send({ error: 'invalid credentials' }); reply.setCookie(cookieName, auth.sign(s), { path: '/', secure: secureOrigin, httpOnly: true, sameSite: 'lax', signed: false, maxAge: 400 * 24 * 60 * 60 }); return await sessionState(s, control.connect(s.id, true)); });
+  app.post('/api/auth/login', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => { browser(request, true); const data = body(request); const preauth = request.headers['x-csrf-token']; if (typeof data.password !== 'string' || typeof preauth !== 'string') return reply.code(401).send({ error: 'invalid credentials' }); const s = await auth.login(data.password, preauth); if (!s) return reply.code(401).send({ error: 'invalid credentials' }); reply.setCookie(cookieName, auth.sign(s), { path: '/', secure: secureOrigin, httpOnly: true, sameSite: 'lax', signed: false, maxAge: 400 * 24 * 60 * 60 }); return await sessionState(s, await control.claimInitial(s.id)); });
   app.post('/api/auth/take-control', async (request, reply) => {
     const s = session(request, true);
     const providedName = body(request).deviceName;
@@ -630,7 +630,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       deviceName = await devices.get(s.id);
     }
     if (deviceName === undefined) return reply.code(400).send({ error: 'Name this device before taking control.' });
-    control.take(s.id);
+    await control.take(s.id);
     return await sessionState(s, true);
   });
   // rename the active browser client
@@ -839,7 +839,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const pending = await settings.status().catch(() => undefined);
     return pending?.pending ? { ...preview, settingsImpact: { pendingTargets: pending.targets, warning: `Updating rebuilds RAC with all saved pending RAC settings${pending.targets.includes('cloudflared') ? '; Cloudflare changes still require their separate Restart proof' : ''}.` } } : preview;
   });
-  app.post('/api/auth/logout', async (request, reply) => { const s = session(request, true); control.release(s.id); auth.logout(s.id); reply.clearCookie(cookieName, { path: '/', secure: secureOrigin, httpOnly: true, sameSite: 'lax' }); return reply.code(204).send(); });
+  // clear browser authentication even when durable ownership release fails
+  app.post('/api/auth/logout', async (request, reply) => {
+    const s = session(request, true);
+    auth.logout(s.id);
+    reply.clearCookie(cookieName, { path: '/', secure: secureOrigin, httpOnly: true, sameSite: 'lax' });
+    await control.release(s.id);
+    return reply.code(204).send();
+  });
   app.get('/api/dashboard', async (request) => { controlled(request); return await dashboardUpdates.refresh(); });
   app.post('/api/dashboard/ticket', async (request) => { const s = controlled(request, true); return { ticket: tickets.mint(s.id, 'dashboard', 'dashboard').id }; });
   app.get('/api/cleanup', async (request) => { controlled(request); const targets = await cleanup.scan(); await dashboardUpdates.refresh().catch(() => undefined); return { targets }; });

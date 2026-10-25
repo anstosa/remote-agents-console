@@ -94,7 +94,7 @@ describe('application integration surfaces', () => {
       const inactiveRealtime = await app.inject({ method: 'POST', url: '/api/realtime/session', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId } });
       expect(inactiveRealtime.statusCode).toBe(423);
       // establish explicit ownership before exercising the voice lifecycle
-      control.take('browser-session');
+      await control.take('browser-session');
       const realtime = await app.inject({ method: 'POST', url: '/api/realtime/session', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: `__Host-rac=${signed}`, 'x-csrf-token': 'browser-csrf' }, payload: { voiceSessionId } });
       expect(realtime.statusCode).toBe(200);
       const activeStatus = await app.inject({ method: 'GET', url: '/api/integrations/status', headers: { host: 'agents.example.com', cookie: `__Host-rac=${signed}` } });

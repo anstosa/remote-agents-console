@@ -3,6 +3,7 @@ import { acquireConfig, migrationErrorLines } from './migrations/boot.js';
 import { retireBookmarks } from './conversations/retire-bookmarks.js';
 import { formatSavedPromptsToNotes, migrateSavedPromptsToNotes } from './migrations/saved-prompts-to-notes.js';
 import { buildApp } from './app.js';
+import { ControlService } from './auth/control.js';
 import { WorktreeNoteService } from './notes/service.js';
 import { DiscoveryService } from './discovery/service.js';
 import { TmuxCommandRegistry } from './tmux/command-registry.js';
@@ -50,7 +51,9 @@ const dashboardUpdates = new DashboardUpdates<DashboardPayload>(dashboardFingerp
 const notes = new WorktreeNoteService();
 const savedPromptsLines = formatSavedPromptsToNotes(await migrateSavedPromptsToNotes({ projectIds: config.projects.map(project => project.id), notes }));
 if (savedPromptsLines.length > 0) { process.stderr.write('Saved prompts migration:\n'); for (const line of savedPromptsLines) process.stderr.write(`  ${line}\n`); }
-const app = await buildApp(config, { tmux, discovery, push, notifications, cleanup, dashboardUpdates, worktreeStore, worktreeManagement, prSwitch, notes });
+// preserve the last controller while every new process starts disconnected
+const control = await ControlService.persisted();
+const app = await buildApp(config, { control, tmux, discovery, push, notifications, cleanup, dashboardUpdates, worktreeStore, worktreeManagement, prSwitch, notes });
 // publish evidence before serving health without a host queue dependency
 await attestBoot(settingsInstallation, config, applicationContent, undefined, applicationMigration);
 // honor the configured cadence while overlapping refreshes coalesce
