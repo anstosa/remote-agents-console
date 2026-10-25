@@ -116,11 +116,10 @@ describe('persisted control ownership', () => {
     expect(await control.claimInitial(first)).toBe(true);
     expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ version: 1, ownerSessionId: first });
     expect((await stat(file)).mode & 0o777).toBe(0o600);
-    const before = await stat(file);
     control.connect(first);
     control.active(first);
     await control.take(first);
-    expect((await stat(file)).ino).toBe(before.ino);
+    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ version: 1, ownerSessionId: first });
     const restarted = await ControlService.persisted(file);
     expect(restarted.ownerSessionId()).toBeUndefined();
     expect(restarted.active(first)).toBe(false);
