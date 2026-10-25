@@ -23,6 +23,7 @@ const control = { connect: () => true } as never;
 const dashboardUpdates = { setLoader: () => {}, refresh: async () => {}, close: () => {} } as never;
 
 const worktree = testWorktree({ id: 'wt-main', projectId: 'proj', label: 'Proj · main', path: '/repo', identity: '/repo', main: true });
+const projects = [testProject({ id: 'proj' })];
 const codexPane = { id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/repo', worktreeId: 'wt-main', title: 'Ready', kind: 'codex' as const };
 
 // boot and settings-change both precede the Jan-5 due instant, so a tick at Jan-5 10:00 fires it once.
@@ -49,8 +50,9 @@ async function seed(schedule: Partial<Schedule> & { target: ScheduleTarget }, op
   return { notes, queued: new QueuedPromptService(join(root, 'queue.json')), noteId: created!.id };
 }
 
+// share project labels between application config and discovery
 async function tickApp(deps: Record<string, unknown>, bootAt = bootPast) {
-  return await buildApp(testConfig({ projects: [testProject({ id: 'proj' })] as never }), { auth, control, dashboardUpdates, launchPollDelay: zeroPollDelay, scheduleBootAt: bootAt, ...deps } as never);
+  return await buildApp(testConfig({ projects }), { auth, control, dashboardUpdates, launchPollDelay: zeroPollDelay, scheduleBootAt: bootAt, ...deps } as never);
 }
 
 const lastRunOf = async (notes: WorktreeNoteService, noteId: string) => (await notes.list('proj'))?.find(note => note.id === noteId)?.schedule?.lastRun;
@@ -58,6 +60,8 @@ const lastRunOf = async (notes: WorktreeNoteService, noteId: string) => (await n
 // a discovery that resolves one live agent for the reconcile pass (no fresh launch this tick)
 const staticDiscovery = (agent: Agent) => ({
   invalidateWorktrees: () => {},
+  // use the same project labels as the application fixture
+  projectsNow: () => projects,
   worktreesNow: () => [worktree],
   worktrees: async () => [worktree],
   dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [agent], projects: [] }),

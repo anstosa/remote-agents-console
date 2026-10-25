@@ -1,0 +1,181 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# replace stale pr runs without cancelling checks for another main commit
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  checks:
+    name: Lint and typecheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+
+  server:
+    name: Server tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # real terminal clients need a usable terminfo entry even in a headless ci shell
+    env:
+      TERM: xterm-256color
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      # keep native and real-terminal tests from silently skipping on hosted runners
+      - name: Install and verify terminal prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends g++ make python3 git tmux zsh util-linux
+          tmux -S "$RUNNER_TEMP/test-probe.sock" new-session -d -s probe
+          tmux -S "$RUNNER_TEMP/test-probe.sock" kill-server
+      - run: pnpm install --frozen-lockfile
+      # budget subprocess and filesystem cases without retrying failed assertions
+      - name: Run every server test
+        run: >-
+          pnpm --filter @rac/server test --maxWorkers=2 --minWorkers=1
+          --testTimeout=15000 --hookTimeout=30000
+          --reporter=default --reporter=junit --outputFile.junit=test-results/server.xml
+      # retain diagnostics even when the test command fails
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: server-test-results
+          path: apps/server/test-results/
+          retention-days: 7
+
+  settings:
+    name: Settings script tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      # these suites use node built-ins and do not need workspace dependencies
+      - name: Run every settings script test
+        run: |
+          mkdir -p test-results
+          node --test --test-concurrency=1 scripts/settings/*.test.mjs | tee test-results/settings.log
+      # preserve the built-in runner output on failure as well as success
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: settings-test-results
+          path: test-results/settings.log
+          retention-days: 7
+
+  browser:
+    name: Browser tests (${{ matrix.shard }}/8)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # finish every shard even when another runner finds a failure
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    env:
+      SHARD: ${{ matrix.shard }}
+      PLAYWRIGHT_HTML_OPEN: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @rac/web exec playwright install --with-deps chromium
+      # isolate the fixed vite port and browser timing on one runner per shard
+      - name: Run browser shard
+        run: >-
+          pnpm --filter @rac/web test:e2e
+          --shard="$SHARD/8" --workers=1 --retries=2 --forbid-only
+          --global-timeout=2700000 --trace=on-first-retry
+          --reporter=line,html --output=test-results
+      # each shard owns an immutable report and its failure attachments
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: browser-test-results-${{ matrix.shard }}
+          path: |
+            apps/web/playwright-report/
+            apps/web/test-results/
+          retention-days: 7
+
+  browser-policy:
+    name: Production browser policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RAC_E2E_PRODUCTION_POLICY: '1'
+      PLAYWRIGHT_HTML_OPEN: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @rac/web exec playwright install --with-deps chromium
+      # the stricter policy assertions require emitted assets rather than vite dev scripts
+      - run: pnpm --filter @rac/web build
+      - name: Test the production page and worker policies
+        run: >-
+          pnpm --filter @rac/web test:e2e e2e/settings-code-editor.spec.ts
+          --workers=1 --retries=2 --forbid-only
+          --global-timeout=1500000 --trace=on-first-retry
+          --reporter=line,html --output=test-results
+      # keep the policy report separate from development-server shards
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: browser-policy-results
+          path: |
+            apps/web/playwright-report/
+            apps/web/test-results/
+          retention-days: 7

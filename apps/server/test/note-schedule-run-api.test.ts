@@ -47,6 +47,8 @@ const runNow = (noteId: string, worktreeId = 'wt-main') => ({ method: 'POST' as 
 // a discovery that always resolves one live agent (for the skipped-state paths)
 const staticDiscovery = (agent: Agent) => ({
   invalidateWorktrees: () => {},
+  // use the same project labels as the application fixture
+  projectsNow: () => defaultProjects,
   worktreesNow: () => [worktree],
   worktrees: async () => [worktree],
   dashboard: async (): Promise<Dashboard> => ({ generation: 1, places: [], adapters: {}, agents: [agent], projects: [] }),

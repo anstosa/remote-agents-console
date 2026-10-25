@@ -448,8 +448,11 @@ describe('host Files service safety orchestration', () => {
     const refreshed = await f.service.list(place, session, destination);
     const create = await f.service.prepareOperation(place, session, { kind: 'create-file', name: 'other', destinationDirectoryToken: refreshed.destinationDirectoryToken });
     await expect(f.service.executeOperation(place, session, create.operationId, {})).rejects.toMatchObject({ code: 'busy' });
+    // consume the intentional source error as well as the service rejection
+    source.once('error', () => undefined);
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'partial_failure' });
     source.destroy(new Error('fixture disconnect'));
-    await expect(pending).rejects.toBeTruthy();
+    await rejected;
   });
 
   // lifecycle logs expose only identifiers, counts and stable state

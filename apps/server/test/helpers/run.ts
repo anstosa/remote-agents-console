@@ -1,5 +1,6 @@
-import type { Agent, Dashboard, SocketRef, Worktree } from '../../src/domain/models.js';
+import type { Agent, Dashboard, Project, SocketRef, Worktree } from '../../src/domain/models.js';
 import type { Place } from '../../src/places/places.js';
+import { testProject } from './config.js';
 
 /**
  * The fakes the Run primitive's HTTP-seam tests drive `buildApp` with, kept here so the
@@ -56,6 +57,7 @@ export function launchFake(options: { refuse?: boolean; unlaunchable?: boolean }
 export function reuseWorld(params: { worktree: Worktree; socket: SocketRef; agent: Agent; afterReset: (readIndex: number) => Agent; capture?: () => string; vanishAfterReset?: boolean }): {
   discovery: {
     invalidateWorktrees: () => void;
+    projectsNow: () => Project[];
     worktreesNow: () => Worktree[];
     worktrees: () => Promise<Worktree[]>;
     place: () => Promise<undefined>;
@@ -96,6 +98,8 @@ export function reuseWorld(params: { worktree: Worktree; socket: SocketRef; agen
   };
   const discovery = {
     invalidateWorktrees: () => {},
+    // expose the project used to label schedule outcomes
+    projectsNow: () => [testProject({ id: worktree.projectId })],
     worktreesNow: () => [worktree],
     worktrees: async () => [worktree],
     place: async () => undefined,
@@ -115,6 +119,7 @@ export function reuseWorld(params: { worktree: Worktree; socket: SocketRef; agen
  */
 export function appearingDiscovery(params: { worktree: Worktree; agent: Agent; socket: SocketRef; appearAfter?: number; working?: () => boolean }): {
   invalidateWorktrees: () => void;
+  projectsNow: () => Project[];
   worktreesNow: () => Worktree[];
   worktrees: () => Promise<Worktree[]>;
   place: () => Promise<undefined>;
@@ -126,6 +131,8 @@ export function appearingDiscovery(params: { worktree: Worktree; agent: Agent; s
   let dashboards = 0;
   return {
     invalidateWorktrees: () => {},
+    // expose the project used to label schedule outcomes
+    projectsNow: () => [testProject({ id: worktree.projectId })],
     worktreesNow: () => [worktree],
     worktrees: async () => [worktree],
     place: async () => undefined,

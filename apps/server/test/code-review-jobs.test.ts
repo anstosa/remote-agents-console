@@ -67,7 +67,8 @@ describe('code review jobs', () => {
       expect(jobs.status('cora', 'fingerprint-1234567890')).toBe('running');
       expect(runs[0]!.request).toMatchObject({ kind: 'codex', effort: 'high', label: '🔍 Review · Correctness' });
       runs[0]!.resolve(output);
-      await settle();
+      // wait for durable completion rather than elapsed wall time
+      await expect.poll(() => jobs.get('owner-a', started.id)?.state.kind).toBe('ready');
       const job = jobs.get('owner-a', started.id);
       expect(job?.state).toMatchObject({ kind: 'ready', review: { fingerprint: 'fingerprint-1234567890', preset: { id: 'correctness' }, effort: 'high', findings: [{ startLine: 2 }], general: [{ title: 'No test' }] } });
       expect(settled).toMatchObject([{ worktreeId: 'cora', state: { kind: 'ready' } }]);
@@ -96,7 +97,8 @@ describe('code review jobs', () => {
       const started = await jobs.start('owner-a', 'agent-cora', prepared(), { preset: preset.id, effort: 'low' });
       expect(runs[0]!.request.effort).toBe('low');
       runs[0]!.reject(new ReviewRunError('timed_out', true));
-      await settle();
+      // wait for the observable failure before checking its details
+      await expect.poll(() => jobs.get('owner-a', started.id)?.state.kind).toBe('error');
       expect(jobs.get('owner-a', started.id)?.state).toEqual({ kind: 'error', code: 'timed_out', retryable: true });
       expect(jobs.status('cora', 'fingerprint-1234567890')).toBe('failed');
       expect(settled).toMatchObject([{ state: { kind: 'error', code: 'timed_out' } }]);

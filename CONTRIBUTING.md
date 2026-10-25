@@ -24,15 +24,53 @@ Run the smallest targeted tests while iterating, then the repository checks:
 pnpm lint
 pnpm typecheck
 pnpm test
+pnpm test:scripts
 pnpm build
 ```
 
 For visible browser changes, add or update a Playwright spec in `apps/web/e2e`.
+Install Chromium and run the browser suite separately:
+
+```bash
+pnpm --filter @rac/web exec playwright install --with-deps chromium
+pnpm --filter @rac/web test:e2e
+```
+
+To exercise the editor's production page and worker security policies, build the
+web app first, then run its browser tests against the preview server:
+
+```bash
+pnpm --filter @rac/web build
+RAC_E2E_PRODUCTION_POLICY=1 pnpm --filter @rac/web test:e2e e2e/settings-code-editor.spec.ts
+```
+
 If the README presentation changes, regenerate its privacy-safe screenshots:
 
 ```bash
 pnpm --filter @rac/web screenshots:readme
 ```
+
+## Continuous integration
+
+[Tests](.github/workflows/tests.yml) runs on every push to `main`, when a pull
+request is opened, updated, or reopened, and on manual dispatch. GitHub-hosted
+Ubuntu runners use Node 22 and the pnpm version pinned in `package.json`.
+
+- Lint and typecheck cover both applications.
+- Server tests install and probe tmux, with the shell and native-build tools
+  needed to run the real-terminal suites instead of silently skipping them.
+- Settings script tests run independently of the server suite. `pnpm test`
+  alone does not include these tests or the browser tests.
+- All Playwright specs run across eight isolated shards with one worker each.
+  A separate job builds the web app and exercises the production-policy cases.
+- Browser tests retry failures twice; reports retain flaky results, failure
+  screenshots, and first-retry traces. Test reports are uploaded for seven days.
+
+No application secrets, backend service, Docker daemon, or deployment is needed.
+A failed job fails the workflow without cancelling the other browser shards.
+New commits supersede earlier runs for the same PR; each `main` push keeps its
+own run. Download the matching test-results artifact from the Actions run to
+inspect a failure.
 
 ## Change expectations
 
