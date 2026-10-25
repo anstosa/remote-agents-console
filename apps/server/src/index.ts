@@ -14,6 +14,7 @@ import { CleanupService } from './cleanup/service.js';
 import { CleanupMonitor } from './cleanup/monitor.js';
 import { WorktreeLaunchStore } from './worktrees/store.js';
 import { WorktreeManagementService } from './worktrees/management.js';
+import { PullRequestSwitchService } from './pull-requests/switch-service.js';
 import { attestBoot, bootInstallation } from './settings/boot.js';
 import type { ConfigSourceMigration } from './migrations/runner.js';
 
@@ -36,7 +37,7 @@ const config = await acquireConfig(process.env, undefined, (content, migration) 
 // (Conversations replace bookmarks; ADR 0007). A missing file is a no-op, so this fires once.
 await retireBookmarks();
 // dashboard commands share a quiet connection independently of browser viewers
-const tmux = new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = new WorktreeLaunchStore(); const discovery = new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const push = new PushService(); const worktreeManagement = new WorktreeManagementService(() => discovery.projectsNow()); const cleanup = new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement);
+const tmux = new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = new WorktreeLaunchStore(); const discovery = new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const push = new PushService(); const prSwitch = new PullRequestSwitchService(config, discovery); const worktreeManagement = new WorktreeManagementService(() => discovery.projectsNow(), undefined, undefined, prSwitch); const cleanup = new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement);
 // generate or import the durable push identity without blocking console recovery
 await push.initialize().catch(() => { process.stderr.write('[push] VAPID storage unavailable; push alerts disabled until storage is writable and valid.\n'); });
 const dashboardPollMs = config.pollIntervalMs;
@@ -49,7 +50,7 @@ const dashboardUpdates = new DashboardUpdates<DashboardPayload>(dashboardFingerp
 const notes = new WorktreeNoteService();
 const savedPromptsLines = formatSavedPromptsToNotes(await migrateSavedPromptsToNotes({ projectIds: config.projects.map(project => project.id), notes }));
 if (savedPromptsLines.length > 0) { process.stderr.write('Saved prompts migration:\n'); for (const line of savedPromptsLines) process.stderr.write(`  ${line}\n`); }
-const app = await buildApp(config, { tmux, discovery, push, notifications, cleanup, dashboardUpdates, worktreeStore, worktreeManagement, notes });
+const app = await buildApp(config, { tmux, discovery, push, notifications, cleanup, dashboardUpdates, worktreeStore, worktreeManagement, prSwitch, notes });
 // publish evidence before serving health without a host queue dependency
 await attestBoot(settingsInstallation, config, applicationContent, undefined, applicationMigration);
 // honor the configured cadence while overlapping refreshes coalesce

@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../src/tmux/command.js';
 import { WorktreeManagementService, worktreeManagementAvailability, type GitExec } from '../src/worktrees/management.js';
-import { testProject } from './helpers/config.js';
+import { PullRequestSwitchService } from '../src/pull-requests/switch-service.js';
+import type { ValidatedConfig } from '../src/config/schema.js';
+import type { GitCommand } from '../src/git/worktree-state.js';
+import { testProject, testWorktree } from './helpers/config.js';
 
 const dirs: string[] = [];
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -201,5 +204,113 @@ describe('WorktreeManagementService.add — against a real repository', () => {
 
     // a base that does not resolve is refused with git untouched
     expect(await service.add('proj', { mode: 'new', branch: 'feature/two', base: 'no-such-ref' })).toMatchObject({ ok: false, status: 409 });
+  });
+});
+
+// the pull-request source is the real switch service, so the pinned fetch and SHA check run for real
+describe('WorktreeManagementService.add — from a pull request', () => {
+  const git = async (cwd: string, ...args: string[]) => { const r = await run('/usr/bin/git', ['-C', cwd, ...args]); if (r.code !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
+  type Listed = { number: number; branch: string; headSha: string; headOnOrigin: boolean };
+
+  // an origin holding a head-on-origin branch and a fork PR head reachable only as refs/pull/8/head,
+  // cloned as the Project's main checkout
+  async function pullRequestRepository() {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-add-pr-')));
+    dirs.push(root);
+    const origin = join(root, 'origin');
+    const checkout = join(root, 'repo');
+    await mkdir(origin);
+    await git(origin, 'init', '-q', '-b', 'main');
+    await git(origin, 'config', 'user.email', 'test@example.com');
+    await git(origin, 'config', 'user.name', 'Test');
+    await git(origin, 'commit', '-q', '--allow-empty', '-m', 'base');
+    await git(origin, 'switch', '-q', '-c', 'feature/draft');
+    await git(origin, 'commit', '-q', '--allow-empty', '-m', 'draft');
+    const draftSha = await git(origin, 'rev-parse', 'HEAD');
+    await git(origin, 'switch', '-q', '-c', 'fork-source', 'main');
+    await git(origin, 'commit', '-q', '--allow-empty', '-m', 'fork');
+    const forkSha = await git(origin, 'rev-parse', 'HEAD');
+    await git(origin, 'update-ref', 'refs/pull/8/head', forkSha);
+    await git(origin, 'switch', '-q', 'main');
+    await git(origin, 'branch', '-q', '-D', 'fork-source');
+    await git(root, 'clone', '-q', origin, checkout);
+    const project = testProject({ id: 'proj', label: 'Proj', path: checkout, identity: join(checkout, '.git'), worktreesDirectory: join(root, 'wts'), available: true });
+    return { origin, checkout, project, draftSha, forkSha };
+  }
+
+  // the real switch service over one main worktree, listing the given open pull requests
+  function service(project: ReturnType<typeof testProject>, listed: Listed[], dashboardWorktrees: object[] = [], command: GitCommand = run) {
+    const main = testWorktree({ id: `proj:${project.path}`, projectId: 'proj', path: project.path, identity: project.path, main: true });
+    const discovery = { worktreesNow: () => [main], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [{ worktrees: dashboardWorktrees }] }) };
+    const pulls = { supports: async () => true, open: async () => ({ own: listed.map(pullRequest => ({ ...pullRequest, title: 'Work', draft: false, url: `https://github.com/octo/repo/pull/${pullRequest.number}` })), others: [] }) };
+    const switching = new PullRequestSwitchService({} as ValidatedConfig, discovery as never, pulls as never, command);
+    return new WorktreeManagementService(() => [project], undefined, undefined, switching);
+  }
+
+  it('checks out an origin pull request as pr-<number> on a tracking branch at the listed head', async () => {
+    const { project, draftSha } = await pullRequestRepository();
+    const result = await service(project, [{ number: 7, branch: 'feature/draft', headSha: draftSha, headOnOrigin: true }]).add('proj', { mode: 'pull-request', number: 7 });
+    const path = join(project.worktreesDirectory, 'pr-7');
+    expect(result).toEqual({ ok: true, path, label: 'Proj · pr-7' });
+    expect(await git(path, 'branch', '--show-current')).toBe('feature/draft');
+    expect(await git(path, 'rev-parse', 'HEAD')).toBe(draftSha);
+    expect(await git(path, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/feature/draft');
+  });
+
+  it('checks out the verified head even when the fetched ref moves right after the check', async () => {
+    const { project, checkout, draftSha } = await pullRequestRepository();
+    const base = await git(checkout, 'rev-parse', 'origin/main');
+    // another fetch lands between the SHA check and the worktree add
+    const command: GitCommand = async (binary, args) => {
+      const result = await run(binary, args);
+      if (args.includes('refs/remotes/origin/feature/draft^{commit}')) await git(checkout, 'update-ref', 'refs/remotes/origin/feature/draft', base);
+      return result;
+    };
+    const result = await service(project, [{ number: 7, branch: 'feature/draft', headSha: draftSha, headOnOrigin: true }], [], command).add('proj', { mode: 'pull-request', number: 7 });
+    expect(result).toMatchObject({ ok: true });
+    expect(await git(join(project.worktreesDirectory, 'pr-7'), 'rev-parse', 'HEAD')).toBe(draftSha);
+  });
+
+  it('checks out a fork pull request from its pinned ref on an untracked rac/pr branch', async () => {
+    const { project, forkSha } = await pullRequestRepository();
+    const result = await service(project, [{ number: 8, branch: 'main', headSha: forkSha, headOnOrigin: false }]).add('proj', { mode: 'pull-request', number: 8 });
+    const path = join(project.worktreesDirectory, 'pr-8');
+    expect(result).toEqual({ ok: true, path, label: 'Proj · pr-8' });
+    expect(await git(path, 'branch', '--show-current')).toBe(`rac/pr/8/${forkSha.slice(0, 12)}`);
+    expect(await git(path, 'rev-parse', 'HEAD')).toBe(forkSha);
+    expect((await run('/usr/bin/git', ['-C', path, 'rev-parse', '--abbrev-ref', '@{upstream}'])).code).not.toBe(0);
+  });
+
+  it('reuses an existing local branch at the pull request head and refuses one that differs', async () => {
+    const { project, checkout, draftSha, forkSha } = await pullRequestRepository();
+    await git(checkout, 'fetch', '-q', 'origin', `${forkSha}:refs/heads/rac/pr/8/${forkSha.slice(0, 12)}`);
+    await git(checkout, 'branch', 'feature/draft', 'origin/main');
+    const management = service(project, [{ number: 7, branch: 'feature/draft', headSha: draftSha, headOnOrigin: true }, { number: 8, branch: 'main', headSha: forkSha, headOnOrigin: false }]);
+
+    expect(await management.add('proj', { mode: 'pull-request', number: 8 })).toMatchObject({ ok: true });
+    expect(await git(join(project.worktreesDirectory, 'pr-8'), 'rev-parse', 'HEAD')).toBe(forkSha);
+
+    expect(await management.add('proj', { mode: 'pull-request', number: 7 })).toEqual({ ok: false, status: 409, error: 'The local branch feature/draft differs from the pull request head. Update or delete it, then try again.' });
+    expect(await git(checkout, 'rev-parse', 'feature/draft')).toBe(await git(checkout, 'rev-parse', 'origin/main'));
+  });
+
+  it('refuses a taken pr-<number> path, a pull request another worktree holds, and one that moved', async () => {
+    const { project, checkout, origin, draftSha, forkSha } = await pullRequestRepository();
+    const other = join(project.worktreesDirectory, 'review');
+    await mkdir(project.worktreesDirectory);
+    await git(checkout, 'worktree', 'add', '-q', other, 'feature/draft');
+    const holder = { id: `proj:${other}`, label: 'Proj · review', path: other, branch: 'feature/draft' };
+    const management = service(project, [{ number: 7, branch: 'feature/draft', headSha: draftSha, headOnOrigin: true }, { number: 8, branch: 'main', headSha: forkSha, headOnOrigin: false }, { number: 9, branch: 'main', headSha: forkSha, headOnOrigin: false }], [holder]);
+
+    expect(await management.add('proj', { mode: 'pull-request', number: 7 })).toEqual({ ok: false, status: 409, error: 'feature/draft is already checked out in Proj · review.' });
+
+    await mkdir(join(project.worktreesDirectory, 'pr-8'));
+    expect(await management.add('proj', { mode: 'pull-request', number: 8 })).toEqual({ ok: false, status: 409, error: 'the target worktree path already exists' });
+
+    // origin's PR ref moved past the listed head
+    await git(origin, 'update-ref', 'refs/pull/9/head', draftSha);
+    expect(await management.add('proj', { mode: 'pull-request', number: 9 })).toEqual({ ok: false, status: 409, error: 'Pull request #9 changed on GitHub after it was listed. Reopen the list and try again.' });
+    expect(await management.add('proj', { mode: 'pull-request', number: 10 })).toEqual({ ok: false, status: 409, error: 'Pull request #10 is no longer open.' });
+    expect(await git(checkout, 'worktree', 'list', '--porcelain')).not.toContain('pr-9');
   });
 });

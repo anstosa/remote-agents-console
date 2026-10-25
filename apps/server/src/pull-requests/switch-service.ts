@@ -47,6 +47,10 @@ function gitFailure(workspace: string, action: string, result: { code: number; s
   return first ? `git ${action} failed: ${first}` : `git ${action} failed.`;
 }
 type GitHead = { branch?: string; commit: string };
+// a pull request head fetched and verified for checkout: the local `branch` to check out (reused when
+// `existing`), else created at `sha`, which the fetched `startPoint` ref held when checked; the branch
+// tracks `startPoint` only for an origin branch
+export type PinnedPullRequestHead = { branch: string; sha: string; startPoint: string; track: boolean; existing: boolean };
 
 export class PullRequestSwitchService {
   private branchMutationInProgress = false;
@@ -70,10 +74,31 @@ export class PullRequestSwitchService {
 
   // list one project's pull requests and every local branch, each annotated with the worktree that holds it
   async branchList(projectId: string): Promise<RepositoryBranchList | undefined> {
-    const worktrees = this.discovery.worktreesNow().filter(candidate => candidate.projectId === projectId && candidate.available);
-    // linked worktrees share one set of refs, so read through the main checkout when it is there
-    const anchor = worktrees.find(candidate => candidate.main) ?? worktrees[0];
+    const anchor = this.projectAnchor(projectId);
     return anchor === undefined ? undefined : await this.repositoryList(anchor, undefined, true);
+  }
+
+  // fetch and verify one open pull request of a project for a new worktree, refusing one a worktree already holds
+  async fetchForWorktree(projectId: string, number: number): Promise<PinnedPullRequestHead | { error: string }> {
+    if (!Number.isInteger(number) || number < 1) return { error: 'That is not a valid pull request number.' };
+    const anchor = this.projectAnchor(projectId);
+    const list = anchor === undefined ? undefined : await this.repositoryList(anchor, undefined, false);
+    if (anchor === undefined || list === undefined || !list.pullRequestsSupported) return { error: 'Pull requests are unavailable for this project.' };
+    const pullRequest = this.checkoutCandidate(list, number);
+    return 'error' in pullRequest ? pullRequest : await this.fetchPinnedHead(anchor.identity, pullRequest);
+  }
+
+  // one listed pull request that no worktree holds yet
+  private checkoutCandidate(list: RepositoryBranchList, number: number): SwitchablePullRequest | { error: string } {
+    const pullRequest = list.pullRequests.find(candidate => candidate.number === number) ?? list.otherPullRequests.find(candidate => candidate.number === number);
+    if (pullRequest === undefined) return { error: `Pull request #${number} is no longer open.` };
+    return pullRequest.checkedOut ? { error: alreadyCheckedOut(pullRequest.checkoutBranch, pullRequest.openIn) } : pullRequest;
+  }
+
+  // linked worktrees share one set of refs, so a project's repository is read through its main checkout when it is there
+  private projectAnchor(projectId: string): Worktree | undefined {
+    const worktrees = this.discovery.worktreesNow().filter(candidate => candidate.projectId === projectId && candidate.available);
+    return worktrees.find(candidate => candidate.main) ?? worktrees[0];
   }
 
   // the repository-wide list, read through one checkout. A `currentBranch` ('' when detached) makes it
@@ -226,12 +251,10 @@ export class PullRequestSwitchService {
     try {
       const available = await this.available(worktreeId, false);
       if (available === undefined) return { error: switchingUnavailable };
-      const pullRequest = available.pullRequests.find(candidate => candidate.number === number) ?? available.otherPullRequests.find(candidate => candidate.number === number);
-      if (pullRequest === undefined) return { error: `Pull request #${number} is no longer open.` };
-      if (pullRequest.checkedOut) return { error: alreadyCheckedOut(pullRequest.checkoutBranch, pullRequest.openIn) };
+      const pullRequest = this.checkoutCandidate(available, number);
+      if ('error' in pullRequest) return pullRequest;
       if (!available.enabled) return { error: uncommittedChanges };
-      return await this.runSwitch(worktreeId, pullRequest.checkoutBranch, workspace =>
-        pullRequest.headOnOrigin ? this.switchBranchRef(workspace, pullRequest) : this.switchPullRequestRef(workspace, pullRequest));
+      return await this.runSwitch(worktreeId, pullRequest.checkoutBranch, workspace => this.switchPullRequest(workspace, pullRequest));
     } finally {
       this.branchMutationInProgress = false;
     }
@@ -460,33 +483,29 @@ export class PullRequestSwitchService {
     return gitFailure(workspace, 'switch', await this.command('/usr/bin/git', ['-C', workspace, 'switch', '--', branch]));
   }
 
-  // fetch one SHA-pinned origin branch and check out its tracking local branch
-  private async switchBranchRef(workspace: string, pullRequest: SwitchablePullRequest): Promise<string | undefined> {
-    const fetchedRef = `refs/remotes/origin/${pullRequest.branch}`;
-    return await this.fetchAndSwitch(workspace, pullRequest, `refs/heads/${pullRequest.branch}:${fetchedRef}`, fetchedRef, ['--track', fetchedRef]);
+  // fetch one pull request's pinned head and check out its local branch, creating it when absent
+  private async switchPullRequest(workspace: string, pullRequest: SwitchablePullRequest): Promise<string | undefined> {
+    const head = await this.fetchPinnedHead(workspace, pullRequest);
+    if ('error' in head) return head.error;
+    const args = head.existing ? ['switch', '--', head.branch] : ['switch', '-c', head.branch, head.track ? '--track' : '--no-track', head.startPoint];
+    return gitFailure(workspace, 'switch', await this.command('/usr/bin/git', ['-C', workspace, ...args]));
   }
 
-  // fetch one SHA-pinned GitHub pull request ref and check out its local branch
-  private async switchPullRequestRef(workspace: string, pullRequest: SwitchablePullRequest): Promise<string | undefined> {
-    const fetchedRef = `refs/rac/pull/${pullRequest.number}`;
-    return await this.fetchAndSwitch(workspace, pullRequest, `refs/pull/${pullRequest.number}/head:${fetchedRef}`, fetchedRef, ['--no-track', fetchedRef]);
-  }
-
-  // fetch a pinned ref, verify it is the reviewed head, then switch to its local branch, creating it when absent
-  private async fetchAndSwitch(workspace: string, pullRequest: SwitchablePullRequest, fetchSpec: string, fetchedRef: string, createArgs: string[]): Promise<string | undefined> {
-    const { headSha, checkoutBranch: localBranch } = pullRequest;
+  // fetch a pull request's head into its pinned ref and verify it is the reviewed head: an origin PR
+  // lands in its remote-tracking ref (so its local branch tracks it), a fork PR in refs/rac/pull/N.
+  // An existing local branch is reusable only when it already sits at that head.
+  private async fetchPinnedHead(workspace: string, pullRequest: SwitchablePullRequest): Promise<PinnedPullRequestHead | { error: string }> {
+    const { number, headSha, checkoutBranch: branch, headOnOrigin } = pullRequest;
+    const startPoint = headOnOrigin ? `refs/remotes/origin/${pullRequest.branch}` : `refs/rac/pull/${number}`;
+    const fetchSpec = `${headOnOrigin ? `refs/heads/${pullRequest.branch}` : `refs/pull/${number}/head`}:${startPoint}`;
     const fetched = await this.command('/usr/bin/git', ['-C', workspace, 'fetch', 'origin', '--no-tags', '--force', fetchSpec]);
     const fetchFailure = gitFailure(workspace, 'fetch', fetched);
-    if (fetchFailure !== undefined) return `Pull request #${pullRequest.number} could not be fetched from origin. ${fetchFailure}`;
-    // require the fetched ref to pin the exact reviewed head before mutating the checkout
-    if (!await this.commitMatches(workspace, `${fetchedRef}^{commit}`, headSha)) return `Pull request #${pullRequest.number} changed on GitHub after it was listed. Reopen the list and try again.`;
-    const existing = await this.command('/usr/bin/git', ['-C', workspace, 'show-ref', '--verify', '--quiet', `refs/heads/${localBranch}`]);
-    if (existing.code === 0) {
-      // reuse an existing local branch only when it already matches the reviewed head
-      if (!await this.commitMatches(workspace, `refs/heads/${localBranch}^{commit}`, headSha)) return `The local branch ${localBranch} differs from the pull request head. Update or delete it, then try again.`;
-      return gitFailure(workspace, 'switch', await this.command('/usr/bin/git', ['-C', workspace, 'switch', '--', localBranch]));
-    }
-    return gitFailure(workspace, 'switch', await this.command('/usr/bin/git', ['-C', workspace, 'switch', '-c', localBranch, ...createArgs]));
+    if (fetchFailure !== undefined) return { error: `Pull request #${number} could not be fetched from origin. ${fetchFailure}` };
+    // require the fetched ref to pin the exact reviewed head before mutating any checkout
+    if (!await this.commitMatches(workspace, `${startPoint}^{commit}`, headSha)) return { error: `Pull request #${number} changed on GitHub after it was listed. Reopen the list and try again.` };
+    const existing = (await this.command('/usr/bin/git', ['-C', workspace, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
+    if (existing && !await this.commitMatches(workspace, `refs/heads/${branch}^{commit}`, headSha)) return { error: `The local branch ${branch} differs from the pull request head. Update or delete it, then try again.` };
+    return { branch, sha: headSha, startPoint, track: headOnOrigin, existing };
   }
 
   // whether one revision resolves to the exact commit

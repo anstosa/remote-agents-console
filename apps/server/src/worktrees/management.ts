@@ -2,6 +2,7 @@ import { access, mkdir, realpath } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import type { Project, Worktree } from '../domain/models.js';
 import { PullRequestService } from '../pull-requests/service.js';
+import type { PullRequestSwitchService } from '../pull-requests/switch-service.js';
 import { run } from '../tmux/command.js';
 
 /**
@@ -24,8 +25,9 @@ const addTimeoutMs = 120_000;
  */
 export type BranchOption = { name: string; ref: string; remote: boolean; checkedOut: boolean };
 export type BranchesResult = { ok: true; branches: BranchOption[]; defaultBranch?: string } | { ok: false; status: number; error: string };
-export type AddInput = { mode: 'new' | 'existing'; branch: string; base?: string };
-export type AddResult = { ok: true; path: string } | { ok: false; status: number; error: string };
+export type AddInput = { mode: 'new' | 'existing'; branch: string; base?: string } | { mode: 'pull-request'; number: number };
+// `label` is the display label the new Worktree should carry when its branch name would not do
+export type AddResult = { ok: true; path: string; label?: string } | { ok: false; status: number; error: string };
 
 /**
  * The fresh facts the Remove dialog decides with (ADR 0003): the structural flags from
@@ -95,7 +97,8 @@ export class WorktreeManagementService {
   private readonly chains = new Map<string, Promise<unknown>>();
 
   // share exact-head PR evidence between suggestions and guarded deletion
-  constructor(private readonly projects: () => readonly Project[], private readonly git: GitExec = defaultGit, private readonly pullRequests: Pick<PullRequestService, 'cleanupHead'> = new PullRequestService()) {}
+  // `pullRequestHeads` resolves and fetches a pull request for the `pull-request` Add mode
+  constructor(private readonly projects: () => readonly Project[], private readonly git: GitExec = defaultGit, private readonly pullRequests: Pick<PullRequestService, 'cleanupHead'> = new PullRequestService(), private readonly pullRequestHeads?: Pick<PullRequestSwitchService, 'fetchForWorktree'>) {}
 
   private project(projectId: string): Project | undefined {
     return this.projects().find(project => project.id === projectId);
@@ -152,13 +155,19 @@ export class WorktreeManagementService {
     return head.code === 0 && head.stdout.trim() !== '' ? head.stdout.trim() : undefined;
   }
 
-  // create a Worktree for a new or existing branch, returning its realpath'd root. Every
-  // refusal is a 409 raised before git runs; git's own failure carries its trimmed stderr.
+  // create a Worktree for a new or existing branch, or an open pull request, returning its
+  // realpath'd root. A malformed input is a 400; every other refusal is a 409, raised before
+  // git mutates anything; git's own failure carries its trimmed stderr.
   async add(projectId: string, input: AddInput): Promise<AddResult> {
     const project = this.project(projectId);
     if (project === undefined) return { ok: false, status: 404, error: 'project unavailable' };
     const availability = worktreeManagementAvailability(project);
     if (!availability.available) return { ok: false, status: 409, error: availability.reason! };
+    if (input.mode === 'pull-request') {
+      if (!Number.isSafeInteger(input.number) || input.number < 1) return { ok: false, status: 400, error: 'invalid pull request number' };
+      const leaf = `pr-${input.number}`;
+      return await this.serialize(projectId, () => this.runPullRequestAdd(project, input.number, worktreePath(project.worktreesDirectory, leaf)!, `${project.label} · ${leaf}`));
+    }
     if (input.mode !== 'new' && input.mode !== 'existing') return { ok: false, status: 400, error: 'invalid worktree mode' };
     const branchIssue = invalidBranchReason(input.branch);
     if (branchIssue !== undefined) return { ok: false, status: 409, error: branchIssue };
@@ -167,7 +176,33 @@ export class WorktreeManagementService {
     return await this.serialize(projectId, () => this.runAdd(project, input, path));
   }
 
-  private async runAdd(project: Project, input: AddInput, path: string): Promise<AddResult> {
+  // check out one open pull request at `pr-<number>`, on the local branch the switch service names
+  // for it, from the head it fetched and verified against the listed SHA
+  private async runPullRequestAdd(project: Project, number: number, path: string, label: string): Promise<AddResult> {
+    if (this.pullRequestHeads === undefined) return { ok: false, status: 409, error: 'pull request worktrees are unavailable' };
+    if (await this.pathExists(path)) return { ok: false, status: 409, error: 'the target worktree path already exists' };
+    const head = await this.pullRequestHeads.fetchForWorktree(project.id, number);
+    if ('error' in head) return { ok: false, status: 409, error: head.error };
+    // a new branch starts at the verified SHA, not the fetched ref, which another fetch could move after the check
+    const added = await this.addCheckout(project, path, head.existing ? [path, head.branch] : ['--no-track', '-b', head.branch, path, head.sha]);
+    if (!added.ok) return added;
+    if (!head.existing && head.track) {
+      const tracked = await this.git(['-C', path, 'branch', '--set-upstream-to', head.startPoint]);
+      // the checkout stands without its upstream; only pull and push lose their default
+      if (tracked.code !== 0) console.warn(`[worktrees] ${path}: could not track ${head.startPoint}: ${tracked.stderr.trim()}`);
+    }
+    return { ...added, label };
+  }
+
+  // run `git worktree add` with the given arguments, returning the realpath'd root
+  private async addCheckout(project: Project, path: string, args: string[]): Promise<AddResult> {
+    await mkdir(project.worktreesDirectory, { recursive: true });
+    const created = await this.git(['-C', project.path, 'worktree', 'add', ...args], addTimeoutMs);
+    if (created.code !== 0) return { ok: false, status: 409, error: (created.stderr.trim() || 'git worktree add failed') };
+    return { ok: true, path: await realpath(path).catch(() => path) };
+  }
+
+  private async runAdd(project: Project, input: Extract<AddInput, { mode: 'new' | 'existing' }>, path: string): Promise<AddResult> {
     if (!await this.refFormatValid(input.branch)) return { ok: false, status: 409, error: `\`${input.branch}\` is not a valid branch name` };
     if (input.mode === 'new') {
       if (await this.branchExists(project.path, input.branch)) return { ok: false, status: 409, error: `branch \`${input.branch}\` already exists` };
@@ -183,13 +218,7 @@ export class WorktreeManagementService {
       if (!await this.commitResolves(project.path, base)) return { ok: false, status: 409, error: `base \`${base}\` does not resolve to a commit` };
     }
     if (await this.pathExists(path)) return { ok: false, status: 409, error: 'the target worktree path already exists' };
-    await mkdir(project.worktreesDirectory, { recursive: true });
-    const args = input.mode === 'new'
-      ? ['-C', project.path, 'worktree', 'add', '--no-track', '-b', input.branch, path, base!]
-      : ['-C', project.path, 'worktree', 'add', path, input.branch];
-    const created = await this.git(args, addTimeoutMs);
-    if (created.code !== 0) return { ok: false, status: 409, error: (created.stderr.trim() || 'git worktree add failed') };
-    return { ok: true, path: await realpath(path).catch(() => path) };
+    return await this.addCheckout(project, path, input.mode === 'new' ? ['--no-track', '-b', input.branch, path, base!] : [path, input.branch]);
   }
 
   // the fresh Remove-dialog facts for one discovered Worktree: its structural flags plus

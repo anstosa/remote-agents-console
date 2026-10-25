@@ -171,4 +171,23 @@ describe('POST /api/projects/:id/worktrees', () => {
       expect(added).toHaveLength(1);
     } finally { await server.close(); }
   });
+
+  it('creates a worktree from a pull request number, labelled as the service names it', async () => {
+    const added: unknown[] = [];
+    const worktreeStore = await store();
+    const worktreeManagement = { add: async (_id: string, input: unknown) => { added.push(input); return { ok: true, path: '/repo/wts/feat', label: 'Proj · pr-7' }; } } as never;
+    const launch = { startWorktreeShell: async () => true, launch: async () => true } as never;
+    const server = await app({ discovery: discoveryStub(), worktreeManagement, launch, worktreeStore });
+    try {
+      for (const payload of [{ mode: 'pull-request' }, { mode: 'pull-request', number: '7' }, { mode: 'pull-request', number: 1.5 }, { mode: 'pull-request', number: 0 }]) {
+        const invalid = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload });
+        expect(invalid.statusCode).toBe(400);
+      }
+      const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'pull-request', number: 7, launch: false } });
+      expect(response.statusCode).toBe(201);
+      // client-supplied branch names never reach a pull-request add
+      expect(added).toEqual([{ mode: 'pull-request', number: 7 }]);
+      expect(await worktreeStore.labels()).toEqual({ 'proj:/repo/wts/feat': 'Proj · pr-7' });
+    } finally { await server.close(); }
+  });
 });
