@@ -25,7 +25,10 @@ const runGit: GitCommand = (binary, args) => run(binary, args, undefined, gitCom
 export type PullRequestWorktree = { worktreeId: string; worktreeName: string; agentId?: string };
 export type SwitchablePullRequest = PullRequestChoice & { checkoutBranch: string; checkedOut: boolean; openIn?: PullRequestWorktree };
 export type SwitchableBranch = { branch: string; checkedOut: boolean; openIn?: PullRequestWorktree; commitSummary?: BranchCommitSummary };
-export type PullRequestSwitchAvailability = { enabled: boolean; pullRequests: SwitchablePullRequest[]; otherPullRequests: SwitchablePullRequest[]; branches: SwitchableBranch[]; pullRequestsSupported: boolean };
+// a repository's pull requests and local branches, each annotated with the worktree that holds it
+export type RepositoryBranchList = { pullRequests: SwitchablePullRequest[]; otherPullRequests: SwitchablePullRequest[]; branches: SwitchableBranch[]; pullRequestsSupported: boolean };
+// one worktree's view of the list; `enabled` when its working tree is clean enough to switch
+export type PullRequestSwitchAvailability = RepositoryBranchList & { enabled: boolean };
 export type PullRequestMoveResult = 'moved' | 'unavailable' | 'recovery-required' | 'busy';
 // a branch/PR checkout outcome; 'busy' means an involved agent is working and, with job
 // control gone, cannot be interrupted for the checkout; `error` explains any other refusal
@@ -52,25 +55,43 @@ export class PullRequestSwitchService {
   // adapter: it is structurally unable to type into an agent's terminal.
   constructor(private readonly config: ValidatedConfig, private readonly discovery: DiscoveryService, private readonly pullRequests = new PullRequestService(), private readonly command: GitCommand = runGit) {}
 
-  // list one worktree's switchable pull requests and local branches, whether or not an agent runs there
+  // list one worktree's switchable pull requests and local branches, whether or not an agent runs there:
+  // the repository-wide list with this worktree's live branch and switch readiness overlaid
   async available(worktreeId: string, includeCommitSummaries = true): Promise<PullRequestSwitchAvailability | undefined> {
-    const discoveredWorktrees = this.discovery.worktreesNow();
-    const worktree = worktreeById(discoveredWorktrees, worktreeId);
+    const worktree = worktreeById(this.discovery.worktreesNow(), worktreeId);
     if (worktree === undefined) return undefined;
+    const head = await this.command('/usr/bin/git', ['-C', worktree.identity, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
+    const list = await this.repositoryList(worktree, head.code === 0 ? head.stdout.trim() : '', includeCommitSummaries);
+    if (list === undefined) return undefined;
+    // reflect git changes completed while remote and branch metadata were loading
+    const enabled = await this.switchReady(worktree);
+    return { enabled, ...list };
+  }
+
+  // list one project's pull requests and every local branch, each annotated with the worktree that holds it
+  async branchList(projectId: string): Promise<RepositoryBranchList | undefined> {
+    const worktrees = this.discovery.worktreesNow().filter(candidate => candidate.projectId === projectId && candidate.available);
+    // linked worktrees share one set of refs, so read through the main checkout when it is there
+    const anchor = worktrees.find(candidate => candidate.main) ?? worktrees[0];
+    return anchor === undefined ? undefined : await this.repositoryList(anchor, undefined, true);
+  }
+
+  // the repository-wide list, read through one checkout. A `currentBranch` ('' when detached) makes it
+  // that checkout's own list: its live branch outranks cached ownership and is left off the local branches.
+  private async repositoryList(anchor: Worktree, currentBranch: string | undefined, includeCommitSummaries: boolean): Promise<RepositoryBranchList | undefined> {
+    const discoveredWorktrees = this.discovery.worktreesNow();
     // require one canonical repository identity, not merely a GitHub origin
-    const repository = await this.repositoryIdentity(worktree.identity);
+    const repository = await this.repositoryIdentity(anchor.identity);
     if (repository === undefined) return undefined;
     const dashboard = await this.discovery.dashboard().catch(() => undefined);
     const checkedOut = new Map<string, PullRequestWorktree | undefined>();
     const branchOwners = new Map<string, BranchSummaryOwner>();
-    const head = await this.command('/usr/bin/git', ['-C', worktree.identity, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
-    const currentBranch = head.code === 0 ? head.stdout.trim() : '';
     // prefer the live destination branch over cached dashboard metadata
-    if (currentBranch) checkedOut.set(currentBranch, { worktreeId: worktree.id, worktreeName: worktree.label });
+    if (currentBranch) checkedOut.set(currentBranch, { worktreeId: anchor.id, worktreeName: anchor.label });
     const agents = await Promise.all((dashboard?.agents ?? []).map(async agent => {
       const agentWorktree = discoveredWorktrees.find(candidate => worktreeMatchesWorkspace(candidate, agent.home));
       // skip agents in this worktree, whose live branch is read above, and branchless agents
-      if (agentWorktree?.id === worktree.id || agent.branch === undefined) return undefined;
+      if ((currentBranch !== undefined && agentWorktree?.id === anchor.id) || agent.branch === undefined) return undefined;
       const workspace = agentWorktree?.identity ?? agent.home;
       // keep only owners proven to share the target repository
       if (await this.repositoryIdentity(workspace) !== repository) return undefined;
@@ -103,9 +124,8 @@ export class PullRequestSwitchService {
       checkedOut.set(branch, { worktreeId: candidate.id, worktreeName: candidate.label });
     }
     // list pull requests only for a supported GitHub origin
-    const pullRequestsSupported = await this.pullRequests.supports(worktree.identity);
-    // load slow remote metadata before taking the readiness snapshot
-    const pullRequests = pullRequestsSupported ? await this.pullRequests.open(worktree.identity) : { own: [], others: [] };
+    const pullRequestsSupported = await this.pullRequests.supports(anchor.identity);
+    const pullRequests = pullRequestsSupported ? await this.pullRequests.open(anchor.identity) : { own: [], others: [] };
     // apply worktree availability around each checkout branch
     const switchable = (choices: PullRequestChoice[]): SwitchablePullRequest[] => choices.map(pullRequest => {
       const branch = pullRequest.headOnOrigin ? pullRequest.branch : this.pullRequestBranch(pullRequest);
@@ -114,17 +134,15 @@ export class PullRequestSwitchService {
     const own = switchable(pullRequests.own);
     const others = switchable(pullRequests.others);
     const branches = await this.localBranches(
-      worktree.identity,
+      anchor.identity,
       checkedOut,
-      currentBranch,
+      currentBranch ?? '',
       new Set([...own, ...others].map(pullRequest => pullRequest.checkoutBranch)),
       includeCommitSummaries,
-      worktree.defaultBranch,
+      anchor.defaultBranch,
       branchOwners
     );
-    // reflect git changes completed while remote and branch metadata were loading
-    const enabled = await this.switchReady(worktree);
-    return { enabled, pullRequests: own, otherPullRequests: others, branches, pullRequestsSupported };
+    return { pullRequests: own, otherPullRequests: others, branches, pullRequestsSupported };
   }
 
   // annotate one branch with the worktree that currently holds it

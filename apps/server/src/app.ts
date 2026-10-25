@@ -1798,6 +1798,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   // a Worktree's pull requests and local branches, whether or not an Agent runs there
   app.get('/api/worktrees/:id/switch-prs', async (request, reply) => { controlled(request); const availability = await prSwitch.available((request.params as { id: string }).id); return availability === undefined ? reply.code(404).send({ error: 'pull request switching unavailable' }) : availability; });
+  // the same list for the whole repository, with no worktree's checkout overlaid
+  app.get('/api/projects/:id/switch-prs', async (request, reply) => { controlled(request); const list = await prSwitch.branchList((request.params as { id: string }).id); return list === undefined ? reply.code(404).send({ error: 'repository branch list unavailable' }) : list; });
   app.get('/api/agents/:id/github-actions', async (request, reply) => { controlled(request); const url = await prSwitch.actionsUrl((request.params as { id: string }).id); return url === undefined ? reply.code(404).send({ error: 'GitHub Actions unavailable' }) : { url }; });
   // a Worktree's GitHub Actions, for the Workspace toolbar's menu whether or not an Agent runs there
   app.get('/api/worktrees/:id/github-actions', async (request, reply) => {

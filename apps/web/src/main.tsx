@@ -84,7 +84,10 @@ type PullRequestChoice = { number: number; title: string; branch: string; draft:
 type PullRequestWorktree = { worktreeId: string; worktreeName: string; agentId?: string };
 type SwitchablePullRequest = PullRequestChoice & { checkedOut: boolean; openIn?: PullRequestWorktree };
 type SwitchableBranch = { branch: string; checkedOut: boolean; openIn?: PullRequestWorktree; commitSummary?: { subject: string; count: number } };
-type PullRequestSwitchAvailability = { enabled: boolean; pullRequests: SwitchablePullRequest[]; otherPullRequests: SwitchablePullRequest[]; branches: SwitchableBranch[]; pullRequestsSupported: boolean };
+// a repository's pull requests and local branches, each annotated with the worktree that holds it
+type RepositoryBranchList = { pullRequests: SwitchablePullRequest[]; otherPullRequests: SwitchablePullRequest[]; branches: SwitchableBranch[]; pullRequestsSupported: boolean };
+// one worktree's view of the list; `enabled` when its working tree is clean enough to switch
+type PullRequestSwitchAvailability = RepositoryBranchList & { enabled: boolean };
 type DashboardTarget = { worktreeId: string; agentId?: string };
 type GitStatusChange = { code: string; path: string; originalPath?: string; additions?: number; deletions?: number; category?: 'implementation'|'test'|'doc' };
 type GitStatusSummary = { files: number; staged: number; unstaged: number; untracked: number; conflicted: number; changes?: GitStatusChange[] };
@@ -6291,16 +6294,11 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddT
         setLoadingPrSwitch(false);
         return;
       }
-      const availability = payload as { enabled?: unknown; pullRequests?: unknown; otherPullRequests?: unknown; branches?: unknown; pullRequestsSupported?: unknown };
+      const list = repositoryBranchList(payload);
+      const enabled = (payload as { enabled?: unknown } | null)?.enabled;
       // validate successful availability
-      if (payload !== null && typeof payload === 'object' && typeof availability.enabled === 'boolean' && Array.isArray(availability.pullRequests) && Array.isArray(availability.otherPullRequests) && Array.isArray(availability.branches) && typeof availability.pullRequestsSupported === 'boolean') {
-        const next = {
-          enabled: availability.enabled,
-          pullRequests: switchablePullRequests(availability.pullRequests),
-          otherPullRequests: switchablePullRequests(availability.otherPullRequests),
-          branches: switchableBranches(availability.branches),
-          pullRequestsSupported: availability.pullRequestsSupported
-        };
+      if (list !== undefined && typeof enabled === 'boolean') {
+        const next = { enabled, ...list };
         // cache one workspace list
         if (worktreeId !== undefined) pullRequestSwitchCache.set(worktreeId, next);
         setPrSwitch(next);
@@ -6402,7 +6400,6 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddT
   // a generating review stays readable while its border reports progress
   const reviewLabel = review?.generating ? 'Generating…' : review !== undefined ? 'Open Review' : 'Review';
   const mutationInFlight = switchingPr !== undefined || movingPr !== undefined || switchingBranch !== undefined || movingBranch !== undefined;
-  const otherPullRequestCount = prSwitch?.otherPullRequests.length ?? 0;
   const pullRequestReason = pullRequestStatusReason(loadingPrSwitch, prSwitchError, prSwitchLoaded, prSwitch);
   const branchReason = branchStatusReason(loadingPrSwitch, prSwitchError, prSwitchLoaded, prSwitch);
   // close the branch panel before navigating worktrees
@@ -6515,8 +6512,8 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddT
   const commentsToggle = worktreeId === undefined ? undefined : { open: commentsOpen, unresolved: unresolvedThreads ?? pullRequest?.unresolvedThreads ?? 0, onToggle: () => setCommentsOpen(open => !open) };
   const commentsPanel = commentsOpen && worktreeId !== undefined && pullRequest !== undefined && pullRequest.status !== 'merged' ? <PullRequestCommentsPanel load={loadComments} onLoaded={commentsLoaded} onAddToPrompt={onAddToPrompt} /> : undefined;
   const workingPanel = <>{commentsPanel ?? <><span className="git-status-panel-header"><strong>{mode === 'working' ? 'Working changes' : 'PR changes'}</strong>{panelDetails.length > 0 && <small className="git-status-details">{panelDetails.join(' · ')}</small>}</span>{byCommit ? <span className="git-status-files">{groupingToolbar}<GitCommitSections log={commitLog} error={commitLogError} uncommitted={summary?.changes ?? []} collapsed={sectionCollapsed} onToggle={toggleSection} messages={openMessages} onToggleMessage={toggleMessage} onViewCommit={onViewCommit} onReviewCommit={onReviewCommit} reviewCommitDisabledReason={review === undefined ? undefined : 'Dismiss the current guided review to start another'} onOpenFile={onOpenFile} /></span> : changedFiles !== undefined && changedFiles.length > 0 ? <span className="git-status-files">{groupingToolbar}<GitChangeGroup label="Implementation" changes={implementationChanges} onOpenFile={path => onOpenFile(path, mode)} /><GitChangeGroup label="TESTS & DOCS" changes={supportingChanges} onOpenFile={path => onOpenFile(path, mode)} /></span> : <span className="git-status-empty">{emptyLabel}</span>}</>}<span className="git-status-panel-footer"><span className="git-status-actions">{onViewChanges !== undefined && <button className="git-status-view-changes" type="button" disabled={changedFiles === undefined || changedFiles.length === 0} title={`View all ${mode === 'working' ? 'Working' : 'All PR'} changes in the Code panel`} onClick={() => onViewChanges(mode)}>View changes</button>}<button className={`git-status-review${progressBorder(review?.generating === true, 'peach')}`} type="button" aria-busy={review?.generating || undefined} disabled={onReview === undefined || disabledReviewReason !== undefined} title={disabledReviewReason ?? (review?.generating ? 'Generating the guided review — open it to watch progress or cancel' : review !== undefined ? 'Open the current guided review' : `Start guided review of ${mode === 'working' ? 'Working' : 'All PR'} changes`)} onClick={() => onReview?.(mode)}><ProgressRing busy={review?.generating === true} />{reviewLabel}</button>{/* dismiss after dispatch without waiting for the action to finish */}<ConfiguredButtonList slot="pullRequest" className="configured-pull-request-actions" onSelect={onToggle} /></span>{/* keep the current pr between actions and view modes */}<PullRequestCard pullRequest={pullRequest} comments={commentsToggle} /><span className="git-status-mode" role="group" aria-label="Git change view"><button type="button" aria-pressed={mode === 'working'} onClick={() => setMode('working')}>Working</button><button type="button" aria-pressed={mode === 'pr'} disabled={prSummary === undefined} title={prSummary === undefined ? 'Merge target unavailable' : `Compare with ${prBaseLabel}`} onClick={() => setMode('pr')}>All PR</button></span></span></>;
-  const pullRequestPanel = <><span className="git-status-panel-header"><strong>Pull requests</strong>{pullRequestReason !== undefined && <small className={`git-status-details${prSwitchError === undefined ? '' : ' error'}`} role={prSwitchError === undefined ? 'status' : 'alert'} aria-label={pullRequestReason}>{pullRequestReason}</small>}</span><span className="git-status-switch-list">{prSwitch?.pullRequests.map(pullRequest => <SwitchPullRequestOption key={pullRequest.number} pullRequest={pullRequest} currentWorktreeId={worktreeId} enabled={prSwitch.enabled} loading={loadingPrSwitch} refreshFailed={prSwitchError !== undefined} switchingPr={switchingPr} movingPr={movingPr} onSwitch={switchPullRequest} onMove={movePullRequest} onSelectTarget={selectWorktree} />)}{prSwitch !== undefined && otherPullRequestCount > 0 && <details className="other-pull-requests"><summary>Pull requests by others <span>{otherPullRequestCount}</span></summary><div>{prSwitch.otherPullRequests.map(pullRequest => <SwitchPullRequestOption key={pullRequest.number} pullRequest={pullRequest} currentWorktreeId={worktreeId} enabled={prSwitch.enabled} loading={loadingPrSwitch} refreshFailed={prSwitchError !== undefined} switchingPr={switchingPr} movingPr={movingPr} onSwitch={switchPullRequest} onMove={movePullRequest} onSelectTarget={selectWorktree} />)}</div></details>}</span></>;
-  const branchPanel = <><span className="git-status-panel-header"><strong>Branches</strong>{branchReason !== undefined && <small className={`git-status-details${prSwitchError === undefined ? '' : ' error'}`} role={prSwitchError === undefined ? 'status' : 'alert'} aria-label={branchReason}>{branchReason}</small>}</span><span className="git-status-switch-list">{prSwitch?.branches.map(candidate => <SwitchBranchOption key={candidate.branch} branch={candidate} enabled={prSwitch.enabled} loading={loadingPrSwitch} refreshFailed={prSwitchError !== undefined} switchingBranch={switchingBranch} movingBranch={movingBranch} onSwitch={switchBranch} onMove={moveBranch} onDelete={worktreeId === undefined ? undefined : reviewBranchRemoval} onSelectTarget={selectWorktree} />)}</span></>;
+  const pullRequestPanel = <><span className="git-status-panel-header"><strong>Pull requests</strong>{pullRequestReason !== undefined && <small className={`git-status-details${prSwitchError === undefined ? '' : ' error'}`} role={prSwitchError === undefined ? 'status' : 'alert'} aria-label={pullRequestReason}>{pullRequestReason}</small>}</span><PullRequestChoiceList list={prSwitch} currentWorktreeId={worktreeId} pending={switchingPr !== undefined || movingPr !== undefined} onSelectTarget={selectWorktree} actions={(choice, here) => <PullRequestCheckoutButton pullRequest={choice} here={here} enabled={prSwitch?.enabled ?? false} loading={loadingPrSwitch} refreshFailed={prSwitchError !== undefined} switchingPr={switchingPr} movingPr={movingPr} onSwitch={switchPullRequest} onMove={movePullRequest} />} /></>;
+  const branchPanel = <><span className="git-status-panel-header"><strong>Branches</strong>{branchReason !== undefined && <small className={`git-status-details${prSwitchError === undefined ? '' : ' error'}`} role={prSwitchError === undefined ? 'status' : 'alert'} aria-label={branchReason}>{branchReason}</small>}</span><BranchChoiceList branches={prSwitch?.branches} pending={switchingBranch !== undefined || movingBranch !== undefined} onSelectTarget={selectWorktree} actions={candidate => <BranchCheckoutActions branch={candidate} enabled={prSwitch?.enabled ?? false} loading={loadingPrSwitch} refreshFailed={prSwitchError !== undefined} switchingBranch={switchingBranch} movingBranch={movingBranch} onSwitch={switchBranch} onMove={moveBranch} onDelete={worktreeId === undefined ? undefined : reviewBranchRemoval} />} /></>;
   let activePanel = workingPanel;
   // show pull request choices
   if (tab === 'prs') activePanel = pullRequestPanel;
@@ -7097,6 +7094,13 @@ function validCheckoutWorktree(openIn: unknown): openIn is PullRequestWorktree |
 // vector label symbols share the width of an emoji prefix
 const LauncherLabelIcon = () => <span className="launcher-label-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 14c3-8 6-8 9-4s6 4 9-4" /></svg></span>;
 
+// validate one repository branch list payload, dropping malformed entries
+function repositoryBranchList(payload: unknown): RepositoryBranchList | undefined {
+  const list = payload as { pullRequests?: unknown; otherPullRequests?: unknown; branches?: unknown; pullRequestsSupported?: unknown } | null;
+  if (list === null || typeof list !== 'object' || !Array.isArray(list.pullRequests) || !Array.isArray(list.otherPullRequests) || !Array.isArray(list.branches) || typeof list.pullRequestsSupported !== 'boolean') return undefined;
+  return { pullRequests: switchablePullRequests(list.pullRequests), otherPullRequests: switchablePullRequests(list.otherPullRequests), branches: switchableBranches(list.branches), pullRequestsSupported: list.pullRequestsSupported };
+}
+
 // retain only safe pull request actions
 function switchablePullRequests(values: unknown[]): SwitchablePullRequest[] {
   return values.filter((value): value is SwitchablePullRequest => {
@@ -7145,25 +7149,38 @@ function SwitchOpenInLine({ openIn, here, operationPending, onSelectTarget }: { 
   return <button className="switch-pr-open-in switch-pr-open-in-link" type="button" disabled={operationPending} aria-label={`Switch to ${openIn.worktreeName}`} onClick={() => onSelectTarget(openIn)}>Open in {openIn.worktreeName}<span aria-hidden="true"> →</span></button>;
 }
 
-// render one pull request switch target
-function SwitchPullRequestOption({ pullRequest, currentWorktreeId, enabled, loading, refreshFailed, switchingPr, movingPr, onSwitch, onMove, onSelectTarget }: { pullRequest: SwitchablePullRequest; currentWorktreeId?: string; enabled: boolean; loading: boolean; refreshFailed: boolean; switchingPr?: number; movingPr?: number; onSwitch: (number: number) => void | Promise<void>; onMove: (number: number) => void | Promise<void>; onSelectTarget: (target: DashboardTarget) => void }) {
+// the repository's pull requests, with other authors' folded below; `actions` supplies each row's
+// buttons, and `here` marks a row checked out in `currentWorktreeId`
+function PullRequestChoiceList({ list, currentWorktreeId, pending, onSelectTarget, actions }: { list?: Pick<RepositoryBranchList, 'pullRequests' | 'otherPullRequests'>; currentWorktreeId?: string; pending: boolean; onSelectTarget: (target: DashboardTarget) => void; actions: (pullRequest: SwitchablePullRequest, here: boolean) => React.ReactNode }) {
+  const row = (pullRequest: SwitchablePullRequest) => {
+    const here = currentWorktreeId !== undefined && pullRequest.openIn?.worktreeId === currentWorktreeId;
+    return <PullRequestChoiceRow key={pullRequest.number} pullRequest={pullRequest} here={here} pending={pending} onSelectTarget={onSelectTarget}>{actions(pullRequest, here)}</PullRequestChoiceRow>;
+  };
+  return <span className="git-status-switch-list">{list?.pullRequests.map(row)}{list !== undefined && list.otherPullRequests.length > 0 && <details className="other-pull-requests"><summary>Pull requests by others <span>{list.otherPullRequests.length}</span></summary><div>{list.otherPullRequests.map(row)}</div></details>}</span>;
+}
+
+// render one pull request with its consumer-supplied actions and, when checked out, the worktree holding it
+function PullRequestChoiceRow({ pullRequest, here, pending, onSelectTarget, children }: { pullRequest: SwitchablePullRequest; here: boolean; pending: boolean; onSelectTarget: (target: DashboardTarget) => void; children: React.ReactNode }) {
   const status = pullRequest.draft ? 'draft' : 'open';
   const statusLabel = pullRequest.draft ? 'Draft' : 'Open';
   const label = `#${pullRequest.number}: ${pullRequest.title}`;
-  const openIn = pullRequest.openIn;
-  const checkedOutHere = currentWorktreeId !== undefined && openIn?.worktreeId === currentWorktreeId;
+  return <div className="switch-pr-option" role="group" aria-label={`${label}; ${statusLabel}`}><div className="switch-pr-main"><a className="switch-pr" href={pullRequest.url} target="_blank" rel="noreferrer" title={`Open ${label} in GitHub`} aria-label={label}><span className="switch-pr-copy"><span><strong className={`status-${status}`}>#{pullRequest.number}</strong><span>: {pullRequest.title}</span></span></span></a></div><span className="switch-pr-actions"><PullRequestIndicators checks={pullRequest.checks} issues={pullRequest.issues} />{children}</span>{pullRequest.checkedOut && <div className="switch-pr-owner"><SwitchOpenInLine openIn={pullRequest.openIn} here={here} operationPending={pending} onSelectTarget={onSelectTarget} /></div>}</div>;
+}
+
+// the git flyout's checkout action for one pull request: switch to it, or move it here when held elsewhere
+function PullRequestCheckoutButton({ pullRequest, here, enabled, loading, refreshFailed, switchingPr, movingPr, onSwitch, onMove }: { pullRequest: SwitchablePullRequest; here: boolean; enabled: boolean; loading: boolean; refreshFailed: boolean; switchingPr?: number; movingPr?: number; onSwitch: (number: number) => void | Promise<void>; onMove: (number: number) => void | Promise<void> }) {
   const operationPending = switchingPr !== undefined || movingPr !== undefined;
   const busy = movingPr === pullRequest.number || switchingPr === pullRequest.number;
-  const checkoutReason = pullRequestCheckoutReason(pullRequest, enabled, refreshFailed, checkedOutHere);
+  const checkoutReason = pullRequestCheckoutReason(pullRequest, enabled, refreshFailed, here);
   // run one checkout transaction
   const checkout = () => {
     // ignore the current branch defensively
-    if (checkedOutHere) return;
+    if (here) return;
     // transfer occupied branches
     if (pullRequest.checkedOut) return void onMove(pullRequest.number);
     void onSwitch(pullRequest.number);
   };
-  return <div className="switch-pr-option" role="group" aria-label={`${label}; ${statusLabel}`}><div className="switch-pr-main"><a className="switch-pr" href={pullRequest.url} target="_blank" rel="noreferrer" title={`Open ${label} in GitHub`} aria-label={label}><span className="switch-pr-copy"><span><strong className={`status-${status}`}>#{pullRequest.number}</strong><span>: {pullRequest.title}</span></span></span></a></div><span className="switch-pr-actions"><PullRequestIndicators checks={pullRequest.checks} issues={pullRequest.issues} /><button className={`switch-pr-action switch-pr-checkout outline-button${progressBorder(busy, 'blue')}`} aria-busy={busy || undefined} disabled={loading || refreshFailed || operationPending || !enabled || pullRequest.checkedOut && (openIn === undefined || checkedOutHere)} title={checkoutReason} onClick={checkout}><ProgressRing busy={busy} />{movingPr === pullRequest.number ? 'Moving…' : switchingPr === pullRequest.number ? 'Checking out…' : 'Checkout'}</button></span>{pullRequest.checkedOut && <div className="switch-pr-owner"><SwitchOpenInLine openIn={openIn} here={checkedOutHere} operationPending={operationPending} onSelectTarget={onSelectTarget} /></div>}</div>;
+  return <button className={`switch-pr-action switch-pr-checkout outline-button${progressBorder(busy, 'blue')}`} aria-busy={busy || undefined} disabled={loading || refreshFailed || operationPending || !enabled || pullRequest.checkedOut && (pullRequest.openIn === undefined || here)} title={checkoutReason} onClick={checkout}><ProgressRing busy={busy} />{movingPr === pullRequest.number ? 'Moving…' : switchingPr === pullRequest.number ? 'Checking out…' : 'Checkout'}</button>;
 }
 
 // explain one unavailable branch switch target
@@ -7194,13 +7211,22 @@ function branchSummaryPreview(subject: string): string {
   return preview;
 }
 
-// render one local branch switch target
-function SwitchBranchOption({ branch, enabled, loading, refreshFailed, switchingBranch, movingBranch, onSwitch, onMove, onDelete, onSelectTarget }: { branch: SwitchableBranch; enabled: boolean; loading: boolean; refreshFailed: boolean; switchingBranch?: string; movingBranch?: string; onSwitch: (branch: string) => void | Promise<void>; onMove: (branch: string) => void | Promise<void>; onDelete?: (branch: SwitchableBranch) => void; onSelectTarget: (target: DashboardTarget) => void }) {
-  const openIn = branch.openIn;
+// the repository's local branches; `actions` supplies each row's buttons
+function BranchChoiceList({ branches, pending, onSelectTarget, actions }: { branches?: SwitchableBranch[]; pending: boolean; onSelectTarget: (target: DashboardTarget) => void; actions: (branch: SwitchableBranch) => React.ReactNode }) {
+  return <span className="git-status-switch-list">{branches?.map(branch => <BranchChoiceRow key={branch.branch} branch={branch} pending={pending} onSelectTarget={onSelectTarget}>{actions(branch)}</BranchChoiceRow>)}</span>;
+}
+
+// render one local branch with its commit summary, its consumer-supplied actions and, when checked out, the worktree holding it
+function BranchChoiceRow({ branch, pending, onSelectTarget, children }: { branch: SwitchableBranch; pending: boolean; onSelectTarget: (target: DashboardTarget) => void; children: React.ReactNode }) {
   const summary = branch.commitSummary;
   // shorten only the subject and preserve the additional commit count
   const summarySubject = summary?.subject.split(/\r?\n/u, 1)[0] ?? '';
   const summaryMore = summary !== undefined && summary.count > 1 ? ` and ${summary.count - 1} more` : '';
+  return <div className="switch-pr-option switch-branch-option" role="group" aria-label={branch.branch}><div className="switch-pr-main"><strong className="switch-branch-name">{branch.branch}</strong>{summary !== undefined && <small className="switch-branch-summary" title={`${summarySubject}${summaryMore}`}><span>{branchSummaryPreview(summarySubject)}</span>{summaryMore !== '' && <span className="switch-branch-summary-more">{summaryMore}</span>}</small>}</div><span className="switch-pr-actions">{children}</span>{branch.checkedOut && <div className="switch-pr-owner"><SwitchOpenInLine openIn={branch.openIn} here={false} operationPending={pending} onSelectTarget={onSelectTarget} /></div>}</div>;
+}
+
+// the git flyout's actions for one local branch: review its deletion, and switch to it or move it here when held elsewhere
+function BranchCheckoutActions({ branch, enabled, loading, refreshFailed, switchingBranch, movingBranch, onSwitch, onMove, onDelete }: { branch: SwitchableBranch; enabled: boolean; loading: boolean; refreshFailed: boolean; switchingBranch?: string; movingBranch?: string; onSwitch: (branch: string) => void | Promise<void>; onMove: (branch: string) => void | Promise<void>; onDelete?: (branch: SwitchableBranch) => void }) {
   const operationPending = switchingBranch !== undefined || movingBranch !== undefined;
   const busy = movingBranch === branch.branch || switchingBranch === branch.branch;
   const checkoutReason = branchCheckoutReason(branch, enabled, refreshFailed);
@@ -7210,11 +7236,11 @@ function SwitchBranchOption({ branch, enabled, loading, refreshFailed, switching
     if (branch.checkedOut) return void onMove(branch.branch);
     void onSwitch(branch.branch);
   };
-  return <div className="switch-pr-option switch-branch-option" role="group" aria-label={branch.branch}><div className="switch-pr-main"><strong className="switch-branch-name">{branch.branch}</strong>{summary !== undefined && <small className="switch-branch-summary" title={`${summarySubject}${summaryMore}`}><span>{branchSummaryPreview(summarySubject)}</span>{summaryMore !== '' && <span className="switch-branch-summary-more">{summaryMore}</span>}</small>}</div><span className="switch-pr-actions">{onDelete !== undefined && <button className="switch-pr-action switch-branch-delete icon-button outline-button" disabled={loading || operationPending} aria-label={`Delete ${branch.branch}`} title={`Review deletion safeguards for ${branch.branch}`} onClick={() => onDelete(branch)}><svg className="more-menu-icon action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg></button>}<button className={`switch-pr-action switch-pr-checkout outline-button${progressBorder(busy, 'blue')}`} aria-busy={busy || undefined} disabled={loading || refreshFailed || operationPending || !enabled || (branch.checkedOut && openIn === undefined)} title={checkoutReason} onClick={checkout}><ProgressRing busy={busy} />{movingBranch === branch.branch ? 'Moving…' : switchingBranch === branch.branch ? 'Checking out…' : 'Checkout'}</button></span>{branch.checkedOut && <div className="switch-pr-owner"><SwitchOpenInLine openIn={openIn} here={false} operationPending={operationPending} onSelectTarget={onSelectTarget} /></div>}</div>;
+  return <>{onDelete !== undefined && <button className="switch-pr-action switch-branch-delete icon-button outline-button" disabled={loading || operationPending} aria-label={`Delete ${branch.branch}`} title={`Review deletion safeguards for ${branch.branch}`} onClick={() => onDelete(branch)}><svg className="more-menu-icon action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg></button>}<button className={`switch-pr-action switch-pr-checkout outline-button${progressBorder(busy, 'blue')}`} aria-busy={busy || undefined} disabled={loading || refreshFailed || operationPending || !enabled || (branch.checkedOut && branch.openIn === undefined)} title={checkoutReason} onClick={checkout}><ProgressRing busy={busy} />{movingBranch === branch.branch ? 'Moving…' : switchingBranch === branch.branch ? 'Checking out…' : 'Checkout'}</button></>;
 }
 
 // explain pull request availability
-function pullRequestStatusReason(loading: boolean, error: string | undefined, loaded: boolean, availability: PullRequestSwitchAvailability | undefined): string | undefined {
+function pullRequestStatusReason(loading: boolean, error: string | undefined, loaded: boolean, availability: RepositoryBranchList | undefined): string | undefined {
   // show loading in the tab instead of repeating it in the header
   if (loading) return undefined;
   // preserve one actionable error
@@ -7229,7 +7255,7 @@ function pullRequestStatusReason(loading: boolean, error: string | undefined, lo
 }
 
 // explain local branch availability
-function branchStatusReason(loading: boolean, error: string | undefined, loaded: boolean, availability: PullRequestSwitchAvailability | undefined): string | undefined {
+function branchStatusReason(loading: boolean, error: string | undefined, loaded: boolean, availability: RepositoryBranchList | undefined): string | undefined {
   // show loading in the tab instead of repeating it in the header
   if (loading) return undefined;
   // expose the shared repository refresh error

@@ -329,6 +329,23 @@ describe('pull request switching', () => {
     }
   });
 
+  // the repository-wide list no worktree's checkout is overlaid on, for choosing what a new worktree opens
+  it('lists a project\'s pull requests and every local branch with the worktree that holds each', async () => {
+    const coraView = { id: worktree.id, projectId: 'cora', label: 'Cora', path: worktree.path, available: true, pinned: true, main: true, detached: false, locked: false, order: 0, branch: 'feature/current' };
+    const deltaView = { id: 'delta', projectId: 'cora', label: 'Delta', path: '/worktrees/delta', available: true, pinned: false, main: false, detached: false, locked: false, order: 1, branch: 'feature/draft' };
+    const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [{ id: 'cora', label: 'Cora', available: true, worktrees: [coraView, deltaView] }] }) };
+    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand('feature/current\nfeature/draft\nfeature/solo\n'));
+
+    await expect(service.branchList('cora')).resolves.toEqual({
+      pullRequests: [{ ...choices[0], checkoutBranch: 'feature/draft', checkedOut: true, openIn: { worktreeId: 'delta', worktreeName: 'Delta' } }],
+      otherPullRequests: [],
+      branches: [{ branch: 'feature/current', checkedOut: true, openIn: { worktreeId: worktree.id, worktreeName: 'Cora' } }, { branch: 'feature/solo', checkedOut: false }],
+      pullRequestsSupported: true
+    });
+    await expect(service.branchList('absent')).resolves.toBeUndefined();
+  });
+
   it('returns local branches with pull requests unsupported when there is no GitHub origin', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
     // fail closed if the GitHub-only path is ever queried

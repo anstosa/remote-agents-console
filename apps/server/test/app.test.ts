@@ -673,6 +673,24 @@ describe('pull request switch API', () => {
     } finally { await pullRequestApp.close(); }
   }, 15_000);
 
+  it('lists a project\'s pull requests and branches with no worktree overlaid', async () => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const list = { pullRequests: [], otherPullRequests: [], branches: [{ branch: 'feature/solo', checkedOut: false }], pullRequestsSupported: true };
+    const branchList = vi.fn(async (projectId: string) => projectId === 'cora' ? list : undefined);
+    const pullRequestApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 19).toString('base64url')), prSwitch: { branchList } as never });
+    try {
+      const boot = await pullRequestApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
+      const login = await pullRequestApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
+      const headers = { host: 'agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0] };
+      const response = await pullRequestApp.inject({ method: 'GET', url: '/api/projects/cora/switch-prs', headers });
+      const absent = await pullRequestApp.inject({ method: 'GET', url: '/api/projects/absent/switch-prs', headers });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual(list);
+      expect(absent.statusCode).toBe(404);
+    } finally { await pullRequestApp.close(); }
+  }, 15_000);
+
   it('moves an occupied pull request through the controlled HTTP boundary', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const move = vi.fn<() => Promise<'moved' | 'recovery-required'>>().mockResolvedValueOnce('moved').mockResolvedValueOnce('recovery-required');
