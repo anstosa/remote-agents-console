@@ -95,14 +95,21 @@ async function reconcileGoogleEvent(fetcher: typeof fetch, accessToken: string, 
 
 // classify google status and bounded reason without echoing its body
 export async function classifyFailure(response: Response, attempts: number, random: () => number = Math.random): Promise<DeliveryResult> {
+  // preserve definitive statuses even when their unused body is oversized or broken
+  if (response.status === 401 || response.status === 404 || response.status === 429 || retryStatuses.has(response.status)) {
+    await response.body?.cancel().catch(() => undefined);
+    // stop on a lost grant without parsing provider content
+    if (response.status === 401) return { kind: 'authorization_required' };
+    // treat a missing calendar as terminal for its exact target
+    if (response.status === 404) return { kind: 'target_missing' };
+    return retry(attempts, response, random);
+  }
   const payload = await readGoogleObject(response, 256 * 1024);
   const reasons = googleReasons(payload);
-  // stop on lost grant and missing immutable target
-  if (response.status === 401 || reasons.includes('invalid_grant')) return { kind: 'authorization_required' };
-  // treat a missing calendar as terminal for its exact target
-  if (response.status === 404) return { kind: 'target_missing' };
-  // retry quota and documented transient failures only
-  if (response.status === 429 || retryStatuses.has(response.status) || response.status === 403 && reasons.some(reason => retryReasons.has(reason))) return retry(attempts, response, random);
+  // retain bounded reason-based authorization and quota handling
+  if (reasons.includes('invalid_grant')) return { kind: 'authorization_required' };
+  // distinguish retryable quota from permanent policy rejections
+  if (response.status === 403 && reasons.some(reason => retryReasons.has(reason))) return retry(attempts, response, random);
   return { kind: 'permanent', reason: 'google_request_rejected' };
 }
 

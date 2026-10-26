@@ -34,6 +34,32 @@ describe('Google Calendar API client', () => {
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
+  // preserve definitive statuses without reading oversized or broken provider streams
+  it.each([
+    [401, 'authorization_required', 'oversized'], [401, 'authorization_required', 'broken'],
+    [404, 'target_missing', 'oversized'], [404, 'target_missing', 'broken'],
+    [429, 'retry', 'broken'], [503, 'retry', 'broken']
+  ] as const)('classifies HTTP %s as %s with an unreadable %s body', async (status, kind, bodyKind) => {
+    const body = new ReadableStream<Uint8Array>({
+      // make any attempted parse fail while leaving status and headers definitive
+      start(controller) {
+        // exercise stream failure separately from the bounded-size rejection
+        if (bodyKind === 'broken') controller.error(new Error('synthetic body failure'));
+        else controller.enqueue(new Uint8Array(256 * 1024 + 1));
+      }
+    });
+    const cancel = vi.spyOn(body, 'cancel');
+    const response = new Response(body, { status, headers: { 'retry-after': '2' } });
+    // direct classification covers retry statuses without insert reconciliation
+    if (kind === 'retry') await expect(classifyFailure(response, 1, () => 0)).resolves.toEqual({ kind, reason: 'retry_scheduled', delayMs: 2000 });
+    else {
+      const fetcher = vi.fn(async () => response);
+      await expect(deliverGoogleEvent(fetcher as typeof fetch, 'synthetic-token', ready)).resolves.toEqual({ kind });
+      expect(fetcher).toHaveBeenCalledOnce();
+    }
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   // never accept or overwrite an exact-id event belonging to another activity
   it('rejects a foreign opaque ownership marker during conflict reconciliation', async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(new Response('{}', { status: 409 })).mockResolvedValueOnce(new Response(JSON.stringify({ extendedProperties: { private: { racActivity: 'foreign-marker' } } }), { status: 200 }));

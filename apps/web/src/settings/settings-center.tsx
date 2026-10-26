@@ -1019,7 +1019,16 @@ function EnvironmentEditor({ source, draft, disclosures, issues, disabled, insta
     ? Object.entries(record !== null && typeof record === 'object' && !Array.isArray(record) ? record : {}).map(([key, value]) => ({ key, protected: isProtectedValue(value) || protectedSettingIdentity(key), present: isProtectedValue(value) ? value.present : true, hasValue: isProtectedValue(value) ? value.hasValue ?? value.present : value !== '', ...(typeof value === 'string' ? { value } : {}), apply: source.apply }))
     : source.fields ?? [];
   // keep each field with its dedicated controls without changing source identity
-  const visibleScopedKeys = scopedKeys ?? (scope === 'storage' ? storageEnvironmentKeys : scope === 'agents' ? agentEnvironmentKeysForInstallation(installationKind) : scope === 'voice' ? voiceEnvironmentKeys : scope === 'google-calendar' ? googleCalendarEnvironmentKeys : tmuxEnvironmentKeysForInstallation(installationKind));
+  let defaultScopedKeys: ReadonlySet<string>;
+  // choose one scope without obscuring installation-specific defaults
+  switch (scope) {
+    case 'storage': defaultScopedKeys = storageEnvironmentKeys; break;
+    case 'agents': defaultScopedKeys = agentEnvironmentKeysForInstallation(installationKind); break;
+    case 'voice': defaultScopedKeys = voiceEnvironmentKeys; break;
+    case 'google-calendar': defaultScopedKeys = googleCalendarEnvironmentKeys; break;
+    default: defaultScopedKeys = tmuxEnvironmentKeysForInstallation(installationKind);
+  }
+  const visibleScopedKeys = scopedKeys ?? defaultScopedKeys;
   const fields = allFields.filter(field => scope === 'general' ? !excludedKeys.has(field.key) : visibleScopedKeys.has(field.key));
   // remove the final launch override without retaining a newly authored empty record
   const stagePatch: SetPatch = (target, next, derived) => {
@@ -1842,23 +1851,32 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     endMoment: { label: 'End moment', description: 'Choose the supported lifecycle evidence that ends each event.' }
   };
   const googleCalendarConfigDisabled = loading || saving || !runtime.canMutate || voiceSource === undefined || voiceSource.value === undefined || !voiceSource.writable || rawSourceIds.has('app') || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true;
-  const googleCalendarConfiguration = voiceSource === undefined ? <p role="note">Load Application configuration before editing Google Calendar capture.</p>
-    : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing Google Calendar capture.</p>
-      : googleCalendarSchema === undefined ? <p role="note">Google Calendar configuration is unavailable in this installation.</p>
-        : <>
-          {!voiceSource.writable && <p role="note">Google Calendar configuration is read-only in this installation.</p>}
-          {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing Google Calendar capture.</p>}
-          {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing Google Calendar capture.</p>}
-          {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing Google Calendar capture.</p>}
-          {/* render only the four lifecycle configuration fields in their approved order */}
-          {googleCalendarKeys.map(key => {
-            const fieldSchema = googleCalendarSchema.properties?.[key];
-            // retain the generated schema as the source of truth
-            if (fieldSchema === undefined) return null;
-            return <SchemaField key={`google-calendar:${key}:${catalogEditorEpoch}`} source={voiceSource} schema={{ ...fieldSchema, ...googleCalendarSchemaOverrides[key] }} value={valueAt(voiceSource.value, ['googleCalendar', key])} path={['googleCalendar', key]} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={googleCalendarConfigDisabled} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} />;
-          })}
-          <FieldIssues issues={issues} sourceId={voiceSource.id} path={['googleCalendar']} />
-        </>;
+  let googleCalendarConfiguration: ReactNode;
+  // retain source-loading guidance before evaluating schema availability
+  if (voiceSource === undefined) {
+    googleCalendarConfiguration = <p role="note">Load Application configuration before editing Google Calendar capture.</p>;
+  // keep malformed whole-source repair ahead of structured editing
+  } else if (voiceSource.value === undefined) {
+    googleCalendarConfiguration = <p role="note">Repair the Application whole source before editing Google Calendar capture.</p>;
+  // avoid inventing controls when the installation has no Calendar schema
+  } else if (googleCalendarSchema === undefined) {
+    googleCalendarConfiguration = <p role="note">Google Calendar configuration is unavailable in this installation.</p>;
+  } else {
+    googleCalendarConfiguration = <>
+      {!voiceSource.writable && <p role="note">Google Calendar configuration is read-only in this installation.</p>}
+      {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing Google Calendar capture.</p>}
+      {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing Google Calendar capture.</p>}
+      {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing Google Calendar capture.</p>}
+      {/* render only the four lifecycle configuration fields in their approved order */}
+      {googleCalendarKeys.map(key => {
+        const fieldSchema = googleCalendarSchema.properties?.[key];
+        // retain the generated schema as the source of truth
+        if (fieldSchema === undefined) return null;
+        return <SchemaField key={`google-calendar:${key}:${catalogEditorEpoch}`} source={voiceSource} schema={{ ...fieldSchema, ...googleCalendarSchemaOverrides[key] }} value={valueAt(voiceSource.value, ['googleCalendar', key])} path={['googleCalendar', key]} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={googleCalendarConfigDisabled} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} />;
+      })}
+      <FieldIssues issues={issues} sourceId={voiceSource.id} path={['googleCalendar']} />
+    </>;
+  }
   const googleCalendarEnvironment = <>
     {environmentSource === undefined && <p role="note">Load Environment &amp; keys before editing Google Calendar credentials.</p>}
     {environmentDraft?.content !== undefined && <p role="note">Finish or discard the Environment &amp; keys whole-source draft before editing Google Calendar credentials.</p>}
@@ -1867,8 +1885,14 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     {environmentSource !== undefined && !environmentSource.writable && <p role="note">Google Calendar credentials are read-only in this installation.</p>}
     {environmentSource !== undefined && <EnvironmentEditor source={environmentSource} draft={environmentDraft} disclosures={disclosures} issues={issues} disabled={loading || saving || !runtime.canMutate || !environmentSource.writable || rawSourceIds.has('env') || environmentDraft?.content !== undefined || environmentDraft?.remove === true} scope="google-calendar" onPatch={patch} onReveal={reveal} onRemask={remask} />}
   </>;
-  const googleCalendarTitleTemplate = valueAt(voiceSource?.value, ['googleCalendar', 'titleTemplate']);
-  const googleCalendarEditor = <GoogleCalendarSettings setup={googleCalendar} configuration={googleCalendarConfiguration} environment={googleCalendarEnvironment} titleTemplate={typeof googleCalendarTitleTemplate === 'string' ? googleCalendarTitleTemplate : typeof googleCalendarSchema?.properties?.titleTemplate?.default === 'string' ? googleCalendarSchema.properties.titleTemplate.default : '{worktree}'} disabled={loading || saving || !runtime.canMutate} blockedByDrafts={dirtyCount > 0} confirmationTarget={confirmationTarget} onNotice={onSaveNotice} />;
+  const configuredCalendarTitleTemplate = valueAt(voiceSource?.value, ['googleCalendar', 'titleTemplate']);
+  const defaultCalendarTitleTemplate = googleCalendarSchema?.properties?.titleTemplate?.default;
+  let googleCalendarTitleTemplate = '{worktree}';
+  // prefer the current source value over schema and built-in defaults
+  if (typeof configuredCalendarTitleTemplate === 'string') googleCalendarTitleTemplate = configuredCalendarTitleTemplate;
+  // retain installation-provided defaults when no explicit value exists
+  else if (typeof defaultCalendarTitleTemplate === 'string') googleCalendarTitleTemplate = defaultCalendarTitleTemplate;
+  const googleCalendarEditor = <GoogleCalendarSettings setup={googleCalendar} configuration={googleCalendarConfiguration} environment={googleCalendarEnvironment} titleTemplate={googleCalendarTitleTemplate} disabled={loading || saving || !runtime.canMutate} blockedByDrafts={dirtyCount > 0} confirmationTarget={confirmationTarget} onNotice={onSaveNotice} />;
 
   // share source locks across application-backed structured editors
   const applicationFieldsDisabled = loading || saving || !runtime.canMutate || voiceSource === undefined || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true;

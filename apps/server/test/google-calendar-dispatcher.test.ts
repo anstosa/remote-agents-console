@@ -87,7 +87,11 @@ describe('Google Calendar dispatcher', () => {
     expect(fetcher).toHaveBeenCalledTimes(status === 200 ? 2 : 1);
   });
   // retain provider terminal state durably instead of acknowledging or endlessly retrying it
-  it.each([[401, 'authorization_required'], [404, 'target_missing']] as const)('persists terminal status %s as %s across restart', async (status, expected) => {
+  it.each([
+    [401, 'authorization_required', 'json'], [404, 'target_missing', 'json'],
+    [401, 'authorization_required', 'oversized'], [404, 'target_missing', 'oversized'],
+    [401, 'authorization_required', 'broken'], [404, 'target_missing', 'broken']
+  ] as const)('persists terminal status %s as %s across restart with a %s body', async (status, expected, bodyKind) => {
     const directory = await tempDir('rac-google-calendar-');
     const key = `active:${randomBytes(32).toString('base64url')}`;
     const authPath = join(directory, 'auth.json');
@@ -96,7 +100,14 @@ describe('Google Calendar dispatcher', () => {
     const auth: GoogleAuthState = { version: 1, clientId: 'client', principal: { sub: 'subject' }, tokens: { accessToken: 'access', expiresAt: now + 3_600_000 }, calendars: [{ id: 'one', name: 'one' }], selectedCalendarId: 'one' };
     await new AuthStore(authPath, parseTokenKey(key)).save(auth);
     await new ActivityStore(activitiesPath, () => now).add(readyActivity('terminal', 'one', 0));
-    const fetcher = vi.fn(async () => new Response('{}', { status }));
+    const fetcher = vi.fn(async () => new Response(bodyKind === 'json' ? '{}' : new ReadableStream<Uint8Array>({
+      // body failures must not replace the provider's definitive terminal status
+      start(controller) {
+        // distinguish broken transport from a bounded response-size failure
+        if (bodyKind === 'broken') controller.error(new Error('synthetic body failure'));
+        else controller.enqueue(new Uint8Array(256 * 1024 + 1));
+      }
+    }), { status }));
     const service = await createGoogleCalendarService({ config: readyActivity('terminal', 'one', 0).policy, publicOrigin: 'https://agents.example.com', env: { RAC_GOOGLE_CALENDAR_CLIENT_ID: 'client', RAC_GOOGLE_CALENDAR_CLIENT_SECRET: 'synthetic-secret', RAC_GOOGLE_CALENDAR_TOKEN_KEY: key }, authPath, activitiesPath, fetch: fetcher as typeof fetch, now: () => now });
     await service.dispatch();
     await service.dispatch();

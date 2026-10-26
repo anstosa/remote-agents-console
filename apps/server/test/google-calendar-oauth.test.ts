@@ -93,6 +93,46 @@ describe('Google Calendar OAuth', () => {
     }
   });
 
+  // recover a token-free lineage even when remote revocation did not succeed
+  it.each([true, false])('reconnects after rejected revocation only with a fresh grant: %s', async freshGrant => {
+    const directory = await tempDir('rac-google-calendar-reconsent-');
+    const authPath = join(directory, 'auth.json');
+    const keyText = `active:${randomBytes(32).toString('base64url')}`;
+    const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const calendars = [{ id: 'app-calendar', name: 'RAC Work' }];
+    await new AuthStore(authPath, parseTokenKey(keyText)).save({ version: 1, clientId: 'client', principal: { sub: 'stable-subject' }, tokens: { accessToken: 'prior-access', refreshToken: 'prior-refresh', expiresAt: Date.now() + 3_600_000 }, calendars, selectedCalendarId: 'app-calendar' });
+    let nonce = '';
+    const fetcher = vi.fn(async (input: string | URL) => {
+      // keep the remote grant alive while local disconnect still removes its tokens
+      if (String(input).includes('/revoke')) return new Response('{}', { status: 500 });
+      // model both a renewed grant and a provider that still omits it
+      if (String(input).includes('/token')) return new Response(JSON.stringify({ access_token: 'new-access', ...(freshGrant ? { refresh_token: 'new-refresh' } : {}), expires_in: 3600, id_token: idToken('client', nonce, pair.privateKey, 'key') }), { status: 200 });
+      return new Response(JSON.stringify({ keys: [{ ...pair.publicKey.export({ format: 'jwk' }), kid: 'key', alg: 'RS256', use: 'sig' }] }), { status: 200 });
+    });
+    const options = { config, publicOrigin: 'https://agents.example.com', env: { RAC_GOOGLE_CALENDAR_CLIENT_ID: 'client', RAC_GOOGLE_CALENDAR_CLIENT_SECRET: 'synthetic-secret', RAC_GOOGLE_CALENDAR_TOKEN_KEY: keyText }, authPath, activitiesPath: join(directory, 'activities.json'), fetch: fetcher as typeof fetch };
+    const authority = { sessionId: 'session', reservationGeneration: 'generation', reservationGenerationOf: () => 'generation', renewReservation: () => true, isSessionValid: () => true };
+    const first = await createGoogleCalendarService(options);
+    await expect(first.disconnect(authority)).resolves.toMatchObject({ connected: false, calendars, selectedCalendarId: 'app-calendar' });
+    expect(fetcher).toHaveBeenCalledOnce();
+    const before = await readFile(authPath, 'utf8');
+    expect((await new AuthStore(authPath, parseTokenKey(keyText)).load())?.tokens).toEqual({ accessToken: '', expiresAt: 0 });
+    const restarted = await createGoogleCalendarService(options);
+    const authorization = new URL(restarted.beginConnect('session', 'generation'));
+    expect(authorization.searchParams.get('prompt')).toBe('consent select_account');
+    nonce = authorization.searchParams.get('nonce')!;
+    const completion = restarted.completeConnect({ ...authority, code: 'code', state: authorization.searchParams.get('state')! });
+    // preserve the registry while publishing only genuinely renewable credentials
+    if (freshGrant) {
+      await expect(completion).resolves.toBeUndefined();
+      expect(restarted.summary()).toMatchObject({ connected: true, calendars, selectedCalendarId: 'app-calendar' });
+      expect((await new AuthStore(authPath, parseTokenKey(keyText)).load())?.tokens).toMatchObject({ accessToken: 'new-access', refreshToken: 'new-refresh' });
+    } else {
+      await expect(completion).rejects.toMatchObject({ code: 'authorization_required' });
+      expect(restarted.summary().connected).toBe(false);
+      expect(await readFile(authPath, 'utf8')).toBe(before);
+    }
+  });
+
   // emit only the selected least-privilege scope and consume state once
   it('builds exact pkce authorization and rejects replay', () => {
     const transactions = new OAuthTransactions();
@@ -101,7 +141,7 @@ describe('Google Calendar OAuth', () => {
     expect(url.searchParams.get('scope')).toBe('openid email https://www.googleapis.com/auth/calendar.app.created');
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('access_type')).toBe('offline');
-    expect(url.searchParams.get('prompt')).toBe('select_account');
+    expect(url.searchParams.get('prompt')).toBe('consent select_account');
     expect(transactions.consume(begun.transaction.state, 2_000).sessionId).toBe('session');
     expect(() => transactions.consume(begun.transaction.state, 2_000)).toThrow('oauth_transaction_invalid');
   });

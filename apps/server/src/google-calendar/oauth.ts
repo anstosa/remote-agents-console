@@ -42,7 +42,8 @@ export class OAuthTransactions {
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('scope', `openid email ${calendarScope}`);
     url.searchParams.set('access_type', 'offline');
-    url.searchParams.set('prompt', 'select_account');
+    // renew consent when a prior remote grant outlives locally removed credentials
+    url.searchParams.set('prompt', 'consent select_account');
     url.searchParams.set('include_granted_scopes', 'false');
     url.searchParams.set('state', state);
     url.searchParams.set('nonce', nonce);
@@ -155,5 +156,3 @@ function decodeJson(value: string): Record<string, unknown> {
     return parsed as Record<string, unknown>;
   } catch { throw new GoogleCalendarError('oauth_transaction_invalid', 400); }
 }
-
-export const googleCalendarOAuthScope = calendarScope;

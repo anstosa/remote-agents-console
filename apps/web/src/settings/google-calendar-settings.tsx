@@ -287,6 +287,16 @@ export function GoogleCalendarSettings({ setup, configuration, environment, titl
 
   const selectedCalendar = status?.calendars.find(calendar => calendar.id === selectedCalendarId);
   const statusCopy = statusLabel(status, loading);
+  let previewContent: ReactNode = <small>Previewing…</small>;
+  // prioritize validation errors over previously rendered preview content
+  if (previewError) previewContent = <span className="settings-field-error">{previewError}</span>;
+  // label only a safe server-generated preview
+  else if (preview) previewContent = <><small>Safe server preview</small><strong>{preview}</strong></>;
+  let connectionLabel = 'Connect Google account';
+  // keep pending navigation visible while the connect button is busy
+  if (busyAction === 'connect') connectionLabel = 'Opening Google…';
+  // distinguish an existing account from an initial connection
+  else if (status?.connected) connectionLabel = 'Reconnect Google account';
 
   return <div className="settings-google-calendar" data-settings-path="googleCalendar">
     <section className="settings-google-calendar-status" aria-label="Google Calendar status" aria-live="polite">
@@ -304,7 +314,7 @@ export function GoogleCalendarSettings({ setup, configuration, environment, titl
         <span>Supported placeholders</span>
         <span className="settings-google-calendar-placeholders">{/* render the fixed allowlist only */}{placeholders.map(placeholder => <code key={placeholder}>{placeholder}</code>)}</span>
         <small>Use <code>{'{{'}</code> and <code>{'}}'}</code> for literal braces. The agent placeholder expands only to a fixed agent product label. Prompt text, response content, terminal text, and paths are never available to titles.</small>
-        <output aria-live="polite" aria-label="Event title preview">{previewError ? <span className="settings-field-error">{previewError}</span> : preview ? <><small>Safe server preview</small><strong>{preview}</strong></> : <small>Previewing…</small>}</output>
+        <output aria-live="polite" aria-label="Event title preview">{previewContent}</output>
       </div>
       <p className="settings-google-calendar-evidence" role="note">RAC creates an event only when the selected boundaries are supported by exact lifecycle evidence. Unsupported adapters, missing evidence, contamination, or nonpositive intervals are suppressed and reported instead of using guessed times. “First question, otherwise finished” uses a supported first-question boundary when present and the exact finish boundary otherwise.</p>
     </section>
@@ -325,7 +335,7 @@ export function GoogleCalendarSettings({ setup, configuration, environment, titl
       <header><div><h3>Google account</h3><p>Connection changes are live and separate from Save changes.</p></div></header>
       <p className="settings-google-calendar-evidence" role="note" aria-label="Google Calendar data disclosure">By connecting, RAC receives your Google account ID and email and stores encrypted access and refresh tokens. RAC uses this data only to create and manage RAC-created calendars and events. Events contain configured titles and work start and end times, not prompts or responses. Google data is not used for AI training. Read the <a href="/privacy">Privacy Policy</a> and <a href="/terms">Terms of Service</a>.</p>
       <div className="settings-google-calendar-actions">
-        <button type="button" className="settings-primary-button" disabled={liveBlocked || providerUnavailable || setupIncomplete} aria-busy={busyAction === 'connect' || undefined} onClick={() => { /* navigate through the server-created OAuth transaction */ void connect(); }}>{busyAction === 'connect' ? 'Opening Google…' : status?.connected ? 'Reconnect Google account' : 'Connect Google account'}</button>
+        <button type="button" className="settings-primary-button" disabled={liveBlocked || providerUnavailable || setupIncomplete} aria-busy={busyAction === 'connect' || undefined} onClick={() => { /* navigate through the server-created OAuth transaction */ void connect(); }}>{connectionLabel}</button>
         {status?.connected && <button type="button" className="danger" disabled={liveBlocked || confirmationTarget == null} onClick={() => { /* require explicit account disconnect confirmation */ setConfirmingDisconnect(true); }}>Disconnect</button>}
       </div>
       {status !== undefined && !status.setup.clientId && <p role="note">Add <code>RAC_GOOGLE_CALENDAR_CLIENT_ID</code> before connecting.</p>}
