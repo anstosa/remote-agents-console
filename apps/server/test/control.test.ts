@@ -93,8 +93,8 @@ describe('ControlService', () => {
 
 // separate durable ownership from per-process connection leases
 describe('persisted control ownership', () => {
-  const first = 'a'.repeat(43);
-  const second = 'b'.repeat(43);
+  const first = Buffer.alloc(32, 1).toString('base64url');
+  const second = Buffer.alloc(32, 2).toString('base64url');
   let directory: string;
   let file: string;
 
@@ -203,6 +203,7 @@ describe('persisted control ownership', () => {
     '{}',
     JSON.stringify({ version: 2, ownerSessionId: first }),
     JSON.stringify({ version: 1, ownerSessionId: 'invalid' }),
+    JSON.stringify({ version: 1, ownerSessionId: 'a'.repeat(43) }),
     JSON.stringify({ version: 1, ownerSessionId: first, expires: 123 }),
     `${' '.repeat(1_025)}${JSON.stringify({ version: 1, ownerSessionId: first })}`
   ])('rejects malformed ownership record %#', async stored => {
