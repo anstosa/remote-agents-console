@@ -1,4 +1,4 @@
-import { readGoogleObject } from './bounded-response.js';
+import { cancelGoogleResponse, readGoogleObject } from './bounded-response.js';
 import type { CalendarActivity, GoogleCalendarTarget } from './provider-types.js';
 import { GoogleCalendarError } from './provider-types.js';
 
@@ -32,6 +32,8 @@ export async function createGoogleCalendar(fetcher: typeof fetch, accessToken: s
   } catch { throw new GoogleCalendarError('calendar_create_outcome_unknown', 503); }
   // classify definite rejections without consuming an untrusted body
   if (!response.ok) {
+    await cancelGoogleResponse(response);
+    // keep rejection classification independent of discarded provider content
     if (response.status === 401) throw new GoogleCalendarError('authorization_required', 401);
     if (response.status >= 500) throw new GoogleCalendarError('calendar_create_outcome_unknown', 503);
     throw new GoogleCalendarError('google_request_rejected', response.status === 403 ? 403 : 400);
@@ -76,28 +78,36 @@ export async function deliverGoogleEvent(fetcher: typeof fetch, accessToken: str
 
 // reconcile only the snapshotted target and stable event id
 async function reconcileGoogleEvent(fetcher: typeof fetch, accessToken: string, activity: CalendarActivity, random: () => number, failed?: Response): Promise<DeliveryResult> {
-  const url = `${calendarApi}/calendars/${encodeURIComponent(activity.target!.id)}/events/${encodeURIComponent(activity.eventId!)}`;
-  let response: Response;
-  try { response = await fetcher(url, { headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' } }); }
-  catch {
-    // retry an unknown successful insert body and classify known failed responses
-    return failed === undefined || failed.ok ? retry(activity.attempts, undefined, random) : classifyFailure(failed, activity.attempts, random);
+  try {
+    const url = `${calendarApi}/calendars/${encodeURIComponent(activity.target!.id)}/events/${encodeURIComponent(activity.eventId!)}`;
+    let response: Response;
+    try { response = await fetcher(url, { headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' } }); }
+    catch {
+      // finish reason parsing before finally releases the same failed response
+      return failed === undefined || failed.ok ? retry(activity.attempts, undefined, random) : await classifyFailure(failed, activity.attempts, random);
+    }
+    // compare only the opaque ownership marker
+    if (response.ok) {
+      const payload = await readGoogleObject(response, 256 * 1024);
+      return payload.extendedProperties?.private?.racActivity === activity.marker ? { kind: 'delivered' } : { kind: 'ownership_conflict' };
+    }
+    // release an absent lookup body before retrying the same immutable id
+    if (response.status === 404) {
+      await cancelGoogleResponse(response);
+      return retry(activity.attempts, failed, random);
+    }
+    return await classifyFailure(response, activity.attempts, random);
+  } finally {
+    // release every superseded insert response after its last classification use
+    if (failed !== undefined) await cancelGoogleResponse(failed);
   }
-  // compare only the opaque ownership marker
-  if (response.ok) {
-    const payload = await readGoogleObject(response, 256 * 1024);
-    return payload.extendedProperties?.private?.racActivity === activity.marker ? { kind: 'delivered' } : { kind: 'ownership_conflict' };
-  }
-  // retry the same id after confirmed initial absence
-  if (response.status === 404) return retry(activity.attempts, failed, random);
-  return classifyFailure(response, activity.attempts, random);
 }
 
 // classify google status and bounded reason without echoing its body
 export async function classifyFailure(response: Response, attempts: number, random: () => number = Math.random): Promise<DeliveryResult> {
   // preserve definitive statuses even when their unused body is oversized or broken
   if (response.status === 401 || response.status === 404 || response.status === 429 || retryStatuses.has(response.status)) {
-    await response.body?.cancel().catch(() => undefined);
+    await cancelGoogleResponse(response);
     // stop on a lost grant without parsing provider content
     if (response.status === 401) return { kind: 'authorization_required' };
     // treat a missing calendar as terminal for its exact target

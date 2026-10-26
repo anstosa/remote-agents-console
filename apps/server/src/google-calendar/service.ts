@@ -1,3 +1,4 @@
+import { cancelGoogleResponse } from './bounded-response.js';
 import { createHash } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import type { CalendarAdmission, CalendarCaptureSink, CalendarSignal, CalendarSummary, GoogleCalendarConfig } from './contracts.js';
@@ -286,7 +287,7 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
     const connection = this.connectionSnapshot();
     const token = connection.auth?.tokens.refreshToken ?? connection.auth?.tokens.accessToken;
     // attempt provider revocation without blocking local disconnect
-    if (token !== undefined) await this.options.fetcher('https://oauth2.googleapis.com/revoke', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token }) }).catch(() => undefined);
+    if (token !== undefined) await this.options.fetcher('https://oauth2.googleapis.com/revoke', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token }) }).then(cancelGoogleResponse).catch(() => undefined);
     this.fenceOperation(authority);
     this.assertConnection(connection);
     const lineage = connection.auth;

@@ -251,7 +251,13 @@ describe('Google Calendar managed lifecycle', () => {
     expect(signals.at(-1)).toEqual({ id: 'claude-journal-failure', type: 'invalid', reason: 'missing_lifecycle_evidence' });
   });
 
-  it('bounds a stale Claude journal after the exact armed window expires', async () => {
+  // malformed pane bytes must age out exactly like a stale journal
+  it.each([
+    { name: 'stale', payload: undefined },
+    { name: 'null', payload: 'null' },
+    { name: 'array', payload: '[]' },
+    { name: 'malformed', payload: '{' }
+  ])('bounds a $name Claude journal after the exact armed window expires', async ({ payload }) => {
     const directory = await tempDir('rac-calendar-lifecycle-');
     const signals: CalendarSignal[] = [];
     let now = new Date('2026-10-23T17:00:00.000Z');
@@ -259,7 +265,7 @@ describe('Google Calendar managed lifecycle', () => {
     await lifecycle.admit({ id: 'stale-journal', agentId: 'agent-1', kind: 'claude', submittedAt: now.toISOString() });
     const intent = await lifecycle.beforeSend({ id: 'stale-journal', agentId: 'agent-1', kind: 'claude', submittedAt: now.toISOString(), prompt: 'managed', socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%8', processId: process.pid, sentAt: now.toISOString() });
     const arm = intent.arm!;
-    const stale = Buffer.from(JSON.stringify({ activityId: 'old-activity', nonce: 'old-nonce', processGeneration: 'old-generation', state: 'active', startedAt: now.toISOString() })).toString('base64url');
+    const stale = Buffer.from(payload ?? JSON.stringify({ activityId: 'old-activity', nonce: 'old-nonce', processGeneration: 'old-generation', state: 'active', startedAt: now.toISOString() })).toString('base64url');
     const tmux = join(directory, 'tmux-stale');
     await writeFile(tmux, `#!/bin/sh\ncase "$*" in *'@rac_calendar_journal'*) printf '%s\\n' '${stale}' ;; *'@rac_calendar_arm'*) printf '%s\\n' '${arm}' ;; esac\n`, { mode: 0o755 });
     const previous = process.env.RAC_TMUX_BIN;

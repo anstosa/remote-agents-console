@@ -35,3 +35,8 @@ async function boundedText(response: Response, maximum: number): Promise<string>
   }
   return Buffer.concat(chunks, bytes).toString('utf8');
 }
+
+// release unused provider bodies without replacing an established outcome
+export async function cancelGoogleResponse(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
+}

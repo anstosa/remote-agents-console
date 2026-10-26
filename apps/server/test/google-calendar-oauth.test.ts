@@ -102,9 +102,10 @@ describe('Google Calendar OAuth', () => {
     const calendars = [{ id: 'app-calendar', name: 'RAC Work' }];
     await new AuthStore(authPath, parseTokenKey(keyText)).save({ version: 1, clientId: 'client', principal: { sub: 'stable-subject' }, tokens: { accessToken: 'prior-access', refreshToken: 'prior-refresh', expiresAt: Date.now() + 3_600_000 }, calendars, selectedCalendarId: 'app-calendar' });
     let nonce = '';
+    const cancelledRevocation = vi.fn();
     const fetcher = vi.fn(async (input: string | URL) => {
       // keep the remote grant alive while local disconnect still removes its tokens
-      if (String(input).includes('/revoke')) return new Response('{}', { status: 500 });
+      if (String(input).includes('/revoke')) return new Response(new ReadableStream<Uint8Array>({ cancel: cancelledRevocation }), { status: 500 });
       // model both a renewed grant and a provider that still omits it
       if (String(input).includes('/token')) return new Response(JSON.stringify({ access_token: 'new-access', ...(freshGrant ? { refresh_token: 'new-refresh' } : {}), expires_in: 3600, id_token: idToken('client', nonce, pair.privateKey, 'key') }), { status: 200 });
       return new Response(JSON.stringify({ keys: [{ ...pair.publicKey.export({ format: 'jwk' }), kid: 'key', alg: 'RS256', use: 'sig' }] }), { status: 200 });
@@ -114,6 +115,7 @@ describe('Google Calendar OAuth', () => {
     const first = await createGoogleCalendarService(options);
     await expect(first.disconnect(authority)).resolves.toMatchObject({ connected: false, calendars, selectedCalendarId: 'app-calendar' });
     expect(fetcher).toHaveBeenCalledOnce();
+    expect(cancelledRevocation).toHaveBeenCalledOnce();
     const before = await readFile(authPath, 'utf8');
     expect((await new AuthStore(authPath, parseTokenKey(keyText)).load())?.tokens).toEqual({ accessToken: '', expiresAt: 0 });
     const restarted = await createGoogleCalendarService(options);

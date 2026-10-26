@@ -71,19 +71,22 @@ export class OAuthTransactions {
   }
 }
 
-// exchange one authorization code without retaining response bodies
-export async function exchangeAuthorizationCode(config: OAuthConfiguration, transaction: OAuthTransaction, code: string, fetcher: typeof fetch, now = Date.now()): Promise<{ tokens: GoogleTokens; idToken: string }> {
-  const body = new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, code, code_verifier: transaction.verifier, grant_type: 'authorization_code', redirect_uri: config.redirectUri });
-  let response: Response;
-  let payload: Record<string, any>;
+// normalize only provider transport and bounded parsing failures
+async function fetchGoogleObject(url: string, init: RequestInit, fetcher: typeof fetch, maximum: number): Promise<{ response: Response; payload: Record<string, any> }> {
   try {
-    response = await fetcher(tokenEndpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
-    payload = await readGoogleObject(response, 128 * 1024);
+    const response = await fetcher(url, init);
+    return { response, payload: await readGoogleObject(response, maximum) };
   } catch (error) {
-    // preserve bounded provider errors and normalize transport failures
+    // preserve bounded provider errors without exposing transport details
     if (error instanceof GoogleCalendarError) throw error;
     throw new GoogleCalendarError('google_unavailable', 503);
   }
+}
+
+// exchange one authorization code without retaining response bodies
+export async function exchangeAuthorizationCode(config: OAuthConfiguration, transaction: OAuthTransaction, code: string, fetcher: typeof fetch, now = Date.now()): Promise<{ tokens: GoogleTokens; idToken: string }> {
+  const body = new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, code, code_verifier: transaction.verifier, grant_type: 'authorization_code', redirect_uri: config.redirectUri });
+  const { response, payload } = await fetchGoogleObject(tokenEndpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body }, fetcher, 128 * 1024);
   // require the documented successful token fields
   if (!response.ok || typeof payload.access_token !== 'string' || payload.access_token.length > 32_768 || typeof payload.id_token !== 'string' || payload.id_token.length > 65_536 || typeof payload.expires_in !== 'number' || !Number.isFinite(payload.expires_in) || payload.expires_in <= 0) throw new GoogleCalendarError(response.status === 401 ? 'authorization_required' : 'oauth_transaction_invalid', 400);
   const refreshToken = typeof payload.refresh_token === 'string' && payload.refresh_token.length <= 8192 ? payload.refresh_token : undefined;
@@ -93,16 +96,7 @@ export async function exchangeAuthorizationCode(config: OAuthConfiguration, tran
 // refresh an existing grant without changing its identity
 export async function refreshAuthorization(config: OAuthConfiguration, refreshToken: string, fetcher: typeof fetch, now = Date.now()): Promise<GoogleTokens> {
   const body = new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' });
-  let response: Response;
-  let payload: Record<string, any>;
-  try {
-    response = await fetcher(tokenEndpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
-    payload = await readGoogleObject(response, 128 * 1024);
-  } catch (error) {
-    // preserve bounded provider errors and normalize transport failures
-    if (error instanceof GoogleCalendarError) throw error;
-    throw new GoogleCalendarError('google_unavailable', 503);
-  }
+  const { response, payload } = await fetchGoogleObject(tokenEndpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body }, fetcher, 128 * 1024);
   // distinguish expired grants from transient provider failures
   if (!response.ok || typeof payload.access_token !== 'string' || payload.access_token.length > 32_768 || typeof payload.expires_in !== 'number') throw new GoogleCalendarError(response.status === 400 || response.status === 401 ? 'authorization_required' : 'google_unavailable', 503);
   return { accessToken: payload.access_token, refreshToken, expiresAt: now + Math.min(Math.max(payload.expires_in, 1), 86_400) * 1_000 };
@@ -117,16 +111,7 @@ export async function validateIdToken(idToken: string, clientId: string, nonce: 
   const claims = decodeJson(pieces[1]!);
   // accept only google's rsa signing contract
   if (header.alg !== 'RS256' || typeof header.kid !== 'string' || header.kid.length > 256) throw new GoogleCalendarError('oauth_transaction_invalid', 400);
-  let response: Response;
-  let document: Record<string, any>;
-  try {
-    response = await fetcher(jwksEndpoint, { headers: { accept: 'application/json' } });
-    document = await readGoogleObject(response, 256 * 1024);
-  } catch (error) {
-    // preserve bounded provider errors and normalize transport failures
-    if (error instanceof GoogleCalendarError) throw error;
-    throw new GoogleCalendarError('google_unavailable', 503);
-  }
+  const { response, payload: document } = await fetchGoogleObject(jwksEndpoint, { headers: { accept: 'application/json' } }, fetcher, 256 * 1024);
   // require one bounded matching public jwk
   if (!response.ok || !Array.isArray(document.keys) || document.keys.length > 64) throw new GoogleCalendarError('google_unavailable', 503);
   const jwk = document.keys.find(candidate => candidate !== null && typeof candidate === 'object' && (candidate as Record<string, unknown>).kid === header.kid) as JsonWebKey | undefined;

@@ -489,28 +489,31 @@ export class GoogleCalendarLifecycle implements PromptCalendarLifecycle {
     return undefined;
   }
 
-  // read one exact pane journal without treating stale bytes as current evidence
-  private async claudePaneJournal(current: CorrelationRecord): Promise<ClaudeJournal | undefined> {
+  // decode one managed option from the exact socket and pane
+  private async claudePaneOption(current: CorrelationRecord, option: '@rac_calendar_journal' | '@rac_calendar_arm'): Promise<ClaudeJournal | undefined> {
+    // keep absent pane coordinates outside the tmux command boundary
     if (current.socketPath === undefined || current.paneId === undefined) return undefined;
-    const binary = tmuxBinary();
-    const shown = await run(binary, ['-S', current.socketPath, 'show-options', '-p', '-v', '-t', current.paneId, '@rac_calendar_journal']).catch(() => undefined);
+    const shown = await run(tmuxBinary(), ['-S', current.socketPath, 'show-options', '-p', '-v', '-t', current.paneId, option]).catch(() => undefined);
+    // reject failed commands and absent option bytes before decoding
     if (shown === undefined || shown.code !== 0 || shown.stdout.trim() === '') return undefined;
     try {
-      const candidate = JSON.parse(Buffer.from(shown.stdout.trim(), 'base64url').toString('utf8')) as ClaudeJournal;
-      return this.exactClaudeEvidence(candidate, current) ? candidate : undefined;
+      const candidate: unknown = JSON.parse(Buffer.from(shown.stdout.trim(), 'base64url').toString('utf8'));
+      // malformed objects cannot supply journal evidence or an arm nonce
+      if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return undefined;
+      return candidate as ClaudeJournal;
     } catch { return undefined; }
+  }
+
+  // read one exact pane journal without treating stale bytes as current evidence
+  private async claudePaneJournal(current: CorrelationRecord): Promise<ClaudeJournal | undefined> {
+    const candidate = await this.claudePaneOption(current, '@rac_calendar_journal');
+    return candidate !== undefined && this.exactClaudeEvidence(candidate, current) ? candidate : undefined;
   }
 
   // read the current exact arm used to distinguish a live pre-submit wait from stale evidence
   private async claudePaneArm(current: CorrelationRecord): Promise<ClaudeJournal | undefined> {
-    if (current.socketPath === undefined || current.paneId === undefined) return undefined;
-    const binary = tmuxBinary();
-    const shown = await run(binary, ['-S', current.socketPath, 'show-options', '-p', '-v', '-t', current.paneId, '@rac_calendar_arm']).catch(() => undefined);
-    if (shown === undefined || shown.code !== 0 || shown.stdout.trim() === '') return undefined;
-    try {
-      const candidate = JSON.parse(Buffer.from(shown.stdout.trim(), 'base64url').toString('utf8')) as ClaudeJournal;
-      return this.exactClaudeJournal(candidate, current) && (candidate.state === 'armed' || candidate.state === 'active') ? candidate : undefined;
-    } catch { return undefined; }
+    const candidate = await this.claudePaneOption(current, '@rac_calendar_arm');
+    return candidate !== undefined && this.exactClaudeJournal(candidate, current) && (candidate.state === 'armed' || candidate.state === 'active') ? candidate : undefined;
   }
 
   // require all opaque correlation keys before accepting hook bytes
@@ -562,10 +565,9 @@ export class GoogleCalendarLifecycle implements PromptCalendarLifecycle {
   private async clearClaudeArm(current: CorrelationRecord): Promise<void> {
     if (current.kind !== 'claude' || current.socketPath === undefined || current.paneId === undefined || current.nonce === undefined) return;
     const binary = tmuxBinary();
-    const shown = await run(binary, ['-S', current.socketPath, 'show-options', '-p', '-v', '-t', current.paneId, '@rac_calendar_arm']).catch(() => undefined);
-    if (shown === undefined || shown.code !== 0) return;
-    let arm: { nonce?: unknown };
-    try { arm = JSON.parse(Buffer.from(shown.stdout.trim(), 'base64url').toString('utf8')) as typeof arm; } catch { return; }
+    const arm = await this.claudePaneOption(current, '@rac_calendar_arm');
+    // retain the arm when current option bytes cannot establish its identity
+    if (arm === undefined) return;
     if (arm.nonce === current.nonce) await run(binary, ['-S', current.socketPath, 'set-option', '-p', '-t', current.paneId, '-u', '@rac_calendar_arm']).catch(() => undefined);
   }
 }

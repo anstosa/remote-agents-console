@@ -21,6 +21,12 @@ const ready: CalendarActivity = {
   attempts: 0
 };
 
+// expose a never-ending unused body with an observable finite cancellation
+function pendingResponse(status: number, headers: HeadersInit = {}) {
+  const cancel = vi.fn();
+  return { response: new Response(new ReadableStream<Uint8Array>({ cancel }), { status, headers }), cancel };
+}
+
 // cover least-privilege calendar and immutable event requests
 describe('Google Calendar API client', () => {
   // stop at permanent authorization and target failures without inserting another event
@@ -57,6 +63,50 @@ describe('Google Calendar API client', () => {
       await expect(deliverGoogleEvent(fetcher as typeof fetch, 'synthetic-token', ready)).resolves.toEqual({ kind });
       expect(fetcher).toHaveBeenCalledOnce();
     }
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  // release definite create rejections without reading an irrelevant provider body
+  it.each([[401, 'authorization_required'], [403, 'google_request_rejected'], [503, 'calendar_create_outcome_unknown']] as const)('cancels unused create response %s', async (status, code) => {
+    const { response, cancel } = pendingResponse(status);
+    await expect(createGoogleCalendar((async () => response) as typeof fetch, 'token')).rejects.toMatchObject({ code, statusCode: status });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  // dispose both superseded insert and body-independent lookup failures
+  it.each([[409, 200], [409, 404], [409, 401], [503, 200], [503, 404], [503, 401]])('disposes insert %s after lookup %s', async (insertStatus, lookupStatus) => {
+    const insert = pendingResponse(insertStatus, { 'retry-after': '2' });
+    const lookup = lookupStatus === 200
+      ? { response: new Response(JSON.stringify({ extendedProperties: { private: { racActivity: ready.marker } } }), { status: 200 }), cancel: undefined }
+      : pendingResponse(lookupStatus);
+    const fetcher = vi.fn().mockResolvedValueOnce(insert.response).mockResolvedValueOnce(lookup.response);
+    const result = await deliverGoogleEvent(fetcher as typeof fetch, 'token', ready, () => 0);
+    // retain exact ownership and retry-after classifications during disposal
+    if (lookupStatus === 200) expect(result).toEqual({ kind: 'delivered' });
+    // a missing lookup still retries the same immutable event identity
+    else if (lookupStatus === 404) expect(result).toEqual({ kind: 'retry', reason: 'retry_scheduled', delayMs: 2000 });
+    else expect(result).toEqual({ kind: 'authorization_required' });
+    expect(insert.cancel).toHaveBeenCalledOnce();
+    // successful lookup bodies are bounded-read rather than cancelled
+    if (lookupStatus === 200) expect(lookup.response.bodyUsed).toBe(true);
+    else expect(lookup.cancel).toHaveBeenCalledOnce();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  // finish fallback reason parsing before disposing its original response
+  it('preserves readable conflict reasons when reconciliation is unavailable', async () => {
+    const response = new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 409 });
+    const fetcher = vi.fn().mockResolvedValueOnce(response).mockRejectedValueOnce(new Error('lookup unavailable'));
+    await expect(deliverGoogleEvent(fetcher as typeof fetch, 'token', ready)).resolves.toEqual({ kind: 'authorization_required' });
+    expect(response.bodyUsed).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  // cancellation failure must not replace an already definitive provider outcome
+  it('preserves create failure classification when cancellation rejects', async () => {
+    const cancel = vi.fn().mockRejectedValue(new Error('cancel unavailable'));
+    const response = new Response(new ReadableStream<Uint8Array>({ cancel }), { status: 401 });
+    await expect(createGoogleCalendar((async () => response) as typeof fetch, 'token')).rejects.toMatchObject({ code: 'authorization_required' });
     expect(cancel).toHaveBeenCalledOnce();
   });
 
