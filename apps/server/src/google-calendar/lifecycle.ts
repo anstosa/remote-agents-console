@@ -9,8 +9,8 @@ import { readBounded, writePrivate } from '../settings/files.js';
 import { run, tmuxBinary } from '../tmux/command.js';
 import type { CalendarCaptureSink, CalendarLabels } from './contracts.js';
 
-export type PromptLifecycleAdmission = { id: string; agentId: string; kind: string; submittedAt: string };
-export type PromptLifecycleIntent = PromptLifecycleAdmission & {
+type PromptLifecycleAdmission = { id: string; agentId: string; kind: string; submittedAt: string };
+type PromptLifecycleIntent = PromptLifecycleAdmission & {
   prompt: string;
   baseline?: CompletionBaseline;
   socketFingerprint: string;
@@ -30,8 +30,8 @@ export type PromptCalendarLifecycle = {
   invalid(id: string, reason: string): Promise<void>;
 };
 
-export type ClaudeLifecycleContract = { cliVersion: string; payloadContract: string };
-export type GoogleCalendarLifecycleOptions = {
+type ClaudeLifecycleContract = { cliVersion: string; payloadContract: string };
+type GoogleCalendarLifecycleOptions = {
   sink: CalendarCaptureSink;
   labels(agentId: string): Promise<CalendarLabels>;
   claudeCompatibility?: () => ClaudeLifecycleContract | undefined;

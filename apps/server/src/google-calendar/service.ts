@@ -44,7 +44,7 @@ export type GoogleCalendarService = CalendarCaptureSink & {
   dispatch: () => Promise<void>;
 };
 
-export type ServiceConstruction = {
+type ServiceConstruction = {
   config: GoogleCalendarConfig;
   publicOrigin: string;
   clientId: string;

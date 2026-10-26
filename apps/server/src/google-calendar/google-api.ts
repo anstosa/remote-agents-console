@@ -6,7 +6,7 @@ const calendarApi = 'https://www.googleapis.com/calendar/v3';
 const retryStatuses = new Set([500, 502, 503, 504]);
 const retryReasons = new Set(['userRateLimitExceeded', 'rateLimitExceeded']);
 
-export type DeliveryResult =
+type DeliveryResult =
   | { kind: 'delivered' }
   | { kind: 'retry'; delayMs: number; reason: 'retry_scheduled' }
   | { kind: 'authorization_required' }
@@ -16,7 +16,7 @@ export type DeliveryResult =
   | { kind: 'permanent'; reason: string };
 
 // validate a bounded visible calendar name
-export function calendarName(value: unknown): string {
+function calendarName(value: unknown): string {
   const name = value === undefined ? 'RAC Agent Work' : value;
   // require one visible scalar-bounded label
   if (typeof name !== 'string' || [...name].length < 1 || [...name].length > 120 || /[\u0000-\u001f\u007f]/u.test(name) || name.trim().length === 0) throw new GoogleCalendarError('invalid_calendar_name', 400);

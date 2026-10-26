@@ -10,7 +10,7 @@ export function calendarAgentLabel(kind: string): string {
 }
 
 // recognize product labels without promoting generated pane or conversation content
-export function isCalendarAgentLabel(value: unknown): value is string {
+function isCalendarAgentLabel(value: unknown): value is string {
   return typeof value === 'string' && allowed.has(value);
 }
 

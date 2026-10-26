@@ -3,7 +3,7 @@ import type { Session } from '../auth/service.js';
 import type { CallbackAuthority, GoogleCalendarService, OperationAuthority } from './service.js';
 import { GoogleCalendarError } from './provider-types.js';
 
-export type GoogleCalendarRoutes = {
+type GoogleCalendarRoutes = {
   service: GoogleCalendarService;
   session: (request: FastifyRequest, mutation?: boolean) => Session;
   controlled: (request: FastifyRequest, mutation?: boolean) => Session;

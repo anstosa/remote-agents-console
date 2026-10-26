@@ -10,7 +10,7 @@ const calendarScope = 'https://www.googleapis.com/auth/calendar.app.created';
 const transactionLifetimeMs = 10 * 60 * 1_000;
 const maximumTransactions = 128;
 
-export type OAuthTransaction = {
+type OAuthTransaction = {
   state: string;
   sessionId: string;
   reservationGeneration: string;

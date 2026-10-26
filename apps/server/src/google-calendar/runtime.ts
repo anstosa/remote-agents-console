@@ -5,7 +5,7 @@ import { GoogleCalendarError } from './provider-types.js';
 import { parseTokenKey } from './crypto.js';
 import { renderCalendarTitle, validateTitleTemplate } from './title.js';
 
-export type GoogleCalendarServiceOptions = {
+type GoogleCalendarServiceOptions = {
   config: GoogleCalendarConfig;
   publicOrigin: string;
   env?: NodeJS.ProcessEnv;
