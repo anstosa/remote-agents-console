@@ -70,11 +70,9 @@ describe('tracked prompt lifecycle', () => {
         since: async (baseline: { ordinal: number }) => terminal.get(baseline.ordinal) ?? { kind: 'pending' as const }
       }
     };
-    const question = vi.fn(async () => undefined);
-    const questionForAgent = vi.fn(async () => undefined);
     const calendar = {
       admit: async () => undefined, beforeSend: async () => ({}),
-      pending: async () => [], observe: async () => undefined, question, questionForAgent,
+      pending: async () => [], observe: async () => undefined,
       missing: async () => undefined, invalid: async () => undefined, handOver: async () => undefined
     };
     const service = new PromptService(discovery as never, tmux as never, undefined, queue, undefined, () => adapter as never, undefined, undefined, calendar);
@@ -94,8 +92,6 @@ describe('tracked prompt lifecycle', () => {
     await service.observe(agent as never);
     agent.attention = 'question';
     await service.observe(agent as never);
-    expect(question).not.toHaveBeenCalled();
-    expect(questionForAgent).not.toHaveBeenCalled();
     expect(service.requestStatus(tracked!.requestId)).toMatchObject({ state: 'running', submitted: true });
 
     // reject an idle transition without this rollout's terminal event
@@ -217,8 +213,8 @@ describe('tracked prompt lifecycle', () => {
     const beforeSend = vi.fn(async (_intent: { id: string }) => ({ arm: 'synthetic-arm' }));
     const calendar = {
       admit: async () => undefined, beforeSend,
-      pending: async () => [], observe: async () => undefined, question: async () => undefined,
-      questionForAgent: async () => undefined, missing: async () => undefined, invalid, handOver: async () => undefined
+      pending: async () => [], observe: async () => undefined,
+      missing: async () => undefined, invalid, handOver: async () => undefined
     };
     const raw = vi.spyOn(tmuxCommand, 'run').mockResolvedValue({ code: 1, stdout: '', stderr: '' });
     try {
@@ -379,8 +375,6 @@ describe('tracked prompt lifecycle', () => {
       beforeSend: async () => ({}),
       pending: async () => [{ id: 'durable-activity', agentId: agent.id, kind: 'codex' }, { id: 'sibling-activity', agentId: 'socket:%2', kind: 'codex' }],
       observe,
-      question: async () => undefined,
-      questionForAgent: async () => undefined,
       invalid: async () => undefined,
       missing,
       handOver: async () => undefined
@@ -395,38 +389,6 @@ describe('tracked prompt lifecycle', () => {
     expect(observe.mock.calls.map(call => call[0])).toEqual(['sibling-activity', 'durable-activity']);
     expect(observe.mock.calls[1]?.[1]?.version).toBe(1);
     expect(missing).toHaveBeenCalledExactlyOnceWith('sibling-activity');
-  });
-
-  // process identity cannot prove a question belongs to the managed turn
-  it('ignores generic question attention after restart for Codex and Claude', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'rac-prompt-calendar-question-'));
-    directories.push(directory);
-    const question = vi.fn(async () => undefined);
-    const questionForAgent = vi.fn(async () => undefined);
-    const calendar = {
-      admit: async () => undefined,
-      beforeSend: async () => ({}),
-      pending: async () => [],
-      observe: async () => undefined,
-      question,
-      questionForAgent,
-      invalid: async () => undefined,
-      missing: async () => undefined,
-      handOver: async () => undefined
-    };
-    const claude = testAgent('claude', directory, 'question');
-    const claudeDiscovery = { worktreesNow: () => [], target: async () => ({ agent: claude, socket }), agentProcessId: () => process.pid };
-    const claudeService = new PromptService(claudeDiscovery as never, { capture: async () => 'question' } as never, undefined, undefined, undefined, () => claudeAdapter, undefined, undefined, calendar);
-    await claudeService.observe(claude as never);
-    expect(question).not.toHaveBeenCalled();
-    expect(questionForAgent).not.toHaveBeenCalled();
-
-    const codex = testAgent('codex', directory, 'question');
-    const codexDiscovery = { worktreesNow: () => [], target: async () => ({ agent: codex, socket }), agentProcessId: () => process.pid };
-    const codexService = new PromptService(codexDiscovery as never, { capture: async () => 'question' } as never, undefined, undefined, undefined, () => codexAdapter, undefined, undefined, calendar);
-    await codexService.observe(codex as never);
-    expect(question).not.toHaveBeenCalled();
-    expect(questionForAgent).not.toHaveBeenCalled();
   });
 
   it('cold-starts PromptService and finalizes a persisted native lifecycle without a phase', async () => {

@@ -110,7 +110,7 @@ import { HostCommandRunner } from './button-actions/host-command-runner.js';
 import { defaultGoogleCalendarConfig, type CalendarLabels } from './google-calendar/contracts.js';
 import { createGoogleCalendarService } from './google-calendar/runtime.js';
 import type { GoogleCalendarService } from './google-calendar/service.js';
-import { createGoogleCalendarLifecycle, type PromptCalendarLifecycle } from './google-calendar/lifecycle.js';
+import { GoogleCalendarLifecycle, type PromptCalendarLifecycle } from './google-calendar/lifecycle.js';
 import { registerGoogleCalendarRoutes } from './google-calendar/routes.js';
 import { calendarLabelsForAgent } from './google-calendar/labels.js';
 import { renderNotFoundPage, renderPublicPolicyPage } from './public-pages.js';
@@ -177,7 +177,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     ...(process.env.RAC_GOOGLE_CALENDAR_ACTIVITIES_FILE === undefined ? {} : { activitiesPath: process.env.RAC_GOOGLE_CALENDAR_ACTIVITIES_FILE })
   });
   // avoid touching lifecycle files on installations that have not enabled capture
-  const calendarLifecycle = deps.calendarLifecycle ?? (config.googleCalendar?.enabled === true ? createGoogleCalendarLifecycle({
+  const calendarLifecycle = deps.calendarLifecycle ?? (config.googleCalendar?.enabled === true ? new GoogleCalendarLifecycle({
     sink: googleCalendar,
     // resolve only safe configured labels and closed adapter names
     labels: async (agentId): Promise<CalendarLabels> => {

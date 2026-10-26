@@ -107,7 +107,8 @@ const authorizationUrl = (value: unknown): string | undefined => {
   if (typeof value !== 'string') return undefined;
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' && url.hostname === 'accounts.google.com' ? url.toString() : undefined;
+    // reject inherited blob origins and other non-https schemes
+    return url.protocol === 'https:' && url.origin === 'https://accounts.google.com' ? url.toString() : undefined;
   } catch {
     return undefined;
   }

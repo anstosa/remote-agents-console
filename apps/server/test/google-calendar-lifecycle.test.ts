@@ -211,28 +211,6 @@ describe('Google Calendar managed lifecycle', () => {
     expect(signals.map(signal => signal.type)).toEqual(['sent', 'started', 'finished']);
   });
 
-  // do not convert a matching long-lived process into turn-level question authority
-  it('ignores process-only first questions after rehydration', async () => {
-    const directory = await tempDir('rac-calendar-lifecycle-');
-    const file = join(directory, 'lifecycle.json');
-    const signals: CalendarSignal[] = [];
-    const options = { file, sink: { admit: async () => true, signal: async (signal: CalendarSignal) => { signals.push(signal); } }, labels: async () => ({ worktree: 'Cora', project: 'RAC', agent: 'Codex' }) };
-    const first = new GoogleCalendarLifecycle(options);
-    await first.admit({ id: 'question-activity', agentId: 'agent-1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z' });
-    const processGeneration = await currentProcess();
-    await first.beforeSend({ id: 'question-activity', agentId: 'agent-1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', prompt: 'ask', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', processId: processGeneration.pid, sentAt: '2026-10-23T17:00:01.000Z' });
-    await first.observe('question-activity', { version: 1, compatible: () => true, inspect: async () => ({ state: 'pending', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: 2, startOrdinal: 3, turnId: 'question-turn', startedAt: '2026-10-23T17:00:02.000Z' }) });
-
-    const restarted = new GoogleCalendarLifecycle(options);
-    await restarted.questionForAgent('agent-1', { pid: processGeneration.pid, start: 'replacement-start' }, '2026-10-23T17:00:03.000Z');
-    expect(signals.map(signal => signal.type)).toEqual(['sent', 'started']);
-    await restarted.questionForAgent('agent-1', processGeneration, '2026-10-23T17:00:03.000Z');
-
-    await restarted.question('question-activity', processGeneration, '2026-10-23T17:00:03.000Z');
-    expect(signals.map(signal => signal.type)).toEqual(['sent', 'started']);
-    expect(JSON.parse(await readFile(file, 'utf8')).records[0].questionAt).toBeUndefined();
-  });
-
   it.each([['codex', 'omx'], ['omx', 'codex']])('keeps one activity across queued %s to %s handover and refreshes start labels', async (fromKind, toKind) => {
     const directory = await tempDir('rac-calendar-lifecycle-');
     const signals: CalendarSignal[] = [];
@@ -312,8 +290,8 @@ describe('Google Calendar managed lifecycle', () => {
     await expect(lifecycle.pending()).resolves.toEqual([]);
   });
 
-  // a process-only API cannot bypass a pending durable start acknowledgement
-  it('keeps process-only question entrypoints inert during start retries', async () => {
+  // retain exact native evidence until the provider acknowledges its start
+  it('retries durable start acknowledgement without losing native evidence', async () => {
     const directory = await tempDir('rac-calendar-lifecycle-');
     const processGeneration = await currentProcess();
     const signals: CalendarSignal[] = [];
@@ -327,9 +305,7 @@ describe('Google Calendar managed lifecycle', () => {
     await lifecycle.beforeSend({ id: 'deferred-question', agentId: 'agent-1', kind: 'codex', submittedAt: new Date().toISOString(), prompt: 'ask later', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', processId: processGeneration.pid, sentAt: new Date().toISOString() });
     const capability = { version: 1 as const, compatible: () => true, inspect: async () => ({ state: 'pending' as const, source: 'codex-rollout' as const, parserVersion: 1 as const, receiptOrdinal: 2, startOrdinal: 3, turnId: 'deferred-turn', startedAt: new Date().toISOString() }) };
     await lifecycle.observe('deferred-question', capability);
-    await lifecycle.question('deferred-question', processGeneration);
     expect(signals.map(signal => signal.type)).toEqual(['sent', 'started']);
-    expect(JSON.parse(await readFile(join(directory, 'lifecycle.json'), 'utf8')).records[0].questionAt).toBeUndefined();
     rejectStart = false;
     await lifecycle.observe('deferred-question', capability);
     expect(signals.map(signal => signal.type)).toEqual(['sent', 'started', 'started']);

@@ -10,7 +10,6 @@ import { run, tmuxBinary } from '../tmux/command.js';
 import type { CalendarCaptureSink, CalendarLabels } from './contracts.js';
 
 export type PromptLifecycleAdmission = { id: string; agentId: string; kind: string; submittedAt: string };
-export type PromptLifecycleProcess = { pid: number; start: string };
 export type PromptLifecycleIntent = PromptLifecycleAdmission & {
   prompt: string;
   baseline?: CompletionBaseline;
@@ -27,9 +26,7 @@ export type PromptCalendarLifecycle = {
   observe(id: string, capability: ManagedPromptLifecycleV1 | undefined): Promise<void>;
   pending(): Promise<Array<{ id: string; agentId: string; kind: string }>>;
   handOver(fromAgentId: string, toAgentId: string): Promise<void>;
-  questionForAgent(agentId: string, process: PromptLifecycleProcess, at?: string): Promise<void>;
   missing(id: string): Promise<void>;
-  question(id: string, process: PromptLifecycleProcess, at?: string): Promise<void>;
   invalid(id: string, reason: string): Promise<void>;
 };
 
@@ -275,12 +272,6 @@ export class GoogleCalendarLifecycle implements PromptCalendarLifecycle {
       if (changed) await this.persist(records);
     }).catch(() => undefined);
   }
-
-  // process-only legacy calls cannot prove turn-level question evidence
-  async question(_id: string, _process: PromptLifecycleProcess, _at?: string): Promise<void> {}
-
-  // recovered process identity is not a producer-stamped question
-  async questionForAgent(_agentId: string, _process: PromptLifecycleProcess, _at?: string): Promise<void> {}
 
   // record one absent owner without guessing a stop instant
   async missing(id: string): Promise<void> {
@@ -578,6 +569,3 @@ export class GoogleCalendarLifecycle implements PromptCalendarLifecycle {
     if (arm.nonce === current.nonce) await run(binary, ['-S', current.socketPath, 'set-option', '-p', '-t', current.paneId, '-u', '@rac_calendar_arm']).catch(() => undefined);
   }
 }
-
-// construct the optional lifecycle collector for application wiring
-export const createGoogleCalendarLifecycle = (options: GoogleCalendarLifecycleOptions): GoogleCalendarLifecycle => new GoogleCalendarLifecycle(options);

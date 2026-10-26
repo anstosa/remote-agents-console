@@ -3,6 +3,7 @@ import { mockAccountSocket } from './account-fixture.js';
 import type { GoogleCalendarSummary, SettingsPatch, SettingsSource, SettingsStatus } from '../src/settings/contracts.js';
 
 type CalendarFixtureState = {
+  connectUrl: string;
   summary: GoogleCalendarSummary;
   settingsStatus: SettingsStatus;
   mutations: Array<{ path: string; body: Record<string, unknown> }>;
@@ -96,6 +97,7 @@ async function setup(page: Page, width = 1440) {
   await page.addInitScript(() => localStorage.clear());
   const sources = [applicationSource(), environmentSource()];
   const state: CalendarFixtureState = {
+    connectUrl: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture',
     summary: {
       enabled: false,
       available: true,
@@ -140,7 +142,7 @@ async function setup(page: Page, width = 1440) {
     }
     if (path === '/api/settings/google-calendar/connect' && request.method() === 'POST') {
       state.mutations.push({ path, body: request.postDataJSON() as Record<string, unknown> });
-      return route.fulfill({ json: { url: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture' } });
+      return route.fulfill({ json: { url: state.connectUrl } });
     }
     if (path === '/api/settings/google-calendar/calendars' && request.method() === 'POST') {
       const body = request.postDataJSON() as { name: string };
@@ -298,9 +300,45 @@ test('explains degraded lifecycle, unknown-create, and revoked-auth states witho
   await expect(settings.getByText('Failed', { exact: true }).locator('..').getByRole('definition')).toHaveText('1');
 });
 
+// prove OAuth replaces this tab without relying on a popup or an unobserved mutation
 test('starts OAuth with a top-level Google navigation and no popup dependency', async ({ page }) => {
   const { settings, state } = await setup(page);
-  await page.route('https://accounts.google.com/**', route => route.abort());
+  await page.route('https://**/*', route => route.abort());
+  const popups: Page[] = [];
+  // keep popup creation observable even if a future implementation immediately closes it
+  page.on('popup', popup => popups.push(popup));
+  const navigation = page.waitForRequest(request => request.url() === state.connectUrl);
   await settings.getByRole('button', { name: 'Reconnect Google account', exact: true }).click();
+  const request = await navigation;
+  expect(request.isNavigationRequest()).toBe(true);
+  expect(request.frame()).toBe(page.mainFrame());
+  expect(popups).toEqual([]);
+  expect(page.context().pages()).toHaveLength(1);
   await expect.poll(() => state.mutations.at(-1)).toEqual({ path: '/api/settings/google-calendar/connect', body: {} });
+});
+
+// reject lookalike hosts, alternate ports and non-https schemes before navigation
+for (const connectUrl of [
+  'https://accounts.google.com.evil.example.test/oauth',
+  'https://accounts.google.com:8443/oauth',
+  'http://accounts.google.com/oauth',
+  'blob:https://accounts.google.com/00000000-0000-4000-8000-000000000000'
+]) test(`reports unsafe OAuth destination ${connectUrl} without navigating`, async ({ page }) => {
+  const { settings, state } = await setup(page);
+  state.connectUrl = connectUrl;
+  const initialUrl = page.url();
+  await page.route('https://**/*', route => route.abort());
+  await page.route('http://accounts.google.com/**', route => route.abort());
+  const navigations: string[] = [];
+  // observe document requests rather than confusing the expected POST with navigation
+  page.on('request', request => {
+    // no document navigation is permitted for an unsafe provider response
+    if (request.isNavigationRequest()) navigations.push(request.url());
+  });
+  await settings.getByRole('button', { name: 'Reconnect Google account', exact: true }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'unsafe destination' })).toBeVisible();
+  expect(navigations).toEqual([]);
+  expect(page.url()).toBe(initialUrl);
+  expect(page.context().pages()).toHaveLength(1);
+  expect(state.mutations.at(-1)).toEqual({ path: '/api/settings/google-calendar/connect', body: {} });
 });
