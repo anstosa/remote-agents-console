@@ -844,6 +844,9 @@ const encodeAttachment = async (file: File): Promise<{ name: string; data: strin
 });
 const agentNotificationTag = (agent: Pick<Agent, 'id' | 'worktreeId'>) => agent.worktreeId === undefined ? `agent-status-${agent.id}` : `worktree-status-${agent.worktreeId}`;
 const reviewNotificationTag = (worktreeId: string) => `review-ready-${worktreeId}`;
+// One Worktree's guided review: a fresh start (`start` counts it, so each mounts a fresh panel) or a
+// restored `initialTour` with its stored Code review or the job still running one
+type ReviewSession = { launch: ReviewLaunch; start: number; initialTour?: ReviewTour; initialCodeReview: { review?: CodeReview; job?: ReviewJob }; minimized: boolean; indicator: ReviewTourIndicator };
 // resolve user-facing names for one agent alert
 const agentNotificationNames = (agent: Agent, projects: Project[]) => {
   const project = projects.find(candidate => candidate.id === agent.projectId);
@@ -8712,19 +8715,26 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   }, [davo.enabled]);
   // retain one stable voice trigger context
   const voiceTrigger = useMemo(() => davo.enabled ? { open: openVoice, active: voiceActive, visible: voiceOpen, name: davo.name } : undefined, [davo.enabled, davo.name, openVoice, voiceActive, voiceOpen]);
-  const [reviewLaunch, setReviewLaunch] = useState<ReviewLaunch>();
+  // the guided reviews by Worktree id, each mounted above the tabs while it lives
+  const [reviewSessions, setReviewSessions] = useState<Record<string, ReviewSession>>({});
   // counts tour starts, so each start mounts a fresh dialog
   const [reviewStarts, setReviewStarts] = useState(0);
   // the Worktree whose start sheet is open
   const [reviewStart, setReviewStart] = useState<ReviewTarget>();
-  const [reviewInitialTour, setReviewInitialTour] = useState<ReviewTour>();
-  // a restored tour's stored Code review, or the job still running one
-  const [reviewInitialCodeReview, setReviewInitialCodeReview] = useState<{ review?: CodeReview; job?: ReviewJob }>({});
-  const [reviewMinimized, setReviewMinimized] = useState(false);
-  // the open review panel's column in the reviewed Worktree's split, while that tab is in view
+  // the open review panel's column in the active Worktree's split, while that tab is in view
   const [reviewSlot, setReviewSlot] = useState<ReviewPanelSlot>();
-  const [reviewIndicator, setReviewIndicator] = useState<ReviewTourIndicator>({ generating: false, stale: false });
   const [reviewRestoringWorktreeId, setReviewRestoringWorktreeId] = useState<string>();
+  const updateReviewSession = useCallback((worktreeId: string, update: (session: ReviewSession) => ReviewSession) => setReviewSessions(current => {
+    const session = current[worktreeId];
+    const next = session === undefined ? session : update(session);
+    return next === session ? current : { ...current, [worktreeId]: next! };
+  }), []);
+  const dropReviewSession = useCallback((worktreeId: string) => setReviewSessions(current => {
+    if (current[worktreeId] === undefined) return current;
+    const { [worktreeId]: _dropped, ...rest } = current;
+    return rest;
+  }), []);
+  const setReviewIndicator = useCallback((worktreeId: string, indicator: ReviewTourIndicator) => updateReviewSession(worktreeId, session => session.indicator.generating === indicator.generating && session.indicator.stale === indicator.stale ? session : { ...session, indicator }), [updateReviewSession]);
   const [unavailable, setUnavailable] = useState(false);
   const [active, setActive] = useState(0);
   const [creatingAgent, setCreatingAgent] = useState(false);
@@ -9010,11 +9020,10 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     finally { refreshInFlight.current = false; }
   }, [applyDashboard, onInactive, onUnauthorized]);
   useEffect(() => {
-    // wait for an active review binding
-    if (reviewLaunch === undefined || data === undefined) return;
+    if (data === undefined) return;
     // clear replaced or removed agent bindings (a sibling Agent at the Worktree is not a replacement)
-    if (!data.agents.some(agent => agent.id === reviewLaunch.agentId && agent.worktreeId === reviewLaunch.worktreeId)) { setReviewLaunch(undefined); setReviewInitialTour(undefined); setReviewIndicator({ generating: false, stale: false }); }
-  }, [data, reviewLaunch]);
+    for (const { launch } of Object.values(reviewSessions)) if (!data.agents.some(agent => agent.id === launch.agentId && agent.worktreeId === launch.worktreeId)) dropReviewSession(launch.worktreeId);
+  }, [data, reviewSessions, dropReviewSession]);
   const closeCleanup = useCallback(() => {
     setCleanupOpen(false);
     setCleanupError('');
@@ -9836,15 +9845,11 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     await refresh();
     showOperationFeedback({ tone: 'success', message: 'Worktrees pruned', detail: 'Stale checkouts and orphaned records were cleared.' });
   };
-  // start a tour from the start sheet, replacing any review held for another Worktree
+  // start a tour from the start sheet, replacing only the review held for its own Worktree
   const launchReview = (launch: ReviewLaunch) => {
     setReviewStart(undefined);
-    setReviewIndicator({ generating: true, stale: false });
-    setReviewInitialTour(undefined);
-    setReviewInitialCodeReview({});
     setReviewStarts(count => count + 1);
-    setReviewLaunch(launch);
-    setReviewMinimized(true);
+    setReviewSessions(current => ({ ...current, [launch.worktreeId]: { launch, start: reviewStarts + 1, initialCodeReview: {}, minimized: true, indicator: { generating: true, stale: false } } }));
   };
   // close the start sheet, handing focus back to the Git status control it came from
   const cancelReviewStart = () => {
@@ -9857,38 +9862,30 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     if (reviewRestoringWorktreeId !== undefined) return;
     void dismissNotification(reviewNotificationTag(stored.worktreeId));
     setReviewRestoringWorktreeId(stored.worktreeId);
-    setReviewIndicator({ generating: true, stale: false });
     try {
       const response = await request(`/api/worktrees/${encodeURIComponent(stored.worktreeId)}/review-tour`);
       const payload: unknown = await response.json().catch(() => undefined);
       const review = payload !== null && typeof payload === 'object' && (payload as { review?: unknown }).review !== null && typeof (payload as { review?: unknown }).review === 'object' ? (payload as { review: { worktreeId?: unknown; branch?: unknown; tour?: unknown; codeReview?: unknown; codeReviewJob?: unknown } }).review : undefined;
       // require the dashboard-bound worktree and branch
       if (!response.ok || review?.worktreeId !== stored.worktreeId || review.branch !== stored.branch || !isReviewTour(review.tour)) throw new Error('invalid stored review');
-      setReviewInitialTour(review.tour);
+      const tour = review.tour;
       // resume the stored Code review, or poll the job still running one
       const storedCodeReview = codeReviewFrom(review.codeReview);
-      setReviewInitialCodeReview({ ...(storedCodeReview === undefined ? {} : { review: storedCodeReview }), ...(isReviewJob(review.codeReviewJob) ? { job: review.codeReviewJob } : {}) });
-      setReviewLaunch({ agentId: agent.id, worktreeId: stored.worktreeId, scope: review.tour.scope, ...(review.tour.commit === undefined ? {} : { commit: review.tour.commit }), includeTests: review.tour.includeTests, includeDocs: review.tour.includeDocs });
-      setReviewIndicator({ generating: false, stale: false });
-      setReviewMinimized(false);
+      const initialCodeReview = { ...(storedCodeReview === undefined ? {} : { review: storedCodeReview }), ...(isReviewJob(review.codeReviewJob) ? { job: review.codeReviewJob } : {}) };
+      const launch: ReviewLaunch = { agentId: agent.id, worktreeId: stored.worktreeId, scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), includeTests: tour.includeTests, includeDocs: tour.includeDocs };
+      setReviewSessions(current => ({ ...current, [stored.worktreeId]: { launch, start: 0, initialTour: tour, initialCodeReview, minimized: false, indicator: { generating: false, stale: false } } }));
     } catch {
-      setReviewIndicator({ generating: false, stale: false });
       await refresh();
     } finally { setReviewRestoringWorktreeId(undefined); }
   };
   // remove one durable review and its local surface
-  const dismissReview = async (): Promise<boolean> => {
-    // require a bound review
-    if (reviewLaunch === undefined) return false;
-    const response = await request(`/api/worktrees/${encodeURIComponent(reviewLaunch.worktreeId)}/review-tour`, { method: 'DELETE' }).catch(() => undefined);
+  const dismissReview = async (worktreeId: string): Promise<boolean> => {
+    const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/review-tour`, { method: 'DELETE' }).catch(() => undefined);
     // retain local state after a failed dismissal
     if (response === undefined || !response.ok) return false;
-    setData(current => current === undefined ? current : { ...current, reviews: current.reviews?.filter(review => review.worktreeId !== reviewLaunch.worktreeId) });
-    setReviewLaunch(undefined);
-    setReviewInitialTour(undefined);
-    setReviewIndicator({ generating: false, stale: false });
-    setReviewMinimized(false);
-    void dismissNotification(reviewNotificationTag(reviewLaunch.worktreeId));
+    setData(current => current === undefined ? current : { ...current, reviews: current.reviews?.filter(review => review.worktreeId !== worktreeId) });
+    dropReviewSession(worktreeId);
+    void dismissNotification(reviewNotificationTag(worktreeId));
     return true;
   };
   if (data === undefined) return <LoadingScreen label={unavailable ? 'Reconnecting to console' : 'Syncing console state'} />;
@@ -9959,27 +9956,23 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const voiceDialog = davo.enabled ? <VoiceDialog name={davo.name} open={voiceOpen} callRequest={voiceCallRequest} context={voiceContext} request={request} onClose={closeVoice} onSelectWorktree={selectVoiceWorktree} onActiveChange={setVoiceActive} /> : null;
   const visibleOperationFeedback = operationFeedback?.worktreeId === undefined || operationFeedback.worktreeId === activeWorktreeId ? operationFeedback : undefined;
   // minimize without discarding the cached review
-  const minimizeReview = () => {
-    setReviewMinimized(true);
+  const minimizeReview = (worktreeId: string) => {
+    updateReviewSession(worktreeId, session => ({ ...session, minimized: true }));
     window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.workspace-toolbar-actions .git-status-summary')?.focus());
   };
   // announce a newly generated review
-  const notifyReviewReady = () => {
-    // require the matching active review
-    if (reviewLaunch === undefined) return;
-    const agent = data.agents.find(candidate => candidate.id === reviewLaunch.agentId);
-    const worktree = worktrees.find(candidate => candidate.id === reviewLaunch.worktreeId);
+  const notifyReviewReady = (launch: ReviewLaunch) => {
+    const agent = data.agents.find(candidate => candidate.id === launch.agentId);
+    const worktree = worktrees.find(candidate => candidate.id === launch.worktreeId);
     const project = data.projects.find(candidate => candidate.id === worktree?.projectId);
-    const worktreeName = worktree?.label ?? agent?.worktreeLabel ?? (agent === undefined ? reviewLaunch.worktreeId : agentLabel(agent));
+    const worktreeName = worktree?.label ?? agent?.worktreeLabel ?? (agent === undefined ? launch.worktreeId : agentLabel(agent));
     const projectName = project?.label ?? worktreeName;
-    void showNotification('system', `Review ready in ${projectName}`, `${worktreeName} is ready for review`, reviewNotificationTag(reviewLaunch.worktreeId), `/#agent=${encodeURIComponent(reviewLaunch.agentId)}`, reviewLaunch.worktreeId);
+    void showNotification('system', `Review ready in ${projectName}`, `${worktreeName} is ready for review`, reviewNotificationTag(launch.worktreeId), `/#agent=${encodeURIComponent(launch.agentId)}`, launch.worktreeId);
   };
   // open and acknowledge the local review
-  const openLocalReview = () => {
-    // require the matching active review
-    if (reviewLaunch === undefined) return;
-    void dismissNotification(reviewNotificationTag(reviewLaunch.worktreeId));
-    setReviewMinimized(false);
+  const openLocalReview = (worktreeId: string) => {
+    void dismissNotification(reviewNotificationTag(worktreeId));
+    updateReviewSession(worktreeId, session => ({ ...session, minimized: false }));
   };
   const newWorktreeProject = newWorktree === undefined ? undefined : data.projects.find(project => project.id === newWorktree.projectId);
   // the git flyout's rows open the dialog on their Project, unless it cannot manage worktrees here
@@ -10038,14 +10031,18 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   };
   const openFolderDialog = openFolderPath === undefined ? null : <OpenFolderDialog initialPath={openFolderPath} request={request} placeFor={listedFolder} onClose={() => setOpenFolderPath(undefined)} onOpened={folderOpened} />;
   const worktreeManagementDialogs = <>{renameWorkspace !== undefined && <RenameWorkspaceDialog key={renameWorkspace.key} workspace={renameWorkspace} onClose={() => setRenameWorkspace(undefined)} />}{newWorktreeDialog}{removeWorktreeDialog}{renameWorktreeDialog}{pruneDialog}{openFolderDialog}</>;
-  // the reviewed branch's open or draft pull request, which an All PR tour can post its feedback to
-  const reviewPullRequest = reviewLaunch === undefined ? undefined : [data.agents.find(candidate => candidate.id === reviewLaunch.agentId)?.pullRequest, worktrees.find(candidate => candidate.id === reviewLaunch.worktreeId)?.pullRequest].find(pullRequest => pullRequest !== undefined && pullRequest.status !== 'merged');
-  const reviewPanel = reviewLaunch === undefined ? null : <ReviewTourPanel key={`${reviewLaunch.worktreeId}:${reviewInitialTour?.fingerprint ?? `start-${reviewStarts}`}`} launch={reviewLaunch} request={request} slot={reviewSlot} initialTour={reviewInitialTour} tourAgent={data.reviewTour?.agent} {...(reviewInitialTour === undefined ? {} : { initialCodeReview: reviewInitialCodeReview.review, initialCodeReviewJob: reviewInitialCodeReview.job })} codeReviewCapability={codeReviewCapability(data.codeReview)} pullRequest={reviewPullRequest} onMinimize={minimizeReview} onDismiss={dismissReview} onIndicatorChange={setReviewIndicator} onReady={notifyReviewReady} onOpenAgent={setActivateAgentId} onError={(message, detail) => showOperationFeedback({ tone: 'error', message, detail, worktreeId: reviewLaunch.worktreeId })} {...(data.editor === true ? { onOpenInEditor: (target: EditorTarget) => void openEditorAt(reviewLaunch.worktreeId, target) } : {})} />;
+  // each review renders only into the slot of the Worktree in view; the rest stay mounted, hidden
+  const reviewPanel = Object.values(reviewSessions).map(({ launch, start, initialTour, initialCodeReview }) => {
+    const { worktreeId } = launch;
+    // the reviewed branch's open or draft pull request, which an All PR tour can post its feedback to
+    const pullRequest = [data.agents.find(candidate => candidate.id === launch.agentId)?.pullRequest, worktrees.find(candidate => candidate.id === worktreeId)?.pullRequest].find(candidate => candidate !== undefined && candidate.status !== 'merged');
+    return <ReviewTourPanel key={`${worktreeId}:${initialTour?.fingerprint ?? `start-${start}`}`} launch={launch} request={request} {...(worktreeId === agent?.worktreeId ? { slot: reviewSlot } : {})} initialTour={initialTour} tourAgent={data.reviewTour?.agent} {...(initialTour === undefined ? {} : { initialCodeReview: initialCodeReview.review, initialCodeReviewJob: initialCodeReview.job })} codeReviewCapability={codeReviewCapability(data.codeReview)} pullRequest={pullRequest} onMinimize={() => minimizeReview(worktreeId)} onDismiss={() => dismissReview(worktreeId)} onIndicatorChange={indicator => setReviewIndicator(worktreeId, indicator)} onReady={() => notifyReviewReady(launch)} onOpenAgent={setActivateAgentId} onError={(message, detail) => showOperationFeedback({ tone: 'error', message, detail, worktreeId })} {...(data.editor === true ? { onOpenInEditor: (target: EditorTarget) => void openEditorAt(worktreeId, target) } : {})} />;
+  });
   const reviewStartSheet = reviewStart === undefined ? null : <ReviewStartSheet target={reviewStart} prBase={data.agents.find(candidate => candidate.id === reviewStart.agentId)?.gitPrStatus?.base} request={request} tour={data.reviewTour} codeReview={codeReviewCapability(data.codeReview)} onStart={launchReview} onCancel={cancelReviewStart} />;
   const storedReview = agent?.worktreeId === undefined ? undefined : data.reviews?.find(review => review.worktreeId === agent.worktreeId);
-  const localReview = agent?.worktreeId !== undefined && agent.worktreeId === reviewLaunch?.worktreeId;
+  const localReview = agent?.worktreeId === undefined ? undefined : reviewSessions[agent.worktreeId];
   const reviewAgent = reviewBindingAgent(agent, item?.agents ?? []);
-  const activeReview = localReview ? { ...reviewIndicator, onOpen: openLocalReview, ...(reviewMinimized ? {} : { panel: <ReviewPanelColumn onSlot={setReviewSlot} />, onMinimize: minimizeReview }) } : reviewAgent !== undefined && storedReview !== undefined ? { generating: reviewRestoringWorktreeId === storedReview.worktreeId, stale: false, onOpen: () => void openStoredReview(reviewAgent, storedReview) } : undefined;
+  const activeReview = localReview !== undefined ? { ...localReview.indicator, onOpen: () => openLocalReview(localReview.launch.worktreeId), ...(localReview.minimized ? {} : { panel: <ReviewPanelColumn onSlot={setReviewSlot} />, onMinimize: () => minimizeReview(localReview.launch.worktreeId) }) } : reviewAgent !== undefined && storedReview !== undefined ? { generating: reviewRestoringWorktreeId === storedReview.worktreeId, stale: false, onOpen: () => void openStoredReview(reviewAgent, storedReview) } : undefined;
   // append workspace actions after each place's agent choices
   const placeEntries = (place: { id: string; label: string; consoleShells?: number } | undefined): LaunchMenuEntry[] => place === undefined ? [] : [
     { key: 'terminal', label: 'Terminal', detail: (place.consoleShells ?? 0) > 0 ? 'Focus its shell' : 'Open the Workspace with a new shell', icon: <LauncherRowIcon name="terminal" />, onSelect: () => void openTerminalAt(place.id, place.label) },
@@ -10114,7 +10111,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       if (savedBrowserSplit(placeId) && (entry.worktree?.projectUrl ?? entry.agents[0]?.projectUrl) !== undefined) splits.push({ key: 'browser', label: 'Project browser' });
       // include retained code views
       if (savedCodeOpen(placeId)) splits.push({ key: 'code', label: 'Code changes' });
-      if (!reviewMinimized && reviewLaunch !== undefined && entry.agents.some(agent => agent.worktreeId === reviewLaunch.worktreeId)) splits.push({ key: 'review', label: 'Guided review' });
+      if (entry.agents.some(agent => agent.worktreeId !== undefined && reviewSessions[agent.worktreeId]?.minimized === false)) splits.push({ key: 'review', label: 'Guided review' });
       // a Stack panel shows only for a stack with processes
       if (savedStackPanel(placeId) && ((entry.worktree?.stack ?? entry.agents[0]?.stack)?.processes?.length ?? 0) > 0) splits.push({ key: 'stack', label: 'Stack' });
     }

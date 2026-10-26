@@ -67,6 +67,55 @@ const maxPostMarkdown = 40_000;
 // below this panel width the step's narration and feedback fold into a drawer above the diff
 const compactWidth = 720;
 
+// The operator's work on one tour, kept per Worktree so a reload or a remount resumes it. `tour` binds
+// it to the tour it was written on: the fingerprint names only the Comparison, which a fresh tour of
+// unchanged code shares. `dispatch` is the change request, only once edited by hand.
+type ReviewDraft = { tour: string; current: number; statuses: Record<string, StepState>; feedback: Record<string, string>; comments: ReviewDiffComment[]; orphanFeedback: string; triage: Record<string, FindingTriage>; dispatch?: string };
+const reviewDraftKey = (worktreeId: string) => `remote-agent-console:review-draft:${worktreeId}`;
+const tourIdentity = (tour: ReviewTour) => JSON.stringify([tour.fingerprint, tour.title, tour.steps.map(step => step.id)]);
+const isText = (value: unknown, max: number): value is string => typeof value === 'string' && value.length <= max;
+const isLine = (value: unknown): boolean => Number.isInteger(value) && (value as number) >= 0;
+const isSide = (value: unknown): boolean => value === 'additions' || value === 'deletions';
+// a plain record whose keys and entries all pass
+function isRecordOf(value: unknown, key: (key: string) => boolean, entry: (entry: unknown) => boolean): boolean {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.entries(value).every(([candidate, item]) => key(candidate) && entry(item));
+}
+function isDraftComment(value: unknown, changeIds: ReadonlySet<string>): boolean {
+  if (value === null || typeof value !== 'object') return false;
+  const comment = value as Record<string, unknown>;
+  return isText(comment.id, 100) && typeof comment.changeId === 'string' && changeIds.has(comment.changeId) && isSide(comment.startSide) && isLine(comment.startLine) && isSide(comment.endSide) && isLine(comment.endLine) && isText(comment.body, maxFeedback);
+}
+function isTriage(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false;
+  const triage = value as Record<string, unknown>;
+  return triage.state === 'dismissed' || triage.state === 'kept' && isText(triage.commentId, 100) || triage.state === 'noted' && isText(triage.note, maxFeedback);
+}
+
+// the saved draft of exactly this tour, if a valid one is stored
+function readReviewDraft(worktreeId: string, tour: ReviewTour): ReviewDraft | undefined {
+  let raw: unknown;
+  try { raw = JSON.parse(localStorage.getItem(reviewDraftKey(worktreeId)) ?? 'null'); } catch { return undefined; }
+  if (raw === null || typeof raw !== 'object') return undefined;
+  const draft = raw as Record<string, unknown>;
+  const stepIds = new Set(tour.steps.map(step => step.id));
+  const changeIds = new Set(tour.changes.map(change => change.id));
+  const valid = draft.tour === tourIdentity(tour) && isLine(draft.current) && (draft.current as number) < tour.steps.length
+    && isRecordOf(draft.statuses, id => stepIds.has(id), status => status === 'unvisited' || status === 'visited' || status === 'skipped')
+    && isRecordOf(draft.feedback, id => stepIds.has(id), note => isText(note, maxFeedback))
+    && Array.isArray(draft.comments) && draft.comments.every(comment => isDraftComment(comment, changeIds))
+    && isText(draft.orphanFeedback, maxDispatch) && isRecordOf(draft.triage, id => id.length <= 100, isTriage)
+    && (draft.dispatch === undefined || isText(draft.dispatch, maxDispatch));
+  return valid ? draft as ReviewDraft : undefined;
+}
+
+// save or, with none, forget one Worktree's draft
+function saveReviewDraft(worktreeId: string, draft: ReviewDraft | undefined): void {
+  try {
+    if (draft === undefined) localStorage.removeItem(reviewDraftKey(worktreeId));
+    else localStorage.setItem(reviewDraftKey(worktreeId), JSON.stringify(draft));
+  } catch { /* private browsing or a full quota leaves the review working, only unsaved */ }
+}
+
 // a scope and, for exactly the commit scope, its commit
 function isScoped(value: { scope: unknown; commit?: unknown }): boolean {
   return value.scope === 'working' || value.scope === 'pr' ? value.commit === undefined : value.scope === 'commit' && typeof value.commit === 'string';
@@ -364,16 +413,18 @@ export function ReviewPanelColumn({ onSlot }: { onSlot: (slot: ReviewPanelSlot |
 export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent, initialCodeReview, initialCodeReviewJob, codeReviewCapability, pullRequest, onMinimize, onDismiss, onIndicatorChange, onReady, onOpenInEditor, onOpenAgent, onError }: { launch: ReviewLaunch; request: ReviewRequest; slot?: ReviewPanelSlot; initialTour?: ReviewTour; tourAgent?: ReviewAgentKind; initialCodeReview?: CodeReview; initialCodeReviewJob?: ReviewJob; codeReviewCapability?: CodeReviewCapability; pullRequest?: ReviewPullRequest; onMinimize: () => void; onDismiss: () => Promise<boolean>; onIndicatorChange: (indicator: ReviewTourIndicator) => void; onReady: (tour: ReviewTour) => void; onOpenInEditor?: (target: EditorTarget) => void; onOpenAgent?: (agentId: string) => void; onError?: (message: string, detail: string) => void }) {
   // the Comparison is fixed for the review's lifetime: changing it means starting again
   const { includeTests, includeDocs } = launch;
-  const [state, setState] = useState<ViewState>(initialTour === undefined ? 'loading' : 'overview');
+  // a restored tour resumes the work saved on it, at the step it was left on
+  const [draft] = useState(() => initialTour === undefined ? undefined : readReviewDraft(launch.worktreeId, initialTour));
+  const [state, setState] = useState<ViewState>(initialTour === undefined ? 'loading' : draft === undefined ? 'overview' : 'tour');
   const [tour, setTour] = useState<ReviewTour | undefined>(initialTour);
   const [job, setJob] = useState<ReviewJob>();
   // an interactive tour run's Agent, once its pending poll names it
   const [tourRun, setTourRun] = useState<ReviewRunLink>();
   const [error, setError] = useState('');
-  const [current, setCurrent] = useState(0);
-  const [statuses, setStatuses] = useState<Record<string, StepState>>(initialTour === undefined ? {} : { [initialTour.steps[0]!.id]: 'visited' });
-  const [feedback, setFeedback] = useState<Record<string, string>>({});
-  const [comments, setComments] = useState<ReviewDiffComment[]>([]);
+  const [current, setCurrent] = useState(draft?.current ?? 0);
+  const [statuses, setStatuses] = useState<Record<string, StepState>>(draft?.statuses ?? (initialTour === undefined ? {} : { [initialTour.steps[0]!.id]: 'visited' }));
+  const [feedback, setFeedback] = useState<Record<string, string>>(draft?.feedback ?? {});
+  const [comments, setComments] = useState<ReviewDiffComment[]>(draft?.comments ?? []);
   const [openCommentIds, setOpenCommentIds] = useState<ReadonlySet<string>>(new Set());
   // the panel's root, while it is in view
   const [panel, setPanel] = useState<HTMLElement | null>(null);
@@ -385,10 +436,10 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
   const [notesOpen, setNotesOpen] = useState(false);
   const notesBar = useRef<HTMLButtonElement | null>(null);
   const notesDrawer = useRef<HTMLElement | null>(null);
-  const [orphanFeedback, setOrphanFeedback] = useState('');
-  const [dispatch, setDispatch] = useState('');
+  const [orphanFeedback, setOrphanFeedback] = useState(draft?.orphanFeedback ?? '');
+  const [dispatch, setDispatch] = useState(draft?.dispatch ?? '');
   // whether the operator edited the change request by hand: it is then never rebuilt behind their back
-  const [dispatchEdited, setDispatchEdited] = useState(false);
+  const [dispatchEdited, setDispatchEdited] = useState(draft?.dispatch !== undefined);
   const [dispatching, setDispatching] = useState(false);
   const [sent, setSent] = useState(false);
   // the draft review posted to the pull request so far, a post in flight, and why the last one failed:
@@ -411,7 +462,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
   const [addingCodeReview, setAddingCodeReview] = useState(false);
   const [retryingCodeReview, setRetryingCodeReview] = useState(false);
   // the triage of each Finding by id, and whether the last Keep was refused at the aggregate cap
-  const [triage, setTriage] = useState<Record<string, FindingTriage>>({});
+  const [triage, setTriage] = useState<Record<string, FindingTriage>>(draft?.triage ?? {});
   const [limitNotice, setLimitNotice] = useState(false);
   // the general note just kept, focused once it renders
   const [focusedNote, setFocusedNote] = useState<string>();
@@ -502,9 +553,9 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     // display the restored artifact before any requested regeneration
     if (restored) {
       setTour(initialTour);
-      setStatuses({ [initialTour.steps[0]!.id]: 'visited' });
+      setStatuses(draft?.statuses ?? { [initialTour.steps[0]!.id]: 'visited' });
       setCurrent(currentStep => Math.min(currentStep, initialTour.steps.length - 1));
-      setState('overview');
+      setState(draft === undefined ? 'overview' : 'tour');
       setError('');
       setStale(false);
       return;
@@ -635,6 +686,12 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
       if (createdReviewJob !== undefined && !tourSettled) void request(`/api/code-review/jobs/${encodeURIComponent(createdReviewJob.id)}`, { method: 'DELETE' }, false);
     };
   }, [launch, includeTests, includeDocs, retry, request, initialTour]);
+
+  // save the operator's work as it changes; an empty comment is still being written, or discarded
+  useEffect(() => {
+    if (tour === undefined) return;
+    saveReviewDraft(launch.worktreeId, { tour: tourIdentity(tour), current, statuses, feedback, comments: comments.filter(comment => comment.body.trim() !== ''), orphanFeedback, triage, ...(dispatchEdited ? { dispatch } : {}) });
+  }, [launch.worktreeId, tour, current, statuses, feedback, comments, orphanFeedback, triage, dispatch, dispatchEdited]);
 
   // poll comparison freshness while reviewing
   useEffect(() => {
@@ -996,6 +1053,7 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
     setDismissError('');
     cancelCodeReview();
     const dismissed = await onDismiss().catch(() => false);
+    if (dismissed) saveReviewDraft(launch.worktreeId, undefined);
     // preserve the review when removal fails
     if (!dismissed) { setDismissError('The cached review could not be dismissed.'); setDismissing(false); }
   };

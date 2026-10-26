@@ -1731,6 +1731,8 @@ async function openPostTour(page: Page, { scope = 'pr', pullRequest = openPullRe
   const prompts: string[] = [];
   const tour = { ...postTour, scope, base: scope === 'pr' ? 'origin/main' : 'HEAD' };
   const comparison = { fingerprint: tour.fingerprint };
+  // each open restores the tour afresh, not the draft an earlier open in this page saved
+  if (page.url().startsWith('http')) await page.evaluate(() => localStorage.removeItem('remote-agent-console:review-draft:owen'));
   await installAgentWebSocket(page);
   await page.route('**/api/**', async route => {
     const request = route.request();
@@ -1764,6 +1766,82 @@ async function commentOnLine(dialog: ReturnType<Page['getByRole']>, text: string
   await dialog.getByLabel(`Comment on ${label}`).fill(body);
   await dialog.getByRole('button', { name: 'Done' }).click();
 }
+
+// verify a restored tour resumes its notes, comments and step after the page reloads
+test('resumes a tour\'s notes, comments and step after a reload', async ({ page }) => {
+  const { dialog } = await openPostTour(page);
+  await dialog.getByLabel('Feedback for this change').fill('Route reads well.');
+  await commentOnLine(dialog, 'const x = 9;', 'line 5', 'Guard x.');
+  await dialog.getByRole('button', { name: 'Next' }).click();
+  await expect(dialog.getByText('The service performs the transition.')).toBeVisible();
+
+  await page.reload();
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  await expect(dialog.getByText('The service performs the transition.')).toBeVisible();
+  await dialog.getByRole('button', { name: 'Back' }).click();
+  await expect(dialog.getByLabel('Feedback for this change')).toHaveValue('Route reads well.');
+  await expect(dialog.getByLabel('Relevant changes').locator('.review-tour-inline-comment')).toContainText('Guard x.');
+});
+
+// verify a tour started in another Worktree neither replaces this one's review nor, when this one is
+// opened again, cancels its own generation
+test('keeps one review per Worktree while another generates', async ({ page }) => {
+  const deleted: string[] = [];
+  let deltaReady = false;
+  const tours: Record<string, object> = { 'agent-1': { ...postTour, title: 'Owen tour', scope: 'working', base: 'HEAD', fingerprint: 'owen-fingerprint-123456' }, 'agent-2': { ...postTour, title: 'Delta tour', scope: 'working', base: 'HEAD', fingerprint: 'delta-fingerprint-123456' } };
+  const agent = (id: string, worktreeId: string, worktreeLabel: string, worktreeOrder: number) => ({ ...startSheetAgent, id, sessionId: `socket:$${worktreeOrder + 1}`, home: `/worktrees/${worktreeId}`, worktreeId, worktreeLabel, worktreeOrder });
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, agents: [agent('agent-1', 'owen', 'Owen', 0), agent('agent-2', 'delta', 'Delta', 1)], projects: [] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    const started = /^\/api\/agents\/(agent-[12])\/review-tour\/jobs$/u.exec(url.pathname)?.[1];
+    if (started !== undefined && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob(`job-${started}`) } });
+    const polled = /^\/api\/review-tour\/jobs\/job-(agent-[12])$/u.exec(url.pathname)?.[1];
+    if (polled !== undefined && request.method() === 'DELETE') { deleted.push(url.pathname); return route.fulfill({ status: 204 }); }
+    if (polled !== undefined) return polled === 'agent-2' && !deltaReady ? route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob(`job-${polled}`) } }) : route.fulfill({ json: { status: 'ready', tour: tours[polled] } });
+    const checked = /^\/api\/agents\/(agent-[12])\/review-tour\/fingerprint$/u.exec(url.pathname)?.[1];
+    if (checked !== undefined) return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: (tours[checked] as { fingerprint: string }).fingerprint } } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  await page.goto('/');
+  const branchButton = page.getByRole('button', { name: /Git status: feature\/review-tour/ });
+  const changedFiles = page.getByRole('region', { name: 'Changed files' });
+  const startWorkingReview = async () => {
+    await branchButton.click();
+    await changedFiles.getByRole('button', { name: 'Working' }).click();
+    await startReview(page);
+  };
+
+  // Owen's tour, with a comment on it
+  await startWorkingReview();
+  await expect(branchButton).not.toHaveAttribute('aria-busy');
+  await branchButton.click();
+  await changedFiles.getByRole('button', { name: 'Open Review' }).click();
+  const owen = page.getByRole('region', { name: 'Owen tour' });
+  await owen.getByRole('button', { name: 'Start tour' }).click();
+  await commentOnLine(owen, 'const x = 9;', 'line 5', 'Guard x.');
+
+  // Delta's tour starts, and is still generating when Owen's is in view again
+  await page.getByRole('tab', { name: /^Delta/u }).click();
+  await expect(owen).toHaveCount(0);
+  await startWorkingReview();
+  await expect(branchButton).toHaveAttribute('aria-busy', 'true');
+  await page.getByRole('tab', { name: /^Owen/u }).click();
+  await expect(owen.getByLabel('Relevant changes').locator('.review-tour-inline-comment')).toContainText('Guard x.');
+
+  // Delta's generation carried on to its tour
+  deltaReady = true;
+  await page.getByRole('tab', { name: /^Delta/u }).click();
+  await expect(branchButton).not.toHaveAttribute('aria-busy');
+  await branchButton.click();
+  await changedFiles.getByRole('button', { name: 'Open Review' }).click();
+  await expect(page.getByRole('region', { name: 'Delta tour' })).toBeVisible();
+  expect(deleted).toEqual([]);
+});
 
 test('shows the pull request description on an All PR tour overview', async ({ page }) => {
   const comments = { number: 123, url: openPullRequest.url, threads: [], reviews: [], comments: [], description: { id: 'PR1', author: 'octocat', bot: false, body: '<!-- template hint -->\nRetry with **backoff**.', createdAt: '2026-10-01T00:00:00Z', url: openPullRequest.url } };
