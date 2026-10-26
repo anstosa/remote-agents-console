@@ -171,7 +171,8 @@ test('keeps agent management in the far-left toolbar while + dropdowns only choo
   await expect(codex.locator(':scope > button')).toHaveText([/Codex/u, /Accounts/u, 'Update', '★']);
   await codex.getByRole('menuitem', { name: 'Codex accounts' }).click();
   await expect(menu.getByRole('group', { name: 'Codex accounts' }).getByRole('heading', { name: 'Accounts' })).toBeVisible();
-  await toolbar.getByRole('button', { name: 'Choose agent' }).click();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
   await page.getByRole('button', { name: 'Launch agent', exact: true }).click();
   const plus = page.getByRole('group', { name: 'Agent launcher' });
   const worktreeLaunch = plus.getByRole('button', { name: 'Launch Cora' });

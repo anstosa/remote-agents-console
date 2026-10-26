@@ -2,6 +2,7 @@ import { createPortal } from 'react-dom';
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { useViewportFlyout } from './viewport-flyout.js';
 import { usePhoneLayout } from './panel-header.js';
+import { FlyoutBackdrop } from './flyout-portal.js';
 
 // The closed registry of agent kinds, in resolution/priority order (duplicated from the
 // server's `agentKinds` by design). A configured kind (one with a program) is launchable;
@@ -206,7 +207,8 @@ export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch
   else if (entries.length > 0) menuLabel = 'More ways to open';
   // place rows choose agents without exposing toolbar management
   const menu = <LaunchMenu verb={verb} label={label} resolution={resolution} onLaunch={launch} entries={menuEntries} launchDisabled={launchDisabled} showAgentSettings={showAgentSettings} accounts={accounts} accountsView={accountsView} onAccountsViewChange={setAccountsView} />;
-  const flyout = open && createPortal(<div ref={flyoutRef} style={style} className="more-menu flyout-menu launch-menu" role="menu" aria-label={menuLabel} onKeyDown={event => { /* close the chooser on escape */ if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeMenu(); } }}>{menu}</div>, document.body);
+  // block account-page click-through without changing nested launcher menus
+  const flyout = open && createPortal(<>{accountsView !== undefined && <FlyoutBackdrop onDismiss={closeMenu} />}<div ref={flyoutRef} style={style} className="more-menu flyout-menu launch-menu" role="menu" aria-label={menuLabel} onKeyDown={event => { /* close the chooser on escape */ if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeMenu(); } }}>{menu}</div></>, document.body);
   // the empty card keeps a direct action; place rows explicitly retain their chooser
   if (placeActions && entries.length === 0 && !alwaysShowMenu) return primaryButton ?? <button type="button" className={`${primaryClass}${pending ? ' progress-border progress-green' : ''}`} aria-busy={pending || undefined} aria-label={`Launch ${label}`} disabled={disabled || launchDisabled || pending || (resolution !== undefined && resolution.kind === undefined)} onClick={() => launch(resolution?.kind === undefined ? undefined : { kind: resolution.kind, sandboxed: defaultSandboxed(adapters?.[resolution.kind]) })}>{pending && <span className="update-progress-ring" aria-hidden="true" />}{verb}</button>;
   // launcher rows keep their split action even on a phone; the full-size Launch uses one chooser

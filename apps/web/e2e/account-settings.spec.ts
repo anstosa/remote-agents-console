@@ -70,6 +70,77 @@ async function setupAccountSettings(page: Page, initialAccounts: Account[], rena
   return state;
 }
 
+// cover physical outside presses at both persistent-toolbar layouts
+for (const viewport of [{ label: 'desktop', width: 1280, height: 800 }, { label: 'phone', width: 390, height: 844 }]) {
+  test.describe(`${viewport.label} account submenu input`, () => {
+    test.use({ hasTouch: viewport.label === 'phone' });
+    test(`blocks ${viewport.label} toolbar actions behind the account submenu`, async ({ page }) => {
+      const pageErrors: string[] = [];
+      const consoleErrors: string[] = [];
+      let shellStarts = 0;
+      const worktreeId = 'repo:/repo/wts/cora';
+      // collect uncaught and console-level browser failures
+      page.on('pageerror', error => pageErrors.push(error.message));
+      page.on('console', message => {
+        // retain only actual console errors
+        if (message.type() === 'error') consoleErrors.push(message.text());
+      });
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await setupAccountSettings(page, [{ id: 'personal-account', label: 'Personal', email: 'personal@example.com', active: true, planType: 'pro' }]);
+      // expose one idle worktree with a directly actionable terminal control
+      await page.route('**/api/dashboard', route => route.fulfill({ json: {
+        generation: 1,
+        adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } },
+        agents: [],
+        projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [{ id: worktreeId, projectId: 'repo', label: 'Cora', path: '/repo/wts/cora', available: true, pinned: true, order: 1, launch: { kind: 'codex', origin: 'default' } }] }],
+        scratchLaunch: { kind: 'codex', origin: 'default' },
+        cleanupPending: 0,
+        reviews: [],
+        reviewTour: { available: false, reason: 'generator_unavailable' },
+      } }));
+      // record real shell creation without starting a host process
+      await page.route('**/api/**', async route => {
+        const request = route.request();
+        const path = decodeURIComponent(new URL(request.url()).pathname);
+        // create one synthetic shell
+        if (path === `/api/worktrees/${worktreeId}/shells` && request.method() === 'POST') {
+          shellStarts += 1;
+          return route.fulfill({ status: 201, json: { paneId: '%12' } });
+        }
+        // keep the direct-create branch free of existing panes
+        if (path === `/api/worktrees/${worktreeId}/panes`) return route.fulfill({ json: { panes: [] } });
+        return route.fallback();
+      });
+
+      await page.goto('/');
+      const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+      const chooser = toolbar.getByRole('button', { name: /^(Choose agent|Launch agent)$/u });
+      const terminal = toolbar.getByRole('button', { name: 'Open a terminal' });
+      const terminalBounds = await terminal.boundingBox();
+      // require a physical target before coordinate input
+      if (terminalBounds === null) throw new Error('terminal toolbar button has no bounds');
+      const terminalPoint = { x: terminalBounds.x + terminalBounds.width / 2, y: terminalBounds.y + terminalBounds.height / 2 };
+      // use the active device's physical coordinate input
+      const pressTerminal = () => viewport.label === 'phone' ? page.touchscreen.tap(terminalPoint.x, terminalPoint.y) : page.mouse.click(terminalPoint.x, terminalPoint.y);
+
+      await chooser.click();
+      const menu = page.getByRole('menu', { name: 'Choose agent', exact: true });
+      await menu.getByRole('menuitem', { name: 'Codex accounts', exact: true }).click();
+      const accounts = menu.getByRole('group', { name: 'Codex accounts', exact: true });
+      await expect(accounts).toBeVisible();
+
+      await pressTerminal();
+      await expect(menu).toHaveCount(0);
+      expect(shellStarts).toBe(0);
+
+      await pressTerminal();
+      await expect.poll(() => shellStarts).toBe(1);
+      expect(pageErrors).toEqual([]);
+      expect(consoleErrors).toEqual([]);
+    });
+  });
+}
+
 test('shows API-key spend and persists trimmed account and API-key names', async ({ page }) => {
   const pageErrors: string[] = [];
   // collect uncaught browser failures
