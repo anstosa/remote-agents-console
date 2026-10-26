@@ -23,7 +23,7 @@ export type PromptLifecycleIntent = PromptLifecycleAdmission & {
 
 export type PromptCalendarLifecycle = {
   admit(input: PromptLifecycleAdmission): Promise<void>;
-  beforeSend(input: PromptLifecycleIntent): Promise<{ tracked: boolean; arm?: string }>;
+  beforeSend(input: PromptLifecycleIntent): Promise<{ arm?: string }>;
   observe(id: string, capability: ManagedPromptLifecycleV1 | undefined): Promise<void>;
   pending(): Promise<Array<{ id: string; agentId: string; kind: string }>>;
   handOver(fromAgentId: string, toAgentId: string): Promise<void>;
@@ -163,15 +163,15 @@ export class GoogleCalendarLifecycle implements PromptCalendarLifecycle {
   }
 
   // durably pin intent before submit keys; failure degrades capture only
-  async beforeSend(input: PromptLifecycleIntent): Promise<{ tracked: boolean; arm?: string }> {
+  async beforeSend(input: PromptLifecycleIntent): Promise<{ arm?: string }> {
     try {
       return await this.serialize(async records => {
       const current = records.get(input.id);
       // unsupported adapters and unadmitted activities remain inert
-      if (current === undefined || !current.admitted) return { tracked: false };
+      if (current === undefined || !current.admitted) return {};
       if (input.kind !== 'claude' && input.baseline === undefined) {
         await this.fail(records, current, 'unsupported_lifecycle_contract');
-        return { tracked: false };
+        return {};
       }
       const promptFingerprint = fingerprint(input.prompt);
       const transportFingerprint = fingerprint(queueReadyPrompt(input.prompt));
@@ -182,18 +182,18 @@ export class GoogleCalendarLifecycle implements PromptCalendarLifecycle {
       // no installed Claude version/payload fixture means production stays visibly unsupported
       if (input.kind === 'claude' && (claudeContract === undefined || nonce === undefined || input.processId === undefined || processStart === undefined)) {
         await this.fail(records, current, 'unsupported_lifecycle_contract');
-        return { tracked: false };
+        return {};
       }
       records.set(input.id, { ...current, agentId: input.agentId, kind: input.kind, promptFingerprint, transportFingerprint, ...(input.baseline === undefined ? {} : { baseline: structuredClone(input.baseline) }), processGeneration, source: input.kind === 'claude' ? 'claude-hook' : 'codex-rollout', parserVersion: 1, ...(input.processId === undefined ? {} : { processId: input.processId }), ...(processStart === undefined ? {} : { processStart }), socketPath: input.socketPath, paneId: input.paneId, ...(nonce === undefined ? {} : { nonce }), sentAt: input.sentAt });
       await this.persist(records);
-      if (input.kind !== 'claude') return { tracked: true };
+      if (input.kind !== 'claude') return {};
       const arm = { v: 1, state: 'armed', activityId: input.id, nonce, promptFingerprint, paneId: input.paneId, processGeneration, contract: claudeContract, process: { pid: input.processId, start: processStart }, armedAt: input.sentAt, expiresAt: new Date(Date.parse(input.sentAt) + 30_000).toISOString() };
-      return { tracked: true, arm: Buffer.from(JSON.stringify(arm)).toString('base64url') };
+      return { arm: Buffer.from(JSON.stringify(arm)).toString('base64url') };
       });
     } catch (error) {
       // pre-key storage failures invalidate the exact admitted provider capture
       if (error instanceof CaptureStoreError) await this.compensate(input.id);
-      return { tracked: false };
+      return {};
     }
   }
 

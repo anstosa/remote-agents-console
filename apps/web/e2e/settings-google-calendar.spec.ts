@@ -209,7 +209,7 @@ for (const width of [1440, 390]) test(`renders Google Calendar settings safely a
   await expect(settings.getByRole('switch', { name: 'Enable Google Calendar', exact: true })).not.toBeChecked();
   await expect(settings.getByRole('textbox', { name: 'Event title template', exact: true })).toHaveValue('{worktree}');
   await expect(settings.getByRole('combobox', { name: 'Start moment', exact: true })).toContainText('Agent work started');
-  await expect(settings.getByRole('switch', { name: 'End moment', exact: true })).toHaveAttribute('data-value', 'work_finished');
+  await expect(settings.getByRole('switch', { name: 'End moment', exact: true })).toBeChecked();
   await expect(settings.getByRole('status', { name: 'Event title preview', exact: true })).toContainText('feature/calendar');
   await expect(settings.getByText('{worktree}', { exact: true })).toHaveCount(1);
   await expect(settings.getByText('{project}', { exact: true })).toHaveCount(1);

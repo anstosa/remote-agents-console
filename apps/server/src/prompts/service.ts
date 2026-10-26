@@ -754,7 +754,7 @@ export class PromptService {
     const keys: TmuxKey[] = submission === 'enter' || submission === 'confirmed-enter' ? ['Enter'] : adapterKeys;
     const submittedAt = Date.now();
     // persist exact pre-key intent before the tracked submit path proceeds
-    const calendarIntent: { tracked: boolean; arm?: string } | undefined = queuedPromptId === undefined ? undefined : await this.calendar?.beforeSend({
+    const calendarIntent: { arm?: string } | undefined = queuedPromptId === undefined ? undefined : await this.calendar?.beforeSend({
       id: queuedPromptId,
       agentId,
       kind: first.agent.kind,
@@ -766,7 +766,7 @@ export class PromptService {
       paneId: submitTarget.agent.paneId,
       ...(first.processId === undefined ? {} : { processId: first.processId }),
       sentAt: new Date(submittedAt).toISOString()
-    }).catch(() => ({ tracked: false }));
+    }).catch(() => ({}));
     const resetBefore = paneSnapshot(submitTarget.agent);
     // arm and submit Claude in one ordered tmux batch after exact draft ownership
     const submittedWithArm = calendarIntent?.arm === undefined ? undefined : await this.tmux.armAndSendKeys(submitTarget.socket, submitTarget.agent.paneId, calendarIntent.arm, keys).catch(() => false);

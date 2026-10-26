@@ -29,7 +29,7 @@ const config = { enabled: true, titleTemplate: '{worktree}', startMoment: 'work_
 
 // build one minimal durable activity
 function activity(id: string): CalendarActivity {
-  return { version: 1, id, agentId: 'agent', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', labels: { worktree: 'Cora', agent: 'Codex' }, policy: config, status: 'admitted', attempts: 0 };
+  return { version: 1, id, agentId: 'agent', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', labels: { worktree: 'Cora', agent: 'Codex' }, policy: config, target: { id: 'calendar', name: 'RAC Work' }, principalSub: 'subject', status: 'admitted', attempts: 0 };
 }
 
 // build one internally consistent finalized activity
@@ -53,6 +53,60 @@ async function connectedService(records: CalendarActivity[] = []) {
 
 // cover atomic private persistence and key rotation
 describe('Google Calendar stores', () => {
+  // connected lifecycle rows need the immutable destination pair before rehydration
+  it.each(['admitted', 'awaiting_evidence', 'suppressed'] as const)('validates destination identity for %s rows', async status => {
+    const directory = await tempDir('rac-google-calendar-admission-schema-');
+    // exercise both partial pairs as well as connected and disconnected identities
+    for (const pair of ['both', 'target', 'principal', 'neither'] as const) {
+      const row: CalendarActivity = { ...activity(pair), status, ...(status === 'admitted' ? {} : { completedAt: Date.now() }) };
+      // remove exactly the selected persisted identity members
+      if (pair === 'principal' || pair === 'neither') delete row.target;
+      // one-sided identities are never a valid disconnected suppression
+      if (pair === 'target' || pair === 'neither') delete row.principalSub;
+      const file = join(directory, `${pair}.json`);
+      await writeFile(file, JSON.stringify({ version: 1, activities: [row] }), { mode: 0o600 });
+      const store = new ActivityStore(file);
+      // only suppression can omit the complete connected identity
+      if (pair === 'both' || status === 'suppressed' && pair === 'neither') {
+        await store.load();
+        expect(store.get(pair)).toMatchObject({ id: pair, status });
+      } else {
+        await expect(store.load()).rejects.toThrow('activity_store_invalid');
+        expect(store.list()).toEqual([]);
+      }
+    }
+  });
+
+  // valid admitted state must still finalize after reloading its private destination
+  it('reloads an admitted identity before signaling a completed interval', async () => {
+    const directory = await tempDir('rac-google-calendar-admitted-restart-');
+    const key = `active:${randomBytes(32).toString('base64url')}`;
+    const authPath = join(directory, 'auth.json');
+    const activitiesPath = join(directory, 'activities.json');
+    await new AuthStore(authPath, parseTokenKey(key)).save({ version: 1, clientId: 'client', principal: { sub: 'subject' }, tokens: { accessToken: 'access', refreshToken: 'refresh', expiresAt: Date.now() + 3_600_000 }, calendars: [{ id: 'calendar', name: 'RAC Work' }], selectedCalendarId: 'calendar' });
+    await writeFile(activitiesPath, JSON.stringify({ version: 1, activities: [activity('restart')] }), { mode: 0o600 });
+    const service = await createGoogleCalendarService({ config, publicOrigin: 'https://agents.example.com', env: { RAC_GOOGLE_CALENDAR_CLIENT_ID: 'client', RAC_GOOGLE_CALENDAR_CLIENT_SECRET: 'secret', RAC_GOOGLE_CALENDAR_TOKEN_KEY: key }, authPath, activitiesPath });
+    await service.stop();
+    await service.signal({ id: 'restart', type: 'started', at: '2026-10-23T17:01:00.000Z' });
+    await service.signal({ id: 'restart', type: 'finished', at: '2026-10-23T17:02:00.000Z' });
+    const restored = new ActivityStore(activitiesPath);
+    await restored.load();
+    expect(restored.get('restart')).toMatchObject({ status: 'ready', target: { id: 'calendar', name: 'RAC Work' }, principalSub: 'subject' });
+  });
+
+  // keep a broken storage collaborator from turning finalization into a raw dereference
+  it('contains malformed in-memory admission identity before finalization', async () => {
+    const service = await connectedService([activity('malformed')]);
+    await service.stop();
+    const spy = vi.spyOn(ActivityStore.prototype, 'update').mockImplementationOnce(async (_id, update) => {
+      const row = { ...activity('malformed'), target: undefined, startedAt: '2026-10-23T17:01:00.000Z' };
+      update(row);
+      return row;
+    });
+    try {
+      await expect(service.signal({ id: 'malformed', type: 'finished', at: '2026-10-23T17:02:00.000Z' })).rejects.toMatchObject({ code: 'capture_store_unavailable' });
+    } finally { spy.mockRestore(); }
+  });
   // reject malformed private bytes before decoding or publishing any provider state
   it.each([['auth', 255], ['auth', 0], ['activities', 255], ['activities', 0]] as const)('fails closed for %s with byte %s', async (kind, byte) => {
     const directory = await tempDir('rac-google-calendar-invalid-bytes-');
@@ -111,7 +165,7 @@ describe('Google Calendar stores', () => {
     expect(service.summary().counts.pending).toBe(status === 'admitted' ? 1 : 0);
     const lifecycle = new GoogleCalendarLifecycle({ file: join(await tempDir('rac-google-calendar-'), 'lifecycle.json'), sink: service, labels: async () => row.labels });
     await lifecycle.admit(input);
-    expect(await lifecycle.beforeSend({ ...input, prompt: 'synthetic work', baseline: { rollout: '/private/rollout.jsonl', ordinal: 0 }, socketFingerprint: 'socket', socketPath: '/missing/socket', paneId: '%7', sentAt: '2026-10-23T17:00:01.000Z' })).toEqual({ tracked: status === 'admitted' });
+    await lifecycle.beforeSend({ ...input, prompt: 'synthetic work', baseline: { rollout: '/private/rollout.jsonl', ordinal: 0 }, socketFingerprint: 'socket', socketPath: '/missing/socket', paneId: '%7', sentAt: '2026-10-23T17:00:01.000Z' });
     expect(await lifecycle.pending()).toEqual(status === 'admitted' ? [{ id: row.id, agentId: row.agentId, kind: row.kind }] : []);
   });
 

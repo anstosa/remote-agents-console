@@ -225,7 +225,7 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
         version: 1,
         clientId: this.oauth.clientId,
         principal,
-        tokens: { ...exchanged.tokens, ...(refreshToken === undefined ? {} : { refreshToken }) },
+        tokens: { ...exchanged.tokens, refreshToken },
         calendars: samePrincipal ? prior?.calendars.map(calendar => ({ ...calendar })) ?? [] : [],
         ...(samePrincipal && prior?.selectedCalendarId !== undefined ? { selectedCalendarId: prior.selectedCalendarId } : {})
       };
@@ -403,6 +403,8 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
 
   // atomically derive one immutable interval and outbox identity
   private finalize(activity: CalendarActivity, end: string | undefined): void {
+    // a malformed storage collaborator cannot authorize a destination or cause a raw dereference
+    if (activity.target === undefined || activity.principalSub === undefined) throw new GoogleCalendarError('capture_store_unavailable', 503);
     const start = activity.policy.startMoment === 'prompt_submitted' ? validInstant(activity.submittedAt) : activity.policy.startMoment === 'prompt_sent' ? activity.sentAt : activity.startedAt;
     const startMs = start === undefined ? Number.NaN : Date.parse(start);
     const endMs = end === undefined ? Number.NaN : Date.parse(end);
@@ -413,7 +415,7 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
       activity.completedAt = this.options.now();
       return;
     }
-    const target = activity.target!;
+    const target = activity.target;
     const { eventId, marker } = calendarEventIdentity(target.id, activity.id);
     activity.startAt = start;
     activity.endAt = end;

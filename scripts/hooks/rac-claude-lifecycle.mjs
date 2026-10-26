@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -69,12 +69,27 @@ function appendSpool(record) {
         lockFd = openSync(lock, 'wx', 0o600);
       } catch { return false; }
     }
-    const line = `${JSON.stringify(record)}\n`;
-    const size = existsSync(spool) ? lstatSync(spool).size : 0;
-    // never discard unconsumed evidence when the private spool is full
-    if (size + Buffer.byteLength(line) > maxSpoolBytes) return false;
-    const fd = openSync(spool, 'a', 0o600);
-    try { chmodSync(spool, 0o600); writeSync(fd, line); fsyncSync(fd); } finally { closeSync(fd); }
+    const line = Buffer.from(`${JSON.stringify(record)}\n`);
+    const fd = openSync(spool, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+    try {
+      const metadata = fstatSync(fd);
+      // refuse nonregular, foreign or exposed descriptors without modifying their targets
+      if (!metadata.isFile() || metadata.uid !== process.getuid?.() || (metadata.mode & 0o077) !== 0 || (metadata.mode & 0o600) !== 0o600) return false;
+      // use authoritative descriptor size before retaining any new evidence
+      if (metadata.size + line.length > maxSpoolBytes) return false;
+      let offset = 0;
+      // complete short writes without acknowledging a truncated journal record
+      while (offset < line.length) {
+        const written = writeSync(fd, line, offset, line.length - offset);
+        // a zero-length write cannot make publication progress
+        if (written <= 0) throw new Error('spool_write_failed');
+        offset += written;
+      }
+      fsyncSync(fd);
+      // always fence the directory entry, including a previous uncertain creation
+      const directory = openSync(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fsyncSync(directory); } finally { closeSync(directory); }
+    } finally { closeSync(fd); }
     return true;
   } catch { return false; }
   finally {

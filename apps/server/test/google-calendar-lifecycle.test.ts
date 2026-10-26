@@ -22,7 +22,7 @@ describe('Google Calendar managed lifecycle', () => {
     await first.admit(admission);
     expect(admit).toHaveBeenCalledWith({ ...admission, labels: { worktree: expected, project: expected, agent: 'Codex' } });
     const restarted = new GoogleCalendarLifecycle(options);
-    await expect(restarted.beforeSend({ ...admission, prompt: 'work', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', sentAt: '2026-10-23T17:00:01.000Z' })).resolves.toEqual({ tracked: true });
+    await restarted.beforeSend({ ...admission, prompt: 'work', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', sentAt: '2026-10-23T17:00:01.000Z' });
     await restarted.observe('labels', { version: 1, compatible: () => true, inspect: async () => ({ state: 'pending', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: 2, startOrdinal: 3, turnId: 'turn', startedAt: '2026-10-23T17:00:02.000Z' }) });
     expect(signals.find(signal => signal.type === 'started')?.labels).toEqual({ worktree: expected, project: expected, agent: 'Codex' });
     await expect(new GoogleCalendarLifecycle(options).pending()).resolves.toEqual([{ id: 'labels', agentId: 'agent', kind: 'codex' }]);
@@ -96,7 +96,7 @@ describe('Google Calendar managed lifecycle', () => {
       labels: async () => ({ worktree: 'Cora', project: 'RAC', agent: 'Codex' })
     });
     await lifecycle.admit({ id: 'activity-1', agentId: 'agent-1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z' });
-    await expect(lifecycle.beforeSend({ id: 'activity-1', agentId: 'agent-1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', prompt: 'secret prompt', baseline: { rollout: '/private/rollout.jsonl', ordinal: 7 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', processId: 42, sentAt: '2026-10-23T17:00:01.000Z' })).resolves.toEqual({ tracked: true });
+    await lifecycle.beforeSend({ id: 'activity-1', agentId: 'agent-1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', prompt: 'secret prompt', baseline: { rollout: '/private/rollout.jsonl', ordinal: 7 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', processId: 42, sentAt: '2026-10-23T17:00:01.000Z' });
     const inspect = vi.fn(async () => ({ state: 'finished' as const, source: 'codex-rollout' as const, parserVersion: 1 as const, receiptOrdinal: 8, startOrdinal: 9, terminalOrdinal: 10, turnId: 'turn-1', startedAt: '2026-10-23T17:00:02.000Z', finishedAt: '2026-10-23T17:00:03.000Z' }));
     await lifecycle.observe('activity-1', { version: 1, compatible: () => true, inspect });
 
@@ -118,7 +118,7 @@ describe('Google Calendar managed lifecycle', () => {
       labels: async () => ({ worktree: 'Scratch', project: 'Scratch', agent: 'Claude' })
     });
     await lifecycle.admit({ id: 'activity-2', agentId: 'agent-2', kind: 'claude', submittedAt: '2026-10-23T17:00:00.000Z' });
-    await expect(lifecycle.beforeSend({ id: 'activity-2', agentId: 'agent-2', kind: 'claude', submittedAt: '2026-10-23T17:00:00.000Z', prompt: 'do it', socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%2', sentAt: '2026-10-23T17:00:01.000Z' })).resolves.toEqual({ tracked: false });
+    await lifecycle.beforeSend({ id: 'activity-2', agentId: 'agent-2', kind: 'claude', submittedAt: '2026-10-23T17:00:00.000Z', prompt: 'do it', socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%2', sentAt: '2026-10-23T17:00:01.000Z' });
     expect(signals).toEqual([{ id: 'activity-2', type: 'invalid', reason: 'unsupported_lifecycle_contract' }]);
   });
 
@@ -350,7 +350,7 @@ describe('Google Calendar managed lifecycle', () => {
     const malformed = join(directory, 'malformed.json');
     await writeFile(malformed, '{', { mode: 0o600 });
     const preKey = new GoogleCalendarLifecycle({ file: malformed, sink: { admit: async () => true, signal: async signal => { signals.push(signal); } }, labels: async () => ({ worktree: 'Cora', project: 'RAC', agent: 'Codex' }) });
-    await expect(preKey.beforeSend({ id: 'pre-key-failure', agentId: 'agent-1', kind: 'codex', submittedAt: new Date().toISOString(), prompt: 'continue', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', sentAt: new Date().toISOString() })).resolves.toEqual({ tracked: false });
+    await preKey.beforeSend({ id: 'pre-key-failure', agentId: 'agent-1', kind: 'codex', submittedAt: new Date().toISOString(), prompt: 'continue', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', sentAt: new Date().toISOString() });
     expect(signals).toContainEqual({ id: 'pre-key-failure', type: 'invalid', reason: 'capture_store_unavailable' });
 
     const persistFile = join(directory, 'persist-failure.json');
@@ -359,7 +359,7 @@ describe('Google Calendar managed lifecycle', () => {
     await persistFailure.pending();
     await rm(persistFile);
     await mkdir(persistFile);
-    await expect(persistFailure.beforeSend({ id: 'pre-key-persist-failure', agentId: 'agent-1', kind: 'codex', submittedAt: new Date().toISOString(), prompt: 'continue', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', sentAt: new Date().toISOString() })).resolves.toEqual({ tracked: false });
+    await persistFailure.beforeSend({ id: 'pre-key-persist-failure', agentId: 'agent-1', kind: 'codex', submittedAt: new Date().toISOString(), prompt: 'continue', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', sentAt: new Date().toISOString() });
     expect(signals).toContainEqual({ id: 'pre-key-persist-failure', type: 'invalid', reason: 'capture_store_unavailable' });
   });
 

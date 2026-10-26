@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const helper = join(process.cwd(), '../../scripts/hooks/rac-claude-lifecycle.mjs');
@@ -29,12 +29,55 @@ if(args[0]==='wait-for'){ if(args[1]==='-L'){if(state.locked){process.exitCode=1
 else if(args[0]==='show-options'){ if(state.arm) process.stdout.write(state.arm+'\\n'); else process.exitCode=1; }
 else if(args[0]==='set-option'){ const unset=args.includes('-u'); const name=args[args.length-(unset?1:2)]; if(name==='@rac_calendar_arm'){ if(unset) delete state.arm; else state.arm=args.at(-1); } if(name==='@rac_calendar_journal') state.journal=args.at(-1); writeFileSync(file,JSON.stringify(state)); }
 `, { mode: 0o755 });
-  const invoke = (event: string, body = '') => new Promise<void>((resolve, reject) => {
-    const child = execFile(helper, [event], { env: { ...process.env, RAC_TMUX_BIN: tmux, RAC_CALENDAR_LIFECYCLE_SPOOL: spool, TMUX_PANE: '%7', STATE_FILE: file } }, error => error ? reject(error) : resolve());
+  const traceFile = join(directory, 'filesystem.jsonl');
+  const probe = join(directory, 'filesystem-probe.mjs');
+  // observe real file descriptors and inject only the selected filesystem failure
+  await writeFile(probe, `import fs from 'node:fs';
+import {syncBuiltinESMExports} from 'node:module';
+import {dirname} from 'node:path';
+const original = {open:fs.openSync,close:fs.closeSync,stat:fs.fstatSync,lstat:fs.lstatSync,sync:fs.fsyncSync,write:fs.writeSync};
+const traceFd = original.open(process.env.FS_TRACE,'a',0o600);
+const paths = new Map();
+const trace = (action,path) => original.write(traceFd,JSON.stringify({action,path})+'\\n');
+// retain descriptor identity through every real publication operation
+fs.openSync = (path,...args) => { const fd=original.open(path,...args);paths.set(fd,String(path));trace('open',String(path));return fd; };
+// validate the opened file rather than a race-prone pathname observation
+fs.fstatSync = fd => {
+  const value=original.stat(fd);trace('stat',paths.get(fd));
+  // emulate a descriptor owned by a different uid without changing host ownership
+  if(process.env.FS_FAULT==='owner'&&paths.get(fd)===process.env.RAC_CALENDAR_LIFECYCLE_SPOOL)return {...value,uid:value.uid+1,isFile:()=>value.isFile()};
+  return value;
+};
+// a misleading path stat must not override the authoritative open descriptor size
+fs.lstatSync = (path,...args) => { const value=original.lstat(path,...args);return process.env.FS_FAULT==='size'&&String(path)===process.env.RAC_CALENDAR_LIFECYCLE_SPOOL?{...value,size:0}:value; };
+// trace actual writes without replacing storage behavior
+fs.writeSync = (fd,...args) => {
+  trace('write',paths.get(fd));
+  // force a stalled append without replacing any other filesystem operation
+  if(process.env.FS_FAULT==='zero-write'&&paths.get(fd)===process.env.RAC_CALENDAR_LIFECYCLE_SPOOL)return 0;
+  // complete a real partial write so the helper must continue from its returned byte count
+  if(process.env.FS_FAULT==='short-write'&&paths.get(fd)===process.env.RAC_CALENDAR_LIFECYCLE_SPOOL)return original.write(fd,args[0],args[1],Math.max(1,Math.floor(args[2]/2)));
+  return original.write(fd,...args);
+};
+// refuse the directory barrier after the file barrier has completed
+fs.fsyncSync = fd => {
+  trace('sync',paths.get(fd));
+  // emulate a failed durable directory publication
+  if(process.env.FS_FAULT==='directory-sync'&&paths.get(fd)===dirname(process.env.RAC_CALENDAR_LIFECYCLE_SPOOL))throw new Error('synthetic_directory_sync_failure');
+  return original.sync(fd);
+};
+// keep descriptor reuse from confusing the recorded publication order
+fs.closeSync = fd => {trace('close',paths.get(fd));paths.delete(fd);return original.close(fd);};
+syncBuiltinESMExports();
+`);
+  const invoke = (event: string, body = '', fault = '') => new Promise<void>((resolve, reject) => {
+    const child = execFile(process.execPath, ['--import', probe, helper, event], { env: { ...process.env, RAC_TMUX_BIN: tmux, RAC_CALENDAR_LIFECYCLE_SPOOL: spool, TMUX_PANE: '%7', STATE_FILE: file, FS_TRACE: traceFile, FS_FAULT: fault } }, error => error ? reject(error) : resolve());
     child.stdin!.end(body);
   });
   const state = async () => JSON.parse(await readFile(file, 'utf8')) as { arm?: string; journal?: string; locked?: boolean; unlocks?: number };
-  return { invoke, state, spool };
+  // read the actual syscall boundary evidence from this isolated helper process
+  const trace = async () => (await readFile(traceFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { action: string; path: string });
+  return { invoke, state, spool, trace };
 }
 
 // build the exact synthetic documented hook identity used by dormant helper tests
@@ -43,6 +86,78 @@ const questionPayload = (id = promptId) => JSON.stringify({ hook_event_name: 'Pr
 const terminalPayload = () => JSON.stringify({ hook_event_name: 'Stop', session_id: sessionId, prompt_id: promptId, stop_hook_active: false });
 
 describe('Claude managed lifecycle hook', () => {
+  // rejected spool paths must not modify another file or repair exposed permissions
+  it.each(['symlink', 'directory', 'exposed'] as const)('refuses a %s spool without touching its target', async kind => {
+    const test = await fixture('managed');
+    const protectedFile = join(dirname(test.spool), 'protected.txt');
+    await writeFile(protectedFile, 'unchanged', { mode: 0o640 });
+    await chmod(protectedFile, 0o640);
+    // a link cannot redirect append or chmod to a different same-account file
+    if (kind === 'symlink') await symlink(protectedFile, test.spool);
+    // reject a nonregular target before writing any evidence
+    if (kind === 'directory') await mkdir(test.spool);
+    // an existing exposed file is rejected rather than silently chmodded
+    if (kind === 'exposed') {
+      await writeFile(test.spool, 'unchanged', { mode: 0o644 });
+      await chmod(test.spool, 0o644);
+    }
+    await test.invoke('start', startPayload('managed'));
+    expect(await readFile(protectedFile, 'utf8')).toBe('unchanged');
+    expect((await stat(protectedFile)).mode & 0o777).toBe(0o640);
+    // retain the original public-mode file unchanged on refusal
+    if (kind === 'exposed') {
+      expect(await readFile(test.spool, 'utf8')).toBe('unchanged');
+      expect((await stat(test.spool)).mode & 0o777).toBe(0o644);
+    }
+    expect(JSON.parse(Buffer.from((await test.state()).journal!, 'base64url').toString('utf8'))).toMatchObject({ state: 'invalid' });
+  });
+
+  // only the size on the opened regular descriptor can authorize a bounded append
+  it('uses descriptor size instead of a misleading path stat', async () => {
+    const test = await fixture('managed');
+    await writeFile(test.spool, Buffer.alloc(8 * 1024 * 1024, 0x20), { mode: 0o600 });
+    await test.invoke('start', startPayload('managed'), 'size');
+    expect((await stat(test.spool)).size).toBe(8 * 1024 * 1024);
+    expect(JSON.parse(Buffer.from((await test.state()).journal!, 'base64url').toString('utf8'))).toMatchObject({ state: 'invalid' });
+  });
+
+  // reject foreign descriptor ownership before any append
+  it('rejects a spool descriptor whose owner does not match the helper', async () => {
+    const test = await fixture('managed');
+    await writeFile(test.spool, '', { mode: 0o600 });
+    await test.invoke('start', startPayload('managed'), 'owner');
+    expect(await readFile(test.spool, 'utf8')).toBe('');
+    expect(JSON.parse(Buffer.from((await test.state()).journal!, 'base64url').toString('utf8'))).toMatchObject({ state: 'invalid' });
+  });
+
+  // partial regular-file writes must complete one parseable record before acknowledgement
+  it('finishes short writes before publishing active lifecycle authority', async () => {
+    const test = await fixture('managed');
+    await test.invoke('start', startPayload('managed'), 'short-write');
+    expect(JSON.parse(await readFile(test.spool, 'utf8'))).toMatchObject({ state: 'active', activityId: 'activity-1' });
+    expect(JSON.parse(Buffer.from((await test.state()).journal!, 'base64url').toString('utf8'))).toMatchObject({ state: 'active' });
+    expect((await test.trace()).filter(entry => entry.action === 'write' && entry.path === test.spool).length).toBeGreaterThan(1);
+  });
+
+  // a stalled write must not acknowledge partial or empty durable evidence
+  it('fails closed when a spool write makes no progress', async () => {
+    const test = await fixture('managed');
+    await test.invoke('start', startPayload('managed'), 'zero-write');
+    expect(await readFile(test.spool, 'utf8')).toBe('');
+    const state = await test.state();
+    expect(state.arm).toBeUndefined();
+    expect(JSON.parse(Buffer.from(state.journal!, 'base64url').toString('utf8'))).toMatchObject({ state: 'invalid' });
+  });
+
+  // a failed parent barrier cannot acknowledge a durable lifecycle publication
+  it('fails closed when the directory durability barrier rejects publication', async () => {
+    const test = await fixture('managed');
+    await test.invoke('start', startPayload('managed'), 'directory-sync');
+    const state = await test.state();
+    expect(state.arm).toBeUndefined();
+    expect(JSON.parse(Buffer.from(state.journal!, 'base64url').toString('utf8'))).toMatchObject({ state: 'invalid' });
+  });
+
   it('consumes one matching arm and keeps authority through question to terminal', async () => {
     const prompt = 'perform the managed task';
     const test = await fixture(prompt);
@@ -61,6 +176,13 @@ describe('Claude managed lifecycle hook', () => {
     const spooled = (await readFile(test.spool, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     expect(spooled.map(entry => entry.state)).toEqual(['active', 'active', 'terminal']);
     expect(await stat(test.spool).then(value => value.mode & 0o777)).toBe(0o600);
+    const trace = await test.trace();
+    const written = trace.findIndex(entry => entry.action === 'write' && entry.path === test.spool);
+    const fileSync = trace.findIndex(entry => entry.action === 'sync' && entry.path === test.spool);
+    const directorySync = trace.findIndex(entry => entry.action === 'sync' && entry.path === dirname(test.spool));
+    expect(written).toBeGreaterThanOrEqual(0);
+    expect(fileSync).toBeGreaterThan(written);
+    expect(directorySync).toBeGreaterThan(fileSync);
   });
 
   // fail closed at each prompt admission boundary including the helper's input bound

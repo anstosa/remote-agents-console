@@ -73,7 +73,7 @@ describe('tracked prompt lifecycle', () => {
     const question = vi.fn(async () => undefined);
     const questionForAgent = vi.fn(async () => undefined);
     const calendar = {
-      admit: async () => undefined, beforeSend: async () => ({ tracked: true }),
+      admit: async () => undefined, beforeSend: async () => ({}),
       pending: async () => [], observe: async () => undefined, question, questionForAgent,
       missing: async () => undefined, invalid: async () => undefined, handOver: async () => undefined
     };
@@ -214,7 +214,7 @@ describe('tracked prompt lifecycle', () => {
     const armAndSendKeys = vi.fn(async () => accepted);
     const sendKeys = vi.fn(async () => true);
     const invalid = vi.fn(async () => undefined);
-    const beforeSend = vi.fn(async (_intent: { id: string }) => ({ tracked: true, arm: 'synthetic-arm' }));
+    const beforeSend = vi.fn(async (_intent: { id: string }) => ({ arm: 'synthetic-arm' }));
     const calendar = {
       admit: async () => undefined, beforeSend,
       pending: async () => [], observe: async () => undefined, question: async () => undefined,
@@ -376,7 +376,7 @@ describe('tracked prompt lifecycle', () => {
     const missing = vi.fn(async () => undefined);
     const calendar = {
       admit: async () => undefined,
-      beforeSend: async () => ({ tracked: true }),
+      beforeSend: async () => ({}),
       pending: async () => [{ id: 'durable-activity', agentId: agent.id, kind: 'codex' }, { id: 'sibling-activity', agentId: 'socket:%2', kind: 'codex' }],
       observe,
       question: async () => undefined,
@@ -405,7 +405,7 @@ describe('tracked prompt lifecycle', () => {
     const questionForAgent = vi.fn(async () => undefined);
     const calendar = {
       admit: async () => undefined,
-      beforeSend: async () => ({ tracked: true }),
+      beforeSend: async () => ({}),
       pending: async () => [],
       observe: async () => undefined,
       question,
