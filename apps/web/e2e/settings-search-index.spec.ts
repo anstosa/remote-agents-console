@@ -23,10 +23,11 @@ const source = (id: string, format: SettingsSource['format'], schema?: SettingsS
 const pages: SettingsSearchPage[] = [
   { id: 'browser', label: 'This browser', group: 'Console' },
   { id: 'voice', label: 'Voice', group: 'Console' },
+  { id: 'google-calendar', label: 'Google Calendar', group: 'Integrations' },
   { id: 'keyboard', label: 'Keyboard shortcuts', group: 'Console' },
   { id: 'app', label: 'Application', group: 'Application' },
   { id: 'interface', label: 'Interface', group: 'Application' },
-  { id: 'agents', label: 'Agents', group: 'Application' },
+  { id: 'agents', label: 'Agents', group: 'Integrations' },
   { id: 'projects', label: 'Projects', group: 'Application' },
   { id: 'reviews', label: 'Reviews', group: 'Application' },
   { id: 'tmux', label: 'TMUX', group: 'Application' },
@@ -146,6 +147,39 @@ test('indexes Interface and Projects controls under their owning pages', () => {
   expect(fieldAt(results, 'app', ['buttons', 'pullRequest', '0', 'text'])).toBeUndefined();
   expect(JSON.stringify(results)).not.toContain('PRIVATE_BUTTON_TEXT');
   expect(JSON.stringify(results)).not.toContain('PRIVATE_BUTTON_PROMPT');
+});
+
+// route calendar configuration and credentials without indexing title values
+test('indexes Google Calendar fields only on the dedicated page', () => {
+  const schema = applicationSettingsSchema();
+  const application = source('app', 'json', schema, {
+    googleCalendar: {
+      enabled: false,
+      titleTemplate: 'PRIVATE {worktree} TITLE',
+      startMoment: 'work_started',
+      endMoment: 'work_finished'
+    }
+  });
+  const environment = source('env', 'env', undefined, undefined, [
+    'RAC_GOOGLE_CALENDAR_CLIENT_ID',
+    'RAC_GOOGLE_CALENDAR_CLIENT_SECRET',
+    'RAC_GOOGLE_CALENDAR_TOKEN_KEY',
+    'RAC_GOOGLE_CALENDAR_PREVIOUS_TOKEN_KEY'
+  ].map(key => ({ key, protected: true, present: true, hasValue: true, apply: 'rac-restart' as const, description: `${key} setup value.` })));
+  const results = build([application, environment]);
+
+  expect(fieldAt(results, 'google-calendar', ['googleCalendar', 'enabled'])?.label).toBe('Enable Google Calendar');
+  expect(fieldAt(results, 'google-calendar', ['googleCalendar', 'enabled'])?.breadcrumbs).toEqual(['Integrations', 'Google Calendar']);
+  expect(fieldAt(results, 'google-calendar', ['googleCalendar', 'titleTemplate'])?.label).toBe('Event title template');
+  expect(fieldAt(results, 'google-calendar', ['googleCalendar', 'startMoment'])?.label).toBe('Start moment');
+  expect(fieldAt(results, 'google-calendar', ['googleCalendar', 'endMoment'])?.label).toBe('End moment');
+  expect(fieldAt(results, 'app', ['googleCalendar', 'titleTemplate'])).toBeUndefined();
+  expect(fieldAt(results, 'google-calendar', ['RAC_GOOGLE_CALENDAR_TOKEN_KEY'])).toBeDefined();
+  expect(fieldAt(results, 'env', ['RAC_GOOGLE_CALENDAR_TOKEN_KEY'])).toBeUndefined();
+  const serialized = JSON.stringify(results);
+  expect(serialized).not.toContain('PRIVATE {worktree} TITLE');
+  expect(serialized).not.toContain('Timely');
+  expect(serialized).not.toMatch(/offset/iu);
 });
 
 // normalize product acronyms only in search metadata, never canonical values
@@ -455,9 +489,9 @@ test('routes Agent environment fields by installation mode without leaking sourc
     expect(fieldAt(compose, 'env', [key])).toBeUndefined();
   }
   // route codex-owned fields into codex env
-  for (const key of agentEnvironmentKeysForAdapter('codex', 'compose')) expect(fieldAt(compose, 'agents', [key])?.breadcrumbs).toEqual(['Application', 'Agents', 'Codex', 'Environment & keys']);
+  for (const key of agentEnvironmentKeysForAdapter('codex', 'compose')) expect(fieldAt(compose, 'agents', [key])?.breadcrumbs).toEqual(['Integrations', 'Agents', 'Codex', 'Environment & keys']);
   // route claude-owned fields into claude env
-  for (const key of agentEnvironmentKeysForAdapter('claude', 'compose')) expect(fieldAt(compose, 'agents', [key])?.breadcrumbs).toEqual(['Application', 'Agents', 'Claude', 'Environment & keys']);
+  for (const key of agentEnvironmentKeysForAdapter('claude', 'compose')) expect(fieldAt(compose, 'agents', [key])?.breadcrumbs).toEqual(['Integrations', 'Agents', 'Claude', 'Environment & keys']);
   expect(agentEnvironmentOwnerForKey('CODEX_VERSION', 'compose')).toBe('codex');
   expect(agentEnvironmentOwnerForKey('CODEX_VERSION', 'systemd')).toBeUndefined();
   expect(agentEnvironmentKeysForAdapter('omx', 'compose').size).toBe(0);

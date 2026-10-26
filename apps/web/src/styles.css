@@ -150,8 +150,11 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 main { max-width: 1100px; margin: auto; padding: var(--edge); }
 .console { position: relative; isolation: isolate; max-width: none; width: 100%; height: var(--app-height, 100dvh); padding: 0; display: grid; grid-template-rows: minmax(0, 1fr); overflow: hidden; background: radial-gradient(circle at 50% -14rem, var(--surface-1) 0, var(--mantle) 35rem, var(--crust) 78rem); }
 .console::before { position: absolute; inset: 0; z-index: -1; content: ''; opacity: .32; background-image: linear-gradient(color-mix(in srgb, var(--surface-2) 9%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in srgb, var(--surface-2) 9%, transparent) 1px, transparent 1px); background-size: 2.5rem 2.5rem; mask-image: radial-gradient(ellipse at 50% 0, #000 0, transparent 72%); }
-.auth-screen { position: relative; isolation: isolate; max-width: none; width: 100%; min-height: 100dvh; display: grid; place-items: center; overflow: hidden; background: radial-gradient(circle at 50% 42%, var(--surface-0) 0, var(--mantle) 26rem, var(--crust) 70rem); }
+.auth-screen { position: relative; isolation: isolate; box-sizing: border-box; max-width: none; width: 100%; min-height: 100dvh; display: grid; place-items: center; overflow: hidden; background: radial-gradient(circle at 50% 42%, var(--surface-0) 0, var(--mantle) 26rem, var(--crust) 70rem); }
 .auth-screen::before { position: absolute; inset: 0; z-index: -1; content: ''; opacity: .28; background-image: linear-gradient(color-mix(in srgb, var(--surface-2) 8%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in srgb, var(--surface-2) 8%, transparent) 1px, transparent 1px); background-size: 2rem 2rem; mask-image: radial-gradient(circle at center, #000 0, transparent 68%); }
+/* keep password entry reachable in short viewports without changing app scrolling */
+.auth-login-screen { height: var(--app-height, 100dvh); min-height: 0; overflow-y: auto; align-items: safe center; }
+.auth-back { justify-self: start; min-height: 2.75rem; padding: .3rem 0; background: transparent; border: 0; box-shadow: none; color: var(--blue); font-size: .72rem; }
 .auth-glow { position: absolute; z-index: -1; width: 28rem; aspect-ratio: 1; border-radius: 50%; background: conic-gradient(from 180deg, transparent, color-mix(in srgb, var(--mauve) 14%, transparent), color-mix(in srgb, var(--blue) 16%, transparent), transparent); filter: blur(28px); }
 .auth-card { position: relative; display: grid; gap: 1rem; width: min(25rem, calc(100vw - 2rem)); padding: 1.5rem; border: 1px solid color-mix(in srgb, var(--lavender) 42%, var(--surface-1)); border-radius: var(--control-radius); background: linear-gradient(145deg, color-mix(in srgb, var(--base) 94%, transparent), color-mix(in srgb, var(--mantle) 93%, transparent)); box-shadow: 0 1.5rem 4rem color-mix(in srgb, var(--crust) 86%, transparent), inset 0 1px color-mix(in srgb, var(--text) 5%, transparent); }
 .auth-card::before { position: absolute; top: 0; right: 1.2rem; left: 1.2rem; height: 1px; content: ''; background: linear-gradient(90deg, transparent, var(--lavender), transparent); opacity: .8; }
@@ -159,6 +162,13 @@ main { max-width: 1100px; margin: auto; padding: var(--edge); }
 .auth-heading { display: grid; gap: .22rem; }
 .auth-heading p { margin: 0; color: var(--mauve); font: 700 .64rem var(--font-mono); letter-spacing: .16em; }
 .auth-heading h1 { margin: 0; color: var(--text); font-size: 1.4rem; letter-spacing: -.025em; }
+/* keep the public description and legal links legible without competing with authentication */
+.auth-description { margin: -.2rem 0 0; color: var(--subtext-0); font-size: .72rem; line-height: 1.55; }
+.auth-policy-footer { border-top: 1px solid var(--surface-1); padding-top: .85rem; }
+.auth-policy-links { display: flex; flex-wrap: wrap; gap: .45rem 1rem; }
+.auth-policy-links a { color: var(--blue); font: 700 .68rem var(--font-mono); text-decoration: underline; text-underline-offset: .16em; }
+.auth-policy-links a:hover { color: var(--text); }
+.auth-policy-links a:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
 .server-switcher { display: inline-flex; min-width: 0; max-width: 100%; align-items: stretch; overflow-x: auto; color: var(--subtext-0); font-family: var(--font-mono); scrollbar-width: none; }
 .server-switcher::-webkit-scrollbar { display: none; }
 .server-switcher-button { position: relative; display: inline-flex; min-width: 0; min-height: 2rem; max-width: 12rem; align-items: center; justify-content: flex-start; gap: .5rem; border: 1px solid var(--surface-1); border-radius: 0; padding: .35rem .55rem; background: var(--mantle); color: var(--subtext-0); box-shadow: none; cursor: pointer; font: 700 .72rem var(--font-mono); text-decoration: none; transition: filter .15s ease; }

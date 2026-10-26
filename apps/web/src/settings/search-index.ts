@@ -1,6 +1,6 @@
 import { composeOptionSettings } from '../../../server/src/settings/catalog.js';
 import { isProtectedValue, type SettingsSchema, type SettingsSnapshot, type SettingsSource } from './contracts.js';
-import { agentEnvironmentKeys, agentEnvironmentOwnerForKey, storageEnvironmentKeys, voiceEnvironmentKeys } from './environment-fields.js';
+import { agentEnvironmentKeys, agentEnvironmentOwnerForKey, googleCalendarEnvironmentKeys, storageEnvironmentKeys, voiceEnvironmentKeys } from './environment-fields.js';
 import { tmuxEnvironmentKeysForInstallation } from './tmux-settings.js';
 
 export type SettingsSearchPage = {
@@ -54,6 +54,7 @@ const applicationDedicatedPaths = new Set([
   'projects',
   'buttons',
   'review',
+  'googleCalendar',
   'proxy',
   'integrations.multiInstance',
   'integrations.realtime'
@@ -244,6 +245,23 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
     }
   }
 
+  const googleCalendar = baseSchema.properties?.googleCalendar;
+  // route calendar capture configuration to its dedicated page
+  if (googleCalendar !== undefined) {
+    const properties = googleCalendar.properties ?? {};
+    const presented = { ...googleCalendar, properties: {
+      ...properties,
+      enabled: { ...properties.enabled, type: properties.enabled?.type ?? 'boolean', label: 'Enable Google Calendar' } as SettingsSchema,
+      titleTemplate: { ...properties.titleTemplate, type: properties.titleTemplate?.type ?? 'string', label: 'Event title template' } as SettingsSchema,
+      startMoment: { ...properties.startMoment, type: properties.startMoment?.type ?? 'enum', label: 'Start moment' } as SettingsSchema,
+      endMoment: { ...properties.endMoment, type: properties.endMoment?.type ?? 'enum', label: 'End moment' } as SettingsSchema
+    } };
+    visitSchema(index, 'google-calendar', presented, childValue(source.value, 'googleCalendar'), ['googleCalendar'], [], {
+      forceAbsentChildren: true,
+      includeSelf: false
+    });
+  }
+
   const polling = baseSchema.properties?.tmux;
   // index the application half of the TMUX page
   if (polling !== undefined) {
@@ -321,6 +339,11 @@ function addEnvironmentFields(index: FieldIndex, source: SettingsSource | undefi
     // keep dedicated voice credentials searchable through disabled and raw states
     if (voiceEnvironmentKeys.has(field.key)) {
       index.add('voice', field.key, [field.key], ['Environment & keys'], [field.description]);
+      continue;
+    }
+    // keep Google OAuth credentials searchable only on their masked setup page
+    if (googleCalendarEnvironmentKeys.has(field.key)) {
+      index.add('google-calendar', field.key, [field.key], ['Environment & keys'], [field.description]);
       continue;
     }
     // whole-source mode and dedicated controls replace the general environment row

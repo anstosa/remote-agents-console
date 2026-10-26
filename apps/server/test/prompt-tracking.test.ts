@@ -1,12 +1,19 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { AuthStore, ActivityStore } from '../src/google-calendar/store.js';
+import { parseTokenKey } from '../src/google-calendar/crypto.js';
+import { createGoogleCalendarService } from '../src/google-calendar/runtime.js';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { codexAdapter } from '../src/adapters/codex.js';
 import { claudeAdapter } from '../src/adapters/claude.js';
 import type { AttentionState, CompletionEvent } from '../src/adapters/types.js';
 import { QueuedPromptService } from '../src/prompts/queue.js';
 import { PromptService } from '../src/prompts/service.js';
+import { GoogleCalendarLifecycle } from '../src/google-calendar/lifecycle.js';
+import * as tmuxCommand from '../src/tmux/command.js';
+import type { CalendarSignal } from '../src/google-calendar/contracts.js';
 
 const socket = { fingerprint: 'socket', path: '/tmp/sock', device: 1, inode: 1 };
 const directories: string[] = [];
@@ -42,7 +49,8 @@ describe('tracked prompt lifecycle', () => {
     const discovery = {
       worktreesNow: () => [],
       target: async () => ({ agent, socket }),
-      paneProcessId: () => 42
+      paneProcessId: () => 42,
+      agentProcessId: () => process.pid
     };
     const tmux = {
       pastePrompt: async () => true,
@@ -62,7 +70,14 @@ describe('tracked prompt lifecycle', () => {
         since: async (baseline: { ordinal: number }) => terminal.get(baseline.ordinal) ?? { kind: 'pending' as const }
       }
     };
-    const service = new PromptService(discovery as never, tmux as never, undefined, queue, undefined, () => adapter as never);
+    const question = vi.fn(async () => undefined);
+    const questionForAgent = vi.fn(async () => undefined);
+    const calendar = {
+      admit: async () => undefined, beforeSend: async () => ({ tracked: true }),
+      pending: async () => [], observe: async () => undefined, question, questionForAgent,
+      missing: async () => undefined, invalid: async () => undefined, handOver: async () => undefined
+    };
+    const service = new PromptService(discovery as never, tmux as never, undefined, queue, undefined, () => adapter as never, undefined, undefined, calendar);
 
     const tracked = await service.submitTracked(agent.id, 'same prompt');
     expect(tracked).toBeDefined();
@@ -79,6 +94,8 @@ describe('tracked prompt lifecycle', () => {
     await service.observe(agent as never);
     agent.attention = 'question';
     await service.observe(agent as never);
+    expect(question).not.toHaveBeenCalled();
+    expect(questionForAgent).not.toHaveBeenCalled();
     expect(service.requestStatus(tracked!.requestId)).toMatchObject({ state: 'running', submitted: true });
 
     // reject an idle transition without this rollout's terminal event
@@ -188,6 +205,76 @@ describe('tracked prompt lifecycle', () => {
     expect(service.requestStatus(tracked!.requestId)).toMatchObject({ state: 'running', submitted: true });
   });
 
+  // keep the atomic Claude arm path inside the injected pane-safety boundary
+  it.each([true, false])('submits a managed Claude arm through tmux with outcome %s', async accepted => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-prompt-arm-'));
+    directories.push(directory);
+    const agent = testAgent('claude', directory);
+    const discovery = { worktreesNow: () => [], target: async () => ({ agent, socket }) };
+    const armAndSendKeys = vi.fn(async () => accepted);
+    const sendKeys = vi.fn(async () => true);
+    const invalid = vi.fn(async () => undefined);
+    const beforeSend = vi.fn(async (_intent: { id: string }) => ({ tracked: true, arm: 'synthetic-arm' }));
+    const calendar = {
+      admit: async () => undefined, beforeSend,
+      pending: async () => [], observe: async () => undefined, question: async () => undefined,
+      questionForAgent: async () => undefined, missing: async () => undefined, invalid, handOver: async () => undefined
+    };
+    const raw = vi.spyOn(tmuxCommand, 'run').mockResolvedValue({ code: 1, stdout: '', stderr: '' });
+    try {
+      const service = new PromptService(discovery as never, { pastePrompt: async () => true, sendKeys, armAndSendKeys } as never, undefined, undefined, undefined, () => claudeAdapter, undefined, undefined, calendar);
+      const tracked = await service.submitTracked(agent.id, 'managed Claude work');
+      expect(armAndSendKeys).toHaveBeenCalledExactlyOnceWith(socket, '%1', 'synthetic-arm', ['Enter']);
+      expect(sendKeys).not.toHaveBeenCalled();
+      expect(raw).not.toHaveBeenCalled();
+      const requestId = beforeSend.mock.calls[0]![0].id;
+      expect(tracked?.requestId).toBe(accepted ? requestId : undefined);
+      expect(service.requestStatus(requestId)).toMatchObject({ state: accepted ? 'running' : 'failed', submitted: accepted });
+      // failed atomic submission invalidates only the exact capture rather than sending again
+      if (!accepted) expect(invalid).toHaveBeenCalledExactlyOnceWith(requestId, 'missing_lifecycle_evidence');
+    } finally { raw.mockRestore(); }
+  });
+
+  // internal Note recovery must also settle an admitted but never-dispatched capture
+  it('invalidates calendar admissions after a departed queue is durably drained to Notes', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(100_000);
+    try {
+      const directory = await mkdtemp(join(tmpdir(), 'rac-prompt-calendar-note-'));
+      directories.push(directory);
+      const key = `active:${randomBytes(32).toString('base64url')}`;
+      const authPath = join(directory, 'auth.json');
+      const activitiesPath = join(directory, 'activities.json');
+      const lifecyclePath = join(directory, 'lifecycle.json');
+      await new AuthStore(authPath, parseTokenKey(key)).save({ version: 1, clientId: 'client', principal: { sub: 'subject' }, tokens: { accessToken: 'access', refreshToken: 'refresh', expiresAt: 3_600_000 }, calendars: [{ id: 'calendar', name: 'RAC Work' }], selectedCalendarId: 'calendar' });
+      const provider = await createGoogleCalendarService({ config: { enabled: true, titleTemplate: '{worktree}', startMoment: 'work_started', endMoment: 'work_finished' }, publicOrigin: 'https://agents.example.com', env: { RAC_GOOGLE_CALENDAR_CLIENT_ID: 'client', RAC_GOOGLE_CALENDAR_CLIENT_SECRET: 'secret', RAC_GOOGLE_CALENDAR_TOKEN_KEY: key }, authPath, activitiesPath });
+      const options = { file: lifecyclePath, sink: provider, labels: async () => ({ worktree: 'Main', agent: 'Claude' }) };
+      const lifecycle = new GoogleCalendarLifecycle(options);
+      const queue = new QueuedPromptService(join(directory, 'queue.json'));
+      const agent = testAgent('claude', directory, 'working');
+      const note = join(directory, 'recovered-note.txt');
+      // acknowledge recovery only after the Note boundary has durably accepted the prompt
+      const drain = vi.fn(async (_scope: string, queued: { text: string }) => { await writeFile(note, queued.text); return true; });
+      const service = new PromptService({ worktreesNow: () => [], target: async () => ({ agent, socket }) } as never, { capture: async () => '› Working' } as never, undefined, queue, drain, () => claudeAdapter, undefined, undefined, lifecycle);
+      const tracked = await service.submitTracked(agent.id, 'never sent follow-up');
+      expect(provider.summary().counts.pending).toBe(1);
+      expect(JSON.parse(await readFile(lifecyclePath, 'utf8')).records).toHaveLength(1);
+      await service.retireDeparted([]);
+      vi.setSystemTime(130_001);
+      await service.retireDeparted([]);
+      expect(drain).toHaveBeenCalledOnce();
+      expect(await readFile(note, 'utf8')).toBe('never sent follow-up');
+      await expect(queue.list('agent:socket:%1')).resolves.toEqual([]);
+      expect(service.requestStatus(tracked!.requestId)).toMatchObject({ state: 'failed', error: 'prompt_not_delivered' });
+      expect(JSON.parse(await readFile(lifecyclePath, 'utf8')).records).toEqual([]);
+      await expect(new GoogleCalendarLifecycle(options).pending()).resolves.toEqual([]);
+      const reloaded = new ActivityStore(activitiesPath);
+      await reloaded.load();
+      expect(reloaded.get(tracked!.requestId)).toMatchObject({ status: 'awaiting_evidence', reason: 'missing_lifecycle_evidence' });
+      expect(provider.summary().counts.pending).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   // allocate a process-local identity when durable queuing is unavailable
   it('tracks direct submission with a fallback request id', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'rac-prompt-direct-'));
@@ -278,5 +365,95 @@ describe('tracked prompt lifecycle', () => {
 
     expect(first.requestStatus(tracked!.requestId)).toMatchObject({ state: 'queued' });
     expect(restarted.requestStatus(tracked!.requestId)).toBeUndefined();
+  });
+
+  // durable calendar correlation survives the process-local phase registry
+  it('reconciles live and departed calendar activities once per dashboard refresh after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-prompt-calendar-restart-'));
+    directories.push(directory);
+    const agent = testAgent('codex', directory, 'finished');
+    const observe = vi.fn(async () => undefined);
+    const missing = vi.fn(async () => undefined);
+    const calendar = {
+      admit: async () => undefined,
+      beforeSend: async () => ({ tracked: true }),
+      pending: async () => [{ id: 'durable-activity', agentId: agent.id, kind: 'codex' }, { id: 'sibling-activity', agentId: 'socket:%2', kind: 'codex' }],
+      observe,
+      question: async () => undefined,
+      questionForAgent: async () => undefined,
+      invalid: async () => undefined,
+      missing,
+      handOver: async () => undefined
+    };
+    const discovery = { worktreesNow: () => [], target: async () => ({ agent, socket }) };
+    const restarted = new PromptService(discovery as never, { capture: async () => '› Ready' } as never, undefined, undefined, undefined, () => codexAdapter, undefined, undefined, calendar);
+
+    await restarted.reconcileCalendar([agent.id]);
+    await restarted.observe(agent as never);
+
+    expect(observe).toHaveBeenCalledTimes(2);
+    expect(observe.mock.calls.map(call => call[0])).toEqual(['sibling-activity', 'durable-activity']);
+    expect(observe.mock.calls[1]?.[1]?.version).toBe(1);
+    expect(missing).toHaveBeenCalledExactlyOnceWith('sibling-activity');
+  });
+
+  // process identity cannot prove a question belongs to the managed turn
+  it('ignores generic question attention after restart for Codex and Claude', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-prompt-calendar-question-'));
+    directories.push(directory);
+    const question = vi.fn(async () => undefined);
+    const questionForAgent = vi.fn(async () => undefined);
+    const calendar = {
+      admit: async () => undefined,
+      beforeSend: async () => ({ tracked: true }),
+      pending: async () => [],
+      observe: async () => undefined,
+      question,
+      questionForAgent,
+      invalid: async () => undefined,
+      missing: async () => undefined,
+      handOver: async () => undefined
+    };
+    const claude = testAgent('claude', directory, 'question');
+    const claudeDiscovery = { worktreesNow: () => [], target: async () => ({ agent: claude, socket }), agentProcessId: () => process.pid };
+    const claudeService = new PromptService(claudeDiscovery as never, { capture: async () => 'question' } as never, undefined, undefined, undefined, () => claudeAdapter, undefined, undefined, calendar);
+    await claudeService.observe(claude as never);
+    expect(question).not.toHaveBeenCalled();
+    expect(questionForAgent).not.toHaveBeenCalled();
+
+    const codex = testAgent('codex', directory, 'question');
+    const codexDiscovery = { worktreesNow: () => [], target: async () => ({ agent: codex, socket }), agentProcessId: () => process.pid };
+    const codexService = new PromptService(codexDiscovery as never, { capture: async () => 'question' } as never, undefined, undefined, undefined, () => codexAdapter, undefined, undefined, calendar);
+    await codexService.observe(codex as never);
+    expect(question).not.toHaveBeenCalled();
+    expect(questionForAgent).not.toHaveBeenCalled();
+  });
+
+  it('cold-starts PromptService and finalizes a persisted native lifecycle without a phase', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-prompt-calendar-cold-'));
+    directories.push(directory);
+    const file = join(directory, 'calendar-lifecycle.json');
+    const signals: CalendarSignal[] = [];
+    const options = { file, sink: { admit: async () => true, signal: async (signal: CalendarSignal) => { signals.push(signal); } }, labels: async () => ({ worktree: 'Cora', project: 'RAC', agent: 'Codex' }) };
+    const original = new GoogleCalendarLifecycle(options);
+    await original.admit({ id: 'cold-activity', agentId: 'socket:%1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z' });
+    await original.beforeSend({ id: 'cold-activity', agentId: 'socket:%1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', prompt: 'cold prompt', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', sentAt: '2026-10-23T17:00:01.000Z' });
+    const agent = testAgent('codex', directory, 'finished');
+    const adapter = {
+      ...codexAdapter,
+      managedPromptLifecycleV1: {
+        version: 1 as const,
+        compatible: () => true,
+        inspect: async () => ({ state: 'finished' as const, source: 'codex-rollout' as const, parserVersion: 1 as const, receiptOrdinal: 2, startOrdinal: 3, terminalOrdinal: 4, turnId: 'cold-turn', startedAt: '2026-10-23T17:00:02.000Z', finishedAt: '2026-10-23T17:00:03.000Z' })
+      }
+    };
+    const restartedLifecycle = new GoogleCalendarLifecycle(options);
+    const discovery = { worktreesNow: () => [], target: async () => ({ agent, socket }) };
+    const restarted = new PromptService(discovery as never, { capture: async () => '› Ready' } as never, undefined, undefined, undefined, () => adapter, undefined, undefined, restartedLifecycle);
+
+    await restarted.observe(agent as never);
+
+    expect(signals.map(signal => signal.type)).toEqual(['sent', 'started', 'finished']);
+    await expect(restartedLifecycle.pending()).resolves.toEqual([]);
   });
 });

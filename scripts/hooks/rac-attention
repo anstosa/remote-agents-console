@@ -33,12 +33,14 @@ shift 2>/dev/null || true
 
 session=${CLAUDE_CODE_SESSION_ID:-}
 payload_flag=
+lifecycle_event=
 # read an explicit --session <id> and the --payload flag; ignore every other extra argument
 while [ "$#" -gt 0 ]; do
   case $1 in
     --session) session=${2:-}; shift 2 2>/dev/null || shift ;;
     --session=*) session=${1#--session=}; shift ;;
     --payload) payload_flag=1; shift ;;
+    --lifecycle) lifecycle_event=${2:-}; shift 2 2>/dev/null || shift ;;
     *) shift ;;
   esac
 done
@@ -58,11 +60,20 @@ fi
 # list-panes line stays tab-safe), empty unless --payload supplied a small-enough
 # hook body. An oversize payload (over 64 KiB) is dropped; the state still reports.
 question=
-if [ -n "$payload_flag" ]; then
-  raw=$(cat)
-  if [ "$(printf %s "$raw" | wc -c | tr -d ' ')" -le 65536 ]; then
+if [ -n "$payload_flag" ] || [ -n "$lifecycle_event" ]; then
+  # retain at most one byte beyond the accepted hook payload bound
+  raw=$(head -c 65537)
+  raw_bytes=$(printf %s "$raw" | wc -c | tr -d ' ')
+  if [ "$raw_bytes" -le 65536 ]; then
     question=$(printf %s "$raw" | base64 | tr -d '\n')
+  else
+    raw=
   fi
+fi
+
+# lifecycle correlation is opt-in through a short-lived opaque pane arm
+if [ -n "$lifecycle_event" ]; then
+  printf %s "$raw" | "$(dirname "$0")/rac-claude-lifecycle.mjs" "$lifecycle_event" >/dev/null 2>&1 || :
 fi
 
 # one tmux invocation sets @rac_attention, plus @rac_session when known. @rac_question

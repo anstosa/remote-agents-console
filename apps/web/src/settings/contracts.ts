@@ -126,6 +126,82 @@ export type CloudflareStatus = {
   reconnectOrigin?: string;
 };
 
+export type GoogleCalendarSummary = {
+  enabled: boolean;
+  available: boolean;
+  connected: boolean;
+  status: 'disabled' | 'setup_required' | 'connected' | 'ready' | 'degraded';
+  accountEmail?: string;
+  calendars: Array<{ id: string; name: string }>;
+  selectedCalendarId?: string;
+  setup: {
+    clientId: boolean;
+    clientSecret: boolean;
+    tokenKey: boolean;
+    redirectUri: string;
+  };
+  counts: {
+    pending: number;
+    delivered: number;
+    failed: number;
+    suppressed: number;
+  };
+  lastError?: string;
+  lastSuccessAt?: string;
+};
+
+// require one exact set of public response keys
+const hasOnlyKeys = (value: object, allowed: ReadonlySet<string>): boolean => Object.keys(value).every(key => allowed.has(key));
+
+// accept bounded display text without control bytes
+const isSafeCalendarText = (value: unknown, maximum: number): value is string => typeof value === 'string' && Array.from(value).length <= maximum && !/[\p{Cc}\p{Cs}]/u.test(value);
+
+// validate a public callback URI without admitting query credentials
+const isSafeRedirectUri = (value: unknown): value is string => {
+  // require a bounded textual URI
+  if (!isSafeCalendarText(value, 2_048)) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'https:' || url.protocol === 'http:') && url.username === '' && url.password === '' && url.search === '' && url.hash === '';
+  } catch {
+    return false;
+  }
+};
+
+// accept only the safe Google Calendar status projection
+export const isGoogleCalendarSummary = (value: unknown): value is GoogleCalendarSummary => {
+  // require the expected response envelope
+  if (value === null || typeof value !== 'object') return false;
+  const summary = value as GoogleCalendarSummary;
+  const setup = summary.setup;
+  const counts = summary.counts;
+  // validate nested setup and delivery metadata without admitting provider credentials
+  if (setup === null || typeof setup !== 'object' || counts === null || typeof counts !== 'object') return false;
+  // reject unversioned response expansion that could include provider secrets
+  if (!hasOnlyKeys(value, new Set(['enabled', 'available', 'connected', 'status', 'accountEmail', 'calendars', 'selectedCalendarId', 'setup', 'counts', 'lastError', 'lastSuccessAt']))) return false;
+  if (!hasOnlyKeys(setup, new Set(['clientId', 'clientSecret', 'tokenKey', 'redirectUri'])) || !hasOnlyKeys(counts, new Set(['pending', 'delivered', 'failed', 'suppressed']))) return false;
+  // validate every RAC-created calendar label and opaque identifier
+  if (!Array.isArray(summary.calendars) || !summary.calendars.every(calendar => calendar !== null && typeof calendar === 'object' && hasOnlyKeys(calendar, new Set(['id', 'name'])) && isSafeCalendarText(calendar.id, 1_024) && calendar.id !== '' && isSafeCalendarText(calendar.name, 120) && calendar.name.trim() !== '')) return false;
+  // require the selected target to come from the returned RAC-owned registry
+  if (summary.selectedCalendarId !== undefined && !summary.calendars.some(calendar => calendar.id === summary.selectedCalendarId)) return false;
+  return typeof summary.enabled === 'boolean'
+    && typeof summary.available === 'boolean'
+    && typeof summary.connected === 'boolean'
+    && ['disabled', 'setup_required', 'connected', 'ready', 'degraded'].includes(summary.status)
+    && (summary.accountEmail === undefined || isSafeCalendarText(summary.accountEmail, 320))
+    && (summary.selectedCalendarId === undefined || isSafeCalendarText(summary.selectedCalendarId, 1_024))
+    && typeof setup.clientId === 'boolean'
+    && typeof setup.clientSecret === 'boolean'
+    && typeof setup.tokenKey === 'boolean'
+    && isSafeRedirectUri(setup.redirectUri)
+    && Number.isSafeInteger(counts.pending) && counts.pending >= 0
+    && Number.isSafeInteger(counts.delivered) && counts.delivered >= 0
+    && Number.isSafeInteger(counts.failed) && counts.failed >= 0
+    && Number.isSafeInteger(counts.suppressed) && counts.suppressed >= 0
+    && (summary.lastError === undefined || isSafeCalendarText(summary.lastError, 320))
+    && (summary.lastSuccessAt === undefined || isSafeCalendarText(summary.lastSuccessAt, 80));
+};
+
 // accept only redacted setup metadata and ordinary operation progress
 export const isCloudflareStatus = (value: unknown): value is CloudflareStatus => {
   if (value === null || typeof value !== 'object') return false;

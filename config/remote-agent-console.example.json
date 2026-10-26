@@ -5,6 +5,12 @@
   },
   "name": "My server",
   "publicOrigin": "http://127.0.0.1:8787",
+  "googleCalendar": {
+    "enabled": false,
+    "titleTemplate": "{worktree}",
+    "startMoment": "work_started",
+    "endMoment": "work_finished"
+  },
   "scratchDirectory": "/home/me",
   "defaultAgent": "codex",
   "editor": "/usr/bin/nvim",

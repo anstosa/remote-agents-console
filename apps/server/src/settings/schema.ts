@@ -21,6 +21,15 @@ export function applicationSettingsSchema(presentation: ApplicationSettingsPrese
   // capitalize product acronyms only in presentation metadata
   schema.properties!.integrations!.properties!.mcp!.label = 'MCP';
   schema.properties!.adapters!.properties!.omx!.label = 'OMX';
+  // present safe calendar policy separately from inbound tools
+  const calendar = schema.properties?.googleCalendar;
+  if (calendar?.properties !== undefined) {
+    calendar.label = 'Google Calendar';
+    Object.assign(calendar.properties.enabled!, { label: 'Enable Google Calendar', description: 'Capture new RAC agent prompts after saving and restarting RAC.' });
+    Object.assign(calendar.properties.titleTemplate!, { label: 'Event title', description: 'Use {worktree}, {project}, or {agent}. Escape literal braces with {{ and }}.' });
+    Object.assign(calendar.properties.startMoment!, { label: 'Event start', description: 'Submission includes queue waiting; working starts only with verified agent work.' });
+    Object.assign(calendar.properties.endMoment!, { label: 'Event end', description: 'First question otherwise uses the confirmed finish; continuing the prompt does not create another event.' });
+  }
   describeApplicationPlaceholders(schema, presentation);
   describeApplicationCommands(schema);
   describeButtonSettings(schema);

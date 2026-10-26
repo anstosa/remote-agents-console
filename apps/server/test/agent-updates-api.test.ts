@@ -45,6 +45,17 @@ describe('agent update API', () => {
     expect(unavailable.statusCode).toBe(404);
   }, 15_000);
 
+  // expose the service-owned safe message rather than erasing useful diagnostics
+  it('preserves a safe installer failure and diagnostic reference for synchronous clients', async () => {
+    const error = 'OMX update failed with exit code 1. Private diagnostics: .data/agent-updates/omx-example.json.';
+    const update = vi.fn<AgentUpdateServiceLike['update']>(async () => ({ outcome: 'failed', error }));
+    app = await buildApp(testConfig(), { auth: await testAuthService(), agentUpdates: { statuses: async () => [], update, startUpdate: () => ({ outcome: 'unavailable' }), updateStatus: () => undefined } });
+    const headers = await authenticatedHeaders(app);
+    const failed = await app.inject({ method: 'POST', url: '/api/agents/omx/update', headers });
+    expect(failed.statusCode).toBe(502);
+    expect(failed.json()).toEqual({ error });
+  }, 15_000);
+
   it('rejects unknown agent kinds', async () => {
     const update: AgentUpdateServiceLike['update'] = vi.fn(async () => ({ outcome: 'unavailable' }));
     app = await buildApp(testConfig(), { auth: await testAuthService(), agentUpdates: { statuses: async () => [], update, startUpdate: () => ({ outcome: 'unavailable' }), updateStatus: () => undefined } });

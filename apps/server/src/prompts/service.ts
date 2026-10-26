@@ -6,6 +6,7 @@ import { TmuxAdapter } from '../tmux/adapter.js';
 import { codexCollapsedPasteLabel, failedTurnFromCapture, lastPromptFromHistory, latestCompletedAssistantTurn, queueReadyPrompt } from '../adapters/codex-turns.js';
 import { adapterFor } from '../adapters/registry.js';
 import { codexFamily, type Adapter, type AgentKind, type CompletionBaseline, type CompletionEvent, type PaneSnapshot, type Submission, type SubmissionDraftState, type SubmissionMode, type TmuxKey } from '../adapters/types.js';
+import type { PromptCalendarLifecycle } from '../google-calendar/lifecycle.js';
 import type { Agent } from '../domain/models.js';
 import { run } from '../tmux/command.js';
 import type { PromptHistoryService } from '../prompt-history/service.js';
@@ -47,7 +48,7 @@ const submissionRetryAttempts: ReadonlySet<number> = new Set([6, 14, 30, 50, 70]
 const trackedRequestTerminalTtlMs = 60 * 60 * 1_000;
 const maxTrackedTerminalRequests = 1_000;
 // the console never composes submission through an unknown kind
-type AdapterView = Pick<Adapter, 'stateSource' | 'submission' | 'turns' | 'questions' | 'completion' | 'newConversation'>;
+type AdapterView = Pick<Adapter, 'stateSource' | 'submission' | 'turns' | 'questions' | 'completion' | 'managedPromptLifecycleV1' | 'newConversation'>;
 type CancelOutcome = 'ok' | 'unavailable' | 'not-working';
 // an Adapter that announces its own Attention state (rather than the console
 // inferring it from the title): it must report `working` before a prompt counts
@@ -99,7 +100,7 @@ export class PromptService {
   private lifecycleMutationVersion = 0;
 
   // bind queue delivery and optional shared host staging
-  constructor(private readonly discovery: DiscoveryService, private readonly tmux: TmuxAdapter, private readonly history?: PromptHistoryService, private readonly queued?: QueuedPromptService, private readonly drainUndelivered?: UndeliveredDrain, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, private readonly teardownFor: (kind: AgentKind) => string | undefined = () => undefined, private readonly attachmentStaging?: AttachmentStagingWorkspace) {}
+  constructor(private readonly discovery: DiscoveryService, private readonly tmux: TmuxAdapter, private readonly history?: PromptHistoryService, private readonly queued?: QueuedPromptService, private readonly drainUndelivered?: UndeliveredDrain, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, private readonly teardownFor: (kind: AgentKind) => string | undefined = () => undefined, private readonly attachmentStaging?: AttachmentStagingWorkspace, private readonly calendar?: PromptCalendarLifecycle) {}
 
   // submit or durably queue one prompt. `resetAt` marks the prompt as the first
   // turn of a conversation just reset with the Adapter's new-conversation command
@@ -140,6 +141,7 @@ export class PromptService {
     if (releaseMutation === undefined || this.restartLocks.has(scope)) {
       releaseMutation?.();
       const queued = await this.queued?.enqueue(scope, prompt, attachments, origin);
+      if (queued !== undefined) await this.admitCalendar(queued.id, agentId, first.agent.kind, queued.createdAt, prompt, attachments);
       // retain exact queue identity through the restart handoff
       if (tracked && queued !== undefined) this.trackQueuedRequest(queued.id, agentId, prompt);
       return { accepted: queued !== undefined, ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) };
@@ -156,6 +158,7 @@ export class PromptService {
         const baselineCompletion = adopting ? await this.completionSignature(agentId) : undefined;
         const rolloutBaseline = adopting ? await this.captureRolloutBaseline(agentId, this.resolveAdapter(first.agent.kind)) : undefined;
         const queued = await this.queued.enqueue(scope, prompt, attachments, origin);
+        if (queued !== undefined) await this.admitCalendar(queued.id, agentId, first.agent.kind, queued.createdAt, prompt, attachments);
         // register before any later observer can dispatch this queue item
         if (tracked && queued !== undefined) this.trackQueuedRequest(queued.id, agentId, prompt);
         // track work that started outside the managed prompt flow
@@ -167,13 +170,15 @@ export class PromptService {
         const queued = await this.queued.enqueue(scope, prompt, attachments, origin);
         // stop before paste when durable storage is unavailable
         if (queued === undefined) return { accepted: false };
+        await this.admitCalendar(queued.id, agentId, first.agent.kind, queued.createdAt, prompt, attachments);
         // publish identity before synchronous dispatch can advance it
         if (tracked) this.trackQueuedRequest(queued.id, agentId, prompt);
         // delivery may remain queued without rejecting the accepted request
         await this.dispatch(agentId, scope, resetAt);
         return { accepted: true, ...(tracked ? { requestId: queued.id } : {}) };
       }
-      const requestId = tracked ? randomBytes(18).toString('base64url') : undefined;
+      const requestId = tracked || this.calendar !== undefined ? randomBytes(18).toString('base64url') : undefined;
+      if (requestId !== undefined) await this.admitCalendar(requestId, agentId, first.agent.kind, new Date().toISOString(), prompt, attachments);
       // direct deployments still receive a unique process-local identity
       if (requestId !== undefined) this.trackQueuedRequest(requestId, agentId, prompt);
       const accepted = await this.send(agentId, prompt, attachments, first, 'queue', false, resetAt, requestId);
@@ -223,6 +228,14 @@ export class PromptService {
     terminal.sort((left, right) => (left[1].terminalAt ?? 0) - (right[1].terminalAt ?? 0));
     // evict only the oldest terminal overflow
     for (let index = 0; index < terminal.length - maxTrackedTerminalRequests; index += 1) this.trackedRequests.delete(terminal[index]![0]);
+  }
+
+  // admit only model prompts; shell and instant conversation controls never become activities
+  private async admitCalendar(id: string, agentId: string, kind: AgentKind, submittedAt: string, prompt: string, attachments: PromptAttachment[]): Promise<void> {
+    if (this.calendar === undefined || attachments.length === 0 && prompt.startsWith('!')) return;
+    const adapter = this.resolveAdapter(kind);
+    if (adapter?.submission.completesWithoutWork?.(prompt) === true) return;
+    await this.calendar.admit({ id, agentId, kind, submittedAt }).catch(() => undefined);
   }
 
   // Paste and submit a new-conversation reset command (`/clear`, `/new`) through the
@@ -331,7 +344,10 @@ export class PromptService {
     const prompt = await this.queued.update(promptScope(agentId), promptId, text);
     const tracked = this.trackedRequests.get(promptId);
     // changed configured bytes no longer represent the tracked action request
-    if (prompt !== undefined && tracked !== undefined && tracked.promptFingerprint !== createHash('sha256').update(text).digest('base64url')) this.settleTrackedRequest(promptId, 'failed', 'queue_updated');
+    if (prompt !== undefined && tracked !== undefined && tracked.promptFingerprint !== createHash('sha256').update(text).digest('base64url')) {
+      this.settleTrackedRequest(promptId, 'failed', 'queue_updated');
+      await this.calendar?.invalid(promptId, 'missing_lifecycle_evidence').catch(() => undefined);
+    }
     return prompt;
   }
 
@@ -339,7 +355,10 @@ export class PromptService {
   async consumeQueuedOnSuccess(agentId: string, promptId: string, use: (queued: QueuedPrompt) => Promise<boolean>): Promise<'missing' | 'failed' | 'consumed'> {
     const result = await this.queued?.consumeOnSuccess(promptScope(agentId), promptId, use) ?? 'missing';
     // a saved Note cannot later complete the original prompt action
-    if (result === 'consumed') this.settleTrackedRequest(promptId, 'failed', 'queue_saved');
+    if (result === 'consumed') {
+      this.settleTrackedRequest(promptId, 'failed', 'queue_saved');
+      await this.calendar?.invalid(promptId, 'missing_lifecycle_evidence').catch(() => undefined);
+    }
     return result;
   }
 
@@ -352,7 +371,10 @@ export class PromptService {
     const target = await this.discovery.target(agentId);
     const removed = target !== undefined && this.queued !== undefined && await this.queued.remove(promptScope(agentId), promptId) !== undefined;
     // removed tracked work can never be dispatched
-    if (removed) this.settleTrackedRequest(promptId, 'failed', 'queue_removed');
+    if (removed) {
+      this.settleTrackedRequest(promptId, 'failed', 'queue_removed');
+      await this.calendar?.invalid(promptId, 'missing_lifecycle_evidence').catch(() => undefined);
+    }
     return removed;
   }
 
@@ -368,6 +390,8 @@ export class PromptService {
     // an Adapter without Turn capture cannot read an answer back: complete on
     // working -> finished, store the prompt alone, and skip the grace/halt path
     const adapter = this.resolveAdapter(agent.kind);
+    // reconcile durable correlations even when process-local prompt phases were lost on restart
+    await this.reconcileCalendar(undefined, agent.id);
     // a reset spinner is not a model turn and must never enter answer recovery
     if (this.conversationResets.get(scope)?.state === 'pending' && !this.phases.has(scope)) {
       // use fresh reset readiness rather than a possibly stale dashboard attention snapshot
@@ -462,6 +486,21 @@ export class PromptService {
     await this.dispatch(agent.id, scope);
   }
 
+  // split departed-owner recovery from each live agent's observation
+  async reconcileCalendar(liveAgentIds?: readonly string[], onlyAgentId?: string): Promise<void> {
+    const pending = await this.calendar?.pending().catch(() => []) ?? [];
+    const live = liveAgentIds === undefined ? undefined : new Set(liveAgentIds);
+    for (const activity of pending) {
+      // live agents reconcile once through their own observation path
+      if (live?.has(activity.agentId)) continue;
+      // process-local observation does not rescan sibling native evidence
+      if (onlyAgentId !== undefined && activity.agentId !== onlyAgentId) continue;
+      const capability = this.resolveAdapter(activity.kind as AgentKind)?.managedPromptLifecycleV1;
+      await this.calendar?.observe(activity.id, capability).catch(() => undefined);
+      if (live !== undefined && !live.has(activity.agentId)) await this.calendar?.missing(activity.id).catch(() => undefined);
+    }
+  }
+
   // advance a Turn-less prompt: no answer to capture, so completion is the
   // working -> finished transition and the durable queue is released on finished
   private async observeTurnless(agent: Pick<Agent, 'id' | 'attention'>, scope: string, reported: boolean): Promise<void> {
@@ -534,6 +573,7 @@ export class PromptService {
     const to = promptScope(toAgentId);
     // prompts that cannot move stay with the departed scope and drain into Notes
     if (this.queued !== undefined && !await this.queued.moveScope(from, to)) return;
+    await this.calendar?.handOver(fromAgentId, toAgentId).catch(() => undefined);
     // only queued requests have exact transfer identity during a restart handoff
     for (const [requestId, request] of this.trackedRequests) {
       if (request.agentId !== fromAgentId || request.terminalAt !== undefined) continue;
@@ -563,7 +603,10 @@ export class PromptService {
         const result = await this.queued.consumeOnSuccess(scope, prompt.id, queued => this.drainUndelivered!(scope, queued));
         if (result === 'failed') return false;
         // a durable note recovery is terminal failure for the requested action
-        if (result === 'consumed') this.settleTrackedRequest(prompt.id, 'failed', 'prompt_not_delivered');
+        if (result === 'consumed') {
+          this.settleTrackedRequest(prompt.id, 'failed', 'prompt_not_delivered');
+          await this.calendar?.invalid(prompt.id, 'missing_lifecycle_evidence').catch(() => undefined);
+        }
       }
     } catch {
       return false;
@@ -710,8 +753,24 @@ export class PromptService {
     // the update advisor is submitted with Enter regardless of the Adapter's keys
     const keys: TmuxKey[] = submission === 'enter' || submission === 'confirmed-enter' ? ['Enter'] : adapterKeys;
     const submittedAt = Date.now();
+    // persist exact pre-key intent before the tracked submit path proceeds
+    const calendarIntent: { tracked: boolean; arm?: string } | undefined = queuedPromptId === undefined ? undefined : await this.calendar?.beforeSend({
+      id: queuedPromptId,
+      agentId,
+      kind: first.agent.kind,
+      submittedAt: new Date(submittedAt).toISOString(),
+      prompt: attachmentPrompt,
+      ...(rolloutBaseline === undefined ? {} : { baseline: rolloutBaseline }),
+      socketFingerprint: submitTarget.socket.fingerprint,
+      socketPath: submitTarget.socket.path,
+      paneId: submitTarget.agent.paneId,
+      ...(first.processId === undefined ? {} : { processId: first.processId }),
+      sentAt: new Date(submittedAt).toISOString()
+    }).catch(() => ({ tracked: false }));
     const resetBefore = paneSnapshot(submitTarget.agent);
-    let submitted = await this.tmux.sendKeys(submitTarget.socket, submitTarget.agent.paneId, keys).catch(() => false);
+    // arm and submit Claude in one ordered tmux batch after exact draft ownership
+    const submittedWithArm = calendarIntent?.arm === undefined ? undefined : await this.tmux.armAndSendKeys(submitTarget.socket, submitTarget.agent.paneId, calendarIntent.arm, keys).catch(() => false);
+    let submitted = submittedWithArm ?? await this.tmux.sendKeys(submitTarget.socket, submitTarget.agent.paneId, keys).catch(() => false);
     // allow reset redraws their startup budget without weakening prompt acknowledgement
     const acceptUntil = reset ? submittedAt + conversationResetGraceMs : Date.now() + submissionAcceptGraceMs;
     // inspect ambiguous transport failures too before abandoning a pasted draft
@@ -721,6 +780,7 @@ export class PromptService {
     // clear stale prose questions after delivery
     if (submitted) this.discovery.invalidateMessageQuestion?.(agentId);
     if (!submitted) {
+      if (queuedPromptId !== undefined) await this.calendar?.invalid(queuedPromptId, 'missing_lifecycle_evidence').catch(() => undefined);
       // halt only when a durable prompt is still waiting
       await this.holdFailedSubmission(scope, failedDraft);
     } else if (instant) {

@@ -20,10 +20,11 @@ import { PanelIcon, panelIcons } from '../panel-header.js';
 import { SplitConfirmation } from '../split-confirmation.js';
 import { SettingsSourceHandover, type SettingsHandoverChoices } from './source-handover.js';
 import { isTmuxSettingsChange, tmuxEnvironmentKeys, tmuxEnvironmentKeysForInstallation } from './tmux-settings.js';
-import { agentEnvironmentKeys, agentEnvironmentKeysForAdapter, agentEnvironmentKeysForInstallation, environmentKeysWithDedicatedControls, storageEnvironmentKeys, voiceEnvironmentKeys } from './environment-fields.js';
+import { agentEnvironmentKeys, agentEnvironmentKeysForAdapter, agentEnvironmentKeysForInstallation, environmentKeysWithDedicatedControls, googleCalendarEnvironmentKeys, storageEnvironmentKeys, voiceEnvironmentKeys } from './environment-fields.js';
 import { SettingsSelect, type SettingsSelectOption } from './select.js';
 import { isConfiguredButtonPath, SettingsButtonColorSwatch, SettingsButtonFields, SettingsButtonPreview } from './button-fields.js';
 import { CloudflareSettings, useCloudflareSetupDraft } from './cloudflare-settings.js';
+import { GoogleCalendarSettings, useGoogleCalendarSetup } from './google-calendar-settings.js';
 import { editableIconSources, InstanceIconPreview, instanceIcons, isInstanceIconName } from './icon-preview.js';
 import { composeOptionSettings, environmentDescription, knownEnvironmentKeys, labels as sourceLabels, protectedSettingIdentity } from '../../../server/src/settings/catalog.js';
 import { buildSettingsSearchIndex, type SettingsSearchResult } from './search-index.js';
@@ -45,6 +46,7 @@ export function useSettingsSession() {
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const browserDraft = useSettingsBrowserDraftState();
   const cloudflare = useCloudflareSetupDraft(snapshot !== undefined);
+  const googleCalendar = useGoogleCalendarSetup(snapshot !== undefined);
   // revoke newly entered tunnel credentials with controller and connection authority
   useEffect(() => { cloudflare.clearToken(); }, [cloudflare.clearToken, runtime.canMutate, runtime.securityEpoch]);
   const operationPending = useRef(false);
@@ -63,7 +65,7 @@ export function useSettingsSession() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [rawSourceIds, setRawSourceIds] = useState(() => new Set<string>());
-  return { snapshot, setSnapshot, sources, setSources, drafts, setDrafts, browserDraft, cloudflare, operationPending, saveCancelled, loading, setLoading, saving, setSaving, savePending, setSavePending, loadGeneration, issues, setIssues, warnings, setWarnings, message, setMessage, error, setError, rawSourceIds, setRawSourceIds };
+  return { snapshot, setSnapshot, sources, setSources, drafts, setDrafts, browserDraft, cloudflare, googleCalendar, operationPending, saveCancelled, loading, setLoading, saving, setSaving, savePending, setSavePending, loadGeneration, issues, setIssues, warnings, setWarnings, message, setMessage, error, setError, rawSourceIds, setRawSourceIds };
 }
 
 const rawFormats = new Set<SettingsSource['format']>(['compose', 'cloudflared', 'credentials', 'wrapper', 'svg']);
@@ -72,7 +74,7 @@ const pendingSourceFormats = { app: 'json', env: 'env', installation: 'installat
 // reuse the authoritative labels before the installation catalog arrives
 const pendingSourceNavigation: Pick<SettingsSource, 'id' | 'label' | 'format' | 'path'>[] = Object.entries(pendingSourceFormats).map(([id, format]) => ({ id, label: sourceLabels[id] ?? id, format }));
 // keep dedicated and automatically derived controls out of the application field tree
-const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'review', 'scratchDirectory', 'projects', 'buttons', 'proxy', 'integrations.multiInstance', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
+const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', 'proxy', 'integrations.multiInstance', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
 // keep dedicated source selectors with their application and tmux consumers
 const dedicatedInstallationPaths = new Set(['version', 'sources']);
 
@@ -88,6 +90,19 @@ const labelForKey = (key: string): string => key
   .replace(/[-_]+/gu, ' ')
   .replace(/^./u, character => character.toUpperCase())
   .replace(/\burl\b/giu, 'URL');
+
+// present lifecycle enums as operator-facing evidence boundaries
+const calendarMomentLabel = (path: string[], value: string): string | undefined => {
+  // label only the dedicated Google Calendar selectors
+  if (path[0] !== 'googleCalendar') return undefined;
+  return ({
+    prompt_submitted: 'Prompt submitted (includes queue wait)',
+    prompt_sent: 'Prompt sent to agent',
+    work_started: 'Agent work started',
+    first_question_or_finished: 'First question, otherwise finished',
+    work_finished: 'Agent work finished'
+  } as Record<string, string>)[value];
+};
 
 // retain a stable identity for one protected field
 const disclosureKey = (sourceId: string, path: string[]): string => `${sourceId}\u0000${path.join('\u0000')}`;
@@ -892,7 +907,7 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   // render enumerated strings without losing their exact value
   } else if (schema.type === 'enum') {
     const resettable = reviewField && (schema.optional || defaulted);
-    control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: option, ...(buttonField && path.at(-1) === 'color' ? { icon: <SettingsButtonColorSwatch color={option} /> } : path.at(-1) === 'icon' && isInstanceIconName(option) ? { icon: <InstanceIconPreview name={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
+    control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: calendarMomentLabel(path, option) ?? option, ...(buttonField && path.at(-1) === 'color' ? { icon: <SettingsButtonColorSwatch color={option} /> } : path.at(-1) === 'icon' && isInstanceIconName(option) ? { icon: <InstanceIconPreview name={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
   // render booleans as accessible switches
   } else if (schema.type === 'boolean') {
     control = <label className="client-settings-toggle"><input id={controlId} aria-label={label} type="checkbox" role="switch" checked={effectiveValue === true} disabled={disabled} onChange={event => stagePatch(source, { op: 'set', path, value: event.target.checked })} /><span className="client-settings-switch-state">{effectiveValue === true ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label>;
@@ -990,7 +1005,7 @@ function InstallationEditor({ source, installationKind, sources, onNavigate, ...
 }
 
 // edit the line-preserving environment model one variable at a time
-function EnvironmentEditor({ source, draft, disclosures, issues, disabled, installationKind, scope = 'general', excludedKeys = tmuxEnvironmentKeys, scopedKeys, pathPrefix = [], onPatch, onReveal, onRemask, onHideCollection }: { source: SettingsSource; draft?: Draft; disclosures: Map<string, Disclosure>; issues: SettingsIssue[]; disabled: boolean; installationKind?: SettingsSnapshot['installationKind']; scope?: 'general' | 'tmux' | 'voice' | 'agents' | 'storage'; excludedKeys?: ReadonlySet<string>; scopedKeys?: ReadonlySet<string>; pathPrefix?: string[]; onPatch: SetPatch; onReveal: (source: SettingsSource, path: string[]) => Promise<void>; onRemask: (key: string) => Promise<void>; onHideCollection?: HideCollection }) {
+function EnvironmentEditor({ source, draft, disclosures, issues, disabled, installationKind, scope = 'general', excludedKeys = tmuxEnvironmentKeys, scopedKeys, pathPrefix = [], onPatch, onReveal, onRemask, onHideCollection }: { source: SettingsSource; draft?: Draft; disclosures: Map<string, Disclosure>; issues: SettingsIssue[]; disabled: boolean; installationKind?: SettingsSnapshot['installationKind']; scope?: 'general' | 'tmux' | 'voice' | 'agents' | 'storage' | 'google-calendar'; excludedKeys?: ReadonlySet<string>; scopedKeys?: ReadonlySet<string>; pathPrefix?: string[]; onPatch: SetPatch; onReveal: (source: SettingsSource, path: string[]) => Promise<void>; onRemask: (key: string) => Promise<void>; onHideCollection?: HideCollection }) {
   const [adding, setAdding] = useState(false);
   const [newKey, setNewKey] = useState('');
   const [newValue, setNewValue] = useState('');
@@ -1004,7 +1019,7 @@ function EnvironmentEditor({ source, draft, disclosures, issues, disabled, insta
     ? Object.entries(record !== null && typeof record === 'object' && !Array.isArray(record) ? record : {}).map(([key, value]) => ({ key, protected: isProtectedValue(value) || protectedSettingIdentity(key), present: isProtectedValue(value) ? value.present : true, hasValue: isProtectedValue(value) ? value.hasValue ?? value.present : value !== '', ...(typeof value === 'string' ? { value } : {}), apply: source.apply }))
     : source.fields ?? [];
   // keep each field with its dedicated controls without changing source identity
-  const visibleScopedKeys = scopedKeys ?? (scope === 'storage' ? storageEnvironmentKeys : scope === 'agents' ? agentEnvironmentKeysForInstallation(installationKind) : scope === 'voice' ? voiceEnvironmentKeys : tmuxEnvironmentKeysForInstallation(installationKind));
+  const visibleScopedKeys = scopedKeys ?? (scope === 'storage' ? storageEnvironmentKeys : scope === 'agents' ? agentEnvironmentKeysForInstallation(installationKind) : scope === 'voice' ? voiceEnvironmentKeys : scope === 'google-calendar' ? googleCalendarEnvironmentKeys : tmuxEnvironmentKeysForInstallation(installationKind));
   const fields = allFields.filter(field => scope === 'general' ? !excludedKeys.has(field.key) : visibleScopedKeys.has(field.key));
   // remove the final launch override without retaining a newly authored empty record
   const stagePatch: SetPatch = (target, next, derived) => {
@@ -1153,7 +1168,7 @@ const sourceGroup = (source: Pick<SettingsSource, 'id' | 'format'>): string => {
 // flag backing sources and the dedicated pages that own their invalid controls
 function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
   const pages = new Set<string>();
-  const applicationPages: Record<string, string> = { adapters: 'agents', projects: 'projects', review: 'reviews', buttons: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
+  const applicationPages: Record<string, string> = { adapters: 'agents', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
   // route only authoritative issue identities never field values or error text
   for (const { sourceId, path } of issues) {
     pages.add(sourceId);
@@ -1172,6 +1187,8 @@ function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
       if (agentEnvironmentKeys.has(section)) pages.add('agents');
       // voice credentials stay with the Voice controls
       if (voiceEnvironmentKeys.has(section)) pages.add('voice');
+      // Google OAuth credentials stay with the calendar setup controls
+      if (googleCalendarEnvironmentKeys.has(section)) pages.add('google-calendar');
       // persistence locations belong to Storage
       if (storageEnvironmentKeys.has(section)) pages.add('storage');
       // tmux connection overrides belong to TMUX
@@ -1196,6 +1213,7 @@ const sectionIcon = (id: string, format?: SettingsSource['format']): ReactNode =
     interface: 'M3 4h18v16H3zM3 9h18M8 9v11m4-7h5m-5 3h3',
     keyboard: 'M2 5h20v14H2zM5 8h1m3 0h1m3 0h1m3 0h1M5 11h1m3 0h1m3 0h1m3 0h1M6 15h12',
     voice: 'M9 4a3 3 0 0 1 6 0v8a3 3 0 0 1-6 0zm-3 7v1a6 6 0 0 0 12 0v-1m-6 7v4m-3 0h6',
+    'google-calendar': 'M5 3v3m14-3v3M4 8h16v12H4zM8 12h3v3H8z',
     agents: 'M12 3v3M5 7h14v13H5zM2 11v5m20-5v5M8 12h2m4 0h2m-7 4h6',
     reviews: 'M5 3h14v18H5zM8 7h8M8 11h5m-5 5 2 2 5-5',
     storage: 'M20 6c0 2-3.6 3-8 3S4 8 4 6s3.6-3 8-3 8 1 8 3v12c0 2-3.6 3-8 3s-8-1-8-3V6m0 6c0 2 3.6 3 8 3s8-1 8-3',
@@ -1210,7 +1228,7 @@ const sectionIcon = (id: string, format?: SettingsSource['format']): ReactNode =
     wrapper: 'M3 4h18v16H3zm3 5 3 3-3 3m6 0h4',
     svg: 'M3 3h18v18H3zM3 16l6-6 6 6 3-3 3 3M16 7h.01'
   };
-  return <PanelIcon path={id === 'cloudflare' ? glyphs.cloudflared : id === 'browser' || id === 'interface' || id === 'voice' || id === 'keyboard' || id === 'tmux' || id === 'projects' || id === 'agents' || id === 'reviews' || id === 'storage' ? glyphs[id] : glyphs[format ?? 'json']} />;
+  return <PanelIcon path={id === 'cloudflare' ? glyphs.cloudflared : id === 'browser' || id === 'interface' || id === 'voice' || id === 'google-calendar' || id === 'keyboard' || id === 'tmux' || id === 'projects' || id === 'agents' || id === 'reviews' || id === 'storage' ? glyphs[id] : glyphs[format ?? 'json']} />;
 };
 
 // bind tmux controls and wrapper contents to their existing installed sources
@@ -1302,7 +1320,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   const runtime = useSettingsRuntime();
   const workspaceEditor = useSettingsTerminalEditor();
   const headerActionsTarget = useContext(SettingsHeaderActionsContext);
-  const { snapshot, setSnapshot, sources, setSources, drafts, setDrafts, browserDraft: browserDraftState, cloudflare, operationPending, saveCancelled, loading, setLoading, saving: fileSaving, setSaving, savePending, setSavePending, loadGeneration, issues, setIssues, warnings, setWarnings, message, setMessage, error, setError, rawSourceIds, setRawSourceIds } = session;
+  const { snapshot, setSnapshot, sources, setSources, drafts, setDrafts, browserDraft: browserDraftState, cloudflare, googleCalendar, operationPending, saveCancelled, loading, setLoading, saving: fileSaving, setSaving, savePending, setSavePending, loadGeneration, issues, setIssues, warnings, setWarnings, message, setMessage, error, setError, rawSourceIds, setRawSourceIds } = session;
   // keep unrelated settings mutations locked during host-side tunnel work
   const cloudflareApplying = runtime.status?.operation?.kind === 'cloudflare' && (runtime.status.operation.state === 'queued' || runtime.status.operation.state === 'running');
   const saving = fileSaving || cloudflareApplying;
@@ -1397,7 +1415,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
       // retain virtual pages and redirect removed standalone tabs
       setSelectedId(current => {
         const next = current === 'compose' ? 'compose-override' : current === 'wrapper' ? 'tmux' : current === 'cloudflared' || current === 'cloudflared-credentials' ? 'cloudflare' : current;
-        return next === 'browser' || next === 'interface' || next === 'voice' || next === 'keyboard' || next === 'tmux' || next === 'projects' || next === 'agents' || next === 'reviews' || next === 'storage' || next === 'cloudflare' || payload.sources.some(source => source.id === next) ? next : 'browser';
+        return next === 'browser' || next === 'interface' || next === 'voice' || next === 'google-calendar' || next === 'keyboard' || next === 'tmux' || next === 'projects' || next === 'agents' || next === 'reviews' || next === 'storage' || next === 'cloudflare' || payload.sources.some(source => source.id === next) ? next : 'browser';
       });
       if (!preserveDrafts) { setDrafts({}); setIssues([]); setWarnings([]); setCatalogEditorEpoch(current => current + 1); }
       setError('');
@@ -1650,6 +1668,8 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   if (changes.some(isTmuxSettingsChange)) changedSourceIds.add('tmux');
   // surface moved environment drafts on their dedicated voice page
   if (changes.some(change => change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => voiceEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('voice');
+  // keep calendar config and credential drafts on their dedicated page
+  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'googleCalendar' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => googleCalendarEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('google-calendar');
   // keep both original backing sources visible on the dedicated Agents page
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'adapters' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => agentEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('agents');
   // keep data-location drafts visible on Storage without changing either backing source
@@ -1813,6 +1833,43 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // keep setup keys available while voice is disabled without competing with raw file drafts
   const voiceEnvironmentEditor = <section className="settings-schema-section settings-voice-environment" aria-label="Voice environment settings"><header><h3>Environment &amp; keys</h3></header>{environmentSource === undefined && <p role="note">Load Environment &amp; keys before editing voice credentials.</p>}{environmentDraft?.content !== undefined && <p role="note">Finish or discard the Environment &amp; keys whole-source draft before editing voice credentials.</p>}{environmentDraft?.remove === true && <p role="note">Discard the Environment &amp; keys source removal before editing voice credentials.</p>}{environmentSource !== undefined && !environmentSource.writable && <p role="note">Voice environment settings are read-only in this installation.</p>}{environmentSource !== undefined && <EnvironmentEditor source={environmentSource} draft={environmentDraft} disclosures={disclosures} issues={issues} disabled={loading || saving || !runtime.canMutate || !environmentSource.writable || environmentDraft?.content !== undefined || environmentDraft?.remove === true} scope="voice" onPatch={patch} onReveal={reveal} onRemask={remask} />}</section>;
 
+  const googleCalendarSchema = voiceSource?.schema?.properties?.googleCalendar;
+  const googleCalendarKeys = ['enabled', 'titleTemplate', 'startMoment', 'endMoment'] as const;
+  const googleCalendarSchemaOverrides: Readonly<Record<typeof googleCalendarKeys[number], Partial<SettingsSchema>>> = {
+    enabled: { label: 'Enable Google Calendar', description: 'Capture supported agent work after the saved setting is applied by a RAC restart.' },
+    titleTemplate: { label: 'Event title template', description: 'Use literal text and the three supported placeholders only.' },
+    startMoment: { label: 'Start moment', description: 'Choose the supported lifecycle evidence that begins each event.' },
+    endMoment: { label: 'End moment', description: 'Choose the supported lifecycle evidence that ends each event.' }
+  };
+  const googleCalendarConfigDisabled = loading || saving || !runtime.canMutate || voiceSource === undefined || voiceSource.value === undefined || !voiceSource.writable || rawSourceIds.has('app') || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true;
+  const googleCalendarConfiguration = voiceSource === undefined ? <p role="note">Load Application configuration before editing Google Calendar capture.</p>
+    : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing Google Calendar capture.</p>
+      : googleCalendarSchema === undefined ? <p role="note">Google Calendar configuration is unavailable in this installation.</p>
+        : <>
+          {!voiceSource.writable && <p role="note">Google Calendar configuration is read-only in this installation.</p>}
+          {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing Google Calendar capture.</p>}
+          {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing Google Calendar capture.</p>}
+          {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing Google Calendar capture.</p>}
+          {/* render only the four lifecycle configuration fields in their approved order */}
+          {googleCalendarKeys.map(key => {
+            const fieldSchema = googleCalendarSchema.properties?.[key];
+            // retain the generated schema as the source of truth
+            if (fieldSchema === undefined) return null;
+            return <SchemaField key={`google-calendar:${key}:${catalogEditorEpoch}`} source={voiceSource} schema={{ ...fieldSchema, ...googleCalendarSchemaOverrides[key] }} value={valueAt(voiceSource.value, ['googleCalendar', key])} path={['googleCalendar', key]} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={googleCalendarConfigDisabled} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} />;
+          })}
+          <FieldIssues issues={issues} sourceId={voiceSource.id} path={['googleCalendar']} />
+        </>;
+  const googleCalendarEnvironment = <>
+    {environmentSource === undefined && <p role="note">Load Environment &amp; keys before editing Google Calendar credentials.</p>}
+    {environmentDraft?.content !== undefined && <p role="note">Finish or discard the Environment &amp; keys whole-source draft before editing Google Calendar credentials.</p>}
+    {rawSourceIds.has('env') && environmentDraft?.content === undefined && <p role="note">Switch Environment &amp; keys back to the structured editor before editing Google Calendar credentials.</p>}
+    {environmentDraft?.remove === true && <p role="note">Discard the Environment &amp; keys source removal before editing Google Calendar credentials.</p>}
+    {environmentSource !== undefined && !environmentSource.writable && <p role="note">Google Calendar credentials are read-only in this installation.</p>}
+    {environmentSource !== undefined && <EnvironmentEditor source={environmentSource} draft={environmentDraft} disclosures={disclosures} issues={issues} disabled={loading || saving || !runtime.canMutate || !environmentSource.writable || rawSourceIds.has('env') || environmentDraft?.content !== undefined || environmentDraft?.remove === true} scope="google-calendar" onPatch={patch} onReveal={reveal} onRemask={remask} />}
+  </>;
+  const googleCalendarTitleTemplate = valueAt(voiceSource?.value, ['googleCalendar', 'titleTemplate']);
+  const googleCalendarEditor = <GoogleCalendarSettings setup={googleCalendar} configuration={googleCalendarConfiguration} environment={googleCalendarEnvironment} titleTemplate={typeof googleCalendarTitleTemplate === 'string' ? googleCalendarTitleTemplate : typeof googleCalendarSchema?.properties?.titleTemplate?.default === 'string' ? googleCalendarSchema.properties.titleTemplate.default : '{worktree}'} disabled={loading || saving || !runtime.canMutate} blockedByDrafts={dirtyCount > 0} confirmationTarget={confirmationTarget} onNotice={onSaveNotice} />;
+
   // share source locks across application-backed structured editors
   const applicationFieldsDisabled = loading || saving || !runtime.canMutate || voiceSource === undefined || voiceSource.value === undefined || !voiceSource.writable || voiceFileDraft?.content !== undefined || voiceFileDraft?.remove === true;
   const adaptersSchema = voiceSource?.schema?.properties?.adapters;
@@ -1953,11 +2010,13 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     { id: 'voice', group: 'Console', label: 'Voice', keywords: `davo voice assistant name context enable write tools advanced OpenAI realtime MCP ${[...voiceEnvironmentKeys].join(' ')}`, content: <>{voiceEditor}{voiceFieldsEditor}{voiceEnvironmentEditor}</> },
     { id: 'keyboard', group: 'Console', label: 'Keyboard shortcuts', keywords: 'keyboard shortcuts bindings keys prefix terminal command', content: keyboardSettings },
     { id: 'interface', group: 'Application', label: 'Interface', keywords: 'custom buttons actions slots shell command agent prompt appearance terminal font theme dark light reduced motion notification sounds audio mute flyout markers', content: interfaceEditor },
-    { id: 'agents', group: 'Application', label: 'Agents', keywords: `adapters codex omx claude pi opencode program arguments environment setup teardown updates accounts usage cost ${[...agentEnvironmentKeys].join(' ')}`, content: agentsEditor },
     { id: 'projects', group: 'Application', label: 'Projects', keywords: 'projects repositories directories dynamic worktrees launcher paths overrides commands tasks button overrides', content: projectsEditor },
     { id: 'reviews', group: 'Application', label: 'Reviews', keywords: 'review tours code review presets prompts model effort codex claude headless interactive', content: reviewsEditor },
     { id: 'tmux', group: 'Application', label: 'TMUX', keywords: `tmux polling pollIntervalMs wrapper executable connection discovery socket ${[...tmuxEnvironmentKeys].join(' ')} ${sources.find(source => source.id === 'wrapper')?.path ?? ''}`, content: <TmuxSettings sources={sources} installationKind={snapshot?.installationKind} drafts={drafts} disclosures={disclosures} issues={issues} disabled={loading || saving || !runtime.canMutate} navigationDisabled={loading || saving} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} /> },
     { id: 'storage', group: 'Application', label: 'Storage', keywords: `storage data .data files paths directories scratchDirectory scratch notes prompts history worktrees integrations previews ${[...storageEnvironmentKeys].join(' ')}`, content: storageEditor },
+    // group external services without changing their backing sources
+    { id: 'agents', group: 'Integrations', label: 'Agents', keywords: `adapters codex omx claude pi opencode program arguments environment setup teardown updates accounts usage cost ${[...agentEnvironmentKeys].join(' ')}`, content: agentsEditor },
+    { id: 'google-calendar', group: 'Integrations', label: 'Google Calendar', keywords: `google calendar oauth events activity lifecycle work start finish question retry delivery ${[...googleCalendarEnvironmentKeys].join(' ')}`, content: googleCalendarEditor },
     { id: 'cloudflare', group: 'Deployment', label: 'Cloudflare', keywords: 'cloudflare tunnel remote access hostname token connector dns public origin instructions', content: <CloudflareSettings setup={cloudflare} disabled={loading || saving || !runtime.canMutate} blockedByDrafts={fileAndBrowserDirtyCount > 0 || runtime.status?.pending === true} confirmationTarget={confirmationTarget} advanced={sources.some(source => (source.id === 'cloudflared' || source.id === 'cloudflared-credentials') && source.exists) ? sources.filter(source => source.id === 'cloudflared' || source.id === 'cloudflared-credentials').map(source => <section key={source.id}><h3>{source.label}</h3><RawSourceEditor source={source} draft={drafts[source.id]} disclosure={disclosures.get(disclosureKey(source.id, []))} issues={issues} disabled={loading || saving || !runtime.canMutate || !source.writable} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} /></section>) : undefined} /> }
   ];
   // select preference pages independently of the file catalog
@@ -1975,7 +2034,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // browser navigation never depends on the installation files
   const sectionLoading = (id: string): boolean => loading && id !== 'browser' && id !== 'interface' && id !== 'projects';
   // unavailable file placeholders cannot open an invented editor
-  const sectionDisabled = (id: string): boolean => sectionLoading(id) || snapshot === undefined && (id === 'tmux' || id === 'agents' || id === 'reviews' || id === 'storage' || id === 'cloudflare' || !preferences.some(preference => preference.id === id));
+  const sectionDisabled = (id: string): boolean => sectionLoading(id) || snapshot === undefined && (id === 'tmux' || id === 'agents' || id === 'reviews' || id === 'storage' || id === 'google-calendar' || id === 'cloudflare' || !preferences.some(preference => preference.id === id));
   const issuePageIds = settingsIssuePageIds(issues);
   // announce validation failures before ordinary unsaved changes
   const navigationLabel = (id: string, label: string): string => `${label}${issuePageIds.has(id) ? ' · Validation issues' : changedSourceIds.has(id) ? ' · Unsaved changes' : ''}`;

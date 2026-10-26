@@ -4,6 +4,14 @@ import { tmuxEnvironmentKeys } from './tmux-settings.js';
 // keep exclusively voice credentials with their setup controls
 export const voiceEnvironmentKeys: ReadonlySet<string> = new Set(['RAC_OPENAI_API_KEY', 'RAC_REALTIME_MCP_TOKEN']);
 
+// keep Google OAuth credentials and encryption keys with their dedicated setup page
+export const googleCalendarEnvironmentKeys: ReadonlySet<string> = new Set([
+  'RAC_GOOGLE_CALENDAR_CLIENT_ID',
+  'RAC_GOOGLE_CALENDAR_CLIENT_SECRET',
+  'RAC_GOOGLE_CALENDAR_TOKEN_KEY',
+  'RAC_GOOGLE_CALENDAR_PREVIOUS_TOKEN_KEY'
+]);
+
 const codexEnvironmentKeys: ReadonlySet<string> = new Set(['RAC_CODEX_BIN', 'RAC_HOST_CODEX_BIN', 'RAC_OPENAI_ADMIN_KEY', 'RAC_OPENAI_API_KEY_IDS', 'CODEX_VERSION']);
 const portableCodexEnvironmentKeys: ReadonlySet<string> = new Set([...codexEnvironmentKeys].filter(key => key !== 'CODEX_VERSION'));
 const claudeEnvironmentKeys: ReadonlySet<string> = new Set(['RAC_CLAUDE_BIN', 'RAC_CLAUDE_CONFIG_DIR']);
@@ -81,7 +89,7 @@ function hasControl(source: SettingsSource | undefined, path: readonly string[])
 // hide duplicate form rows while leaving their original environment source intact
 export function environmentKeysWithDedicatedControls(sources: readonly SettingsSource[]): ReadonlySet<string> {
   // retain file values without advertising unsupported or installer-only controls
-  const keys = new Set([...tmuxEnvironmentKeys, ...voiceEnvironmentKeys, ...agentEnvironmentKeys, ...storageEnvironmentKeys, ...unsupportedEnvironmentKeys, ...installerOnlyEnvironmentKeys]);
+  const keys = new Set([...tmuxEnvironmentKeys, ...voiceEnvironmentKeys, ...googleCalendarEnvironmentKeys, ...agentEnvironmentKeys, ...storageEnvironmentKeys, ...unsupportedEnvironmentKeys, ...installerOnlyEnvironmentKeys]);
   const application = sources.find(source => source.id === 'app');
   // application controls retain their existing source and override semantics
   for (const [key, path] of Object.entries(applicationFields)) {

@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        CODEX_VERSION: ${CODEX_VERSION:-0.144.5}
+        CODEX_VERSION: ${CODEX_VERSION:-0.164.0}
     restart: unless-stopped
     init: true
     # The application intentionally binds to loopback. Host networking keeps
@@ -16,6 +16,8 @@ services:
       RAC_CONFIG_WRITE_PATH: /workspace/config/remote-agent-console.docker.json
       # the packaged image runs from /app, so the server's own checkout is the mount
       RAC_SERVER_CHECKOUT: /workspace
+      # match the bundled agent version used by lifecycle compatibility probes
+      CODEX_VERSION: ${CODEX_VERSION:-0.164.0}
       # linux host networking reaches project ports through loopback
       RAC_PROJECT_PROXY_HOST: ${RAC_PROJECT_PROXY_HOST:-127.0.0.1}
       RAC_DEVICE_NAMES_FILE: /workspace/.data/device-names.json
@@ -35,6 +37,9 @@ services:
       RAC_INTEGRATION_AUTH_FILE: /workspace/.data/integration-auth.json
       RAC_INTEGRATION_STATE_FILE: /workspace/.data/integration-state.json
       RAC_INTEGRATION_AUDIT_FILE: /workspace/.data/integration-audit.jsonl
+      RAC_GOOGLE_CALENDAR_AUTH_FILE: /workspace/.data/google-calendar-auth.json
+      RAC_GOOGLE_CALENDAR_ACTIVITIES_FILE: /workspace/.data/google-calendar-activities.json
+      RAC_GOOGLE_CALENDAR_LIFECYCLE_FILE: /workspace/.data/google-calendar-lifecycle.json
     volumes:
       - ./:/workspace:rw
       - codex-home:/home/node/.codex

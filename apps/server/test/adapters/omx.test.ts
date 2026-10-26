@@ -65,12 +65,15 @@ describe('omx adapter recognizes', () => {
 });
 
 describe('omx adapter shares the Codex TUI behaviour', () => {
-  it('reuses the Codex submission, turns, commands, conversations and completion objects by reference', () => {
+  // share the exact native lifecycle parser rather than drifting between adapters
+  it('reuses the Codex submission, turns, commands, conversations, completion and managed lifecycle objects by reference', () => {
     expect(omxAdapter.submission).toBe(codexAdapter.submission);
     expect(omxAdapter.turns).toBe(codexAdapter.turns);
     expect(omxAdapter.commands).toBe(codexAdapter.commands);
     expect(omxAdapter.conversations).toBe(codexAdapter.conversations);
     expect(omxAdapter.completion).toBe(codexAdapter.completion);
+    expect(codexAdapter.managedPromptLifecycleV1).toBeDefined();
+    expect(omxAdapter.managedPromptLifecycleV1).toBe(codexAdapter.managedPromptLifecycleV1);
     expect(omxAdapter.questions?.parse).toBe(codexAdapter.questions?.parse);
     expect(omxAdapter.questions?.queued).toBe(codexAdapter.questions?.queued);
   });

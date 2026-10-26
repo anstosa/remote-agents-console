@@ -16,28 +16,28 @@ describe('claude hooks settings', () => {
 
   it('bakes RAC_TMUX_BIN only when a tmux binary is configured (never under the bridge)', () => {
     const baked = claudeHooksSettings({ repoRoot: '/repo', tmuxBin: '/opt/tmux' });
-    expect(baked.hooks.UserPromptSubmit[0]!.hooks[0]!.command).toBe('RAC_TMUX_BIN=/opt/tmux /repo/scripts/hooks/rac-attention working');
+    expect(baked.hooks.UserPromptSubmit[0]!.hooks[0]!.command).toBe('RAC_TMUX_BIN=/opt/tmux RAC_CALENDAR_LIFECYCLE_SPOOL=/repo/.data/google-calendar-claude-lifecycle.jsonl /repo/scripts/hooks/rac-attention working --lifecycle start');
     const bridged = claudeHooksSettings({ repoRoot: '/host/repo' });
-    expect(bridged.hooks.UserPromptSubmit[0]!.hooks[0]!.command).toBe('/host/repo/scripts/hooks/rac-attention working');
+    expect(bridged.hooks.UserPromptSubmit[0]!.hooks[0]!.command).toBe('RAC_CALENDAR_LIFECYCLE_SPOOL=/host/repo/.data/google-calendar-claude-lifecycle.jsonl /host/repo/scripts/hooks/rac-attention working --lifecycle start');
   });
 
   it('maps every ADR 0001 event to its Attention state and reports nothing on SessionEnd', () => {
     const { hooks } = claudeHooksSettings({ repoRoot: '/repo', tmuxBin: '/usr/bin/tmux' });
     const state = (entry: { hooks: { command: string }[] }) => entry.hooks[0]!.command.split(' ').pop();
     expect(state(hooks.SessionStart[0]!)).toBe('finished');
-    expect(state(hooks.UserPromptSubmit[0]!)).toBe('working');
+    expect(hooks.UserPromptSubmit[0]!.hooks[0]!.command).toContain('working --lifecycle start');
     // AskUserQuestion carries its payload; ExitPlanMode only reports the state (ADR 0006)
-    expect(hooks.PreToolUse.map(entry => [entry.matcher, state(entry), entry.hooks[0]!.command.endsWith('--payload')])).toEqual([
-      ['AskUserQuestion', '--payload', true],
-      ['ExitPlanMode', 'question', false],
+    expect(hooks.PreToolUse.map(entry => [entry.matcher, entry.hooks[0]!.command.includes('question --payload'), entry.hooks[0]!.command.includes('--lifecycle question')])).toEqual([
+      ['AskUserQuestion', true, true],
+      ['ExitPlanMode', false, false],
     ]);
     expect(state(hooks.Elicitation[0]!)).toBe('question');
     expect(state(hooks.PermissionRequest[0]!)).toBe('question');
     expect(state(hooks.PostToolUse[0]!)).toBe('working');
     expect(state(hooks.PermissionDenied[0]!)).toBe('working');
     expect(state(hooks.ElicitationResult[0]!)).toBe('working');
-    expect(state(hooks.Stop[0]!)).toBe('finished');
-    expect(state(hooks.StopFailure[0]!)).toBe('finished');
+    expect(hooks.Stop[0]!.hooks[0]!.command).toContain('finished --lifecycle terminal');
+    expect(hooks.StopFailure[0]!.hooks[0]!.command).toContain('finished --lifecycle terminal');
     // Notification splits on notification_type: the prompt is a question, going idle is finished
     expect(hooks.Notification.map(entry => [entry.matcher, state(entry)])).toEqual([
       ['permission_prompt', 'question'],

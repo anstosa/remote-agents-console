@@ -99,6 +99,8 @@ test('shows and switches the configured server on authentication and output scre
   };
 
   await page.goto('/');
+  // keep server selection inside deliberate credential entry
+  await page.getByRole('button', { name: 'Log in', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Console access' })).toBeVisible();
   await expectServerTargets();
   await expect(page.getByRole('combobox', { name: /Remote Agents server/u })).toHaveCount(0);
@@ -395,6 +397,8 @@ test('renders a single configured server as the current button', async ({ page }
   });
 
   await page.goto('/');
+  // reveal the configured server only after choosing password entry
+  await page.getByRole('button', { name: 'Log in', exact: true }).click();
   const group = page.getByRole('group', { name: 'Remote Agents servers' });
   const buttons = group.getByRole('button');
   await expect(buttons).toHaveCount(1);

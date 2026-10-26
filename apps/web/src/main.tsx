@@ -1,6 +1,7 @@
 import { cloneElement, Component, createContext, type Dispatch, Fragment, lazy, type ReactElement, type ReactNode, type SetStateAction, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
+import { PublicHomepage } from './public-homepage.js';
 import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { pollWhileVisible } from './client-scheduling.js';
@@ -2203,19 +2204,40 @@ function TabRowLead() {
   return <div className="tab-row-lead"><ServerSelector />{voice && <button type="button" className={`server-switcher-button server-switcher-voice${voice.active ? ' active' : ''}`} aria-label={voiceLabel} aria-pressed={voice.visible} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={voiceMenu} onClick={voice.open}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.69 2.8a2 2 0 0 1-.45 2.11L8.08 9.9a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.33 1.84.56 2.8.69A2 2 0 0 1 22 16.92Z" /></svg><span>{voice.active ? 'Ongoing' : `Call ${voice.name}`}</span></button>}{disableError && <span role="alert">{disableError}</span>}<ConfiguredButtonList slot="tabLead" className="tab-lead-buttons" /></div>;
 }
 
-function Login({ done, initialError }: { done: (session: SessionInfo) => void; initialError?: string }) {
+// reveal credentials only after choosing login without replacing a workspace destination
+function PublicEntry({ done, initialError }: { done: (session: SessionInfo) => void; initialError?: string }) {
+  const [showLogin, setShowLogin] = useState(location.hash === '#login');
+  // remove only the public fallback's login fragment
+  const clearLoginHash = () => {
+    // leave notification and workspace fragments untouched
+    if (location.hash === '#login') history.replaceState(null, '', `${location.pathname}${location.search}`);
+  };
+  // return from credential entry without retaining a password
+  const showHomepage = () => { clearLoginHash(); setShowLogin(false); };
+  // preserve the established session and control transition
+  const finishLogin = (session: SessionInfo) => { clearLoginHash(); done(session); };
+  // keep the password form separate from the public product description
+  if (showLogin) return <Login initialError={initialError} done={finishLogin} onBack={showHomepage} />;
+  return <PublicHomepage error={initialError} onLogin={() => { /* request credentials without submitting anything */ setShowLogin(true); }} />;
+}
+
+// authenticate through the existing password and CSRF flow
+function Login({ done, initialError, onBack }: { done: (session: SessionInfo) => void; initialError?: string; onBack: () => void }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState(initialError ?? '');
+  // submit credentials only after the explicit form action
   const login = async (event: React.FormEvent) => {
     event.preventDefault();
     const response = await request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) });
+    // retain the form and error after rejected credentials
     if (!response.ok) return setError('Invalid credentials');
     const session = await response.json() as SessionInfo;
     csrf = session.csrfToken;
     setPassword('');
     done(session);
   };
-  return <main className="auth-screen"><div className="auth-glow" /><form className="auth-card" onSubmit={login}><div className="auth-mark" aria-hidden="true"><span>&gt;_</span></div><div className="auth-heading"><ServerSwitcher className="auth-server-switcher" /><p>REMOTE // AGENTS</p><h1>Console access</h1></div><label className="sr-only">Username<input type="text" name="username" autoComplete="username" tabIndex={-1} /></label><label>Password<input autoFocus type="password" name="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" /></label>{error && <p className="auth-error" role="alert">{error}</p>}<button className="auth-submit">Authenticate <span aria-hidden="true">↗</span></button></form></main>;
+  // keep the existing login controls and public policy navigation
+  return <main className="auth-screen auth-login-screen"><div className="auth-glow" /><form className="auth-card" onSubmit={login}><button type="button" className="auth-back" onClick={onBack}>Back to homepage</button><div className="auth-mark" aria-hidden="true"><span>&gt;_</span></div><div className="auth-heading"><ServerSwitcher className="auth-server-switcher" /><p>REMOTE // AGENTS</p><h1>Console access</h1></div><p className="auth-description">Log in with this installation's console password. Connecting Google Calendar is optional and separate from console login.</p><label className="sr-only">Username<input type="text" name="username" autoComplete="username" tabIndex={-1} /></label><label>Password<input autoFocus type="password" name="password" value={password} onChange={event => { /* retain credentials only until submission or leaving the form */ setPassword(event.target.value); }} autoComplete="current-password" /></label>{error && <p className="auth-error" role="alert">{error}</p>}<button className="auth-submit">Authenticate <span aria-hidden="true">↗</span></button><footer className="auth-policy-footer"><nav className="auth-policy-links" aria-label="Legal policies"><a href="/privacy">Privacy Policy</a><a href="/terms">Terms of Service</a></nav></footer></form></main>;
 }
 
 // frame full-screen loading with the shared clockwise progress border
@@ -10754,7 +10776,7 @@ function App() {
         ? <NoteFeedbackProvider><DashboardView onUnauthorized={handleUnauthorized} onInactive={handleInactive} updateError={agentUpdateError} onDismissUpdateError={() => { /* dismiss only the agent update failure */ setAgentUpdateError(''); }} /></NoteFeedbackProvider>
         : (state === 'inactive' || state === 'naming') && sessionInfo !== undefined
           ? <ControlScreen session={sessionInfo} claimed={claimSession} />
-          : <Login initialError={error} done={applySession} />;
+          : <PublicEntry initialError={error} done={applySession} />;
   // expose settings without a manual server update bypass
   const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
   // share the current launch settings with every flyout

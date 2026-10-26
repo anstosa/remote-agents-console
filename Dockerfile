@@ -19,7 +19,7 @@ COPY apps ./apps
 RUN pnpm build && pnpm --filter @rac/server deploy --legacy --prod /opt/rac-server
 
 FROM node:${NODE_VERSION}
-ARG CODEX_VERSION=0.144.5
+ARG CODEX_VERSION=0.164.0
 ENV HOME=/home/node \
     NODE_ENV=production
 

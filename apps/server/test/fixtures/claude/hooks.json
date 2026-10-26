@@ -17,7 +17,7 @@
           {
             "type": "command",
             "timeout": 5,
-            "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention working"
+            "command": "RAC_TMUX_BIN=/usr/bin/tmux RAC_CALENDAR_LIFECYCLE_SPOOL=/srv/remoteagents/.data/google-calendar-claude-lifecycle.jsonl /srv/remoteagents/scripts/hooks/rac-attention working --lifecycle start"
           }
         ]
       }
@@ -29,7 +29,7 @@
           {
             "type": "command",
             "timeout": 5,
-            "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention question --payload"
+            "command": "RAC_TMUX_BIN=/usr/bin/tmux RAC_CALENDAR_LIFECYCLE_SPOOL=/srv/remoteagents/.data/google-calendar-claude-lifecycle.jsonl /srv/remoteagents/scripts/hooks/rac-attention question --payload --lifecycle question"
           }
         ]
       },
@@ -105,7 +105,7 @@
           {
             "type": "command",
             "timeout": 5,
-            "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention finished"
+            "command": "RAC_TMUX_BIN=/usr/bin/tmux RAC_CALENDAR_LIFECYCLE_SPOOL=/srv/remoteagents/.data/google-calendar-claude-lifecycle.jsonl /srv/remoteagents/scripts/hooks/rac-attention finished --lifecycle terminal"
           }
         ]
       }
@@ -116,7 +116,7 @@
           {
             "type": "command",
             "timeout": 5,
-            "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention finished"
+            "command": "RAC_TMUX_BIN=/usr/bin/tmux RAC_CALENDAR_LIFECYCLE_SPOOL=/srv/remoteagents/.data/google-calendar-claude-lifecycle.jsonl /srv/remoteagents/scripts/hooks/rac-attention finished --lifecycle terminal"
           }
         ]
       }

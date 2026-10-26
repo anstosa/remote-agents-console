@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
-test('renders the protected console login screen', async ({ page }) => { await page.goto('/'); await expect(page).toHaveTitle('Remote Agent Console'); await expect(page.getByRole('heading', { name: 'Console access' })).toBeVisible(); await expect(page.getByLabel('Password')).toBeVisible(); });
+// require an explicit homepage action before exposing credential entry
+test('opens the protected console login from the public homepage', async ({ page }) => { await page.goto('/'); await expect(page).toHaveTitle('Remote Agent Console'); await expect(page.getByRole('heading', { name: 'Remote Agent Console', exact: true })).toBeVisible(); await expect(page.getByLabel('Password')).toHaveCount(0); await page.getByRole('button', { name: 'Log in', exact: true }).click(); await expect(page.getByRole('heading', { name: 'Console access' })).toBeVisible(); await expect(page.getByLabel('Password')).toBeVisible(); });
 
 test('shows the controlling device and prompts an unnamed device before takeover', async ({ page }) => {
   let takeover: unknown;

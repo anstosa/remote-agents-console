@@ -2,6 +2,8 @@ import { expect, test } from '@playwright/test';
 
 test('bundles and uses every JetBrains Mono Nerd Font face', async ({ page }) => {
   await page.goto('/');
+  // open credential entry through the public homepage
+  await page.getByRole('button', { name: 'Log in', exact: true }).click();
 
   await expect(page.locator('body')).toHaveCSS('font-family', /JetBrainsMono Nerd Font/u);
   await expect(page.getByRole('heading', { name: 'Console access' })).toHaveCSS('font-family', /JetBrainsMono Nerd Font/u);

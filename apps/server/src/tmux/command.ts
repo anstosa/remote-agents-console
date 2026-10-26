@@ -49,4 +49,24 @@ export const paneEnv = (source: NodeJS.ProcessEnv = process.env): NodeJS.Process
   return env;
 };
 // stdout and stderr decode as UTF-8 streams, so a character split between two pipe reads survives
-export async function run(command: string, args: string[], input?: string, timeoutMs = 5000): Promise<{ code: number; stdout: string; stderr: string }> { return await new Promise((resolve, reject) => { const child = spawn(command, args, { shell: false, env: safeEnv(), stdio: ['pipe', 'pipe', 'pipe'] }); let stdout = '', stderr = ''; child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8'); const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs); child.stdout.on('data', d => { stdout = (stdout + d).slice(-1_000_000); }); child.stderr.on('data', d => { stderr = (stderr + d).slice(-16_384); }); child.on('error', reject); child.on('close', code => { clearTimeout(timer); resolve({ code: code ?? -1, stdout, stderr }); }); if (input !== undefined) child.stdin.end(input); else child.stdin.end(); }); }
+export async function run(command: string, args: string[], input?: string, timeoutMs = 5000): Promise<{ code: number; stdout: string; stderr: string; timedOut?: true }> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, { shell: false, env: safeEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    let timedOut = false;
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    // distinguish a deadline kill from other signal interruptions
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
+    child.stdout.on('data', d => { stdout = (stdout + d).slice(-1_000_000); });
+    child.stderr.on('data', d => { stderr = (stderr + d).slice(-16_384); });
+    child.on('error', reject);
+    child.on('close', code => {
+      clearTimeout(timer);
+      resolve({ code: code ?? -1, stdout, stderr, ...(timedOut ? { timedOut: true } : {}) });
+    });
+    // close stdin even when no payload is supplied
+    if (input !== undefined) child.stdin.end(input);
+    else child.stdin.end();
+  });
+}

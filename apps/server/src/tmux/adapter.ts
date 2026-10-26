@@ -454,6 +454,15 @@ export class TmuxAdapter {
     return true;
   }
 
+  // keep managed Claude arming and submission in one guarded tmux batch
+  async armAndSendKeys(socket: SocketRef, pane: string, arm: string, keys: readonly TmuxKey[]): Promise<boolean> {
+    // reject unsafe pane coordinates and unbounded or malformed opaque arm bytes
+    if (!paneId.test(pane) || keys.length === 0 || !/^[A-Za-z0-9_-]{1,16384}$/u.test(arm)) return false;
+    // apply the same history-view and selector safety as ordinary adapter input
+    if (!await this.preparePaneInput(socket, pane)) return false;
+    return (await run(this.binary, ['-S', socket.path, 'set-option', '-p', '-t', pane, '@rac_calendar_arm', arm, ';', 'send-keys', '-t', pane, ...keys])).code === 0;
+  }
+
   // write a console-owned Attention state on a pane (e.g. `finished` after an interrupt)
   async setReportedAttention(socket: SocketRef, pane: string, state: AttentionState): Promise<boolean> {
     if (!paneId.test(pane) || !attentionStates.has(state)) return false;

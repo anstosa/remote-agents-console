@@ -6,6 +6,33 @@ import { ControlService } from '../src/auth/control.js';
 
 // distinguish reserved ownership from an active connection lease
 describe('ControlService', () => {
+  // preserve oauth identity through a long consent round trip
+  it('renews only the same generation after lease expiry', async () => {
+    let now = 0;
+    const control = new ControlService(() => now, 100);
+    await control.take('first');
+    const generation = control.reservationGeneration('first')!;
+    now = 1_000;
+    expect(control.active('first')).toBe(false);
+    expect(control.renewReservation('first', generation)).toBe(true);
+    expect(control.reservationGeneration('first')).toBe(generation);
+    await control.take('second');
+    await control.take('first');
+    expect(control.renewReservation('first', generation)).toBe(false);
+    expect(control.reservationGeneration('first')).not.toBe(generation);
+  });
+  // release cannot resurrect a previously authorized transaction
+  it('invalidates generations on logout without changing redundant ownership', async () => {
+    const control = new ControlService();
+    await control.take('first');
+    const generation = control.reservationGeneration('first')!;
+    await control.take('first');
+    expect(control.renewReservation('first', generation)).toBe(true);
+    await control.release('first');
+    expect(control.renewReservation('first', generation)).toBe(false);
+    await control.take('first');
+    expect(control.renewReservation('first', generation)).toBe(false);
+  });
   // distinguish explicit first admission from passive session restoration
   it('keeps an unowned console inactive when initial admission is disabled', async () => {
     const control = new ControlService();
@@ -114,17 +141,24 @@ describe('persisted control ownership', () => {
     const control = await ControlService.persisted(file);
     expect(control.connect(first)).toBe(false);
     expect(await control.claimInitial(first)).toBe(true);
+    const generation = control.reservationGeneration(first)!;
     expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ version: 1, ownerSessionId: first });
     expect((await stat(file)).mode & 0o777).toBe(0o600);
     control.connect(first);
     control.active(first);
     await control.take(first);
+    expect(control.reservationGeneration(first)).toBe(generation);
     expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ version: 1, ownerSessionId: first });
     const restarted = await ControlService.persisted(file);
+    const restoredGeneration = restarted.reservationGeneration(first)!;
+    expect(restoredGeneration).toEqual(expect.any(String));
+    expect(restoredGeneration).not.toBe(generation);
     expect(restarted.ownerSessionId()).toBeUndefined();
     expect(restarted.active(first)).toBe(false);
     expect(restarted.connect(second)).toBe(false);
     expect(await restarted.claimInitial(second)).toBe(false);
+    expect(restarted.renewReservation(first, generation)).toBe(false);
+    expect(restarted.renewReservation(first, restoredGeneration)).toBe(true);
     expect(restarted.connect(first)).toBe(true);
     expect(restarted.ownerSessionId()).toBe(first);
   });
@@ -161,11 +195,14 @@ describe('persisted control ownership', () => {
   it('does not acknowledge failed takeovers or releases and permits retry', async () => {
     const control = await ControlService.persisted(file);
     await control.take(first);
+    const generation = control.reservationGeneration(first);
     const saved = join(directory, 'saved');
     await rename(join(directory, 'state'), saved);
     await writeFile(join(directory, 'state'), 'not a directory');
     await expect(control.take(second)).rejects.toThrow();
+    expect(control.reservationGeneration(first)).toBe(generation);
     await expect(control.release(first)).rejects.toThrow();
+    expect(control.reservationGeneration(first)).toBe(generation);
     expect(control.connect(first)).toBe(true);
     expect(control.connect(second)).toBe(false);
     expect((await ControlService.persisted(join(saved, 'control-owner.json'))).connect(first)).toBe(true);
@@ -180,11 +217,14 @@ describe('persisted control ownership', () => {
   it('cleans a failed rename without publishing ownership and permits retry', async () => {
     const control = await ControlService.persisted(file);
     await control.take(first);
+    const generation = control.reservationGeneration(first);
     const saved = join(directory, 'saved.json');
     await rename(file, saved);
     await mkdir(file);
     await expect(control.take(second)).rejects.toThrow();
+    expect(control.reservationGeneration(first)).toBe(generation);
     await expect(control.release(first)).rejects.toThrow();
+    expect(control.reservationGeneration(first)).toBe(generation);
     expect(control.connect(first)).toBe(true);
     expect(control.connect(second)).toBe(false);
     expect((await ControlService.persisted(saved)).connect(first)).toBe(true);

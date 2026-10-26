@@ -10,6 +10,7 @@ type PageHeaderCopy = {
 const pageHeaders: Readonly<Record<string, PageHeaderCopy>> = {
   browser: { eyebrow: 'Browser settings', description: 'Manage this browser’s name and identity.' },
   voice: { eyebrow: 'Server settings', description: 'Configure the voice assistant, its context, tools, and credentials.' },
+  'google-calendar': { eyebrow: 'Server settings', description: 'Capture supported agent work in a dedicated Google Calendar.' },
   keyboard: { eyebrow: 'Server settings', description: 'Configure server-wide keyboard shortcuts stored with the application.' },
   interface: { eyebrow: 'Application settings', description: 'Customize this browser’s appearance and configure application-wide buttons.' },
   app: { eyebrow: 'Server settings', description: 'Configure network access, integrations, and remote servers.' },

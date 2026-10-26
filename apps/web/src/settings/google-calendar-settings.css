@@ -1,0 +1,42 @@
+.settings-google-calendar { display: grid; min-width: 0; gap: 1rem; }
+.settings-google-calendar-status { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: .75rem; border-bottom: 1px solid var(--surface-1); padding-bottom: .85rem; }
+.settings-google-calendar-status > span { display: grid; min-width: 0; gap: .18rem; color: var(--text); font: 650 .72rem/1.4 var(--font-mono); overflow-wrap: anywhere; }
+.settings-google-calendar-status small { color: var(--subtext-0); font-size: .62rem; }
+.settings-google-calendar-warning,
+.settings-google-calendar-error { margin: 0; border: 1px solid color-mix(in srgb, var(--yellow) 52%, var(--surface-1)); border-radius: var(--control-radius); padding: .65rem; background: color-mix(in srgb, var(--yellow) 8%, transparent); color: var(--yellow); font: 600 .65rem/1.45 var(--font-mono); overflow-wrap: anywhere; }
+.settings-google-calendar-error { border-color: color-mix(in srgb, var(--red) 52%, var(--surface-1)); background: color-mix(in srgb, var(--red) 8%, transparent); color: var(--red); }
+.settings-google-calendar-fields { display: grid; min-width: 0; gap: .8rem; }
+.settings-google-calendar-template-help,
+.settings-google-calendar-oauth-help { display: grid; min-width: 0; gap: .45rem; color: var(--subtext-0); font: 600 .64rem/1.45 var(--font-mono); }
+.settings-google-calendar-template-help > span:first-child { color: var(--subtext-0); font-weight: 700; }
+.settings-google-calendar-placeholders { display: flex; min-width: 0; flex-wrap: wrap; gap: .35rem; }
+.settings-google-calendar-placeholders code { border: 1px solid var(--surface-2); border-radius: .25rem; padding: .2rem .35rem; background: var(--surface-0); color: var(--mauve); }
+.settings-google-calendar-template-help output { display: grid; min-width: 0; gap: .18rem; border-left: 2px solid var(--mauve); padding: .45rem .6rem; background: color-mix(in srgb, var(--mauve) 6%, transparent); overflow-wrap: anywhere; }
+.settings-google-calendar-template-help output small { color: var(--overlay-1); }
+.settings-google-calendar-evidence { border-left: 2px solid var(--surface-2); padding-left: .6rem; }
+.settings-google-calendar-environment { margin-top: .5rem; }
+.settings-google-calendar-oauth-help code,
+.settings-google-calendar-delivery small { overflow-wrap: anywhere; }
+.settings-google-calendar-copy-row { display: flex; min-width: 0; align-items: center; gap: .5rem; }
+.settings-google-calendar-copy-row code { min-width: 0; flex: 1; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .48rem .58rem; background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); color: var(--text); }
+.settings-google-calendar-actions { display: flex; min-width: 0; flex-wrap: wrap; gap: .5rem; }
+.settings-google-calendar-name,
+.settings-google-calendar-select { display: grid; min-width: 0; gap: .35rem; color: var(--subtext-0); font: 700 .62rem var(--font-mono); }
+.settings-google-calendar-name input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .5rem .58rem; background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); color: var(--text); box-shadow: inset 0 1px #0003; font: 600 .7rem/1.4 var(--font-mono); }
+.settings-google-calendar-name input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.settings-google-calendar-select { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.settings-google-calendar-select > span { grid-column: 1 / -1; }
+.settings-google-calendar-select .settings-select { min-width: 0; }
+.settings-google-calendar-counts { display: grid; margin: 0; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .45rem; }
+.settings-google-calendar-counts > div { display: grid; min-width: 0; gap: .1rem; border-left: 2px solid var(--surface-2); padding: .35rem .5rem; }
+.settings-google-calendar-counts dt { color: var(--overlay-1); font: 600 .58rem var(--font-mono); }
+.settings-google-calendar-counts dd { margin: 0; color: var(--text); font: 750 .82rem var(--font-mono); }
+
+@container settings-panel (max-width: 520px) {
+  .settings-google-calendar-status,
+  .settings-google-calendar-copy-row { align-items: stretch; flex-direction: column; }
+  .settings-google-calendar-status button,
+  .settings-google-calendar-copy-row button { width: 100%; }
+  .settings-google-calendar-select { grid-template-columns: minmax(0, 1fr); }
+  .settings-google-calendar-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

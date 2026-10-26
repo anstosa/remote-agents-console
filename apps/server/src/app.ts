@@ -107,8 +107,15 @@ import { registerSettingsRoutes } from './settings/routes.js';
 import { ConfiguredButtonCatalog } from './button-actions/catalog.js';
 import { ButtonActionError, ButtonActionService, buttonActionInputSchema } from './button-actions/service.js';
 import { HostCommandRunner } from './button-actions/host-command-runner.js';
+import { defaultGoogleCalendarConfig, type CalendarLabels } from './google-calendar/contracts.js';
+import { createGoogleCalendarService } from './google-calendar/runtime.js';
+import type { GoogleCalendarService } from './google-calendar/service.js';
+import { createGoogleCalendarLifecycle, type PromptCalendarLifecycle } from './google-calendar/lifecycle.js';
+import { registerGoogleCalendarRoutes } from './google-calendar/routes.js';
+import { calendarLabelsForAgent } from './google-calendar/labels.js';
+import { renderNotFoundPage, renderPublicPolicyPage } from './public-pages.js';
 
-export type Dependencies = { buttonActions?: ButtonActionService; settings?: SettingsService; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider };
+export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use.
 declare module 'fastify' {
@@ -162,12 +169,29 @@ const noteAttachmentBodyLimit = Math.ceil(maxPromptAttachmentBytes * 1.4);
 const openFolderReadinessAttempts = 10_000 / launchPollIntervalMs;
 // build the console server
 export async function buildApp(config: ValidatedConfig, deps: Dependencies = {}): Promise<FastifyInstance> {
+  // initialize optional calendar delivery without affecting core readiness
+  const googleCalendar = deps.googleCalendar ?? await createGoogleCalendarService({
+    config: config.googleCalendar ?? defaultGoogleCalendarConfig,
+    publicOrigin: config.publicOrigin.origin,
+    ...(process.env.RAC_GOOGLE_CALENDAR_AUTH_FILE === undefined ? {} : { authPath: process.env.RAC_GOOGLE_CALENDAR_AUTH_FILE }),
+    ...(process.env.RAC_GOOGLE_CALENDAR_ACTIVITIES_FILE === undefined ? {} : { activitiesPath: process.env.RAC_GOOGLE_CALENDAR_ACTIVITIES_FILE })
+  });
+  // avoid touching lifecycle files on installations that have not enabled capture
+  const calendarLifecycle = deps.calendarLifecycle ?? (config.googleCalendar?.enabled === true ? createGoogleCalendarLifecycle({
+    sink: googleCalendar,
+    // resolve only safe configured labels and closed adapter names
+    labels: async (agentId): Promise<CalendarLabels> => {
+      const agent = (await discovery.target(agentId))?.agent;
+      return calendarLabelsForAgent(agent, discovery.worktreesNow(), discovery.projectsNow());
+    }
+  }) : undefined);
+
   // stage bridged scratch attachments in the existing shared checkout
   const attachmentStaging = process.env.RAC_HOST_TMUX_DIR === undefined ? undefined : {
     workspace: serverCheckout(),
     hostWorkspace: serverCheckoutOnHost(config.projects, process.env.RAC_HOST_REPOSITORY?.trim() || process.env.RAC_HOST_WORKSPACE)
   };
-  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId)); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const prompts = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, kind => config.adapters[kind]?.teardown, attachmentStaging); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, undefined, prSwitch); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
+  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId)); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const prompts = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, calendarLifecycle); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, undefined, prSwitch); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
   const temporaryPreviews = deps.temporaryPreviews ?? new TemporaryPreviewService();
   // publish only boot-opaque presentations of trusted configured actions
   const buttonCatalog = deps.buttonActions?.catalog ?? new ConfiguredButtonCatalog(config);
@@ -344,6 +368,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   } });
   // reuse browser auth without granting integration principals settings capabilities
   await registerSettingsRoutes(app, { service: settings, session, controlled, isController: id => control.ownerSessionId() === id });
+  // keep outbound google authorization separate from inbound integration principals
+  await registerGoogleCalendarRoutes(app, {
+    service: googleCalendar, session, controlled,
+    reservationGeneration: id => control.reservationGeneration(id),
+    renewReservation: (id, generation) => control.renewReservation(id, generation),
+    isSessionValid: id => control.reservationGeneration(id) !== undefined
+  });
+  // own provider workers within the normal application lifecycle
+  app.addHook('onReady', async () => { googleCalendar.start(); });
+  app.addHook('onClose', async () => { await googleCalendar.stop(); });
   // refresh remote identities from their publishers
   const refreshRemoteServers = async (known?: InstanceStatus[]) => {
     const statuses = known ?? await instanceStatusPoller.statuses(config.remoteServers);
@@ -445,6 +479,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // a Review run pane whose run is not in flight (a restart forgot it) goes back to the operator
     void interactiveRunner.releaseOrphans(discovered.agents);
     const queuedCounts = await queuedPromptCounts(discovered.agents);
+    // recover durable intervals even when the original agent is no longer listed
+    if (calendarLifecycle !== undefined) await prompts.reconcileCalendar?.(discovered.agents.map(agent => agent.id)).catch(() => undefined);
     await Promise.all(discovered.agents.map(agent => prompts.observe(agent).catch(() => undefined)));
     await prompts.retireDeparted(discovered.agents.map(agent => agent.id)).catch(() => undefined);
     // suppress completions while more work waits
@@ -606,6 +642,29 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   app.get('/preview/:token', temporaryPreview);
   app.get('/preview/:token/*', temporaryPreview);
+  // publish the privacy policy without session or controller checks
+  app.get('/privacy', async (request, reply) => { browser(request); return reply.type('text/html; charset=utf-8').send(renderPublicPolicyPage('privacy')); });
+  // publish terms without changing authentication for protected routes
+  app.get('/terms', async (request, reply) => { browser(request); return reply.type('text/html; charset=utf-8').send(renderPublicPolicyPage('terms')); });
+  // render public browser errors while retaining machine-readable API and asset failures
+  app.setNotFoundHandler(async (request, reply) => {
+    browser(request);
+    const pathname = request.url.split('?')[0] ?? '';
+    // honor explicit HTML media ranges without ignoring a rejected quality value
+    const acceptsHtml = request.headers.accept?.toLowerCase().split(',').some(range => {
+      const [mediaType, ...parameters] = range.split(';');
+      // default an omitted quality value to the standard full preference
+      const quality = parameters.find(parameter => parameter.trim().startsWith('q='))?.split('=')[1] ?? '1';
+      return mediaType?.trim() === 'text/html' && Number(quality) > 0 && Number(quality) <= 1;
+    });
+    // keep reserved API and static asset namespaces machine-readable
+    const resourcePath = /^\/(?:api|assets|fonts)(?:\/|$)/u.test(pathname);
+    const html = (request.method === 'GET' || request.method === 'HEAD') && acceptsHtml && !resourcePath;
+    const payload = html ? renderNotFoundPage() : JSON.stringify({ error: 'not found' });
+    reply.code(404).header('Vary', 'Accept').type(html ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8').header('Content-Length', Buffer.byteLength(payload));
+    // delegated static HEAD requests need explicit body suppression with matching GET length
+    return reply.send(request.method === 'HEAD' ? undefined : payload);
+  });
   app.get('/', async (request, reply) => { browser(request); return reply.sendFile('index.html'); });
   app.get('/api/ui-version', async (request) => { browser(request); return { version: await uiVersion() }; });
   // restore authentication without silently claiming an unowned console
@@ -709,7 +768,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // preserve one in-flight update
     if (result.outcome === 'busy') return reply.code(409).send({ error: 'Agent update is already running.' });
     // report an operator command failure safely
-    if (result.outcome === 'failed') return reply.code(502).send({ error: 'Agent update failed.' });
+    if (result.outcome === 'failed') return reply.code(502).send({ error: result.error ?? 'Agent update failed.' });
     return { agent: result.status };
   });
   // publish one authenticated background update state

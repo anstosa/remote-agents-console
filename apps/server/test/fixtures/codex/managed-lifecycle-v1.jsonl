@@ -1,0 +1,4 @@
+{"type":"session_meta","ordinal":0,"timestamp":"2026-10-23T17:16:40.000Z","payload":{"id":"019a1234-5678-7000-8000-000000000001","cwd":"/sanitized/worktree","timestamp":"2026-10-23T17:16:40.000Z","originator":"codex-tui","cli_version":"0.164.0"}}
+{"type":"response_item","ordinal":41,"timestamp":"2026-10-23T17:17:00.000Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sanitized managed lifecycle probe"}]}}
+{"type":"event_msg","ordinal":42,"timestamp":"2026-10-23T17:17:10.000Z","payload":{"type":"task_started","turn_id":"sanitized-turn","started_at":1792775807}}
+{"type":"event_msg","ordinal":43,"timestamp":"2026-10-23T17:22:20.000Z","payload":{"type":"task_complete","turn_id":"sanitized-turn","completed_at":1792776107}}

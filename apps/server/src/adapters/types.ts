@@ -216,6 +216,19 @@ export type CompletionEvent =
  */
 export type CompletionBaseline = { rollout: string; ordinal: number; resetPane?: { pid: number; cwd?: string } } | { cwd: string; resetAt: number; ordinal: number };
 
+/** exact managed-turn evidence from a version-pinned native event stream */
+export type ManagedPromptLifecycleEvidence =
+  | { state: 'pending'; source: 'codex-rollout'; parserVersion: 1; receiptOrdinal?: number; startOrdinal?: number; turnId?: string; startedAt?: string }
+  | { state: 'finished'; source: 'codex-rollout'; parserVersion: 1; receiptOrdinal: number; startOrdinal: number; terminalOrdinal: number; turnId: string; startedAt: string; finishedAt: string }
+  | { state: 'invalid'; reason: 'missing_lifecycle_evidence' | 'unsupported_lifecycle_contract' };
+
+/** versioned native correlation for one RAC-managed prompt */
+export type ManagedPromptLifecycleV1 = {
+  readonly version: 1;
+  compatible(): boolean;
+  inspect(baseline: CompletionBaseline, prompt: { fingerprint: string; transportFingerprint: string }, checkpoint?: { receiptOrdinal?: number; startOrdinal?: number; turnId?: string; startedAt?: string }): Promise<ManagedPromptLifecycleEvidence>;
+};
+
 /**
  * A pane snapshot the console feeds an Adapter's `newConversation` while it drives a
  * Run: the pane title, the Attention state the console derived, and the conversation
@@ -373,6 +386,8 @@ export interface Adapter {
     accepted?(baseline: CompletionBaseline, prompt: string): Promise<boolean>;
     since(baseline: CompletionBaseline): Promise<CompletionEvent | undefined>;
   };
+  /** exact correlation only; adapters must omit this when native evidence is unproved */
+  readonly managedPromptLifecycleV1?: ManagedPromptLifecycleV1;
   /**
    * How a Run resets an existing pane to a fresh conversation and how it knows a
    * freshly launched pane is ready for its first prompt (Scheduled prompts). Pure

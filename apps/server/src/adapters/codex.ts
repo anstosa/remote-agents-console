@@ -1,7 +1,7 @@
 import { classifyCodexPane } from './codex-panes.js';
 import { isCodexCommand } from './codex-processes.js';
 import { codexQuestionTextEntry, queuedCodexQuestion } from './codex-questions.js';
-import { codexCommands, codexCompletion, codexConversations, codexInferState, codexNewConversation, codexSubmission, codexTurns, parseCodexQuestion } from './codex-tui.js';
+import { codexCommands, codexCompletion, codexConversations, codexInferState, codexManagedPromptLifecycleV1, codexNewConversation, codexSubmission, codexTurns, parseCodexQuestion } from './codex-tui.js';
 import { codexReviewRuns } from './codex-review-runs.js';
 import type { Adapter } from './types.js';
 
@@ -31,6 +31,7 @@ export const codexAdapter = {
   commands: codexCommands,
   conversations: codexConversations,
   completion: codexCompletion,
+  managedPromptLifecycleV1: codexManagedPromptLifecycleV1,
   newConversation: codexNewConversation,
   // Codex hides no panes and runs no helper processes; its one cleanup rule is the stale agent
   panes: { classify: classifyCodexPane },

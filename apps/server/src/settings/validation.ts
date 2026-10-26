@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { applyListenOverrides, sourceSchema, validateConfig } from '../config/schema.js';
 import { environment } from './env.js';
 import { SettingsError, type SettingsIssue } from './contracts.js';
+import { parseTokenKey } from '../google-calendar/crypto.js';
 
 // validate otherwise-ownerless installation selectors
 const absolute = z.string().startsWith('/').max(4096).refine(value => !/[\0\r\n]/u.test(value));
@@ -36,6 +37,10 @@ export async function validateEnvironment(content: string): Promise<void> {
     if (key === 'RAC_LISTEN_PORT' && value !== '' && (!/^\d{1,5}$/u.test(value) || Number(value) < 1 || Number(value) > 65_535)) throw new SettingsError('invalid_listener_port');
     // validate persisted timezone choices
     if (key === 'TZ' && value !== '') { try { new Intl.DateTimeFormat('en', { timeZone: value }); } catch { throw new SettingsError('invalid_timezone'); } }
+    // validate authored encryption keys without making optional runtime failures fatal
+    if ((key === 'RAC_GOOGLE_CALENDAR_TOKEN_KEY' || key === 'RAC_GOOGLE_CALENDAR_PREVIOUS_TOKEN_KEY') && value !== '') {
+      try { parseTokenKey(value); } catch { throw new SettingsError('invalid_google_calendar_token_key'); }
+    }
     // validate structured provider mappings
     if (key === 'RAC_OPENAI_API_KEY_IDS' && value !== '') {
       try { const parsed: unknown = JSON.parse(value); if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(); } catch { throw new SettingsError('invalid_api_key_mapping'); }

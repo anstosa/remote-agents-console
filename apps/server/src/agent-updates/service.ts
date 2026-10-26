@@ -7,6 +7,7 @@ import { agentKinds } from '../adapters/types.js';
 import type { ValidatedConfig } from '../config/schema.js';
 import { run } from '../tmux/command.js';
 import { serverCheckout, serverCheckoutOnHost } from '../workspaces/server-checkout.js';
+import { maxAgentUpdateOutputBytes, saveAgentUpdateFailure, type AgentUpdateFailureReason } from './diagnostics.js';
 
 // allow registry latency while keeping version checks bounded
 const statusTimeoutMs = 30_000;
@@ -14,18 +15,18 @@ const statusTimeoutMs = 30_000;
 const updateTimeoutMs = 15 * 60_000;
 const cacheTtlMs = 15 * 60_000;
 const failedCacheTtlMs = 60_000;
-const maxOutputBytes = 16 * 1024;
 // quote one trusted command wrapper value for the host shell
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 export type AgentUpdateStatus = { kind: AgentKind; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string };
-export type AgentUpdateResult = { outcome: 'updated'; status: AgentUpdateStatus } | { outcome: 'unavailable' } | { outcome: 'busy' } | { outcome: 'failed' };
+export type AgentUpdateResult = { outcome: 'updated'; status: AgentUpdateStatus } | { outcome: 'unavailable' } | { outcome: 'busy' } | { outcome: 'failed'; error?: string };
 export type AgentUpdateJob =
   | { id: string; kind: AgentKind; state: 'running' }
   | { id: string; kind: AgentKind; state: 'complete'; agent: AgentUpdateStatus }
   | { id: string; kind: AgentKind; state: 'failed'; error: string };
 export type AgentUpdateStart = { outcome: 'started'; job: AgentUpdateJob } | { outcome: 'unavailable' } | { outcome: 'busy' };
-export type AgentUpdateRunner = (command: string, timeoutMs: number) => Promise<{ code: number; output: string }>;
+type AgentUpdateCommandResult = { code: number; output: string; failure?: AgentUpdateFailureReason };
+export type AgentUpdateRunner = (command: string, timeoutMs: number) => Promise<AgentUpdateCommandResult>;
 export type AgentUpdateServiceLike = Pick<AgentUpdateService, 'statuses' | 'update' | 'startUpdate' | 'updateStatus'>;
 
 // remove terminal controls and retain one bounded version line
@@ -54,7 +55,7 @@ async function readOutput(path: string): Promise<string> {
   if (file === undefined) return '';
   try {
     const details = await file.stat();
-    const length = Math.min(details.size, maxOutputBytes);
+    const length = Math.min(details.size, maxAgentUpdateOutputBytes);
     // avoid an unnecessary read for an empty file
     if (length === 0) return '';
     const buffer = Buffer.allocUnsafe(length);
@@ -105,10 +106,11 @@ export class AgentUpdateService {
     void this.update(kind).then(result => {
       // retain only the terminal state for this job identity
       if (result.outcome === 'updated') this.settleJob(job, { ...job, state: 'complete', agent: result.status });
-      else this.settleJob(job, { ...job, state: 'failed', error: 'Agent update failed.' });
-    }, () => {
+      else this.settleJob(job, { ...job, state: 'failed', error: result.outcome === 'failed' ? result.error ?? 'Agent update failed.' : 'Agent update failed.' });
+    }, async error => {
       // contain an unexpected background rejection
-      this.settleJob(job, { ...job, state: 'failed', error: 'Agent update failed.' });
+      const failure = await this.failedUpdate(kind, { code: -1, output: exceptionOutput(error), failure: 'launch_failed' });
+      this.settleJob(job, { ...job, state: 'failed', error: failure.error ?? 'Agent update failed.' });
     });
     return { outcome: 'started', job };
   }
@@ -133,13 +135,35 @@ export class AgentUpdateService {
       const activeRefresh = this.refreshes.get(kind);
       // finish an older version read before mutating the installation
       if (activeRefresh !== undefined) await activeRefresh.catch(() => undefined);
-      const result = await this.runner(commands.run, updateTimeoutMs).catch(() => ({ code: -1, output: '' }));
+      const result = await this.runner(commands.run, updateTimeoutMs).catch((error): AgentUpdateCommandResult => ({ code: -1, output: exceptionOutput(error), failure: 'launch_failed' }));
       // do not claim an update when the command failed
-      if (result.code !== 0) return { outcome: 'failed' };
+      if (result.code !== 0) return await this.failedUpdate(kind, result);
       this.cache.delete(kind);
       return { outcome: 'updated', status: await this.status(kind, true) };
     } finally {
       this.updating = undefined;
+    }
+  }
+
+  // retain bounded private evidence while exposing only categorical failure details
+  private async failedUpdate(kind: AgentKind, result: AgentUpdateCommandResult): Promise<Extract<AgentUpdateResult, { outcome: 'failed' }>> {
+    const code = Number.isInteger(result.code) && result.code > 0 && result.code <= 255 ? result.code : undefined;
+    const reason = result.failure ?? (code === undefined ? 'interrupted' : 'command_failed');
+    const name = kind === 'omx' ? 'OMX' : kind === 'codex' ? 'Codex' : kind;
+    const details: Record<AgentUpdateFailureReason, string> = {
+      command_failed: `with exit code ${code ?? 'unknown'}`,
+      launch_failed: 'because the update command could not start',
+      timed_out: 'because the update command timed out',
+      bridge_unavailable: 'because the host update bridge is unavailable',
+      invalid_completion: 'because the update command returned an invalid completion status',
+      interrupted: 'because the update command stopped before reporting completion'
+    };
+    const error = `${name} update failed ${details[reason]}.`;
+    try {
+      const report = await saveAgentUpdateFailure(this.checkout, { kind, code: result.code, output: result.output, reason });
+      return { outcome: 'failed', error: `${error} Private diagnostics: ${report}.` };
+    } catch {
+      return { outcome: 'failed', error: `${error} Private diagnostics could not be saved.` };
     }
   }
 
@@ -184,16 +208,16 @@ export class AgentUpdateService {
   }
 
   // execute a trusted command locally or through the host tmux bridge
-  private async runConfigured(command: string, timeoutMs: number): Promise<{ code: number; output: string }> {
+  private async runConfigured(command: string, timeoutMs: number): Promise<AgentUpdateCommandResult> {
     const path = process.env.RAC_HOST_PATH?.trim();
     const prefix = `export HOME=${quote(this.home)}; ${path ? `export PATH=${quote(path)}; ` : ''}cd -- ${quote(this.home)}; `;
     // use the local shell for direct deployments
     if (this.socket === undefined) {
       const result = await run('/bin/bash', ['-lc', `${prefix}{ ${command}; }`], undefined, timeoutMs);
-      return { code: result.code, output: `${result.stdout}${result.stderr}` };
+      return { code: result.code, output: `${result.stdout}${result.stderr}`, ...(result.timedOut ? { failure: 'timed_out' as const } : {}) };
     }
     // a bridged command needs a shared checkout for completion files
-    if (this.hostCheckout === undefined) return { code: -1, output: '' };
+    if (this.hostCheckout === undefined) return { code: -1, output: 'Shared host checkout unavailable.', failure: 'bridge_unavailable' };
     const token = randomBytes(12).toString('hex');
     const session = `rac-agent-update-${token}`;
     const localBase = join(this.checkout, '.data', 'agent-updates', token);
@@ -202,20 +226,25 @@ export class AgentUpdateService {
     const statusFile = `${localBase}.status`;
     const temporaryStatusFile = `${localBase}.status.tmp`;
     await mkdir(dirname(localBase), { recursive: true, mode: 0o700 });
-    const script = `${prefix}{ ${command}; } > ${quote(`${hostBase}.out`)} 2>&1; code=$?; printf '%s' "$code" > ${quote(`${hostBase}.status.tmp`)}; mv -- ${quote(`${hostBase}.status.tmp`)} ${quote(`${hostBase}.status`)}`;
+    const script = `umask 077; ${prefix}{ ${command}; } > ${quote(`${hostBase}.out`)} 2>&1; code=$?; printf '%s' "$code" > ${quote(`${hostBase}.status.tmp`)}; mv -- ${quote(`${hostBase}.status.tmp`)} ${quote(`${hostBase}.status`)}`;
     try {
       const launched = await run(this.tmuxBinary, ['-S', this.socket, 'new-session', '-d', '-s', session, '-c', this.home, '/bin/bash', '-lc', script]);
       // fail when the host tmux rejects the command
-      if (launched.code !== 0) return { code: launched.code, output: launched.stderr };
+      if (launched.code !== 0) return { code: launched.code, output: `${launched.stdout}${launched.stderr}`, failure: 'launch_failed' };
       const deadline = Date.now() + timeoutMs;
       // wait for the atomic completion marker
       while (Date.now() < deadline) {
         const status = await readFile(statusFile, 'utf8').catch(() => undefined);
         // return only after output has closed
-        if (status !== undefined) return { code: Number.parseInt(status.trim(), 10), output: await readOutput(outputFile) };
+        if (status !== undefined) {
+          const code = /^(?:0|[1-9]\d{0,2})$/u.test(status.trim()) ? Number(status.trim()) : -1;
+          // refuse malformed markers instead of guessing a successful completion
+          if (code < 0 || code > 255) return { code: -1, output: await readOutput(outputFile), failure: 'invalid_completion' };
+          return { code, output: await readOutput(outputFile) };
+        }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      return { code: -1, output: await readOutput(outputFile) };
+      return { code: -1, output: await readOutput(outputFile), failure: 'timed_out' };
     } finally {
       // stop writers before removing shared completion files
       await run(this.tmuxBinary, ['-S', this.socket, 'kill-session', '-t', `=${session}`]).catch(() => undefined);
@@ -226,4 +255,9 @@ export class AgentUpdateService {
       ]);
     }
   }
+}
+
+// keep rejected command details inside owner-only diagnostics
+function exceptionOutput(error: unknown): string {
+  return error instanceof Error ? error.stack ?? error.message : String(error);
 }

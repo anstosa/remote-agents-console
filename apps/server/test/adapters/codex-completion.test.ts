@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { appendFile, mkdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { codexPromptAccepted, codexRolloutBaseline, codexTurnSince, completionFromRecords, maxOrdinalFromRecords, promptAcceptedFromRecords } from '../../src/adapters/codex-conversations.js';
+import { codexManagedLifecycleCompatible, codexPromptAccepted, codexRolloutBaseline, codexTurnSince, completionFromRecords, managedPromptLifecycleFromRecords, maxOrdinalFromRecords, promptAcceptedFromRecords } from '../../src/adapters/codex-conversations.js';
 import { codexHome, fakeProc, tempDir } from '../helpers/codex-fixtures.js';
 
 type Record = { type: string; ordinal: number; payload: unknown };
@@ -23,7 +25,7 @@ async function writeRollout(home: string, id: string, records: Record[], cwd = '
   const [year, month, day] = createdAt.slice(0, 10).split('-');
   const directory = join(home, 'sessions', year, month, day);
   await mkdir(directory, { recursive: true });
-  const meta = { type: 'session_meta', ordinal: 0, payload: { id, cwd, timestamp: createdAt, originator: 'codex-tui' } };
+  const meta = { type: 'session_meta', ordinal: 0, payload: { id, cwd, timestamp: createdAt, originator: 'codex-tui', cli_version: '0.164.0' } };
   const stamp = createdAt.slice(0, 19).replace(/:/gu, '-');
   const file = join(directory, `rollout-${stamp}-${id}.jsonl`);
   await writeFile(file, `${[meta, ...records].map(line => JSON.stringify(line)).join('\n')}\n`);
@@ -40,6 +42,45 @@ const promptRecord = (ordinal: number, prompt: string): Record => ({
 });
 
 describe('Codex rollout completion', () => {
+  it('correlates one exact numeric native turn without using record timestamps', () => {
+    const prompt = 'Do it';
+    const identity = { fingerprint: createHash('sha256').update(prompt).digest('hex'), transportFingerprint: createHash('sha256').update(`${prompt} `).digest('hex') };
+    const records: Record[] = [
+      promptRecord(1, prompt),
+      { type: 'event_msg', ordinal: 2, payload: { type: 'task_started', turn_id: 'turn-1', started_at: 1_792_775_807 } },
+      { type: 'event_msg', ordinal: 3, payload: { type: 'task_complete', turn_id: 'other', completed_at: 1_792_775_900 } },
+      { type: 'event_msg', ordinal: 4, payload: { type: 'task_complete', turn_id: 'turn-1', completed_at: 1_792_776_107 } }
+    ];
+    expect(managedPromptLifecycleFromRecords(lines(records), 0, identity)).toEqual({ state: 'finished', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: 1, startOrdinal: 2, terminalOrdinal: 4, turnId: 'turn-1', startedAt: '2026-10-23T17:16:47.000Z', finishedAt: '2026-10-23T17:21:47.000Z' });
+  });
+
+  it('fails closed for string payload times and competing receipts', () => {
+    const prompt = 'Do it';
+    const identity = { fingerprint: createHash('sha256').update(prompt).digest('hex'), transportFingerprint: createHash('sha256').update(`${prompt} `).digest('hex') };
+    const stringTime: Record[] = [promptRecord(1, prompt), { type: 'event_msg', ordinal: 2, payload: { type: 'task_started', turn_id: 'turn-1', started_at: '2026-10-23T09:30:07Z' } }];
+    expect(managedPromptLifecycleFromRecords(lines(stringTime), 0, identity)).toEqual({ state: 'invalid', reason: 'unsupported_lifecycle_contract' });
+    const competing: Record[] = [promptRecord(1, prompt), promptRecord(2, 'direct terminal input'), { type: 'event_msg', ordinal: 3, payload: { type: 'task_started', turn_id: 'turn-2', started_at: 1_792_775_807 } }];
+    expect(managedPromptLifecycleFromRecords(lines(competing), 0, identity)).toEqual({ state: 'invalid', reason: 'missing_lifecycle_evidence' });
+  });
+
+  it('continues from persisted exact start evidence after the receipt leaves the bounded tail', () => {
+    const prompt = 'Do it';
+    const identity = { fingerprint: createHash('sha256').update(prompt).digest('hex'), transportFingerprint: createHash('sha256').update(`${prompt} `).digest('hex') };
+    const terminal: Record[] = [{ type: 'event_msg', ordinal: 500, payload: { type: 'task_complete', turn_id: 'turn-long', completed_at: 1_792_776_107 } }];
+    expect(managedPromptLifecycleFromRecords(lines(terminal), 0, identity, { receiptOrdinal: 1, startOrdinal: 2, turnId: 'turn-long', startedAt: '2026-10-23T17:16:47.000Z' })).toEqual({ state: 'finished', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: 1, startOrdinal: 2, terminalOrdinal: 500, turnId: 'turn-long', startedAt: '2026-10-23T17:16:47.000Z', finishedAt: '2026-10-23T17:21:47.000Z' });
+  });
+
+  it('gates managed lifecycle parsing on the pinned Codex compatibility probe', () => {
+    expect(codexManagedLifecycleCompatible('0.164.0')).toBe(true);
+    expect(codexManagedLifecycleCompatible('0.165.0')).toBe(false);
+    expect(codexManagedLifecycleCompatible(undefined)).toBe(true);
+    const fixture = readFileSync(new URL('../fixtures/codex/managed-lifecycle-v1.jsonl', import.meta.url), 'utf8').trim().split('\n');
+    expect(JSON.parse(fixture[0]!).payload.cli_version).toBe('0.164.0');
+    const prompt = 'sanitized managed lifecycle probe';
+    const identity = { fingerprint: createHash('sha256').update(prompt).digest('hex'), transportFingerprint: createHash('sha256').update(`${prompt} `).digest('hex') };
+    expect(managedPromptLifecycleFromRecords(fixture, 40, identity).state).toBe('finished');
+  });
+
   it('reads a completed turn and its answer from the task_complete event', () => {
     const records = turnRecords(1, 't1', 'Summarize the change', 'It renames the flag.');
     expect(completionFromRecords(lines(records), 0)).toEqual({ kind: 'completed', ordinal: 4, answer: 'It renames the flag.' });

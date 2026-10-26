@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SettingsSchema, SettingsSource } from '../../web/src/settings/contracts.js';
-import { agentEnvironmentKeys, agentEnvironmentKeysForInstallation, environmentKeysWithDedicatedControls, storageEnvironmentKeys, voiceEnvironmentKeys } from '../../web/src/settings/environment-fields.js';
+import { agentEnvironmentKeys, agentEnvironmentKeysForInstallation, environmentKeysWithDedicatedControls, googleCalendarEnvironmentKeys, storageEnvironmentKeys, voiceEnvironmentKeys } from '../../web/src/settings/environment-fields.js';
 import { tmuxEnvironmentKeys } from '../../web/src/settings/tmux-settings.js';
 
 // isolate the actual field visibility inputs without writing source files
@@ -12,7 +12,7 @@ const installation = source('installation', {}, {
   native: { type: 'object', optional: true, properties: { environmentFile: { type: 'string' } } }
 });
 const installerKeys = ['NODE_BIN', 'RAC_ENV_FILE', 'COMPOSE_FILE', 'COMPOSE_ENV_FILES', 'COMPOSE_PROJECT_NAME', 'COMPOSE_PROFILES', 'COMPOSE_PARALLEL_LIMIT', 'COMPOSE_COMPATIBILITY'];
-const baselineExcludedKeys = [...tmuxEnvironmentKeys, ...voiceEnvironmentKeys, ...agentEnvironmentKeys, ...storageEnvironmentKeys, 'RAC_LOG_LEVEL', ...installerKeys];
+const baselineExcludedKeys = [...tmuxEnvironmentKeys, ...voiceEnvironmentKeys, ...googleCalendarEnvironmentKeys, ...agentEnvironmentKeys, ...storageEnvironmentKeys, 'RAC_LOG_LEVEL', ...installerKeys];
 
 describe('environment controls owned by other settings tabs', () => {
   // reserve persisted RAC data locations for Storage rather than the general environment page

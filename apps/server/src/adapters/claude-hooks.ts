@@ -20,9 +20,10 @@ type HookEntry = { matcher?: string; hooks: CommandHandler[] };
 // bridge, where the host's PATH tmux is used) and the script named by its host path.
 // `--payload` (AskUserQuestion only) carries the hook's stdin as the reported
 // Inline question the console renders (ADR 0006).
-function report(context: AdapterFileContext, state: AttentionState, payload = false): CommandHandler {
+function report(context: AdapterFileContext, state: AttentionState, payload = false, lifecycle?: 'start' | 'question' | 'terminal'): CommandHandler {
   const prefix = context.tmuxBin === undefined ? '' : `RAC_TMUX_BIN=${context.tmuxBin} `;
-  return { type: 'command', timeout: 5, command: `${prefix}${context.repoRoot}/scripts/hooks/rac-attention ${state}${payload ? ' --payload' : ''}` };
+  const lifecyclePrefix = lifecycle === undefined ? '' : `RAC_CALENDAR_LIFECYCLE_SPOOL=${context.repoRoot}/.data/google-calendar-claude-lifecycle.jsonl `;
+  return { type: 'command', timeout: 5, command: `${prefix}${lifecyclePrefix}${context.repoRoot}/scripts/hooks/rac-attention ${state}${payload ? ' --payload' : ''}${lifecycle === undefined ? '' : ` --lifecycle ${lifecycle}`}` };
 }
 
 // The event → state mapping (ADR 0001). `SessionStart` also registers the session
@@ -37,9 +38,9 @@ export function claudeHooksSettings(context: AdapterFileContext): { hooks: Recor
   return {
     hooks: {
       SessionStart: finished,
-      UserPromptSubmit: working,
+      UserPromptSubmit: [{ hooks: [report(context, 'working', false, 'start')] }],
       PreToolUse: [
-        { matcher: 'AskUserQuestion', hooks: [report(context, 'question', true)] },
+        { matcher: 'AskUserQuestion', hooks: [report(context, 'question', true, 'question')] },
         { matcher: 'ExitPlanMode', hooks: [report(context, 'question')] },
       ],
       Elicitation: question,
@@ -47,8 +48,8 @@ export function claudeHooksSettings(context: AdapterFileContext): { hooks: Recor
       PostToolUse: working,
       PermissionDenied: working,
       ElicitationResult: working,
-      Stop: finished,
-      StopFailure: finished,
+      Stop: [{ hooks: [report(context, 'finished', false, 'terminal')] }],
+      StopFailure: [{ hooks: [report(context, 'finished', false, 'terminal')] }],
       Notification: [
         { matcher: 'permission_prompt', hooks: [report(context, 'question')] },
         { matcher: 'idle_prompt', hooks: [report(context, 'finished')] },

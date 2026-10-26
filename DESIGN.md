@@ -1,11 +1,13 @@
 # Design
 
 ## Source of truth
-Status: Active. Updated: 2026-10-23. Scope: Settings page headers, navigation, search, Cloudflare setup, notices and workspace toolbar decorators.
+Status: Active. Updated: 2026-10-26. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, workspace toolbar decorators, public homepage and policies.
 Evidence: existing Settings forms and split confirmation, `compose.yaml`, the
 host settings queue/applier, and Cloudflare's official Tunnel setup documentation.
 Toolbar evidence: `apps/web/src/styles.css`, browser layout regressions, and the
 requirement to retain mobile decorator placement at every viewport width.
+Homepage evidence: Google's [homepage requirements](https://support.google.com/cloud/answer/13807376)
+and [OAuth branding requirements](https://support.google.com/cloud/answer/15549049).
 
 ## Brand
 Practical administration, clear ownership, and truthful status. Avoid decorative
@@ -24,6 +26,22 @@ They need copyable setup steps and origin values, safe credential entry, progres
 failure recovery, and an explicit final hostname transition.
 
 ## Information architecture
+Publish `/privacy` and `/terms` as complete, readable HTML without login or control.
+Link them from the public homepage beside the full product and data-use description and
+from the Google Calendar disclosure before Connect. These documents need no app
+JavaScript, account data, credentials or instance-specific details.
+Unknown browser URLs use the same public document layout with an actual HTTP 404
+and a return-to-console link. API and asset requests retain JSON errors.
+The anonymous homepage identifies Remote Agent Console and describes agents,
+prompts, repositories, reviews, files and project tools before a prominent Log in
+action reveals password entry. Explain the optional Google Calendar connection,
+account identity, encrypted tokens and restricted calendar/event access. Keep
+password authentication separate from Google authorization. Restore existing
+sessions before choosing the homepage, preserving naming/control safeguards and
+workspace destinations. Offer a return from password entry to the homepage.
+Publish the same information and policy links without JavaScript; never claim
+Google domain verification or branding approval based on a code deployment.
+
 Replace the two raw Cloudflare navigation entries with one Cloudflare page.
 Existing tunnels show only the configured endpoint, process up/down status, and
 expandable configuration files. Replace tunnel explicitly reopens setup without
@@ -111,7 +129,7 @@ Voice-only environment credentials live on Voice even while the feature is off;
 they retain the environment source, masking, shared save and restart behavior.
 Place write-tool controls directly below Context without an advanced-section
 heading. Separate Environment & keys from the voice controls with whitespace.
-Application has a top-level Agents page for adapter configuration. Put each adapter's
+Settings groups Agents and Google Calendar under Integrations. Put each adapter's
 environment controls in a flat Environment & keys section: retain application-owned
 custom adapter variables and environment-file-owned RAC variables in their original
 backing sources, shared save transaction, masking and restart behavior. Show environment

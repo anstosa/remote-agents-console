@@ -19,7 +19,7 @@ const isStoredControl = (value: unknown): value is StoredControl => {
 
 // reserve browser ownership independently of its live connection lease
 export class ControlService {
-  private owner?: { sessionId: string; expires: number };
+  private owner?: { sessionId: string; expires: number; generation: string };
   private file?: string;
   private mutation = Promise.resolve();
 
@@ -45,7 +45,7 @@ export class ControlService {
       // accept only the supported ownership record
       if (!isStoredControl(stored)) throw new Error('Invalid console control state');
       // a restored owner must reconnect before using a live lease
-      if (stored.ownerSessionId !== null) control.owner = { sessionId: stored.ownerSessionId, expires: 0 };
+      if (stored.ownerSessionId !== null) control.owner = { sessionId: stored.ownerSessionId, expires: 0, generation: randomUUID() };
       return control;
     } finally {
       await handle.close();
@@ -66,7 +66,7 @@ export class ControlService {
       // serialize first admission with takeovers and logout
       if (this.owner === undefined) {
         await this.write(sessionId);
-        this.owner = { sessionId, expires: 0 };
+        this.owner = { sessionId, expires: 0, generation: randomUUID() };
       }
       return this.connect(sessionId);
     });
@@ -75,10 +75,22 @@ export class ControlService {
   // acknowledge explicit handoffs only after durable ownership is replaced
   async take(sessionId: string): Promise<void> {
     await this.mutate(async () => {
+      // retain only the unchanged reservation's oauth authority
+      const generation = this.owner?.sessionId === sessionId ? this.owner.generation : randomUUID();
       // unchanged ownership needs only a fresh connection lease
       if (this.owner?.sessionId !== sessionId) await this.write(sessionId);
-      this.owner = { sessionId, expires: this.now() + this.leaseMs };
+      this.owner = { sessionId, expires: this.now() + this.leaseMs, generation };
     });
+  }
+
+  // bind oauth transactions to the reservation rather than its short live lease
+  reservationGeneration(sessionId: string): string | undefined { return this.owner?.sessionId === sessionId ? this.owner.generation : undefined; }
+
+  // restore only the unchanged reserved owner without permitting takeover
+  renewReservation(sessionId: string, generation: string): boolean {
+    // reject retired or displaced reservations even after later lease expiry
+    if (this.owner?.sessionId !== sessionId || this.owner.generation !== generation) return false;
+    return this.connect(sessionId);
   }
 
   // expired reservations never grant settings or integration authority

@@ -158,6 +158,51 @@ describe('TmuxAdapter capture', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  // arm and submit only after the adapter's existing pane-mode safety check
+  it('uses the adapter-owned binary for an atomic Claude arm and submit batch', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    vi.stubEnv('RAC_TMUX_BIN', '/configured/tmux');
+    try {
+      run.mockResolvedValueOnce({ code: 0, stdout: '0\t\n', stderr: '' });
+      await expect(new TmuxAdapter().armAndSendKeys(socket, '%1', 'synthetic-arm', ['Enter'])).resolves.toBe(true);
+      expect(run.mock.calls).toEqual([
+        ['/configured/tmux', ['-S', '/tmp/tmux', 'display-message', '-p', '-t', '%1', '#{pane_in_mode}\t#{pane_mode}']],
+        ['/configured/tmux', ['-S', '/tmp/tmux', 'set-option', '-p', '-t', '%1', '@rac_calendar_arm', 'synthetic-arm', ';', 'send-keys', '-t', '%1', 'Enter']]
+      ]);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  // unrelated selectors must reject the arm as well as its submit key
+  it('does not arm or submit into an unsupported pane mode', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    run.mockResolvedValueOnce({ code: 0, stdout: '1\tclock-mode\n', stderr: '' });
+    await expect(new TmuxAdapter().armAndSendKeys(socket, '%1', 'synthetic-arm', ['Enter'])).resolves.toBe(false);
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  // invalid coordinates and empty submission cannot publish an otherwise valid arm
+  it.each([['bad-pane', ['Enter'] as const], ['%1', [] as const]])('rejects armed input for %s with keys %j', async (pane, keys) => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    await expect(new TmuxAdapter().armAndSendKeys(socket, pane, 'synthetic-arm', keys)).resolves.toBe(false);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  // surface an atomic tmux rejection to the prompt lifecycle rather than claiming receipt
+  it('returns false when the guarded arm batch fails', async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    run.mockResolvedValueOnce({ code: 0, stdout: '0\t\n', stderr: '' });
+    run.mockResolvedValueOnce({ code: 1, stdout: '', stderr: '' });
+    await expect(new TmuxAdapter().armAndSendKeys(socket, '%1', 'synthetic-arm', ['Enter'])).resolves.toBe(false);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  // reject malformed arm data before invoking the process boundary
+  it.each(['', 'arm with spaces', 'a'.repeat(16_385)])('refuses invalid arm data %#', async arm => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    await expect(new TmuxAdapter().armAndSendKeys(socket, '%1', arm, ['Enter'])).resolves.toBe(false);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('sends an Adapter key sequence one send-keys invocation per key', async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
     run.mockResolvedValueOnce({ code: 0, stdout: '0\t\n', stderr: '' });

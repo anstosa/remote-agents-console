@@ -1,4 +1,4 @@
-import { codexCommands, codexCompletion, codexConversations, codexInferState, codexNewConversation, codexSubmission, codexTurns, parseCodexQuestion } from './codex-tui.js';
+import { codexCommands, codexCompletion, codexConversations, codexInferState, codexManagedPromptLifecycleV1, codexNewConversation, codexSubmission, codexTurns, parseCodexQuestion } from './codex-tui.js';
 import { classifyOmxPane, classifyOmxProcess, isOmxWorkerPane } from './omx-panes.js';
 import { isOmxLeaderCommand } from './omx-processes.js';
 import { pendingOmxQuestion } from './omx-questions.js';
@@ -41,6 +41,7 @@ export const omxAdapter = {
   commands: codexCommands,
   conversations: codexConversations,
   completion: codexCompletion,
+  managedPromptLifecycleV1: codexManagedPromptLifecycleV1,
   // OMX runs the Codex TUI, so `/new` resets it identically (shared by reference)
   newConversation: codexNewConversation,
   // team worker panes are hidden; orphan workers, HUD panes/processes and stale OMX panes are cleanup targets

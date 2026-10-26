@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { codexDraftState, codexOwnsDraft, failedTurnFromCapture, lastPromptFromHistory, latestAgentMessageFromHistory, latestCompletedAssistantTurn, queueReadyPrompt } from './codex-turns.js';
 import { parseChoiceQuestion } from './codex-questions.js';
-import { codexConversationName, codexConversationSummaries, codexHome, codexLatestMessage, codexPromptAccepted, codexRolloutBaseline, codexTurnSince, discoverCodexConversation, validCodexThreadId } from './codex-conversations.js';
+import { codexConversationName, codexConversationSummaries, codexHome, codexLatestMessage, codexManagedLifecycleCompatible, codexManagedPromptLifecycle, codexPromptAccepted, codexRolloutBaseline, codexTurnSince, discoverCodexConversation, validCodexThreadId } from './codex-conversations.js';
 import type { Adapter, AttentionState, PromptCommand } from './types.js';
 
 // The new-conversation reset lives in its own module; both the Codex and OMX Adapters
@@ -150,4 +150,11 @@ export const codexCompletion: NonNullable<Adapter['completion']> = {
   // confirm durable prompt receipt
   accepted: (baseline, prompt) => codexPromptAccepted(baseline, prompt),
   since: (baseline) => codexTurnSince(baseline),
+};
+
+// expose only the validated version-one rollout correlation contract
+export const codexManagedPromptLifecycleV1: NonNullable<Adapter['managedPromptLifecycleV1']> = {
+  version: 1,
+  compatible: () => codexManagedLifecycleCompatible(),
+  inspect: (baseline, prompt, checkpoint) => codexManagedPromptLifecycle(baseline, prompt, checkpoint),
 };
