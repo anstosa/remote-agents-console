@@ -63,6 +63,8 @@ jobs:
           tmux -S "$RUNNER_TEMP/test-probe.sock" new-session -d -s probe
           tmux -S "$RUNNER_TEMP/test-probe.sock" kill-server
       - run: pnpm install --frozen-lockfile
+      # build the production bundle consumed by the server static boundary
+      - run: pnpm --filter @rac/web build
       # budget subprocess and filesystem cases without retrying failed assertions
       - name: Run every server test
         run: >-
