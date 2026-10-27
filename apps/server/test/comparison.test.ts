@@ -451,7 +451,6 @@ describe('comparison resolution', () => {
     });
   }, 20_000);
 
-
   // ignore publication tracking as source evidence
   it('does not mistake a same-name published upstream for the branch source', async () => {
     const root = await repo();
