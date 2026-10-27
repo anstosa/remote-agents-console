@@ -107,6 +107,12 @@ export const createOutputLinkOverlays = (container: HTMLElement, onOpen: () => v
           // native open, copy, and keyboard actions use the same selected destination
           for (const type of ['pointerdown', 'mousedown', 'click', 'auxclick', 'contextmenu', 'keydown']) anchor.addEventListener(type, guardCurrentTarget);
           anchor.addEventListener('mousedown', event => event.stopPropagation());
+          // the overlay sits outside xterm's element, so hand the wheel to the terminal beneath it
+          anchor.addEventListener('wheel', event => {
+            const forwarded = new WheelEvent('wheel', event);
+            terminal.element?.querySelector('.xterm-screen')?.dispatchEvent(forwarded);
+            if (forwarded.defaultPrevented) event.preventDefault();
+          }, { passive: false });
           anchor.addEventListener('click', event => {
             event.stopPropagation();
             onOpen();

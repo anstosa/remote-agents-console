@@ -162,6 +162,47 @@ test('desktop wheel reaches a mouse-reporting Agent output', async ({ page }) =>
   await expect.poll(() => paneInputText(page, 'agent-1')).toMatch(/\x1b\[<64;\d+;\d+M/u);
 });
 
+// a link overlay sits over the terminal; the wheel under it must still scroll
+test.describe('desktop wheel over an output link', () => {
+  const history = Array.from({ length: 60 }, (_, index) => `line ${String(index).padStart(3, '0')}`).join('\r\n');
+  const link = (page: import('@playwright/test').Page) => page.locator('.log-output .output-link-overlay');
+  const wheelOverLink = async (page: import('@playwright/test').Page) => {
+    await expect(link(page)).toHaveCount(1);
+    const bounds = await link(page).boundingBox();
+    // require a rendered overlay to point at
+    if (bounds === null) throw new Error('output link has no bounds');
+    await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    await page.mouse.wheel(0, -120);
+  };
+
+  test('scrolls the browser scrollback', async ({ page }) => {
+    await installPaneMock(page);
+    await routeApi(page);
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.goto('/');
+    await seedPaneSize(page, 'agent-1', 80, 24);
+    await pushBytes(page, 'agent-1', `${history}\r\nsee https://example.com/docs`);
+    const rows = page.getByLabel('Live log').locator('.xterm-rows');
+    await expect(rows).toContainText('example.com/docs');
+    const top = () => rows.locator('div').first().textContent();
+    const before = await top();
+    await wheelOverLink(page);
+    await expect.poll(top).not.toBe(before);
+  });
+
+  test('reaches a mouse-reporting program', async ({ page }) => {
+    await installPaneMock(page);
+    await routeApi(page);
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.goto('/');
+    await seedPaneSize(page, 'agent-1', 80, 24);
+    await pushBytes(page, 'agent-1', '\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[2J\x1b[Hsee https://example.com/docs');
+    await expect(page.getByLabel('Live log').locator('.xterm-rows')).toContainText('example.com/docs');
+    await wheelOverLink(page);
+    await expect.poll(() => paneInputText(page, 'agent-1')).toMatch(/\x1b\[<64;\d+;\d+M/u);
+  });
+});
+
 // use a touch-capable phone context
 test.describe('phone Agent output scrolling', () => {
   test.use({
