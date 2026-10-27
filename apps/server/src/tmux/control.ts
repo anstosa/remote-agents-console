@@ -298,7 +298,10 @@ export class TmuxControlClient implements PaneClient {
    * with `-N` to keep trailing cells, and the cursor restored from `#{cursor_x/y}`. mouse
    * reporting and coordinate modes are restored for either buffer so a fresh browser can
    * send wheel input to the live program. the normal buffer is the history to `depth`, joined
-   * with CRLF, cleared first and followed by the modes and cursor position. reply lines are
+   * with CRLF, cleared first and followed by the modes and cursor position. `capture-pane -e`
+   * carries the pen from cell to cell and never resets it, so either capture is followed by an
+   * SGR reset; otherwise the last captured cell's style (an underlined link, say) becomes the
+   * browser's pen and colours everything the program writes next. reply lines are
    * byte-preserving (latin1); the ASCII control prefixes stay ASCII, so latin1 reproduces the
    * exact bytes a spawned capture would print.
    */
@@ -320,11 +323,11 @@ export class TmuxControlClient implements PaneClient {
       if (capture?.ok !== true) return Buffer.alloc(0);
       let out = '\x1b[?1049h\x1b[H\x1b[2J';
       capture.lines.forEach((line, index) => { out += `\x1b[${index + 1};1H${line}`; });
-      return Buffer.from(out + mouseModes + cursor, 'latin1');
+      return Buffer.from(`${out}\x1b[0m${mouseModes}${cursor}`, 'latin1');
     }
     const capture = await this.command(`capture-pane -e -p -J -t ${pane} -S -${depth}`).catch(() => undefined);
     if (capture?.ok !== true) return Buffer.alloc(0);
-    return Buffer.from(`\x1b[H\x1b[2J${capture.lines.join('\r\n')}${mouseModes}${cursor}`, 'latin1');
+    return Buffer.from(`\x1b[H\x1b[2J${capture.lines.join('\r\n')}\x1b[0m${mouseModes}${cursor}`, 'latin1');
   }
 
   private async continuePane(pane: string): Promise<void> {

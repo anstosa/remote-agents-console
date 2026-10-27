@@ -503,9 +503,26 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       const capture = await run(tmux, ['-S', socket, 'capture-pane', '-e', '-p', '-J', '-t', pane, '-S', '-100']);
       const cursor = await run(tmux, ['-S', socket, 'display-message', '-p', '-t', pane, '#{cursor_x} #{cursor_y}']);
       expect(cursor.stdout.trim()).toBe('10 0');
-      const expected = `\x1b[H\x1b[2J${capture.stdout.replace(/\r?\n$/u, '').split(/\r?\n/u).join('\r\n')}\x1b[1;11H`;
+      const expected = `\x1b[H\x1b[2J${capture.stdout.replace(/\r?\n$/u, '').split(/\r?\n/u).join('\r\n')}\x1b[0m\x1b[1;11H`;
       expect(seed).toBe(expected);
       expect(seed).toContain('hello seed');
+    } finally {
+      client.dispose();
+    }
+  });
+
+  // capture-pane -e never resets the pen, so a seed must, or the program's next text inherits the last cell's style
+  it('resets the pen after a seed whose last captured cell is underlined', async () => {
+    const { ref, socket, pane } = await fixtureSession();
+    const client = new TmuxControlClient(tmux, ref.path, 'fixture', () => {});
+    try {
+      await client.ready;
+      expect(await client.sendInput(pane, Buffer.from('\x1b[4mUNDERLINED\n'))).toBe(true);
+      await expect.poll(async () => (await run(tmux, ['-S', socket, 'capture-pane', '-e', '-p', '-t', pane])).stdout).toMatch(/\x1b\[4mUNDERLINED/u);
+      const seed = (await client.seed(pane, 100)).toString('latin1');
+      expect(seed).toContain('\x1b[4mUNDERLINED');
+      // the final SGR the browser parses is a full reset, not the capture's underline
+      expect([...seed.matchAll(/\x1b\[[\d;:]*m/gu)].at(-1)?.[0]).toBe('\x1b[0m');
     } finally {
       client.dispose();
     }
