@@ -301,6 +301,31 @@ for (const update of ['unrelated', 'revision', 'navigation'] as const) {
   });
 }
 
+// extensionless placeholders need both retry and metadata-only recovery paths
+for (const scenario of ['retry', 'metadata'] as const) {
+  // classify bytes rather than relying on a raster extension
+  test(`recovers a capped extensionless image through ${scenario}`, async ({ page }) => {
+    const path = 'assets/logo';
+    const patch = patchOf([{ ...cappedFile(path), fingerprint: 'extensionless-v1' }]);
+    const metadata = { path, base: null, working: { path, size: 6 * 1024 * 1024, binary: true, truncated: false } };
+    await mountPanel(page, patch, scenario === 'metadata' ? { [path]: metadata } : {});
+    await panel(page).getByRole('button', { name: 'Load anyway', exact: true }).click();
+    // a failed request must be retryable without changing the revision
+    if (scenario === 'retry') {
+      const retry = panel(page).getByRole('button', { name: 'Retry', exact: true });
+      await expect(retry).toBeEnabled();
+      await updatePanel(page, patch, { [path]: { path, base: null, working: imageRevision(path) } });
+      await retry.click();
+      await expect(panel(page).getByRole('img', { name: `After: ${path}`, exact: true })).toBeVisible();
+      expect(await codeLoads(page)).toHaveLength(2);
+    } else {
+      await expect(panel(page).getByText('Binary file — no image preview available.', { exact: true })).toBeVisible();
+      await expect(panel(page).getByRole('img')).toHaveCount(0);
+      expect(await codeLoads(page)).toHaveLength(1);
+    }
+  });
+}
+
 // capped patch text must not prevent a bounded image request or a retry
 test('retries an unavailable capped image without entering the text diff loader', async ({ page }) => {
   const path = 'assets/capped.png';

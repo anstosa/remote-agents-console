@@ -6,7 +6,7 @@
 // them in — so it stays free of any network code and easy to drive in isolation. What the view owns
 // itself is purely visual: the diff mode (Hunks / Full context / Plain file), unified vs split, and
 // the changed-file rail/drawer.
-import { type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { closeOnMiddleClick } from '../middle-click.js';
 import { FlyoutPortal } from '../flyout-portal.js';
 import { useViewportFlyout } from '../viewport-flyout.js';
@@ -103,6 +103,8 @@ type PlaceholderReason = 'capped' | 'binary' | 'metadata' | 'unrenderable';
 type Placeholder = { path: string; reason: PlaceholderReason; note?: string };
 // The per-Change load status of the "Load anyway" affordance.
 type LoadStatus = 'loading' | 'error';
+// manual preview loads retain a usable recovery action
+const loadLabels = { loading: 'Loading…', error: 'Retry', idle: 'Load anyway' };
 // A CodeView item paired with the patch-derived content version (`fileVersion`) it was built for.
 // The library reconciles controlled items by id + `version`, so a stable version already stops it
 // re-rendering or re-hydrating an unchanged file; caching the item by version on top of that both
@@ -592,8 +594,8 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     const currentFile = currentPatch?.files.find(candidate => candidate.change.path === path);
     // reject changed revisions even before the refresh effect has pruned their ticket
     if (currentFile === undefined || previewVersion(currentFile, comparisonKeyRef.current, currentPatch?.gitBase) !== request.version) { complete(); return; }
-    // select image revisions instead of trying to parse their bytes as text
-    if (contents !== undefined && (contents.base?.image !== undefined || contents.working?.image !== undefined)) {
+    // route raster and metadata-only revisions through their safe per-side renderer
+    if (contents !== undefined && !isTextComparison(contents)) {
       setPreviewOverride({ version: request.version, contents });
       // never replace a selection made while these bytes were loading
       if (navigationRef.current.epoch === navigation) onSelectFile(path);
@@ -622,6 +624,13 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     return <EditorJumpButton file={item.id.slice(5)} line={diffJumpLine(item.fileDiff, range)} onOpen={onOpenInEditor} />;
   };
 
+  let selectedPreviewBody: ReactNode = null;
+  // calculate selected revision identity and cached bytes once per render
+  if (selectedPreviewFile !== undefined) {
+    const version = previewVersion(selectedPreviewFile, comparisonKey, patch?.gitBase);
+    const initialContents = previewOverride?.version === version ? previewOverride.contents : undefined;
+    selectedPreviewBody = <ComparisonFilePreview key={version} path={selectedPreviewFile.change.path} loadFile={loadFile} onText={contents => setPreviewOverride({ version, contents })} initialContents={initialContents} options={options} onOpenInEditor={onOpenInEditor} />;
+  }
   const fileCount = groups.implementation.length + groups.supporting.length;
   const style = codeViewStyle(fontSize) as CSSProperties;
   // The rail is a persistent column on a wide panel unless the reviewer collapsed it; a narrow panel
@@ -739,7 +748,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
           {state === 'ready' && fileCount > 0 && <>
             {missing && <p className="code-pane-status" role="alert">This file isn't part of the current changes. <button type="button" className="code-pane-retry" onClick={backToAll}>Back to all files</button></p>}
             {/* keep binary candidates outside the text diff renderer */}
-            {selectedPreviewFile !== undefined ? <ComparisonFilePreview key={previewVersion(selectedPreviewFile, comparisonKey, patch?.gitBase)} path={selectedPreviewFile.change.path} loadFile={loadFile} onText={contents => setPreviewOverride({ version: previewVersion(selectedPreviewFile, comparisonKey, patch?.gitBase), contents })} initialContents={previewOverride?.version === previewVersion(selectedPreviewFile, comparisonKey, patch?.gitBase) ? previewOverride.contents : undefined} options={options} onOpenInEditor={onOpenInEditor} /> : <>
+            {selectedPreviewFile !== undefined ? selectedPreviewBody : <>
             {plainForSelected !== undefined && plainForSelected.contents === undefined && plainForSelected.error !== true && <p className="code-pane-status progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading file…</p>}
             {plainForSelected?.error === true && <p className="code-pane-status" role="alert">Unable to load this file.</p>}
             {selectedPath === undefined && patch?.truncated === true && <p className="code-pane-notice">Some files were left out because the change set is very large.</p>}
@@ -756,11 +765,13 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
                     </span>
                     {/* open raster candidates without requesting every file up front */}
                     {(placeholder.reason === 'binary' || (placeholder.reason !== 'metadata' && isImagePath(placeholder.path))) && <button type="button" className="code-pane-load" aria-label={`Preview ${placeholder.path}`} onClick={() => openFile(placeholder.path)}>Preview</button>}
-                    {/* retain the inline text load action for other withheld files */}
+                    {/* retain an inline load or retry action for other withheld files */}
                     {placeholder.reason !== 'binary' && !isImagePath(placeholder.path) && (placeholder.reason === 'capped' || placeholder.reason === 'unrenderable') && (
-                      loadStatus[placeholder.path] === 'error'
-                        ? <span className="code-pane-placeholder-error">Could not load</span>
-                        : <button type="button" className={`code-pane-load${loadStatus[placeholder.path] === 'loading' ? ' progress-border progress-blue' : ''}`} aria-busy={loadStatus[placeholder.path] === 'loading' || undefined} disabled={loadStatus[placeholder.path] === 'loading'} onClick={() => void loadAnyway(placeholder.path)}>{loadStatus[placeholder.path] === 'loading' && <span className="update-progress-ring" aria-hidden="true" />}{loadStatus[placeholder.path] === 'loading' ? 'Loading…' : 'Load anyway'}</button>
+                      <>
+                        {/* explain failures without removing their recovery control */}
+                        {loadStatus[placeholder.path] === 'error' && <span className="code-pane-placeholder-error">Could not load</span>}
+                        <button type="button" className={`code-pane-load${loadStatus[placeholder.path] === 'loading' ? ' progress-border progress-blue' : ''}`} aria-busy={loadStatus[placeholder.path] === 'loading' || undefined} disabled={loadStatus[placeholder.path] === 'loading'} onClick={() => void loadAnyway(placeholder.path)}>{loadStatus[placeholder.path] === 'loading' && <span className="update-progress-ring" aria-hidden="true" />}{loadLabels[loadStatus[placeholder.path] ?? 'idle']}</button>
+                      </>
                     )}
                   </li>
                 ))}
@@ -804,21 +815,32 @@ function ImageRevision({ revision, side, options, onOpenInEditor }: { revision: 
   // bounded source keeps the established highlighted file renderer
   const items = useMemo<PanelItem[]>(() => !revision.binary && revision.content !== undefined ? [fileItemForContents(revision.path, revision.content)] : [], [revision]);
   const [selection, setSelection] = useState<CodeViewLineSelection | null>(null);
+  let body: ReactNode;
+  // binary metadata and raster bytes have independent feedback
+  if (revision.binary) {
+    let message = 'Binary file — no image preview available.';
+    // oversized named rasters explain their byte boundary
+    if (isImagePath(revision.path) && revision.size > previewImageByteLimit) message = 'Image exceeds the 5 MiB preview limit.';
+    let preview = <p className="code-pane-status">{message}</p>;
+    // only complete raster bytes become an image element
+    if (revision.image !== undefined) preview = <RasterImage image={revision.image} label={`${side}: ${revision.path}`} />;
+    body = <div className="code-pane-file-image">{preview}</div>;
+  } else {
+    let preview = <p className="code-pane-status">Text preview unavailable.</p>;
+    // available bounded source uses the established file renderer
+    if (revision.content !== undefined) preview = <CodeView className="code-pane-view" options={options} items={items} onSelectedLinesChange={setSelection} disableWorkerPool />;
+    body = <div className="code-pane-revision-text">
+      {preview}
+      {/* comparison text retains its separate two-mib cap */}
+      {revision.truncated && <footer className="code-pane-file-truncated">Preview limited to the first 2 MiB.</footer>}
+    </div>;
+  }
   return <figure className="code-pane-image-revision">
     <figcaption><strong>{side}</strong><span title={revision.path}>{revision.path}</span>
       {/* only the working source opens the current file, at its selected line */}
       {side === 'After' && !revision.binary && onOpenInEditor !== undefined && <EditorJumpButton file={revision.path} line={selection === null ? 1 : Math.min(selection.range.start, selection.range.end)} onOpen={onOpenInEditor} />}
     </figcaption>
-    {/* text and raster sides do not determine each other's renderer */}
-    {!revision.binary ? <div className="code-pane-revision-text">
-      {/* unavailable text stays explicit rather than becoming an empty code view */}
-      {revision.content === undefined ? <p className="code-pane-status">Text preview unavailable.</p> : <CodeView className="code-pane-view" options={options} items={items} onSelectedLinesChange={setSelection} disableWorkerPool />}
-      {/* comparison text retains its separate two-mib cap */}
-      {revision.truncated && <footer className="code-pane-file-truncated">Preview limited to the first 2 MiB.</footer>}
-    </div> : <div className="code-pane-file-image">
-      {/* render complete bytes or explain why this revision has no image */}
-      {revision.image !== undefined ? <RasterImage image={revision.image} label={`${side}: ${revision.path}`} /> : <p className="code-pane-status">{isImagePath(revision.path) && revision.size > previewImageByteLimit ? 'Image exceeds the 5 MiB preview limit.' : 'Binary file — no image preview available.'}</p>}
-    </div>}
+    {body}
   </figure>;
 }
 
