@@ -9,11 +9,12 @@ import { decryptRecord, encryptRecord } from './crypto.js';
 import { readBounded, writePrivate } from '../settings/files.js';
 import { renderCalendarTitle, validateTitleTemplate } from './title.js';
 import { calendarEventIdentity } from './event-identity.js';
+import { calendarInterval } from './interval.js';
 
 const maximumActivityBytes = 32 * 1024 * 1024;
 const maximumPending = 10_000;
 const retentionMs = 30 * 24 * 60 * 60 * 1_000;
-const activityKeys = new Set(['version', 'id', 'agentId', 'kind', 'submittedAt', 'labels', 'policy', 'target', 'principalSub', 'status', 'reason', 'sentAt', 'startedAt', 'questionAt', 'finishedAt', 'startAt', 'endAt', 'summary', 'eventId', 'marker', 'attempts', 'firstAttemptAt', 'nextAttemptAt', 'completedAt', 'lastError']);
+const activityKeys = new Set(['version', 'id', 'agentId', 'kind', 'submittedAt', 'labels', 'policy', 'target', 'principalSub', 'status', 'reason', 'sentAt', 'startedAt', 'questionAt', 'finishedAt', 'startAt', 'endAt', 'estimatedInterval', 'summary', 'eventId', 'marker', 'attempts', 'firstAttemptAt', 'nextAttemptAt', 'completedAt', 'lastError']);
 const deliveryStatuses = new Set<CalendarActivity['status']>(['ready', 'delivering', 'delivered', 'authorization_required', 'retry_scheduled', 'dead_letter', 'ownership_conflict', 'deleted_by_user', 'target_missing']);
 const completedStatuses = new Set<CalendarActivity['status']>(['delivered', 'suppressed', 'awaiting_evidence', 'authorization_required', 'dead_letter', 'ownership_conflict', 'deleted_by_user', 'target_missing']);
 
@@ -223,6 +224,8 @@ function validActivity(value: unknown): value is CalendarActivity {
   if (activity.version !== 1 || !safeIdentifier(activity.id, 256) || !safeIdentifier(activity.agentId, 256, true) || !safeIdentifier(activity.kind, 64) || !validTimestamp(activity.submittedAt) || !calendarActivityStatuses.includes(activity.status) || !nonnegativeInteger(activity.attempts)) return false;
   // validate every optional scalar before status-specific use
   if (!optionalTimestamp(activity.sentAt) || !optionalTimestamp(activity.startedAt) || !optionalTimestamp(activity.questionAt) || !optionalTimestamp(activity.finishedAt) || !optionalTimestamp(activity.startAt) || !optionalTimestamp(activity.endAt) || !optionalInteger(activity.firstAttemptAt) || !optionalInteger(activity.nextAttemptAt) || !optionalInteger(activity.completedAt) || activity.reason !== undefined && !safeIdentifier(activity.reason, 128) || activity.lastError !== undefined && !safeIdentifier(activity.lastError, 128) || activity.principalSub !== undefined && !safeIdentifier(activity.principalSub, 255) || activity.summary !== undefined && !safeDisplay(activity.summary, 512, true) || activity.eventId !== undefined && !/^[0-9a-f]{52}$/u.test(activity.eventId) || activity.marker !== undefined && !/^[A-Za-z0-9_-]{43}$/u.test(activity.marker)) return false;
+  // reserve the estimate marker for fixed-duration delivery snapshots
+  if (activity.estimatedInterval !== undefined && activity.estimatedInterval !== true) return false;
   // every connected admission needs both destination members; only suppression may omit both
   if ((activity.target === undefined) !== (activity.principalSub === undefined) || activity.status !== 'suppressed' && activity.target === undefined) return false;
   // validate the immutable target recursively
@@ -230,7 +233,7 @@ function validActivity(value: unknown): value is CalendarActivity {
   // require finalized rows to match their derivable interval and identities
   if (deliveryStatuses.has(activity.status) && !validDeliverySnapshot(activity)) return false;
   // forbid pre-final rows from carrying provider metadata
-  if (!deliveryStatuses.has(activity.status) && [activity.startAt, activity.endAt, activity.summary, activity.eventId, activity.marker].some(field => field !== undefined)) return false;
+  if (!deliveryStatuses.has(activity.status) && [activity.startAt, activity.endAt, activity.estimatedInterval, activity.summary, activity.eventId, activity.marker].some(field => field !== undefined)) return false;
   // require terminal rows to retain a completion instant
   if (completedStatuses.has(activity.status) && activity.completedAt === undefined) return false;
   // forbid active rows from carrying a false completion instant
@@ -246,10 +249,9 @@ function validActivity(value: unknown): value is CalendarActivity {
 function validDeliverySnapshot(activity: CalendarActivity): boolean {
   // require the immutable target, principal, and lifecycle boundary
   if (activity.target === undefined || activity.principalSub === undefined || activity.startedAt === undefined || activity.startAt === undefined || activity.endAt === undefined || activity.summary === undefined || activity.eventId === undefined || activity.marker === undefined) return false;
-  const startEvidence = activity.policy.startMoment === 'prompt_submitted' ? activity.submittedAt : activity.policy.startMoment === 'prompt_sent' ? activity.sentAt : activity.startedAt;
-  const endEvidence = activity.policy.endMoment === 'first_question_or_finished' ? activity.questionAt ?? activity.finishedAt : activity.finishedAt;
-  // bind delivery fields to persisted lifecycle evidence
-  if (startEvidence === undefined || endEvidence === undefined || activity.startAt !== new Date(Date.parse(startEvidence)).toISOString() || activity.endAt !== new Date(Date.parse(endEvidence)).toISOString() || Date.parse(activity.endAt) <= Date.parse(activity.startAt)) return false;
+  const interval = calendarInterval(activity);
+  // bind exact and estimated timing to the same persisted work evidence
+  if (interval === undefined || activity.startAt !== interval.startAt || activity.endAt !== interval.endAt || activity.estimatedInterval !== interval.estimatedInterval) return false;
   const { eventId, marker } = calendarEventIdentity(activity.target.id, activity.id);
   return activity.eventId === eventId && activity.marker === marker && activity.summary === renderCalendarTitle(activity.policy.titleTemplate, activity.labels);
 }

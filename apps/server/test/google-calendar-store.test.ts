@@ -38,6 +38,12 @@ function readyActivity(id: string): CalendarActivity {
   return { ...activity(id), target, principalSub: 'subject', status: 'ready', startedAt: '2026-10-23T17:01:00.000Z', finishedAt: '2026-10-23T17:02:00.000Z', startAt: '2026-10-23T17:01:00.000Z', endAt: '2026-10-23T17:02:00.000Z', summary: 'Cora', ...calendarEventIdentity(target.id, id), nextAttemptAt: 1 };
 }
 
+// build one internally consistent estimated outbox record
+function estimatedActivity(id: string) {
+  const target = { id: 'calendar', name: 'RAC Work' };
+  return { ...activity(id), target, principalSub: 'subject', status: 'ready' as const, startedAt: '2026-10-23T17:01:00.000Z', startAt: '2026-10-23T17:01:00.000Z', endAt: '2026-10-23T17:16:00.000Z', estimatedInterval: true as const, summary: 'Cora', ...calendarEventIdentity(target.id, id), nextAttemptAt: 1 };
+}
+
 // restore real service admission against isolated durable rows and a fake provider
 async function connectedService(records: CalendarActivity[] = []) {
   const directory = await tempDir('rac-google-calendar-');
@@ -92,6 +98,16 @@ describe('Google Calendar stores', () => {
     const restored = new ActivityStore(activitiesPath);
     await restored.load();
     expect(restored.get('restart')).toMatchObject({ status: 'ready', target: { id: 'calendar', name: 'RAC Work' }, principalSub: 'subject' });
+  });
+
+  // reload estimated ready and delivered intervals without weakening exact rows
+  it.each(['ready', 'delivered'] as const)('reloads a valid fifteen-minute estimated %s interval', async status => {
+    const file = join(await tempDir('rac-google-calendar-estimated-restart-'), 'activities.json');
+    const row = { ...estimatedActivity(status), status, ...(status === 'delivered' ? { attempts: 1, firstAttemptAt: 1, completedAt: 2 } : {}) };
+    await writeFile(file, JSON.stringify({ version: 1, activities: [row] }), { mode: 0o600 });
+    const store = new ActivityStore(file, () => 100);
+    await store.load();
+    expect(store.get(status)).toMatchObject({ status, estimatedInterval: true, startAt: '2026-10-23T17:01:00.000Z', endAt: '2026-10-23T17:16:00.000Z' });
   });
 
   // keep a broken storage collaborator from turning finalization into a raw dereference
@@ -251,15 +267,25 @@ describe('Google Calendar stores', () => {
   // reject provider metadata that is not derivable from closed lifecycle state
   it('rejects tampered recursive and status-specific activity fields', async () => {
     const file = join(await tempDir('rac-google-calendar-'), 'activities.json');
-    const cases: unknown[] = [
+    const cases = [
       { ...readyActivity('summary'), summary: 'injected metadata' },
       { ...readyActivity('target'), target: { id: 'calendar', name: 'RAC Work', description: 'private' } },
-      { ...activity('incomplete'), status: 'ready', summary: 'Cora' }
+      { ...activity('incomplete'), status: 'ready', summary: 'Cora' },
+      { ...estimatedActivity('estimated-duration'), endAt: '2026-10-23T17:15:59.999Z' },
+      { ...estimatedActivity('estimated-anchor'), startAt: '2026-10-23T17:00:00.000Z', endAt: '2026-10-23T17:15:00.000Z' },
+      { ...estimatedActivity('estimated-target'), target: { id: 'other-calendar', name: 'RAC Work' } },
+      { ...estimatedActivity('estimated-event'), eventId: '0'.repeat(52) },
+      { ...estimatedActivity('estimated-marker'), marker: 'A'.repeat(43) },
+      { ...estimatedActivity('estimated-marker-removed'), estimatedInterval: undefined },
+      { ...estimatedActivity('estimated-start-removed'), startedAt: undefined },
+      { ...estimatedActivity('estimated-false'), estimatedInterval: false },
+      { ...readyActivity('exact-marked-estimated'), finishedAt: '2026-10-23T17:16:00.000Z', endAt: '2026-10-23T17:16:00.000Z', estimatedInterval: true },
+      { ...activity('estimated-incomplete'), estimatedInterval: true }
     ];
     for (const record of cases) {
       // isolate each malformed persisted document
       await writeFile(file, JSON.stringify({ version: 1, activities: [record] }), { mode: 0o600 });
-      await expect(new ActivityStore(file).load()).rejects.toThrow('activity_store_invalid');
+      await expect(new ActivityStore(file).load(), record.id).rejects.toThrow('activity_store_invalid');
     }
   });
 });

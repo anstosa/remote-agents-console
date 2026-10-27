@@ -117,8 +117,8 @@ describe('Google Calendar dispatcher', () => {
     expect(fetcher).toHaveBeenCalledOnce();
     expect(service.summary().counts.failed).toBe(1);
   });
-  // deliver one final event after exact start and matching finish
-  it('persists and delivers one stable completed event', async () => {
+  // preserve both short and fifteen-minute exact evidence without estimate markers
+  it.each(['2026-10-23T17:15:00.000Z', '2026-10-23T17:25:00.000Z'] as const)('persists and delivers one exact event ending at %s', async finishedAt => {
     const directory = await tempDir('rac-google-calendar-');
     const keyText = `active:${randomBytes(32).toString('base64url')}`;
     const auth: GoogleAuthState = { version: 1, clientId: 'client', principal: { sub: 'subject' }, tokens: { accessToken: 'access-token', refreshToken: 'refresh-token', expiresAt: Date.now() + 3_600_000 }, calendars: [{ id: 'calendar', name: 'RAC Work' }], selectedCalendarId: 'calendar' };
@@ -132,13 +132,101 @@ describe('Google Calendar dispatcher', () => {
     const service = await createGoogleCalendarService({ config: { enabled: true, titleTemplate: '{worktree} {agent}', startMoment: 'work_started', endMoment: 'work_finished' }, publicOrigin: 'https://agents.example.com', env: { RAC_GOOGLE_CALENDAR_CLIENT_ID: 'client', RAC_GOOGLE_CALENDAR_CLIENT_SECRET: 'secret', RAC_GOOGLE_CALENDAR_TOKEN_KEY: keyText }, authPath: join(directory, 'auth.json'), activitiesPath: join(directory, 'activities.json'), fetch: fetcher as typeof fetch });
     expect(await service.admit({ id: 'activity', agentId: 'agent', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', labels: { worktree: 'Admission', agent: 'hostile pane title' } })).toBe(true);
     await service.signal({ id: 'activity', type: 'started', at: '2026-10-23T17:10:00.000Z', labels: { worktree: 'Cora', agent: 'secret conversation content' } });
-    await service.signal({ id: 'activity', type: 'finished', at: '2026-10-23T17:15:00.000Z' });
-    await vi.waitFor(() => expect(service.summary().counts.delivered).toBe(1));
+    await service.signal({ id: 'activity', type: 'finished', at: finishedAt });
+    await vi.waitFor(() => expect(service.summary().counts.delivered).toBe(1), { timeout: 10_000 });
     expect(fetcher).toHaveBeenCalledOnce();
-    expect(bodies[0]).toMatchObject({ summary: 'Cora Agent', start: { dateTime: '2026-10-23T17:10:00.000Z' }, end: { dateTime: '2026-10-23T17:15:00.000Z' } });
+    expect(bodies[0]).toMatchObject({ summary: 'Cora Agent', start: { dateTime: '2026-10-23T17:10:00.000Z' }, end: { dateTime: finishedAt } });
     expect((bodies[0] as { id: string }).id).toMatch(/^[0-9a-f]{52}$/u);
+    const persisted = new ActivityStore(join(directory, 'activities.json'));
+    await persisted.load();
+    expect(persisted.get('activity')).not.toHaveProperty('estimatedInterval');
     // lock the persisted v1 namespaces and encodings independently of implementation helpers
     expect(bodies[0]).toMatchObject({ id: '9e55f65f0887a1408813d6ed296aef0b985130f3e49737bd448f', extendedProperties: { private: { racActivity: 'WYJ2kOu3G_mtQZ9J7xoGWlzlViGi__WUsjlju1P8YSA' } } });
+  });
+
+  // isolate connected interval captures behind a successful fake provider
+  async function intervalService(config: CalendarActivity['policy']) {
+    const directory = await tempDir('rac-google-calendar-interval-');
+    const keyText = `active:${randomBytes(32).toString('base64url')}`;
+    const authPath = join(directory, 'auth.json');
+    const activitiesPath = join(directory, 'activities.json');
+    await new AuthStore(authPath, parseTokenKey(keyText)).save({ version: 1, clientId: 'client', principal: { sub: 'subject' }, tokens: { accessToken: 'access', expiresAt: Date.now() + 3_600_000 }, calendars: [{ id: 'calendar', name: 'RAC Work' }], selectedCalendarId: 'calendar' });
+    const bodies: Array<{ start: { dateTime: string }; end: { dateTime: string }; id: string }> = [];
+    // retain emitted event boundaries without calling Google
+    const fetcher = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { start: { dateTime: string }; end: { dateTime: string }; id: string };
+      bodies.push(body);
+      return new Response(JSON.stringify({ id: body.id }), { status: 200 });
+    });
+    const service = await createGoogleCalendarService({ config, publicOrigin: 'https://agents.example.com', env: { RAC_GOOGLE_CALENDAR_CLIENT_ID: 'client', RAC_GOOGLE_CALENDAR_CLIENT_SECRET: 'secret', RAC_GOOGLE_CALENDAR_TOKEN_KEY: keyText }, authPath, activitiesPath, fetch: fetcher as typeof fetch });
+    return { service, activitiesPath, fetcher, bodies };
+  }
+
+  // represent only proven-start uncertain work as a fifteen-minute event
+  it.each([
+    ['prompt_submitted', '2026-10-23T17:00:00.000Z', '2026-10-23T17:15:00.000Z', 'invalid'],
+    ['prompt_sent', '2026-10-23T17:02:00.000Z', '2026-10-23T17:17:00.000Z', 'invalid'],
+    ['prompt_sent', '2026-10-23T17:10:00.000Z', '2026-10-23T17:25:00.000Z', 'invalid-without-sent'],
+    ['work_started', '2026-10-23T17:10:00.000Z', '2026-10-23T17:25:00.000Z', 'nonpositive-finish'],
+    ['work_started', '2026-10-23T17:10:00.000Z', '2026-10-23T17:25:00.000Z', 'malformed-finish']
+  ] as const)('estimates uncertain %s work from %s through %s after %s', async (startMoment, expectedStart, expectedEnd, terminal) => {
+    const { service, activitiesPath, fetcher, bodies } = await intervalService({ enabled: true, titleTemplate: '{worktree}', startMoment, endMoment: 'work_finished' });
+    await service.admit({ id: terminal, agentId: 'agent', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', labels: { worktree: 'Cora', agent: 'Codex' } });
+    // omit sent evidence for the configured-start fallback case
+    if (terminal !== 'invalid-without-sent') await service.signal({ id: terminal, type: 'sent', at: '2026-10-23T17:02:00.000Z' });
+    await service.signal({ id: terminal, type: 'started', at: '2026-10-23T17:10:00.000Z' });
+    // use an explicit invalidation or an unusable terminal boundary
+    if (terminal === 'nonpositive-finish') await service.signal({ id: terminal, type: 'finished', at: '2026-10-23T17:10:00.000Z' });
+    else if (terminal === 'malformed-finish') await service.signal({ id: terminal, type: 'finished', at: 'not-a-time' });
+    else await service.signal({ id: terminal, type: 'invalid', reason: 'missing_lifecycle_evidence' });
+    await vi.waitFor(() => expect(service.summary().counts.delivered).toBe(1), { timeout: 10_000 });
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(bodies[0]).toMatchObject({ start: { dateTime: expectedStart }, end: { dateTime: expectedEnd } });
+    const persisted = new ActivityStore(activitiesPath);
+    await persisted.load();
+    expect(persisted.get(terminal)).toMatchObject({ status: 'delivered', estimatedInterval: true, startAt: expectedStart, endAt: expectedEnd });
+  });
+
+  // keep pre-start invalidation from inventing work
+  it('keeps uncertain work without a proven start out of Google Calendar', async () => {
+    const { service, activitiesPath, fetcher } = await intervalService({ enabled: true, titleTemplate: '{worktree}', startMoment: 'prompt_submitted', endMoment: 'work_finished' });
+    await service.admit({ id: 'unstarted', agentId: 'agent', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', labels: { worktree: 'Cora', agent: 'Codex' } });
+    await service.signal({ id: 'unstarted', type: 'invalid', reason: 'missing_lifecycle_evidence' });
+    const persisted = new ActivityStore(activitiesPath);
+    await persisted.load();
+    expect(persisted.get('unstarted')).toMatchObject({ status: 'awaiting_evidence', reason: 'missing_lifecycle_evidence' });
+    expect(persisted.get('unstarted')).not.toHaveProperty('estimatedInterval');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  // malformed progress cannot authorize a premature estimated event
+  it.each(['sent', 'started', 'question'] as const)('keeps malformed nonterminal %s evidence out of Google Calendar', async type => {
+    const { service, activitiesPath, fetcher } = await intervalService({ enabled: true, titleTemplate: '{worktree}', startMoment: 'work_started', endMoment: 'work_finished' });
+    await service.admit({ id: type, agentId: 'agent', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', labels: { worktree: 'Cora', agent: 'Codex' } });
+    await service.signal({ id: type, type: 'started', at: '2026-10-23T17:10:00.000Z' });
+    await service.signal({ id: type, type, at: 'not-a-time' });
+    const persisted = new ActivityStore(activitiesPath);
+    await persisted.load();
+    expect(persisted.get(type)).toMatchObject({ status: 'awaiting_evidence', reason: 'missing_lifecycle_evidence' });
+    expect(persisted.get(type)).not.toHaveProperty('estimatedInterval');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  // use the first question when exact and estimate only a malformed question
+  it.each([
+    ['2026-10-23T17:12:00.000Z', '2026-10-23T17:12:00.000Z', false],
+    ['not-a-time', '2026-10-23T17:25:00.000Z', true]
+  ] as const)('finalizes first-question timing from %s', async (questionAt, expectedEnd, estimated) => {
+    const { service, activitiesPath } = await intervalService({ enabled: true, titleTemplate: '{worktree}', startMoment: 'work_started', endMoment: 'first_question_or_finished' });
+    await service.admit({ id: questionAt, agentId: 'agent', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', labels: { worktree: 'Cora', agent: 'Codex' } });
+    await service.signal({ id: questionAt, type: 'started', at: '2026-10-23T17:10:00.000Z' });
+    await service.signal({ id: questionAt, type: 'question', at: questionAt });
+    await vi.waitFor(() => expect(service.summary().counts.delivered).toBe(1), { timeout: 10_000 });
+    const persisted = new ActivityStore(activitiesPath);
+    await persisted.load();
+    expect(persisted.get(questionAt)).toMatchObject({ startAt: '2026-10-23T17:10:00.000Z', endAt: expectedEnd, ...(estimated ? { estimatedInterval: true } : {}) });
+    // distinguish exact evidence from a coincidental fixed duration
+    if (!estimated) expect(persisted.get(questionAt)).not.toHaveProperty('estimatedInterval');
   });
 
   // suppress disconnected admission permanently rather than backfilling it
@@ -233,7 +321,7 @@ describe('Google Calendar dispatcher', () => {
     await service.admit({ id: 'quota', agentId: 'agent', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', labels: { worktree: 'Cora', agent: 'Codex' } });
     await service.signal({ id: 'quota', type: 'started', at: '2026-10-23T17:01:00.000Z' });
     await service.signal({ id: 'quota', type: 'finished', at: '2026-10-23T17:02:00.000Z' });
-    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(service.summary().counts.failed).toBe(1), { timeout: 10_000 });
     now += 3_000;
     await service.dispatch();
     expect(service.summary().counts.delivered).toBe(1);

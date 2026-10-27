@@ -37,6 +37,8 @@ export type CalendarActivity = {
   finishedAt?: string;
   startAt?: string;
   endAt?: string;
+  // distinguish the fixed-duration fallback from measured fifteen-minute work
+  estimatedInterval?: true;
   summary?: string;
   eventId?: string;
   marker?: string;

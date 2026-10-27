@@ -10,6 +10,7 @@ import { ActivityStore, AuthStore, publishPrivateStage } from './store.js';
 import { renderCalendarTitle, validateTitleTemplate } from './title.js';
 import { calendarEventIdentity } from './event-identity.js';
 import { normalizeCalendarLabels as safeLabels } from './agent-labels.js';
+import { calendarInterval } from './interval.js';
 
 const dispatchIntervalMs = 1_000;
 const maximumAttempts = 8;
@@ -369,15 +370,14 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
   private applySignal(activity: CalendarActivity, input: CalendarSignal): void {
     // ignore finalized and suppressed rows
     if (activity.status !== 'admitted') return;
-    // fail closed on explicit correlation invalidation
-    if (input.type === 'invalid') {
-      activity.status = 'awaiting_evidence';
-      activity.reason = safeReason(input.reason, 'missing_lifecycle_evidence');
-      activity.completedAt = this.options.now();
+    const shouldFinalize = input.type === 'finished' || input.type === 'question' && activity.policy.endMoment === 'first_question_or_finished';
+    const at = validInstant(input.at);
+    // estimate only explicit uncertainty or an unusable selected terminal boundary
+    if (input.type === 'invalid' || at === undefined && shouldFinalize) {
+      this.finalize(activity, input.type === 'invalid' ? safeReason(input.reason, 'missing_lifecycle_evidence') : 'missing_lifecycle_evidence');
       return;
     }
-    const at = validInstant(input.at);
-    // require exact positive timestamps for every evidence signal
+    // malformed progress retains the existing fail-closed state without emitting work
     if (at === undefined) {
       activity.status = 'awaiting_evidence';
       activity.reason = 'missing_lifecycle_evidence';
@@ -396,30 +396,26 @@ export class ActiveGoogleCalendarService implements GoogleCalendarService {
     if (input.type === 'question' && activity.questionAt === undefined) activity.questionAt = at;
     // capture the matching finish once
     if (input.type === 'finished' && activity.finishedAt === undefined) activity.finishedAt = at;
-    const shouldFinalize = input.type === 'finished' || input.type === 'question' && activity.policy.endMoment === 'first_question_or_finished';
     // finalize only at the selected terminal boundary
     if (!shouldFinalize) return;
-    this.finalize(activity, input.type === 'question' ? activity.questionAt : activity.finishedAt);
+    this.finalize(activity);
   }
 
   // atomically derive one immutable interval and outbox identity
-  private finalize(activity: CalendarActivity, end: string | undefined): void {
+  private finalize(activity: CalendarActivity, reason = 'missing_lifecycle_evidence'): void {
     // a malformed storage collaborator cannot authorize a destination or cause a raw dereference
     if (activity.target === undefined || activity.principalSub === undefined) throw new GoogleCalendarError('capture_store_unavailable', 503);
-    const start = activity.policy.startMoment === 'prompt_submitted' ? validInstant(activity.submittedAt) : activity.policy.startMoment === 'prompt_sent' ? activity.sentAt : activity.startedAt;
-    const startMs = start === undefined ? Number.NaN : Date.parse(start);
-    const endMs = end === undefined ? Number.NaN : Date.parse(end);
-    // require proven start eligibility and a positive selected interval
-    if (activity.startedAt === undefined || start === undefined || end === undefined || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    const interval = calendarInterval(activity);
+    // preserve missing-work failures without inventing execution from admission
+    if (interval === undefined) {
       activity.status = 'awaiting_evidence';
-      activity.reason = 'missing_lifecycle_evidence';
+      activity.reason = reason;
       activity.completedAt = this.options.now();
       return;
     }
     const target = activity.target;
     const { eventId, marker } = calendarEventIdentity(target.id, activity.id);
-    activity.startAt = start;
-    activity.endAt = end;
+    Object.assign(activity, interval);
     activity.summary = renderCalendarTitle(activity.policy.titleTemplate, activity.labels);
     activity.eventId = eventId;
     activity.marker = marker;
