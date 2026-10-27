@@ -5,6 +5,8 @@ date: 2026-09-25
 
 # A Workspace is its tmux session
 
+*Amended by ADR 0015 (2026-10-26):* a Workspace has a tmux session rather than being one. Pane membership still follows the session mark as decided here, but a Workspace's structured Agents are recorded at its Place, and its other Panels need no pane.
+
 ADR 0003 placed every pane by its cwd: the nearest Place containing its root. A Console shell opened in one Workspace that then `cd`'d into another Worktree's folder was split between two Places. The pane listing still streamed it, because its session held the first Place's other panes. The rename, end and Remove-gate lookups placed it at the second Place, so renaming or ending it from the first answered 404. A new Terminal at the second Place would also join the first Place's session.
 
 Membership is now the tmux session. Every session the console creates carries a session option `@rac_place=<Place id>`, which every pane in it reads through `list-panes #{@rac_place}`, including panes in windows opened later. A pane belongs to the Place its session is marked with, wherever its shell has `cd`'d, and no pane outside a marked session belongs to any Place, even one sitting in a Place's folder. One rule places Agents (`placeId`), lists and counts Console shells, bounds the panes a Terminal may stream, picks the session a new Terminal or launch joins, and scopes Remove's idle-shell kill.

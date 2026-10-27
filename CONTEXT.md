@@ -57,8 +57,16 @@ _Avoid_: Location, target, context
 ### Agents
 
 **Agent**:
-A live tmux pane whose process tree runs an agent CLI. Carries a kind naming the Adapter that recognised it.
+An agent CLI the console drives at a Place. Carries a kind naming the CLI and a Transport naming how the console drives it. Over the tmux Transport it is a live tmux pane whose process tree runs the CLI, and a new pane is a new Agent. Over a structured Transport it keeps one identity from launch until it is closed, across restarts of its process and changes of Conversation, and while its process is gone it is Exited.
 _Avoid_: Session, process
+
+**Exited**:
+A structured Agent whose process has ended without the Agent being closed. It keeps its Conversation and Queued prompts but dispatches nothing until the operator resumes it. Says whether the process is alive, alongside the Attention state, not one of them.
+_Avoid_: Stopped, crashed, dead, finished (an Attention state)
+
+**Transport**:
+How the console drives an Agent: tmux (keys into a pane, state read from the pane and the CLI's files) or structured (prompts, updates, and questions exchanged as messages with the CLI). Independent of kind: one CLI could be driven either way and keep the same Conversations.
+_Avoid_: Driver, protocol, mode
 
 **Adapter**:
 The server module that knows one agent CLI: how to launch and resume it, recognise its processes, read its state, submit prompts, and find its Conversations. It describes the agent; the console performs every action.
@@ -77,8 +85,16 @@ A Conversation that has a Conversation name. What the console lists and offers t
 _Avoid_: Bookmark, saved chat, session
 
 **Launch profile**:
-The choice a worktree launches with: an Adapter plus whether the agent is Sandboxed. The Adapter is remembered per Worktree as the last one used; Sandboxed starts on whenever the Adapter offers it and is never remembered.
+The choice a worktree launches with: an Adapter, whether the agent is Sandboxed, and, where the Agent can switch models, a model and Effort. The Adapter is remembered per Worktree as the last one used; Sandboxed starts on whenever the Adapter offers it and is never remembered; the model and Effort start on the default and are never remembered.
 _Avoid_: Agent selection, launch preset
+
+**Effort**:
+How much reasoning the model spends on each response: Claude's effort, Codex's reasoning effort, Pi's thinking level. Each kind has its own levels, and each model offers only those it supports. Chosen beside the model, never as part of its name.
+_Avoid_: Thinking level, reasoning effort (each CLI's own word)
+
+**Allowed model**:
+A model the operator allows for Agents of a kind that can switch models (Pi so far): the only models such an Agent can be launched on, switched to, or spawned with, however many the operator's logins offer. The list is ordered; its first model is the default for a new Conversation, and each may name a default Effort.
+_Avoid_: Favorite model, enabled model, scoped model (Pi's word for its cycling list)
 
 **Setup command / Teardown command**:
 Operator-configured lifecycle commands on an adapter entry, keyed by kind. The setup command runs in the launched pane before the program and aborts the launch on failure; the teardown command runs best-effort in the agent's home folder after the console stops an agent of that kind. Home for host-specific repairs (the OMX-on-ZFS pointer cleanup, on the OMX Adapter's entry), not part of the Adapter module.
@@ -105,8 +121,16 @@ _Avoid_: Scraped state, heuristic state
 One prompt and the Agent's complete response to it. What prompt history records; not every Adapter can recover one from the pane.
 _Avoid_: Exchange, round, message pair
 
+**Conductor**:
+The one Agent that acts on the console itself, through the console's MCP server: it sends prompts to other Agents and hears back when their Turns end, spawns new Agents, keeps Notes of its own, and reacts to what it Watches. It lives in a directory Project the operator chooses, is always running, and is always Sandboxed; the Agents it spawns are Sandboxed Pi Agents. A role any kind could fill once the console can arm and confirm that kind's sandbox; Pi so far. No other Agent can act on the console.
+_Avoid_: Foreman, Overseer, Supervisor (a process that keeps processes alive), orchestrator, Steward
+
+**Watch**:
+Something the Conductor asked to hear about: a pull request, a Stack process, a Project's review requests, or a command whose output lines it reads. Each change the Watch sees reaches the Conductor once, as a queued prompt; nothing it did not Watch ever wakes it. Belongs to the Conductor, not its Conversation.
+_Avoid_: Subscription, monitor (Claude's tool), trigger
+
 **Inline question**:
-A question the Agent is asking that the console can answer on the operator's behalf by choosing one of its options, whether the Agent wrote it as a file, reported it through its pane (Claude's `AskUserQuestion` payload, ADR 0006), or only drew it on the pane.
+A question the Agent is asking that the console can answer on the operator's behalf, by choosing one of its options or giving text, whether the Agent wrote it as a file, reported it through its pane (Claude's `AskUserQuestion` payload, ADR 0006), only drew it on the pane, or, over a structured Transport, sent it as a message.
 _Avoid_: Choice list, structured question, parsed question, reported question (those name where it came from, not what it is)
 
 ### Panes
@@ -124,7 +148,7 @@ A panel's standing request that its pane be sized to the panel's grid, yielding 
 _Avoid_: Viewport lease, pin, resize request
 
 **Workspace**:
-The set of Panels open at one Place, and the console's unit of navigation: one per Place, selected from the tab row. Its panes are those of the tmux session marked with its Place, and no others. It exists while its Place has an Agent, a Console shell, or a pending launch, or is Pinned; which Panels are open is remembered per browser.
+The set of Panels open at one Place, and the console's unit of navigation: one per Place, selected from the tab row. It has one tmux session, marked with its Place, whose panes are its Terminals and tmux Agents, and no others; its structured Agents are recorded at the Place, and its other Panels need no pane at all. It exists while its Place has an Agent, a Console shell, or a pending launch, or is Pinned; which Panels are open is remembered per browser.
 _Avoid_: Tab (the selector entry), session, worktree (a kind of Place)
 
 **Panel**:
@@ -149,16 +173,20 @@ _Avoid_: Bookmark, favourite, pinned conversation (Pinned is a Worktree word)
 A prompt accepted while the Agent was busy, held durably until it can be dispatched.
 _Avoid_: Pending prompt, backlog
 
+**Steer**:
+A message sent into the Turn in progress, which the Agent reads before its next model call. Never queued by the console and not durable: offered only while the Agent is working and only where its Transport can deliver one.
+_Avoid_: Interjection, interrupt (Cancel ends the Turn), follow-up
+
 **Note**:
-Operator text kept with a Project, or with a Scratch directory, and edited in the console. A Note can opt into visibility in all Workspaces while retaining one original record. The console's only saved text: what gets sent as a prompt, given a Schedule, or simply kept.
+Text kept with a Project, or with a Scratch directory: written by the operator in the console, or by the Conductor, which may change or delete a Note only while it is the Conductor's: once the operator saves one, it is the operator's. A Note can opt into visibility in all Workspaces while retaining one original record. The console's only saved text: what gets sent as a prompt, given a Schedule, or simply kept.
 _Avoid_: Saved prompt (retired), sticky note, snippet
 
 **Schedule**:
-A standing instruction on a Note: when to run it, with which Adapter, and in which target (a Worktree, a directory Project, or Scratch). At most one per Note; carries the outcome of its last Run.
+A standing instruction on a Note: when to run it, with which Adapter, and in which target (a Worktree, a directory Project, Scratch, or the Conductor). At most one per Note; carries the outcome of its last Run.
 _Avoid_: Cron job, timer, recurring prompt
 
 **Run**:
-One firing of a Schedule. The console starts a fresh Conversation in the Schedule's own pane, launching one when there is none, and submits the Note's text as its first prompt. Recorded on the Schedule as launched, skipped, or failed.
+One firing of a Schedule. The console starts a fresh Conversation in the Schedule's own pane, launching one when there is none, and submits the Note's text as its first prompt; for a Schedule aimed at the Conductor, it queues the text to the Conductor instead. Recorded on the Schedule as launched, delivered, skipped, or failed.
 _Avoid_: Execution, job, invocation
 
 **Stack commands**:
