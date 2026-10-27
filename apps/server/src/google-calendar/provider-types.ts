@@ -17,7 +17,7 @@ export type GoogleAuthState = {
 
 // share one closed vocabulary between runtime persistence and the type contract
 export const calendarActivityStatuses = ['admitted', 'ready', 'delivering', 'delivered', 'suppressed', 'awaiting_evidence', 'authorization_required', 'retry_scheduled', 'dead_letter', 'ownership_conflict', 'deleted_by_user', 'target_missing'] as const;
-export type ActivityStatus = typeof calendarActivityStatuses[number];
+type ActivityStatus = typeof calendarActivityStatuses[number];
 
 export type CalendarActivity = {
   version: 1;

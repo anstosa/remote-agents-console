@@ -31,10 +31,57 @@ async function hookPayload() {
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return undefined; }
 }
 
+// admit only bounded control-free metadata scalars
+function opaque(value, maximum) {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+// require exact object members before interpreting pane-owned bytes
+function closedObject(value, required, optional = []) {
+  // arrays and primitives cannot supply a versioned record
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const allowed = [...required, ...optional];
+  // reject missing required fields and every unrecognized content-bearing field
+  return required.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => allowed.includes(key));
+}
+
+// preserve the backend's bounded positive timestamp contract
+function positiveTime(value) {
+  return opaque(value, 64) && Number.isFinite(Date.parse(value)) && Date.parse(value) > 0;
+}
+
+// accept only the closed private v1 armed and active producer shapes
+function validArm(arm) {
+  const common = ['v', 'state', 'activityId', 'nonce', 'paneId', 'processGeneration', 'contract', 'process', 'armedAt', 'expiresAt'];
+  // establish an object before choosing its state-specific fields
+  if (arm === null || typeof arm !== 'object' || Array.isArray(arm)) return false;
+  let required;
+  // initial authority includes only its opaque prompt fingerprint
+  if (arm.state === 'armed') required = [...common, 'promptFingerprint'];
+  // active successors contain exact observed identity and time evidence instead
+  else if (arm.state === 'active') required = [...common, 'startedAt', 'sessionId', 'promptId', 'recordedAt'];
+  else return false;
+  // unknown fields cannot flow through invalidation or publication
+  if (!closedObject(arm, required, arm.state === 'active' ? ['firstQuestionAt'] : [])) return false;
+  // keep process and contract evidence closed even inside a valid root record
+  if (!closedObject(arm.process, ['pid', 'start']) || !closedObject(arm.contract, ['cliVersion', 'payloadContract'])) return false;
+  // opaque identifiers remain bounded without imposing production-only fixture formats
+  if (arm.v !== 1 || !['activityId', 'nonce', 'processGeneration'].every(key => opaque(arm[key], 256))) return false;
+  // require exact pane syntax and process-generation scalars
+  if (typeof arm.paneId !== 'string' || arm.paneId.length > 32 || !/^%[0-9]+$/u.test(arm.paneId) || !Number.isSafeInteger(arm.process.pid) || arm.process.pid <= 0 || typeof arm.process.start !== 'string' || !/^[0-9]{1,32}$/u.test(arm.process.start)) return false;
+  // admit bounded contract labels and finite authority timestamps only
+  if (!opaque(arm.contract.cliVersion, 256) || !opaque(arm.contract.payloadContract, 256) || !positiveTime(arm.armedAt) || !positiveTime(arm.expiresAt)) return false;
+  // malformed fingerprints cannot produce even an invalid diagnostic record
+  if (arm.state === 'armed') return typeof arm.promptFingerprint === 'string' && /^[a-f0-9]{64}$/u.test(arm.promptFingerprint);
+  // active identity and observed times must remain valid across every subsequent hook
+  if (!opaque(arm.sessionId, 256) || typeof arm.promptId !== 'string' || !uuid.test(arm.promptId) || !positiveTime(arm.startedAt) || !positiveTime(arm.recordedAt)) return false;
+  return arm.firstQuestionAt === undefined || positiveTime(arm.firstQuestionAt) && Date.parse(arm.firstQuestionAt) >= Date.parse(arm.startedAt);
+}
+
 // require the documented per-prompt correlation fields
 function promptIdentity(payload, hookEvents) {
   if (payload === null || typeof payload !== 'object' || !hookEvents.includes(payload.hook_event_name)) return undefined;
-  if (typeof payload.session_id !== 'string' || payload.session_id.length < 1 || payload.session_id.length > 256) return undefined;
+  if (!opaque(payload.session_id, 256)) return undefined;
   if (typeof payload.prompt_id !== 'string' || !uuid.test(payload.prompt_id)) return undefined;
   return { sessionId: payload.session_id, promptId: payload.prompt_id };
 }
@@ -43,7 +90,10 @@ function promptIdentity(payload, hookEvents) {
 function journal(arm, updates) {
   return {
     v: 1, activityId: arm.activityId, nonce: arm.nonce, paneId: arm.paneId,
-    processGeneration: arm.processGeneration, process: arm.process, contract: arm.contract,
+    processGeneration: arm.processGeneration,
+    // reconstruct approved nested members instead of forwarding untrusted objects
+    process: { pid: arm.process.pid, start: arm.process.start },
+    contract: { cliVersion: arm.contract.cliVersion, payloadContract: arm.contract.payloadContract },
     armedAt: arm.armedAt, expiresAt: arm.expiresAt,
     ...(arm.startedAt === undefined ? {} : { startedAt: arm.startedAt }),
     ...(arm.firstQuestionAt === undefined ? {} : { firstQuestionAt: arm.firstQuestionAt }),
@@ -129,7 +179,8 @@ async function main() {
     if (shown.status !== 0 || !shown.stdout.trim()) return;
     let arm;
     try { arm = JSON.parse(Buffer.from(shown.stdout.trim(), 'base64url').toString('utf8')); } catch { return; }
-    if (arm?.v !== 1 || arm.paneId !== pane || typeof arm.nonce !== 'string' || typeof arm.process?.pid !== 'number' || typeof arm.process?.start !== 'string' || typeof arm.contract?.cliVersion !== 'string' || typeof arm.contract?.payloadContract !== 'string') return;
+    // reject contaminated authority before any process traversal or journal operation
+    if (!validArm(arm) || arm.paneId !== pane) return;
     let ancestor = process.ppid;
     let processMatches = false;
     // bind the hook to the exact armed Claude process generation
