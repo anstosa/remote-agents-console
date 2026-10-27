@@ -273,7 +273,8 @@ export function ConsoleFullscreenLoader({ action, reconnecting, onEntered }: { a
   const detail = serverRestart ? operation?.phase ?? 'Applying saved settings and checking health…' : 'Preparing to apply saved settings…';
   return <FullscreenLoader label={label} onEntered={action === undefined ? undefined : onEntered} focusReturnKey={action}>
     {restarting && <div className="fullscreen-restart-details">
-      <p>{detail}</p>
+      {/* omit the redundant host restart phase */}
+      {detail !== 'restarting' && <p>{detail}</p>}
       {progress?.state === 'restarting' && <RestartRecoveryCountdown deadline={progress.recoveryDeadline} />}
       {progress?.state === 'recovering' && <p>Automatic host recovery is in progress…</p>}
       {progress !== undefined && status?.recoveryCommand && <small>Manual recovery: <code>{status.recoveryCommand}</code>. Recovery keeps saved settings.</small>}

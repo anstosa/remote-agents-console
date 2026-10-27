@@ -241,6 +241,25 @@ for (const preference of ['system', 'application']) {
   });
 }
 
+// keep the restart heading and recovery guidance without repeating the host phase
+for (const width of [390, 1440]) test(`omits the redundant restarting phase at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  const { state, refresh } = await setup(page);
+  state.status.operation = { id: 'restart-1', state: 'running', phase: 'restarting', restart: { state: 'restarting', recoveryDeadline: await page.evaluate(() => Date.now() + 180_000) } };
+  await refresh();
+
+  const loader = page.getByRole('alert', { name: 'Restarting server', exact: true });
+  await expect(loader).toBeVisible();
+  await expect(loader.locator('.loading-line')).toHaveText('Restarting server');
+  await expect(loader.getByText('restarting', { exact: true })).toHaveCount(0);
+  await expect(loader.getByRole('timer', { name: 'Automatic recovery countdown' })).toHaveText('Automatic recovery in 3:00');
+  await expect(loader).toContainText('Manual recovery:');
+  // paint the passive overlay before capturing responsive evidence
+  await page.clock.resume();
+  await expect(loader).toHaveCSS('opacity', '1');
+  await page.screenshot({ path: `/tmp/remoteagents-restart-no-duplicate-${width}.png` });
+});
+
 test('hides recovery before restart and counts down the fixed host deadline through disconnection and reload', async ({ page }) => {
   const { state, refresh, startRestart } = await setup(page);
   const notice = page.getByRole('status', { name: 'Restart pending', exact: true });
