@@ -19,7 +19,7 @@ const failedCacheTtlMs = 60_000;
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 export type AgentUpdateStatus = { kind: AgentKind; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string };
-export type AgentUpdateResult = { outcome: 'updated'; status: AgentUpdateStatus } | { outcome: 'unavailable' } | { outcome: 'busy' } | { outcome: 'failed'; error?: string };
+type AgentUpdateResult = { outcome: 'updated'; status: AgentUpdateStatus } | { outcome: 'unavailable' } | { outcome: 'busy' } | { outcome: 'failed'; error?: string };
 export type AgentUpdateJob =
   | { id: string; kind: AgentKind; state: 'running' }
   | { id: string; kind: AgentKind; state: 'complete'; agent: AgentUpdateStatus }
