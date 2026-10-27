@@ -720,32 +720,51 @@ export class PromptService {
     const matchingReset = previousReset?.agentId === agentId ? previousReset : undefined;
     const baselineResetAt = resetAt ?? (matchingReset?.external ? undefined : matchingReset?.at);
     const rolloutBaseline = this.queued === undefined && queuedPromptId === undefined || instant ? undefined : await this.captureRolloutBaseline(agentId, adapter, baselineResetAt, matchingReset?.external);
+    // retain Calendar's pre-intent instant separately from transport and reset deadlines
+    const calendarSentAt = new Date().toISOString();
+    // persist exact pre-key intent before the tracked submit path proceeds
+    const calendarIntent: { arm?: string } | undefined = queuedPromptId === undefined || this.calendar === undefined ? undefined : await this.calendar.beforeSend({
+      id: queuedPromptId,
+      agentId,
+      kind: first.agent.kind,
+      submittedAt: calendarSentAt,
+      prompt: attachmentPrompt,
+      ...(rolloutBaseline === undefined ? {} : { baseline: rolloutBaseline }),
+      socketFingerprint: second.socket.fingerprint,
+      socketPath: second.socket.path,
+      paneId: second.agent.paneId,
+      ...(first.processId === undefined ? {} : { processId: first.processId }),
+      sentAt: calendarSentAt
+    }).catch(() => ({}));
+    // invalidate only this intent and retain durable ownership when the final proof fails
+    const abortBeforeKeys = async (): Promise<false> => {
+      // a rejected target cannot leave an admitted interval eligible for later delivery
+      if (queuedPromptId !== undefined) await this.calendar?.invalid(queuedPromptId, 'missing_lifecycle_evidence').catch(() => undefined);
+      await this.holdFailedSubmission(scope, failedDraft);
+      return false;
+    };
     // refresh after every settle/baseline delay so key selection reflects send-time state
     let submitTarget = await this.submissionTarget(agentId, second).catch(() => undefined);
     // never submit through a replacement pane or native question
     if (!submitTarget || agentAttentionState(submitTarget.agent) === 'question') {
-      await this.holdFailedSubmission(scope, failedDraft);
-      return false;
+      return abortBeforeKeys();
     }
     // preserve operator edits made while the initial baseline was being read
     if (settle) {
       const captured = await this.tmux.capture(submitTarget.socket, submitTarget.agent.paneId).catch(() => undefined);
       // first-paste delivery permits an exact collapsed label but never known edits
       if (captured === undefined || observeDraft(captured, composed.text) !== 'visible' || adapter.submission.ownsDraft?.(captured, composed.text) === false) {
-        await this.holdFailedSubmission(scope, failedDraft);
-        return false;
+        return abortBeforeKeys();
       }
       submitTarget = await this.submissionTarget(agentId, second).catch(() => undefined);
       // captures may outlive the original native process or reveal a new question
       if (!submitTarget || agentAttentionState(submitTarget.agent) === 'question') {
-        await this.holdFailedSubmission(scope, failedDraft);
-        return false;
+        return abortBeforeKeys();
       }
       const latestCapture = await this.tmux.capture(submitTarget.socket, submitTarget.agent.paneId).catch(() => undefined);
       // lifecycle scans can outlast the draft and must not authorize stale input
       if (latestCapture === undefined || observeDraft(latestCapture, composed.text) !== 'visible' || adapter.submission.ownsDraft?.(latestCapture, composed.text) === false || !this.submissionProcessCurrent(agentId, second) || agentAttentionState(submitTarget.agent) === 'question') {
-        await this.holdFailedSubmission(scope, failedDraft);
-        return false;
+        return abortBeforeKeys();
       }
     }
     // use direct submit only while the final target is idle
@@ -753,20 +772,6 @@ export class PromptService {
     // the update advisor is submitted with Enter regardless of the Adapter's keys
     const keys: TmuxKey[] = submission === 'enter' || submission === 'confirmed-enter' ? ['Enter'] : adapterKeys;
     const submittedAt = Date.now();
-    // persist exact pre-key intent before the tracked submit path proceeds
-    const calendarIntent: { arm?: string } | undefined = queuedPromptId === undefined ? undefined : await this.calendar?.beforeSend({
-      id: queuedPromptId,
-      agentId,
-      kind: first.agent.kind,
-      submittedAt: new Date(submittedAt).toISOString(),
-      prompt: attachmentPrompt,
-      ...(rolloutBaseline === undefined ? {} : { baseline: rolloutBaseline }),
-      socketFingerprint: submitTarget.socket.fingerprint,
-      socketPath: submitTarget.socket.path,
-      paneId: submitTarget.agent.paneId,
-      ...(first.processId === undefined ? {} : { processId: first.processId }),
-      sentAt: new Date(submittedAt).toISOString()
-    }).catch(() => ({}));
     const resetBefore = paneSnapshot(submitTarget.agent);
     // arm and submit Claude in one ordered tmux batch after exact draft ownership
     const submittedWithArm = calendarIntent?.arm === undefined ? undefined : await this.tmux.armAndSendKeys(submitTarget.socket, submitTarget.agent.paneId, calendarIntent.arm, keys).catch(() => false);

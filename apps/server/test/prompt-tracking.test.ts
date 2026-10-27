@@ -231,6 +231,67 @@ describe('tracked prompt lifecycle', () => {
     } finally { raw.mockRestore(); }
   });
 
+  // durable Calendar work must not authorize keys from a stale native snapshot
+  it.each(['process', 'question', 'edit', 'clear', 'unchanged', 'working'] as const)('revalidates %s after deferred Calendar intent persistence', async change => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-calendar-presend-'));
+    directories.push(directory);
+    const queue = new QueuedPromptService(join(directory, 'queue.json'));
+    const agent = testAgent('claude', directory);
+    let pid = process.pid;
+    let draft = 'managed queued prompt';
+    let sent = false;
+    let entered!: () => void;
+    let release!: (intent: { arm: string }) => void;
+    const awaitingIntent = new Promise<void>(resolve => { entered = resolve; });
+    const intent = new Promise<{ arm: string }>(resolve => { release = resolve; });
+    const beforeSend = vi.fn(async (_input: { id: string }) => { entered(); return await intent; });
+    const invalid = vi.fn(async () => undefined);
+    const calendar = { admit: async () => undefined, beforeSend, invalid, pending: async () => [], observe: async () => undefined, missing: async () => undefined, handOver: async () => undefined };
+    const discovery = { worktreesNow: () => [], target: async () => ({ agent, socket }), agentProcessId: () => pid };
+    const accept = async () => { sent = true; draft = ''; agent.attention = 'working'; return true; };
+    const armAndSendKeys = vi.fn(accept);
+    const sendKeys = vi.fn(accept);
+    const adapter = {
+      ...claudeAdapter,
+      submission: {
+        prepare: (prompt: string) => ({ text: prompt, keys: ['Tab'], idleKeys: ['Enter'] }),
+        observeDraft: (capture: string, prompt: string) => capture === prompt ? 'visible' : 'cleared',
+        ownsDraft: (capture: string, prompt: string) => capture === prompt,
+        interrupt: ['C-c'], selectOption: () => ['Enter']
+      },
+      completion: { baseline: async () => ({ rollout: 'synthetic-rollout', ordinal: 0 }), since: async () => ({ kind: 'pending' }), accepted: async () => sent }
+    };
+    const service = new PromptService(discovery as never, { pastePrompt: async () => true, capture: async () => draft, armAndSendKeys, sendKeys } as never, undefined, queue, undefined, () => adapter as never, undefined, undefined, calendar);
+    const submission = service.submitTracked(agent.id, draft);
+    await awaitingIntent;
+    // mutate only the selected native fact while persistence is genuinely suspended
+    switch (change) {
+      case 'process': pid += 1; break;
+      case 'question': agent.attention = 'question'; break;
+      case 'edit': draft = 'operator-owned edit'; break;
+      case 'clear': draft = ''; break;
+      case 'working': agent.attention = 'working'; break;
+    }
+    release({ arm: 'synthetic-arm' });
+    const tracked = await submission;
+    const requestId = beforeSend.mock.calls[0]![0].id;
+    const accepted = change === 'unchanged' || change === 'working';
+    expect(tracked?.requestId).toBe(requestId);
+    // unchanged authority submits exactly once with send-time attention-derived keys
+    if (accepted) {
+      expect(armAndSendKeys).toHaveBeenCalledExactlyOnceWith(socket, '%1', 'synthetic-arm', change === 'working' ? ['Tab'] : ['Enter']);
+      expect(await queue.list(`agent:${agent.id}`)).toEqual([]);
+      expect(service.requestStatus(requestId)).toMatchObject({ submitted: true });
+      expect(invalid).not.toHaveBeenCalled();
+    } else {
+      expect(armAndSendKeys).not.toHaveBeenCalled();
+      expect(await queue.list(`agent:${agent.id}`)).toEqual([expect.objectContaining({ id: requestId, text: 'managed queued prompt' })]);
+      expect(service.requestStatus(requestId)).toMatchObject({ submitted: false });
+      expect(invalid).toHaveBeenCalledExactlyOnceWith(requestId, 'missing_lifecycle_evidence');
+    }
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   // internal Note recovery must also settle an admitted but never-dispatched capture
   it('invalidates calendar admissions after a departed queue is durably drained to Notes', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });

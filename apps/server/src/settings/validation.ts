@@ -22,6 +22,8 @@ export async function validateEnvironment(content: string): Promise<void> {
   const env = environment(content);
   // preserve the login and signed-session prerequisites on every candidate
   if (!env.RAC_PASSWORD_HASH || !env.RAC_SESSION_SECRET) throw new SettingsError('required_authentication_settings');
+  let activeCalendarKey: ReturnType<typeof parseTokenKey> | undefined;
+  let previousCalendarKey: ReturnType<typeof parseTokenKey> | undefined;
   // validate each known security contract
   for (const [key, value] of Object.entries(env)) {
     // retain required authentication even during rotation
@@ -39,13 +41,20 @@ export async function validateEnvironment(content: string): Promise<void> {
     if (key === 'TZ' && value !== '') { try { new Intl.DateTimeFormat('en', { timeZone: value }); } catch { throw new SettingsError('invalid_timezone'); } }
     // validate authored encryption keys without making optional runtime failures fatal
     if ((key === 'RAC_GOOGLE_CALENDAR_TOKEN_KEY' || key === 'RAC_GOOGLE_CALENDAR_PREVIOUS_TOKEN_KEY') && value !== '') {
-      try { parseTokenKey(value); } catch { throw new SettingsError('invalid_google_calendar_token_key'); }
+      try {
+        const parsed = parseTokenKey(value);
+        // retain each parsed slot for the runtime-equivalent rotation invariant
+        if (key === 'RAC_GOOGLE_CALENDAR_TOKEN_KEY') activeCalendarKey = parsed;
+        else previousCalendarKey = parsed;
+      } catch { throw new SettingsError('invalid_google_calendar_token_key'); }
     }
     // validate structured provider mappings
     if (key === 'RAC_OPENAI_API_KEY_IDS' && value !== '') {
       try { const parsed: unknown = JSON.parse(value); if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(); } catch { throw new SettingsError('invalid_api_key_mapping'); }
     }
   }
+  // reject ambiguous rotation identities without reflecting either key in the error
+  if (activeCalendarKey !== undefined && previousCalendarKey !== undefined && (activeCalendarKey.kid === previousCalendarKey.kid || activeCalendarKey.bytes.equals(previousCalendarKey.bytes))) throw new SettingsError('invalid_google_calendar_token_key');
 }
 
 // reuse application schema and cross-field checks

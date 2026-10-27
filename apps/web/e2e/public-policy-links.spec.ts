@@ -1,6 +1,18 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mockAccountSocket } from './account-fixture.js';
 
+// reject even hidden homepage DOM while preserving semantic selectors
+async function expectHomepageAbsent(page: Page) {
+  await expect(page.getByRole('heading', { name: 'Remote Agent Console', exact: true, includeHidden: true })).toHaveCount(0);
+}
+
+// keep restoration and authenticated states free of anonymous entry controls
+async function expectAnonymousEntryAbsent(page: Page) {
+  await expectHomepageAbsent(page);
+  await expect(page.getByRole('heading', { name: 'Console access', exact: true, includeHidden: true })).toHaveCount(0);
+  await expect(page.getByLabel('Password', { exact: true })).toHaveCount(0);
+}
+
 // isolate public entry and password login from real sessions and credentials
 async function mockEntry(page: Page, initiallyAuthenticated = false) {
   await mockAccountSocket(page);
@@ -45,7 +57,7 @@ for (const width of [1440, 390, 320]) test(`shows a descriptive public homepage 
   await page.setViewportSize({ width, height: width < 600 ? 844 : 1000 });
   await page.goto('/');
 
-  const home = page.locator('main.public-homepage');
+  const home = page.getByRole('main');
   await expect(home.getByRole('heading', { name: 'Remote Agent Console', exact: true })).toBeVisible();
   await expect(home.getByRole('heading', { name: 'Optional Google Calendar integration', exact: true })).toBeVisible();
   await expect(home.getByRole('heading', { name: 'Run agents', exact: true })).toBeVisible();
@@ -81,10 +93,10 @@ for (const width of [1440, 390]) test(`skips the homepage for an existing sessio
   await page.setViewportSize({ width, height: width < 600 ? 844 : 1000 });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'No sessions', exact: true })).toBeVisible();
-  await expect(page.locator('.public-homepage, form.auth-card')).toHaveCount(0);
+  await expectAnonymousEntryAbsent(page);
   await page.reload();
   await expect(page.getByRole('heading', { name: 'No sessions', exact: true })).toBeVisible();
-  await expect(page.locator('.public-homepage, form.auth-card')).toHaveCount(0);
+  await expectAnonymousEntryAbsent(page);
   expect(state.bootstrapRequests()).toBe(0);
   expect(state.passwords).toEqual([]);
 });
@@ -94,7 +106,7 @@ test('opens direct login links and returns to a clean homepage URL', async ({ pa
   await mockEntry(page);
   await page.goto('/#login');
   await expect(page.getByRole('heading', { name: 'Console access', exact: true })).toBeVisible();
-  await expect(page.locator('.public-homepage')).toHaveCount(0);
+  await expectHomepageAbsent(page);
   await page.getByRole('button', { name: 'Back to homepage', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Remote Agent Console', exact: true })).toBeVisible();
   await expect(page).toHaveURL('http://127.0.0.1:4173/');
@@ -113,10 +125,10 @@ test('keeps session restoration ahead of the public homepage', async ({ page }) 
   });
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(page.getByText('Restoring secure session', { exact: true })).toBeVisible();
-  await expect(page.locator('.public-homepage, form.auth-card')).toHaveCount(0);
+  await expectAnonymousEntryAbsent(page);
   releaseSession();
   await expect(page.getByRole('heading', { name: 'No sessions', exact: true })).toBeVisible();
-  await expect(page.locator('.public-homepage, form.auth-card')).toHaveCount(0);
+  await expectAnonymousEntryAbsent(page);
 });
 
 // retain intended workspace destinations and recover from rejected passwords
@@ -128,10 +140,10 @@ test('logs in after an explicit CTA and preserves a pending workspace hash', asy
   await page.getByLabel('Password', { exact: true }).fill('wrong-synthetic-password');
   await page.getByRole('button', { name: 'Authenticate', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveText('Invalid credentials');
-  await expect(page.locator('.public-homepage')).toHaveCount(0);
+  await expectHomepageAbsent(page);
   await page.getByLabel('Password', { exact: true }).fill('synthetic-password');
   await page.getByRole('button', { name: 'Authenticate', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'No sessions', exact: true })).toBeVisible();
-  await expect(page.locator('.public-homepage, form.auth-card')).toHaveCount(0);
+  await expectAnonymousEntryAbsent(page);
   expect(state.passwords).toEqual(['wrong-synthetic-password', 'synthetic-password']);
 });

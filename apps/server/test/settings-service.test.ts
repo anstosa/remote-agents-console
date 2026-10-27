@@ -25,6 +25,42 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
+describe('Calendar token-key rotation settings', () => {
+  // reject every ambiguous pair before any file-backed transaction is committed
+  it.each(['identical', 'same-id', 'same-bytes', 'distinct'] as const)('validates a %s rotation pair atomically without disclosure', async pair => {
+    const current = await fixture();
+    const before = source(await current.service.snapshot(), 'env');
+    const active = `active-rotation:${Buffer.alloc(32, 21).toString('base64url')}`;
+    let previous = active;
+    // preserve each independently valid key while varying only the cross-field relation
+    switch (pair) {
+      case 'same-id': previous = `active-rotation:${Buffer.alloc(32, 22).toString('base64url')}`; break;
+      case 'same-bytes': previous = `previous-rotation:${Buffer.alloc(32, 21).toString('base64url')}`; break;
+      case 'distinct': previous = `previous-rotation:${Buffer.alloc(32, 22).toString('base64url')}`; break;
+    }
+    const original = await readFile(current.envPath, 'utf8');
+    const save = current.service.save({ changes: [{ sourceId: 'env', revisionId: before.revisionId, patches: [
+      { op: 'set', path: ['RAC_GOOGLE_CALENDAR_TOKEN_KEY'], value: active },
+      { op: 'set', path: ['RAC_GOOGLE_CALENDAR_PREVIOUS_TOKEN_KEY'], value: previous }
+    ] }] }, 'controller-session');
+    // distinct key identity and bytes retain the supported rotation path
+    if (pair === 'distinct') {
+      await expect(save).resolves.toMatchObject({ sources: expect.any(Array) });
+      expect(await readFile(current.envPath, 'utf8')).toContain(active);
+      expect(await readFile(current.envPath, 'utf8')).toContain(previous);
+    } else {
+      const error = await save.then(() => undefined, failure => failure);
+      expect(error).toMatchObject({ code: 'invalid_google_calendar_token_key' });
+      expect(JSON.stringify(error)).not.toContain('active-rotation');
+      expect(JSON.stringify(error)).not.toContain('previous-rotation');
+      expect(JSON.stringify(error)).not.toContain(active.split(':')[1]);
+      expect(JSON.stringify(error)).not.toContain(previous.split(':')[1]);
+      expect(await readFile(current.envPath, 'utf8')).toBe(original);
+      expect(current.transport.records.some(record => record.request.kind === 'commit')).toBe(false);
+    }
+  });
+});
+
 describe('simple Cloudflare connector setup', () => {
   // status inspection must not take ownership of a saved settings restart
   it('keeps pending settings restartable after a read-only connector status query', async () => {

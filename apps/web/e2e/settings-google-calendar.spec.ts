@@ -221,7 +221,7 @@ for (const width of [1440, 390]) test(`renders Google Calendar settings safely a
   await expect(settings.getByText(/seven days/u)).toBeVisible();
   await expect(settings.getByText(/Timely/iu)).toHaveCount(0);
   await expect(settings.getByText(/offset/iu)).toHaveCount(0);
-  const account = settings.locator('section[aria-label="Google Calendar account"]');
+  const account = settings.getByRole('region', { name: 'Google Calendar account', exact: true });
   const disclosure = account.getByRole('note', { name: 'Google Calendar data disclosure', exact: true });
   await expect(disclosure).toContainText('receives your Google account ID and email');
   await expect(disclosure).toContainText('stores encrypted access and refresh tokens');
@@ -230,7 +230,8 @@ for (const width of [1440, 390]) test(`renders Google Calendar settings safely a
   await expect(disclosure).toContainText('not used for AI training');
   await expect(disclosure.getByRole('link', { name: 'Privacy Policy', exact: true })).toHaveAttribute('href', '/privacy');
   await expect(disclosure.getByRole('link', { name: 'Terms of Service', exact: true })).toHaveAttribute('href', '/terms');
-  await expect(account.locator('.settings-google-calendar-evidence + .settings-google-calendar-actions')).toHaveCount(1);
+  await expect(disclosure).toBeVisible();
+  await expect(account.getByRole('button', { name: 'Reconnect Google account', exact: true })).toBeVisible();
   expect(await settings.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
 });
 
