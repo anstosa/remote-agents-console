@@ -13,6 +13,12 @@ type Command = (binary: string, args: string[]) => Promise<{ code: number; stdou
 // quote trusted scripts separately from context-derived paths
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
+// preserve Files directory identity until an edited command is explicitly submitted
+export const guardedDirectoryCommand = (command: string, lease: DirectoryExecutionLease): string => {
+  const identity = `${lease.identity.dev}:${lease.identity.ino}:directory`;
+  return `(if cd -- ${quote(lease.canonicalHostPath)} && [ "$(LC_ALL=C /usr/bin/stat -Lc '%d:%i:%F' -- .)" = ${quote(identity)} ]; then BASH_ENV= /bin/bash -c ${quote(command)}; else printf '%s\\n' 'Files directory changed; command not run.' >&2; exit 125; fi)`;
+};
+
 // own one detached host process and its exact exit marker
 export class HostCommandRunner {
   private readonly socketArgs: string[];

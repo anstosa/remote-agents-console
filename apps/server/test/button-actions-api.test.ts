@@ -41,7 +41,9 @@ describe('button action API boundary', () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const catalog = new ConfiguredButtonCatalog(config, Buffer.alloc(32, 9));
     const operation: ButtonOperation = { id: 'operation_123456789012345678901234', state: 'queued' };
+    const prepared = { kind: 'prompt' as const, text: 'trusted prompt', placeId: 'project:/workspace', agentId: 'agent-1' };
     let owner = '';
+    const draft = vi.fn(async (sessionId: string) => { owner = sessionId; return prepared; });
     const start = vi.fn(async (sessionId: string) => { owner = sessionId; return operation; });
     const status = vi.fn(async (sessionId: string, id: string) => {
       // hide operation identity across sessions
@@ -49,7 +51,7 @@ describe('button action API boundary', () => {
       return operation;
     });
     const close = vi.fn();
-    const buttonActions = { catalog, start, status, close } as unknown as ButtonActionService;
+    const buttonActions = { catalog, draft, start, status, close } as unknown as ButtonActionService;
     const app = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 21).toString('base64url')), buttonActions });
     apps.push(app);
     const first = await login(app);
@@ -60,6 +62,31 @@ describe('button action API boundary', () => {
       placeId: 'project:/workspace',
       slot: 'pullRequest'
     };
+    const draftRequest = {
+      actionId: request.actionId,
+      configRevision: request.configRevision,
+      placeId: request.placeId,
+      slot: request.slot
+    };
+
+    const unauthenticatedDraft = await app.inject({ method: 'POST', url: '/api/button-actions/draft', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': first.csrf }, payload: draftRequest });
+    expect(unauthenticatedDraft.statusCode).toBe(401);
+    expect(unauthenticatedDraft.headers['cache-control']).toBe('no-store');
+    const foreignDraftOrigin = await app.inject({ method: 'POST', url: '/api/button-actions/draft', headers: { ...first.headers, origin: 'https://foreign.example.com' }, payload: draftRequest });
+    expect(foreignDraftOrigin.statusCode).toBe(403);
+    const missingDraftCsrf = await app.inject({ method: 'POST', url: '/api/button-actions/draft', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: first.cookie }, payload: draftRequest });
+    expect(missingDraftCsrf.statusCode).toBe(403);
+    const injectedDraft = await app.inject({ method: 'POST', url: '/api/button-actions/draft', headers: first.headers, payload: { ...draftRequest, requestId: 'request_123456', cwd: '/tmp', agentPrompt: 'injected', shellCommand: 'rm -rf /' } });
+    expect(injectedDraft.statusCode).toBe(400);
+    expect(injectedDraft.json()).toEqual({ error: 'invalid_button_action' });
+    expect(injectedDraft.headers['cache-control']).toBe('no-store');
+    expect(draft).not.toHaveBeenCalled();
+
+    const drafted = await app.inject({ method: 'POST', url: '/api/button-actions/draft', headers: first.headers, payload: draftRequest });
+    expect(drafted.statusCode).toBe(200);
+    expect(drafted.json()).toEqual({ draft: prepared });
+    expect(drafted.headers['cache-control']).toBe('no-store');
+    expect(draft).toHaveBeenCalledTimes(1);
 
     const unauthenticated = await app.inject({ method: 'POST', url: '/api/button-actions', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': first.csrf }, payload: request });
     expect(unauthenticated.statusCode).toBe(401);
@@ -94,15 +121,20 @@ describe('button action API boundary', () => {
     const nonController = await app.inject({ method: 'POST', url: '/api/button-actions', headers: second.headers, payload: { ...request, requestId: 'request_second' } });
     expect(nonController.statusCode).toBe(423);
     expect(start).toHaveBeenCalledTimes(1);
+    const nonControllerDraft = await app.inject({ method: 'POST', url: '/api/button-actions/draft', headers: second.headers, payload: draftRequest });
+    expect(nonControllerDraft.statusCode).toBe(423);
+    expect(nonControllerDraft.headers['cache-control']).toBe('no-store');
+    expect(draft).toHaveBeenCalledTimes(1);
   }, 20_000);
 
   // expose only bounded service errors
   it('maps action failures without leaking trusted definitions', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const catalog = new ConfiguredButtonCatalog(config, Buffer.alloc(32, 10));
+    const draft = vi.fn(async () => { throw new ButtonActionError('stale_button_configuration'); });
     const start = vi.fn(async () => { throw new ButtonActionError('stale_button_configuration'); });
     const status = vi.fn(async () => { throw new ButtonActionError('button_action_status_unavailable', 503); });
-    const buttonActions = { catalog, start, status, close: vi.fn() } as unknown as ButtonActionService;
+    const buttonActions = { catalog, draft, start, status, close: vi.fn() } as unknown as ButtonActionService;
     const app = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 22).toString('base64url')), buttonActions });
     apps.push(app);
     const browser = await login(app);
@@ -117,6 +149,29 @@ describe('button action API boundary', () => {
     expect(response.statusCode).toBe(409);
     expect(response.json()).toEqual({ error: 'stale_button_configuration' });
     expect(response.body).not.toContain('review, commit, and push');
+
+    const draftResponse = await app.inject({ method: 'POST', url: '/api/button-actions/draft', headers: browser.headers, payload: {
+      actionId: catalog.value.application.pullRequest[0]!.id,
+      configRevision: catalog.value.revision,
+      placeId: 'project:/workspace',
+      slot: 'pullRequest'
+    } });
+    expect(draftResponse.statusCode).toBe(409);
+    expect(draftResponse.json()).toEqual({ error: 'stale_button_configuration' });
+    expect(draftResponse.headers['cache-control']).toBe('no-store');
+    expect(draftResponse.body).not.toContain('review, commit, and push');
+
+    draft.mockRejectedValueOnce(new Error('secret command detail'));
+    const unavailableDraft = await app.inject({ method: 'POST', url: '/api/button-actions/draft', headers: browser.headers, payload: {
+      actionId: catalog.value.application.pullRequest[0]!.id,
+      configRevision: catalog.value.revision,
+      placeId: 'project:/workspace',
+      slot: 'pullRequest'
+    } });
+    expect(unavailableDraft.statusCode).toBe(503);
+    expect(unavailableDraft.json()).toEqual({ error: 'button_action_unavailable' });
+    expect(unavailableDraft.headers['cache-control']).toBe('no-store');
+    expect(unavailableDraft.body).not.toContain('secret command detail');
 
     const unavailable = await app.inject({ method: 'GET', url: '/api/button-actions/operation_123456789012345678901234', headers: { host: 'agents.example.com', cookie: browser.cookie } });
     expect(unavailable.statusCode).toBe(503);

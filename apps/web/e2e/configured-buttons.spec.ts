@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { installPaneMock, paneInputText, pushQuestion, seedPaneSize } from './pane-stream-mock.js';
 
 const palette = {
   crust: 'rgb(17, 17, 27)',
@@ -37,7 +38,8 @@ const effective = {
   rightNav: [button('right-action', 'Right action', 'sapphire', 'outline')],
   navMenu: [button('menu-action', 'Menu action', 'maroon', 'solid', 'prompt')],
   pullRequest: [button('push-action', 'Commit/Push', 'mauve', 'solid', 'prompt'), button('fixup-action', '$fixup', 'lavender', 'outline', 'shell')],
-  'split:agent': [button('agent-action', 'Agent action', 'sky', 'outline', 'prompt')]
+  'split:agent': [button('agent-action', 'Agent action', 'sky', 'outline', 'prompt')],
+  'split:terminal': [button('terminal-action', 'Terminal action', 'green', 'outline', 'shell')]
 };
 const worktree = { id: 'wt-1', projectId: 'repo', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/buttons', gitStatus: { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0 } };
 const dashboard = {
@@ -48,20 +50,64 @@ const dashboard = {
   buttons: { revision: 'buttons-v1', application: effective, projects: { repo: effective } }
 };
 
-// mount one retained action registry with a controllable flyout operation
-async function mount(page: import('@playwright/test').Page) {
+type Pane = { paneId: string; session: string; window: string; role: 'shell'; name: string; command: string; path: string; title: string; agent: false; busy: false };
+type FixtureState = { dashboard: typeof dashboard; panes: Pane[] };
+type DraftResult = { status?: number; json: unknown };
+type MountOptions = {
+  agents?: typeof dashboard.agents;
+  panes?: Pane[];
+  storedTerminals?: Array<{ paneId: string; name: string }>;
+  worktreePrompt?: string;
+  createdPane?: Pane;
+  draft?: (body: Record<string, unknown>, state: FixtureState) => DraftResult | Promise<DraftResult>;
+};
+
+const buildPane = (paneId: string, name: string, window: string): Pane => ({ paneId, session: '$1', window, role: 'shell', name, command: 'zsh', path: worktree.path, title: '', agent: false, busy: false });
+
+// mount configured actions with mutable dashboard, pane and draft fixtures
+async function mount(page: import('@playwright/test').Page, options: MountOptions = {}) {
   const starts: Array<Record<string, unknown>> = [];
+  const drafts: Array<Record<string, unknown>> = [];
+  const prompts: Array<Record<string, unknown>> = [];
+  const answers: Array<Record<string, unknown>> = [];
+  const shellCreates: Array<Record<string, unknown>> = [];
+  const state: FixtureState = { dashboard: structuredClone(dashboard), panes: [...options.panes ?? []] };
+  state.dashboard.agents = structuredClone(options.agents ?? dashboard.agents);
+  let dashboardReads = 0;
   let menuComplete = false;
+  await installPaneMock(page);
+  // restore only the terminals this fixture explicitly opens
+  if (options.storedTerminals !== undefined) await page.addInitScript(({ key, terminals }) => localStorage.setItem(key, JSON.stringify(terminals)), { key: `rac.terminals:${worktree.id}`, terminals: options.storedTerminals });
+  // restore one agentless worktree draft before its pending composer mounts
+  if (options.worktreePrompt !== undefined) await page.addInitScript(({ key, prompt }) => localStorage.setItem(key, prompt), { key: `remote-agent-console:prompt-draft:worktree-prompt:${worktree.id}`, prompt: options.worktreePrompt });
   await page.route('**/api/**', async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (path === '/api/dashboard') return route.fulfill({ json: dashboard });
+    if (path === '/api/dashboard') { dashboardReads += 1; return route.fulfill({ json: state.dashboard }); }
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (/^\/api\/agents\/[^/]+\/tickets$/u.test(path)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (/^\/api\/(?:agents\/[^/]+|worktrees\/[^/]+)\/tickets$/u.test(path)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/[^/]+\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(path)) return route.fulfill({ json: { prompts: [] } });
-    if (path === `/api/worktrees/${worktree.id}/panes`) return route.fulfill({ json: { panes: [] } });
+    if (/^\/api\/agents\/[^/]+\/prompt$/u.test(path) && request.method() === 'POST') { prompts.push(request.postDataJSON() as Record<string, unknown>); return route.fulfill({ status: 204 }); }
+    if (/^\/api\/agents\/[^/]+\/question$/u.test(path) && request.method() === 'POST') { answers.push(request.postDataJSON() as Record<string, unknown>); return route.fulfill({ status: 204 }); }
+    if (path === `/api/worktrees/${worktree.id}/panes`) return route.fulfill({ json: { panes: state.panes } });
+    // create one discoverable managed shell for edit-before-submit
+    if (path === `/api/worktrees/${worktree.id}/shells` && request.method() === 'POST') {
+      shellCreates.push(request.postDataJSON() as Record<string, unknown>);
+      const created = options.createdPane ?? buildPane('%9', 'shell', '@9');
+      if (!state.panes.some(pane => pane.paneId === created.paneId)) state.panes.push(created);
+      return route.fulfill({ status: 201, json: { paneId: created.paneId } });
+    }
     if (path === `/api/worktrees/${worktree.id}/notes`) return route.fulfill({ json: { notes: [] } });
+    // prepare trusted text without exposing it through the dashboard
+    if (path === '/api/button-actions/draft' && request.method() === 'POST') {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      drafts.push(body);
+      const result = options.draft === undefined
+        ? { json: { draft: { kind: 'shell', text: 'echo ready', placeId: worktree.id } } }
+        : await options.draft(body, state);
+      return route.fulfill({ status: result.status ?? 200, json: result.json });
+    }
     // record one configured action dispatch
     if (path === '/api/button-actions' && request.method() === 'POST') {
       const body = request.postDataJSON() as Record<string, unknown> & { actionId: string };
@@ -74,7 +120,16 @@ async function mount(page: import('@playwright/test').Page) {
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
   await page.goto('/');
-  return { starts, completeMenu: () => { menuComplete = true; } };
+  return { starts, drafts, prompts, answers, shellCreates, state, dashboardReads: () => dashboardReads, completeMenu: () => { menuComplete = true; } };
+}
+
+// open the custom action's edit path without invoking its primary click
+async function editBeforeSubmit(page: import('@playwright/test').Page, source: import('@playwright/test').Locator, beforeSelect?: () => void | Promise<void>) {
+  await source.click({ button: 'right' });
+  const edit = page.getByRole('menuitem', { name: 'Edit before submit', exact: true });
+  await expect(edit).toBeVisible();
+  await beforeSelect?.();
+  await edit.click();
 }
 
 test('renders configured slots and retains closed flyout progress without executable request data', async ({ page }) => {
@@ -205,3 +260,322 @@ test('interrupts a delayed action response from an old server boot', async ({ pa
   await expect(page.locator('.operation-feedback').filter({ hasText: 'Tab action finished' })).toHaveCount(0);
   expect(posts).toBe(1);
 });
+
+// preserve the current draft while opening an agent action for editing
+test('stages an existing-agent prompt from a panel action without submitting it', async ({ page }) => {
+  const prepared = 'Review the current diff, then wait for approval.';
+  const controls = await mount(page, { draft: body => ({ json: { draft: { kind: 'prompt', text: prepared, placeId: String(body.placeId), agentId: String(body.agentId) } } }) });
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await prompt.fill('Keep this context');
+
+  const agentAction = page.locator('.agent-panel .panel-header-actions').getByRole('button', { name: 'Agent action' });
+  await editBeforeSubmit(page, agentAction, () => {
+    // opening the menu must not prepare or execute its source action
+    expect(controls.drafts).toEqual([]);
+    expect(controls.starts).toEqual([]);
+    expect(controls.prompts).toEqual([]);
+  });
+
+  await expect(prompt).toHaveValue(`Keep this context\n\n${prepared}`);
+  await expect(prompt).toBeFocused();
+  expect(controls.drafts).toEqual([{ actionId: 'agent-action', configRevision: 'buttons-v1', placeId: 'wt-1', slot: 'split:agent', agentId: 'agent-1' }]);
+  expect(controls.starts).toEqual([]);
+  expect(controls.prompts).toEqual([]);
+  expect(JSON.stringify(controls.state.dashboard)).not.toContain(prepared);
+});
+
+// carry agentless text into the newly launched agent without submitting
+test('preserves an agentless worktree draft when a prepared prompt launches its agent', async ({ page }) => {
+  const prepared = 'Inspect the failing build and report the cause.';
+  const existing = 'Keep the prior investigation notes';
+  const launched = { ...dashboard.agents[0]!, id: 'agent-2', sessionId: 'socket:$2', title: 'Starting' };
+  const controls = await mount(page, {
+    agents: [],
+    worktreePrompt: 'Open the pending composer',
+    draft: (_body, state) => {
+      // expose the agent only after preparation starts it
+      state.dashboard.agents = [launched];
+      return { json: { draft: { kind: 'prompt', text: prepared, placeId: worktree.id, agentId: launched.id } } };
+    }
+  });
+  const readsBeforeDraft = controls.dashboardReads();
+  const pendingPrompt = page.getByRole('textbox', { name: 'Prompt' });
+  await expect(pendingPrompt).toBeVisible();
+  await pendingPrompt.fill(existing);
+
+  await page.getByRole('button', { name: 'More options' }).click();
+  await editBeforeSubmit(page, page.getByRole('button', { name: 'Menu action' }), () => {
+    // a configured list menu is inert until its explicit edit row is selected
+    expect(controls.drafts).toEqual([]);
+    expect(controls.starts).toEqual([]);
+    expect(controls.prompts).toEqual([]);
+  });
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await expect(prompt).toHaveValue(`${existing}\n\n${prepared}`);
+  await expect(prompt).toBeFocused();
+  await expect.poll(controls.dashboardReads).toBeGreaterThan(readsBeforeDraft);
+  expect(controls.drafts).toEqual([{ actionId: 'menu-action', configRevision: 'buttons-v1', placeId: 'wt-1', slot: 'navMenu' }]);
+  expect(controls.starts).toEqual([]);
+  expect(controls.prompts).toEqual([]);
+  expect(JSON.stringify(controls.state.dashboard)).not.toContain(prepared);
+});
+
+// accept only the exact agent discovered during this preparation
+test('accepts a launched agent published before its held draft response', async ({ page }) => {
+  const prepared = 'Continue from the newly discovered session.';
+  const launched = { ...dashboard.agents[0]!, id: 'agent-early', sessionId: 'socket:$early', title: 'Ready' };
+  let markDraftStarted!: () => void;
+  let releaseDraft!: () => void;
+  const draftStarted = new Promise<void>(resolve => { markDraftStarted = resolve; });
+  const heldDraft = new Promise<void>(resolve => { releaseDraft = resolve; });
+  const controls = await mount(page, {
+    agents: [],
+    draft: async (_body, state) => {
+      // publish discovery before the request carrying trusted bytes completes
+      state.dashboard.agents = [launched];
+      markDraftStarted();
+      await heldDraft;
+      return { json: { draft: { kind: 'prompt', text: prepared, placeId: worktree.id, agentId: launched.id } } };
+    }
+  });
+
+  await page.getByRole('button', { name: 'More options' }).click();
+  const editing = editBeforeSubmit(page, page.getByRole('button', { name: 'Menu action' }));
+  await draftStarted;
+  const readsBeforeRefresh = controls.dashboardReads();
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(controls.dashboardReads).toBeGreaterThan(readsBeforeRefresh);
+  const prompt = page.locator(`textarea[data-prompt-id="${launched.id}"]`);
+  await expect(prompt).toBeVisible();
+  await expect(prompt).toHaveValue('');
+
+  releaseDraft();
+  await editing;
+  await expect(prompt).toHaveValue(prepared);
+  await expect(prompt).toBeFocused();
+  expect(controls.starts).toEqual([]);
+  expect(controls.prompts).toEqual([]);
+});
+
+// edit a normal prompt without answering the active question
+test('reveals the normal prompt when editing an action during a structured question', async ({ page }) => {
+  const prepared = 'Use this as a normal follow-up instead.';
+  const controls = await mount(page, { draft: () => ({ json: { draft: { kind: 'prompt', text: prepared, placeId: worktree.id, agentId: 'agent-1' } } }) });
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await pushQuestion(page, 'agent-1', { id: 'configured-question', text: 'Which path?', choices: ['First', 'Second'], source: 'structured' });
+  await expect(page.getByRole('region', { name: 'Agent question' })).toBeVisible();
+
+  await editBeforeSubmit(page, page.locator('.agent-panel .panel-header-actions').getByRole('button', { name: 'Agent action' }));
+
+  const prompt = page.locator('textarea[data-prompt-id="agent-1"]');
+  await expect(prompt).toHaveValue(prepared);
+  await expect(prompt).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Switch to answer mode' })).toBeVisible();
+  expect(controls.answers).toEqual([]);
+  expect(controls.prompts).toEqual([]);
+  expect(controls.starts).toEqual([]);
+});
+
+// keep multiline bytes out of the shell until explicit submission
+test('creates a terminal editor for multiline shell bytes and sends only the explicit edited submission', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const prepared = 'printf "one\\n"\nprintf "two\\n"\n';
+  const edited = 'printf "edited\\n"\nprintf "two\\n"\n';
+  const created = buildPane('%9', 'draft shell', '@9');
+  const controls = await mount(page, {
+    createdPane: created,
+    draft: () => ({ json: { draft: { kind: 'shell', text: prepared, placeId: worktree.id } } })
+  });
+
+  await editBeforeSubmit(page, page.locator('.tab-row-lead').getByRole('button', { name: 'Tab action' }));
+  await expect.poll(() => controls.shellCreates.length).toBe(1);
+  await seedPaneSize(page, created.paneId, 80, 24);
+
+  const terminal = page.locator(`.terminal-pane[data-panel-key="${created.paneId}"]`);
+  const command = terminal.getByRole('textbox', { name: 'Terminal command' });
+  await expect(command).toHaveValue(prepared);
+  await expect(command).toBeFocused();
+  await expect(terminal.getByRole('button', { name: 'Submit command' })).toBeVisible();
+  await expect(terminal.getByRole('button', { name: 'Cancel command edit' })).toBeVisible();
+  expect(await paneInputText(page, created.paneId)).toBe('');
+  await command.fill(edited);
+  await expect(command).toHaveValue(edited);
+  expect(await paneInputText(page, created.paneId)).toBe('');
+
+  await terminal.getByRole('button', { name: 'Submit command' }).click();
+  await expect.poll(() => paneInputText(page, created.paneId)).toBe(`${edited}\r`);
+  await expect(command).toHaveCount(0);
+  expect(controls.drafts).toEqual([{ actionId: 'tab-action', configRevision: 'buttons-v1', placeId: 'wt-1', slot: 'tabLead', agentId: 'agent-1' }]);
+  expect(controls.starts).toEqual([]);
+  expect(controls.prompts).toEqual([]);
+  expect(JSON.stringify(controls.state.dashboard)).not.toContain(prepared);
+});
+
+// reject oversized edits and appends without losing existing input
+test('keeps terminal edits within the shared utf-8 byte limit without sending or truncating', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const pane = buildPane('%5', 'build', '@5');
+  let draftCalls = 0;
+  const controls = await mount(page, {
+    panes: [pane],
+    storedTerminals: [{ paneId: pane.paneId, name: pane.name }],
+    draft: () => {
+      // make the second preparation test total append size
+      draftCalls += 1;
+      return { json: { draft: { kind: 'shell', text: draftCalls === 1 ? 'echo base' : 'echo next', placeId: worktree.id } } };
+    }
+  });
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await seedPaneSize(page, pane.paneId, 80, 24);
+  await editBeforeSubmit(page, page.locator('.tab-row-lead').getByRole('button', { name: 'Tab action' }));
+  const panel = page.locator(`.terminal-pane[data-panel-key="${pane.paneId}"]`);
+  const command = panel.getByRole('textbox', { name: 'Terminal command' });
+  await expect(command).toHaveValue('echo base');
+
+  await command.fill('x'.repeat(262_145));
+  await expect(command).toHaveValue('echo base');
+  await expect(panel.getByRole('alert')).toContainText('Commands are limited to 256 KiB');
+  await command.fill('é'.repeat(131_073));
+  await expect(command).toHaveValue('echo base');
+  await expect(panel.getByRole('alert')).toContainText('Commands are limited to 256 KiB');
+  await command.fill('x'.repeat(262_144));
+  await expect.poll(() => command.evaluate((element: HTMLTextAreaElement) => element.value.length)).toBe(262_144);
+  await expect(panel.getByRole('alert')).toHaveCount(0);
+  await command.fill('x'.repeat(262_143));
+  await expect.poll(() => command.evaluate((element: HTMLTextAreaElement) => element.value.length)).toBe(262_143);
+  expect(await paneInputText(page, pane.paneId)).toBe('');
+
+  await editBeforeSubmit(page, page.locator('.tab-row-lead').getByRole('button', { name: 'Tab action' }));
+  await expect.poll(() => controls.drafts.length).toBe(2);
+  await expect.poll(() => command.evaluate((element: HTMLTextAreaElement) => element.value.length)).toBe(262_143);
+  await expect(page.getByRole('alert').filter({ hasText: 'Tab action could not be edited' })).toContainText('Commands are limited to 256 KiB');
+  expect(await paneInputText(page, pane.paneId)).toBe('');
+  expect(controls.shellCreates).toEqual([]);
+  expect(controls.starts).toEqual([]);
+});
+
+// route folded header actions to their exact terminal
+test('targets a folded terminal-header action exactly and otherwise reuses the current terminal', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const build = buildPane('%5', 'build', '@5');
+  const testPane = buildPane('%6', 'tests', '@6');
+  const controls = await mount(page, {
+    panes: [build, testPane],
+    storedTerminals: [{ paneId: build.paneId, name: build.name }, { paneId: testPane.paneId, name: testPane.name }],
+    draft: body => ({ json: { draft: { kind: 'shell', text: body.actionId === 'terminal-action' ? 'npm run build' : 'npm test', placeId: worktree.id } } })
+  });
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await seedPaneSize(page, build.paneId, 80, 24);
+  await seedPaneSize(page, testPane.paneId, 80, 24);
+  const buildPanel = page.locator(`.terminal-pane[data-panel-key="${build.paneId}"]`);
+  const testPanel = page.locator(`.terminal-pane[data-panel-key="${testPane.paneId}"]`);
+
+  await testPanel.locator('.xterm-screen').click();
+  await expect(testPanel).toHaveClass(/\bfocused\b/u);
+  const folded = buildPanel.getByRole('button', { name: 'More terminal build actions' });
+  await expect(folded).toBeVisible();
+  await folded.evaluate(element => (element as HTMLButtonElement).click());
+  const terminalAction = page.getByRole('button', { name: 'Terminal action' });
+  await terminalAction.click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: 'Copy', exact: true })).toHaveCount(0);
+  await page.getByRole('menuitem', { name: 'Edit before submit', exact: true }).click();
+
+  await expect(buildPanel.getByRole('textbox', { name: 'Terminal command' })).toHaveValue('npm run build');
+  await expect(testPanel.getByRole('textbox', { name: 'Terminal command' })).toHaveCount(0);
+  await buildPanel.getByRole('button', { name: 'Cancel command edit' }).click();
+
+  await testPanel.locator('.xterm-screen').click();
+  await editBeforeSubmit(page, page.locator('.tab-row-lead').getByRole('button', { name: 'Tab action' }));
+  await expect(testPanel.getByRole('textbox', { name: 'Terminal command' })).toHaveValue('npm test');
+  await expect(buildPanel.getByRole('textbox', { name: 'Terminal command' })).toHaveCount(0);
+  expect(await paneInputText(page, build.paneId)).toBe('');
+  expect(await paneInputText(page, testPane.paneId)).toBe('');
+  expect(controls.shellCreates).toEqual([]);
+  expect(controls.starts).toEqual([]);
+});
+
+// fail closed when the captured terminal disappears
+test('does not redirect a vanished terminal-header target into another pane', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const build = buildPane('%5', 'build', '@5');
+  const testPane = buildPane('%6', 'tests', '@6');
+  const controls = await mount(page, {
+    panes: [build, testPane],
+    storedTerminals: [{ paneId: build.paneId, name: build.name }, { paneId: testPane.paneId, name: testPane.name }],
+    draft: (_body, state) => {
+      // remove the captured pane before the client resolves its exact destination
+      state.panes = [testPane];
+      return { json: { draft: { kind: 'shell', text: 'npm run build', placeId: worktree.id } } };
+    }
+  });
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await seedPaneSize(page, build.paneId, 80, 24);
+  await seedPaneSize(page, testPane.paneId, 80, 24);
+  const buildPanel = page.locator(`.terminal-pane[data-panel-key="${build.paneId}"]`);
+  const testPanel = page.locator(`.terminal-pane[data-panel-key="${testPane.paneId}"]`);
+  const folded = buildPanel.getByRole('button', { name: 'More terminal build actions' });
+  await folded.evaluate(element => (element as HTMLButtonElement).click());
+
+  await editBeforeSubmit(page, page.getByRole('button', { name: 'Terminal action' }));
+
+  await expect(page.getByRole('alert').filter({ hasText: 'Terminal action could not be edited' })).toContainText('selected terminal is no longer available');
+  await expect(buildPanel.getByRole('textbox', { name: 'Terminal command' })).toHaveCount(0);
+  await expect(testPanel.getByRole('textbox', { name: 'Terminal command' })).toHaveCount(0);
+  expect(await paneInputText(page, build.paneId)).toBe('');
+  expect(await paneInputText(page, testPane.paneId)).toBe('');
+  expect(controls.shellCreates).toEqual([]);
+  expect(controls.starts).toEqual([]);
+});
+
+// discard old terminal identities after a confirmed server restart
+test('clears a staged terminal command when the dashboard changes server boot', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const pane = buildPane('%5', 'build', '@5');
+  const controls = await mount(page, {
+    panes: [pane],
+    storedTerminals: [{ paneId: pane.paneId, name: pane.name }],
+    draft: () => ({ json: { draft: { kind: 'shell', text: 'echo old boot', placeId: worktree.id } } })
+  });
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await seedPaneSize(page, pane.paneId, 80, 24);
+  const stagingRefresh = page.waitForResponse(response => new URL(response.url()).pathname === '/api/dashboard' && response.request().method() === 'GET');
+  await editBeforeSubmit(page, page.locator('.tab-row-lead').getByRole('button', { name: 'Tab action' }));
+  const panel = page.locator(`.terminal-pane[data-panel-key="${pane.paneId}"]`);
+  const command = panel.getByRole('textbox', { name: 'Terminal command' });
+  await expect(command).toHaveValue('echo old boot');
+  expect(await paneInputText(page, pane.paneId)).toBe('');
+  const stagingResponse = await stagingRefresh;
+  await stagingResponse.finished();
+  // let refresh release its in-flight coalescing guard
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+
+  const readsBeforeBoot = controls.dashboardReads();
+  controls.state.dashboard.serverStartedAt = 18;
+  controls.state.dashboard.generation = 2;
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(controls.dashboardReads).toBeGreaterThan(readsBeforeBoot);
+  await expect(command).toHaveCount(0);
+  expect(await paneInputText(page, pane.paneId)).toBe('');
+  expect(controls.starts).toEqual([]);
+});
+
+// reject both transport failures and stale trusted-byte envelopes
+for (const scenario of [
+  { name: 'failed preparation', result: { status: 409, json: { error: 'button_config_stale' } } },
+  { name: 'retargeted response', result: { json: { draft: { kind: 'prompt', text: 'must not stage', placeId: 'wt-stale', agentId: 'agent-1' } } } }
+] as const) {
+  // failed preparation must leave the current editor unchanged
+  test(`does not stage or execute a prompt after a ${scenario.name}`, async ({ page }) => {
+    const controls = await mount(page, { draft: () => scenario.result });
+    const prompt = page.getByRole('textbox', { name: 'Prompt' });
+    await prompt.fill('Existing draft');
+
+    await editBeforeSubmit(page, page.locator('.agent-panel .panel-header-actions').getByRole('button', { name: 'Agent action' }));
+
+    await expect(prompt).toHaveValue('Existing draft');
+    await expect(page.getByRole('alert').filter({ hasText: 'Agent action could not be edited' })).toBeVisible();
+    expect(controls.starts).toEqual([]);
+    expect(controls.prompts).toEqual([]);
+  });
+}

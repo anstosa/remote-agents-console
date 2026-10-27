@@ -1,18 +1,26 @@
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
+import { promisify } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 import { ConfiguredButtonCatalog } from '../src/button-actions/catalog.js';
-import { ButtonActionError, ButtonActionService, buttonActionInputSchema, type ButtonActionInput } from '../src/button-actions/service.js';
+import { ButtonActionError, ButtonActionService, buttonActionDraftInputSchema, buttonActionInputSchema, type ButtonActionDraftInput, type ButtonActionInput } from '../src/button-actions/service.js';
 import { defaultButtons, type ButtonSlot, type ButtonSlots, type ConfiguredButton } from '../src/config/buttons.js';
 import type { Agent } from '../src/domain/models.js';
 import type { Place } from '../src/places/places.js';
 import type { PromptRequestStatus } from '../src/prompts/service.js';
+
+// run guarded drafts in an isolated real Bash child
+const execFileAsync = promisify(execFile);
 
 const prompt = (text: string, agentPrompt: string): ConfiguredButton => ({ text, color: 'mauve', style: 'solid', action: { agentPrompt } });
 const shell = (text: string, shellCommand: string): ConfiguredButton => ({ text, color: 'green', style: 'outline', action: { shellCommand } });
 const place: Place = { id: 'project:/workspace', kind: 'worktree', projectId: 'project', label: 'Workspace', home: '/workspace', hostPath: '/host/workspace' };
 
 // build one deterministic application catalog
-function catalog(projectButtons?: { leftNav?: ConfiguredButton[] }, key = Buffer.alloc(32, 7)): ConfiguredButtonCatalog {
+function catalog(projectButtons?: { leftNav?: ConfiguredButton[]; splits?: { files?: ConfiguredButton[] } }, key = Buffer.alloc(32, 7)): ConfiguredButtonCatalog {
   const buttons: ButtonSlots = structuredClone(defaultButtons);
   buttons.leftNav = [prompt('Ask', 'ask exactly'), prompt('Other', 'other exactly'), shell('Build', 'pnpm build')];
   buttons.splits.files = [shell('Files', 'pwd')];
@@ -29,6 +37,11 @@ function actionId(buttons: ConfiguredButtonCatalog, slot: ButtonSlot, text: stri
 // build one strict action request
 function input(buttons: ConfiguredButtonCatalog, text = 'Ask', slot: ButtonSlot = 'leftNav', overrides: Partial<ButtonActionInput> = {}): ButtonActionInput {
   return { requestId: 'request_123456', actionId: actionId(buttons, slot, text), configRevision: buttons.value.revision, placeId: place.id, slot, ...overrides };
+}
+
+// build one strict draft request without an execution retry identity
+function draftInput(buttons: ConfiguredButtonCatalog, text = 'Ask', slot: ButtonSlot = 'leftNav', overrides: Partial<ButtonActionDraftInput> = {}): ButtonActionDraftInput {
+  return { actionId: actionId(buttons, slot, text), configRevision: buttons.value.revision, placeId: place.id, slot, ...overrides };
 }
 
 // build one Agent in the requested Place
@@ -121,9 +134,172 @@ describe('button action input', () => {
     expect(buttonActionInputSchema.safeParse({ ...valid, slot: 'split:unknown' }).success).toBe(false);
     expect(buttonActionInputSchema.safeParse({ ...valid, filesDirectoryToken: '' }).success).toBe(false);
   });
+
+  // omit execution retry identity and reject every browser-supplied action value
+  it('accepts only the strict draft locator contract', () => {
+    const buttons = catalog();
+    const valid = draftInput(buttons);
+    expect(buttonActionDraftInputSchema.safeParse(valid).success).toBe(true);
+    expect(buttonActionDraftInputSchema.safeParse({ ...valid, requestId: 'request_123456' }).success).toBe(false);
+    expect(buttonActionDraftInputSchema.safeParse({ ...valid, agentPrompt: 'injected' }).success).toBe(false);
+    expect(buttonActionDraftInputSchema.safeParse({ ...valid, shellCommand: 'injected' }).success).toBe(false);
+    expect(buttonActionDraftInputSchema.safeParse({ ...valid, cwd: '/tmp' }).success).toBe(false);
+  });
 });
 
 describe('button action service', () => {
+  // preserve trusted bytes while preparing edits without invoking either execution engine
+  it('returns exact prompt and shell drafts without executing them', async () => {
+    const promptBytes = '  ask exactly\nwith spacing  ';
+    const shellBytes = "printf ' exact bytes \\n'";
+    const buttons = catalog({ leftNav: [prompt('Ask', promptBytes), shell('Build', shellBytes)] });
+    const fixture = serviceFixture({ catalog: buttons, agents: [agent('codex', 'agent-1'), agent('omx', 'agent-2')] });
+
+    const existingDraft = await fixture.service.draft('session', draftInput(buttons));
+    const promptDraft = await fixture.service.draft('session', draftInput(buttons, 'Ask', 'leftNav', { agentId: 'agent-2' }));
+    const shellDraft = await fixture.service.draft('session', draftInput(buttons, 'Build'));
+
+    expect(existingDraft).toEqual({ kind: 'prompt', text: promptBytes, placeId: place.id, agentId: 'agent-1' });
+    expect(promptDraft).toEqual({ kind: 'prompt', text: promptBytes, placeId: place.id, agentId: 'agent-2' });
+    expect(shellDraft).toEqual({ kind: 'shell', text: shellBytes, placeId: place.id });
+    expect(fixture.launchAgent).not.toHaveBeenCalled();
+    expect(fixture.submitTracked).not.toHaveBeenCalled();
+    expect(fixture.observePrompt).not.toHaveBeenCalled();
+    expect(fixture.execute).not.toHaveBeenCalled();
+  });
+
+  // reject stale or retargeted draft locators and never fall back from an exact Agent
+  it('validates draft catalog, Place, project, slot and selected Agent before launch', async () => {
+    const buttons = catalog({ leftNav: [prompt('Ask', 'project ask')] });
+    const fixture = serviceFixture({ catalog: buttons, agents: [agent('codex', 'eligible'), agent('codex', 'foreign', 'other:/workspace')] });
+    const valid = draftInput(buttons);
+
+    await expectActionError(fixture.service.draft('session', { ...valid, configRevision: 'stale' }), 'stale_button_configuration');
+    await expectActionError(fixture.service.draft('session', { ...valid, placeId: 'missing:/place' }), 'place_unavailable', 404);
+    await expectActionError(fixture.service.draft('session', { ...valid, slot: 'rightNav' }), 'button_unavailable', 404);
+    fixture.dependencies.resolvePlace = async id => id === place.id ? { ...place, projectId: 'other' } : undefined;
+    await expectActionError(fixture.service.draft('session', valid), 'button_unavailable', 404);
+    fixture.dependencies.resolvePlace = async id => id === place.id ? place : undefined;
+    await expectActionError(fixture.service.draft('session', { ...valid, agentId: 'foreign' }), 'agent_unavailable', 404);
+    await expectActionError(fixture.service.draft('session', { ...valid, agentId: 'missing' }), 'agent_unavailable', 404);
+    expect(fixture.launchAgent).not.toHaveBeenCalled();
+    expect(fixture.submitTracked).not.toHaveBeenCalled();
+
+    fixture.service.close();
+    await expectActionError(fixture.service.draft('session', valid), 'server_stopped', 503);
+  });
+
+  // share a normal Place launch between a draft and an executing action
+  it('launches only when needed and coalesces concurrent draft and action requests', async () => {
+    let resolveLaunch!: (value: Agent) => void;
+    const launch = new Promise<Agent>(resolve => { resolveLaunch = resolve; });
+    const fixture = serviceFixture({ agents: [], launchAgent: async () => await launch });
+
+    const draft = fixture.service.draft('session', draftInput(fixture.buttons, 'Other'));
+    const operation = await fixture.service.start('session', input(fixture.buttons));
+    await flush();
+    expect(fixture.launchAgent).toHaveBeenCalledTimes(1);
+
+    resolveLaunch(agent());
+    await expect(draft).resolves.toEqual({ kind: 'prompt', text: 'other exactly', placeId: place.id, agentId: 'agent-1' });
+    await flush();
+    expect(operation.id).toBeDefined();
+    expect(fixture.submitTracked).toHaveBeenCalledTimes(1);
+    expect(fixture.observePrompt).toHaveBeenCalledTimes(1);
+    expect(fixture.execute).not.toHaveBeenCalled();
+  });
+
+  // bound failed, mismatched and unsupported draft Agent resolution
+  it('rejects unusable draft launch targets without prompt submission', async () => {
+    const missing = serviceFixture({ agents: [], launchAgent: async () => undefined });
+    await expectActionError(missing.service.draft('session', draftInput(missing.buttons)), 'agent_launch_failed');
+
+    const mismatched = serviceFixture({ agents: [], launchAgent: async () => agent('codex', 'foreign', 'other:/workspace') });
+    await expectActionError(mismatched.service.draft('session', draftInput(mismatched.buttons)), 'agent_launch_mismatch');
+
+    const unsupported = serviceFixture({ agents: [agent('terminal' as Agent['kind'])] });
+    await expectActionError(unsupported.service.draft('session', draftInput(unsupported.buttons)), 'agent_kind_unavailable');
+    expect(missing.submitTracked).not.toHaveBeenCalled();
+    expect(mismatched.submitTracked).not.toHaveBeenCalled();
+    expect(unsupported.submitTracked).not.toHaveBeenCalled();
+  });
+
+  // validate Files authority only to produce a guarded manual command
+  it('guards Files drafts and rejects missing, unexpected, expired or changed leases', async () => {
+    const buttons = catalog({ splits: { files: [shell('Files', "echo 'quoted'")] } });
+    const fixture = serviceFixture({ catalog: buttons });
+    const files = draftInput(fixture.buttons, 'Files', 'split:files');
+
+    await expectActionError(fixture.service.draft('session', files), 'files_context_required', 400);
+    await expectActionError(fixture.service.draft('session', draftInput(fixture.buttons, 'Build', 'leftNav', { filesDirectoryToken: 'unexpected-token' })), 'unexpected_files_context', 400);
+    fixture.directoryLease.mockResolvedValueOnce({ canonicalHostPath: "/host/workspace/a'b", backendGeneration: 'generation', expiresAt: Date.now() + 60_000, identity: { dev: '1', ino: '2', kind: 'directory' }, current: () => true });
+    const guarded = await fixture.service.draft('session', { ...files, filesDirectoryToken: 'valid-token' });
+    expect(guarded).toEqual({
+      kind: 'shell',
+      text: `(if cd -- '/host/workspace/a'\\''b' && [ "$(LC_ALL=C /usr/bin/stat -Lc '%d:%i:%F' -- .)" = '1:2:directory' ]; then BASH_ENV= /bin/bash -c 'echo '\\''quoted'\\'''; else printf '%s\\n' 'Files directory changed; command not run.' >&2; exit 125; fi)`,
+      placeId: place.id
+    });
+    expect(await fixture.service.draft('session', draftInput(fixture.buttons, 'Build'))).toEqual({ kind: 'shell', text: 'pnpm build', placeId: place.id });
+
+    fixture.directoryLease.mockResolvedValueOnce({ canonicalHostPath: '/host/workspace/old', backendGeneration: 'generation', expiresAt: Date.now() - 1, identity: { dev: '1', ino: '2', kind: 'directory' }, current: () => true });
+    await expectActionError(fixture.service.draft('session', { ...files, filesDirectoryToken: 'expired-token' }), 'files_context_changed');
+    fixture.directoryLease.mockResolvedValueOnce({ canonicalHostPath: '/host/workspace/replaced', backendGeneration: 'generation', expiresAt: Date.now() + 60_000, identity: { dev: '1', ino: '2', kind: 'directory' }, current: () => false });
+    await expectActionError(fixture.service.draft('session', { ...files, filesDirectoryToken: 'changed-token' }), 'files_context_changed');
+    fixture.directoryLease.mockRejectedValueOnce(new ButtonActionError('files_context_changed', 404));
+    await expectActionError(fixture.service.draft('session', { ...files, filesDirectoryToken: 'wrong-token' }), 'files_context_changed', 404);
+    expect(fixture.execute).not.toHaveBeenCalled();
+    expect(fixture.launchAgent).not.toHaveBeenCalled();
+  });
+
+  // isolate guarded Files drafts from the parent shell and reject changed directories
+  it('executes a valid guarded draft without trusting startup files or exiting its parent shell', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-button-draft-'));
+    const directory = join(root, "quoted'directory");
+    const moved = join(root, 'original-directory');
+    const parentMarker = join(root, 'parent-marker');
+    const cwdMarker = join(root, 'cwd-marker');
+    const evil = join(root, 'evil-env');
+    try {
+      await mkdir(directory);
+      await writeFile(evil, "printf '%s' bypass > bypass.txt\n", 'utf8');
+      const identity = await stat(directory, { bigint: true });
+      const buttons = catalog({ splits: { files: [shell('Files', "printf '%s' 'ran' > result.txt")] } });
+      const fixture = serviceFixture({ catalog: buttons });
+      fixture.directoryLease.mockResolvedValue({
+        canonicalHostPath: directory,
+        backendGeneration: 'generation',
+        expiresAt: Date.now() + 60_000,
+        identity: { dev: identity.dev.toString(), ino: identity.ino.toString(), kind: 'directory' },
+        current: () => true
+      });
+      const draft = await fixture.service.draft('session', { ...draftInput(buttons, 'Files', 'split:files'), filesDirectoryToken: 'valid-token' });
+      const script = `export BASH_ENV="$EVIL"; ${draft.text}; printf '%s' reached > "$MARKER"; printf '%s' "$PWD" > "$CWD_MARKER"`;
+      const environment = { ...process.env, BASH_ENV: '', EVIL: evil, MARKER: parentMarker, CWD_MARKER: cwdMarker };
+
+      await execFileAsync('/bin/bash', ['-c', script], { cwd: root, env: environment });
+      expect(await readFile(join(directory, 'result.txt'), 'utf8')).toBe('ran');
+      expect(await readFile(parentMarker, 'utf8')).toBe('reached');
+      expect(await readFile(cwdMarker, 'utf8')).toBe(root);
+      await expect(readFile(join(directory, 'bypass.txt'), 'utf8')).rejects.toThrow();
+
+      await rm(parentMarker);
+      await rename(directory, moved);
+      await mkdir(directory);
+      await execFileAsync('/bin/bash', ['-c', script], { cwd: root, env: environment });
+      expect(await readFile(parentMarker, 'utf8')).toBe('reached');
+      await expect(readFile(join(directory, 'result.txt'), 'utf8')).rejects.toThrow();
+
+      await rm(parentMarker);
+      await rm(directory, { recursive: true });
+      await execFileAsync('/bin/bash', ['-c', script], { cwd: root, env: environment });
+      expect(await readFile(parentMarker, 'utf8')).toBe('reached');
+      await expect(readFile(join(directory, 'result.txt'), 'utf8')).rejects.toThrow();
+    } finally {
+      // remove only this test's isolated directory
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   // register retry identity before effects and guard active work globally
   it('recovers lost responses without duplicate submission or foreign disclosure', async () => {
     const fixture = serviceFixture();

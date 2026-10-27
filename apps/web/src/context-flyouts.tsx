@@ -4,6 +4,8 @@ import { useEffect } from 'react';
 const flyoutTrigger = (target: EventTarget | null): HTMLButtonElement | null => {
   // ignore non-element event targets
   if (!(target instanceof Element)) return null;
+  // custom buttons own an edit menu and must never execute through a synthetic click
+  if (target.closest('.configured-button') !== null) return null;
   const direct = target.closest<HTMLButtonElement>('button[data-context-flyout]');
   // prefer a dropdown button over its surrounding split group
   if (direct !== null) return direct;

@@ -16,7 +16,8 @@ import { SelectionActionsContext, openSelectionContextMenu, preserveContextMenuP
 import { ContextFlyoutEvents } from './context-flyouts.js';
 import { agentSplitHidden, setAgentSplitHidden, workspaceAlias, setWorkspaceAlias, settingsSplitOpen, setSettingsSplitOpen, useWorkspaceViewRevision, workspaceViews, pendingWorkspaceJumps, type WorkspaceSplit, type WorkspaceView } from './workspace-view.js';
 import { PanelExpandContext, type PanelAction, type PanelExpansion, PanelHeader, PanelIcon, panelIcons, type ProgressColor, useExpansionScope, usePanelExpand, usePanelExpansion, usePhoneLayout } from './panel-header.js';
-import { ConfiguredButtonList, ConfiguredButtonsProvider, type ButtonCatalog, useConfiguredButtons, useConfiguredButtonsBusy } from './configured-buttons.js';
+import { ConfiguredButtonList, ConfiguredButtonsProvider, type ButtonActionDraft, type ButtonCatalog, useConfiguredButtons, useConfiguredButtonsBusy } from './configured-buttons.js';
+import { clearTerminalCommand, pruneTerminalCommands, stageTerminalCommand, terminalCommandKey, terminalCommandLimitMessage, TerminalCommandDraft } from './terminal-command-draft.js';
 import { type CarouselPanel, type PanelCarousel, PanelDots, usePanelCarousel, usePanelSwipe } from './panel-carousel.js';
 import { NoteMarkdown } from './note-markdown.js';
 import { ProjectOpen } from './project-open.js';
@@ -2569,15 +2570,19 @@ function Prompt({ id, ready = true, history, onHistoryChanged, onPromptFocus, on
     return () => observer.disconnect();
   }, []);
   const [listening, setListening] = useState(false);
-  // continue typing at the same caret after the launch placeholder is replaced
+  // restore launch handoffs and explicit custom-action insertions without submitting
   useLayoutEffect(() => {
     const selection = promptHandoffFocus.get(id);
+    // ordinary typing must not switch question modes or steal focus
+    if (selection === undefined) return;
+    // reveal an editable normal prompt without choosing or submitting an answer
+    if (question !== undefined && answerMode) { setNormalPromptQuestionId(question.id); return; }
+    // keep the reveal request until the actual composer has mounted
+    if (promptInput.current === null) return;
     promptHandoffFocus.delete(id);
-    // restore only the composer that owned focus at handoff
-    if (selection === undefined || promptInput.current === null) return;
     promptInput.current.focus();
     promptInput.current.setSelectionRange(selection.start, selection.end);
-  }, [id]);
+  }, [id, value, question?.id, answerMode]);
   const recognition = useRef<SpeechRecognitionInstance | undefined>(undefined);
   const voiceHoldTimer = useRef<number | undefined>(undefined);
   const voiceHoldPointer = useRef<number | undefined>(undefined);
@@ -5767,7 +5772,12 @@ function useWorktreeTerminals(worktreeId: string | undefined) {
   const refreshPanes = useCallback(async (): Promise<WorktreePane[] | undefined> => {
     if (worktreeId === undefined) return undefined;
     const list = await listPlacePanes(worktreeId);
-    if (list !== undefined) setPanes(list);
+    // only authoritative successful listings may prune minimized command drafts
+    if (list !== undefined) {
+      setPanes(list);
+      const live = new Set(list.map(pane => pane.paneId));
+      pruneTerminalCommands(worktreeId, paneId => live.has(paneId) || stillRequested(requestedTerminals, paneId));
+    }
     return list;
   }, [worktreeId]);
   useEffect(() => {
@@ -5808,10 +5818,12 @@ function useWorktreeTerminals(worktreeId: string | undefined) {
   }), [worktreeId]);
   // forget ended panes without counting them as minimized shells
   const forgetPane = useCallback((paneId: string) => {
+    // closed panes must not leave an editable draft for a reused identity
+    if (worktreeId !== undefined) clearTerminalCommand(terminalCommandKey(worktreeId, paneId));
     closePane(paneId);
     // remove the ended pane from the current picker listing
     setPanes(current => current.filter(pane => pane.paneId !== paneId));
-  }, [closePane]);
+  }, [closePane, worktreeId]);
   // share managed-shell deletion between the header and picker
   const endPane = useCallback(async (pane: WorktreePane): Promise<boolean | undefined> => {
     // never delete agent panes or unmanaged session panes
@@ -5855,6 +5867,7 @@ type WorktreeTerminals = ReturnType<typeof useWorktreeTerminals>;
 // render a live terminal with fullscreen, minimize and managed-shell delete actions
 function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, onDelete, onOpenFile, selectionActions, mobileActive = false }: { worktreeId: string; paneId: string; name: string; onMinimize: () => void; onExit: () => void; onRename?: (name: string) => Promise<boolean>; onDelete?: () => Promise<boolean | undefined>; onOpenFile?: (path: string) => void } & TerminalColumnProps) {
   const canvas = useRef<HTMLDivElement | null>(null);
+  const commandDraftKey = terminalCommandKey(worktreeId, paneId);
   const [focused, setFocused] = useState(false);
   const [selection, setSelection] = useState<TerminalSelection>();
   const [selectionModeActive, setSelectionModeActive] = useState(false);
@@ -5886,6 +5899,8 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
     try {
       const deleted = await onDelete();
       setDeleteError(deleted === false);
+      // an ended shell cannot retain a command for a future pane
+      if (deleted === true) clearTerminalCommand(commandDraftKey);
     } finally { setDeletePending(false); }
   };
   const onExitRef = useRef(onExit);
@@ -5917,7 +5932,8 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
     const handle = mountStreamedTerminal(container, {
       connect: createWorktreePaneConnector(worktreeId, paneId, request),
       transformInput: data => applyStickyModifiers(paneId, data),
-      onExit: () => onExitRef.current(),
+      // drop staged bytes only after the shell actually exits
+      onExit: () => { clearTerminalCommand(commandDraftKey); onExitRef.current(); },
       onStatus: setConnection,
       // expose file links only when the owning Place supplied a destination
       ...(onOpenFile === undefined ? {} : { onOpenFile: (path: string) => openTerminalFileRef.current?.(path) })
@@ -5963,6 +5979,8 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
   }, [worktreeId, paneId]);
   // open terminal modes and clipboard actions without sending a secondary mouse report
   const openTerminalContextMenu = (event: React.MouseEvent<HTMLElement>) => {
+    // custom buttons and the staged command editor own their contextual actions
+    if (event.target instanceof Element && event.target.closest('.configured-button, .terminal-command-draft') !== null) return;
     const controller = selectionControllerRef.current;
     const selectedText = controller?.getSelectedText() ?? '';
     const linkUrl = currentOutputLinkUrl(event.target);
@@ -5995,6 +6013,12 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
       : <span className="pane-title" title={name}>{name}</span>}
     </>} />
     <div className="terminal-canvas" ref={canvas} aria-label={`Terminal ${name}`} />
+    {/* editable actions remain outside the pty until explicit submission */}
+    <TerminalCommandDraft draftKey={commandDraftKey} onSubmit={text => {
+      // leave selection mode before intentionally sending the edited command
+      selectionControllerRef.current?.setMode('output');
+      return terminalInputs.get(paneId)?.(`${text}\r`) === true;
+    }} onCancel={() => terminalFocusers.get(paneId)?.()} />
     {/* keep helper keys with their terminal instead of replacing the static toolbar; CSS shows them on a phone or above a software keyboard */}
     {mobileActive && <MobileTerminalKeys id={paneId} />}
     {/* keep selection actions hidden with their terminal panel */}
@@ -6590,7 +6614,9 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
       panel?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
       if (panel === null) return;
       // the agent panel's input is its composer, ahead of the xterm showing its output
-      const field = input ? panel.querySelector<HTMLElement>('.prompt-composer textarea:not([disabled])') ?? panel.querySelector<HTMLElement>('.xterm-helper-textarea') : null;
+      // a staged terminal action takes focus before live shell input
+      const command = panel.querySelector<HTMLElement>('.terminal-command-draft textarea');
+      const field = command ?? (input ? panel.querySelector<HTMLElement>('.prompt-composer textarea:not([disabled])') ?? panel.querySelector<HTMLElement>('.xterm-helper-textarea') : null);
       if (field !== null) { field.focus({ preventScroll: true }); return; }
       panel.tabIndex = -1;
       panel.focus({ preventScroll: true });
@@ -6939,8 +6965,8 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
     // leave editors and explicit flyout triggers to their own context behavior
     const openPanelMenu = (event: MouseEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      // never route an answer or prompt paste into terminal input
-      if (isEditorTarget(target) || target?.closest('[data-context-flyout]') !== null) return;
+      // custom action menus must not become agent output or prompt actions
+      if (isEditorTarget(target) || target?.closest('[data-context-flyout], .configured-button') !== null) return;
       openOutputContextMenu(event);
     };
     panel.addEventListener('pointerdown', preserveSecondaryPress, true);
@@ -9733,17 +9759,28 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   };
   // Terminal from +: open the Place's Workspace with one of its Console shells as a focused
   // Terminal panel (one already open here first), creating a shell only when the Place has none
-  const openTerminalAt = async (placeId: string, label: string) => {
-    if (terminalOpening.current.has(placeId)) return;
+  // optional staged bytes use the same reveal/create path without reaching terminal input
+  const openTerminalAt = async (placeId: string, label: string, draft?: { text: string; paneId?: string }): Promise<boolean> => {
+    // serialize shell creation without losing a second action silently
+    if (terminalOpening.current.has(placeId)) {
+      // ordinary launcher repeats remain a no-op while edit requests report the conflict
+      if (draft !== undefined) throw new Error('A terminal is already opening. Try editing this action again.');
+      return false;
+    }
     terminalOpening.current.add(placeId);
     openPlace(placeId);
-    const fail = (detail: string) => showOperationFeedback({ tone: 'error', message: `Could not open a terminal at ${label}`, detail, worktreeId: placeId });
+    // keep ordinary launcher failures visible without submitting any staged bytes
+    const fail = (detail: string) => { showOperationFeedback({ tone: 'error', message: `Could not open a terminal at ${label}`, detail, worktreeId: placeId }); return false; };
     try {
       const panes = await listPlacePanes(placeId);
       if (panes === undefined) return fail('Unable to list the terminals there.');
       const open = new Set(savedTerminals(placeId).map(terminal => terminal.paneId));
       const shells = panes.filter(isConsoleShell);
-      let shell: WorktreePane | undefined = shells.find(pane => open.has(pane.paneId)) ?? shells[0];
+      // retain the exact source terminal when the edit came from its header
+      const preferred = draft?.paneId === undefined ? undefined : panes.find(pane => pane.paneId === draft.paneId && !pane.agent);
+      // a vanished explicit target cannot redirect bytes into another shell
+      if (draft?.paneId !== undefined && preferred === undefined) throw new Error('The selected terminal is no longer available. Open the action again.');
+      let shell: WorktreePane | undefined = preferred ?? shells.find(pane => open.has(pane.paneId)) ?? shells[0];
       let paneId = shell?.paneId;
       if (paneId === undefined) {
         const created = await createPlaceShell(placeId);
@@ -9751,8 +9788,14 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
         paneId = created.paneId;
         shell = (await listPlacePanes(placeId))?.find(pane => pane.paneId === paneId);
       }
+      // mount or update the editable composer before focusing this terminal
+      if (draft !== undefined && !stageTerminalCommand(terminalCommandKey(placeId, paneId), draft.text)) throw new Error(terminalCommandLimitMessage);
       requestTerminalFocus(placeId, { paneId, name: shell === undefined ? 'shell' : terminalPaneLabel(shell) });
+      // restore narrow or expanded layouts to the staged terminal split
+      const view = workspaceViews.get(placeItemKey(placeId));
+      view?.jump(paneId, draft !== undefined);
       void refresh();
+      return true;
     } finally { terminalOpening.current.delete(placeId); }
   };
   // the guided review's jump to a line: open the editor in the Place, beside the review's panel
@@ -10207,8 +10250,31 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   ]);
   const keyboardOverlays = <><KeyboardLayer keys={data.keys} />{keyPicker !== undefined && <KeyPicker title={keyPicker === 'tree' ? 'Workspaces and panels' : 'Workspaces'} options={keyPickerOptions(keyPicker === 'tree')} onClose={() => setKeyPicker(undefined)} />}</>;
   const configuredButtonContext = { placeId: item?.placeId, projectId: activeProject?.id ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined), agentId: agent?.id, worktreeId: activeWorktreeId };
+  // place trusted action bytes in the owning editor without executing the action
+  const editConfiguredAction = async (draft: ButtonActionDraft, panelKey?: string): Promise<void> => {
+    const key = placeItemKey(draft.placeId);
+    // prompt drafts use the exact existing or freshly launched agent returned by the server
+    if (draft.kind === 'prompt') {
+      // carry agentless worktree text and attachments through the normal handoff first
+      handoffPromptDraft(worktreePromptId(draft.placeId), draft.agentId);
+      const next = appendTextBlock(getPromptDraft(draft.agentId), draft.text);
+      promptHandoffFocus.set(draft.agentId, { start: next.length, end: next.length });
+      setPromptDraft(draft.agentId, next);
+      setAgentSplitHidden(key, false);
+      await refresh();
+      // navigation during preparation must not pull the user out of another workspace
+      if (selectedItemKey.current !== key) return;
+      setActivateAgentId(draft.agentId);
+      workspaceViews.get(key)?.jump('agent', true);
+      return;
+    }
+    const view = workspaceViews.get(key);
+    const current = panelKey ?? view?.currentPanel();
+    const terminal = current !== undefined && splitPanelKind(current) === 'terminal' ? current : view?.splits.find(split => splitPanelKind(split.key) === 'terminal')?.key;
+    await openTerminalAt(draft.placeId, item?.label ?? 'this workspace', { text: draft.text, paneId: terminal });
+  };
   // retain configured action state above every workspace-owned flyout and split
-  const withConfiguredButtons = (content: ReactNode) => <ConfiguredButtonsProvider catalog={data.buttons} serverStartedAt={data.serverStartedAt} context={configuredButtonContext} request={request} onFeedback={showOperationFeedback}><OpenFolderContext.Provider value={showOpenFolder}>{content}</OpenFolderContext.Provider></ConfiguredButtonsProvider>;
+  const withConfiguredButtons = (content: ReactNode) => <ConfiguredButtonsProvider catalog={data.buttons} serverStartedAt={data.serverStartedAt} context={configuredButtonContext} request={request} onFeedback={showOperationFeedback} onEdit={editConfiguredAction}><OpenFolderContext.Provider value={showOpenFolder}>{content}</OpenFolderContext.Provider></ConfiguredButtonsProvider>;
   // separate status text from each tab background and indicator
   const tabBar = <><nav className={`tabs${phone ? ' workspace-dropdown-row' : ''}`} ref={tabsRef} role="tablist" aria-label="Agents and worktrees"><TabRowLead />{phone ? <WorkspaceDropdown items={items} current={visibleActive} onSelect={index => select(index)} onNewWorkspace={() => setLauncherOpen(true)} onRenameWorktree={setRenameWorktreeId} renameDisabled={creatingAgent} onContextMenu={workspaceContextMenu} onTurnOff={entry => void turnOffWorkspace(entry)} /> : items.map((entry, index) => {
     const { transition, label, className, progress, busy } = tabStatus(entry);

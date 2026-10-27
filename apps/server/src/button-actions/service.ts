@@ -5,18 +5,25 @@ import { isReviewRun, type Agent } from '../domain/models.js';
 import { placeHostRoot, type Place } from '../places/places.js';
 import type { PromptService } from '../prompts/service.js';
 import { ConfiguredButtonCatalog } from './catalog.js';
-import type { DirectoryExecutionLease, HostCommandInput, ShellActionResult } from './host-command-runner.js';
+import { guardedDirectoryCommand, type DirectoryExecutionLease, type HostCommandInput, type ShellActionResult } from './host-command-runner.js';
 
-export const buttonActionInputSchema = z.object({
-  requestId: z.string().regex(/^[A-Za-z0-9_-]{12,128}$/u),
+// share the server-owned action locator without accepting executable browser input
+const buttonActionLocatorShape = {
   actionId: z.string().min(1).max(128),
   configRevision: z.string().min(1).max(128),
   placeId: z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden'),
   slot: z.enum(buttonSlotNames),
   agentId: z.string().min(1).max(4096).optional(),
   filesDirectoryToken: z.string().min(1).max(16_384).optional()
+};
+export const buttonActionInputSchema = z.object({
+  requestId: z.string().regex(/^[A-Za-z0-9_-]{12,128}$/u),
+  ...buttonActionLocatorShape
 }).strict();
+export const buttonActionDraftInputSchema = z.object(buttonActionLocatorShape).strict();
 export type ButtonActionInput = z.infer<typeof buttonActionInputSchema>;
+export type ButtonActionDraftInput = z.infer<typeof buttonActionDraftInputSchema>;
+export type ButtonActionDraft = { kind: 'prompt'; text: string; placeId: string; agentId: string } | { kind: 'shell'; text: string; placeId: string };
 export type ButtonOperation = { id: string; state: 'queued' | 'launching' | 'running' | 'complete' | 'failed' | 'interrupted'; phase?: string; error?: string; exitCode?: number; agentId?: string };
 type StoredOperation = { operation: ButtonOperation; sessionId: string; guard: string; touchedAt: number; promptRequestId?: string; agentKind?: Agent['kind'] };
 type StartRecord = { fingerprint: string; promise: Promise<ButtonOperation>; operationId?: string; createdAt: number };
@@ -90,6 +97,52 @@ export class ButtonActionService {
       if (this.starts.get(key) === entry) this.starts.delete(key);
       throw error;
     }
+  }
+
+  // resolve trusted action text for editing without starting the action itself
+  async draft(sessionId: string, input: ButtonActionDraftInput): Promise<ButtonActionDraft> {
+    // reject stale boot/catalog identities before resolving any trusted content
+    if (input.configRevision !== this.catalog.value.revision) throw new ButtonActionError('stale_button_configuration');
+    // shutdown never exposes a draft for work it cannot later coordinate
+    if (this.closed) throw new ButtonActionError('server_stopped', 503);
+    const place = await this.deps.resolvePlace(input.placeId);
+    // only server-discovered Workspaces can resolve an action draft
+    if (place === undefined) throw new ButtonActionError('place_unavailable', 404);
+    const definition = this.catalog.resolve(place.projectId, input.slot, input.actionId, input.configRevision);
+    // a locator must belong to this exact effective list
+    if (definition === undefined) throw new ButtonActionError('button_unavailable', 404);
+    const shell = 'shellCommand' in definition.action;
+    // Files authority applies only to Files shell buttons
+    if (input.filesDirectoryToken !== undefined && (!shell || input.slot !== 'split:files')) throw new ButtonActionError('unexpected_files_context', 400);
+    // a Files shell requires fresh directory authority even though the command is not executed
+    if (shell && input.slot === 'split:files' && input.filesDirectoryToken === undefined) throw new ButtonActionError('files_context_required', 400);
+    // preserve Files identity in the editable command without retaining lease authority
+    if ('shellCommand' in definition.action) {
+      const lease = input.slot === 'split:files' ? await this.deps.directoryLease(place, sessionId, input.filesDirectoryToken!) : undefined;
+      // changed or expired Files authority cannot produce a trusted draft
+      if (lease !== undefined && (!lease.current() || lease.expiresAt < this.now())) throw new ButtonActionError('files_context_changed');
+      // asynchronous resolution cannot expose action text after shutdown
+      if (this.closed) throw new ButtonActionError('server_stopped', 503);
+      return { kind: 'shell', text: lease === undefined ? definition.action.shellCommand : guardedDirectoryCommand(definition.action.shellCommand, lease), placeId: place.id };
+    }
+    const agents = await this.deps.agents();
+    let selected = input.agentId === undefined ? agents.find(agent => belongs(agent, place)) : agents.find(agent => agent.id === input.agentId && belongs(agent, place));
+    // never redirect a selected Agent that disappeared or belongs elsewhere
+    if (input.agentId !== undefined && selected === undefined) throw new ButtonActionError('agent_unavailable', 404);
+    // launch only when no eligible existing Agent was selected
+    if (selected === undefined) {
+      try { selected = await this.launchForPlace(place); }
+      catch { throw new ButtonActionError('agent_launch_failed'); }
+    }
+    // an in-flight launch cannot produce an editable target after shutdown
+    if (this.closed) throw new ButtonActionError('server_stopped', 503);
+    // unavailable normal launch choices fail without installing or choosing another profile
+    if (selected === undefined) throw new ButtonActionError('agent_launch_failed');
+    // a launch result cannot redirect a Workspace action into a different Place
+    if (!belongs(selected, place)) throw new ButtonActionError('agent_launch_mismatch');
+    // support only registered interactive prompt behaviors
+    if (selected.kind !== 'codex' && selected.kind !== 'omx' && selected.kind !== 'claude') throw new ButtonActionError('agent_kind_unavailable');
+    return { kind: 'prompt', text: definition.action.agentPrompt, placeId: place.id, agentId: selected.id };
   }
 
   // read only this browser session's exact operation and delegate prompt observations
@@ -209,15 +262,7 @@ export class ButtonActionService {
     // launch-first uses a single shared promise per Place
     if (agent === undefined) {
       stored.operation.state = 'launching';
-      let launch = this.launches.get(place.id);
-      // a second button joins the same launch rather than creating another Agent
-      if (launch === undefined) {
-        launch = this.launchAtPlace(place);
-        this.launches.set(place.id, launch);
-        // clear only this exact completed launch reservation
-        void launch.finally(() => { if (this.launches.get(place.id) === launch) this.launches.delete(place.id); }).catch(() => undefined);
-      }
-      agent = await launch;
+      agent = await this.launchForPlace(place);
     }
     // an in-flight launch cannot submit new work after shutdown
     if (this.closed || !busy(stored.operation)) return;
@@ -245,6 +290,19 @@ export class ButtonActionService {
     // discovery may have outlived the server's launch authority
     if (this.closed) return undefined;
     return existing ?? await this.deps.launchAgent(place);
+  }
+
+  // share one normal Agent launch between execution and draft preparation
+  private async launchForPlace(place: Place): Promise<Agent | undefined> {
+    let launch = this.launches.get(place.id);
+    // a second request joins the same launch rather than creating another Agent
+    if (launch === undefined) {
+      launch = this.launchAtPlace(place);
+      this.launches.set(place.id, launch);
+      // clear only this exact completed launch reservation
+      void launch.finally(() => { if (this.launches.get(place.id) === launch) this.launches.delete(place.id); }).catch(() => undefined);
+    }
+    return await launch;
   }
 
   // record an engine-owned terminal result and release the global in-flight guard

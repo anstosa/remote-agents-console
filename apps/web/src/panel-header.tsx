@@ -1,7 +1,8 @@
-import { createContext, isValidElement, type CSSProperties, type KeyboardEvent, type ReactElement, type ReactNode, type RefObject, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { ConfiguredButtonIcon, type ButtonSlot, useConfiguredButtons } from './configured-buttons.js';
+import { createContext, isValidElement, type CSSProperties, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode, type RefObject, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { ConfiguredButtonIcon, openConfiguredButtonMenu, type ButtonSlot, useConfiguredButtons } from './configured-buttons.js';
 import { FlyoutPortal } from './flyout-portal.js';
 import { useViewportFlyout } from './viewport-flyout.js';
+import { preserveContextMenuPress } from './selection-context-menu.js';
 
 // The app-wide phone breakpoint. A phone shows a Workspace's panels one per screen, in a swipe
 // carousel, and expanding a panel there hides the tab row and toolbar instead.
@@ -140,6 +141,8 @@ export type PanelAction = {
   label: string;
   icon?: ReactNode;
   onSelect: () => void;
+  // custom actions may stage their bytes instead of executing them
+  onContextMenu?: (event: MouseEvent<HTMLElement>) => void;
   title?: string;
   className?: string;
   disabled?: boolean;
@@ -151,11 +154,11 @@ export type PanelAction = {
   popupOpen?: boolean;
 };
 
-// mark compact actions that open a secondary flyout
+// mark action-owned menus before generic panel context handlers
 const actionButton = (action: PanelAction, row = false) => {
   // keep the action glyph stable while its border reports progress
   const busy = action.progress !== undefined;
-  return <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}${busy ? ` progress-border progress-${action.progress}` : ''}`} style={action.style} disabled={action.disabled} aria-busy={busy || undefined} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onClick={action.onSelect}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{(row || action.showLabel === true || action.icon === undefined) && <span>{action.label}</span>}</button>;
+  return <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}${busy ? ` progress-border progress-${action.progress}` : ''}`} style={action.style} disabled={action.disabled} aria-busy={busy || undefined} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onPointerDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onMouseDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onContextMenu={action.onContextMenu} onClick={action.onSelect}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{(row || action.showLabel === true || action.icon === undefined) && <span>{action.label}</span>}</button>;
 };
 
 export function PanelIcon({ path }: { path: string }) {
@@ -208,7 +211,9 @@ export function PanelHeader({ panelKey, label, title, titleControl, actions, sec
     disabled: action.disabled,
     progress: action.busy ? action.color : undefined,
     showLabel: true,
-    onSelect: action.run
+    onSelect: action.run,
+    // preserve the exact originating terminal when its header owns the action
+    onContextMenu: event => openConfiguredButtonMenu(event, action, closeMore, panelKey)
   }));
   // fold by the panel's own width, so a squeezed split column folds as a phone does
   useLayoutEffect(() => {

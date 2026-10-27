@@ -105,7 +105,7 @@ import { SettingsError } from './settings/contracts.js';
 import { SettingsService } from './settings/service.js';
 import { registerSettingsRoutes } from './settings/routes.js';
 import { ConfiguredButtonCatalog } from './button-actions/catalog.js';
-import { ButtonActionError, ButtonActionService, buttonActionInputSchema } from './button-actions/service.js';
+import { ButtonActionError, ButtonActionService, buttonActionDraftInputSchema, buttonActionInputSchema } from './button-actions/service.js';
 import { HostCommandRunner } from './button-actions/host-command-runner.js';
 import { defaultGoogleCalendarConfig, type CalendarLabels } from './google-calendar/contracts.js';
 import { createGoogleCalendarService } from './google-calendar/runtime.js';
@@ -960,6 +960,22 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       return outcome.status === 'launched' ? found : undefined;
     }
   });
+  // return only bounded action codes rather than trusted executable content
+  const buttonActionFailure = (reply: FastifyReply, error: unknown) => {
+    // preserve typed failures without exposing arbitrary engine errors
+    if (error instanceof ButtonActionError) return reply.code(error.statusCode).send({ error: error.code });
+    return reply.code(503).send({ error: 'button_action_unavailable' });
+  };
+  // resolve one trusted action into an editable draft without executing it
+  app.post('/api/button-actions/draft', { bodyLimit: 32_768, config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const current = controlled(request, true);
+    const parsed = buttonActionDraftInputSchema.safeParse(request.body);
+    // raw commands, prompts, cwd and retry identities are never accepted here
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_button_action' });
+    try { return { draft: await buttonActions.draft(current.id, parsed.data) }; }
+    catch (error) { return buttonActionFailure(reply, error); }
+  });
   // start only server-resolved definitions under the current controller and CSRF boundary
   app.post('/api/button-actions', { bodyLimit: 32_768, config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
     const current = controlled(request, true);
@@ -967,11 +983,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // raw commands, prompts and cwd values are never accepted here
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_button_action' });
     try { return reply.code(202).send({ operation: await buttonActions.start(current.id, parsed.data) }); }
-    catch (error) {
-      // return only bounded action codes rather than trusted executable content
-      if (error instanceof ButtonActionError) return reply.code(error.statusCode).send({ error: error.code });
-      return reply.code(503).send({ error: 'button_action_unavailable' });
-    }
+    catch (error) { return buttonActionFailure(reply, error); }
   });
   // keep operation polling private to its originating active browser session
   app.get('/api/button-actions/:id', async (request, reply) => {
@@ -980,11 +992,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // reject malformed locators before inspecting any engine state
     if (!/^[A-Za-z0-9_-]{24,128}$/u.test(id)) return reply.code(404).send({ error: 'button_action_unavailable' });
     try { return { operation: await buttonActions.status(current.id, id) }; }
-    catch (error) {
-      // unknown and foreign operation locators remain indistinguishable
-      if (error instanceof ButtonActionError) return reply.code(error.statusCode).send({ error: error.code });
-      return reply.code(503).send({ error: 'button_action_unavailable' });
-    }
+    // unknown and foreign operation locators remain indistinguishable
+    catch (error) { return buttonActionFailure(reply, error); }
   });
   // share existing Place resolution and authentication without relaxing legacy previews
   await registerHostFilesRoutes(app, { service: hostFiles, controlled, resolvePlace, downloadTickets: tickets });
