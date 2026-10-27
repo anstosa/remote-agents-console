@@ -12,7 +12,7 @@ const maxMessageLength = 30_000;
 const maxCandidates = 24;
 const maxPathLength = 512;
 const maxPreviewBytes = 256 * 1024;
-const maxTemporaryImageBytes = 5 * 1024 * 1024;
+export const maxInlineImageBytes = 5 * 1024 * 1024;
 const knownBasenames = /^(?:README|LICENSE|Dockerfile|Makefile)(?:\.[A-Za-z0-9_-]+)?$/u;
 const temporaryImagePath = /^\/tmp\/([A-Za-z0-9][A-Za-z0-9._-]{0,254}\.(?:gif|jpe?g|png|webp))$/iu;
 
@@ -28,7 +28,7 @@ const temporaryImageMiss = (error: unknown): boolean => {
 };
 
 // identify one supported raster image from its bytes
-const previewImageMediaType = (content: Buffer): PreviewImage['mediaType'] | undefined => {
+export const previewImageMediaType = (content: Buffer): PreviewImage['mediaType'] | undefined => {
   // recognize PNG signatures
   if (content.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return 'image/png';
   // recognize JPEG signatures
@@ -41,20 +41,37 @@ const previewImageMediaType = (content: Buffer): PreviewImage['mediaType'] | und
   return undefined;
 };
 
-// build one bounded in-memory file preview
-export const previewFileBytes = (path: string, bytes: Buffer): WorkspaceFilePreview => {
+// classify bounded bytes using the true source size when a read is partial
+export const previewFileBytes = (path: string, bytes: Buffer, textCap = maxPreviewBytes, size = bytes.length): WorkspaceFilePreview => {
   const mediaType = previewImageMediaType(bytes);
-  // return supported raster images only within the existing image cap
-  if (mediaType !== undefined && bytes.length <= maxTemporaryImageBytes) {
-    return { path, size: bytes.length, binary: true, truncated: false, image: { mediaType, base64: bytes.toString('base64') } };
+  // inline only complete supported raster images within the image cap
+  if (mediaType !== undefined && size === bytes.length && size <= maxInlineImageBytes) {
+    return { path, size, binary: true, truncated: false, image: { mediaType, base64: bytes.toString('base64') } };
   }
-  const binary = mediaType !== undefined || bytes.includes(0) || !isUtf8(bytes);
+  const binary = mediaType !== undefined || bytes.includes(0) || (size === bytes.length && !isUtf8(bytes));
   // return a safe metadata-only fallback for unsupported binary bytes
-  if (binary) return { path, size: bytes.length, binary: true, truncated: false };
-  let content = bytes.subarray(0, maxPreviewBytes);
+  if (binary) return { path, size, binary: true, truncated: mediaType === undefined && size > bytes.length };
+  let content = bytes.subarray(0, textCap);
   // avoid splitting the final utf-8 code point
-  while (!isUtf8(content)) content = content.subarray(0, content.length - 1);
-  return { path, size: bytes.length, binary: false, truncated: bytes.length > content.length, content: content.toString('utf8') };
+  let trimmed = 0;
+  while (!isUtf8(content) && trimmed < 3) { content = content.subarray(0, content.length - 1); trimmed += 1; }
+  // reject invalid bytes beyond one incomplete utf-8 tail
+  if (!isUtf8(content)) return { path, size, binary: true, truncated: size > bytes.length };
+  return { path, size, binary: false, truncated: size > content.length, content: content.toString('utf8') };
+};
+
+// fill one bounded buffer from an opened descriptor
+const readOpenedBytes = async (handle: Awaited<ReturnType<typeof open>>, length: number): Promise<Buffer> => {
+  const content = Buffer.alloc(length);
+  let offset = 0;
+  // fill only the bounded allocation
+  while (offset < content.length) {
+    const { bytesRead } = await handle.read(content, offset, content.length - offset, offset);
+    // stop on concurrent truncation
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return content.subarray(0, offset);
 };
 
 // normalize one mentioned path
@@ -125,7 +142,7 @@ export class WorkspaceFileService {
     return files;
   }
 
-  // load a bounded text preview
+  // load bounded text or complete raster bytes through one secure descriptor
   async preview(workspace: string, path: string, maxBytes = maxPreviewBytes): Promise<WorkspaceFilePreview | undefined> {
     const resolved = await resolveFile(workspace, path);
     if (resolved === undefined) return undefined;
@@ -138,12 +155,16 @@ export class WorkspaceFileService {
       const local = relative(resolved.root, opened);
       if (!local || local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local)) return undefined;
       const summary = { path: local.split(sep).join('/'), size: info.size };
-      const length = Math.min(summary.size, maxBytes);
-      const bytes = Buffer.alloc(length);
-      const read = length === 0 ? 0 : (await handle.read(bytes, 0, length, 0)).bytesRead;
-      const content = bytes.subarray(0, read);
-      const binary = content.includes(0);
-      return { ...summary, binary, truncated: summary.size > read, ...(binary ? {} : { content: content.toString('utf8') }) };
+      const header = await readOpenedBytes(handle, Math.min(summary.size, 12));
+      const image = previewImageMediaType(header) !== undefined;
+      // return oversized supported images as metadata without reading their bodies
+      if (image && summary.size > maxInlineImageBytes) return { ...summary, binary: true, truncated: false };
+      const length = Math.min(summary.size, image ? maxInlineImageBytes : maxBytes);
+      const content = await readOpenedBytes(handle, length);
+      const settled = await handle.stat();
+      // never inline a partial or concurrently resized image
+      if (image && (content.length !== summary.size || settled.size !== summary.size)) return undefined;
+      return previewFileBytes(summary.path, content, maxBytes, summary.size);
     } finally { await handle.close(); }
   }
 
@@ -171,19 +192,11 @@ export class WorkspaceFileService {
     try {
       const info = await handle.stat();
       // require one bounded regular file owned by the host agent user
-      if (!info.isFile() || info.uid !== this.hostUid || info.size < 1 || info.size > maxTemporaryImageBytes) return undefined;
-      const content = Buffer.alloc(info.size);
-      let offset = 0;
-      // fill only the prevalidated allocation
-      while (offset < content.length) {
-        const { bytesRead } = await handle.read(content, offset, content.length - offset, offset);
-        // stop on concurrent truncation
-        if (bytesRead === 0) break;
-        offset += bytesRead;
-      }
+      if (!info.isFile() || info.uid !== this.hostUid || info.size < 1 || info.size > maxInlineImageBytes) return undefined;
+      const content = await readOpenedBytes(handle, info.size);
       const settled = await handle.stat();
       // reject concurrent truncation or growth
-      if (offset !== content.length || settled.size !== info.size) return undefined;
+      if (content.length !== info.size || settled.size !== info.size) return undefined;
       const mediaType = previewImageMediaType(content);
       // return only recognized raster images
       if (mediaType === undefined) return undefined;

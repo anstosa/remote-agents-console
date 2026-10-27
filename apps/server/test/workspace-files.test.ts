@@ -10,6 +10,7 @@ describe('workspace response files', () => {
     const large = Buffer.from('x'.repeat(256 * 1_024 + 10));
     expect(previewFileBytes('large.txt', large)).toMatchObject({ path: 'large.txt', size: large.length, binary: false, truncated: true, content: 'x'.repeat(256 * 1_024) });
     expect(previewFileBytes('binary.dat', Buffer.from([0xff, 0x00, 0x01]))).toEqual({ path: 'binary.dat', size: 3, binary: true, truncated: false });
+    expect(previewFileBytes('invalid.dat', Buffer.from([0xff]))).toEqual({ path: 'invalid.dat', size: 1, binary: true, truncated: false });
     expect(previewFileBytes('diagram.svg', Buffer.from('<svg><script>alert(1)</script></svg>'))).toMatchObject({ binary: false, content: '<svg><script>alert(1)</script></svg>' });
   });
 
@@ -71,14 +72,43 @@ describe('workspace response files', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'rac-response-preview-'));
     try {
       await writeFile(join(workspace, 'large.txt'), 'x'.repeat(256 * 1_024 + 10));
+      await writeFile(join(workspace, 'unicode.txt'), `${'x'.repeat(256 * 1_024 - 1)}€tail`);
       await writeFile(join(workspace, 'binary.dat'), Buffer.from([1, 0, 2]));
       const service = new WorkspaceFileService();
 
       await expect(service.preview(workspace, 'large.txt')).resolves.toMatchObject({ path: 'large.txt', binary: false, truncated: true, content: 'x'.repeat(256 * 1_024) });
+      await expect(service.preview(workspace, 'unicode.txt')).resolves.toEqual({ path: 'unicode.txt', size: 256 * 1_024 + 6, binary: false, truncated: true, content: 'x'.repeat(256 * 1_024 - 1) });
       await expect(service.preview(workspace, 'binary.dat')).resolves.toEqual({ path: 'binary.dat', size: 3, binary: true, truncated: false });
       await expect(service.preview(workspace, '../unavailable.txt')).resolves.toBeUndefined();
     } finally { await rm(workspace, { recursive: true, force: true }); }
   });
+
+  // inline complete workspace raster images through the same secure file descriptor
+  it('previews workspace raster images up to five mebibytes', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'rac-response-images-'));
+    const pngHeader = Buffer.from('89504e470d0a1a0a', 'hex');
+    const medium = Buffer.concat([pngHeader, Buffer.alloc(2 * 1_024 * 1_024 + 17, 7)]);
+    const exact = Buffer.concat([pngHeader, Buffer.alloc(5 * 1_024 * 1_024 - pngHeader.length, 8)]);
+    const oversized = Buffer.concat([pngHeader, Buffer.alloc(5 * 1_024 * 1_024, 9)]);
+    try {
+      await Promise.all([
+        writeFile(join(workspace, 'medium.png'), medium),
+        writeFile(join(workspace, 'exact.png'), exact),
+        writeFile(join(workspace, 'oversized.png'), oversized)
+      ]);
+      const service = new WorkspaceFileService();
+
+      const preview = await service.preview(workspace, 'medium.png');
+      expect(preview).toMatchObject({ path: 'medium.png', size: medium.length, binary: true, truncated: false, image: { mediaType: 'image/png' } });
+      expect(Buffer.from(preview?.image?.base64 ?? '', 'base64')).toEqual(medium);
+      // the inclusive cap still returns the complete exact-boundary image
+      const exactPreview = await service.preview(workspace, 'exact.png');
+      expect(exactPreview?.size).toBe(exact.length);
+      expect(exactPreview?.truncated).toBe(false);
+      expect(exactPreview?.image?.base64 === exact.toString('base64')).toBe(true);
+      await expect(service.preview(workspace, 'oversized.png')).resolves.toEqual({ path: 'oversized.png', size: oversized.length, binary: true, truncated: false });
+    } finally { await rm(workspace, { recursive: true, force: true }); }
+  }, 15_000);
 
   // verify host temporary screenshots stay image-only and pane-scoped
   it('previews bounded host temporary images through the selected pane root', async () => {

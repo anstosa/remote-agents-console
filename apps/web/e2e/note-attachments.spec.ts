@@ -242,6 +242,24 @@ test('previews text and image note attachments and restores focus after dismissa
   expect(fixture.previewRequests).toEqual(['notes.md', 'screenshot.png']);
 });
 
+// every note preview uses the same complete-raster contract as the code split
+for (const invalid of ['truncated', 'size mismatch', 'magic mismatch'] as const) {
+  // reject malformed successful responses before constructing an image source
+  test(`rejects a note attachment image with ${invalid}`, async ({ page }) => {
+    const path = 'screenshot.png';
+    const fixture = noteFixture({ id: 'note-identifier-001', title: 'Invalid raster', text: 'Inspect this attachment.', attachments: [{ name: path, size: 68 }] });
+    const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aT7sAAAAASUVORK5CYII=';
+    fixture.previewResponse = () => ({ json: { path, size: invalid === 'size mismatch' ? 69 : 68, binary: true, truncated: invalid === 'truncated', image: { mediaType: invalid === 'magic mismatch' ? 'image/jpeg' : 'image/png', base64 } } });
+    await mockNoteApi(page, fixture);
+    await page.goto('/');
+    const dialog = await openNote(page, 'Invalid raster');
+    await dialog.getByRole('button', { name: `Preview note attachment: ${path}` }).click();
+    const preview = page.getByRole('dialog', { name: `File preview: ${path}` });
+    await expect(preview.getByRole('alert')).toHaveText('Preview unavailable');
+    await expect(preview.getByRole('img')).toHaveCount(0);
+  });
+}
+
 // preserve bounded preview failures and stale-response safety
 test('shows failed, binary, truncated, and safely closed note attachment previews', async ({ page }) => {
   let finishSlowPreview!: () => void;

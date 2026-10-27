@@ -320,7 +320,8 @@ export class HostFilesService {
     const length = Math.min(size, hostFilesLimits.previewBytes);
     const stream = await this.options.backend.read({ kind: 'read', path: target.path, identity: target, start: 0, length }, undefined);
     const bytes = await this.readBounded(stream, length);
-    const preview = previewFileBytes(selected.path, bytes);
+    // preserve the true size while keeping the default text cap
+    const preview = previewFileBytes(selected.path, bytes, undefined, size);
     return { ...preview, path: selected.path, size, truncated: preview.truncated || size > bytes.length };
   }
 

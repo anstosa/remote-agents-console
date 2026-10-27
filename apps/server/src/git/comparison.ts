@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import { constants } from 'node:fs';
 import { lstat, open, readlink, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { run, safeEnv } from '../tmux/command.js';
 import { classifyReviewPath } from './change-classification.js';
-import { WorkspaceFileService } from '../workspace-files/service.js';
+import { maxInlineImageBytes, previewFileBytes, previewImageMediaType, WorkspaceFileService, type PreviewImage } from '../workspace-files/service.js';
 import type { GitComparisonSummary, GitStatusChange, GitStatusSummary } from '../domain/models.js';
 
 // One place for the git comparison pipeline: the base-candidate / merge-base ladder, the
@@ -15,6 +16,8 @@ import type { GitComparisonSummary, GitStatusChange, GitStatusSummary } from '..
 // tour read from here; the base of a Comparison is always a parameter.
 
 const git = '/usr/bin/git';
+// preserve the public patch tail's existing character budget
+const maxCapturedPatchCharacters = 1_000_000;
 // git's canonical empty-tree object; the base of a Working Comparison with no HEAD yet
 const emptyTree = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 const conflictCodes = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
@@ -605,7 +608,10 @@ export async function resolveCommitComparison(workspace: string, commit: string)
 // ---- Per-file patch capture -----------------------------------------------------------------
 
 export type UntrackedPatchKind = 'metadata' | 'binary' | 'untracked';
-export type UntrackedPatch = { patch: string; kind: UntrackedPatchKind } | { tooLarge: true };
+export type UntrackedPatch = { patch: string; kind: UntrackedPatchKind; fingerprint: string } | { tooLarge: true; fingerprint: string };
+
+// identify one untracked metadata result without exposing its contents
+const untrackedMetadata = (change: GitStatusChange, patch: string): UntrackedPatch => ({ patch, kind: 'metadata', fingerprint: digest(JSON.stringify(['untracked-metadata', change.code, change.path, patch])) });
 
 // synthesise a bounded patch for one untracked path without following symlinks; returns
 // `tooLarge` when the file exceeds `maxBytes`, and a metadata note for anything not a plain file
@@ -613,59 +619,89 @@ export async function synthesizeUntrackedPatch(workspace: string, change: GitSta
   const path = join(workspace, change.path);
   const info = await lstat(path).catch(() => undefined);
   // reject disappearing or unsupported paths
-  if (info === undefined) return { patch: `untracked file ${change.path} disappeared`, kind: 'metadata' };
+  if (info === undefined) return untrackedMetadata(change, `untracked file ${change.path} disappeared`);
   // represent symlinks without following them
   if (info.isSymbolicLink()) {
     const target = await readlink(path).catch(() => 'unavailable');
-    return { patch: `new symlink ${change.path} -> ${target}`, kind: 'metadata' };
+    return untrackedMetadata(change, `new symlink ${change.path} -> ${target}`);
   }
   // represent non-files as metadata
-  if (!info.isFile()) return { patch: `untracked non-file ${change.path}`, kind: 'metadata' };
+  if (!info.isFile()) return untrackedMetadata(change, `untracked non-file ${change.path}`);
   const root = await realpath(workspace).catch(() => undefined);
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
   // reject files replaced during inspection
-  if (root === undefined || handle === undefined) return { patch: `untracked file ${change.path} disappeared`, kind: 'metadata' };
+  if (root === undefined || handle === undefined) return untrackedMetadata(change, `untracked file ${change.path} disappeared`);
   let content: Buffer;
   try {
-    const [opened, openedInfo] = await Promise.all([realpath(`/proc/self/fd/${handle.fd}`).catch(() => undefined), handle.stat()]);
+    const [opened, openedInfo] = await Promise.all([realpath(`/proc/self/fd/${handle.fd}`).catch(() => undefined), handle.stat({ bigint: true })]);
     const local = opened === undefined ? undefined : relative(root, opened);
     // bind containment and size checks to the opened descriptor
-    if (opened === undefined || local === undefined || !local || local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local) || !openedInfo.isFile()) return { patch: `untracked file ${change.path} changed during capture`, kind: 'metadata' };
-    if (openedInfo.size > maxBytes) return { tooLarge: true };
+    if (opened === undefined || local === undefined || !local || local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local) || !openedInfo.isFile()) return untrackedMetadata(change, `untracked file ${change.path} changed during capture`);
+    const statFingerprint = digest(JSON.stringify(['untracked-stat', change.code, change.path, openedInfo.dev.toString(), openedInfo.ino.toString(), openedInfo.size.toString(), openedInfo.mtimeNs.toString(), openedInfo.ctimeNs.toString()]));
+    // fingerprint oversized files from opened-descriptor metadata only
+    if (openedInfo.size > BigInt(maxBytes)) return { tooLarge: true, fingerprint: statFingerprint };
     const bounded = Buffer.alloc(maxBytes + 1);
     const read = await handle.read(bounded, 0, bounded.length, 0);
     // reject files that grew beyond the validated limit
-    if (read.bytesRead > maxBytes) return { tooLarge: true };
+    if (read.bytesRead > maxBytes) return { tooLarge: true, fingerprint: statFingerprint };
     content = bounded.subarray(0, read.bytesRead);
   } finally { await handle.close(); }
+  const fingerprint = digest(JSON.stringify(['untracked-content', change.code, change.path, digest(content.toString('base64'))]));
   // represent binary data without exposing bytes
-  if (content.subarray(0, 8_000).includes(0)) return { patch: `new binary file ${change.path} (${content.length} bytes)`, kind: 'binary' };
+  if (content.subarray(0, 8_000).includes(0)) return { patch: `new binary file ${change.path} (${content.length} bytes)`, kind: 'binary', fingerprint };
   const text = content.toString('utf8');
   const lines = text === '' ? [] : text.split('\n');
   const additions = lines.length - (text.endsWith('\n') ? 1 : 0);
   const body = lines.slice(0, additions).map(line => `+${line}`).join('\n');
-  return { patch: `--- /dev/null\n+++ b/${change.path}\n@@ -0,0 +1,${additions} @@\n${body}${body === '' ? '' : '\n'}`, kind: 'untracked' };
+  return { patch: `--- /dev/null\n+++ b/${change.path}\n@@ -0,0 +1,${additions} @@\n${body}${body === '' ? '' : '\n'}`, kind: 'untracked', fingerprint };
 }
 
 // capture the unified patch for one tracked Change from `base` to `head` (default: the working
 // tree); `ok: false` means git failed
 export async function capturePatch(workspace: string, base: string, change: GitStatusChange, head?: string): Promise<{ ok: true; patch: string } | { ok: false }> {
+  const captured = await captureTrackedPatch(workspace, base, change, head);
+  return captured.ok ? { ok: true, patch: captured.patch } : { ok: false };
+}
+
+// retain the bounded public patch while hashing every stdout byte for revision identity
+async function captureTrackedPatch(workspace: string, base: string, change: GitStatusChange, head?: string): Promise<{ ok: true; patch: string; streamFingerprint: string } | { ok: false }> {
   const paths = [change.originalPath, change.path].filter((path): path is string => path !== undefined);
-  // Force the standard a/ b/ path prefixes so the patch parses regardless of the user's git config:
+  // force the standard a/ b/ path prefixes so the patch parses regardless of the user's git config:
   // diff.mnemonicPrefix (c/ w/ i/ …), diff.noprefix, and custom diff.srcPrefix/dstPrefix would
   // otherwise flow into the header, and @pierre/diffs' parser rejects a non-a/b header ("invalid git
   // diff header") — leaving the diff nameless, which breaks file-at-revision loads (full context,
-  // Load anyway) and the Review tour. Explicit --src-prefix/--dst-prefix override every prefix config.
-  const result = await run(git, ['--no-optional-locks', '-C', workspace, 'diff', '--binary', '--no-ext-diff', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', '--find-renames', base, ...(head === undefined ? [] : [head]), '--', ...paths], undefined, 20_000);
-  // surface git failures to the caller
-  if (result.code !== 0) return { ok: false };
-  return { ok: true, patch: result.stdout || `${change.code.trim() || 'metadata'} ${change.originalPath === undefined ? change.path : `${change.originalPath} -> ${change.path}`}` };
+  // Load anyway) and the Review tour. explicit --src-prefix/--dst-prefix override every prefix config.
+  const args = ['--no-optional-locks', '-C', workspace, 'diff', '--binary', '--no-ext-diff', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', '--find-renames', base, ...(head === undefined ? [] : [head]), '--', ...paths];
+  return new Promise(resolve => {
+    const child = spawn(git, args, { shell: false, env: safeEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
+    const fingerprint = createHash('sha256');
+    const decoder = new StringDecoder('utf8');
+    let patch = '';
+    let failed = false;
+    // preserve the existing command deadline without accepting a killed stream as complete
+    const timer = setTimeout(() => { failed = true; child.kill('SIGKILL'); }, 20_000);
+    // hash raw bytes independently of the bounded utf-8 text tail
+    child.stdout.on('data', (chunk: Buffer) => {
+      fingerprint.update(chunk);
+      patch = (patch + decoder.write(chunk)).slice(-maxCapturedPatchCharacters);
+    });
+    // spawn failures cannot produce a valid revision identity
+    child.on('error', () => { failed = true; });
+    // finalize only after all process output has arrived
+    child.on('close', code => {
+      clearTimeout(timer);
+      // preserve the public failure outcome for errors and deadline kills
+      if (failed || code !== 0) { resolve({ ok: false }); return; }
+      patch = (patch + decoder.end()).slice(-maxCapturedPatchCharacters);
+      resolve({ ok: true, patch: patch || `${change.code.trim() || 'metadata'} ${change.originalPath === undefined ? change.path : `${change.originalPath} -> ${change.path}`}`, streamFingerprint: fingerprint.digest('base64url') });
+    });
+  });
 }
 
 // ---- Comparison patch (all files) + fingerprint --------------------------------------------
 
 export type ComparisonFileKind = 'tracked' | UntrackedPatchKind;
-export type ComparisonFile = { change: GitStatusChange; kind: ComparisonFileKind; patch: string; capped: boolean };
+export type ComparisonFile = { change: GitStatusChange; kind: ComparisonFileKind; patch: string; capped: boolean; fingerprint: string };
 export type ComparisonPatch = { base: string; gitBase: string; files: ComparisonFile[]; fingerprint: string; truncated: boolean };
 export type PatchLimits = { perFileBytes: number; totalBytes: number; maxFiles: number };
 
@@ -683,30 +719,33 @@ export async function captureComparisonPatch(workspace: string, comparison: Comp
     if (files.length >= limits.maxFiles) { truncated = true; break; }
     let kind: ComparisonFileKind;
     let patch: string;
+    let fingerprint: string;
     if (change.code === '??') {
       const synth = await synthesizeUntrackedPatch(workspace, change, limits.perFileBytes);
       // a file past the per-file cap is withheld without reading it whole
-      if ('tooLarge' in synth) { files.push({ change, kind: 'untracked', patch: '', capped: true }); continue; }
+      if ('tooLarge' in synth) { files.push({ change, kind: 'untracked', patch: '', capped: true, fingerprint: synth.fingerprint }); continue; }
       kind = synth.kind;
       patch = synth.patch;
+      fingerprint = synth.fingerprint;
     } else {
-      const captured = await capturePatch(workspace, comparison.gitBase, change, comparison.head);
+      const captured = await captureTrackedPatch(workspace, comparison.gitBase, change, comparison.head);
       // an unavailable per-file diff is surfaced as an empty entry rather than failing the whole Comparison
       kind = 'tracked';
       patch = captured.ok ? captured.patch : '';
+      fingerprint = digest(JSON.stringify(['tracked', comparison.gitBase, comparison.head ?? null, change.code, change.path, change.originalPath ?? null, captured.ok ? captured.streamFingerprint : null]));
     }
     const bytes = Buffer.byteLength(patch);
     // withhold a patch that breaches either the per-file or the running-total cap
     if (bytes > limits.perFileBytes || total + bytes > limits.totalBytes) {
       if (total + bytes > limits.totalBytes) truncated = true;
-      files.push({ change, kind, patch: '', capped: true });
+      files.push({ change, kind, patch: '', capped: true, fingerprint });
       continue;
     }
     total += bytes;
-    files.push({ change, kind, patch, capped: false });
+    files.push({ change, kind, patch, capped: false, fingerprint });
   }
-  // fold each Change's line counts in so an edit confined to a capped file still moves the fingerprint
-  const fingerprint = digest(JSON.stringify([comparison.base, comparison.gitBase, files.map(file => [file.change.code, file.change.path, file.change.originalPath ?? null, file.change.additions ?? null, file.change.deletions ?? null, file.capped, file.patch])]));
+  // fold each per-file content token and line count into the aggregate fingerprint
+  const fingerprint = digest(JSON.stringify([comparison.base, comparison.gitBase, files.map(file => [file.change.code, file.change.path, file.change.originalPath ?? null, file.change.additions ?? null, file.change.deletions ?? null, file.capped, file.patch, file.fingerprint])]));
   return { base: comparison.base, gitBase: comparison.gitBase, files, fingerprint, truncated };
 }
 
@@ -714,7 +753,7 @@ export async function captureComparisonPatch(workspace: string, comparison: Comp
 
 // whole enough to expand a large source file's unchanged lines in a diff
 const maxRevisionBytes = 2 * 1024 * 1024;
-export type RevisionFile = { path: string; size: number; binary: boolean; truncated: boolean; content?: string };
+export type RevisionFile = { path: string; size: number; binary: boolean; truncated: boolean; content?: string; image?: PreviewImage };
 // which side of a Comparison to read a file from: a committed revision, or the live working tree
 export type FileRevision = { commit: string } | { workingTree: true };
 
@@ -727,9 +766,14 @@ function gitShowBounded(workspace: string, object: string, maxBytes: number): Pr
     let total = 0;
     let failed = false;
     const timer = setTimeout(() => child.kill('SIGKILL'), 20_000);
+    // retain only bytes inside the requested allocation bound
     child.stdout.on('data', (chunk: Buffer) => {
-      chunks.push(chunk);
-      total += chunk.length;
+      const remaining = maxBytes - total;
+      // ignore queued output after the process has been stopped
+      if (remaining <= 0) return;
+      const bounded = chunk.subarray(0, remaining);
+      chunks.push(bounded);
+      total += bounded.length;
       // stop reading once the cap is reached; the close handler keeps what was collected
       if (total >= maxBytes) child.kill('SIGKILL');
     });
@@ -743,15 +787,15 @@ function gitShowBounded(workspace: string, object: string, maxBytes: number): Pr
   });
 }
 
-// read a file's contents at a revision (git object store) or from the working tree (secure fs
-// read via WorkspaceFileService), capped at 2 MB; undefined when the path is absent there
+// read revisions securely with a 2 MiB text cap and a 5 MiB complete-raster cap
+// return undefined when the path is absent
 export async function fileAtRevision(workspace: string, revision: FileRevision, path: string): Promise<RevisionFile | undefined> {
   // a NUL in the path makes spawn throw; treat it as absent, matching the working-tree branch
   if (path.includes('\0')) return undefined;
   if ('workingTree' in revision) {
     const preview = await new WorkspaceFileService().preview(workspace, path, maxRevisionBytes);
     if (preview === undefined) return undefined;
-    return { path: preview.path, size: preview.size, binary: preview.binary, truncated: preview.truncated, ...(preview.content === undefined ? {} : { content: preview.content }) };
+    return { path: preview.path, size: preview.size, binary: preview.binary, truncated: preview.truncated, ...(preview.content === undefined ? {} : { content: preview.content }), ...(preview.image === undefined ? {} : { image: preview.image }) };
   }
   // refuse a revision git would read as an option (e.g. `--output=…`, an arbitrary-file-write
   // primitive) or that would corrupt the `<rev>:<path>` object spec; a real ref/sha has none of these
@@ -765,10 +809,15 @@ export async function fileAtRevision(workspace: string, revision: FileRevision, 
   if (type.code !== 0 || type.stdout.trim() !== 'blob' || size.code !== 0) return undefined;
   const total = Number(size.stdout.trim());
   if (!Number.isInteger(total) || total < 0) return undefined;
-  const bytes = await gitShowBounded(workspace, object, maxRevisionBytes);
+  // sniff blobs above the text cap before choosing the bounded body read
+  const header = total > maxRevisionBytes ? await gitShowBounded(workspace, object, 12) : undefined;
+  const image = header === undefined ? false : previewImageMediaType(header) !== undefined;
+  // return oversized supported images as metadata without reading their bodies
+  if (image && total > maxInlineImageBytes) return { path, size: total, binary: true, truncated: false };
+  const readLimit = image ? maxInlineImageBytes : maxRevisionBytes;
+  const bytes = await gitShowBounded(workspace, object, readLimit);
   if (bytes === undefined) return undefined;
-  const content = bytes.subarray(0, Math.min(bytes.length, maxRevisionBytes));
-  // one binary heuristic across both sides: match WorkspaceFileService.preview's whole-buffer NUL sniff
-  const binary = content.includes(0);
-  return { path, size: total, binary, truncated: total > content.length, ...(binary ? {} : { content: content.toString('utf8') }) };
+  const content = bytes.subarray(0, Math.min(bytes.length, readLimit, total));
+  const preview = previewFileBytes(path, content, maxRevisionBytes, total);
+  return { path: preview.path, size: preview.size, binary: preview.binary, truncated: preview.truncated, ...(preview.content === undefined ? {} : { content: preview.content }), ...(preview.image === undefined ? {} : { image: preview.image }) };
 }

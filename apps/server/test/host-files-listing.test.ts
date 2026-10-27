@@ -103,3 +103,21 @@ describe('host Files partial directory listings', () => {
     expect(listed.truncated).toBe(true);
   });
 });
+
+// host file capabilities must not inline only the first part of a raster
+describe('host Files bounded previews', () => {
+  // preserve the real size when the host stream stops at its preview cap
+  it('returns oversized images as metadata without partial base64', async () => {
+    const f = await fixture();
+    const bytes = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(5 * 1024 * 1024)]);
+    await writeFile(join(f.directory, 'large.png'), bytes);
+    const listed = await f.service.list(f.place, f.session);
+    const entry = listed.entries.find(candidate => candidate.name === 'large.png');
+    // require the real listed capability rather than manufacturing a token
+    if (entry === undefined) throw new Error('image fixture was not listed');
+    const preview = await f.service.preview(f.place, f.session, entry.objectToken);
+    expect(preview.binary).toBe(true);
+    expect(preview.size).toBe(bytes.length);
+    expect('image' in preview).toBe(false);
+  });
+});

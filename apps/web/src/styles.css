@@ -967,6 +967,17 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 /* the File view: one opened file (a response-file row or a pane link), a peer of the Comparison */
 .code-pane-file-image { display: grid; min-width: 0; min-height: 0; flex: 1 1 auto; overflow: auto; padding: 1rem; place-items: center; background: var(--crust); }
 .code-pane-file-image img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+/* keep image revisions readable in narrow code splits */
+.code-pane-image-comparison { display: flex; min-width: 0; min-height: 0; flex: 1; flex-wrap: wrap; align-content: flex-start; gap: .75rem; overflow: auto; padding: .75rem; }
+.code-pane-image-revision { display: flex; min-width: 0; flex: 1 1 18rem; flex-direction: column; margin: 0; overflow: hidden; border: 1px solid var(--surface-1); border-radius: var(--control-radius); }
+.code-pane-image-revision figcaption { display: flex; min-width: 0; flex-direction: column; gap: .25rem; padding: .5rem .7rem; color: var(--subtext-0); font: .7rem var(--font-mono); }
+.code-pane-image-revision figcaption strong { color: var(--text); }
+.code-pane-image-revision figcaption span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-pane-image-revision .code-pane-file-image { min-height: 8rem; }
+.code-pane-image-revision img { max-height: 28rem; }
+/* bound mixed-media source without squeezing its virtualized code view to zero */
+.code-pane-revision-text { display: flex; min-width: 0; height: 18rem; flex-direction: column; }
+.code-pane-image-note { flex: 1 0 100%; margin: 0; color: var(--subtext-0); font-size: .75rem; }
 .code-pane-file-truncated { flex: 0 0 auto; padding: .45rem .7rem; border-top: 1px solid var(--surface-1); color: var(--yellow); font-size: .7rem; }
 /* the square stacked-files reopener (collapsed rail) / drawer opener (narrow panel) */
 .code-pane-files-open { display: inline-grid; flex: 0 0 1.9rem; width: 1.9rem; height: 1.9rem; padding: 0; place-items: center; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: transparent; color: var(--subtext-0); font: inherit; }

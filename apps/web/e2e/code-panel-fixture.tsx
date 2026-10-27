@@ -28,6 +28,8 @@ type Gate = { held: boolean; waiters: (() => void)[] };
 const gate: Gate = { held: false, waiters: [] };
 export const holdLoads = () => { gate.held = true; };
 export const releaseLoads = () => { gate.held = false; gate.waiters.splice(0).forEach(resume => resume()); };
+// resolve one chosen request so revision responses can arrive out of order
+export const releaseLoad = (index: number) => { gate.waiters.splice(index, 1)[0]?.(); };
 
 // A spec pushes a fresh Comparison (and optional per-file revision contents) to drive a live update.
 let pushUpdate: ((patch: ComparisonPatch, loaded?: Record<string, ComparisonFileContents>) => void) | undefined;
@@ -46,8 +48,10 @@ function Harness({ initialPatch, initialLoaded, startExpanded, editor = false }:
   const loadedRef = useRef(initialLoaded);
   const loadFile = useCallback(async (path: string) => {
     (loadLog().__codeLoads ??= []).push(path);
+    // bind each response to the bytes available when that request began
+    const contents = loadedRef.current[path];
     if (gate.held) await new Promise<void>(resume => gate.waiters.push(resume));
-    return loadedRef.current[path];
+    return contents;
   }, []);
   useEffect(() => {
     pushUpdate = (next, loaded) => { if (loaded !== undefined) loadedRef.current = loaded; setPatch(next); };

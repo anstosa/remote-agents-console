@@ -17,7 +17,7 @@ const cappedFile = (path: string): ComparisonFile => ({ change: { code: ' M', pa
 
 // the fingerprint tracks path *and* patch text so a live update that edits a file's content — not
 // just the file set — reads as a changed Comparison, the way the server's content-sensitive one does
-const patchOf = (files: ComparisonFile[], truncated = false): ComparisonPatch => ({ kind: 'working', base: 'HEAD', gitBase: 'HEAD', files, fingerprint: files.map(file => `${file.change.path}:${file.patch}`).join('|'), truncated });
+const patchOf = (files: ComparisonFile[], truncated = false): ComparisonPatch => ({ kind: 'working', base: 'HEAD', gitBase: 'HEAD', files, fingerprint: files.map(file => `${file.change.path}:${file.fingerprint ?? ''}:${file.patch}`).join('|'), truncated });
 
 // The whole file behind `modifiedPatch`, with lines past the hunk (the `sentinel` line) that only
 // Plain-file and Full-context modes should surface.
@@ -25,6 +25,13 @@ const baseFile = 'const a = 1;\nconst b = 2;\nconst c = 4;\nconst d = 5;\nconst 
 const workingFile = 'const a = 1;\nconst b = 3;\nconst c = 4;\nconst d = 5;\nconst e = 6;\nconst sentinel = 999;\n';
 const revision = (path: string, content: string): RevisionFile => ({ path, size: content.length, binary: false, truncated: false, content });
 const contentsOf = (path: string, base: string, working: string): ComparisonFileContents => ({ path, base: revision(path, base), working: revision(path, working) });
+
+// use a decodable image instead of a placeholder signature
+const previewPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+// represent binary git changes without embedding image bytes in the patch
+const imageChange = (path: string, code = ' M'): ComparisonFile => ({ change: { code, path }, kind: code === '??' ? 'binary' : 'tracked', patch: `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\nGIT binary patch\nliteral 68\n`, capped: false, fingerprint: `${path}:image-v1` });
+// mirror the bounded revision image returned by the server
+const imageRevision = (path: string): RevisionFile => ({ path, size: 68, binary: true, truncated: false, image: { mediaType: 'image/png', base64: previewPng } });
 
 // mount the isolated Code panel with a scripted Comparison (and optional per-file revision contents)
 const mountPanel = async (page: Page, patch: ComparisonPatch, loaded: Record<string, ComparisonFileContents> = {}, startExpanded = false, rootWidth?: number, editor = false) => {
@@ -108,6 +115,297 @@ test('renders each File view state: text through the library, image inline, bina
   // a failed preview reports it
   await mountFilePreview(page, { path: 'gone.ts', state: 'error' });
   await expect(panel(page).getByText(/Preview unavailable/u)).toBeVisible();
+});
+
+// exercise comparison images through the real controller and payload guard
+test('previews before and after images from changed files without eagerly loading every binary', async ({ page }) => {
+  const path = 'assets/new logo.png';
+  const changed = { ...imageChange(path, 'R '), change: { code: 'R ', path, originalPath: 'assets/old logo.png' } };
+  await mountController(page, patchOf([changed, imageChange('assets/other.png')]));
+  // wait for the controller effect before injecting its revisions
+  await page.waitForFunction(() => Boolean((window as unknown as { __ctrl?: Ctrl }).__ctrl));
+  await page.evaluate(({ path, before, after }) => {
+    const controller = (window as unknown as { __ctrl: Ctrl }).__ctrl;
+    controller.setFiles({ [path]: { path, base: before, working: after } });
+    controller.open();
+  }, { path, before: imageRevision('assets/old logo.png'), after: imageRevision(path) });
+  await expect(panel(page).getByRole('button', { name: `Preview ${path}`, exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.fileFetches)).toBe(0);
+  await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+  // both sides must decode and retain their own rename paths
+  for (const name of ['Before: assets/old logo.png', `After: ${path}`]) {
+    const image = panel(page).getByRole('img', { name, exact: true });
+    await expect(image).toBeVisible();
+    await expect.poll(() => image.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  }
+  expect(await page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.fileFetches)).toBe(1);
+});
+
+// preserve missing-side meaning for added and deleted images
+for (const side of ['added', 'deleted'] as const) {
+  test(`previews ${side} images with only their existing revision`, async ({ page }) => {
+    const path = 'assets/logo.png';
+    const image = imageRevision(path);
+    await mountPanel(page, patchOf([imageChange(path, side === 'added' ? '??' : ' D')]), { [path]: { path, base: side === 'added' ? null : image, working: side === 'added' ? image : null } });
+    await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+    await expect(panel(page).getByRole('img', { name: `${side === 'added' ? 'After' : 'Before'}: ${path}`, exact: true })).toBeVisible();
+    await expect(panel(page).getByRole('img')).toHaveCount(1);
+    await expect(panel(page).getByText(side === 'added' ? 'File added' : 'File deleted', { exact: true })).toBeVisible();
+  });
+}
+
+// each revision retains its own media type during a format change
+for (const textSide of ['Before', 'After'] as const) {
+  // mixed comparisons must show source alongside the raster rather than calling it binary
+  test(`previews mixed media with text ${textSide.toLowerCase()} the image change`, async ({ page }) => {
+    const path = 'assets/changed.png';
+    const text = revision(path, 'const prior = 1;\nconst current = 2;\n');
+    const image = imageRevision(path);
+    await mountPanel(page, patchOf([imageChange(path)]), { [path]: { path, base: textSide === 'Before' ? text : image, working: textSide === 'After' ? text : image } }, false, 320, true);
+    await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+    await expect(panel(page).getByText('const current = 2;', { exact: true })).toBeVisible();
+    const raster = panel(page).getByRole('img', { name: `${textSide === 'Before' ? 'After' : 'Before'}: ${path}`, exact: true });
+    await expect(raster).toBeVisible();
+    await expect.poll(() => raster.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+    await expect(panel(page).getByText(/Binary file/u)).toHaveCount(0);
+    const editor = panel(page).getByRole('button', { name: `Open ${path} at line 1 in the editor`, exact: true });
+    // only working source may open the current file in the editor
+    if (textSide === 'After') {
+      await editor.click();
+      expect(await editorJumps(page)).toEqual([{ file: path, line: 1 }]);
+      // selected working lines must retain the editor target
+      await panel(page).locator('[data-column-number="2"]').first().click();
+      await expect(panel(page).getByRole('button', { name: `Open ${path} at line 2 in the editor`, exact: true })).toBeVisible();
+    } else await expect(editor).toHaveCount(0);
+    expect(await panel(page).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    // bounded mixed source must not claim to be a complete revision
+    const truncatedText = { ...text, size: 3 * 1024 * 1024, truncated: true };
+    await updatePanel(page, patchOf([{ ...imageChange(path), fingerprint: 'mixed-truncated' }]), { [path]: { path, base: textSide === 'Before' ? truncatedText : image, working: textSide === 'After' ? truncatedText : image } });
+    await expect(panel(page).getByText('Preview limited to the first 2 MiB.', { exact: true })).toBeVisible();
+    await expect(panel(page).getByText('const current = 2;', { exact: true })).toBeVisible();
+  });
+}
+
+// bound images to a narrow split and survive malformed image bytes
+test('fits image previews inside a narrow split and reports decode errors', async ({ page }) => {
+  const path = 'assets/wide.png';
+  // create a genuinely wide raster to exercise scaling rather than a one-pixel fixture
+  const raster = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 2048; canvas.height = 1024;
+    const base64 = canvas.toDataURL('image/png').split(',')[1];
+    return { base64, size: atob(base64).length };
+  });
+  const wide = { ...imageRevision(path), size: raster.size, image: { mediaType: 'image/png' as const, base64: raster.base64 } };
+  await mountPanel(page, patchOf([imageChange(path)]), { [path]: { path, base: wide, working: wide } }, false, 320);
+  await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+  const after = panel(page).getByRole('img', { name: `After: ${path}`, exact: true });
+  await expect(after).toBeVisible();
+  await expect.poll(() => after.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBe(2048);
+  expect(await after.evaluate(element => element.getBoundingClientRect().width)).toBeLessThan(320);
+  expect(await panel(page).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  // a corrupt but safely encoded payload must not leave a broken image as the only feedback
+  await updatePanel(page, patchOf([{ ...imageChange(path), fingerprint: 'corrupt-image' }]), { [path]: { path, base: null, working: { ...imageRevision(path), size: 8, image: { mediaType: 'image/png', base64: 'iVBORw0KGgo=' } } } });
+  await expect(panel(page).getByRole('alert')).toContainText('Unable to display this image');
+});
+
+// retain a useful fallback without encoding partial or unsupported binaries
+test('reports oversized images and non-image binary files without broken image elements', async ({ page }) => {
+  const path = 'assets/large.png';
+  await mountPanel(page, patchOf([imageChange(path)]), { [path]: { path, base: null, working: { path, size: 6 * 1024 * 1024, binary: true, truncated: false } } });
+  await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+  await expect(panel(page).getByText('Image exceeds the 5 MiB preview limit.', { exact: true })).toBeVisible();
+  await expect(panel(page).getByRole('img')).toHaveCount(0);
+  const binary = 'assets/archive.bin';
+  await updatePanel(page, patchOf([imageChange(binary)]), { [binary]: { path: binary, base: null, working: { path: binary, size: 10, binary: true, truncated: false } } });
+  await panel(page).getByRole('button', { name: 'All files', exact: true }).click();
+  await panel(page).getByRole('button', { name: `Preview ${binary}`, exact: true }).click();
+  await expect(panel(page).getByText('Binary file — no image preview available.', { exact: true })).toBeVisible();
+});
+
+// late image loads must not replace the file the reviewer selected afterward
+test('ignores an image response after selecting another file', async ({ page }) => {
+  const path = 'assets/logo.png';
+  await mountPanel(page, patchOf([imageChange(path), trackedFile('src/a.ts')]), { [path]: { path, base: null, working: imageRevision(path) } });
+  await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).holdLoads());
+  await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+  await expect(panel(page).getByRole('status')).toContainText('Loading image');
+  await panel(page).getByRole('button', { name: 'All files', exact: true }).click();
+  await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).releaseLoads());
+  await expect(panel(page).getByText('const b = 3;')).toBeVisible();
+  await expect(panel(page).getByRole('img', { name: /^(?:Before|After):/u })).toHaveCount(0);
+});
+
+// an older response for the same path must not overwrite a newer selected revision
+test('keeps the newer image when a stale revision response arrives last', async ({ page }) => {
+  const path = 'assets/logo.png';
+  const original = imageChange(path);
+  await mountPanel(page, patchOf([original]), { [path]: { path, base: null, working: imageRevision(path) } });
+  // use a different decodable raster for the second revision
+  const newer = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 2; canvas.height = 1;
+    const base64 = canvas.toDataURL('image/png').split(',')[1];
+    return { base64, size: atob(base64).length };
+  });
+  await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).holdLoads());
+  await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+  await expect.poll(() => codeLoads(page)).toHaveLength(1);
+  await updatePanel(page, patchOf([{ ...original, fingerprint: 'newer-revision' }]), { [path]: { path, base: null, working: { ...imageRevision(path), size: newer.size, image: { mediaType: 'image/png', base64: newer.base64 } } } });
+  await expect.poll(() => codeLoads(page)).toHaveLength(2);
+  // finish revision two before revision one
+  await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).releaseLoad(1));
+  const image = panel(page).getByRole('img', { name: `After: ${path}`, exact: true });
+  const source = `data:image/png;base64,${newer.base64}`;
+  await expect(image).toHaveAttribute('src', source);
+  await expect.poll(() => image.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBe(2);
+  // settle the old response and its render frames before checking the new bytes again
+  await page.evaluate(async () => {
+    (await import('/e2e/code-panel-fixture.tsx')).releaseLoad(0);
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  });
+  await expect(image).toHaveAttribute('src', source);
+  await expect.poll(() => image.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBe(2);
+});
+
+// lazy image classification must preserve each request's revision and navigation owner
+for (const update of ['unrelated', 'revision', 'navigation'] as const) {
+  test(`settles a capped extensionless image load after ${update} changes`, async ({ page }) => {
+    const path = 'assets/logo';
+    const image: ComparisonFile = { ...cappedFile(path), change: { code: '??', path }, kind: 'untracked', fingerprint: 'image-v1' };
+    await mountPanel(page, patchOf([image, trackedFile('src/a.ts')]), { [path]: { path, base: null, working: imageRevision(path) } });
+    await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).holdLoads());
+    await panel(page).getByRole('button', { name: 'Load anyway', exact: true }).click();
+    await expect.poll(() => codeLoads(page)).toHaveLength(1);
+    // only one branch changes the requested image's own revision
+    if (update === 'revision') await updatePanel(page, patchOf([{ ...image, fingerprint: 'image-v2' }, trackedFile('src/a.ts')]), { [path]: { path, base: null, working: imageRevision(path) } });
+    // unrelated source edits must not cancel valid image bytes
+    if (update === 'unrelated') await updatePanel(page, patchOf([image, trackedFileTo('src/a.ts', 'const newer = 1;')]), { [path]: { path, base: null, working: imageRevision(path) } });
+    // explicit file navigation must not be replaced by a late classification response
+    if (update === 'navigation') await panel(page).getByTitle('src/a.ts', { exact: true }).click();
+    await page.evaluate(async () => {
+      (await import('/e2e/code-panel-fixture.tsx')).releaseLoad(0);
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    // unchanged requested bytes may open the image normally
+    if (update === 'unrelated') {
+      await expect(panel(page).getByRole('img', { name: `After: ${path}`, exact: true })).toBeVisible();
+      expect(await codeLoads(page)).toHaveLength(1);
+    } else {
+      await expect(panel(page).getByRole('img', { name: /^(?:Before|After):/u })).toHaveCount(0);
+      // changed revisions must leave a usable load control rather than a stuck spinner
+      if (update === 'revision') await expect(panel(page).getByRole('button', { name: 'Load anyway', exact: true })).toBeEnabled();
+      // navigation must retain the user's new selected text
+      if (update === 'navigation') await expect(panel(page).getByText('const b = 3;')).toBeVisible();
+    }
+  });
+}
+
+// capped patch text must not prevent a bounded image request or a retry
+test('retries an unavailable capped image without entering the text diff loader', async ({ page }) => {
+  const path = 'assets/capped.png';
+  const patch = patchOf([cappedFile(path)]);
+  await mountPanel(page, patch);
+  await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('Unable to load image preview');
+  await updatePanel(page, patch, { [path]: { path, base: null, working: imageRevision(path) } });
+  await panel(page).getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(panel(page).getByRole('img', { name: `After: ${path}`, exact: true })).toBeVisible();
+  await expect(panel(page).getByRole('button', { name: 'Load anyway', exact: true })).toHaveCount(0);
+});
+
+// both endpoint guards must prove complete bounded raster bytes before rendering
+test('validates complete bounded raster payloads for file and comparison previews', async ({ page }) => {
+  await page.goto('/');
+  const accepted = await page.evaluate(async valid => {
+    const { fetchComparisonFile, isFilePreview } = await import('/src/code-panel/comparison.ts');
+    // construct a complete raster envelope exactly at the inclusive byte boundary
+    const exactSize = 5 * 1024 * 1024;
+    const exactBase64 = btoa('\x89PNG\r\n\x1a\n' + '\0'.repeat(exactSize - 8));
+    const payloads = [
+      { scenario: 'valid png', expected: true, payload: valid },
+      { scenario: 'exact image byte cap', expected: true, payload: { ...valid, size: exactSize, image: { mediaType: 'image/png', base64: exactBase64 } } },
+      { scenario: 'jpeg signature', expected: true, payload: { ...valid, size: 3, image: { mediaType: 'image/jpeg', base64: '/9j/' } } },
+      { scenario: 'gif signature', expected: true, payload: { ...valid, size: 6, image: { mediaType: 'image/gif', base64: 'R0lGODlh' } } },
+      { scenario: 'webp signature', expected: true, payload: { ...valid, size: 12, image: { mediaType: 'image/webp', base64: 'UklGRgAAAABXRUJQ' } } },
+      { scenario: 'active svg mime', expected: false, payload: { ...valid, image: { ...valid.image, mediaType: 'image/svg+xml' } } },
+      { scenario: 'malformed base64', expected: false, payload: { ...valid, image: { ...valid.image, base64: '<svg>' } } },
+      { scenario: 'truncated image', expected: false, payload: { ...valid, truncated: true } },
+      { scenario: 'text with image', expected: false, payload: { ...valid, binary: false } },
+      { scenario: 'missing truncation flag', expected: false, payload: { ...valid, truncated: undefined } },
+      { scenario: 'nonboolean truncation flag', expected: false, payload: { ...valid, truncated: 0 } },
+      { scenario: 'negative size', expected: false, payload: { ...valid, size: -1 } },
+      { scenario: 'contradictory content', expected: false, payload: { ...valid, content: 'not an image' } },
+      { scenario: 'decoded size mismatch', expected: false, payload: { ...valid, size: 67 } },
+      { scenario: 'oversized declared image', expected: false, payload: { ...valid, size: 5 * 1024 * 1024 + 1 } },
+      { scenario: 'oversized encoded image', expected: false, payload: { ...valid, image: { ...valid.image, base64: 'A'.repeat(4 * Math.ceil(5 * 1024 * 1024 / 3) + 4) } } },
+      { scenario: 'mime and magic mismatch', expected: false, payload: { ...valid, image: { ...valid.image, mediaType: 'image/jpeg' } } },
+      { scenario: 'unrecognized magic', expected: false, payload: { ...valid, size: 3, image: { ...valid.image, base64: 'AAAA' } } }
+    ];
+    // compare both public wire boundaries for each valid or malformed response
+    return Promise.all(payloads.map(async ({ scenario, expected, payload: working }) => {
+      const response = await fetchComparisonFile(async () => new Response(JSON.stringify({ path: working.path, base: null, working }), { headers: { 'content-type': 'application/json' } }), 'cora', { kind: 'working', path: working.path });
+      return { scenario, expected, file: isFilePreview(working), comparison: response !== undefined };
+    }));
+  }, imageRevision('assets/logo.png'));
+  // identify the exact malformed envelope and endpoint when a guard regresses
+  for (const result of accepted) {
+    expect(result.file, `${result.scenario}: file preview`).toBe(result.expected);
+    expect(result.comparison, `${result.scenario}: comparison preview`).toBe(result.expected);
+  }
+});
+
+// filename extensions must not replace real content classification
+test('previews tracked extensionless images while preserving text files with image extensions', async ({ page }) => {
+  const path = 'assets/logo';
+  await mountPanel(page, patchOf([imageChange(path), trackedFile('src/source.png')]), { [path]: { path, base: null, working: imageRevision(path) } });
+  await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+  await expect(panel(page).getByRole('img', { name: `After: ${path}`, exact: true })).toBeVisible();
+  await panel(page).getByRole('button', { name: 'All files', exact: true }).click();
+  await panel(page).getByTitle('src/source.png', { exact: true }).click();
+  await expect(panel(page).getByText('const b = 3;')).toBeVisible();
+  await expect(panel(page).getByRole('img', { name: /^(?:Before|After):/u })).toHaveCount(0);
+});
+
+// unknown preview candidates must retain ordinary text review controls
+test('retains normal diff controls when a capped image-named file resolves to text', async ({ page }) => {
+  const path = 'src/source.png';
+  await mountPanel(page, patchOf([cappedFile(path)]), { [path]: contentsOf(path, baseFile, workingFile) }, false, undefined, true);
+  await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+  await expect(panel(page).getByText('const b = 3;')).toBeVisible();
+  // text classification must restore the primary renderer's editor metadata
+  await panel(page).getByRole('button', { name: `Open ${path} at line 2 in the editor`, exact: true }).click();
+  expect(await editorJumps(page)).toEqual([{ file: path, line: 2 }]);
+  await (await codeViewOption(panel(page), 'Full ctx')).click();
+  await expect(panel(page).getByText('const sentinel = 999;', { exact: true })).toBeVisible();
+  await (await codeViewOption(panel(page), 'Plain file')).click();
+  const open = panel(page).getByRole('button', { name: `Open ${path} at line 1 in the editor`, exact: true });
+  await expect(open).toBeVisible();
+  // controlled line selection must still update the editor target
+  await panel(page).locator('[data-column-number="3"]').first().click();
+  await expect(panel(page).getByRole('button', { name: `Open ${path} at line 3 in the editor`, exact: true })).toBeVisible();
+});
+
+// image transfers follow the selected revision rather than every live comparison update
+test('refetches images only when their own revision changes', async ({ page }) => {
+  const path = 'assets/logo.png';
+  const original = imageChange(path);
+  await mountController(page, patchOf([original, trackedFile('src/a.ts')]));
+  await page.waitForFunction(() => Boolean((window as unknown as { __ctrl?: Ctrl }).__ctrl));
+  await page.evaluate(({ path, image }) => {
+    const controller = (window as unknown as { __ctrl: Ctrl }).__ctrl;
+    controller.setFiles({ [path]: { path, base: null, working: image } });
+    controller.open();
+  }, { path, image: imageRevision(path) });
+  await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+  await expect(panel(page).getByRole('img', { name: `After: ${path}`, exact: true })).toBeVisible();
+  const fileFetches = () => page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.fileFetches);
+  expect(await fileFetches()).toBe(1);
+  await bumpSignal(page, patchOf([original, trackedFileTo('src/a.ts', 'const changed = 1;')]), 'unrelated-edit');
+  await expect.poll(async () => (await controls(page)).patchChanges).toBe(2);
+  expect(await fileFetches()).toBe(1);
+  await bumpSignal(page, patchOf([{ ...original, fingerprint: 'image-v2' }, trackedFileTo('src/a.ts', 'const changed = 1;')]), 'image-edit');
+  await expect.poll(fileFetches).toBe(2);
 });
 
 // the editor jumps the file headers asked for (mounted with an editor configured)
@@ -951,7 +1249,9 @@ test('a card swapped in the same commit does not restore an older snapshot', asy
   await page.evaluate(() => (window as unknown as { __ctrl: Ctrl }).__ctrl.swap());
 
   await expect(region.locator('.code-pane-count')).toHaveText('8');
-  await expect(region.locator('.code-pane-crumb-current')).not.toHaveText('mod4.ts');
+  // an all-files view has no selected-file breadcrumb
+  await expect(region.getByRole('button', { name: 'All files', exact: true })).toHaveCount(0);
+  await expect(region.getByRole('tree', { name: 'Changed files' }).getByRole('button')).toHaveCount(eightFiles.length);
 });
 
 test('falls back to Working changes when the restored commit is gone', async ({ page }) => {

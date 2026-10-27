@@ -16,13 +16,13 @@ export type ComparisonChange = { code: string; path: string; originalPath?: stri
 export type ComparisonFileKind = 'tracked' | 'metadata' | 'binary' | 'untracked';
 // One file of a Comparison patch: its Change, the captured patch text, and whether the server
 // withheld that text for being over a size cap (drives the "Load anyway" placeholder).
-export type ComparisonFile = { change: ComparisonChange; kind: ComparisonFileKind; patch: string; capped: boolean };
+export type ComparisonFile = { change: ComparisonChange; kind: ComparisonFileKind; patch: string; capped: boolean; fingerprint?: string };
 // The `POST /api/worktrees/:id/comparison` response: every Change with its per-file patch, a
 // content-sensitive fingerprint (for staleness), and whether the file-count/total cap truncated it.
 export type ComparisonPatch = { kind: CodePanelMode | 'commit'; base: string; gitBase: string; files: ComparisonFile[]; fingerprint: string; truncated: boolean };
 
 // One side of a file in a Comparison, from `POST /api/worktrees/:id/comparison/file`.
-export type RevisionFile = { path: string; size: number; binary: boolean; truncated: boolean; content?: string };
+export type RevisionFile = { path: string; size: number; binary: boolean; truncated: boolean; content?: string; image?: PreviewImage };
 // A changed file's two sides; either is null for an add or a delete.
 export type ComparisonFileContents = { path: string; base: RevisionFile | null; working: RevisionFile | null };
 
@@ -35,11 +35,13 @@ const isChange = (value: unknown): value is ComparisonChange =>
 
 const comparisonFileKinds = new Set<ComparisonFileKind>(['tracked', 'metadata', 'binary', 'untracked']);
 
+// validate per-file metadata and optional content identity at the wire boundary
 const isComparisonFile = (value: unknown): value is ComparisonFile =>
   value !== null && typeof value === 'object'
   && isChange((value as ComparisonFile).change)
   && comparisonFileKinds.has((value as ComparisonFile).kind)
   && typeof (value as ComparisonFile).patch === 'string'
+  && ((value as ComparisonFile).fingerprint === undefined || typeof (value as ComparisonFile).fingerprint === 'string')
   && typeof (value as ComparisonFile).capped === 'boolean';
 
 // Validate the patch endpoint's payload before trusting it, the way `useFilePreview` guards its own.
@@ -50,9 +52,14 @@ export const isComparisonPatch = (value: unknown): value is ComparisonPatch =>
   && Array.isArray((value as ComparisonPatch).files)
   && (value as ComparisonPatch).files.every(isComparisonFile);
 
+// validate revision bytes before trusting image sources or text content
 const isRevisionFile = (value: unknown): value is RevisionFile =>
   value !== null && typeof value === 'object' && typeof (value as RevisionFile).path === 'string' && typeof (value as RevisionFile).binary === 'boolean'
-  && ((value as RevisionFile).content === undefined || typeof (value as RevisionFile).content === 'string');
+  && Number.isInteger((value as RevisionFile).size) && (value as RevisionFile).size >= 0
+  && typeof (value as RevisionFile).truncated === 'boolean'
+  && ((value as RevisionFile).content === undefined || typeof (value as RevisionFile).content === 'string')
+  // only complete raster images may become image sources
+  && ((value as RevisionFile).image === undefined || ((value as RevisionFile).binary === true && (value as RevisionFile).truncated === false && (value as RevisionFile).content === undefined && isPreviewImage((value as RevisionFile).image, (value as RevisionFile).size)));
 
 const isComparisonFileContents = (value: unknown): value is ComparisonFileContents =>
   value !== null && typeof value === 'object'
@@ -115,13 +122,40 @@ export type FilePreview = { path: string; size: number; truncated: boolean } & (
 export type FilePreviewView = { path: string; state: CodePanelState; preview?: FilePreview; source?: 'files' | 'settings' };
 
 const previewMediaTypes = new Set<PreviewImage['mediaType']>(['image/gif', 'image/jpeg', 'image/png', 'image/webp']);
-const isPreviewImage = (value: unknown): value is PreviewImage =>
-  value !== null && typeof value === 'object'
-  && previewMediaTypes.has((value as PreviewImage).mediaType)
-  && typeof (value as PreviewImage).base64 === 'string'
-  && /^[A-Za-z0-9+/]*={0,2}$/u.test((value as PreviewImage).base64);
+// share the raster wire limit with the unavailable-image feedback
+export const previewImageByteLimit = 5 * 1024 * 1024;
 
-// Guard the file-preview payload before trusting it, the way the retired dialog's `isAssistantFilePreview` did.
+// prove complete bounded raster bytes without allocating the decoded body
+const isPreviewImage = (value: unknown, size: number): value is PreviewImage => {
+  // accept only the closed raster envelope
+  if (value === null || typeof value !== 'object' || !previewMediaTypes.has((value as PreviewImage).mediaType) || typeof (value as PreviewImage).base64 !== 'string') return false;
+  const image = value as PreviewImage;
+  // reject oversized envelopes before scanning or decoding their data
+  if (size > previewImageByteLimit || image.base64.length > 4 * Math.ceil(previewImageByteLimit / 3)) return false;
+  // require complete base64 quartets and valid padding placement
+  if (image.base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/u.test(image.base64)) return false;
+  let decodedSize = image.base64.length / 4 * 3;
+  // account for two omitted bytes in the final quartet
+  if (image.base64.endsWith('==')) decodedSize -= 2;
+  // account for one omitted byte in the final quartet
+  else if (image.base64.endsWith('=')) decodedSize -= 1;
+  // a capped or misdeclared payload must not become an image source
+  if (decodedSize !== size) return false;
+  let header: string;
+  try { header = atob(image.base64.slice(0, 16)); }
+  // reject malformed encoding even when its character set looked valid
+  catch { return false; }
+  // match the same four byte signatures used by the server
+  const signatures = {
+    'image/png': header.startsWith('\x89PNG\r\n\x1a\n'),
+    'image/jpeg': header.startsWith('\xff\xd8\xff'),
+    'image/gif': header.startsWith('GIF87a') || header.startsWith('GIF89a'),
+    'image/webp': header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP'
+  };
+  return signatures[image.mediaType];
+};
+
+// validate file previews before constructing a data url
 export const isFilePreview = (value: unknown): value is FilePreview =>
   value !== null && typeof value === 'object'
   && typeof (value as FilePreview).path === 'string'
@@ -129,7 +163,7 @@ export const isFilePreview = (value: unknown): value is FilePreview =>
   && typeof (value as FilePreview).truncated === 'boolean'
   && typeof (value as { binary?: unknown }).binary === 'boolean'
   && ((value as FilePreview).binary
-    ? (value as { content?: unknown }).content === undefined && ((value as { image?: unknown }).image === undefined || isPreviewImage((value as { image?: unknown }).image))
+    ? (value as { content?: unknown }).content === undefined && ((value as { image?: unknown }).image === undefined || ((value as FilePreview).truncated === false && isPreviewImage((value as { image?: unknown }).image, (value as FilePreview).size)))
     : typeof (value as { content?: unknown }).content === 'string' && (value as { image?: unknown }).image === undefined);
 
 // One Worktree's Code panel: whether it is open, which Comparison it shows, the latest patch, the

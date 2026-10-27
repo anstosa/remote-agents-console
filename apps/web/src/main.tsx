@@ -22,7 +22,7 @@ import { NoteMarkdown } from './note-markdown.js';
 import { ProjectOpen } from './project-open.js';
 import type { CodePanelReview } from './code-panel/code-panel.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
-import { savedCodeOpen, saveCodeOpen, supportingChange, useCodePanel, type CodePanelCommit, type CodePanelController, type CodePanelMode } from './code-panel/comparison.js';
+import { isFilePreview, savedCodeOpen, saveCodeOpen, supportingChange, useCodePanel, type CodePanelCommit, type CodePanelController, type CodePanelMode, type FilePreview } from './code-panel/comparison.js';
 import { PullRequestCard, PullRequestIndicators, type PullRequestSummary } from './pull-request-card.js';
 import { PullRequestCommentsPanel, unresolvedThreadCount, type PullRequestComments } from './pull-request-comments.js';
 import { isStackOperationLog, isStackProcessOutput, type StackAction, type StackOperationLog, type StackProcessOutput, type StackProcessState, type StackSelection, type StartableNoticeTarget } from './stack-operations.js';
@@ -281,8 +281,6 @@ const NoteFeedbackContext = createContext<{ deleted: (label: string, undoToken: 
 // Adapter and target pickers offer, all resolved from the dashboard for the active tab's context
 type SchedulePrefill = { kind: AgentKind; target: ScheduleTarget; runsOnText: string; adapters: ScheduleAdapterOption[]; targets: ScheduleTargetOption[]; liveAgentIds: string[] };
 type AssistantFile = { path: string; size: number };
-type AssistantPreviewImage = { mediaType: 'image/gif'|'image/jpeg'|'image/png'|'image/webp'; base64: string };
-type AssistantFilePreview = AssistantFile & { truncated: boolean } & ({ binary: true; image?: AssistantPreviewImage } | { binary: false; content: string });
 type FilePreviewState = 'loading'|'ready'|'error';
 type InstanceIcon = 'terminal'|'potato'|'heart';
 // retain inherited peer identity separately from local navigation overrides
@@ -3134,20 +3132,8 @@ const isAssistantFile = (value: unknown): value is AssistantFile => value !== nu
   && typeof (value as AssistantFile).path === 'string'
   && Number.isInteger((value as AssistantFile).size)
   && (value as AssistantFile).size >= 0;
-// validate one inline raster image
-const isAssistantPreviewImage = (value: unknown): value is AssistantPreviewImage => value !== null && typeof value === 'object'
-  && ((value as AssistantPreviewImage).mediaType === 'image/gif' || (value as AssistantPreviewImage).mediaType === 'image/jpeg' || (value as AssistantPreviewImage).mediaType === 'image/png' || (value as AssistantPreviewImage).mediaType === 'image/webp')
-  && typeof (value as AssistantPreviewImage).base64 === 'string'
-  && /^[A-Za-z0-9+/]*={0,2}$/u.test((value as AssistantPreviewImage).base64);
-// validate one bounded workspace preview
-const isAssistantFilePreview = (value: unknown): value is AssistantFilePreview => isAssistantFile(value)
-  && typeof (value as AssistantFilePreview).binary === 'boolean'
-  && typeof (value as AssistantFilePreview).truncated === 'boolean'
-  && ((value as AssistantFilePreview).binary
-    ? (value as { content?: unknown }).content === undefined && ((value as { image?: unknown }).image === undefined || isAssistantPreviewImage((value as { image?: unknown }).image))
-    : typeof (value as { content?: unknown }).content === 'string' && (value as { image?: unknown }).image === undefined);
 // render one explicit file-preview state
-const filePreviewContent = (path: string, state: FilePreviewState, preview?: AssistantFilePreview): ReactNode => {
+const filePreviewContent = (path: string, state: FilePreviewState, preview?: FilePreview): ReactNode => {
   // show pending requests
   if (state === 'loading') return <div className="response-file-message progress-border progress-blue" role="status" aria-busy="true"><ProgressRing busy />Loading preview…</div>;
   // show failed requests
@@ -3164,7 +3150,7 @@ const assistantFileSize = (size: number) => size < 1_024 ? `${size} B` : size < 
 // manage one stored or workspace file preview
 function useFilePreview(previewUrl: string) {
   const [previewPath, setPreviewPath] = useState<string>();
-  const [preview, setPreview] = useState<AssistantFilePreview>();
+  const [preview, setPreview] = useState<FilePreview>();
   const [previewState, setPreviewState] = useState<FilePreviewState>('loading');
   const [copied, setCopied] = useState(false);
   const previewRequest = useRef(0);
@@ -3192,7 +3178,7 @@ function useFilePreview(previewUrl: string) {
       if (!response.ok) throw new Error('preview unavailable');
       const payload: unknown = await response.json();
       // require the shared bounded preview contract
-      if (!isAssistantFilePreview(payload)) throw new Error('invalid preview');
+      if (!isFilePreview(payload)) throw new Error('invalid preview');
       // ignore replaced or closed previews
       if (previewRequest.current !== requestId) return;
       setPreviewPath(payload.path);

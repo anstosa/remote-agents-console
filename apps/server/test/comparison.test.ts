@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -451,6 +451,7 @@ describe('comparison resolution', () => {
     });
   }, 20_000);
 
+
   // ignore publication tracking as source evidence
   it('does not mistake a same-name published upstream for the branch source', async () => {
     const root = await repo();
@@ -701,13 +702,28 @@ describe('comparison patch capture', () => {
   it('produces a stable fingerprint sensitive to both patch text and capped line counts', async () => {
     const { root, comparison } = await scenario();
     const first = await captureComparisonPatch(root, comparison, bigLimits);
-    expect((await captureComparisonPatch(root, comparison, bigLimits)).fingerprint).toBe(first.fingerprint);
+    const unchanged = await captureComparisonPatch(root, comparison, bigLimits);
+    expect(unchanged.fingerprint).toBe(first.fingerprint);
+    expect(unchanged.files.map(file => file.fingerprint)).toEqual(first.files.map(file => file.fingerprint));
+    const imageFingerprint = fileFor(first, 'img.png')?.fingerprint;
+    expect(imageFingerprint).toEqual(expect.any(String));
 
     // a same-line-count edit (keep.ts a\nb\n -> a\nX\n, still +1 line) changes only the patch text,
     // not the numstat counts: the fingerprint must still move, so it cannot ignore patch text
     await writeFile(join(root, 'keep.ts'), 'a\nX\n');
     const sameCount = await captureComparisonPatch(root, await reresolve(root), bigLimits);
     expect(sameCount.fingerprint).not.toBe(first.fingerprint);
+    expect(fileFor(sameCount, 'img.png')?.fingerprint).toBe(imageFingerprint);
+
+    // a same-size tracked binary edit moves its token even when its patch is withheld
+    const binaryLimits = { perFileBytes: 1, totalBytes: 10_000_000, maxFiles: 1_000 };
+    const binaryBefore = await captureComparisonPatch(root, await reresolve(root), binaryLimits);
+    expect(fileFor(binaryBefore, 'img.png')).toMatchObject({ capped: true, patch: '' });
+    await writeFile(join(root, 'img.png'), Buffer.concat([binary, Buffer.from([0x08, 0x00])]));
+    const binaryAfter = await captureComparisonPatch(root, await reresolve(root), binaryLimits);
+    expect(fileFor(binaryAfter, 'img.png')).toMatchObject({ capped: true, patch: '' });
+    expect(fileFor(binaryAfter, 'img.png')?.fingerprint).not.toBe(fileFor(binaryBefore, 'img.png')?.fingerprint);
+    expect(binaryAfter.fingerprint).not.toBe(binaryBefore.fingerprint);
 
     // when keep.ts is capped (patch withheld) a line-count change must still move the fingerprint,
     // so it cannot rely on patch text alone for capped files
@@ -727,10 +743,78 @@ describe('per-file patch primitives', () => {
     await writeFile(join(root, 'small.txt'), 'one\ntwo\n');
     const change = { code: '??', path: 'small.txt' };
     const synth = await synthesizeUntrackedPatch(root, change, 1_000);
-    expect(synth).toEqual({ patch: '--- /dev/null\n+++ b/small.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n', kind: 'untracked' });
+    expect(synth).toMatchObject({ patch: '--- /dev/null\n+++ b/small.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n', kind: 'untracked', fingerprint: expect.any(String) });
 
     await writeFile(join(root, 'big.txt'), 'x'.repeat(64));
-    await expect(synthesizeUntrackedPatch(root, { code: '??', path: 'big.txt' }, 8)).resolves.toEqual({ tooLarge: true });
+    await expect(synthesizeUntrackedPatch(root, { code: '??', path: 'big.txt' }, 8)).resolves.toMatchObject({ tooLarge: true, fingerprint: expect.any(String) });
+  });
+
+  // changing a discarded prefix must still invalidate a capped tracked revision
+  it('fingerprints tracked changes beyond the retained patch tail', async () => {
+    const root = await repo();
+    const suffix = `${'x'.repeat(1_100_000)}\n`;
+    await writeFile(join(root, 'large.txt'), `a${suffix}`);
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'large tracked base');
+    const change = { code: ' M', path: 'large.txt' };
+    // inspect the same fixed comparison budget after each same-line-count edit
+    const snapshot = async () => {
+      const resolved = await resolveComparison(root, 'working', [], { lineStats: true });
+      // require the real working comparison rather than a fabricated change list
+      if (!resolved.ok) throw new Error(`unexpected ${resolved.reason}`);
+      return captureComparisonPatch(root, resolved.comparison, { perFileBytes: 256, totalBytes: 1_000, maxFiles: 10 });
+    };
+    await writeFile(join(root, 'large.txt'), `b${suffix}`);
+    const first = await snapshot();
+    const firstPatch = await capturePatch(root, 'HEAD', change);
+    await writeFile(join(root, 'large.txt'), `c${suffix}`);
+    const second = await snapshot();
+    const secondPatch = await capturePatch(root, 'HEAD', change);
+    // the public patch remains bounded and both discarded-prefix edits share its tail
+    if (!firstPatch.ok || !secondPatch.ok) throw new Error('tracked patch capture failed');
+    expect(firstPatch.patch.length).toBe(1_000_000);
+    expect(firstPatch.patch === secondPatch.patch).toBe(true);
+    expect(fileFor(second, 'large.txt')?.change).toEqual(fileFor(first, 'large.txt')?.change);
+    expect(fileFor(first, 'large.txt')).toMatchObject({ capped: true, patch: '' });
+    expect(fileFor(second, 'large.txt')).toMatchObject({ capped: true, patch: '' });
+    expect(fileFor(second, 'large.txt')?.fingerprint).not.toBe(fileFor(first, 'large.txt')?.fingerprint);
+    expect(second.fingerprint).not.toBe(first.fingerprint);
+  }, 20_000);
+
+  it('fingerprints same-size untracked binaries and stat-only oversized files', async () => {
+    const root = await repo();
+    await Promise.all([
+      writeFile(join(root, 'small.bin'), Buffer.from([1, 0, 2])),
+      writeFile(join(root, 'large.bin'), Buffer.alloc(1_024 * 1_024, 1))
+    ]);
+    // use explicit metadata revisions instead of elapsed filesystem clock ticks
+    const before = new Date('2000-01-01T00:00:00.000Z');
+    await utimes(join(root, 'large.bin'), before, before);
+    const resolved = await resolveComparison(root, 'working');
+    // require the working comparison fixture
+    if (!resolved.ok) throw new Error(`unexpected ${resolved.reason}`);
+    const limits = { perFileBytes: 256, totalBytes: 1_000, maxFiles: 10 };
+    const first = await captureComparisonPatch(root, resolved.comparison, limits);
+    const unchanged = await captureComparisonPatch(root, resolved.comparison, limits);
+    expect(unchanged.files.map(file => file.fingerprint)).toEqual(first.files.map(file => file.fingerprint));
+    expect(fileFor(first, 'small.bin')).toMatchObject({ kind: 'binary', capped: false, fingerprint: expect.any(String) });
+    expect(fileFor(first, 'large.bin')).toMatchObject({ kind: 'untracked', capped: true, fingerprint: expect.any(String) });
+
+    await Promise.all([
+      writeFile(join(root, 'small.bin'), Buffer.from([3, 0, 4])),
+      writeFile(join(root, 'large.bin'), Buffer.alloc(1_024 * 1_024, 2))
+    ]);
+    // force a deterministic timestamp change even on coarse-grained filesystems
+    const after = new Date('2001-01-01T00:00:00.000Z');
+    await utimes(join(root, 'large.bin'), after, after);
+    const changedResult = await resolveComparison(root, 'working');
+    // require the refreshed fixture
+    if (!changedResult.ok) throw new Error(`unexpected ${changedResult.reason}`);
+    const changed = await captureComparisonPatch(root, changedResult.comparison, limits);
+    expect(fileFor(changed, 'small.bin')?.patch).toBe(fileFor(first, 'small.bin')?.patch);
+    expect(fileFor(changed, 'small.bin')?.fingerprint).not.toBe(fileFor(first, 'small.bin')?.fingerprint);
+    expect(fileFor(changed, 'large.bin')?.fingerprint).not.toBe(fileFor(first, 'large.bin')?.fingerprint);
+    expect(changed.fingerprint).not.toBe(first.fingerprint);
   });
 
   it('renders untracked binary files and symlinks as metadata without following them', async () => {
@@ -787,14 +871,73 @@ describe('file at revision', () => {
     expect(image?.content).toBeUndefined();
   });
 
+  // preserve small and medium image reads while leaving oversized images as metadata
+  it('inlines small and medium revision images and leaves oversized images as metadata', async () => {
+    const root = await repo();
+    const header = Buffer.from('89504e470d0a1a0a', 'hex');
+    const small = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+    const medium = Buffer.concat([header, Buffer.alloc(2 * 1024 * 1024 + 17, 3)]);
+    const oversized = Buffer.concat([header, Buffer.alloc(5 * 1024 * 1024, 4)]);
+    await Promise.all([
+      writeFile(join(root, 'small.png'), small),
+      writeFile(join(root, 'medium.png'), medium),
+      writeFile(join(root, 'oversized.png'), oversized)
+    ]);
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'images');
+
+    // the small committed blob skips the header-peek branch
+    await expect(fileAtRevision(root, { commit: 'HEAD' }, 'small.png')).resolves.toEqual({ path: 'small.png', size: small.length, binary: true, truncated: false, image: { mediaType: 'image/png', base64: small.toString('base64') } });
+    // verify immutable and secure working-tree revision sources
+    for (const revision of [{ commit: 'HEAD' } as const, { workingTree: true } as const]) {
+      const preview = await fileAtRevision(root, revision, 'medium.png');
+      expect(preview).toMatchObject({ path: 'medium.png', size: medium.length, binary: true, truncated: false, image: { mediaType: 'image/png' } });
+      expect(Buffer.from(preview?.image?.base64 ?? '', 'base64')).toEqual(medium);
+      await expect(fileAtRevision(root, revision, 'oversized.png')).resolves.toEqual({ path: 'oversized.png', size: oversized.length, binary: true, truncated: false });
+    }
+  }, 20_000);
+
+  // observe actual buffered bytes rather than only the already-trimmed response
+  it.each([0, 1])('bounds git image buffers at and beyond the cap by %i byte', async extra => {
+    const root = await repo();
+    const cap = 5 * 1024 * 1024;
+    const bytes = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(cap + extra - 8)]);
+    await writeFile(join(root, 'cap.png'), bytes);
+    await git(root, 'add', '.');
+    await git(root, 'commit', '-m', 'image boundary');
+    const buffered: number[] = [];
+    const concatenate = Buffer.concat;
+    // measure allocations at the process-output boundary without changing its bytes
+    const spy = vi.spyOn(Buffer, 'concat').mockImplementation((chunks, length) => {
+      // explicit concat lengths determine the allocation even when chunks are shorter
+      buffered.push(length ?? chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+      return concatenate(chunks, length);
+    });
+    let preview;
+    try { preview = await fileAtRevision(root, { commit: 'HEAD' }, 'cap.png'); }
+    finally { spy.mockRestore(); }
+    expect(buffered.length).toBeGreaterThan(0);
+    expect(Math.max(...buffered)).toBeLessThanOrEqual(cap);
+    expect(buffered.filter(size => size < cap).every(size => size <= 12)).toBe(true);
+    // an exact-cap image remains complete rather than being mistaken for truncation
+    if (extra === 0) {
+      expect(preview?.image?.base64 === bytes.toString('base64')).toBe(true);
+      expect(preview?.truncated).toBe(false);
+    } else {
+      expect(preview).toEqual({ path: 'cap.png', size: bytes.length, binary: true, truncated: false });
+    }
+  }, 20_000);
+
   it('truncates a large blob, rejects trees, and refuses an option-like revision', async () => {
     const root = await repo();
     const big = `${'x'.repeat(2 * 1024 * 1024)}\n`;
     const sizable = `${'y'.repeat(300 * 1024)}\n`;
+    const unicode = `${'z'.repeat(2 * 1024 * 1024 - 1)}€tail`;
     await mkdir(join(root, 'dir'));
     await Promise.all([
       writeFile(join(root, 'big.txt'), big),
       writeFile(join(root, 'sizable.txt'), sizable),
+      writeFile(join(root, 'unicode.txt'), unicode),
       writeFile(join(root, 'dir', 'inner.txt'), 'inner\n')
     ]);
     await git(root, 'add', '.');
@@ -808,6 +951,10 @@ describe('file at revision', () => {
     // a file past the 256 KB preview cap still reads whole, at a revision and in the working tree
     await expect(fileAtRevision(root, { commit: 'HEAD' }, 'sizable.txt')).resolves.toMatchObject({ truncated: false, content: sizable });
     await expect(fileAtRevision(root, { workingTree: true }, 'sizable.txt')).resolves.toMatchObject({ truncated: false, content: sizable });
+    // trim only the incomplete utf-8 tail at the two-mebibyte boundary
+    const expectedUnicode = { binary: false, truncated: true, content: 'z'.repeat(2 * 1024 * 1024 - 1) };
+    await expect(fileAtRevision(root, { commit: 'HEAD' }, 'unicode.txt')).resolves.toMatchObject(expectedUnicode);
+    await expect(fileAtRevision(root, { workingTree: true }, 'unicode.txt')).resolves.toMatchObject(expectedUnicode);
 
     // a directory path resolves to a tree object, not a readable file
     await expect(fileAtRevision(root, { commit: 'HEAD' }, 'dir')).resolves.toBeUndefined();
@@ -815,5 +962,5 @@ describe('file at revision', () => {
     await expect(fileAtRevision(root, { commit: '--output=escape.txt' }, 'big.txt')).resolves.toBeUndefined();
     // a NUL in the path is treated as absent rather than throwing
     await expect(fileAtRevision(root, { commit: 'HEAD' }, 'big\0.txt')).resolves.toBeUndefined();
-  });
+  }, 20_000);
 });

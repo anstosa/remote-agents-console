@@ -16,7 +16,7 @@ import { openSelectionContextMenu, preserveContextMenuPress, useSelectionActions
 import { useColorTheme } from '../color-theme.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand } from '../panel-header.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
-import { groupComparisonFiles, type CodePanelCommit, type CodePanelMode, type CodePanelState, type CodePanelView, type CodePanelViewMode, type ExpandedLines, type ScrollAnchor, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView } from './comparison.js';
+import { groupComparisonFiles, previewImageByteLimit, type CodePanelCommit, type CodePanelMode, type CodePanelState, type CodePanelView, type CodePanelViewMode, type ExpandedLines, type ScrollAnchor, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView, type PreviewImage, type RevisionFile } from './comparison.js';
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, isPlaceRelativePath, type EditorTarget } from './editor-jump.js';
 import { annotatedItem, codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, hunkLinesOnlyCSS, loadedFilesFromContents, rememberExpandedLines } from './items.js';
@@ -115,6 +115,18 @@ type OverrideNeed = { path: string; version: number };
 
 const basename = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
 
+// offer previews for capped raster paths without treating svg source as an image
+const isImagePath = (path: string): boolean => /\.(?:png|jpe?g|gif|webp)$/iu.test(path);
+
+// tracked binary patches retain git's binary marker rather than a binary file kind
+const isBinaryPatch = (patch: string): boolean => /^(?:GIT binary patch|Binary files .+ differ)$/mu.test(patch);
+
+// unrelated file edits must not invalidate a selected image's response
+const previewVersion = (file: ComparisonFile, comparison: string, base: string | undefined): string => JSON.stringify([comparison, base, file.fingerprint ?? fileVersion(file), file.change]);
+
+// text comparisons require at least one revision and no binary side
+const isTextComparison = (contents: ComparisonFileContents): boolean => (contents.base !== null || contents.working !== null) && contents.base?.binary !== true && contents.working?.binary !== true;
+
 // Copy text to the clipboard, falling back to a hidden textarea + execCommand when the async
 // Clipboard API is unavailable — RAC is served over LAN http, a non-secure context where
 // `navigator.clipboard` is undefined, so the fallback is what makes copy-path work there.
@@ -142,7 +154,8 @@ const keepKeys = <V,>(record: Record<string, V>, keep: (path: string) => boolean
 // (withheld for size, binary, or a metadata-only change); undefined means it renders as a real diff.
 const placeholderFor = (file: ComparisonFile): Placeholder | undefined => {
   if (file.capped) return { path: file.change.path, reason: 'capped' };
-  if (file.kind === 'binary') return { path: file.change.path, reason: 'binary' };
+  // tracked git binary markers use the same preview action as untracked binaries
+  if (file.kind === 'binary' || isBinaryPatch(file.patch)) return { path: file.change.path, reason: 'binary' };
   if (file.kind === 'metadata') return { path: file.change.path, reason: 'metadata', note: file.patch };
   return undefined;
 };
@@ -204,6 +217,10 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   // items alongside the rest.
   const [loaded, setLoaded] = useState<Record<string, PanelItem>>({});
   const [loadStatus, setLoadStatus] = useState<Record<string, LoadStatus>>({});
+  // each manual load owns one file revision and cannot settle a newer request
+  const loadRequestsRef = useRef(new Map<string, { version: string }>());
+  // reuse a classified response without fetching the same revision again
+  const [previewOverride, setPreviewOverride] = useState<{ version: string; contents: ComparisonFileContents }>();
   // The working-tree contents for the selected file in Plain mode, fetched on demand.
   const [plain, setPlain] = useState<{ path: string; contents?: string; error?: boolean }>();
   // Non-partial rebuilds for files that changed while shown in full context, keyed by path; the item
@@ -232,12 +249,22 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   // unchanged file survives an edit elsewhere. The id-based scroll anchor and the version-guarded item
   // cache are kept so unchanged files stay put.
   const comparisonKey = commit?.sha ?? mode;
+  const comparisonKeyRef = useRef(comparisonKey);
+  comparisonKeyRef.current = comparisonKey;
+  // later navigation wins over an image classification started from the all-files list
+  const navigationRef = useRef({ selectedPath, filePreview, comparisonKey, epoch: 0 });
+  // include external navigation before async responses can settle
+  if (navigationRef.current.selectedPath !== selectedPath || navigationRef.current.filePreview !== filePreview || navigationRef.current.comparisonKey !== comparisonKey) {
+    navigationRef.current = { selectedPath, filePreview, comparisonKey, epoch: navigationRef.current.epoch + 1 };
+  }
   const lastModeRef = useRef(comparisonKey);
   useEffect(() => {
     const modeChanged = lastModeRef.current !== comparisonKey;
     lastModeRef.current = comparisonKey;
+    // a different comparison invalidates all manual loads
     if (modeChanged) {
       setLoaded({}); setLoadStatus({}); setPlain(undefined); setFullOverrides({});
+      loadRequestsRef.current.clear();
       setFileCollapse({});
       anchorRef.current = undefined;
       restoreRef.current = undefined;
@@ -246,18 +273,24 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
       return;
     }
     const live = patch?.files;
-    if (live === undefined) { setLoaded({}); setLoadStatus({}); setFullOverrides({}); return; }
+    // missing comparisons cannot retain pending controls
+    if (live === undefined) { setLoaded({}); setLoadStatus({}); setFullOverrides({}); loadRequestsRef.current.clear(); return; }
     // keep "Load anyway" results for files the Comparison still has (a capped/binary file the reviewer
     // pulled in stays put unless it is gone); keep an override only while its file's version is unchanged
     const present = new Set(live.map(file => file.change.path));
     const versions = new Map(live.map(file => [file.change.path, fileVersion(file)] as const));
+    const previewVersions = new Map(live.map(file => [file.change.path, previewVersion(file, comparisonKey, patch?.gitBase)] as const));
+    // unchanged files keep their request through unrelated live edits
+    for (const [path, request] of loadRequestsRef.current) {
+      // changed or removed revisions release their old loading control
+      if (previewVersions.get(path) !== request.version) loadRequestsRef.current.delete(path);
+    }
     setLoaded(current => keepKeys(current, path => present.has(path)));
-    setLoadStatus(current => keepKeys(current, path => present.has(path)));
+    setLoadStatus(current => keepKeys(current, path => loadRequestsRef.current.has(path)));
     setFullOverrides(current => keepKeys(current, path => versions.get(path) === current[path]?.patchVersion));
     setFileCollapse(current => keepKeys(current, path => present.has(path)));
   }, [comparisonKey, patch?.fingerprint]);
-  // The current Comparison's fingerprint, tracked in a ref so an in-flight "Load anyway" or override
-  // can tell the Comparison changed under it (a stale resolve must not write into the new patch's map).
+  // full-context overrides use the current comparison fingerprint to reject stale rebuilds
   const fingerprintRef = useRef(patch?.fingerprint);
   fingerprintRef.current = patch?.fingerprint;
   // The latest patch, read by the async override resolver (below) to fall back to a fresh partial.
@@ -281,11 +314,31 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   const effectiveSplit = split && !narrow && effectiveMode !== 'plain';
 
   const groups = useMemo(() => patch === undefined ? { implementation: [], supporting: [] } : groupComparisonFiles(patch.files), [patch]);
+  // inspect withheld or non-text patches without guessing content from a filename
+  const { file: selectedPreviewFile, text: selectedTextContents } = useMemo(() => {
+    const file = patch?.files.find(candidate => candidate.change.path === selectedPath);
+    // ordinary text diffs retain their existing renderer even with a raster extension
+    if (file === undefined || file.kind === 'metadata') return { file: undefined, text: undefined };
+    const contents = previewOverride?.version === previewVersion(file, comparisonKey, patch?.gitBase) ? previewOverride.contents : undefined;
+    // restore all primary diff controls once fetched bytes establish ordinary text
+    if (contents !== undefined && isTextComparison(contents)) return { file: undefined, text: contents };
+    return { file: file.capped || file.kind === 'binary' || isBinaryPatch(file.patch) || diffItemForFile(file) === undefined ? file : undefined, text: undefined };
+  }, [patch, selectedPath, comparisonKey, previewOverride]);
+  // unrelated edits must not rebuild a fully hydrated text item
+  const selectedTextItem = useMemo(() => selectedTextContents === undefined ? undefined : diffItemForContents(selectedTextContents), [selectedTextContents]);
 
   // Fetch the working-tree contents for the selected file when Plain mode needs them.
   useEffect(() => {
-    if (patch === undefined || selectedPath === undefined || effectiveMode !== 'plain') { setPlain(undefined); return; }
+    // binary candidates own their preview instead of entering the plain text loader
+    if (patch === undefined || selectedPath === undefined || effectiveMode !== 'plain' || selectedPreviewFile !== undefined) { setPlain(undefined); return; }
+    // skip a selection removed from the comparison
     if (patch.files.every(file => file.change.path !== selectedPath)) return;
+    // reuse classified working text for plain mode instead of fetching it twice
+    if (selectedTextContents !== undefined) {
+      const text = selectedTextContents.working?.content;
+      setPlain(text === undefined ? { path: selectedPath, error: true } : { path: selectedPath, contents: text });
+      return;
+    }
     let cancelled = false;
     const path = selectedPath;
     setPlain({ path });
@@ -296,7 +349,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
       setPlain(text === undefined ? { path, error: true } : { path, contents: text });
     })();
     return () => { cancelled = true; };
-  }, [patch, selectedPath, effectiveMode, loadFile]);
+  }, [patch, selectedPath, effectiveMode, loadFile, selectedPreviewFile, selectedTextContents]);
 
   // Full-context mode hydrates a partial patch with the file's two revisions so the diff library can
   // expand the unchanged lines around each hunk.
@@ -343,6 +396,8 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     if (selectedPath !== undefined) {
       const file = patch.files.find(candidate => candidate.change.path === selectedPath);
       if (file === undefined) return { items: [], placeholders: [], missing: true, overrideNeeds: needs };
+      // image revisions render outside the text diff library
+      if (selectedPreviewFile !== undefined) return { items: [], placeholders: [], missing: false, overrideNeeds: needs };
       // Plain mode always renders the whole current file, even for a file the reviewer earlier
       // pulled in with "Load anyway" — so it wins over the cached diff item.
       if (effectiveMode === 'plain') {
@@ -350,6 +405,8 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
           ? { items: [fileItemForContents(selectedPath, plain.contents)], placeholders: [], missing: false, overrideNeeds: needs }
           : { items: [], placeholders: [], missing: false, overrideNeeds: needs };
       }
+      // classified text uses the same editor, selection, annotations and collapse renderer
+      if (selectedTextItem !== undefined) return { items: [selectedTextItem], placeholders: [], missing: false, overrideNeeds: needs };
       const already = loaded[selectedPath];
       if (already !== undefined) return { items: [already], placeholders: [], missing: false, overrideNeeds: needs };
       const placeholder = placeholderFor(file);
@@ -370,7 +427,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
       if (item !== undefined) nextItems.push(item); else nextPlaceholders.push({ path, reason: 'unrenderable' });
     }
     return { items: nextItems, placeholders: nextPlaceholders, missing: false, overrideNeeds: needs };
-  }, [patch, selectedPath, effectiveMode, plain, groups, supportingExpanded, loaded, fullOverrides]);
+  }, [patch, selectedPath, effectiveMode, plain, groups, supportingExpanded, loaded, fullOverrides, selectedPreviewFile, selectedTextItem]);
 
   // The asked-about lines, each under its last line while its file's patch holds it. `askKey` stands
   // in for them, covering every field read, so a render that moves no thread re-lays out nothing.
@@ -503,24 +560,51 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   latestSnapshot.current = snapshot;
   useLayoutEffect(() => () => onSaveView?.(latestSnapshot.current()), [onSaveView]);
 
+  // explicit navigation supersedes pending image classification
   const openFile = (path: string) => {
+    navigationRef.current.epoch += 1;
+    // preserve the all-files scroll before selecting a file
     if (selectedPath === undefined) anchorRef.current = currentAnchor();
     setDrawerOpen(false);
     onSelectFile(path);
   };
-  const backToAll = () => { setDrawerOpen(false); onClearFile(); };
+  // returning to all files also cancels pending automatic selection
+  const backToAll = () => { navigationRef.current.epoch += 1; setDrawerOpen(false); onClearFile(); };
 
-  // Pull a withheld or binary Change in on demand: fetch its two sides and diff them in the browser.
+  // classify withheld revisions without invalidating requests for unrelated edits
   const loadAnyway = async (path: string) => {
-    const fingerprint = patch?.fingerprint;
+    const file = patch?.files.find(candidate => candidate.change.path === path);
+    // a removed placeholder has no revision to request
+    if (file === undefined) return;
+    const request = { version: previewVersion(file, comparisonKey, patch?.gitBase) };
+    loadRequestsRef.current.set(path, request);
+    const navigation = ++navigationRef.current.epoch;
     setLoadStatus(current => ({ ...current, [path]: 'loading' }));
     const contents = await loadFile(path);
-    // drop a result whose Comparison has since changed — the fingerprint effect already cleared state
-    if (fingerprintRef.current !== fingerprint) return;
+    // a superseded response cannot clear the replacement request's control
+    if (loadRequestsRef.current.get(path) !== request) return;
+    // release only the current request's loading control
+    const complete = () => {
+      loadRequestsRef.current.delete(path);
+      setLoadStatus(current => { const next = { ...current }; delete next[path]; return next; });
+    };
+    const currentPatch = patchRef.current;
+    const currentFile = currentPatch?.files.find(candidate => candidate.change.path === path);
+    // reject changed revisions even before the refresh effect has pruned their ticket
+    if (currentFile === undefined || previewVersion(currentFile, comparisonKeyRef.current, currentPatch?.gitBase) !== request.version) { complete(); return; }
+    // select image revisions instead of trying to parse their bytes as text
+    if (contents !== undefined && (contents.base?.image !== undefined || contents.working?.image !== undefined)) {
+      setPreviewOverride({ version: request.version, contents });
+      // never replace a selection made while these bytes were loading
+      if (navigationRef.current.epoch === navigation) onSelectFile(path);
+      complete();
+      return;
+    }
     const item = contents === undefined ? undefined : diffItemForContents(contents);
+    // failed revisions retain an enabled retry until their version changes
     if (item === undefined) { setLoadStatus(current => ({ ...current, [path]: 'error' })); return; }
     setLoaded(current => ({ ...current, [path]: item }));
-    setLoadStatus(current => { const next = { ...current }; delete next[path]; return next; });
+    complete();
   };
 
   // The selected line range, which the file headers' editor buttons open at (clicking a line number
@@ -588,7 +672,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
 
   const hasDiffs = state === 'ready' && fileCount > 0;
   // render display choices directly in the header flyout at every panel width
-  const viewMenu = hasDiffs ? (closeMenu: () => void) => <div className="code-pane-view-menu">
+  const viewMenu = hasDiffs && selectedPreviewFile === undefined ? (closeMenu: () => void) => <div className="code-pane-view-menu">
     <div className="code-pane-options-group">
       <span className="code-pane-options-label">Diff mode</span>
       <span className="code-pane-segment" role="group" aria-label="Diff mode">
@@ -654,6 +738,8 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
           {state === 'ready' && fileCount === 0 && <p className="code-pane-status">No changes to show.</p>}
           {state === 'ready' && fileCount > 0 && <>
             {missing && <p className="code-pane-status" role="alert">This file isn't part of the current changes. <button type="button" className="code-pane-retry" onClick={backToAll}>Back to all files</button></p>}
+            {/* keep binary candidates outside the text diff renderer */}
+            {selectedPreviewFile !== undefined ? <ComparisonFilePreview key={previewVersion(selectedPreviewFile, comparisonKey, patch?.gitBase)} path={selectedPreviewFile.change.path} loadFile={loadFile} onText={contents => setPreviewOverride({ version: previewVersion(selectedPreviewFile, comparisonKey, patch?.gitBase), contents })} initialContents={previewOverride?.version === previewVersion(selectedPreviewFile, comparisonKey, patch?.gitBase) ? previewOverride.contents : undefined} options={options} onOpenInEditor={onOpenInEditor} /> : <>
             {plainForSelected !== undefined && plainForSelected.contents === undefined && plainForSelected.error !== true && <p className="code-pane-status progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading file…</p>}
             {plainForSelected?.error === true && <p className="code-pane-status" role="alert">Unable to load this file.</p>}
             {selectedPath === undefined && patch?.truncated === true && <p className="code-pane-notice">Some files were left out because the change set is very large.</p>}
@@ -668,7 +754,10 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
                       {placeholder.reason === 'metadata' && (placeholder.note ?? 'Not a regular file')}
                       {placeholder.reason === 'unrenderable' && 'Diff unavailable'}
                     </span>
-                    {(placeholder.reason === 'capped' || placeholder.reason === 'unrenderable') && (
+                    {/* open raster candidates without requesting every file up front */}
+                    {(placeholder.reason === 'binary' || (placeholder.reason !== 'metadata' && isImagePath(placeholder.path))) && <button type="button" className="code-pane-load" aria-label={`Preview ${placeholder.path}`} onClick={() => openFile(placeholder.path)}>Preview</button>}
+                    {/* retain the inline text load action for other withheld files */}
+                    {placeholder.reason !== 'binary' && !isImagePath(placeholder.path) && (placeholder.reason === 'capped' || placeholder.reason === 'unrenderable') && (
                       loadStatus[placeholder.path] === 'error'
                         ? <span className="code-pane-placeholder-error">Could not load</span>
                         : <button type="button" className={`code-pane-load${loadStatus[placeholder.path] === 'loading' ? ' progress-border progress-blue' : ''}`} aria-busy={loadStatus[placeholder.path] === 'loading' || undefined} disabled={loadStatus[placeholder.path] === 'loading'} onClick={() => void loadAnyway(placeholder.path)}>{loadStatus[placeholder.path] === 'loading' && <span className="update-progress-ring" aria-hidden="true" />}{loadStatus[placeholder.path] === 'loading' ? 'Loading…' : 'Load anyway'}</button>
@@ -679,6 +768,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
             )}
             {/* add one disclosure control to each diff header */}
             <CodeView ref={viewRef} className="code-pane-view" options={options} items={visibleItems} renderHeaderPrefix={item => item.type === 'diff' ? <button type="button" className="code-pane-file-collapse" aria-label={`${item.collapsed ? 'Expand' : 'Collapse'} ${item.fileDiff.name}`} aria-expanded={!item.collapsed} title={item.collapsed ? 'Expand file' : 'Collapse file'} onClick={() => toggleFileCollapse(item.id.slice(5))}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg></button> : null} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} renderAnnotation={annotation => annotation.metadata === undefined ? null : ask?.threadFor(annotation.metadata.askId) ?? null} selectedLines={selection} onSelectedLinesChange={setSelection} disableWorkerPool />
+            </>}
           </>}
         </div>
         {narrow && drawerOpen && state === 'ready' && fileCount > 0 && (
@@ -698,6 +788,84 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
       </div>
     </section>
   );
+}
+
+// decode raster bytes only in an image element and report corrupt data accessibly
+function RasterImage({ image, label }: { image: PreviewImage; label: string }) {
+  const source = `data:${image.mediaType};base64,${image.base64}`;
+  const [failed, setFailed] = useState<string>();
+  // a failed previous image must not hide a newer response
+  if (failed === source) return <p className="code-pane-status" role="alert">Unable to display this image.</p>;
+  return <img src={source} alt={label} onError={() => setFailed(source)} />;
+}
+
+// render each revision independently when a change crosses media types
+function ImageRevision({ revision, side, options, onOpenInEditor }: { revision: RevisionFile; side: string; options: PanelOptions; onOpenInEditor?: (target: EditorTarget) => void }) {
+  // bounded source keeps the established highlighted file renderer
+  const items = useMemo<PanelItem[]>(() => !revision.binary && revision.content !== undefined ? [fileItemForContents(revision.path, revision.content)] : [], [revision]);
+  const [selection, setSelection] = useState<CodeViewLineSelection | null>(null);
+  return <figure className="code-pane-image-revision">
+    <figcaption><strong>{side}</strong><span title={revision.path}>{revision.path}</span>
+      {/* only the working source opens the current file, at its selected line */}
+      {side === 'After' && !revision.binary && onOpenInEditor !== undefined && <EditorJumpButton file={revision.path} line={selection === null ? 1 : Math.min(selection.range.start, selection.range.end)} onOpen={onOpenInEditor} />}
+    </figcaption>
+    {/* text and raster sides do not determine each other's renderer */}
+    {!revision.binary ? <div className="code-pane-revision-text">
+      {/* unavailable text stays explicit rather than becoming an empty code view */}
+      {revision.content === undefined ? <p className="code-pane-status">Text preview unavailable.</p> : <CodeView className="code-pane-view" options={options} items={items} onSelectedLinesChange={setSelection} disableWorkerPool />}
+      {/* comparison text retains its separate two-mib cap */}
+      {revision.truncated && <footer className="code-pane-file-truncated">Preview limited to the first 2 MiB.</footer>}
+    </div> : <div className="code-pane-file-image">
+      {/* render complete bytes or explain why this revision has no image */}
+      {revision.image !== undefined ? <RasterImage image={revision.image} label={`${side}: ${revision.path}`} /> : <p className="code-pane-status">{isImagePath(revision.path) && revision.size > previewImageByteLimit ? 'Image exceeds the 5 MiB preview limit.' : 'Binary file — no image preview available.'}</p>}
+    </div>}
+  </figure>;
+}
+
+// request only the selected comparison and discard results after navigation or refresh
+function ComparisonFilePreview({ path, loadFile, onText, initialContents, options, onOpenInEditor }: { path: string; loadFile: CodePanelProps['loadFile']; onText: (contents: ComparisonFileContents) => void; initialContents: ComparisonFileContents | undefined; options: PanelOptions; onOpenInEditor?: (target: EditorTarget) => void }) {
+  const [result, setResult] = useState<{ state: 'loading' } | { state: 'error' } | { state: 'ready'; contents: ComparisonFileContents }>(() => initialContents === undefined ? { state: 'loading' } : { state: 'ready', contents: initialContents });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    // the all-files action may have already fetched this exact revision
+    if (initialContents !== undefined && attempt === 0) return;
+    let cancelled = false;
+    setResult({ state: 'loading' });
+    // isolate failures from text diff state
+    void (async () => {
+      try {
+        const contents = await loadFile(path);
+        // a remounted revision owns its own result
+        if (!cancelled) setResult(contents === undefined ? { state: 'error' } : { state: 'ready', contents });
+      } catch {
+        // transport failures leave a retryable view
+        if (!cancelled) setResult({ state: 'error' });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [path, loadFile, attempt, initialContents]);
+  // hand ordinary text back to the primary renderer after classification
+  useEffect(() => {
+    // image and metadata responses stay in this non-text view
+    if (result.state === 'ready' && isTextComparison(result.contents)) onText(result.contents);
+  }, [result, onText]);
+  // keep loading and retry feedback inside the selected file
+  if (result.state === 'loading') return <p className="code-pane-status progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading image…</p>;
+  // failed requests never fall through to broken image elements
+  if (result.state === 'error') return <p className="code-pane-status" role="alert">Unable to load image preview. <button type="button" className="code-pane-retry" onClick={() => setAttempt(current => current + 1)}>Retry</button></p>;
+  const { base, working } = result.contents;
+  // wait one commit for the existing text renderer to take over
+  if (isTextComparison(result.contents)) return <p className="code-pane-status" role="status">Loading file…</p>;
+  return <div className="code-pane-image-comparison" aria-label={`Image changes: ${path}`} role="group">
+    {/* retain only revisions that actually existed */}
+    {base !== null && <ImageRevision revision={base} side="Before" options={options} />}
+    {working !== null && <ImageRevision revision={working} side="After" options={options} onOpenInEditor={onOpenInEditor} />}
+    {/* distinguish additions and deletions from a failed preview */}
+    {base === null && working !== null && <p className="code-pane-image-note">File added</p>}
+    {working === null && base !== null && <p className="code-pane-image-note">File deleted</p>}
+    {/* handle a file removed from both sides during the request */}
+    {base === null && working === null && <p className="code-pane-status">Image preview unavailable.</p>}
+  </div>;
 }
 
 // The header's Comparison picker: the shown Comparison's name ▾, whose menu switches between Working,
@@ -771,10 +939,14 @@ function FileView({ filePreview, options, style, expanded, onBack, onClose, onOp
           {state === 'loading' && <p className="code-pane-status progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading file…</p>}
           {state === 'error' && <p className="code-pane-status" role="alert">Preview unavailable.</p>}
           {state === 'ready' && preview !== undefined && <>
-            {preview.binary && preview.image !== undefined && <div className="code-pane-file-image"><img src={`data:${preview.image.mediaType};base64,${preview.image.base64}`} alt={`Preview of ${path}`} /></div>}
-            {preview.binary && preview.image === undefined && <p className="code-pane-status">Binary file — no preview available.</p>}
+            {/* inline only complete supported images */}
+            {preview.binary && preview.image !== undefined && <div className="code-pane-file-image"><RasterImage image={preview.image} label={`Preview of ${path}`} /></div>}
+            {/* keep unsupported and oversized binaries readable as metadata */}
+            {preview.binary && preview.image === undefined && <p className="code-pane-status">{isImagePath(path) && preview.size > previewImageByteLimit ? 'Image exceeds the 5 MiB preview limit.' : 'Binary file — no preview available.'}</p>}
+            {/* ordinary source remains highlighted code */}
             {!preview.binary && <CodeView className="code-pane-view" options={options} items={items} {...(onOpenInEditor === undefined ? {} : { renderHeaderMetadata })} onSelectedLinesChange={setSelection} disableWorkerPool />}
-            {preview.truncated && <footer className="code-pane-file-truncated">Preview limited to the first 256 KB.</footer>}
+            {/* the text cap does not describe metadata-only image fallbacks */}
+            {!preview.binary && preview.truncated && <footer className="code-pane-file-truncated">Preview limited to the first 256 KB.</footer>}
           </>}
         </div>
       </div>

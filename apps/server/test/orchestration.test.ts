@@ -70,6 +70,26 @@ function dependencies(overrides: Partial<OrchestrationDependencies> = {}): Orche
 }
 
 describe('OrchestrationService', () => {
+  // integrations must retain their own smaller response limit for raster images
+  it.each([
+    { maxBytes: 32, size: 68, inline: false },
+    { maxBytes: 68, size: 68, inline: true },
+    { maxBytes: undefined, size: 65_537, inline: false }
+  ])('bounds inline image responses at $maxBytes bytes with a $size-byte file', async ({ maxBytes, size, inline }) => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+    const bytes = Buffer.concat([png, Buffer.alloc(size - png.length)]);
+    const service = new OrchestrationService(dependencies({
+      // model the storage boundary returning a complete recognized raster
+      workspaceFiles: { preview: async (_workspace, path) => ({ path, size, binary: true, truncated: false, image: { mediaType: 'image/png', base64: bytes.toString('base64') } }) }
+    }));
+    const result = await service.previewFile({ worktreeId: cora.id, path: 'assets/logo.png', ...(maxBytes === undefined ? {} : { maxBytes }) });
+    // keep unexpected operation errors distinct from a bounded metadata response
+    if (!result.ok) throw new Error(result.error.message);
+    expect('image' in result.value).toBe(inline);
+    expect(result.value.truncated).toBe(!inline);
+    expect(result.value.size).toBe(size);
+  });
+
   // integration summaries share the UI's question priority without changing execution status
   it('includes prose questions in worktree and scratch attention summaries', async () => {
     const deps = dependencies();

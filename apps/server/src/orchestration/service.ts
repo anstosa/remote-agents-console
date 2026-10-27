@@ -156,6 +156,8 @@ function redactIntegrationText(value: string): string {
 
 // copy a file preview through the caller's byte boundary
 function limitPreview(preview: WorkspaceFilePreview, maxBytes: number): FilePreviewV1 {
+  // omit complete raster bytes when they exceed this caller's smaller boundary
+  if (preview.binary && preview.image !== undefined && preview.size > maxBytes) return { path: preview.path, size: preview.size, binary: true, truncated: true };
   // return binary metadata without content
   if (preview.binary || preview.content === undefined) return preview;
   const limited = limitText(redactIntegrationText(preview.content), maxBytes);
