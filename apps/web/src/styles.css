@@ -2314,8 +2314,9 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-diff-toolbar { display: flex; flex: 0 0 auto; justify-content: flex-end; padding: .4rem .6rem; border-bottom: 1px solid var(--surface-1); background: var(--mantle); }
 /* the diff library owns its own scroll container; give it the remaining height to fill and scroll */
 .review-tour-diff-scroll { min-width: 0; min-height: 0; flex: 1 1 auto; overflow: auto; }
-/* an inline comment renders as a diff annotation: light-DOM content slotted under its line */
-.review-tour-inline-comment { display: grid; gap: .4rem; margin: .35rem .6rem .5rem; padding: .55rem .65rem; border: 1px solid color-mix(in srgb, var(--blue) 45%, var(--surface-1)); border-radius: var(--control-radius); background: var(--mantle); color: var(--text); font: 500 .76rem/1.45 var(--font-mono); white-space: normal; }
+/* an inline comment renders as a diff annotation: light-DOM content slotted under its line.
+   Annotation text takes the code's --diffs-font-size; the .76rem fallback covers general Findings outside a diff. */
+.review-tour-inline-comment { display: grid; gap: .4rem; margin: .35rem .6rem .5rem; padding: .55rem .65rem; border: 1px solid color-mix(in srgb, var(--blue) 45%, var(--surface-1)); border-radius: var(--control-radius); background: var(--mantle); color: var(--text); font: 500 var(--diffs-font-size, .76rem)/1.45 var(--font-mono); white-space: normal; }
 .review-tour-inline-comment > small { color: var(--blue); font: 800 .62rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
 .review-tour-inline-comment > p { margin: 0; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
 .review-tour-inline-comment > textarea { box-sizing: border-box; width: 100%; min-height: 5rem; resize: vertical; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .5rem; background: var(--crust); color: var(--text); font: inherit; }
@@ -2324,7 +2325,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-inline-comment button { padding: .3rem .65rem; font-size: .68rem; box-shadow: none; }
 .review-tour-inline-comment button:first-child { border-color: var(--surface-2); background: transparent; color: var(--subtext-0); }
 /* an AI review Finding as a suggested comment: dashed and tinted, so it never reads as the operator's own */
-.review-tour-suggestion { display: grid; gap: .4rem; margin: .35rem .6rem .5rem; padding: .55rem .65rem; border: 1px dashed color-mix(in srgb, var(--mauve) 60%, var(--surface-2)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mauve) 7%, var(--mantle)); color: var(--text); font: 500 .76rem/1.45 var(--font-mono); white-space: normal; }
+.review-tour-suggestion { display: grid; gap: .4rem; margin: .35rem .6rem .5rem; padding: .55rem .65rem; border: 1px dashed color-mix(in srgb, var(--mauve) 60%, var(--surface-2)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mauve) 7%, var(--mantle)); color: var(--text); font: 500 var(--diffs-font-size, .76rem)/1.45 var(--font-mono); white-space: normal; }
 .review-tour-suggestion-title { display: flex; min-width: 0; align-items: baseline; gap: .5rem; }
 .review-tour-suggestion-title strong { min-width: 0; overflow-wrap: anywhere; font-weight: 800; }
 .review-tour-suggestion > p { margin: 0; color: var(--subtext-1); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -2337,7 +2338,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-suggestion.dismissed button { flex: none; border-color: transparent; background: transparent; color: var(--blue); }
 @media (pointer: coarse) { .review-tour-suggestion button { min-height: 2.2rem; padding-inline: .9rem; } }
 /* the gutter "+" choice on picked lines: comment on them or ask about them */
-.review-tour-line-choice { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .4rem; margin: .35rem .6rem .5rem; padding: .3rem .4rem .3rem .65rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); font: 500 .76rem/1.45 var(--font-mono); white-space: normal; }
+.review-tour-line-choice { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .4rem; margin: .35rem .6rem .5rem; padding: .3rem .4rem .3rem .65rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); font: 500 var(--diffs-font-size, .76rem)/1.45 var(--font-mono); white-space: normal; }
 .review-tour-line-choice > small { margin-right: auto; color: var(--overlay-1); font: 800 .62rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
 .review-tour-line-choice button { padding: .3rem .65rem; font-size: .68rem; box-shadow: none; }
 .review-tour-line-choice .review-tour-line-cancel { border-color: var(--surface-2); background: transparent; color: var(--subtext-0); }
@@ -2346,13 +2347,13 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* a Finding's Ask thread, under its suggested or kept comment: questions, the reviewer's Markdown answers and the next question */
 .review-ask-open { display: flex; justify-content: flex-end; margin: -.25rem .6rem .5rem; }
 .review-ask-open button { padding: .2rem .55rem; border-color: transparent; background: transparent; box-shadow: none; color: var(--mauve); font: 700 .66rem var(--font-mono); }
-.review-ask { display: grid; gap: .5rem; margin: -.15rem .6rem .5rem 1.4rem; padding: .5rem .65rem; border-left: 2px solid color-mix(in srgb, var(--mauve) 55%, var(--surface-2)); background: var(--mantle); color: var(--text); font: 500 .76rem/1.45 var(--font-mono); white-space: normal; }
+.review-ask { display: grid; gap: .5rem; margin: -.15rem .6rem .5rem 1.4rem; padding: .5rem .65rem; border-left: 2px solid color-mix(in srgb, var(--mauve) 55%, var(--surface-2)); background: var(--mantle); color: var(--text); font: 500 var(--diffs-font-size, .76rem)/1.45 var(--font-mono); white-space: normal; }
 .review-ask-turn { display: grid; gap: .3rem; }
 .review-ask-question { margin: 0; color: var(--subtext-0); font-weight: 700; white-space: pre-wrap; overflow-wrap: anywhere; }
-.review-ask-answer { padding: 0; overflow-wrap: anywhere; }
+.review-ask-answer { padding: 0; font-size: inherit; overflow-wrap: anywhere; }
 /* Q and A marks hang in a gutter so wrapped lines and Markdown blocks stay aligned */
 .review-ask-question, .review-ask-answer { position: relative; padding-left: 1.4rem; }
-.review-ask-question::before, .review-ask-answer::before { position: absolute; top: 0; left: 0; color: var(--mauve); font: 700 .76rem/1.45 var(--font-mono); }
+.review-ask-question::before, .review-ask-answer::before { position: absolute; top: 0; left: 0; color: var(--mauve); font: 700 1em/1.45 var(--font-mono); }
 .review-ask-question::before { content: "Q"; }
 .review-ask-answer::before { content: "A"; }
 .review-ask-error { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0; color: var(--red); }
