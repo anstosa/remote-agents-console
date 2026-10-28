@@ -2372,7 +2372,10 @@ function useNewTaskPowerOption(task: NewTaskPower | undefined, open: boolean, cl
   if (task === undefined) return null;
   const reason = !configured ? 'Not configured for this worktree.' : availability === undefined ? 'Checking availability…' : availability.enabled ? 'Start a fresh task for this worktree.' : availability.reason ?? 'New Task is currently unavailable.';
   const busy = loading || starting;
-  return <div className="new-task-option" role="none"><button type="button" role="menuitem" className={busy ? 'progress-border progress-blue' : undefined} aria-busy={busy || undefined} disabled={!configured || loading || !availability?.enabled || starting} onClick={() => void start()}><ProgressRing busy={busy} /><MoreMenuIcon name="new-task" />{starting ? 'Starting New Task' : 'New Task'}</button><span className="more-menu-reason" role="status">{reason}</span></div>;
+  // starting mutations override availability reads
+  const progressKind: ProgressKind = starting ? 'working' : 'loading';
+  const busyClass = progressBorder(busy, 'blue', progressKind).trim() || undefined;
+  return <div className="new-task-option" role="none"><button type="button" role="menuitem" className={busyClass} aria-busy={busy || undefined} disabled={!configured || loading || !availability?.enabled || starting} onClick={() => void start()}><ProgressRing busy={busy} /><MoreMenuIcon name="new-task" />{starting ? 'Starting New Task' : 'New Task'}</button><span className="more-menu-reason" role="status">{reason}</span></div>;
 }
 // render configured-agent power choices
 function AgentPowerMenu(props: AgentPowerMenuProps) {

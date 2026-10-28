@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectProgressBorder } from './progress-border-assertions';
+import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions';
 
 test('keeps attachments and repository choices out of the more menu', async ({ page }) => {
   let finishGithubActions!: () => void;
@@ -50,8 +50,14 @@ test('keeps attachments and repository choices out of the more menu', async ({ p
   await page.getByRole('button', { name: 'Agent power options' }).click();
   const powerMenu = page.getByRole('menu', { name: 'Agent power options' });
   const loadingNewTask = powerMenu.getByRole('menuitem', { name: 'New Task', exact: true });
-  await expectProgressBorder(loadingNewTask, 'blue');
+  await expectProgressBorder(loadingNewTask, 'blue', 'loading');
+  await expectClockwiseProgressBorder(loadingNewTask, 'loading');
   await expect(loadingNewTask.locator('.more-menu-icon')).toBeVisible();
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expectReducedMotionSpinner(loadingNewTask, 'blue', 'loading');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await expectProgressBorder(loadingNewTask, 'blue', 'loading');
+  await expectClockwiseProgressBorder(loadingNewTask, 'loading');
   finishNewTask();
   await expect(powerMenu.locator('.new-task-option .more-menu-reason')).toHaveText('Start a fresh task for this worktree.');
   await page.keyboard.press('Escape');

@@ -10,9 +10,13 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   let oldAgentGone = false;
   let replacementReady = false;
   let dashboardRequests = 0;
+  let newTaskAvailabilityReads = 0;
   let transport: { contentType: string | undefined; body: string | null; csrf: string | undefined } | undefined;
   let finishNewTask!: () => void;
+  let finishReopenedAvailability!: () => void;
   const newTaskFinished = new Promise<void>(resolve => { finishNewTask = resolve; });
+  // hold availability while a new task is already starting
+  const reopenedAvailabilityFinished = new Promise<void>(resolve => { finishReopenedAvailability = resolve; });
 
   await installPaneMock(page);
   await page.addInitScript(() => {
@@ -33,7 +37,12 @@ test('keeps a new-task processing indicator visible until the replacement agent 
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/new-task' && request.method() === 'GET') return route.fulfill({ json: { enabled: true } });
+    if (url.pathname === '/api/agents/agent-1/new-task' && request.method() === 'GET') {
+      newTaskAvailabilityReads += 1;
+      // hold the reopened read under the active mutation
+      if (newTaskAvailabilityReads > 1) await reopenedAvailabilityFinished;
+      return route.fulfill({ json: { enabled: true } });
+    }
     if (url.pathname === '/api/agents/agent-1/new-task' && request.method() === 'POST') {
       // capture the real browser request before accepting a task reset
       transport = { contentType: request.headers()['content-type'], body: request.postData(), csrf: request.headers()['x-csrf-token'] };
@@ -69,18 +78,32 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   await page.getByRole('menu', { name: 'Agent power options' }).getByRole('menuitem', { name: 'New Task', exact: true }).click();
 
   await expect.poll(() => transport).toEqual({ contentType: 'application/json', body: '{}', csrf: 'csrf-token' });
+  const power = page.getByRole('button', { name: 'Agent power options' });
+  await expect(power).toBeEnabled();
+  await power.click();
+  // require the overlapping availability request before checking motion
+  await expect.poll(() => newTaskAvailabilityReads).toBe(2);
+  const powerMenu = page.getByRole('menu', { name: 'Agent power options' });
+  const startingNewTask = powerMenu.getByRole('menuitem', { name: 'Starting New Task', exact: true });
+  await expectProgressBorder(startingNewTask, 'blue', 'working');
+  await expectClockwiseProgressBorder(startingNewTask, 'working');
+  finishReopenedAvailability();
+  await page.keyboard.press('Escape');
   const processing = page.locator('.log-loading[role="status"]');
   await expect(processing).toBeVisible();
   await expect(processing).toContainText('preparing a fresh agent');
   await expectSplitProgressBorder(panel, 'peach');
+  await expectProgressBorder(processing, 'peach', 'working');
+  await expectClockwiseProgressBorder(processing, 'working');
   await expect(page.getByRole('status').filter({ hasText: 'Starting a new task' })).toContainText('You can keep using other tabs');
   const startingTab = page.getByRole('tab', { name: 'Cora — Starting new task' });
-  await expectProgressBorder(startingTab, 'blue');
+  await expectProgressBorder(startingTab, 'blue', 'working');
+  await expectClockwiseProgressBorder(startingTab, 'working');
   await expect(startingTab.locator('.tab-kind-stack')).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expectSplitProgressBorder(panel, 'peach');
   const phoneStartingTab = page.getByRole('tab', { name: 'Cora — Starting new task' });
-  await expectProgressBorder(phoneStartingTab, 'blue');
+  await expectProgressBorder(phoneStartingTab, 'blue', 'working');
   await expect(phoneStartingTab.locator('.tab-kind-stack')).toBeVisible();
   // keep the workspace name and transition on distinct readable rows
   const phoneName = phoneStartingTab.locator('.workspace-dropdown-label > span');
@@ -100,6 +123,7 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   await expect(page.getByRole('tab', { name: 'Cora — Starting new task' })).toBeVisible();
   await expect(processing).toBeVisible();
   await expectSplitProgressBorder(panel, 'blue');
+  await expectProgressBorder(processing, 'blue', 'working');
 
   finishNewTask();
   await expect(page.getByRole('alert').filter({ hasText: 'New task is taking longer than expected' })).toBeVisible();
@@ -149,9 +173,12 @@ test('shows the new-task banner only on its worktree', async ({ page }) => {
 
   const banner = page.getByRole('status').filter({ hasText: 'Starting a new task' });
   await expect(banner).toBeVisible();
+  const startingTab = page.getByRole('tab', { name: 'Cora — Starting new task' });
+  await expectProgressBorder(startingTab, 'blue', 'working');
+  await expectClockwiseProgressBorder(startingTab, 'working');
   await page.getByRole('tab', { name: 'Delta — Agent closed' }).click();
   await expect(banner).toHaveCount(0);
-  await page.getByRole('tab', { name: 'Cora — Starting new task' }).click();
+  await startingTab.click();
   await expect(banner).toBeVisible();
   finishNewTask();
 });
