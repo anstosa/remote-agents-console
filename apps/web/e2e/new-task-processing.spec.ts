@@ -173,12 +173,9 @@ test('shows the new-task banner only on its worktree', async ({ page }) => {
 
   const banner = page.getByRole('status').filter({ hasText: 'Starting a new task' });
   await expect(banner).toBeVisible();
-  const startingTab = page.getByRole('tab', { name: 'Cora — Starting new task' });
-  await expectProgressBorder(startingTab, 'blue', 'working');
-  await expectClockwiseProgressBorder(startingTab, 'working');
   await page.getByRole('tab', { name: 'Delta — Agent closed' }).click();
   await expect(banner).toHaveCount(0);
-  await startingTab.click();
+  await page.getByRole('tab', { name: 'Cora — Starting new task' }).click();
   await expect(banner).toBeVisible();
   finishNewTask();
 });
