@@ -306,6 +306,10 @@ const editorControl = (scope: Locator, label: string) => scope
   .getByRole("combobox", { name: label, exact: true })
   .or(scope.getByRole("switch", { name: label, exact: true }));
 
+// one table's section in the stacked key-table editor
+const keyTable = (editor: Locator, name: string) =>
+  editor.getByRole("region", { name: `${name} key table`, exact: true });
+
 // select an explicit option in the shared settings control
 async function chooseEditorOption(
   settings: Locator,
@@ -339,21 +343,17 @@ for (const width of [320, 390, 1440]) {
     await setupShortcutSettings(page, { width });
     const { settings, editor } = await openKeyTables(page);
     const view = editorControl(settings, "Keyboard editor view");
-    const table = editorControl(editor, "Key table");
     const name = editor.getByRole("textbox", {
       name: "New table name",
       exact: true,
     });
-    const [viewBox, tableBox, nameBox] = await Promise.all([
+    const [viewBox, nameBox] = await Promise.all([
       view.boundingBox(),
-      table.boundingBox(),
       name.boundingBox(),
     ]);
     expect(viewBox).not.toBeNull();
-    expect(tableBox).not.toBeNull();
     expect(nameBox).not.toBeNull();
     expect(viewBox!.height).toBeGreaterThanOrEqual(nameBox!.height);
-    expect(Math.abs(tableBox!.height - nameBox!.height)).toBeLessThanOrEqual(1);
     expect(
       await view
         .locator(".settings-select-switch-choice")
@@ -388,10 +388,9 @@ for (const width of [390, 1440]) {
     await editor
       .getByRole("button", { name: "Add table", exact: true })
       .click();
-    await expect(
-      editorControl(editor, "Key table"),
-    ).toHaveAttribute("data-value", "tools");
-    await editor
+    const tools = keyTable(editor, "tools");
+    await expect(tools).toBeVisible();
+    await tools
       .getByRole("button", { name: "Add binding", exact: true })
       .click();
     const form = editor.getByRole("group", {
@@ -406,9 +405,8 @@ for (const width of [390, 1440]) {
     await form
       .getByRole("button", { name: "Apply binding", exact: true })
       .click();
-    await expect(editor.locator('[data-key-chord="C-S-k"]')).toBeVisible();
-    await chooseEditorOption(editor, "Key table", "root");
-    const prefix = editor.locator('[data-key-chord="C-b"]');
+    await expect(tools.locator('[data-key-chord="C-S-k"]')).toBeVisible();
+    const prefix = keyTable(editor, "root").locator('[data-key-chord="C-b"]');
     await prefix
       .getByRole("button", { name: "Edit binding", exact: true })
       .click();
@@ -445,8 +443,8 @@ test("retains an Add binding form after active chord collisions without staging 
     savedKeys: { prefix: { v: "new-terminal" } },
   });
   const { settings, editor } = await openKeyTables(page);
-  await chooseEditorOption(editor, "Key table", "prefix");
-  await editor
+  const prefix = keyTable(editor, "prefix");
+  await prefix
     .getByRole("button", { name: "Add binding", exact: true })
     .click();
   const form = editor.getByRole("group", {
@@ -462,7 +460,7 @@ test("retains an Add binding form after active chord collisions without staging 
   await form
     .getByRole("button", { name: "Apply binding", exact: true })
     .click();
-  await expect(editor.getByRole("alert")).toContainText("already assigned");
+  await expect(prefix.getByRole("alert")).toContainText("already assigned");
   await expect(form).toBeVisible();
   await expect(
     form.getByRole("combobox", { name: "Action", exact: true }),
@@ -472,7 +470,7 @@ test("retains an Add binding form after active chord collisions without staging 
   await form
     .getByRole("button", { name: "Apply binding", exact: true })
     .click();
-  await expect(editor.getByRole("alert")).toContainText("already assigned");
+  await expect(prefix.getByRole("alert")).toContainText("already assigned");
   await expect(form).toBeVisible();
   await expect(
     settings.getByRole("button", { name: "Save changes", exact: true }),
@@ -481,13 +479,12 @@ test("retains an Add binding form after active chord collisions without staging 
   expect(state.saves).toHaveLength(0);
 });
 
-test("preserves an unapplied binding form when the active editor and table are reselected", async ({
+test("preserves an unapplied binding form when the active editor is reselected", async ({
   page,
 }) => {
   await setupShortcutSettings(page);
   const { settings, editor } = await openKeyTables(page);
-  await chooseEditorOption(editor, "Key table", "prefix");
-  await editor
+  await keyTable(editor, "prefix")
     .getByRole("button", { name: "Add binding", exact: true })
     .click();
   const form = editor.getByRole("group", {
@@ -505,8 +502,6 @@ test("preserves an unapplied binding form when the active editor and table are r
     .fill("  printf synthetic-form  ");
   await chooseEditorOption(settings, "Keyboard editor view", "Key tables");
   await expect(form).toBeVisible();
-  await chooseEditorOption(editor, "Key table", "prefix");
-  await expect(form).toBeVisible();
   await expect(recorder).toHaveValue("Ctrl + F9");
   await expect(
     form.getByRole("textbox", { name: "New terminal command", exact: true }),
@@ -523,8 +518,8 @@ test("reactivates an explicit null slot at its raw chord and labels custom null 
     savedKeys: { tools: { "S-C-c": null } },
   });
   const { settings, editor } = await openKeyTables(page);
-  await chooseEditorOption(editor, "Key table", "tools");
-  const disabled = editor.locator('[data-key-chord="C-S-c"]');
+  const tools = keyTable(editor, "tools");
+  const disabled = tools.locator('[data-key-chord="C-S-c"]');
   await expect(disabled).toContainText("Disabled binding");
   await expect(
     disabled.getByRole("button", { name: "Remove binding", exact: true }),
@@ -532,7 +527,7 @@ test("reactivates an explicit null slot at its raw chord and labels custom null 
   await expect(
     disabled.getByRole("button", { name: "Restore default", exact: true }),
   ).toHaveCount(0);
-  await editor
+  await tools
     .getByRole("button", { name: "Add binding", exact: true })
     .click();
   const form = editor.getByRole("group", {
@@ -546,7 +541,7 @@ test("reactivates an explicit null slot at its raw chord and labels custom null 
   await form
     .getByRole("button", { name: "Apply binding", exact: true })
     .click();
-  await expect(editor.locator('[data-key-chord="C-S-c"]')).toContainText(
+  await expect(tools.locator('[data-key-chord="C-S-c"]')).toContainText(
     "Command palette",
   );
   await settings
@@ -563,33 +558,31 @@ test("retargets inbound bindings on table rename and blocks removal until refere
     savedKeys: { root: { "C-g": { table: "tools" } }, tools: {} },
   });
   const { settings, editor } = await openKeyTables(page);
-  await chooseEditorOption(editor, "Key table", "tools");
+  const tools = keyTable(editor, "tools");
   await expect(
-    editor.getByText("Entered by: root: Ctrl + G", { exact: true }),
+    tools.getByText("Entered by: root: Ctrl + G", { exact: true }),
   ).toBeVisible();
-  await editor
+  await tools
     .getByRole("button", { name: "Remove tools table", exact: true })
     .click();
-  await expect(editor.getByRole("alert")).toContainText(
+  await expect(tools.getByRole("alert")).toContainText(
     "still referenced by root.C-g",
   );
-  await editor
+  await tools
     .getByRole("button", { name: "Rename table", exact: true })
     .click();
-  await editor
+  await tools
     .getByRole("textbox", { name: "Table name", exact: true })
     .fill("utilities");
-  await editor
+  await tools
     .getByRole("button", { name: "Apply table name", exact: true })
     .click();
+  const utilities = keyTable(editor, "utilities");
+  await expect(tools).toHaveCount(0);
   await expect(
-    editorControl(editor, "Key table"),
-  ).toHaveAttribute("data-value", "utilities");
-  await expect(
-    editor.getByText("Entered by: root: Ctrl + G", { exact: true }),
+    utilities.getByText("Entered by: root: Ctrl + G", { exact: true }),
   ).toBeVisible();
-  await chooseEditorOption(editor, "Key table", "root");
-  const inbound = editor.locator('[data-key-chord="C-g"]');
+  const inbound = keyTable(editor, "root").locator('[data-key-chord="C-g"]');
   await expect(inbound).toContainText("Switch to the utilities table");
   await inbound
     .getByRole("button", { name: "Edit binding", exact: true })
@@ -603,13 +596,10 @@ test("retargets inbound bindings on table rename and blocks removal until refere
   await form
     .getByRole("button", { name: "Apply binding", exact: true })
     .click();
-  await chooseEditorOption(editor, "Key table", "utilities");
-  await editor
+  await utilities
     .getByRole("button", { name: "Remove utilities table", exact: true })
     .click();
-  await expect(
-    editorControl(editor, "Key table"),
-  ).toHaveAttribute("data-value", "root");
+  await expect(utilities).toHaveCount(0);
   await settings
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
@@ -628,8 +618,8 @@ test("moves a raw-spelled terminal binding without changing command bytes or reu
     savedKeys: { tools: { "C-G": terminal } },
   });
   const { settings, editor } = await openKeyTables(page);
-  await chooseEditorOption(editor, "Key table", "tools");
-  const row = editor.locator('[data-key-chord="C-S-g"]');
+  const tools = keyTable(editor, "tools");
+  const row = tools.locator('[data-key-chord="C-S-g"]');
   await expect(row).toContainText("Terminal running gh");
   await expect(editor).not.toContainText("SYNTHETIC_TOKEN");
   await row
@@ -641,7 +631,7 @@ test("moves a raw-spelled terminal binding without changing command bytes or reu
   await row
     .getByRole("button", { name: "Apply shortcut", exact: true })
     .click();
-  await expect(editor.locator('[data-key-chord="M-h"]')).toContainText(
+  await expect(tools.locator('[data-key-chord="M-h"]')).toContainText(
     "Terminal running gh",
   );
   await settings
@@ -663,11 +653,11 @@ test("locks editor navigation during held validation and preserves an unapplied 
 }) => {
   const state = await setupShortcutSettings(page);
   const { settings, editor } = await openKeyTables(page);
-  await chooseEditorOption(editor, "Key table", "prefix");
-  await editor
+  const prefix = keyTable(editor, "prefix");
+  await prefix
     .getByRole("button", { name: "Disable c in prefix", exact: true })
     .click();
-  await editor
+  await prefix
     .getByRole("button", { name: "Add binding", exact: true })
     .click();
   const form = editor.getByRole("group", {
@@ -705,9 +695,6 @@ test("locks editor navigation during held validation and preserves an unapplied 
   await expect(
     editorControl(settings, "Keyboard editor view"),
   ).toBeDisabled();
-  await expect(
-    editorControl(editor, "Key table"),
-  ).toBeDisabled();
   await expect(form).toBeVisible();
   await expect(recorder).toHaveValue("Ctrl + F9");
   await expect(commandInput).toHaveValue("  printf held-form  ");
@@ -723,9 +710,6 @@ test("locks editor navigation during held validation and preserves an unapplied 
   await expect(commandInput).toHaveValue("  printf held-form  ");
   await expect(
     editorControl(settings, "Keyboard editor view"),
-  ).toBeEnabled();
-  await expect(
-    editorControl(editor, "Key table"),
   ).toBeEnabled();
   expect(state.saves).toHaveLength(0);
 });
@@ -759,8 +743,7 @@ test("revokes a delayed protected terminal reveal when the binding is disabled",
     });
   });
   const { settings, editor } = await openKeyTables(page);
-  await chooseEditorOption(editor, "Key table", "secret");
-  const row = editor.locator('[data-key-chord="C-S-g"]');
+  const row = keyTable(editor, "secret").locator('[data-key-chord="C-S-g"]');
   await page.evaluate((secret) => {
     const current = window as ShortcutWatchWindow;
     current.__shortcutSecretSeen = false;
@@ -818,91 +801,19 @@ test("revokes a delayed protected terminal reveal when the binding is disabled",
   expect(state.saves).toHaveLength(0);
 });
 
-for (const delayed of [false, true]) {
-  test(`revokes an ${delayed ? "in-flight" : "accepted"} protected terminal reveal when Add table navigates`, async ({
-    page,
-  }) => {
-    const protectedTerminal = {
-      terminal: { __racProtected: true, present: true },
-      reuse: false,
-    };
-    const state = await setupShortcutSettings(page, {
-      savedKeys: { secret: { s: protectedTerminal } },
-    });
-    let releaseReveal = () => undefined;
-    let revealRequests = 0;
-    // delay only the in-flight variant so both disclosure states cross Add table
-    if (delayed) {
-      const heldReveal = new Promise<void>((resolve) => {
-        releaseReveal = resolve;
-      });
-      await page.route("**/api/settings/reveal", async (route) => {
-        revealRequests += 1;
-        const body = route.request().postDataJSON() as { revisionId: string };
-        await heldReveal;
-        await route.fulfill({
-          json: {
-            value: "synthetic-add-table-plaintext",
-            revisionId: body.revisionId,
-            leaseId: "add-table-late-lease",
-            expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          },
-        });
-      });
-    }
-    const { editor } = await openKeyTables(page);
-    await chooseEditorOption(editor, "Key table", "secret");
-    const protectedRow = editor.locator('[data-key-chord="s"]');
-    await protectedRow
-      .getByRole("button", { name: "Reveal Terminal command", exact: true })
-      .click();
-    // wait for either the pending request or accepted disclosure
-    if (delayed) await expect.poll(() => revealRequests).toBe(1);
-    else
-      await expect(
-        protectedRow.getByRole("button", {
-          name: "Mask Terminal command",
-          exact: true,
-        }),
-      ).toBeVisible();
-    await editor
-      .getByRole("textbox", { name: "New table name", exact: true })
-      .fill(delayed ? "pending-table" : "accepted-table");
-    await editor
-      .getByRole("button", { name: "Add table", exact: true })
-      .click();
-    releaseReveal();
-    await expect(
-      editorControl(editor, "Key table"),
-    ).toHaveAttribute(
-      "data-value",
-      delayed ? "pending-table" : "accepted-table",
-    );
-    await expect
-      .poll(() => state.remasks)
-      .toContainEqual({
-        leaseId: delayed ? "add-table-late-lease" : "shortcut-lease-1",
-      });
-    await expect(editor).not.toContainText(
-      delayed ? "synthetic-add-table-plaintext" : "synthetic-terminal-command",
-    );
-    expect(state.saves).toHaveLength(0);
-  });
-}
-
 for (const action of ["Discard changes", "Refresh files"] as const) {
   test(`${action} clears an unapplied key-table binding form`, async ({
     page,
   }) => {
     await setupShortcutSettings(page);
     const { settings, editor } = await openKeyTables(page);
-    await chooseEditorOption(editor, "Key table", "prefix");
+    const prefix = keyTable(editor, "prefix");
     // discard needs one shared draft while refresh intentionally exercises local-only state
     if (action === "Discard changes")
-      await editor
+      await prefix
         .getByRole("button", { name: "Disable c in prefix", exact: true })
         .click();
-    await editor
+    await prefix
       .getByRole("button", { name: "Add binding", exact: true })
       .click();
     const form = editor.getByRole("group", {
@@ -921,7 +832,7 @@ for (const action of ["Discard changes", "Refresh files"] as const) {
     if (action === "Discard changes") await confirmSettingsDiscard(page);
     await expect(form).toHaveCount(0);
     await expect(
-      editor.getByRole("button", { name: "Add binding", exact: true }),
+      prefix.getByRole("button", { name: "Add binding", exact: true }),
     ).toBeVisible();
     await expect(
       settings.getByRole("button", { name: "Save changes", exact: true }),
@@ -940,15 +851,15 @@ test("locks key-table controls while Refresh waits for an active terminal remask
     savedKeys: { secret: { s: protectedTerminal } },
   });
   const { settings, editor } = await openKeyTables(page);
-  await chooseEditorOption(editor, "Key table", "secret");
-  const row = editor.locator('[data-key-chord="s"]');
+  const secret = keyTable(editor, "secret");
+  const row = secret.locator('[data-key-chord="s"]');
   await row
     .getByRole("button", { name: "Reveal Terminal command", exact: true })
     .click();
   await expect(
     row.getByRole("button", { name: "Mask Terminal command", exact: true }),
   ).toBeVisible();
-  await editor
+  await secret
     .getByRole("button", { name: "Add binding", exact: true })
     .click();
   const form = editor.getByRole("group", {
@@ -982,12 +893,9 @@ test("locks key-table controls while Refresh waits for an active terminal remask
   await expect(
     editorControl(settings, "Keyboard editor view"),
   ).toBeDisabled();
-  await expect(
-    editorControl(editor, "Key table"),
-  ).toBeDisabled();
   await expect(form).toHaveCount(0);
   await expect(
-    editor.getByRole("button", { name: "Add binding", exact: true }),
+    secret.getByRole("button", { name: "Add binding", exact: true }),
   ).toBeDisabled();
   releaseRemask();
   await expect(refresh).toBeEnabled();

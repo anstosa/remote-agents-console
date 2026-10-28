@@ -477,12 +477,6 @@ test("uses single-line shell editors for safe and protected terminal bindings", 
   test.setTimeout(90_000);
   const { settings, state } = await setupShellSettings(page);
   await selectSection(settings, "Keyboard shortcuts");
-  // switch from the root table to the second configured table
-  const keyTable = settings.getByRole("switch", { name: "Key table", exact: true });
-  await expect(keyTable).not.toBeChecked();
-  await keyTable.click();
-  await expect(keyTable).toBeChecked();
-
   const safeRow = settings.locator(
     '[data-key-table="prefix"] [data-key-chord="t"]',
   );

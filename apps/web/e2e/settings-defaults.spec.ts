@@ -411,16 +411,6 @@ async function selectSection(settings: Locator, id: string, label: string) {
     .click();
 }
 
-// choose one exact option from a custom settings dropdown
-async function chooseOption(selector: Locator, value: string) {
-  await selector.click();
-  await selector
-    .page()
-    .getByRole("listbox")
-    .locator(`[role="option"][data-value=${JSON.stringify(value)}]`)
-    .click();
-}
-
 // prove a standard switch sits to the right and centers on its copy
 async function expectRightAlignedSwitch(field: Locator, label: string) {
   const toggle = field.locator(".client-settings-toggle");
@@ -755,11 +745,7 @@ test("keeps protected keyboard defaults masked and renders their reuse switch", 
   const { settings, state } = await setupDefaults(page);
   await selectSection(settings, "keyboard", "Keyboard shortcuts");
   const editor = settings.getByRole("region", { name: "Edit key tables" });
-  await chooseOption(
-    editor.getByRole("combobox", { name: "Key table", exact: true }),
-    "secret",
-  );
-  const protectedRow = editor.locator('[data-key-chord="s"]');
+  const protectedRow = editor.locator('[data-key-table="secret"] [data-key-chord="s"]');
   // protected controls keep their description without repeating the source label
   await expect(protectedRow.locator(".settings-field-origin")).toHaveCount(0);
   await expect(protectedRow).toContainText("Protected terminal command");
