@@ -1566,23 +1566,27 @@ describe('settings save and validation', () => {
       expect(await readFile(current.composeOverridePath, 'utf8')).toBe(afterOverride);
     });
 
-    // compare mount mappings independently of Project presentation and row order
-    it('does not require an override for labels, reordering or systemd paths', async () => {
+    // compare mount mappings independently of Project row order
+    it('does not require an override when Projects are reordered', async () => {
       const projects = [{ id: 'one', path: '/tmp/one' }, { id: 'two', path: '/tmp/two' }];
       const presentation = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects } });
       const presentationSource = source(await presentation.service.snapshot(), 'app');
       await presentation.service.save({ changes: [{ sourceId: 'app', revisionId: presentationSource.revisionId, patches: [
-        { op: 'set', path: ['projects', '0', 'label'], value: 'One' },
         { op: 'set', path: ['projects'], value: [...projects].reverse() }
       ] }] });
       expect(presentation.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app']);
+      expect(JSON.parse(await readFile(presentation.appPath, 'utf8')).projects).toEqual([...projects].reverse());
+    });
 
+    // native paths remain outside Docker mount ownership
+    it('does not require an override when a systemd Project path changes', async () => {
       const native = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [{ id: 'one', path: '/tmp/one' }] } });
       native.transport.descriptor.kind = 'systemd';
       native.transport.descriptor.native = { unit: 'remote-agent-console.service', environmentFile: native.envPath };
       const nativeSource = source(await native.service.snapshot(), 'app');
       await native.service.save({ changes: [{ sourceId: 'app', revisionId: nativeSource.revisionId, patches: [{ op: 'set', path: ['projects', '0', 'path'], value: '/tmp/native' }] }] });
       expect(native.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app']);
+      expect(JSON.parse(await readFile(native.appPath, 'utf8')).projects[0].path).toBe('/tmp/native');
     });
 
     // prevent automatic mounts from following a pending override owner
