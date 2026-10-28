@@ -388,7 +388,7 @@ describe('LaunchService', () => {
     await expect(service.launch('cora')).resolves.toBe(true);
     const freshSession = run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[];
     expect(freshSession.slice(0, 11)).toEqual(['-S', '/host-tmux/default', 'new-session', '-d', '-s', 'cora', '-c', '/home/ubuntu/cora', '-P', '-F', '#{pane_id}']);
-    expect(freshSession.slice(11)).toEqual(terminalColorFallbackArgv('tmux', ['/usr/bin/zsh', '-lc', freshSession.at(-1)!]));
+    expect(freshSession.slice(11)).toEqual(['--', ...terminalColorFallbackArgv('tmux', ['/usr/bin/zsh', '-lc', freshSession.at(-1)!])]);
     // a fresh launch runs the configured program unchanged — no resume verb
     expect(freshSession.at(-1)).toContain('codex');
     expect(freshSession.at(-1)).not.toContain('resume');
@@ -554,7 +554,7 @@ describe('LaunchService', () => {
 
     // the idle shell is a plain host new-session (no displacement), in the worktree dir
     const created = run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[];
-    expect(created.slice(0, 11)).toEqual(['-S', '/host-tmux/default', 'new-session', '-d', '-s', 'owen', '-P', '-F', '#{pane_id}', '-c', '/home/ubuntu/owen']);
+    expect(created.slice(0, 11)).toEqual(['-S', '/host-tmux/default', 'new-session', '-d', '-s', 'owen', '-c', '/home/ubuntu/owen', '-P', '-F', '#{pane_id}']);
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-t', '%7', '@rac_place', 'owen']);
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%7', '@rac_console_managed', '1']);
     expect(run.mock.calls.some(call => (call[1] as string[]).includes('rename-session'))).toBe(false);
@@ -614,7 +614,7 @@ describe('LaunchService', () => {
 
     // initialize colors before the login shell without a node runner or descriptor
     const created = run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[];
-    expect(created).toEqual(['new-session', '-d', '-s', 'owen', '-c', '/worktrees/owen', '-P', '-F', '#{pane_id}', ...terminalColorFallbackArgv('/usr/bin/tmux', ['/usr/bin/zsh', '-l'])]);
+    expect(created).toEqual(['new-session', '-d', '-s', 'owen', '-c', '/worktrees/owen', '-P', '-F', '#{pane_id}', '--', ...terminalColorFallbackArgv('/usr/bin/tmux', ['/usr/bin/zsh', '-l'])]);
   });
 
   it('suffixes a local worktree launch past a session name an unrelated tmux session already holds', async () => {
@@ -632,7 +632,7 @@ describe('LaunchService', () => {
     // launched under a suffixed name via the node runner, never the taken base name
     const created = run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[];
     expect(created.slice(0, 7)).toEqual(['new-session', '-d', '-s', 'owen-2', '-P', '-F', '#{pane_id}']);
-    expect(created.slice(7)).toEqual(terminalColorFallbackArgv('/usr/bin/tmux', [process.execPath, created.at(-2)!, created.at(-1)!]));
+    expect(created.slice(7)).toEqual(['--', ...terminalColorFallbackArgv('/usr/bin/tmux', [process.execPath, created.at(-2)!, created.at(-1)!])]);
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['set-option', '-t', '%7', '@rac_place', 'owen']);
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['set-option', '-p', '-t', '%7', '@rac_console_managed', '1']);
   });
@@ -1354,7 +1354,7 @@ describe('LaunchService', () => {
 
       expect(tmuxCall('new-window')?.slice(0, 9)).toEqual(['-S', '/tmp/tmux-1000/default', 'new-window', '-d', '-t', '$7', '-P', '-F', '#{pane_id}']);
       const created = tmuxCall('new-window')!;
-      expect(created.slice(9)).toEqual(terminalColorFallbackArgv('/usr/bin/tmux', [process.execPath, created.at(-2)!, created.at(-1)!]));
+      expect(created.slice(9)).toEqual(['--', ...terminalColorFallbackArgv('/usr/bin/tmux', [process.execPath, created.at(-2)!, created.at(-1)!])]);
       expect(tmuxCall('new-window')?.join(' ')).not.toContain(codexProgram);
     });
 
