@@ -1,88 +1,82 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { hostInteractiveShellPath, interactiveShellBootstrap, interactiveShellPath } from '../src/tmux/interactive-shell.js';
 
 const previousInteractiveShell = process.env.RAC_INTERACTIVE_SHELL;
 const previousHostInteractiveShell = process.env.RAC_HOST_INTERACTIVE_SHELL;
+const homes: string[] = [];
 
 // restore shared runtime configuration
-afterEach(() => {
+afterEach(async () => {
   if (previousInteractiveShell === undefined) delete process.env.RAC_INTERACTIVE_SHELL;
   else process.env.RAC_INTERACTIVE_SHELL = previousInteractiveShell;
   if (previousHostInteractiveShell === undefined) delete process.env.RAC_HOST_INTERACTIVE_SHELL;
   else process.env.RAC_HOST_INTERACTIVE_SHELL = previousHostInteractiveShell;
+  await Promise.all(homes.splice(0).map(home => rm(home, { recursive: true, force: true })));
 });
 
+const fish = ['/usr/bin/fish', '/usr/local/bin/fish', '/home/linuxbrew/.linuxbrew/bin/fish'].find(path => existsSync(path));
+
+// run a bootstrap the way a pane does (`<shell> -lc`) in a HOME whose rc file sets MARKER
+async function runBootstrap(shell: string, rc: string, command: string, stay = false, input = ''): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), 'rac-shell-'));
+  homes.push(home);
+  await mkdir(join(home, '.config', 'fish'), { recursive: true });
+  await writeFile(join(home, rc), shell.endsWith('fish') ? 'set -gx MARKER rc\n' : 'export MARKER=rc\n');
+  return execFileSync(shell, ['-lc', interactiveShellBootstrap(command, home, shell, stay)], { env: { PATH: '/usr/bin:/bin', TERM: 'dumb' }, input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+}
+
+const probe = `printf '%s|%s|%s\\n' "$MARKER" "\${RAC_AGENT_COMMAND-unset}" "it's"`;
+
 describe('interactive agent shell', () => {
-  it('starts the agent from the first prompt after job control is active', () => {
+  it('execs the command from an interactive zsh, carrying it in the environment', () => {
     const command = "cd -- '/home/ubuntu/dave' && eval 'detach && new task-1'";
     const bootstrap = interactiveShellBootstrap(command);
 
     expect(interactiveShellPath()).toBe('/usr/bin/zsh');
     expect(hostInteractiveShellPath()).toBe('/usr/bin/zsh');
-    expect(bootstrap).toContain('source "$HOME/.zshenv"');
-    expect(bootstrap).toContain('source "$HOME/.zshrc"');
-    expect(bootstrap).toContain('precmd_functions+=(__rac_start_agent)');
-    expect(bootstrap).toContain("exec '/usr/bin/zsh' -i");
-    expect(bootstrap).toContain(`export RAC_AGENT_COMMAND='cd -- '\\''/home/ubuntu/dave'\\'' && eval '\\''detach && new task-1'\\'''`);
+    expect(bootstrap).toBe([
+      `export RAC_AGENT_COMMAND='cd -- '\\''/home/ubuntu/dave'\\'' && eval '\\''detach && new task-1'\\'''`,
+      `exec '/usr/bin/zsh' -i -c 'exec sh -c '\\''cmd=$RAC_AGENT_COMMAND; unset RAC_AGENT_COMMAND; eval "$cmd"'\\'''`
+    ].join('\n'));
   });
 
-  it('sets the host home before zsh loads the operator configuration', () => {
-    const bootstrap = interactiveShellBootstrap('codex', '/home/ubuntu');
-
-    expect(bootstrap.startsWith("export HOME='/home/ubuntu'\n")).toBe(true);
+  it('sets the host home before the shell loads the operator configuration', () => {
+    expect(interactiveShellBootstrap('codex', '/home/ubuntu').startsWith("export HOME='/home/ubuntu'\n")).toBe(true);
+    expect(interactiveShellBootstrap('codex', '/home/ubuntu', '/usr/bin/fish').startsWith("set -gx HOME '/home/ubuntu'\n")).toBe(true);
   });
 
-  it('supports a configured Bash shell and its normal rc file', () => {
+  it('starts the interactive shell alone when there is no command', () => {
+    expect(interactiveShellBootstrap('', '/home/ubuntu')).toBe("export HOME='/home/ubuntu'\nexec '/usr/bin/zsh' -i");
+  });
+
+  it('refuses a shell it has no startup contract for', () => {
+    expect(() => interactiveShellBootstrap('codex', '$HOME', '/bin/dash')).toThrow('unsupported interactive shell');
+  });
+
+  it('runs the command after .bashrc loads, unset from its environment, then exits with it', async () => {
     process.env.RAC_INTERACTIVE_SHELL = '/bin/bash';
-    process.env.RAC_HOST_INTERACTIVE_SHELL = '/usr/local/bin/bash';
-
-    const bootstrap = interactiveShellBootstrap('codex', '/home/operator', hostInteractiveShellPath());
-
     expect(interactiveShellPath()).toBe('/bin/bash');
-    expect(hostInteractiveShellPath()).toBe('/usr/local/bin/bash');
-    expect(bootstrap).toContain('source "$HOME/.bashrc"');
-    expect(bootstrap).toContain('PROMPT_COMMAND=(__rac_start_agent "${PROMPT_COMMAND[@]}")');
-    expect(bootstrap).toContain('PROMPT_COMMAND="__rac_start_agent${PROMPT_COMMAND:+;$PROMPT_COMMAND}"');
-    expect(bootstrap).toContain("exec '/usr/local/bin/bash' --noprofile --rcfile");
+    expect(await runBootstrap('/bin/bash', '.bashrc', probe, false, 'echo resumed\n')).toBe("rc|unset|it's\n");
   });
 
-  it('supports a configured fish shell, loading its config and starting the agent as a job', () => {
-    process.env.RAC_INTERACTIVE_SHELL = '/usr/bin/fish';
-
-    const command = "cd -- '/home/ubuntu/dave' && eval 'detach && new task-1'";
-    const bootstrap = interactiveShellBootstrap(command, '$HOME');
-
-    expect(interactiveShellPath()).toBe('/usr/bin/fish');
-    // fish loads its own config via `-i`; the hook rides along on `-C`
-    expect(bootstrap).toContain("exec '/usr/bin/fish' -i -C '");
-    expect(bootstrap).toContain('--on-event fish_prompt');
-    // the agent runs through the reader (real job control), not inside the event handler
-    expect(bootstrap).toContain('commandline -r -- __rac_run');
-    expect(bootstrap).toContain('commandline -f execute');
-    // the POSIX command travels in the environment and is unset before the agent inherits it
-    expect(bootstrap).toContain('cmd=$RAC_AGENT_COMMAND; unset RAC_AGENT_COMMAND; eval "$cmd"');
-    expect(bootstrap).toContain(`set -gx RAC_AGENT_COMMAND 'cd -- '\\''/home/ubuntu/dave'\\'' && eval '\\''detach && new task-1'\\'''`);
-    // no HOME override when home is the inherited `$HOME` sentinel
-    expect(bootstrap.startsWith('set -gx RAC_AGENT_COMMAND')).toBe(true);
+  it('returns to an interactive bash after the command when asked to stay', async () => {
+    const output = await runBootstrap('/bin/bash', '.bashrc', probe, true, 'echo "after:$MARKER:${RAC_AGENT_COMMAND-unset}"\n');
+    expect(output).toContain("rc|unset|it's\n");
+    expect(output).toContain('after:rc:unset');
   });
 
-  it('ends the shell with the command when asked, never returning to a prompt', () => {
-    // zsh and bash exit with the command's status from the one-time hook
-    expect(interactiveShellBootstrap('nvim', '$HOME', '/usr/bin/zsh', true)).toContain('eval "$command"\n  exit $?\n}');
-    expect(interactiveShellBootstrap('nvim', '$HOME', '/bin/bash', true)).toContain('eval "$command"\n  exit $?\n}');
-    // fish execs the command, so it is never resumed after the command exits
-    const fish = interactiveShellBootstrap('nvim', '$HOME', '/usr/bin/fish', true);
-    expect(fish).toContain(`function __rac_run\n    exec sh -c '\\''cmd=$RAC_AGENT_COMMAND; unset RAC_AGENT_COMMAND; eval "$cmd"'\\''\nend`);
-    // an agent launch still returns to the shell
-    expect(interactiveShellBootstrap('nvim', '$HOME', '/usr/bin/zsh')).not.toContain('exit $?');
-    expect(interactiveShellBootstrap('nvim', '$HOME', '/usr/bin/fish')).not.toContain('exec sh');
+  it.skipIf(fish === undefined)('runs the POSIX command after config.fish loads, then exits with it', async () => {
+    expect(await runBootstrap(fish!, '.config/fish/config.fish', probe, false, 'echo resumed\n')).toBe("rc|unset|it's\n");
   });
 
-  it('sets the host home before fish loads the operator configuration', () => {
-    process.env.RAC_INTERACTIVE_SHELL = '/usr/bin/fish';
-
-    const bootstrap = interactiveShellBootstrap('codex', '/home/ubuntu');
-
-    expect(bootstrap.startsWith("set -gx HOME '/home/ubuntu'\n")).toBe(true);
+  it.skipIf(fish === undefined)('returns to an interactive fish after the command when asked to stay', async () => {
+    const output = await runBootstrap(fish!, '.config/fish/config.fish', probe, true, 'echo after:$MARKER:(set -q RAC_AGENT_COMMAND; and echo set; or echo unset)\n');
+    expect(output).toContain("rc|unset|it's\n");
+    expect(output).toContain('after:rc:unset');
   });
 });

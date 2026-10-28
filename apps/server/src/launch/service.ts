@@ -467,10 +467,11 @@ export class LaunchService {
     return created.stdout.trim();
   }
 
-  // the bridge login shell running `command` through the interactive bootstrap with the account's
-  // HOME and PATH, its colors established before the shell or the command starts
-  private hostShellArgv(command: string, home: string, exitAfter = false): string[] {
-    return terminalColorFallbackArgv('tmux', [this.hostShell, '-lc', interactiveShellBootstrap(hostCommand(command, home), home, this.hostShell, exitAfter)]);
+  // the bridge login shell exec'ing `command` through the interactive bootstrap with the account's
+  // HOME and PATH, or with no command the interactive shell itself under that HOME; colors are
+  // established before the shell or the command starts
+  private hostShellArgv(command: string, home: string): string[] {
+    return terminalColorFallbackArgv('tmux', [this.hostShell, '-lc', interactiveShellBootstrap(command === '' ? '' : hostCommand(command, home), home, this.hostShell)]);
   }
 
   // where a worktree launch runs: its host root with its Project's account home on the bridge,
@@ -667,14 +668,14 @@ export class LaunchService {
   // the login-shell command and cwd for a Console shell at a Place: a native login shell in the
   // Place home, or the host bootstrap in its host root on the host socket (same shape as
   // `startWorktreeShell`), with the HOME the Place's own Agent launch exports. Never sandboxed —
-  // it is the operator's own shell, not the Agent's. A `command` (the configured editor) runs
-  // through the interactive bootstrap once the shell is up, and the shell ends with it.
+  // it is the operator's own shell, not the Agent's. A `command` (the configured editor) is exec'd
+  // through the interactive bootstrap, so the pane ends with it.
   private consoleShellCommand(place: ConsoleShellPlace, command: string): { cwd: string; argv: string[] } {
     // color setup precedes even operator login-shell startup files
-    if (this.hostSocket === undefined) return { cwd: place.home, argv: terminalColorFallbackArgv(this.tmux, command === '' ? [this.localShell, '-l'] : [this.localShell, '-lc', interactiveShellBootstrap(command, '$HOME', this.localShell, true)]) };
+    if (this.hostSocket === undefined) return { cwd: place.home, argv: terminalColorFallbackArgv(this.tmux, command === '' ? [this.localShell, '-l'] : [this.localShell, '-lc', interactiveShellBootstrap(command, '$HOME', this.localShell)]) };
     // a Worktree launch exports its Project's account home; directory and Scratch launches the default one
     const home = this.agentHome(place.kind === 'worktree' ? place.projectId : undefined);
-    return { cwd: placeHostRoot(place), argv: this.hostShellArgv(command, home, command !== '') };
+    return { cwd: placeHostRoot(place), argv: this.hostShellArgv(command, home) };
   }
 
   // Open a Console shell at the Place and return the new pane id, or undefined on failure.

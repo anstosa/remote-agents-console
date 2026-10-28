@@ -137,7 +137,7 @@ _Avoid_: Terminal mode, swap, interactive pane
 
 **Console shell**:
 A login shell pane the console created at a Place, marked so a launch never adopts it. It stays at its Place wherever its shell `cd`s, outlives the Agent, and ends only when its shell exits or the operator ends it.
-_Avoid_: Shell pane, companion pane, landing shell (the wrapper's prompt left behind when an Agent exits)
+_Avoid_: Shell pane, companion pane, landing shell
 
 ### Operator state
 

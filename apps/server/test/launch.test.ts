@@ -179,7 +179,7 @@ describe('LaunchService', () => {
 
     await expect(service.launchHome()).resolves.toBe(true);
 
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['/usr/bin/zsh', '-lc', expect.stringContaining('source "$HOME/.zshrc"')]));
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['/usr/bin/zsh', '-lc', expect.stringContaining("exec '/usr/bin/zsh' -i -c")]));
     // the pane is labelled, not retitled: its tmux title stays the agent's own
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%5', '@rac_display_label', scratchLabel]);
     expect(run.mock.calls.some(call => (call[1] as string[]).some(arg => arg.includes('pane_title') || arg === 'select-pane'))).toBe(false);
@@ -983,7 +983,7 @@ describe('LaunchService', () => {
       await expect(service.createConsoleShell(worktreePlace(worktree), 'nvim', '/usr/bin/nvim')).resolves.toBe('%9');
 
       const newWindow = run.mock.calls.find(call => call[1].includes('new-window'));
-      expect(newWindow?.[1].slice(12)).toEqual(terminalColorFallbackArgv('/usr/bin/tmux', [interactiveShellPath(), '-lc', interactiveShellBootstrap('/usr/bin/nvim', '$HOME', interactiveShellPath(), true)]));
+      expect(newWindow?.[1].slice(12)).toEqual(terminalColorFallbackArgv('/usr/bin/tmux', [interactiveShellPath(), '-lc', interactiveShellBootstrap('/usr/bin/nvim', '$HOME', interactiveShellPath())]));
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux/default', 'set-option', '-p', '-t', '%9', '@rac_pane_name', 'nvim']);
       // an operator's `remain-on-exit on` would otherwise keep the dead pane
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux/default', 'set-option', '-p', '-t', '%9', 'remain-on-exit', 'off']);
