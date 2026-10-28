@@ -840,6 +840,7 @@ for (const action of ["Discard changes", "Refresh files"] as const) {
   });
 }
 
+// remove editors until refresh remasks protected commands
 test("locks key-table controls while Refresh waits for an active terminal remask", async ({
   page,
 }) => {
@@ -890,21 +891,47 @@ test("locks key-table controls while Refresh waits for an active terminal remask
   });
   await expect(refresh).toBeDisabled();
   await expect(refresh).toHaveAttribute("aria-busy", "true");
+  // retain only the safe loading shell while remasking
+  await expect(
+    settings.getByRole("heading", {
+      name: "Keyboard shortcuts",
+      exact: true,
+      level: 2,
+    }),
+  ).toBeVisible();
+  await expect(
+    settings.getByRole("status").filter({ hasText: "Loading installation files" }),
+  ).toBeVisible();
   await expect(
     editorControl(settings, "Keyboard editor view"),
-  ).toBeDisabled();
+  ).toHaveCount(0);
+  await expect(editor).toHaveCount(0);
   await expect(form).toHaveCount(0);
   await expect(
     secret.getByRole("button", { name: "Add binding", exact: true }),
-  ).toBeDisabled();
+  ).toHaveCount(0);
+  await expect(settings).not.toContainText("synthetic-terminal-command");
   releaseRemask();
   await expect(refresh).toBeEnabled();
   await expect(refresh).not.toHaveAttribute("aria-busy");
+  // select the restored editor without relying on remounted local state
+  await chooseEditorOption(settings, "Keyboard editor view", "Key tables");
+  const restoredEditor = settings.getByRole("region", {
+    name: "Edit key tables",
+    exact: true,
+  });
+  const restoredRow = keyTable(restoredEditor, "secret").locator(
+    '[data-key-chord="s"]',
+  );
   await expect(
-    row.getByRole("button", { name: "Reveal Terminal command", exact: true }),
+    restoredRow.getByRole("button", {
+      name: "Reveal Terminal command",
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(settings).not.toContainText("synthetic-terminal-command");
-  expect(state.remasks).toContainEqual({ leaseId: "shortcut-lease-1" });
+  expect(remaskRequests).toBe(1);
+  expect(state.remasks).toEqual([{ leaseId: "shortcut-lease-1" }]);
 });
 
 // replace one visible shortcut through the recorder
@@ -1066,6 +1093,7 @@ test("preserves safe terminal commands while displaying only their program name"
   );
 });
 
+// restore the chosen view before discard and failed-save assertions
 test("requires advanced controls for masked terminals and supports discard and failed-save retention", async ({
   page,
 }) => {
@@ -1086,6 +1114,14 @@ test("requires advanced controls for masked terminals and supports discard and f
     .click();
   await settings.getByRole("button", { name: "Discard changes" }).click();
   await confirmSettingsDiscard(page);
+  // restore the explicit subview after the catalog remount
+  await expect(
+    settings.getByRole("region", { name: "Edit key tables", exact: true }),
+  ).toBeVisible();
+  expect(state.saves).toHaveLength(0);
+  await chooseEditorOption(settings, "Keyboard editor view", "Command shortcuts");
+  await expect(protectedRow).toContainText("Choose the Key tables editor view");
+  await expect(protectedRow.locator(".shortcut-change")).toBeDisabled();
   await expect(
     command(page, "action:new-terminal").getByRole("button", {
       name: "Disable",
