@@ -1,11 +1,11 @@
 import { parseEnv } from "node:util";
 import { readFileSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, posix, resolve } from "node:path";
 import { runBounded, runQuiet } from "./command.mjs";
 import { MAX_COMMAND_BYTES, MAX_SOURCE_BYTES } from "./constants.mjs";
 import { prepareComposeDependencyInputs, projectComposeDependencies } from "./dependencies.mjs";
 import { sha256 } from "./crypto.mjs";
-import { atomicWriteFile, safeError } from "./fs.mjs";
+import { atomicWriteFile, readBoundedFile, safeError } from "./fs.mjs";
 
 // validate one candidate without executing its authored content
 export async function validateCandidate(source, candidatePath, context = {}) {
@@ -281,7 +281,7 @@ export function composePrefix(compose, files = compose.files, envFiles = compose
 }
 
 // run the probed two-pass candidate algorithm
-export async function validateComposeCandidates(descriptor, candidates, stageDirectory, runner = runBounded) {
+export async function validateComposeCandidates(descriptor, candidates, stageDirectory, runner = runBounded, includeResolvedModel = false) {
   const compose = descriptor.compose;
   const prepared = prepareComposeDependencyInputs(descriptor, candidates, stageDirectory);
   const baseline = await readComposeModel(compose, prepared.baselineFiles, prepared.baselineEnvFiles, runner);
@@ -301,7 +301,52 @@ export async function validateComposeCandidates(descriptor, candidates, stageDir
   const composeSelectors = composeSourceSelectors(descriptor, resolvedModel);
   validateComposeModel(resolvedModel, descriptorWithComposeSelectors(descriptor, composeSelectors));
   const environmentOwnership = composeEnvironmentOwnership(descriptor, candidates, model, resolvedModel);
-  return { dependencySnapshot, composeSelectors, ...environmentOwnership };
+  const planningModel = includeResolvedModel
+    ? await projectMountPlanningModel(descriptor, prepared, stageDirectory, resolvedModel, runner)
+    : undefined;
+  return { dependencySnapshot, composeSelectors, ...(includeResolvedModel ? { resolvedModel: planningModel } : {}), ...environmentOwnership };
+}
+
+// preserve long-form merge identities without changing the validated proof model
+async function projectMountPlanningModel(descriptor, prepared, stageDirectory, resolvedModel, runner) {
+  const metadataKey = "x-rac-project-mount-source";
+  const overrideIndex = descriptor.compose.files.indexOf(descriptor.sources["compose-override"]?.path);
+  // require an active override and exclusive ownership of private metadata
+  if (overrideIndex < 0 || Object.hasOwn(resolvedModel, metadataKey)) throw safeError("project-mount-yaml-unsupported");
+  const source = readBoundedFile(prepared.candidateFiles[overrideIndex], MAX_SOURCE_BYTES).toString("utf8");
+  const lines = source.split("\n");
+  const roots = lines.flatMap((line, index) => line === "services:" ? [index] : []);
+  // accept only the literal root already supported by the mount writer
+  if (roots.length !== 1) throw safeError("project-mount-yaml-unsupported");
+  lines.splice(roots[0], 1, "services:", "  rac-project-mount-parser:", "    image: scratch", "    network_mode: none", `${metadataKey}:`);
+  const parserPath = resolve(stageDirectory, "compose-project-mount-source.yaml");
+  atomicWriteFile(parserPath, lines.join("\n"), 0o600);
+  const parsed = await readResolvedComposeModel(descriptor.compose, parserPath, prepared.candidateEnvFiles, runner, true);
+  const metadata = parsed[metadataKey];
+  // fail closed when the private parser did not retain its expected object
+  if (!isRecord(metadata)) throw safeError("project-mount-yaml-unsupported");
+  const volumes = metadata["remote-agent-console"]?.volumes ?? [];
+  // reject unsupported service volume containers
+  if (!Array.isArray(volumes)) throw safeError("project-mount-yaml-unsupported");
+  const targets = new Map();
+  // only long-form entries retain a distinct Compose merge spelling
+  for (const volume of volumes) {
+    // short syntax already uses normalized merge identities
+    if (!isRecord(volume) || typeof volume.target !== "string") continue;
+    const key = posix.resolve(volume.target.replaceAll("$$", "$"));
+    const previous = targets.get(key);
+    // distinct long-form spellings cannot safely share one effective target
+    if (previous !== undefined && previous !== volume.target) throw safeError("project-mount-yaml-unsupported");
+    targets.set(key, volume.target);
+  }
+  const planningModel = structuredClone(resolvedModel);
+  // substitute spelling only in the private mount-planning view
+  for (const volume of planningModel.services["remote-agent-console"].volumes) {
+    const target = targets.get(posix.resolve(volume.target.replaceAll("$$", "$")));
+    // leave canonical model entries without authored long-form counterparts alone
+    if (target !== undefined) volume.target = target;
+  }
+  return planningModel;
 }
 
 // derive candidate-owned source identities from the resolved model
@@ -483,8 +528,8 @@ async function readComposeModel(compose, files, envFiles, runner) {
 }
 
 // inspect the fully resolved private projection for fixed invariants
-async function readResolvedComposeModel(compose, projected, envFiles, runner) {
-  const args = [...composePrefix(compose, [projected], envFiles), "config", "--format", "json"];
+async function readResolvedComposeModel(compose, projected, envFiles, runner, skipEnvironmentResolution = false) {
+  const args = [...composePrefix(compose, [projected], envFiles), "config", ...(skipEnvironmentResolution ? ["--no-env-resolution"] : []), "--format", "json"];
   const result = await runner("docker", args, { cwd: compose.projectDirectory, maxBytes: MAX_COMMAND_BYTES });
   // expose only one safe validation category
   if (result.code !== 0) {

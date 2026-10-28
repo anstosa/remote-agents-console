@@ -2,7 +2,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { mkdir, open, rm } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { z } from 'zod';
 import type { AgentKind } from '../adapters/types.js';
 import { defaultIntegrationConfig, sourceSchema, type DavoSettings, type ValidatedConfig } from '../config/schema.js';
@@ -37,6 +37,92 @@ function safeServiceUrl(value: string): boolean { try { const url = new URL(valu
 // accept only one canonical public https origin
 function safeReconnectOrigin(value: unknown): value is string { try { if (typeof value !== 'string') return false; const url = new URL(value); return url.protocol === 'https:' && url.origin === value && url.pathname === '/' && hostnameSchema.safeParse(url.hostname).success; } catch { return false; } }
 const cloudflareStatusSchema = z.object({ supported: z.boolean(), reason: z.string().regex(/^[a-z0-9_-]{1,80}$/u).optional(), mode: z.enum(['unconfigured', 'token', 'local']), enabled: z.boolean(), hostname: hostnameSchema.optional(), endpoint: z.string().max(512).refine(safeReconnectOrigin).optional(), tokenPresent: z.boolean(), serviceUrl: z.string().max(512).refine(safeServiceUrl), connected: z.boolean().optional(), verifiedAt: z.string().datetime().optional() }).strict();
+// compare only the Project fields that determine Docker bind mounts
+function projectMountProjection(content: string | undefined): string[] | undefined {
+  // treat absent or malformed application bytes as unknown current mount state
+  if (content === undefined) return undefined;
+  let value: unknown;
+  try { value = JSON.parse(content); } catch { return undefined; }
+  // preserve invalid Project shapes for normal application validation
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const projects = (value as Record<string, unknown>).projects;
+  // omission and an empty collection have the same mount contract
+  if (projects === undefined) return [];
+  // preserve malformed collections for normal application validation
+  if (!Array.isArray(projects)) return undefined;
+  const mounts = new Set<string>();
+  // project each complete authored mount independently of row order and labels
+  for (const project of projects) {
+    // preserve malformed rows for normal application validation
+    if (project === null || typeof project !== 'object' || Array.isArray(project)) return undefined;
+    const record = project as Record<string, unknown>;
+    // defer malformed paths to the existing field-level validation
+    if (typeof record.path !== 'string' || record.hostPath !== undefined && typeof record.hostPath !== 'string') return undefined;
+    mounts.add(JSON.stringify([record.hostPath ?? record.path, record.path]));
+  }
+  return [...mounts].sort();
+}
+// decide whether a valid candidate changes known or newly introduced mount state
+function projectMountsChanged(currentContent: string | undefined, candidateContent: string | undefined): boolean {
+  const current = projectMountProjection(currentContent);
+  const candidate = projectMountProjection(candidateContent);
+  // leave malformed candidates to application validation
+  if (candidate === undefined) return false;
+  // repairing unknown bytes to no Projects needs no Docker override
+  if (current === undefined) return candidate.length > 0;
+  return JSON.stringify(current) !== JSON.stringify(candidate);
+}
+// attribute newly authored Docker mount errors before host validation
+function projectMountIssues(currentContent: string | undefined, candidateContent: string): SettingsIssue[] {
+  const projection = projectMountProjection(currentContent) ?? [];
+  const current = new Set(projection);
+  // retain authored target text independently of host-source corrections
+  const currentTargets = new Set<string>(projection.map(key => JSON.parse(key)[1]));
+  const projects = sourceSchema.parse(JSON.parse(candidateContent)).projects;
+  const targets = new Map<string, string>();
+  const issues: SettingsIssue[] = [];
+  // validate each candidate tuple without tightening unchanged legacy paths
+  for (const [index, project] of projects.entries()) {
+    const source = project.hostPath ?? project.path;
+    const target = isAbsolute(project.path) ? posix.resolve(project.path) : project.path;
+    const sourceIdentity = isAbsolute(source) ? posix.resolve(source) : source;
+    const path = ['projects', String(index)];
+    // reject invalid new paths at the exact authored field
+    if (!current.has(JSON.stringify([source, project.path]))) {
+      // Compose requires an absolute container path without NUL bytes
+      if (!isAbsolute(project.path) || project.path.includes('\0')) issues.push({ sourceId: 'app', path: [...path, 'path'], code: 'project_mount_path_invalid', message: 'Use an absolute container path without NUL characters for this Project.' });
+      // reject alternate spellings of the same Docker destination
+      if (!currentTargets.has(project.path) && isAbsolute(project.path) && !project.path.includes('\0') && project.path !== target) issues.push({ sourceId: 'app', path: [...path, 'path'], code: 'project_mount_path_not_canonical', message: 'Use a container path without trailing slashes or dot segments such as . and ..' });
+      // preserve host-path attribution when a host override was authored
+      if (project.hostPath !== undefined && (!isAbsolute(project.hostPath) || project.hostPath.includes('\0'))) issues.push({ sourceId: 'app', path: [...path, 'hostPath'], code: 'project_mount_path_invalid', message: 'Use an absolute host path without NUL characters for this Project.' });
+    }
+    const previous = targets.get(target);
+    // one destination cannot represent conflicting host sources
+    if (previous !== undefined && previous !== sourceIdentity) issues.push({ sourceId: 'app', path: [...path, project.hostPath === undefined ? 'path' : 'hostPath'], code: 'project_mount_target_conflict', message: 'Projects using the same container path must use the same host path.' });
+    targets.set(target, sourceIdentity);
+  }
+  return issues;
+}
+const projectMountFailures: Record<string, { sourceId: string; message: string }> = {
+  project_mount_yaml_unsupported: { sourceId: 'compose-override', message: 'Use block-style services and volume sections in the Docker override before saving Project paths.' },
+  project_mount_marker_invalid: { sourceId: 'compose-override', message: 'Repair the Project mount markers in the Docker override before saving Project paths.' },
+  project_mount_option_unsupported: { sourceId: 'compose-override', message: 'Use supported scalar bind options in the Docker override before saving Project paths.' },
+  project_mount_path_not_absolute: { sourceId: 'app', message: 'Use absolute container and host paths for new or changed Docker Projects.' },
+  project_mount_path_not_canonical: { sourceId: 'app', message: 'Use container paths without trailing slashes or dot segments such as . and ..' },
+  project_mount_target_conflict: { sourceId: 'app', message: 'Projects using the same container path must use the same host path.' },
+  project_mount_transition_ambiguous: { sourceId: 'app', message: 'Give Projects stable IDs before changing several Project paths together.' },
+  project_mount_host_path_required: { sourceId: 'app', message: 'Set Host path to the actual host directory when using a protected container path such as /workspace.' },
+  project_mount_override_required: { sourceId: 'app', message: 'Save Project paths together with their Docker override mount configuration.' }
+};
+// translate only known input failures owned by this exact prepared transaction
+function projectMountValidationError(error: unknown, sources: HostRequest['sources']): unknown {
+  // keep runtime outages and existing structured errors unchanged
+  if (!(error instanceof SettingsError) || error.statusCode !== 503) return error;
+  const failure = Object.hasOwn(projectMountFailures, error.code) ? projectMountFailures[error.code] : undefined;
+  // never attribute an unknown code or a source outside this request
+  if (failure === undefined || !sources?.some(source => source.id === failure.sourceId)) return error;
+  return new SettingsError('invalid_settings', 400, [{ sourceId: failure.sourceId, path: failure.sourceId === 'app' ? ['projects'] : [], code: error.code, message: failure.message }]);
+}
 // redact protected leaves without changing collection shape
 function redact(value: unknown, path: string[] = [], protectedValues: readonly string[] = []): unknown {
   // protect credential-bearing structured leaves
@@ -570,8 +656,30 @@ export class SettingsService {
     const candidateEnv = candidates.has('env') ? candidates.get('env') ?? '' : sourceContents.get('env') ?? '';
     // validate auth literals and application cross-field rules together
     await validateEnvironment(candidateEnv);
-    const appContent = candidates.has('app') ? candidates.get('app') : sourceContents.get('app');
+    const currentAppContent = sourceContents.get('app');
+    const appContent = candidates.has('app') ? candidates.get('app') : currentAppContent;
     if (appContent !== undefined) { let app: unknown; try { app = JSON.parse(appContent); } catch { throw new SettingsError('invalid_application_json'); } issues.push(...await validateApplication(app, { ...process.env, ...environment(candidateEnv) })); }
+    const projectMountChange = candidates.has('app') && projectMountsChanged(currentAppContent, appContent);
+    // report candidate mount errors without publishing host work
+    if (issues.length === 0 && installation.kind === 'compose' && projectMountChange && appContent !== undefined) issues.push(...projectMountIssues(currentAppContent, appContent));
+    // enlist the writable Docker override only after the application candidate is valid
+    if (issues.length === 0 && installation.kind === 'compose' && projectMountChange) {
+      const overrideId = 'compose-override';
+      const override = documents.get(overrideId);
+      // require one durable override instead of silently restoring explicit removal
+      if (override === undefined || !override.existed || candidates.has(overrideId) && candidates.get(overrideId) === undefined) throw new SettingsError('project_mounts_compose_override_required', 400, [{ sourceId: 'app', path: ['projects'], code: 'project_mounts_compose_override_required', message: 'Install or restore the Docker override before saving Project paths, and do not remove it in the same save.' }]);
+      const desiredSource = this.desiredInstallation?.sources[overrideId];
+      // avoid deriving a candidate into an override whose installed owner is changing
+      if (this.desiredInstallation !== undefined && (desiredSource?.path !== override.source.path || desiredSource.serverPath !== override.source.serverPath)) throw new SettingsError('source_migration_restart_required', 409);
+      // preserve an explicit override edit and otherwise stage its exact current bytes
+      if (!candidates.has(overrideId)) {
+        const content = sourceContents.get(overrideId) ?? await this.sourceContent(installation, overrideId, override, sessionId);
+        if (content === undefined) throw new SettingsError('settings_reveal_required', 403);
+        candidates.set(overrideId, content);
+        await writePrivate(join(this.controlRoot, 'staging', id, overrideId), content);
+        sources.push({ id: overrideId, contentHash: override.hash, existed: override.existed, candidate: overrideId });
+      }
+    }
     // validate additional structured and inert sources before host validation
     for (const [sourceId, content] of candidates) {
       if (content === undefined) continue;
@@ -590,7 +698,7 @@ export class SettingsService {
         const prepared = await this.prepare(input, id, sessionId);
         // return field validation before publishing candidates
         if (prepared.issues.length > 0) return { valid: false, issues: prepared.issues };
-        await this.transport.request(prepared.request, true, () => { published = true; });
+        await this.transport.request(prepared.request, true, () => { published = true; }).catch((error: unknown) => { /* attribute only known prepared-source failures */ throw projectMountValidationError(error, prepared.request.sources); });
         return { valid: true, issues: [] };
       } catch (error) {
         // preserve exact helper-attributed source issues
@@ -613,7 +721,7 @@ export class SettingsService {
     try {
       const prepared = await this.prepare(input, id, sessionId);
       if (prepared.issues.length > 0) throw new SettingsError('invalid_settings', 400, prepared.issues);
-      await this.transport.request({ ...prepared.request, kind: 'commit' }, true, () => { published = true; });
+      await this.transport.request({ ...prepared.request, kind: 'commit' }, true, () => { published = true; }).catch((error: unknown) => { /* preserve validate/save issue parity */ throw projectMountValidationError(error, prepared.request.sources); });
       this.leases.clear();
       // preserve the existing narrow live behavior after durable commit
       if (prepared.candidates.has('app')) {

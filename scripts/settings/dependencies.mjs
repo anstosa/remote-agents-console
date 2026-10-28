@@ -111,7 +111,8 @@ function projectBindVolumeSources(model, context, interpolation) {
     // project only bind sources with deferred interpolation
     for (const volume of volumes) {
       if (volume?.type === "bind" && typeof volume.source === "string" && volume.source.includes("$")) {
-        volume.source = resolveNormalizedModelPath(context, volume.source, interpolation);
+        // preserve the resolved literal through the projected Compose pass
+        volume.source = resolveNormalizedModelPath(context, volume.source, interpolation).replaceAll("$", "$$$$");
       }
     }
   }

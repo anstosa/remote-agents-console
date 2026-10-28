@@ -81,10 +81,37 @@ the host-side path explicitly. Nothing assumes the `/workspace` mount or a
 discovered Worktrees, so a Project that fails to load — or the first moments
 after boot, before discovery's first scan — answers 404 rather than proxying.
 
-For additional Projects, copy `compose.override.example.yaml` to the ignored
-`compose.override.yaml`, remove the host-tmux settings if they are not needed,
-and add each repository bind under `/worktrees`. A Project's `path` must match
-the container bind destination.
+With the host settings applier installed, adding or changing a Project's `path`
+or `hostPath` in Settings also updates the ignored `compose.override.yaml` in
+the same save. The host source is `hostPath`, or `path` when no host override is
+set; the container destination is `path`. Save first, then use **Restart** to
+activate the mounts. Both paths must be absolute; new or edited container `path`
+values must not contain trailing slashes or dot segments such as `.` and `..`.
+Changing only `hostPath` preserves an existing legacy container-path alias.
+Mount policy compares canonical destinations; generated binds retain an exact
+destination's existing literal long-form spelling when Compose requires it for
+merging. Interpolated long-form target expressions are not supported by automatic
+synchronization and are rejected before live files are written; replace the
+existing target expression with a literal before changing its host source in
+Settings. The host directory must already exist; generated binds do not create
+missing host directories.
+
+Existing matching mounts, including ancestor mounts such as `/workspace`, are
+reused when they map to the intended host source. When adding or changing a
+container-only path such as `/workspace`, set `hostPath` to the actual host
+checkout rather than the container alias. Read-only mount options and unrelated
+override configuration are preserved. RAC owns only its marked Project-mount
+block; obsolete manually authored mounts are not deleted automatically. Linked
+Worktrees and a separate `worktreesDirectory` still need their own mounts.
+
+Automatic editing uses the standard block-style service and volume sections
+installed by RAC. Ambiguous YAML or conflicting Project mappings are rejected
+before either file is saved.
+
+For initial setup or direct configuration-file edits outside Settings, copy
+`compose.override.example.yaml` to the ignored `compose.override.yaml`, remove
+the host-tmux settings if they are not needed, and add each repository bind
+under `/worktrees`. A Project's `path` must match the container bind destination.
 
 ## Connect to the host tmux server
 
@@ -131,7 +158,9 @@ worktree mounts. For every host-backed Project:
 - Set the Project's `path` to its container path.
 - Set `hostPath` when the Main worktree's absolute host path differs from `path`.
   When omitted, host-backed launches inherit `path`.
-- Add a matching bind mount to `compose.override.yaml`.
+- Save the Project in Settings to synchronize its bind mount in
+  `compose.override.yaml`, then restart. When editing configuration files
+  directly, add the matching bind mount yourself.
 - Discovered Linked worktrees must be mounted at the **same absolute path**
   inside the container as on the host, and their common Git directory mounted at
   the path referenced by each worktree's `.git` file.

@@ -4,14 +4,14 @@ import { mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validateConfig, type ValidatedConfig } from '../src/config/schema.js';
-import { SettingsError, type CloudflareStatus, type HostReply, type HostRequest, type Installation } from '../src/settings/contracts.js';
+import { SettingsError, type CloudflareStatus, type HostReply, type HostRequest, type Installation, type SettingsPatch } from '../src/settings/contracts.js';
 import { readBounded, writePrivate } from '../src/settings/files.js';
 import { applicationHash, contentHash, environmentProjection } from '../src/settings/proof.js';
 import { SettingsService } from '../src/settings/service.js';
 import type { SettingsTransport } from '../src/settings/transport.js';
 
 type RequestRecord = { request: HostRequest; wait: boolean | undefined };
-type Fixture = { root: string; controlRoot: string; appPath: string; envPath: string; app: Record<string, unknown>; env: string; config: ValidatedConfig; transport: FakeTransport; service: SettingsService };
+type Fixture = { root: string; controlRoot: string; appPath: string; envPath: string; composeOverridePath: string; app: Record<string, unknown>; env: string; config: ValidatedConfig; transport: FakeTransport; service: SettingsService };
 type SettingsOptions = NonNullable<ConstructorParameters<typeof SettingsService>[1]>;
 const roots: string[] = [];
 const fixturePasswordHash = '$argon2id$v=19$m=65536,t=3,p=4$W6Jf7CIBeil2lGgc+goW/w$z3yGGK095rDAeqOGhI28zjP7P4l8lsioqjpausBDZ90';
@@ -318,17 +318,27 @@ class FakeTransport implements SettingsTransport {
 }
 
 // create a full file-backed Settings service without live installation access
-async function fixture(overrides: { app?: Record<string, unknown>; env?: string; live?: SettingsOptions['live']; placeholderRuntime?: SettingsOptions['placeholderRuntime'] } = {}): Promise<Fixture> {
+async function fixture(overrides: { app?: Record<string, unknown>; env?: string; composeOverride?: string; live?: SettingsOptions['live']; placeholderRuntime?: SettingsOptions['placeholderRuntime'] } = {}): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'rac-settings-service-'));
   roots.push(root);
   const controlRoot = join(root, 'control');
   const appPath = join(root, 'config.json');
   const envPath = join(root, '.env');
+  const composeOverride = overrides.composeOverride;
+  const composeOverridePath = join(root, 'compose.override.yaml');
   const app = overrides.app ?? { publicOrigin: 'https://agents.example.com', name: 'Remote Agents' };
   const env = overrides.env ?? `RAC_PASSWORD_HASH='${fixturePasswordHash}'\nRAC_SESSION_SECRET='${fixtureSessionSecret}'\nTZ=UTC\n`;
   await writeFile(appPath, `${JSON.stringify(app, null, 2)}\n`);
   await writeFile(envPath, env, { mode: 0o600 });
+  // create the optional Docker override only for fixtures exercising mount derivation
+  if (composeOverride !== undefined) await writeFile(composeOverridePath, composeOverride, { mode: 0o600 });
   const config = await validateConfig(app, { checkExecutables: false });
+  const sources: Installation['sources'] = {
+    app: { path: appPath, serverPath: appPath, kind: 'json', apply: 'rac-restart' },
+    env: { path: envPath, serverPath: envPath, kind: 'env', apply: 'rac-restart' }
+  };
+  // catalog the override through the same fixed installation source identity
+  if (composeOverride !== undefined) sources['compose-override'] = { path: composeOverridePath, serverPath: composeOverridePath, kind: 'compose', apply: 'rac-restart' };
   const descriptor: Installation = {
     version: 1,
     installationId: 'isolated-service-test',
@@ -340,15 +350,12 @@ async function fixture(overrides: { app?: Record<string, unknown>; env?: string;
     hostControlRoot: controlRoot,
     serverCheckout: root,
     allowedRoots: [root],
-    sources: {
-      app: { path: appPath, serverPath: appPath, kind: 'json', apply: 'rac-restart' },
-      env: { path: envPath, serverPath: envPath, kind: 'env', apply: 'rac-restart' }
-    },
-    compose: { projectDirectory: root, projectName: 'isolated-settings', files: [join(root, 'compose.yaml')], envFiles: [envPath], profiles: [] }
+    sources,
+    compose: { projectDirectory: root, projectName: 'isolated-settings', files: [join(root, 'compose.yaml'), ...(composeOverride === undefined ? [] : [composeOverridePath])], envFiles: [envPath], profiles: [] }
   };
   const transport = new FakeTransport(descriptor, controlRoot);
   const service = new SettingsService(config, { controlRoot, transport, configPath: appPath, checkout: root, placeholderRuntime: overrides.placeholderRuntime ?? (async () => ({ hostNode: '/host/bin/node', hostPath: '/host/bin:/usr/bin', timeZone: 'America/Los_Angeles' })), ...(overrides.live === undefined ? {} : { live: overrides.live }) });
-  return { root, controlRoot, appPath, envPath, app, env, config, transport, service };
+  return { root, controlRoot, appPath, envPath, composeOverridePath, app, env, config, transport, service };
 }
 
 // publish exact private effective evidence for the current fixture files
@@ -1251,7 +1258,7 @@ describe('settings save and validation', () => {
 
   // create the optional project collection only when its first row is authored
   it('inserts the first Project into an absent collection', async () => {
-    const current = await fixture({ app: { publicOrigin: 'https://agents.example.com' } });
+    const current = await fixture({ app: { publicOrigin: 'https://agents.example.com' }, composeOverride: 'services: {}\n' });
     const before = source(await current.service.snapshot(), 'app');
 
     await current.service.save({ changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [
@@ -1259,6 +1266,7 @@ describe('settings save and validation', () => {
     ] }] });
 
     expect(JSON.parse(await readFile(current.appPath, 'utf8'))).toMatchObject({ projects: [{ id: 'one', path: '/tmp/one' }] });
+    expect(current.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app', 'compose-override']);
   });
 
   // prune a process map only after deleting its final authored member
@@ -1351,6 +1359,259 @@ describe('settings save and validation', () => {
     await current.service.save({ changes: [{ sourceId: 'app', revisionId: before.revisionId, content }] });
 
     expect(await readFile(current.appPath, 'utf8')).toBe(content);
+  });
+
+  describe('automatic Docker Project mount transactions', () => {
+    // surface candidate errors at their authored Project fields before host work
+    it.each([
+      { title: 'relative path', projects: [{ id: 'one', path: 'relative/project' }], fieldPath: ['projects', '0', 'path'], raw: false },
+      { title: 'NUL path', projects: [{ id: 'one', path: '/missing\0/project' }], fieldPath: ['projects', '0', 'path'], raw: true },
+      { title: 'NUL host path', projects: [{ id: 'one', path: '/missing/one', hostPath: '/host/\0one' }], fieldPath: ['projects', '0', 'hostPath'], raw: true },
+      { title: 'conflicting host path', projects: [{ id: 'one', path: '/missing/shared', hostPath: '/host/one' }, { id: 'two', path: '/missing/shared', hostPath: '/host/two' }], fieldPath: ['projects', '1', 'hostPath'], raw: false },
+      { title: 'workspace trailing slash', projects: [{ id: 'one', path: '/workspace/', hostPath: '/host/new' }], fieldPath: ['projects', '0', 'path'], raw: false },
+      { title: 'workspace dot segment', projects: [{ id: 'one', path: '/child/../workspace', hostPath: '/host/new' }], fieldPath: ['projects', '0', 'path'], raw: false },
+      { title: 'control dot segment', projects: [{ id: 'one', path: '/run/./rac-settings-control', hostPath: '/host/new' }], fieldPath: ['projects', '0', 'path'], raw: false },
+      { title: 'control trailing slash', projects: [{ id: 'one', path: '/run/rac-settings-control/', hostPath: '/host/new' }], fieldPath: ['projects', '0', 'path'], raw: false },
+      { title: 'aliased conflicting destination', projects: [{ id: 'one', path: '/same', hostPath: '/host/one' }, { id: 'two', path: '/child/../same', hostPath: '/host/two' }], fieldPath: ['projects', '1', 'path'], raw: false }
+    ])('attributes a $title to the Project field consistently for validate and save', async ({ projects, fieldPath, raw }) => {
+      const current = await fixture({ composeOverride: 'services: {}\n' });
+      const before = source(await current.service.snapshot(), 'app');
+      const appBytes = await readFile(current.appPath, 'utf8');
+      // raw JSON can encode NUL while typed patches already reject literal NUL
+      const input = { changes: [{ sourceId: 'app', revisionId: before.revisionId, ...(raw ? { content: JSON.stringify({ ...current.app, projects }) } : { patches: [{ op: 'set' as const, path: ['projects'], value: projects }] }) }] };
+      const result = await current.service.validate(input);
+
+      expect(result).toMatchObject({ valid: false, issues: expect.arrayContaining([expect.objectContaining({ sourceId: 'app', path: fieldPath })]) });
+      await expect(current.service.save(input)).rejects.toMatchObject({ statusCode: 400, issues: result.issues });
+      expect(current.transport.records).toHaveLength(0);
+      expect(await readFile(current.appPath, 'utf8')).toBe(appBytes);
+      expect(await readFile(current.composeOverridePath, 'utf8')).toBe('services: {}\n');
+    });
+
+    // keep helper-attributed guidance identical without publishing either source
+    it.each([
+      { code: 'project_mount_yaml_unsupported', sourceId: 'compose-override' },
+      { code: 'project_mount_marker_invalid', sourceId: 'compose-override' },
+      { code: 'project_mount_option_unsupported', sourceId: 'compose-override' },
+      { code: 'project_mount_path_not_absolute', sourceId: 'app' },
+      { code: 'project_mount_path_not_canonical', sourceId: 'app' },
+      { code: 'project_mount_target_conflict', sourceId: 'app' },
+      { code: 'project_mount_transition_ambiguous', sourceId: 'app' },
+      { code: 'project_mount_host_path_required', sourceId: 'app' },
+      { code: 'project_mount_override_required', sourceId: 'app' }
+    ])('attributes $code consistently for validate and save', async ({ code, sourceId }) => {
+      const override = 'services: {}\n';
+      const current = await fixture({ composeOverride: override });
+      const before = source(await current.service.snapshot(), 'app');
+      const appBytes = await readFile(current.appPath, 'utf8');
+      const input = { changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [{ op: 'set' as const, path: ['projects'], value: [{ id: 'one', path: '/missing/one' }] }] }] };
+      current.transport.failKind = 'validate';
+      current.transport.failError = new SettingsError(code, 503);
+      const result = await current.service.validate(input);
+
+      expect(result).toMatchObject({ valid: false, issues: [{ sourceId, path: sourceId === 'app' ? ['projects'] : [], code, message: expect.stringMatching(/\S+\s+\S+/u) }] });
+      // retain the original actionable YAML repair assertion
+      if (code === 'project_mount_yaml_unsupported') expect(result.issues[0]?.message).toMatch(/block-style/i);
+      current.transport.failKind = 'commit';
+      await expect(current.service.save(input)).rejects.toMatchObject({ statusCode: 400, issues: result.issues });
+      expect(await readFile(current.appPath, 'utf8')).toBe(appBytes);
+      expect(await readFile(current.composeOverridePath, 'utf8')).toBe(override);
+    });
+
+    // known codes cannot claim authority over a source outside the request
+    it('retains 503 when a known override failure belongs to an unenlisted source', async () => {
+      const current = await fixture({ composeOverride: 'services: {}\n' });
+      const before = source(await current.service.snapshot(), 'app');
+      const input = { changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [{ op: 'set' as const, path: ['name'], value: 'Renamed' }] }] };
+      current.transport.failError = new SettingsError('project_mount_yaml_unsupported', 503);
+      current.transport.failKind = 'validate';
+      await expect(current.service.validate(input)).rejects.toMatchObject({ code: 'project_mount_yaml_unsupported', statusCode: 503 });
+      current.transport.failKind = 'commit';
+      await expect(current.service.save(input)).rejects.toMatchObject({ code: 'project_mount_yaml_unsupported', statusCode: 503 });
+      expect(current.transport.records.map(record => record.request.sources?.map(selected => selected.id))).toEqual([['app'], ['app']]);
+    });
+
+    // a host-only edit preserves an existing legacy target field
+    it('preserves a legacy target alias while correcting its host path', async () => {
+      const current = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [{ id: 'legacy', path: '/child/../missing', hostPath: '/host/old' }] }, composeOverride: 'services: {}\n' });
+      const before = source(await current.service.snapshot(), 'app');
+      const input = { changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [{ op: 'set' as const, path: ['projects', '0', 'hostPath'], value: '/host/new' }] }] };
+      expect(await current.service.validate(input)).toEqual({ valid: true, issues: [] });
+      await current.service.save(input);
+      expect(JSON.parse(await readFile(current.appPath, 'utf8')).projects).toEqual([{ id: 'legacy', path: '/child/../missing', hostPath: '/host/new' }]);
+      expect(current.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app', 'compose-override']);
+    });
+
+    // source spelling alone does not imply a different host directory
+    it('accepts equivalent host spellings for legacy and canonical target aliases', async () => {
+      const legacy = { id: 'legacy', path: '/child/../missing', hostPath: '/host/old' };
+      const current = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [legacy] }, composeOverride: 'services: {}\n' });
+      const before = source(await current.service.snapshot(), 'app');
+      const input = { changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [{ op: 'set' as const, path: ['projects'], value: [legacy, { id: 'same', path: '/missing', hostPath: '/host/./old' }] }] }] };
+      await expect(current.service.validate(input)).resolves.toEqual({ valid: true, issues: [] });
+    });
+
+    // mixed raw spellings still share one effective container destination
+    it('attributes a canonical target conflict with an unchanged legacy alias', async () => {
+      const legacy = { id: 'legacy', path: '/child/../missing', hostPath: '/host/old' };
+      const current = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [legacy] }, composeOverride: 'services: {}\n' });
+      const before = source(await current.service.snapshot(), 'app');
+      const appBytes = await readFile(current.appPath, 'utf8');
+      const input = { changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [{ op: 'set' as const, path: ['projects'], value: [legacy, { id: 'new', path: '/missing', hostPath: '/host/new' }] }] }] };
+      const result = await current.service.validate(input);
+      expect(result).toMatchObject({ valid: false, issues: [{ sourceId: 'app', path: ['projects', '1', 'hostPath'], code: 'project_mount_target_conflict' }] });
+      await expect(current.service.save(input)).rejects.toMatchObject({ statusCode: 400, issues: result.issues });
+      expect(current.transport.records).toHaveLength(0);
+      expect(await readFile(current.appPath, 'utf8')).toBe(appBytes);
+    });
+
+    // never turn unrecognized helper failures into user-input errors
+    it.each(['project_mount_unexpected', 'settings_helper_unavailable'])('retains 503 for %s in validate and save', async code => {
+      const current = await fixture({ composeOverride: 'services: {}\n' });
+      const before = source(await current.service.snapshot(), 'app');
+      const input = { changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [{ op: 'set' as const, path: ['projects'], value: [{ id: 'one', path: '/missing/one' }] }] }] };
+      current.transport.failError = new SettingsError(code, 503);
+      current.transport.failKind = 'validate';
+      await expect(current.service.validate(input)).rejects.toMatchObject({ code, statusCode: 503 });
+      current.transport.failKind = 'commit';
+      await expect(current.service.save(input)).rejects.toMatchObject({ code, statusCode: 503 });
+    });
+
+    it.each([
+      { title: 'container path', patch: { op: 'set', path: ['projects', '0', 'path'], value: '/tmp/two' } },
+      { title: 'host path', patch: { op: 'set', path: ['projects', '0', 'hostPath'], value: '/host/one' } },
+      { title: 'Project removal', patch: { op: 'remove', path: ['projects'] } }
+    ] satisfies { title: string; patch: SettingsPatch }[])('enlists the unchanged override with a structured $title edit', async ({ patch }) => {
+      const override = 'services:\n  remote-agent-console:\n    volumes: []\n';
+      const current = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [{ id: 'one', path: '/tmp/one' }] }, composeOverride: override });
+      const before = source(await current.service.snapshot(), 'app');
+      const input = { changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [patch] }] };
+      const originalApp = await readFile(current.appPath, 'utf8');
+
+      expect(await current.service.validate(input)).toEqual({ valid: true, issues: [] });
+      expect(await readFile(current.appPath, 'utf8')).toBe(originalApp);
+      expect(await readFile(current.composeOverridePath, 'utf8')).toBe(override);
+      expect(current.transport.records.at(-1)?.request.sources).toEqual([
+        expect.objectContaining({ id: 'app', candidate: 'app' }),
+        { id: 'compose-override', contentHash: contentHash(override), existed: true, candidate: 'compose-override' }
+      ]);
+
+      await current.service.save(input);
+      const commit = current.transport.records.filter(record => record.request.kind === 'commit').at(-1);
+      expect(commit?.request.sources?.map(selected => selected.id)).toEqual(['app', 'compose-override']);
+      expect(await readFile(current.composeOverridePath, 'utf8')).toBe(override);
+    });
+
+    // cover whole-document API callers as well as structured Settings edits
+    it('enlists the override for a raw application path change', async () => {
+      const override = 'services: {}\n';
+      const current = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [{ id: 'one', path: '/tmp/one' }] }, composeOverride: override });
+      const before = source(await current.service.snapshot(), 'app');
+      const content = `${JSON.stringify({ publicOrigin: 'https://agents.example.com', projects: [{ id: 'one', path: '/tmp/raw' }] }, null, 2)}\n`;
+
+      await current.service.save({ changes: [{ sourceId: 'app', revisionId: before.revisionId, content }] });
+
+      const commit = current.transport.records.filter(record => record.request.kind === 'commit').at(-1);
+      expect(commit?.request.sources?.map(selected => selected.id)).toEqual(['app', 'compose-override']);
+      expect(await readFile(current.appPath, 'utf8')).toBe(content);
+      expect(await readFile(current.composeOverridePath, 'utf8')).toBe(override);
+    });
+
+    // keep raw repair available when malformed bytes contain no usable mount knowledge
+    it('repairs malformed application JSON without requiring an empty mount transaction', async () => {
+      const current = await fixture();
+      await writeFile(current.appPath, '{');
+      const before = source(await current.service.snapshot(), 'app');
+      const content = `${JSON.stringify({ publicOrigin: 'https://agents.example.com', name: 'Repaired' }, null, 2)}\n`;
+
+      await current.service.save({ changes: [{ sourceId: 'app', revisionId: before.revisionId, content }] });
+
+      expect(await readFile(current.appPath, 'utf8')).toBe(content);
+      expect(current.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app']);
+    });
+
+    // keep an operator-authored override candidate as the one transaction participant
+    it('preserves one explicit override edit beside a Project path change', async () => {
+      const beforeOverride = 'services:\n  remote-agent-console:\n    environment:\n      SENTINEL: before\n';
+      const afterOverride = beforeOverride.replace('before', 'after');
+      const current = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [{ id: 'one', path: '/tmp/one' }] }, composeOverride: beforeOverride });
+      const snapshot = await current.service.snapshot();
+
+      await current.service.save({ changes: [
+        { sourceId: 'app', revisionId: source(snapshot, 'app').revisionId, patches: [{ op: 'set', path: ['projects', '0', 'path'], value: '/tmp/two' }] },
+        { sourceId: 'compose-override', revisionId: source(snapshot, 'compose-override').revisionId, content: afterOverride }
+      ] });
+
+      const commit = current.transport.records.filter(record => record.request.kind === 'commit').at(-1);
+      expect(commit?.request.sources?.map(selected => selected.id)).toEqual(['app', 'compose-override']);
+      expect(await readFile(current.composeOverridePath, 'utf8')).toBe(afterOverride);
+    });
+
+    // compare mount mappings independently of Project presentation and row order
+    it('does not require an override for labels, reordering or systemd paths', async () => {
+      const projects = [{ id: 'one', path: '/tmp/one' }, { id: 'two', path: '/tmp/two' }];
+      const presentation = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects } });
+      const presentationSource = source(await presentation.service.snapshot(), 'app');
+      await presentation.service.save({ changes: [{ sourceId: 'app', revisionId: presentationSource.revisionId, patches: [
+        { op: 'set', path: ['projects', '0', 'label'], value: 'One' },
+        { op: 'set', path: ['projects'], value: [...projects].reverse() }
+      ] }] });
+      expect(presentation.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app']);
+
+      const native = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [{ id: 'one', path: '/tmp/one' }] } });
+      native.transport.descriptor.kind = 'systemd';
+      native.transport.descriptor.native = { unit: 'remote-agent-console.service', environmentFile: native.envPath };
+      const nativeSource = source(await native.service.snapshot(), 'app');
+      await native.service.save({ changes: [{ sourceId: 'app', revisionId: nativeSource.revisionId, patches: [{ op: 'set', path: ['projects', '0', 'path'], value: '/tmp/native' }] }] });
+      expect(native.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app']);
+    });
+
+    // prevent automatic mounts from following a pending override owner
+    it('blocks mount edits until a pending override relocation is cleared', async () => {
+      const current = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [{ id: 'one', path: '/tmp/one' }] }, composeOverride: 'services: {}\n' });
+      const originalApp = await readFile(current.appPath, 'utf8');
+      const originalOverride = await readFile(current.composeOverridePath, 'utf8');
+      const desired = structuredClone(current.transport.descriptor);
+      desired.generation += 1;
+      const relocated = join(current.root, 'pending.override.yaml');
+      await writePrivate(relocated, originalOverride);
+      desired.sources['compose-override'] = { ...desired.sources['compose-override']!, path: relocated, serverPath: relocated };
+      desired.compose!.files[1] = relocated;
+      await writePrivate(join(current.controlRoot, 'desired-installation.json'), JSON.stringify(desired));
+      const before = source(await current.service.snapshot(), 'app');
+      const input = { changes: [{ sourceId: 'app', revisionId: before.revisionId, patches: [{ op: 'set' as const, path: ['projects', '0', 'path'], value: '/tmp/two' }] }] };
+      await expect(current.service.validate(input)).rejects.toMatchObject({ code: 'source_migration_restart_required', statusCode: 409 });
+      await expect(current.service.save(input)).rejects.toMatchObject({ code: 'source_migration_restart_required', statusCode: 409 });
+      expect(current.transport.records).toHaveLength(0);
+      expect(await readFile(current.appPath, 'utf8')).toBe(originalApp);
+      expect(await readFile(current.composeOverridePath, 'utf8')).toBe(originalOverride);
+      expect(await readFile(relocated, 'utf8')).toBe(originalOverride);
+      await unlink(join(current.controlRoot, 'desired-installation.json'));
+      const corrected = { changes: [{ ...input.changes[0]!, revisionId: source(await current.service.snapshot(), 'app').revisionId }] };
+      expect(await current.service.validate(corrected)).toMatchObject({ valid: true });
+      await current.service.save(corrected);
+      expect(current.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app', 'compose-override']);
+      expect(JSON.parse(await readFile(current.appPath, 'utf8')).projects[0].path).toBe('/tmp/two');
+    });
+
+    it('rejects a Compose path change without one durable override candidate', async () => {
+      const missing = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [{ id: 'one', path: '/tmp/one' }] } });
+      const missingSource = source(await missing.service.snapshot(), 'app');
+      await expect(missing.service.save({ changes: [{ sourceId: 'app', revisionId: missingSource.revisionId, patches: [{ op: 'set', path: ['projects', '0', 'path'], value: '/tmp/two' }] }] })).rejects.toMatchObject({ code: 'project_mounts_compose_override_required', statusCode: 400 });
+      expect(missing.transport.records).toHaveLength(0);
+
+      const removable = await fixture({ app: { publicOrigin: 'https://agents.example.com', projects: [{ id: 'one', path: '/tmp/one' }] }, composeOverride: 'services: {}\n' });
+      const removableOverride = removable.transport.descriptor.sources['compose-override'];
+      // require the optional source before exercising explicit removal
+      if (removableOverride === undefined) throw new Error('missing compose override source');
+      removableOverride.optional = true;
+      const removableSnapshot = await removable.service.snapshot();
+      await expect(removable.service.save({ changes: [
+        { sourceId: 'app', revisionId: source(removableSnapshot, 'app').revisionId, patches: [{ op: 'set', path: ['projects', '0', 'path'], value: '/tmp/two' }] },
+        { sourceId: 'compose-override', revisionId: source(removableSnapshot, 'compose-override').revisionId, remove: true }
+      ] })).rejects.toMatchObject({ code: 'project_mounts_compose_override_required', statusCode: 400 });
+      expect(removable.transport.records).toHaveLength(0);
+    });
   });
 
   // permit blind protected replacement at the current document revision but never accept mask text

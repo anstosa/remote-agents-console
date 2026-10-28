@@ -40,6 +40,7 @@ import { probeRacHealth, proveInitialTargetBaseline, retargetNativeCloudflaredCo
 import { handoverControlPlane, recoverControlPlaneHandover, validateCheckoutHandover } from "./checkout-handover.mjs";
 import { withRestartWatchdog } from "./restart-watchdog.mjs";
 import { processCloudflareRequest } from "./cloudflare.mjs";
+import { projectMountsChanged, synchronizeProjectMounts } from "./project-mounts.mjs";
 
 // retain helper-only effective source proof data
 const EFFECTIVE_SOURCES = Symbol("effectiveSources");
@@ -136,6 +137,25 @@ export async function validateRequest(descriptor, request, options = {}) {
   // validate every nonremoved candidate
   for (const [sourceId, candidate] of candidates) {
     await validateCandidate(descriptor.sources[sourceId], candidate, options);
+  }
+  // derive Project mounts only inside an enlisted Compose override transaction
+  if (descriptor.kind === "compose" && candidates.has("app")) {
+    const currentApplication = readBoundedFile(descriptor.sources.app.path, MAX_SOURCE_BYTES).toString("utf8");
+    const candidateApplication = readBoundedFile(candidates.get("app"), MAX_SOURCE_BYTES).toString("utf8");
+    // synchronize only an actual mount projection change
+    if (projectMountsChanged(currentApplication, candidateApplication)) {
+      // require one crash-recoverable cross-file transaction
+      if (!candidates.has("compose-override")) throw safeError("project-mount-override-required");
+      const stageDirectory = resolve(descriptor.controlRoot, "staging", request.id);
+      const before = await validateComposeCandidates(descriptor, candidates, stageDirectory, options.runner ?? runBounded, true);
+      const override = candidates.get("compose-override");
+      const original = readBoundedFile(override, MAX_SOURCE_BYTES).toString("utf8");
+      const synchronized = synchronizeProjectMounts(original, currentApplication, candidateApplication, before.resolvedModel, descriptor.compose.projectDirectory);
+      // preserve the source-size boundary after derivation
+      if (Buffer.byteLength(synchronized) > MAX_SOURCE_BYTES) throw safeError("source-too-large");
+      // replace only changed private candidate bytes
+      if (synchronized !== original) atomicWriteFile(override, synchronized, 0o600);
+    }
   }
   const touchesCompose = [...candidates].some(([sourceId]) => ["compose", "env"].includes(descriptor.sources[sourceId].kind));
   let dependencySnapshot;
