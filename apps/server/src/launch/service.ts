@@ -107,8 +107,8 @@ export const scratchLabel = scratchPlaceLabel;
 // for its folder. tmux turns `.` into `_` in a session name, so the name is written that way up
 // front and the free-name check compares what tmux will actually list.
 const placeSessionName = (place: Pick<Place, 'home' | 'hostPath'>): string => worktreeSessionName(placeHostRoot(place)).replaceAll('.', '_');
-// allow approved host repairs and verification
-const updateAdvisorArgs = ['--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen'];
+// allow approved host repairs without running hooks or blocking on their trust dialog
+const updateAdvisorArgs = ['--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen', '--disable', 'hooks'];
 // preserve account options while keeping the advisor's policy and fixed checkout
 const updateAdvisorReplacedFlags = new Map<string, ReplacedFlagValue>([
   ['-s', 'one'], ['--sandbox', 'one'], ['-a', 'one'], ['--ask-for-approval', 'one'],

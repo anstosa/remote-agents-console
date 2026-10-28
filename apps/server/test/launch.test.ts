@@ -296,8 +296,8 @@ describe('LaunchService', () => {
     expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'kill-pane', '-t', '%5']);
   });
 
-  // account selection survives both the host bridge and the local runner
-  it.each(['host', 'local'] as const)('keeps the configured Codex account for a %s update advisor', async transport => {
+  // account selection survives both transports without hook startup dialogs
+  it.each(['host', 'local'] as const)('keeps the configured Codex account without startup hooks for a %s update advisor', async transport => {
     const root = await mkdtemp(join(tmpdir(), 'rac-advisor-account-'));
     tempDirs.push(root);
     // exercise executable overrides without changing the account configuration
@@ -308,7 +308,7 @@ describe('LaunchService', () => {
     else delete process.env.RAC_HOST_TMUX_DIR;
     // return a pane for the advisor label
     run.mockResolvedValue({ code: 0, stdout: '%5', stderr: '' });
-    const config = { adapters: { codex: { program: codexProgram, args: ['--profile', 'selected', '-c', 'model_provider="openai"', '--no-daemon'], env: { CODEX_HOME: '/accounts/selected' }, launchable: true } }, projects: [] };
+    const config = { adapters: { codex: { program: codexProgram, args: ['--profile', 'selected', '-c', 'model_provider="openai"', '-c', 'features.hooks=true', '--enable', 'hooks', '--no-daemon'], env: { CODEX_HOME: '/accounts/selected' }, launchable: true } }, projects: [] };
     const service = new LaunchService(config as never, undefined, undefined, undefined, undefined, undefined, undefined, undefined, root);
 
     await expect(service.launchUpdateAdvisor('/repo', '2'.repeat(40))).resolves.toBe(true);
@@ -322,6 +322,8 @@ describe('LaunchService', () => {
     expect(bootstrap).toContain('--no-daemon');
     expect(bootstrap).toContain(transport === 'host' ? '/host/bin/codex' : '/container/bin/codex');
     expect(bootstrap).toContain('--dangerously-bypass-approvals-and-sandbox --no-alt-screen');
+    // disable hooks per invocation without changing the account's trust state
+    expect(bootstrap).toContain('--disable hooks');
   });
 
   // advisor-owned flags replace conflicting normal-agent options

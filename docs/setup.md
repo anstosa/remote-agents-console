@@ -328,6 +328,9 @@ account/profile selection, even with an executable override. Its approval,
 sandbox, terminal, and working-directory flags replace conflicting adapter
 flags so the review stays in the server checkout. `setup` runs only when the
 advisor uses the configured executable.
+The dedicated advisor disables Codex hooks for its invocation so new or changed
+hooks cannot block startup with a trust dialog or run before the review's approval
+boundary. Normal agent launches and saved hook trust settings are unchanged.
 With neither applicable value set, the Codex-only feature reports unavailable
 rather than spawning a bare `codex` from `PATH`. The **Global settings** flyout
 shows the ChatGPT accounts section only when `adapters.codex` is configured.
