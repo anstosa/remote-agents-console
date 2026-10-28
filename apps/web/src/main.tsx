@@ -48,7 +48,7 @@ import { isReviewJob, type ReviewJob, type ReviewRunLink } from './review-jobs.j
 import { useAskThreads } from './asks.js';
 import { useLineAsks } from './ask-thread.js';
 import { VoiceDialog, type VoiceWorktree } from './voice/voice-dialog.js';
-import { AdaptersContext, AgentLaunchSettingsContext, AgentAccountsMenuContext, agentKindGlyph, agentKindLabel, agentKinds, configuredKinds, defaultSandboxed, LaunchMenu, LaunchSplitButton, LaunchTabBadge, launchRequestInit, originCopy, sandboxCopy, type AdapterCapabilities, type AgentKind, type AgentUpdateStatus, type LaunchMenuEntry, type LaunchResolution, type LaunchChoice } from './launch-profile.js';
+import { AdaptersContext, AgentLaunchSettingsContext, AgentAccountsMenuContext, agentKindGlyph, agentKindLabel, agentKinds, configuredKinds, defaultSandboxed, LaunchMenu, LaunchSplitButton, LaunchTabBadge, launchRequestInit, originCopy, resolvedLaunchChoice, sandboxCopy, type AdapterCapabilities, type AgentKind, type AgentUpdateStatus, type LaunchMenuEntry, type LaunchResolution, type LaunchChoice } from './launch-profile.js';
 import { ScheduleEditor, defaultScheduleCron, lastRunNeedsAttention, scheduleInvalid, type Schedule, type ScheduleAdapterOption, type ScheduleSetBody, type ScheduleTarget, type ScheduleTargetOption } from './schedule-editor.js';
 import { useBrowserPermissionBroker } from './browser-permissions.js';
 import { FilesPanel } from './files-panel/files-panel.js';
@@ -6714,7 +6714,8 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
           // focus the panel once it reaches the carousel
           pendingWorkspaceJumps.set(key, 'code');
           code.openChanges('working');
-        }
+        },
+        ...((place.stack?.processes?.length ?? 0) === 0 ? {} : { toggleStack: () => stackPanel.open ? stackPanel.close() : openStackPanel() })
       })
     };
     workspaceViews.set(key, view);
@@ -7805,6 +7806,12 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
   const phone = usePhoneLayout();
   const globalLaunch = useContext(GlobalLaunchContext);
   const visibleLaunch = launch ?? globalLaunch;
+  const adapters = useContext(AdaptersContext);
+  // the Launch primary's one-click launch, even while it shows a minimized agent or, on a phone, the menu
+  useKeyAction('launch-agent', () => {
+    if (visibleLaunch === undefined || visibleLaunch.disabled === true || visibleLaunch.pending === true || (visibleLaunch.resolution !== undefined && visibleLaunch.resolution.kind === undefined)) return false;
+    visibleLaunch.start(resolvedLaunchChoice(adapters, visibleLaunch.resolution));
+  });
   const place = workspace?.place;
   const worktreeId = place?.worktreeId;
   const projects = useContext(ProjectsContext);
@@ -9451,6 +9458,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     'last-panel': onPanels(view => { const last = view.lastPanel(); if (last !== undefined) view.jump(last, true); }),
     'toggle-expand': onPanels((view, _panels, current) => { if (current !== undefined) view.toggleExpand(current); }),
     'toggle-code': onPanels(view => { if (view.toggleCode === undefined) return false; view.toggleCode(); }),
+    'toggle-stack': onPanels(view => { if (view.toggleStack === undefined) return false; view.toggleStack(); }),
     'rename-panel': onPanels((view, _panels, current) => { if (current !== undefined) view.renamePanel(current); }),
     'close-panel': onPanels((view, _panels, current) => {
       const split = view.splits.find(candidate => candidate.key === current);

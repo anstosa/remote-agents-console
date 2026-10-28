@@ -21,6 +21,7 @@ export type ChordEvent = { key: string; code: string; ctrlKey: boolean; altKey: 
 export const keyActions: Record<string, { description: string; repeat?: true }> = {
   'show-bindings': { description: 'Show key bindings' },
   'command-palette': { description: 'Command palette' },
+  'launch-agent': { description: 'Launch a new agent' },
   'new-terminal': { description: 'New Terminal panel' },
   'split-beside': { description: 'New Terminal beside the current panel' },
   'split-below': { description: 'New Terminal below the current panel' },
@@ -32,6 +33,7 @@ export const keyActions: Record<string, { description: string; repeat?: true }> 
   'select-panel-right': { description: 'Panel to the right', repeat: true },
   'toggle-expand': { description: 'Expand or restore the current panel' },
   'toggle-code': { description: 'Open or close the Code panel' },
+  'toggle-stack': { description: 'Open or close the Stack panel' },
   'rename-panel': { description: 'Rename the current panel' },
   'close-panel': { description: 'Close the current panel' },
   'choose-tree': { description: 'Pick a Workspace or panel' },

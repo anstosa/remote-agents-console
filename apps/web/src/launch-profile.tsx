@@ -42,6 +42,11 @@ export const configuredKinds = (adapters: AdapterCapabilities | undefined): Agen
 // a launch of this kind starts Sandboxed by default whenever the console can enforce it
 export const defaultSandboxed = (capability: AdapterCapability | undefined): boolean => capability?.sandbox === true && capability.sandboxUnavailableReason === undefined;
 
+// what a one-click Launch sends: the resolved kind, Sandboxed when it can be; no choice lets the
+// server pick when the dashboard resolved no kind
+export const resolvedLaunchChoice = (adapters: AdapterCapabilities | undefined, resolution: LaunchResolution | undefined): LaunchChoice | undefined =>
+  resolution?.kind === undefined ? undefined : { kind: resolution.kind, sandboxed: defaultSandboxed(adapters?.[resolution.kind]) };
+
 // POST body for a launch-family route: the chosen kind and whether to confine it
 export const launchRequestInit = (choice: LaunchChoice): RequestInit => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(choice) });
 
@@ -210,7 +215,7 @@ export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch
   // block account-page click-through without changing nested launcher menus
   const flyout = open && createPortal(<>{accountsView !== undefined && <FlyoutBackdrop onDismiss={closeMenu} />}<div ref={flyoutRef} style={style} className="more-menu flyout-menu launch-menu" role="menu" aria-label={menuLabel} onKeyDown={event => { /* close the chooser on escape */ if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeMenu(); } }}>{menu}</div></>, document.body);
   // the empty card keeps a direct action; place rows explicitly retain their chooser
-  if (placeActions && entries.length === 0 && !alwaysShowMenu) return primaryButton ?? <button type="button" className={`${primaryClass}${pending ? ' progress-border progress-green' : ''}`} aria-busy={pending || undefined} aria-label={`Launch ${label}`} disabled={disabled || launchDisabled || pending || (resolution !== undefined && resolution.kind === undefined)} onClick={() => launch(resolution?.kind === undefined ? undefined : { kind: resolution.kind, sandboxed: defaultSandboxed(adapters?.[resolution.kind]) })}>{pending && <span className="update-progress-ring" aria-hidden="true" />}{verb}</button>;
+  if (placeActions && entries.length === 0 && !alwaysShowMenu) return primaryButton ?? <button type="button" className={`${primaryClass}${pending ? ' progress-border progress-green' : ''}`} aria-busy={pending || undefined} aria-label={`Launch ${label}`} disabled={disabled || launchDisabled || pending || (resolution !== undefined && resolution.kind === undefined)} onClick={() => launch(resolvedLaunchChoice(adapters, resolution))}>{pending && <span className="update-progress-ring" aria-hidden="true" />}{verb}</button>;
   // launcher rows keep their split action even on a phone; the full-size Launch uses one chooser
   if (phone && !compact && primary === undefined) {
     // retain update feedback when the minimized panel replaces the phone chooser
@@ -251,7 +256,7 @@ export function LaunchSplitButton({ verb = 'Launch', label, resolution, onLaunch
     <span className={`launch-split${compact ? ' compact' : ''}${quiet ? ' quiet' : ''}${updatesAvailable ? ' updates-available' : ''}${updateInProgress ? ' updates-in-progress' : ''}`} role="group" data-context-dropdown aria-label={`${verb} agent`} ref={anchorRef}>
       {primaryButton ?? (minimized !== undefined ? <button type="button" className={`${primaryClass} launch-primary`} aria-description={minimizedTitle} title={minimizedTitle} onClick={() => { closeMenu(); minimized.onShow(); }}>
         {resolvedKind !== undefined && <KindMark kind={resolvedKind} />}<span className="launch-primary-label">Show agent</span>{minimizedBadge}
-      </button> : <button type="button" className={`${primaryClass} launch-primary${pending ? ' progress-border progress-green' : ''}`} aria-busy={pending || undefined} aria-label={placeActions ? `${verb} ${label}` : actionCopy(verb, resolvedKind)} disabled={(resolution !== undefined && resolvedKind === undefined) || disabled || launchDisabled || pending} title={primaryTitle} onClick={() => launch(resolvedKind === undefined ? undefined : { kind: resolvedKind, sandboxed })}>
+      </button> : <button type="button" className={`${primaryClass} launch-primary${pending ? ' progress-border progress-green' : ''}`} aria-busy={pending || undefined} aria-label={placeActions ? `${verb} ${label}` : actionCopy(verb, resolvedKind)} disabled={(resolution !== undefined && resolvedKind === undefined) || disabled || launchDisabled || pending} title={primaryTitle} onClick={() => launch(resolvedLaunchChoice(adapters, resolution))}>
         {/* identify resolved launches without replacing their glyph during progress */}{pending && <span className="update-progress-ring" aria-hidden="true" />}{resolvedKind !== undefined && <KindMark kind={resolvedKind} />}<span className="launch-primary-label">{visibleAction}</span>{!placeActions && sandboxed && <LockIcon />}
       </button>)}
       <button type="button" className={`launch-chevron${compact ? ' compact' : ''}`} aria-label={updatesAvailable ? `${menuLabel} — ${updateLabel}` : menuLabel} aria-haspopup="menu" data-context-flyout aria-expanded={open} disabled={(none && entries.length === 0) || disabled || pending} onClick={() => { /* toggle the split flyout */ if (open) closeMenu(); else setOpen(true); }}><ChevronIcon /></button>

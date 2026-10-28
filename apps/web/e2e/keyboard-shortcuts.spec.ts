@@ -11,12 +11,12 @@ const panes = (): Pane[] => [
   { paneId: '%5', session: '$1', window: '@1', role: 'shell', name: 'build', command: 'zsh', path: '/worktrees/cora', title: '', agent: false, busy: false }
 ];
 
-const routeApi = (page: Page, options: { keys?: unknown; shells?: unknown[]; deleted?: string[]; notes?: unknown[] } = {}) => page.route('**/api/**', async route => {
+const routeApi = (page: Page, options: { keys?: unknown; shells?: unknown[]; deleted?: string[]; notes?: unknown[]; agent?: object; dashboard?: object; launches?: unknown[] } = {}) => page.route('**/api/**', async route => {
   const request = route.request();
   const url = new URL(request.url());
   const path = url.pathname;
   if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-  if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Working', attention: 'working', queuedPromptCount: 0 }], projects: [], ...(options.keys === undefined ? {} : { keys: options.keys }) } });
+  if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Working', attention: 'working', queuedPromptCount: 0, ...options.agent }], projects: [], ...(options.keys === undefined ? {} : { keys: options.keys }), ...options.dashboard } });
   // expose the authoritative server source to the dedicated shortcut editor
   if (path === '/api/settings/status') return route.fulfill({ json: { pending: false, targets: [], effective: 'known', restartAvailable: true } });
   if (path === '/api/settings' && request.method() === 'GET') return route.fulfill({ json: { version: 1, revisionId: 'keyboard-snapshot', sources: [{ id: 'app', label: 'Application config', path: '/fixture/config/config.json', format: 'json', exists: true, writable: true, protected: false, tracked: false, revisionId: 'keyboard-app', apply: 'rac-restart', value: { keys: options.keys ?? {} }, schema: { type: 'object', properties: { keys: { type: 'json', label: 'Key tables', optional: true, apply: 'rac-restart' } } } }], status: { pending: false, targets: [], effective: 'known', restartAvailable: true } } });
@@ -28,6 +28,10 @@ const routeApi = (page: Page, options: { keys?: unknown; shells?: unknown[]; del
   if (path === '/api/worktrees/cora/shells' && request.method() === 'POST') {
     options.shells?.push(request.postDataJSON());
     return route.fulfill({ status: 201, json: { paneId: '%5' } });
+  }
+  if (path === '/api/worktrees/cora/launch' && request.method() === 'POST') {
+    options.launches?.push(request.postDataJSON());
+    return route.fulfill({ json: { agentId: 'agent-1' } });
   }
   if (/^\/api\/worktrees\/cora\/panes\/%25\d+$/u.test(path) && request.method() === 'DELETE') {
     options.deleted?.push(decodeURIComponent(path.split('/').pop()!) + url.search);
@@ -355,6 +359,39 @@ test('the palette opens the Code panel and a bound key closes it', async ({ page
   await page.keyboard.press('Control+b');
   await page.keyboard.press('k');
   await expect(code).toHaveCount(0);
+});
+
+test('the palette opens the Stack panel and a bound key closes it', async ({ page }) => {
+  await openWithTerminal(page, { keys: { prefix: { k: 'toggle-stack' } }, agent: { stack: { running: true, processes: [{ name: 'api', state: 'running' }] } } });
+  const stack = page.locator('.stack-pane');
+
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press(':');
+  await page.keyboard.type('stack panel');
+  await page.keyboard.press('Enter');
+  await expect(stack).toBeVisible();
+
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('k');
+  await expect(stack).toHaveCount(0);
+});
+
+test('the palette and a bound key launch the toolbar Launch\'s resolved kind', async ({ page }) => {
+  const launches: unknown[] = [];
+  const adapters = { codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } };
+  const worktree = { id: 'cora', projectId: 'proj', label: 'Cora', path: '/worktrees/cora', main: true, available: true, pinned: true, order: 0, launch: { kind: 'codex', origin: 'worktree' } };
+  await openWithTerminal(page, { keys: { prefix: { a: 'launch-agent' } }, launches, agent: { projectId: 'proj', kind: 'codex' }, dashboard: { adapters, projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [worktree] }] } });
+
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press(':');
+  await page.keyboard.type('launch a new agent');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => launches).toEqual([{ kind: 'codex', sandboxed: false }]);
+  await expect(page.locator('.launch-menu')).toHaveCount(0);
+
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('a');
+  await expect.poll(() => launches).toHaveLength(2);
 });
 
 test('closing a panel asks first, and only y closes it', async ({ page }) => {
