@@ -215,6 +215,8 @@ test('guides a human through active-scope implementation changes and sends conso
   await expect(diffPane.locator('[data-diff-type="split"]')).toHaveCount(1);
   await diffLayout.getByRole('button', { name: 'Unified' }).click();
   await expect(diffPane.locator('[data-diff-type="single"]')).toHaveCount(1);
+  // and its remembered Ignore whitespace choice, off by default
+  await expect(diffPane.getByRole('checkbox', { name: 'Ignore whitespace' })).not.toBeChecked();
   expect(jobRequests).toEqual([{ scope: 'pr', includeTests: false, includeDocs: false }]);
   const nextButton = dialog.getByRole('button', { name: 'Next' });
   const nextColors = await nextButton.evaluate(button => {

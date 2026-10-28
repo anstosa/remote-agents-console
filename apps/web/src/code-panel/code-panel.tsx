@@ -17,9 +17,9 @@ import { useColorTheme } from '../color-theme.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand } from '../panel-header.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
 import { groupComparisonFiles, previewImageByteLimit, type CodePanelCommit, type CodePanelMode, type CodePanelState, type CodePanelView, type CodePanelViewMode, type ExpandedLines, type ScrollAnchor, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView, type PreviewImage, type RevisionFile } from './comparison.js';
-import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
+import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useIgnoreWhitespace, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, isPlaceRelativePath, type EditorTarget } from './editor-jump.js';
-import { annotatedItem, codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, hunkLinesOnlyCSS, loadedFilesFromContents, rememberExpandedLines } from './items.js';
+import { annotatedItem, codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, hunkLinesOnlyCSS, loadedFilesFromContents, rememberExpandedLines, withoutWhitespaceChanges } from './items.js';
 import { orderedRange, patchRowIndex, patchRows } from './patch-rows.js';
 import { askLines } from '../asks.js';
 import type { LineAsks } from '../ask-thread.js';
@@ -152,6 +152,15 @@ const keepKeys = <V,>(record: Record<string, V>, keep: (path: string) => boolean
   return Object.fromEntries(kept.map(path => [path, record[path]]));
 };
 
+// One whitespace-ignoring copy per cached item, so an unchanged file hands the library the same
+// object across renders (keeping its scroll and full-context expansion), as the item cache does.
+const whitespaceIgnoredItems = new WeakMap<PanelItem, PanelItem>();
+const whitespaceIgnored = (item: PanelItem): PanelItem => {
+  const ignored = whitespaceIgnoredItems.get(item) ?? withoutWhitespaceChanges(item);
+  whitespaceIgnoredItems.set(item, ignored);
+  return ignored;
+};
+
 // The placeholder a diffable-in-principle file falls back to when its patch cannot be rendered
 // (withheld for size, binary, or a metadata-only change); undefined means it renders as a real diff.
 const placeholderFor = (file: ComparisonFile): Placeholder | undefined => {
@@ -207,6 +216,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   const expanded = usePanelExpand('code')?.expanded === true;
   const [viewMode, setViewMode] = useState<CodePanelViewMode>(savedView?.viewMode ?? 'hunks');
   const [split, setSplit] = useDiffSplit();
+  const [ignoreWhitespace, setIgnoreWhitespace] = useIgnoreWhitespace();
   // wrapping is opt-in so wide lines keep their horizontal scroll by default
   const [wrapLines, setWrapLines] = useState(savedView?.wrapLines ?? false);
   // keep file collapse separate from cached diff content and version each toggle for CodeView
@@ -436,9 +446,10 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   const lineAsks = ask?.lineAsks ?? [];
   const askKey = lineAsks.map(entry => `${entry.id}@${entry.changeId}:${entry.side}:${entry.endLine}`).join('|');
   // only toggled or asked-about files get new item versions; unchanged files retain their cache identity
-  const visibleItems = useMemo(() => items.map(item => {
+  const visibleItems = useMemo(() => items.map(cachedItem => {
     // plain files and untouched diffs keep their original instance
-    if (item.type !== 'diff') return item;
+    if (cachedItem.type !== 'diff') return cachedItem;
+    const item = ignoreWhitespace ? whitespaceIgnored(cachedItem) : cachedItem;
     const path = item.id.slice(5);
     const collapse = fileCollapse[path];
     // an untouched diff keeps its original instance too
@@ -448,7 +459,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     return annotatedItem(shown, asked.filter(entry => patchRowIndex(rows, entry.side, entry.endLine) >= 0).map(entry => ({ key: entry.id, annotation: { side: entry.side, lineNumber: entry.endLine, metadata: { askId: entry.id } } as DiffLineAnnotation<PanelAnnotation> })));
     // askKey stands in for lineAsks
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [items, fileCollapse, askKey, patch]);
+  }), [items, fileCollapse, askKey, patch, ignoreWhitespace]);
   // the library keeps a collapsed item's header mounted, so this controls its body in place
   const toggleFileCollapse = useCallback((path: string) => {
     setFileCollapse(current => ({ ...current, [path]: { collapsed: !current[path]?.collapsed, revision: (current[path]?.revision ?? 0) + 1 } }));
@@ -696,6 +707,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     </div>}
     {/* keep labels mounted through their forwarded click, then reveal the newly configured view */}
     {selectedPath === undefined && groups.supporting.length > 0 && <label className="code-pane-view-check" onClick={event => event.stopPropagation()}><input type="checkbox" checked={supportingExpanded} onChange={event => { setSupportingExpanded(event.target.checked); closeMenu(); }} />View docs <small>({groups.supporting.length})</small></label>}
+    {effectiveMode !== 'plain' && <label className="code-pane-view-check" onClick={event => event.stopPropagation()}><input type="checkbox" checked={ignoreWhitespace} onChange={event => { setIgnoreWhitespace(event.target.checked); closeMenu(); }} />Ignore whitespace</label>}
     <label className="code-pane-view-check" onClick={event => event.stopPropagation()}><input type="checkbox" checked={wrapLines} onChange={event => { setWrapLines(event.target.checked); closeMenu(); }} />Wrap lines</label>
   </div> : undefined;
   const title = <>

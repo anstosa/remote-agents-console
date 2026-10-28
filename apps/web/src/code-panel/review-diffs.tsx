@@ -14,9 +14,9 @@ import type { CodeViewLineSelection, DiffLineAnnotation, FileDiffLoadedChangedFi
 import { CodeView, type CodeViewHandle, type CodeViewItem, type CodeViewReactOptions } from '@pierre/diffs/react';
 import { useColorTheme } from '../color-theme.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
-import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useObservedWidth } from './diff-layout.js';
+import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useIgnoreWhitespace, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, type EditorTarget } from './editor-jump.js';
-import { annotatedItem, codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch, hunkLinesOnlyCSS, rememberExpandedLines } from './items.js';
+import { annotatedItem, codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch, hunkLinesOnlyCSS, rememberExpandedLines, withoutWhitespaceChanges } from './items.js';
 import type { ExpandedLines } from './comparison.js';
 import { orderedRange } from './patch-rows.js';
 
@@ -240,6 +240,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
   useEffect(() => setChoice(undefined), [changes, onAskStart]);
   const initialScrollTop = useRef(scrollTop);
   const terminalFontSize = useTerminalFontSize();
+  const [ignoreWhitespace, setIgnoreWhitespace] = useIgnoreWhitespace();
   // The step's hunk Changes of one file become one diff item, keyed by their Change ids; any other
   // Change is an item of its own. One whose patch is not a diff the parser can recover (a binary
   // file, a metadata-only change) falls back to a placeholder.
@@ -253,11 +254,13 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
     const placeholders: ReviewDiffChange[] = [];
     for (const group of files.values()) {
       const view = fileView(group);
-      const item = diffItemForPatch(group.map(change => change.id).join('+'), view.patch);
-      if (item === undefined) placeholders.push(...group); else baseItems.set(item.id, { item, view });
+      const parsed = diffItemForPatch(group.map(change => change.id).join('+'), view.patch);
+      if (parsed === undefined) { placeholders.push(...group); continue; }
+      const item = ignoreWhitespace ? withoutWhitespaceChanges(parsed) : parsed;
+      baseItems.set(item.id, { item, view });
     }
     return { baseItems, placeholders };
-  }, [changes]);
+  }, [changes, ignoreWhitespace]);
 
   // Each comment, suggested comment and asked-about range, and the "+" choice, anchors one annotation
   // under its last line. CodeView only re-reads an item when its version moves, so an item's version
@@ -373,7 +376,10 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
   const style = codeViewStyle(terminalFontSize) as CSSProperties;
   return (
     <div className="review-tour-diff-view" style={style} ref={viewRef}>
-      {items.length > 0 && splitFits && <div className="review-tour-diff-toolbar"><DiffLayoutSegment split={effectiveSplit} onChange={setSplit} /></div>}
+      {items.length > 0 && <div className="review-tour-diff-toolbar">
+        <label className="code-pane-view-check"><input type="checkbox" checked={ignoreWhitespace} onChange={event => setIgnoreWhitespace(event.target.checked)} />Ignore whitespace</label>
+        {splitFits && <DiffLayoutSegment split={effectiveSplit} onChange={setSplit} />}
+      </div>}
       {placeholders.length > 0 && (
         <ul className="review-tour-diff-placeholders">
           {placeholders.map(change => (

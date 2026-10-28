@@ -4,7 +4,7 @@
 // importers, code-panel.tsx and code-panel/review-diffs.tsx, are both reached through a dynamic
 // `import()`. Kept side-effect free so the isolated-component fixture can exercise item derivation
 // without the dashboard.
-import { parseDiffFromFile, parsePatchFiles, type CodeViewDiffItem, type CodeViewFileItem, type CodeViewItem, type DiffLineAnnotation, type FileDiffLoadedChangedFiles, type FileDiffMetadata, type HunkExpansionRegion, type PostRenderPhase } from '@pierre/diffs';
+import { parseDiffFromFile, parsePatchFiles, type ChangeContent, type CodeViewDiffItem, type CodeViewFileItem, type CodeViewItem, type ContextContent, type DiffLineAnnotation, type FileDiffLoadedChangedFiles, type FileDiffMetadata, type HunkExpansionRegion, type PostRenderPhase } from '@pierre/diffs';
 import type { ComparisonFile, ComparisonFileContents, ExpandedLines, RevisionFile } from './comparison.js';
 
 // Line cap for syntax tokenization: past this a file renders as plain (un-highlighted) text so a
@@ -111,6 +111,113 @@ export const diffItemForContents = (contents: ComparisonFileContents): CodeViewD
   const newFile = contents.working === null ? null : { name: contents.path, contents: newText ?? '', cacheKey: `new:${contents.path}#${version}` };
   const fileDiff = parseDiffFromFile(oldFile, newFile, undefined, false);
   return { id: `diff:${contents.path}`, type: 'diff', fileDiff, version };
+};
+
+// A run of a diff's old and new lines, as indexes into FileDiffMetadata's two line arrays.
+type LineSpan = { deletionLineIndex: number; deletions: number; additionLineIndex: number; additions: number };
+type HunkPart = ContextContent | ChangeContent;
+
+// Append a part, folding adjacent unchanged runs into one.
+const pushPart = (parts: HunkPart[], part: HunkPart): void => {
+  const last = parts[parts.length - 1];
+  if (part.type === 'context' && last?.type === 'context') parts[parts.length - 1] = { ...last, lines: last.lines + part.lines };
+  else parts.push(part);
+};
+
+// Re-diff a span's old and new lines with all whitespace removed, by longest common subsequence: the
+// lines that match become unchanged lines indexing both sides, so each keeps its own text. A line the
+// file ends on without a newline only matches one that also does, as in git. Undefined when the span
+// is too large to diff here.
+const maxRealignCells = 4_000_000;
+const squashWhitespace = (line: string): string => line.replace(/\s+/gu, '');
+const realign = (span: LineSpan, fileDiff: FileDiffMetadata, noNewlineAt: { deletion: number; addition: number }): HunkPart[] | undefined => {
+  const side = (lines: string[], from: number, count: number, noNewline: number) =>
+    lines.slice(from, from + count).map((line, offset) => from + offset === noNewline ? `${squashWhitespace(line)}\n` : squashWhitespace(line));
+  const deleted = side(fileDiff.deletionLines, span.deletionLineIndex, span.deletions, noNewlineAt.deletion);
+  const added = side(fileDiff.additionLines, span.additionLineIndex, span.additions, noNewlineAt.addition);
+  // the matching lines at either end need no table
+  let head = 0;
+  while (head < deleted.length && head < added.length && deleted[head] === added[head]) head += 1;
+  let tail = 0;
+  while (tail < deleted.length - head && tail < added.length - head && deleted[deleted.length - 1 - tail] === added[added.length - 1 - tail]) tail += 1;
+  const rows = deleted.length - head - tail;
+  const cols = added.length - head - tail;
+  if (rows * cols > maxRealignCells) return undefined;
+  // common[i * width + j]: how many lines deleted[head + i..] and added[head + j..] can match
+  const width = cols + 1;
+  const common = new Uint32Array((rows + 1) * width);
+  for (let i = rows - 1; i >= 0; i -= 1) {
+    for (let j = cols - 1; j >= 0; j -= 1) {
+      common[i * width + j] = deleted[head + i] === added[head + j] ? common[(i + 1) * width + j + 1]! + 1 : Math.max(common[(i + 1) * width + j]!, common[i * width + j + 1]!);
+    }
+  }
+  const parts: HunkPart[] = [];
+  const unchanged = (i: number, j: number, lines: number) => pushPart(parts, { type: 'context', lines, deletionLineIndex: span.deletionLineIndex + i, additionLineIndex: span.additionLineIndex + j });
+  if (head > 0) unchanged(0, 0, head);
+  let i = 0;
+  let j = 0;
+  let fromI = 0;
+  let fromJ = 0;
+  const flushChange = () => {
+    if (i > fromI || j > fromJ) parts.push({ type: 'change', deletions: i - fromI, deletionLineIndex: span.deletionLineIndex + head + fromI, additions: j - fromJ, additionLineIndex: span.additionLineIndex + head + fromJ });
+  };
+  while (i < rows || j < cols) {
+    if (i < rows && j < cols && deleted[head + i] === added[head + j] && common[i * width + j] === common[(i + 1) * width + j + 1]! + 1) {
+      flushChange();
+      unchanged(head + i, head + j, 1);
+      i += 1; j += 1; fromI = i; fromJ = j;
+    } else if (j === cols || (i < rows && common[(i + 1) * width + j]! >= common[i * width + j + 1]!)) i += 1;
+    else j += 1;
+  }
+  flushChange();
+  if (tail > 0) unchanged(head + rows, head + cols, tail);
+  return parts;
+};
+
+// A diff item with its whitespace-only changes shown as unchanged lines, like `git diff -w`: each hunk
+// is re-diffed whole (a hunk too large for that has each change block re-diffed instead), so a line
+// that only moved its indentation pairs with its old form even where git's whitespace-sensitive diff
+// had anchored on an unchanged line between them. Hunk ranges and line numbers stay put, so
+// selections and comment anchors address the same lines; only the rows' classification and the
+// library's per-hunk render counts move. A hunk of nothing but whitespace changes renders as
+// unchanged lines. The id is kept while the version and highlight cache key move; an item with
+// nothing to pair (or a file item) is returned as is.
+export const withoutWhitespaceChanges = <I extends CodeViewItem<unknown>>(item: I): I => {
+  if (item.type !== 'diff') return item;
+  const fileDiff = item.fileDiff;
+  let splitShift = 0;
+  let unifiedShift = 0;
+  const hunks = fileDiff.hunks.map(hunk => {
+    const noNewlineAt = {
+      deletion: hunk.noEOFCRDeletions ? hunk.deletionLineIndex + hunk.deletionCount - 1 : -1,
+      addition: hunk.noEOFCRAdditions ? hunk.additionLineIndex + hunk.additionCount - 1 : -1
+    };
+    const whole = realign({ deletionLineIndex: hunk.deletionLineIndex, deletions: hunk.deletionCount, additionLineIndex: hunk.additionLineIndex, additions: hunk.additionCount }, fileDiff, noNewlineAt);
+    const hunkContent: HunkPart[] = [];
+    for (const part of whole ?? hunk.hunkContent.flatMap(part => part.type === 'context' ? [part] : realign(part, fileDiff, noNewlineAt) ?? [part])) pushPart(hunkContent, part);
+    let additionLines = 0;
+    let deletionLines = 0;
+    let splitLineCount = 0;
+    let unifiedLineCount = 0;
+    for (const part of hunkContent) {
+      if (part.type === 'context') { splitLineCount += part.lines; unifiedLineCount += part.lines; continue; }
+      additionLines += part.additions;
+      deletionLines += part.deletions;
+      splitLineCount += Math.max(part.additions, part.deletions);
+      unifiedLineCount += part.additions + part.deletions;
+    }
+    const next = { ...hunk, hunkContent, additionLines, deletionLines, splitLineStart: hunk.splitLineStart + splitShift, splitLineCount, unifiedLineStart: hunk.unifiedLineStart + unifiedShift, unifiedLineCount };
+    splitShift += splitLineCount - hunk.splitLineCount;
+    unifiedShift += unifiedLineCount - hunk.unifiedLineCount;
+    return next;
+  });
+  // every line matched anew folds two unified rows into one, so an unmoved count means nothing changed
+  if (unifiedShift === 0) return item;
+  return {
+    ...item,
+    version: contentHash(`${item.version}|ignore-whitespace`),
+    fileDiff: { ...fileDiff, hunks, splitLineCount: fileDiff.splitLineCount + splitShift, unifiedLineCount: fileDiff.unifiedLineCount + unifiedShift, ...(fileDiff.cacheKey === undefined ? {} : { cacheKey: `${fileDiff.cacheKey}:ignore-whitespace` }) }
+  };
 };
 
 // Build a plain (non-diff) file item from the working-tree contents, for the single-file "Plain

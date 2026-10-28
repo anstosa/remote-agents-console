@@ -618,6 +618,48 @@ test('remembers the last Unified / Split pick across reloads, but a narrow panel
   await expect((await openCodeViewMenu(region)).getByRole('group', { name: 'Diff layout' })).toHaveCount(0);
 });
 
+test('Ignore whitespace shows re-indented lines as unchanged, keeps real changes, and is remembered', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const path = 'src/app.ts';
+  const reindented = `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n@@ -1,3 +1,4 @@\n if (a) {\n-  call( b );\n+    call(b);\n+    other();\n }\n`;
+  const patch = patchOf([{ change: { code: ' M', path, additions: 2, deletions: 1 }, kind: 'tracked', patch: reindented, capped: false }]);
+  await mountPanel(page, patch);
+  const region = panel(page);
+  // a line's content cell (the gutter carries the line type too)
+  const deletions = region.locator('[data-line][data-line-type="change-deletion"]');
+  const additions = region.locator('[data-line][data-line-type="change-addition"]');
+  await expect(deletions).toHaveCount(1);
+  await expect(additions).toHaveCount(2);
+  await (await openCodeViewMenu(region)).getByRole('checkbox', { name: 'Ignore whitespace' }).click();
+  // the re-indented line reads as unchanged, in its new form; the added line stays an addition
+  await expect(deletions).toHaveCount(0);
+  await expect(additions).toHaveCount(1);
+  await expect(additions).toContainText('other();');
+  await expect(region.locator('[data-line][data-line-type="context"]', { hasText: 'call(b);' })).toHaveCount(1);
+  await mountPanel(page, patch);
+  await expect(deletions).toHaveCount(0);
+  await expect((await openCodeViewMenu(region)).getByRole('checkbox', { name: 'Ignore whitespace' })).toBeChecked();
+});
+
+test('Ignore whitespace pairs dedented lines that git split around an unchanged line', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const path = 'src/app.ts';
+  // git anchored on the closing brace, so the old and new forms sit in separate change blocks
+  const dedented = `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n@@ -1,4 +1,4 @@\n if (a) {\n-  one();\n-  two();\n }\n+one();\n+two();\n`;
+  await mountPanel(page, patchOf([{ change: { code: ' M', path, additions: 2, deletions: 2 }, kind: 'tracked', patch: dedented, capped: false }]));
+  const region = panel(page);
+  const deletions = region.locator('[data-line][data-line-type="change-deletion"]');
+  const additions = region.locator('[data-line][data-line-type="change-addition"]');
+  await expect(deletions).toHaveCount(2);
+  await (await openCodeViewMenu(region)).getByRole('checkbox', { name: 'Ignore whitespace' }).click();
+  // as with git diff -w, only the brace moves
+  await expect(region.locator('[data-line][data-line-type="context"]', { hasText: 'one();' })).toHaveCount(1);
+  await expect(deletions).toHaveCount(1);
+  await expect(deletions).toHaveText('}');
+  await expect(additions).toHaveCount(1);
+  await expect(additions).toHaveText('}');
+});
+
 test('covers a size-capped file with a Load anyway placeholder instead of a diff', async ({ page }) => {
   await mountPanel(page, patchOf([trackedFile('src/app.ts'), cappedFile('src/generated.ts')]));
 

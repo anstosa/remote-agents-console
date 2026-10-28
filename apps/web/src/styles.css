@@ -2311,7 +2311,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-narration label > span, .review-tour-summary label > span { color: var(--overlay-0); font-size: .62rem; text-align: right; }
 .review-tour-diffs { display: flex; width: 100%; max-width: none; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; background: var(--crust); }
 .review-tour-diff-view { display: flex; min-width: 0; min-height: 0; flex: 1 1 auto; flex-direction: column; }
-.review-tour-diff-toolbar { display: flex; flex: 0 0 auto; justify-content: flex-end; padding: .4rem .6rem; border-bottom: 1px solid var(--surface-1); background: var(--mantle); }
+.review-tour-diff-toolbar { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: .75rem; padding: .4rem .6rem; border-bottom: 1px solid var(--surface-1); background: var(--mantle); }
 /* the diff library owns its own scroll container; give it the remaining height to fill and scroll */
 .review-tour-diff-scroll { min-width: 0; min-height: 0; flex: 1 1 auto; overflow: auto; }
 /* an inline comment renders as a diff annotation: light-DOM content slotted under its line.
