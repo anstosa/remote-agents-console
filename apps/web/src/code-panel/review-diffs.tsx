@@ -18,6 +18,7 @@ import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useIgnoreWhitespace, 
 import { diffJumpLine, EditorJumpButton, type EditorTarget } from './editor-jump.js';
 import { annotatedItem, codeViewBaseOptions, codeViewStyle, contentHash, diffItemForPatch, hunkLinesOnlyCSS, rememberExpandedLines, withoutWhitespaceChanges } from './items.js';
 import type { ExpandedLines } from './comparison.js';
+import { useMovedLines } from './moved-lines.js';
 import { orderedRange } from './patch-rows.js';
 
 // what a thread can sit under: an inline comment, a suggested comment (an untriaged or dismissed
@@ -314,32 +315,42 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
     throw new Error(`${fileDiff.name}: ${detail}`);
   }, [viewByDiff, loadFile, onExpandError]);
 
+  // moves are found among the step's own diffs
+  const stepItems = useMemo(() => [...baseItems.values()].map(entry => entry.item), [baseItems]);
+  const styleMovedLines = useMovedLines(stepItems, ignoreWhitespace);
+
   // The Code panel's shared render options (the tour has no full-context toggle), plus the gutter "+"
   // that starts a comment, or offers the choice of one or a question when the lines can be asked
   // about. On a mouse it shows on hover; on touch, tapping a line number reveals it. Clicking it —
   // after optionally selecting a range of lines — picks the range, which must lie within one of the
   // step's hunks.
-  const options = useMemo<ReviewOptions>(() => ({
-    ...codeViewBaseOptions(theme === 'latte' ? 'light' : 'dark', terminalFontSize),
-    diffStyle: effectiveSplit ? 'split' : 'unified',
-    enableGutterUtility: true,
-    // the comment "+" is offered only on the step's own lines: an expanded unchanged line may lie
-    // outside the pull request's diff, where a review comment cannot be posted
-    unsafeCSS: hunkLinesOnlyCSS,
-    ...(loadFile === undefined ? {} : { loadDiffFiles }),
-    onPostRender: rememberExpandedLines(expandedLines),
-    onGutterUtilityClick: (range: SelectedLineRange, context: { item: { id: string } }) => {
-      const view = baseItems.get(context.item.id)?.view;
-      const startSide = range.side ?? range.endSide ?? 'additions';
-      const start = view && changeLine(view, startSide, range.start);
-      const end = view && changeLine(view, range.endSide ?? startSide, range.end);
-      if (start === undefined || end === undefined || start.changeId !== end.changeId) return;
-      const picked: ReviewDiffRange = { changeId: start.changeId, ...orderedRange({ ...range, start: start.line, end: end.line }, patchByChangeId.get(start.changeId) ?? '') };
-      if (onAskStart === undefined) onCommentAdd({ id: crypto.randomUUID(), ...picked, body: '' }); else setChoice(picked);
-      // the library commits the picked range as the selection after this callback returns
-      window.setTimeout(() => setSelection(null), 0);
-    }
-  }), [baseItems, patchByChangeId, effectiveSplit, onCommentAdd, onAskStart, terminalFontSize, theme, loadFile, loadDiffFiles, expandedLines]);
+  const options = useMemo<ReviewOptions>(() => {
+    const rememberExpanded = rememberExpandedLines(expandedLines);
+    return {
+      ...codeViewBaseOptions(theme === 'latte' ? 'light' : 'dark', terminalFontSize),
+      diffStyle: effectiveSplit ? 'split' : 'unified',
+      enableGutterUtility: true,
+      // the comment "+" is offered only on the step's own lines: an expanded unchanged line may lie
+      // outside the pull request's diff, where a review comment cannot be posted
+      unsafeCSS: hunkLinesOnlyCSS,
+      ...(loadFile === undefined ? {} : { loadDiffFiles }),
+      onPostRender: (node, instance, phase, context) => {
+        rememberExpanded(node, instance, phase, context);
+        styleMovedLines(node, instance, phase, context);
+      },
+      onGutterUtilityClick: (range: SelectedLineRange, context: { item: { id: string } }) => {
+        const view = baseItems.get(context.item.id)?.view;
+        const startSide = range.side ?? range.endSide ?? 'additions';
+        const start = view && changeLine(view, startSide, range.start);
+        const end = view && changeLine(view, range.endSide ?? startSide, range.end);
+        if (start === undefined || end === undefined || start.changeId !== end.changeId) return;
+        const picked: ReviewDiffRange = { changeId: start.changeId, ...orderedRange({ ...range, start: start.line, end: end.line }, patchByChangeId.get(start.changeId) ?? '') };
+        if (onAskStart === undefined) onCommentAdd({ id: crypto.randomUUID(), ...picked, body: '' }); else setChoice(picked);
+        // the library commits the picked range as the selection after this callback returns
+        window.setTimeout(() => setSelection(null), 0);
+      }
+    };
+  }, [baseItems, patchByChangeId, effectiveSplit, onCommentAdd, onAskStart, terminalFontSize, theme, loadFile, loadDiffFiles, expandedLines, styleMovedLines]);
 
   const commentsById = useMemo(() => new Map(comments.map(comment => [comment.id, comment])), [comments]);
   const suggestionsById = useMemo(() => new Map(suggestions.map(suggestion => [suggestion.id, suggestion])), [suggestions]);

@@ -20,6 +20,7 @@ import { groupComparisonFiles, previewImageByteLimit, type CodePanelCommit, type
 import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useIgnoreWhitespace, useObservedWidth } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, isPlaceRelativePath, type EditorTarget } from './editor-jump.js';
 import { annotatedItem, codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, hunkLinesOnlyCSS, loadedFilesFromContents, rememberExpandedLines, withoutWhitespaceChanges } from './items.js';
+import { useMovedLines } from './moved-lines.js';
 import { orderedRange, patchRowIndex, patchRows } from './patch-rows.js';
 import { askLines } from '../asks.js';
 import type { LineAsks } from '../ask-thread.js';
@@ -509,22 +510,34 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
       window.setTimeout(() => setSelection(null), 0);
     }
   };
-  const options = useMemo<PanelOptions>(() => ({
-    ...codeViewBaseOptions(theme === 'latte' ? 'light' : 'dark', fontSize),
-    ...asking,
-    overflow: wrapLines ? 'wrap' : 'scroll',
-    diffStyle: effectiveSplit ? 'split' : 'unified',
-    // Full context expands the unchanged lines, hydrating each partial patch through loadDiffFiles.
-    // Full context auto-expands every unchanged line; Hunks leaves the gaps collapsed. Either way the
-    // gap ("N unmodified lines") must be expandable on click, which the library only offers when it can
-    // hydrate the partial patch — so `loadDiffFiles` is always provided, not just in Full context. (It
-    // is lazy: nothing is fetched until a gap is actually expanded.)
-    expandUnchanged: effectiveMode === 'full',
-    loadDiffFiles,
-    onPostRender: rememberExpandedLines(expandedLines)
+  // moves are found across every file of the Comparison, so one shows even with only its other end open
+  const moveSources = useMemo(() => (patch?.files ?? []).flatMap(file => {
+    const item = diffItemForFile(file);
+    return item === undefined ? [] : [ignoreWhitespace ? withoutWhitespaceChanges(item) : item];
+  }), [patch, ignoreWhitespace]);
+  const styleMovedLines = useMovedLines(moveSources, ignoreWhitespace);
+  const options = useMemo<PanelOptions>(() => {
+    const rememberExpanded = rememberExpandedLines(expandedLines);
+    return {
+      ...codeViewBaseOptions(theme === 'latte' ? 'light' : 'dark', fontSize),
+      ...asking,
+      overflow: wrapLines ? 'wrap' : 'scroll',
+      diffStyle: effectiveSplit ? 'split' : 'unified',
+      // Full context expands the unchanged lines, hydrating each partial patch through loadDiffFiles.
+      // Full context auto-expands every unchanged line; Hunks leaves the gaps collapsed. Either way the
+      // gap ("N unmodified lines") must be expandable on click, which the library only offers when it can
+      // hydrate the partial patch — so `loadDiffFiles` is always provided, not just in Full context. (It
+      // is lazy: nothing is fetched until a gap is actually expanded.)
+      expandUnchanged: effectiveMode === 'full',
+      loadDiffFiles,
+      onPostRender: (node, instance, phase, context) => {
+        rememberExpanded(node, instance, phase, context);
+        styleMovedLines(node, instance, phase, context);
+      }
+    };
     // `asking` follows startAsk and effectiveMode
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [theme, fontSize, wrapLines, effectiveSplit, effectiveMode, loadDiffFiles, expandedLines, startAsk]);
+  }, [theme, fontSize, wrapLines, effectiveSplit, effectiveMode, loadDiffFiles, expandedLines, startAsk, styleMovedLines]);
 
   // The topmost item and how far into it we have scrolled: the last rendered item whose top has
   // passed the viewport top.

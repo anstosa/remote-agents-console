@@ -129,7 +129,7 @@ const pushPart = (parts: HunkPart[], part: HunkPart): void => {
 // file ends on without a newline only matches one that also does, as in git. Undefined when the span
 // is too large to diff here.
 const maxRealignCells = 4_000_000;
-const squashWhitespace = (line: string): string => line.replace(/\s+/gu, '');
+export const squashWhitespace = (line: string): string => line.replace(/\s+/gu, '');
 const realign = (span: LineSpan, fileDiff: FileDiffMetadata, noNewlineAt: { deletion: number; addition: number }): HunkPart[] | undefined => {
   const side = (lines: string[], from: number, count: number, noNewline: number) =>
     lines.slice(from, from + count).map((line, offset) => from + offset === noNewline ? `${squashWhitespace(line)}\n` : squashWhitespace(line));

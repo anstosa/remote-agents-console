@@ -660,6 +660,40 @@ test('Ignore whitespace pairs dedented lines that git split around an unchanged 
   await expect(additions).toHaveText('}');
 });
 
+test('highlights code moved between files, and re-indented moves once whitespace is ignored', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const header = (path: string) => `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n`;
+  const from = `${header('src/from.ts')}@@ -1,7 +1,1 @@\n export const a = 1;\n-export const first = compute('first value');\n-export const second = compute('second value');\n-function helper(value: number) {\n-  return value * 2 + offset;\n-}\n-export const dropped = 3;\n`;
+  const to = `${header('src/to.ts')}@@ -1,2 +1,7 @@\n namespace b {\n+export const first = compute('first value');\n+export const second = compute('second value');\n+  function helper(value: number) {\n+    return value * 2 + offset;\n+  }\n }\n`;
+  await mountPanel(page, patchOf([
+    { change: { code: ' M', path: 'src/from.ts', additions: 0, deletions: 6 }, kind: 'tracked', patch: from, capped: false },
+    { change: { code: ' M', path: 'src/to.ts', additions: 5, deletions: 0 }, kind: 'tracked', patch: to, capped: false }
+  ]));
+  const region = panel(page);
+  const color = (name: string) => page.evaluate(variable => getComputedStyle(document.documentElement).getPropertyValue(variable).trim(), name);
+  const [mauve, blue] = [await color('--mauve'), await color('--blue')];
+  // the colour a changed line's background, bar and sign derive from
+  const base = (lineType: string, line: number) => region.locator(`[data-line="${line}"][data-line-type="${lineType}"]`)
+    .evaluate((row, side) => getComputedStyle(row).getPropertyValue(`--diffs-${side}-base`).trim(), lineType === 'change-deletion' ? 'deletion' : 'addition');
+  const deleted = (line: number) => base('change-deletion', line);
+  const added = (line: number) => base('change-addition', line);
+  await expect(region.locator('[data-line][data-line-type="change-addition"]')).toHaveCount(5);
+  // the unchanged move reads as moved at both ends; the re-indented one and the dropped line do not
+  await expect.poll(() => deleted(2)).toBe(mauve);
+  expect(await deleted(3)).toBe(mauve);
+  expect(await added(2)).toBe(blue);
+  expect(await added(3)).toBe(blue);
+  expect(await deleted(4)).not.toBe(mauve);
+  expect(await added(4)).not.toBe(blue);
+  expect(await deleted(7)).not.toBe(mauve);
+  await (await openCodeViewMenu(region)).getByRole('checkbox', { name: 'Ignore whitespace' }).click();
+  await expect.poll(() => deleted(4)).toBe(mauve);
+  expect(await deleted(6)).toBe(mauve);
+  expect(await added(4)).toBe(blue);
+  expect(await added(6)).toBe(blue);
+  expect(await deleted(7)).not.toBe(mauve);
+});
+
 test('covers a size-capped file with a Load anyway placeholder instead of a diff', async ({ page }) => {
   await mountPanel(page, patchOf([trackedFile('src/app.ts'), cappedFile('src/generated.ts')]));
 
