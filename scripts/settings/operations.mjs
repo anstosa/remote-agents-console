@@ -283,9 +283,10 @@ async function commitRequest(descriptor, request, options) {
         throw safeError("source-conflict");
       }
       const createsWrapper = !requested.remove && !existed && source.kind === "wrapper";
-      // expose the postproof race seam without widening production behavior
+      // expose the existing postproof race seam for each source
+      options.beforeSourceWrite?.(requested.id, source.path);
+      // track only newly created wrapper publications
       if (createsWrapper) {
-        options.beforeSourceWrite?.(requested.id, source.path);
         sourcePublications.push({ id: requested.id });
       }
       written.push(requested.id);

@@ -112,13 +112,13 @@ function projectMountIssues(currentContent: string | undefined, candidateContent
   return issues;
 }
 const projectMountFailures: Record<string, { sourceId: string; message: string }> = {
-  project_mount_yaml_unsupported: { sourceId: 'compose-override', message: 'Use block-style services and volume sections in the Docker override before saving Project paths.' },
+  project_mount_yaml_unsupported: { sourceId: 'compose-override', message: 'Use explicit block-style service and volume mappings without YAML merges before saving Project paths.' },
   project_mount_marker_invalid: { sourceId: 'compose-override', message: 'Repair the Project mount markers in the Docker override before saving Project paths.' },
   project_mount_option_unsupported: { sourceId: 'compose-override', message: 'Use supported scalar bind options in the Docker override before saving Project paths.' },
   project_mount_path_not_absolute: { sourceId: 'app', message: 'Use absolute container and host paths for new or changed Docker Projects.' },
   project_mount_path_not_canonical: { sourceId: 'app', message: 'Use container paths without trailing slashes or dot segments such as . and ..' },
   project_mount_target_conflict: { sourceId: 'app', message: 'Projects using the same container path must use the same host path.' },
-  project_mount_transition_ambiguous: { sourceId: 'app', message: 'Restore unambiguous current Project IDs and paths before changing mounts, or clear Projects first to remove RAC-owned binds.' },
+  project_mount_transition_ambiguous: { sourceId: 'app', message: 'Use stable Project IDs and compatible paths and bind options before changing mounts, or clear Projects first to remove RAC-owned binds.' },
   project_mount_host_path_required: { sourceId: 'app', message: 'Set Host path to the actual host directory when using a protected container path such as /workspace.' },
   project_mount_override_required: { sourceId: 'app', message: 'Save Project paths together with their Docker override mount configuration.' }
 };

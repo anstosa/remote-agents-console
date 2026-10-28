@@ -1,0 +1,390 @@
+{
+  "description": "data-only Docker Project bind projection contract for independent server and privileged helper enforcement",
+  "maintenance": "update these vectors and both test drivers whenever tuple identity, unknown-current repair, or override-presence semantics change; do not share production parsing across the privilege boundary",
+  "applicationDefaults": {
+    "publicOrigin": "https://agents.example.com"
+  },
+  "vectors": [
+    {
+      "name": "omitted and empty Projects are equivalent",
+      "current": {},
+      "candidate": {
+        "projects": []
+      },
+      "hasOverride": true,
+      "changed": false,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "new Project enlists an installed override",
+      "current": {
+        "projects": []
+      },
+      "candidate": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "hasOverride": true,
+      "changed": true,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "host source changes alter the mount tuple",
+      "current": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "candidate": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one",
+            "hostPath": "/host/contract/one"
+          }
+        ]
+      },
+      "hasOverride": true,
+      "changed": true,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "explicit fallback source does not alter the mount tuple",
+      "current": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "candidate": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one",
+            "hostPath": "/missing/contract/one"
+          }
+        ]
+      },
+      "hasOverride": true,
+      "changed": false,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "duplicate idless rows still describe one effective mount",
+      "current": {
+        "projects": [
+          {
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "candidate": {
+        "projects": [
+          {
+            "path": "/missing/contract/one"
+          },
+          {
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "hasOverride": true,
+      "changed": false,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "Project row ordering does not alter mounts",
+      "current": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          },
+          {
+            "id": "two",
+            "path": "/missing/contract/two"
+          }
+        ]
+      },
+      "candidate": {
+        "projects": [
+          {
+            "id": "two",
+            "path": "/missing/contract/two"
+          },
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "hasOverride": true,
+      "changed": false,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "Project ID metadata does not alter mounts",
+      "current": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "candidate": {
+        "projects": [
+          {
+            "id": "renamed",
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "hasOverride": true,
+      "changed": false,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "repairing current ID metadata does not alter mounts",
+      "current": {
+        "projects": [
+          {
+            "id": 42,
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "candidate": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "hasOverride": true,
+      "changed": false,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "unknown current truth enlists an installed override for empty repair",
+      "current": "{",
+      "candidate": {
+        "projects": []
+      },
+      "hasOverride": true,
+      "changed": true,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "unknown current empty repair needs no absent override",
+      "current": "{",
+      "candidate": {
+        "projects": []
+      },
+      "hasOverride": false,
+      "changed": false,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "damaged siblings require installed override reconciliation",
+      "current": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          },
+          {
+            "id": "broken"
+          }
+        ]
+      },
+      "candidate": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "hasOverride": true,
+      "changed": true,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "new mounts require a durable override",
+      "current": {
+        "projects": []
+      },
+      "candidate": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "hasOverride": false,
+      "changed": true,
+      "server": {
+        "valid": false,
+        "issues": [
+          {
+            "sourceId": "app",
+            "path": [
+              "projects"
+            ],
+            "code": "project_mounts_compose_override_required"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown nonempty repair still requires an override",
+      "current": "{",
+      "candidate": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one"
+          }
+        ]
+      },
+      "hasOverride": false,
+      "changed": true,
+      "server": {
+        "valid": false,
+        "issues": [
+          {
+            "sourceId": "app",
+            "path": [
+              "projects"
+            ],
+            "code": "project_mounts_compose_override_required"
+          }
+        ]
+      }
+    },
+    {
+      "name": "NUL tuples do not collide across source and target",
+      "current": {
+        "projects": [
+          {
+            "id": "one",
+            "hostPath": "/a",
+            "path": "/b\u0000/c"
+          }
+        ]
+      },
+      "candidate": {
+        "projects": [
+          {
+            "id": "one",
+            "hostPath": "/a\u0000/b",
+            "path": "/c"
+          }
+        ]
+      },
+      "hasOverride": true,
+      "changed": true,
+      "server": {
+        "valid": false,
+        "issues": [
+          {
+            "sourceId": "app",
+            "path": [
+              "projects",
+              "0",
+              "hostPath"
+            ],
+            "code": "project_mount_path_invalid"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a damaged current NUL source can be replaced by a valid source",
+      "current": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one",
+            "hostPath": "/host\u0000/old"
+          }
+        ]
+      },
+      "candidate": {
+        "projects": [
+          {
+            "id": "one",
+            "path": "/missing/contract/one",
+            "hostPath": "/host/contract/repaired"
+          }
+        ]
+      },
+      "hasOverride": true,
+      "changed": true,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "name": "null Projects repair cleans an installed override",
+      "current": {
+        "projects": null
+      },
+      "candidate": {
+        "projects": []
+      },
+      "hasOverride": true,
+      "changed": true,
+      "server": {
+        "valid": true,
+        "issues": []
+      }
+    }
+  ]
+}

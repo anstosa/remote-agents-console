@@ -100,13 +100,16 @@ Existing matching mounts, including ancestor mounts such as `/workspace`, are
 reused when they map to the intended host source. When adding or changing a
 container-only path such as `/workspace`, set `hostPath` to the actual host
 checkout rather than the container alias. Read-only mount options and unrelated
-override configuration are preserved. RAC owns only its marked Project-mount
+override configuration are preserved. Projects sharing a destination must agree
+on consistency and bind options; their read-only restrictions are combined.
+RAC owns only its marked Project-mount
 block; obsolete manually authored mounts are not deleted automatically. Linked
 Worktrees and a separate `worktreesDirectory` still need their own mounts.
 
 Automatic editing uses the standard block-style service and volume sections
-installed by RAC. Ambiguous YAML or conflicting Project mappings are rejected
-before either file is saved.
+installed by RAC. YAML merges at the services map or RAC service level are not
+supported; use explicit mappings there. Ambiguous YAML or conflicting Project
+mappings are rejected before either file is saved.
 
 For initial setup or direct configuration-file edits outside Settings, copy
 `compose.override.example.yaml` to the ignored `compose.override.yaml`, remove

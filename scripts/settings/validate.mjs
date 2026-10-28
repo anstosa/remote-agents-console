@@ -6,6 +6,7 @@ import { MAX_COMMAND_BYTES, MAX_SOURCE_BYTES } from "./constants.mjs";
 import { prepareComposeDependencyInputs, projectComposeDependencies } from "./dependencies.mjs";
 import { sha256 } from "./crypto.mjs";
 import { atomicWriteFile, readBoundedFile, safeError } from "./fs.mjs";
+import { PROJECT_MOUNT_OPERATOR_VOLUMES, projectMountOperatorSource } from "./project-mounts.mjs";
 
 // validate one candidate without executing its authored content
 export async function validateCandidate(source, candidatePath, context = {}) {
@@ -297,7 +298,7 @@ export async function validateComposeCandidates(descriptor, candidates, stageDir
   if (second.code !== 0) {
     throw safeError("invalid-compose");
   }
-  const resolvedModel = await readResolvedComposeModel(compose, projected, prepared.candidateEnvFiles, runner);
+  const resolvedModel = await readResolvedComposeModel(compose, [projected], prepared.candidateEnvFiles, runner);
   const composeSelectors = composeSourceSelectors(descriptor, resolvedModel);
   validateComposeModel(resolvedModel, descriptorWithComposeSelectors(descriptor, composeSelectors));
   const environmentOwnership = composeEnvironmentOwnership(descriptor, candidates, model, resolvedModel);
@@ -314,14 +315,21 @@ async function projectMountPlanningModel(descriptor, prepared, stageDirectory, r
   // require an active override and exclusive ownership of private metadata
   if (overrideIndex < 0 || Object.hasOwn(resolvedModel, metadataKey)) throw safeError("project-mount-yaml-unsupported");
   const source = readBoundedFile(prepared.candidateFiles[overrideIndex], MAX_SOURCE_BYTES).toString("utf8");
-  const lines = source.split("\n");
+  const operatorSource = projectMountOperatorSource(source);
+  const operatorPath = resolve(stageDirectory, "compose-project-mount-operator.yaml");
+  atomicWriteFile(operatorPath, operatorSource, 0o600);
+  const operatorModel = await readResolvedComposeModel(descriptor.compose, prepared.candidateFiles.with(overrideIndex, operatorPath), prepared.candidateEnvFiles, runner, true);
+  const operatorVolumes = operatorModel.services?.["remote-agent-console"]?.volumes;
+  // require the independently resolved operator-only destination policy
+  if (!Array.isArray(operatorVolumes)) throw safeError("invalid-project-mount-model");
+  const lines = operatorSource.split("\n");
   const roots = lines.flatMap((line, index) => line === "services:" ? [index] : []);
   // accept only the literal root already supported by the mount writer
   if (roots.length !== 1) throw safeError("project-mount-yaml-unsupported");
   lines.splice(roots[0], 1, "services:", "  rac-project-mount-parser:", "    image: scratch", "    network_mode: none", `${metadataKey}:`);
   const parserPath = resolve(stageDirectory, "compose-project-mount-source.yaml");
   atomicWriteFile(parserPath, lines.join("\n"), 0o600);
-  const parsed = await readResolvedComposeModel(descriptor.compose, parserPath, prepared.candidateEnvFiles, runner, true);
+  const parsed = await readResolvedComposeModel(descriptor.compose, [parserPath], prepared.candidateEnvFiles, runner, true);
   const metadata = parsed[metadataKey];
   // fail closed when the private parser did not retain its expected object
   if (!isRecord(metadata)) throw safeError("project-mount-yaml-unsupported");
@@ -340,6 +348,7 @@ async function projectMountPlanningModel(descriptor, prepared, stageDirectory, r
     targets.set(key, volume.target);
   }
   const planningModel = structuredClone(resolvedModel);
+  planningModel[PROJECT_MOUNT_OPERATOR_VOLUMES] = operatorVolumes;
   // substitute spelling only in the private mount-planning view
   for (const volume of planningModel.services["remote-agent-console"].volumes) {
     const target = targets.get(posix.resolve(renderedEnvironmentValue(volume.target)));
@@ -528,8 +537,8 @@ async function readComposeModel(compose, files, envFiles, runner) {
 }
 
 // inspect the fully resolved private projection for fixed invariants
-async function readResolvedComposeModel(compose, projected, envFiles, runner, skipEnvironmentResolution = false) {
-  const args = [...composePrefix(compose, [projected], envFiles), "config", ...(skipEnvironmentResolution ? ["--no-env-resolution"] : []), "--format", "json"];
+async function readResolvedComposeModel(compose, files, envFiles, runner, skipEnvironmentResolution = false) {
+  const args = [...composePrefix(compose, files, envFiles), "config", ...(skipEnvironmentResolution ? ["--no-env-resolution"] : []), "--format", "json"];
   const result = await runner("docker", args, { cwd: compose.projectDirectory, maxBytes: MAX_COMMAND_BYTES });
   // expose only one safe validation category
   if (result.code !== 0) {
