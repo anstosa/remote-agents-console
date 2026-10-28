@@ -38,7 +38,7 @@ function safeServiceUrl(value: string): boolean { try { const url = new URL(valu
 function safeReconnectOrigin(value: unknown): value is string { try { if (typeof value !== 'string') return false; const url = new URL(value); return url.protocol === 'https:' && url.origin === value && url.pathname === '/' && hostnameSchema.safeParse(url.hostname).success; } catch { return false; } }
 const cloudflareStatusSchema = z.object({ supported: z.boolean(), reason: z.string().regex(/^[a-z0-9_-]{1,80}$/u).optional(), mode: z.enum(['unconfigured', 'token', 'local']), enabled: z.boolean(), hostname: hostnameSchema.optional(), endpoint: z.string().max(512).refine(safeReconnectOrigin).optional(), tokenPresent: z.boolean(), serviceUrl: z.string().max(512).refine(safeServiceUrl), connected: z.boolean().optional(), verifiedAt: z.string().datetime().optional() }).strict();
 // compare only the Project fields that determine Docker bind mounts
-function projectMountProjection(content: string | undefined): string[] | undefined {
+function projectMountProjection(content: string | undefined, tolerant = false): string[] | undefined {
   // treat absent or malformed application bytes as unknown current mount state
   if (content === undefined) return undefined;
   let value: unknown;
@@ -54,27 +54,35 @@ function projectMountProjection(content: string | undefined): string[] | undefin
   // project each complete authored mount independently of row order and labels
   for (const project of projects) {
     // preserve malformed rows for normal application validation
-    if (project === null || typeof project !== 'object' || Array.isArray(project)) return undefined;
+    if (project === null || typeof project !== 'object' || Array.isArray(project)) {
+      // preserve trustworthy siblings only when inspecting current truth
+      if (tolerant) continue;
+      return undefined;
+    }
     const record = project as Record<string, unknown>;
     // defer malformed paths to the existing field-level validation
-    if (typeof record.path !== 'string' || record.hostPath !== undefined && typeof record.hostPath !== 'string') return undefined;
+    if (typeof record.path !== 'string' || record.hostPath !== undefined && typeof record.hostPath !== 'string') {
+      // preserve trustworthy siblings only when inspecting current truth
+      if (tolerant) continue;
+      return undefined;
+    }
     mounts.add(JSON.stringify([record.hostPath ?? record.path, record.path]));
   }
   return [...mounts].sort();
 }
 // decide whether a valid candidate changes known or newly introduced mount state
-function projectMountsChanged(currentContent: string | undefined, candidateContent: string | undefined): boolean {
+function projectMountsChanged(currentContent: string | undefined, candidateContent: string | undefined, hasOverride: boolean): boolean {
   const current = projectMountProjection(currentContent);
   const candidate = projectMountProjection(candidateContent);
   // leave malformed candidates to application validation
   if (candidate === undefined) return false;
-  // repairing unknown bytes to no Projects needs no Docker override
-  if (current === undefined) return candidate.length > 0;
+  // unknown truth still requires cleanup when an override is installed
+  if (current === undefined) return hasOverride || candidate.length > 0;
   return JSON.stringify(current) !== JSON.stringify(candidate);
 }
 // attribute newly authored Docker mount errors before host validation
 function projectMountIssues(currentContent: string | undefined, candidateContent: string): SettingsIssue[] {
-  const projection = projectMountProjection(currentContent) ?? [];
+  const projection = projectMountProjection(currentContent, true) ?? [];
   const current = new Set(projection);
   // retain authored target text independently of host-source corrections
   const currentTargets = new Set<string>(projection.map(key => JSON.parse(key)[1]));
@@ -110,7 +118,7 @@ const projectMountFailures: Record<string, { sourceId: string; message: string }
   project_mount_path_not_absolute: { sourceId: 'app', message: 'Use absolute container and host paths for new or changed Docker Projects.' },
   project_mount_path_not_canonical: { sourceId: 'app', message: 'Use container paths without trailing slashes or dot segments such as . and ..' },
   project_mount_target_conflict: { sourceId: 'app', message: 'Projects using the same container path must use the same host path.' },
-  project_mount_transition_ambiguous: { sourceId: 'app', message: 'Give Projects stable IDs before changing several Project paths together.' },
+  project_mount_transition_ambiguous: { sourceId: 'app', message: 'Restore unambiguous current Project IDs and paths before changing mounts, or clear Projects first to remove RAC-owned binds.' },
   project_mount_host_path_required: { sourceId: 'app', message: 'Set Host path to the actual host directory when using a protected container path such as /workspace.' },
   project_mount_override_required: { sourceId: 'app', message: 'Save Project paths together with their Docker override mount configuration.' }
 };
@@ -659,7 +667,7 @@ export class SettingsService {
     const currentAppContent = sourceContents.get('app');
     const appContent = candidates.has('app') ? candidates.get('app') : currentAppContent;
     if (appContent !== undefined) { let app: unknown; try { app = JSON.parse(appContent); } catch { throw new SettingsError('invalid_application_json'); } issues.push(...await validateApplication(app, { ...process.env, ...environment(candidateEnv) })); }
-    const projectMountChange = candidates.has('app') && projectMountsChanged(currentAppContent, appContent);
+    const projectMountChange = candidates.has('app') && projectMountsChanged(currentAppContent, appContent, documents.get('compose-override')?.existed === true);
     // report candidate mount errors without publishing host work
     if (issues.length === 0 && installation.kind === 'compose' && projectMountChange && appContent !== undefined) issues.push(...projectMountIssues(currentAppContent, appContent));
     // enlist the writable Docker override only after the application candidate is valid

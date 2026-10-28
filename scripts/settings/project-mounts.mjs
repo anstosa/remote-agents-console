@@ -32,11 +32,17 @@ function mappings(content, tolerant = false) {
   });
   // reject any malformed candidate row
   if (parsed.some((mapping) => mapping === undefined)) {
-    // tolerate only damaged current truth during repair
-    if (tolerant) return [];
-    throw safeError("invalid-project-mounts");
+    // retain independently trustworthy current rows during repair
+    if (!tolerant) throw safeError("invalid-project-mounts");
   }
-  return parsed;
+  return parsed.filter((mapping) => mapping !== undefined);
+}
+
+// distinguish damaged current truth from a genuinely empty mount set
+function currentMountState(content) {
+  try { return { mappings: mappings(content), known: true }; } catch {
+    return { mappings: mappings(content, true), known: false };
+  }
 }
 
 // match the server's collision-free mount identity
@@ -45,8 +51,12 @@ const mappingKey = (mapping) => JSON.stringify([mapping.source, mapping.target])
 const mappingSet = (selected) => [...new Set(selected.map(mappingKey))].sort();
 
 // compare mount knowledge rather than unrelated application fields
-export function projectMountsChanged(currentApplication, candidateApplication) {
-  return JSON.stringify(mappingSet(mappings(currentApplication, true))) !== JSON.stringify(mappingSet(mappings(candidateApplication)));
+export function projectMountsChanged(currentApplication, candidateApplication, hasOverride = true) {
+  const current = currentMountState(currentApplication);
+  const candidate = mappings(candidateApplication);
+  // unknown truth still requires cleanup when an override is installed
+  if (!current.known) return hasOverride || candidate.length > 0;
+  return JSON.stringify(mappingSet(current.mappings)) !== JSON.stringify(mappingSet(candidate));
 }
 
 // retain one literal dollar through Compose interpolation
@@ -126,7 +136,7 @@ function withoutManagedBlock(source) {
       // collect one generated path
       if (path !== null) {
         let value;
-        try { value = JSON.parse(path[2]).replaceAll("$$", "$"); } catch { /* reject malformed owned path */ throw safeError("project-mount-marker-invalid"); }
+        try { value = composePath(JSON.parse(path[2])); } catch { /* reject malformed owned path */ throw safeError("project-mount-marker-invalid"); }
         // distinguish host and container identities
         if (path[1] === "source") {
           // reject duplicate source identities
@@ -175,7 +185,14 @@ function covers(mapping, volume, projectDirectory) {
 
 // match changed rows by stable id or one unambiguous idless transition
 function changes(current, candidate) {
-  const byId = new Map(current.filter((mapping) => mapping.id).map((mapping) => [mapping.id, mapping]));
+  const byId = new Map();
+  // reject conflicting identities before selecting one transition template
+  for (const mapping of current.filter((mapping) => mapping.id)) {
+    const previous = byId.get(mapping.id);
+    // row order must not choose between different previous mount policies
+    if (previous !== undefined && mappingKey(previous) !== mappingKey(mapping)) throw safeError("project-mount-transition-ambiguous");
+    byId.set(mapping.id, mapping);
+  }
   const stable = candidate.flatMap((mapping) => {
     const previous = mapping.id ? byId.get(mapping.id) : undefined;
     return previous !== undefined && mappingKey(previous) !== mappingKey(mapping) ? [{ previous, next: mapping }] : [];
@@ -227,10 +244,11 @@ function mountBlock(mapping, template, destination) {
 
 // synchronize one staged override without touching its live source
 export function synchronizeProjectMounts(source, currentApplication, candidateApplication, resolvedModel, projectDirectory) {
-  const current = mappings(currentApplication, true);
+  const state = currentMountState(currentApplication);
+  const current = state.mappings;
   const candidate = mappings(candidateApplication);
   // leave unrelated application changes untouched
-  if (JSON.stringify(mappingSet(current)) === JSON.stringify(mappingSet(candidate))) return source;
+  if (state.known && JSON.stringify(mappingSet(current)) === JSON.stringify(mappingSet(candidate))) return source;
   const currentKeys = new Set(current.map(mappingKey));
   const currentTargets = new Set(current.map((mapping) => mapping.target));
   // validate only newly authored mappings
@@ -253,6 +271,9 @@ export function synchronizeProjectMounts(source, currentApplication, candidateAp
   }
   const desired = [...desiredByTarget.values()];
   const { lines, targets: oldManagedTargets } = withoutManagedBlock(source);
+  const trustworthyTargets = new Set(current.map((mapping) => targetKey(mapping.target)));
+  // unknown owned transitions cannot safely donate or discard prior access policy
+  if (!state.known && candidate.length > 0 && [...oldManagedTargets].some((target) => !trustworthyTargets.has(target))) throw safeError("project-mount-transition-ambiguous");
   const resolved = resolvedModel?.services?.["remote-agent-console"]?.volumes;
   // require one normalized Compose service model
   if (!Array.isArray(resolved)) throw safeError("invalid-project-mount-model");

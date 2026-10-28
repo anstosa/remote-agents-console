@@ -1530,6 +1530,22 @@ describe('settings save and validation', () => {
       expect(current.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app']);
     });
 
+    // retain override cleanup authority even when current Project truth is damaged
+    it.each(['invalid-json', 'invalid-sibling'])('enlists the override for an empty repair of %s', async damage => {
+      const override = 'services:\n  remote-agent-console:\n    volumes: []\n';
+      const current = await fixture({ composeOverride: override });
+      await writeFile(current.appPath, damage === 'invalid-json' ? '{' : JSON.stringify({ publicOrigin: 'https://agents.example.com', projects: [{ id: 'old', path: '/tmp/old' }, {}] }));
+      const originalApp = await readFile(current.appPath, 'utf8');
+      const before = source(await current.service.snapshot(), 'app');
+      const input = { changes: [{ sourceId: 'app', revisionId: before.revisionId, content: JSON.stringify({ publicOrigin: 'https://agents.example.com', projects: [] }) }] };
+      expect(await current.service.validate(input)).toMatchObject({ valid: true });
+      expect(current.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app', 'compose-override']);
+      expect(await readFile(current.appPath, 'utf8')).toBe(originalApp);
+      expect(await readFile(current.composeOverridePath, 'utf8')).toBe(override);
+      await current.service.save(input);
+      expect(current.transport.records.at(-1)?.request.sources?.map(selected => selected.id)).toEqual(['app', 'compose-override']);
+    });
+
     // keep an operator-authored override candidate as the one transaction participant
     it('preserves one explicit override edit beside a Project path change', async () => {
       const beforeOverride = 'services:\n  remote-agent-console:\n    environment:\n      SENTINEL: before\n';

@@ -99,6 +99,40 @@ test("repairs a malformed current application with strict candidate mounts", () 
   assert.throws(() => synchronizeProjectMounts(override, application([]), '{"projects":"invalid"}', model(), "/stack"), /invalid-project-mounts/);
 });
 
+// one damaged sibling cannot erase a known read-only transition
+test("retains a valid current Project beside malformed siblings during repair", () => {
+  const previous = { id: "kept", path: "/old", hostPath: "/host/old" };
+  const current = application([previous, { id: "damaged" }]);
+  const candidate = application([{ ...previous, path: "/new", hostPath: "/host/new" }]);
+  const result = synchronizeProjectMounts(override, current, candidate, model([{ type: "bind", source: "/host/old", target: "/old", read_only: true }]), "/stack");
+  assert.match(result, /target: "\/new"[\s\S]*read_only: true/);
+});
+
+// unknown application bytes still require removal of proven RAC-owned binds
+test("cleans an owned block when damaged application bytes are repaired to no Projects", () => {
+  const selected = application([{ id: "old", path: "/old", hostPath: "/host/old" }]);
+  const owned = synchronizeProjectMounts(override, application([]), selected, model(), "/stack");
+  assert.equal(projectMountsChanged("{", application([]), true), true);
+  assert.equal(projectMountsChanged("{", application([]), false), false);
+  const result = synchronizeProjectMounts(owned, "{", application([]), model([{ type: "bind", source: "/host/old", target: "/old" }]), "/stack");
+  assert.doesNotMatch(result, /source: "\/host\/old"|target: "\/old"/);
+  assert.ok(result.includes("- /manual/source:/manual/target:ro # operator mount"));
+});
+
+// conflicting stable identities cannot choose a previous policy by row order
+test("rejects ambiguous current identities while repairing malformed siblings", () => {
+  const current = application([{ id: "same", path: "/one", hostPath: "/host/one" }, { id: "same", path: "/two", hostPath: "/host/two" }, {}]);
+  const candidate = application([{ id: "same", path: "/new", hostPath: "/host/new" }]);
+  assert.throws(() => synchronizeProjectMounts(override, current, candidate, model(), "/stack"), /project-mount-transition-ambiguous/);
+});
+
+// damaged truth cannot infer a transition from an unaccounted canonical owned bind
+test("rejects a nonempty repair with an unaccounted legacy owned target", () => {
+  const previous = application([{ id: "old", path: "/old", hostPath: "/host/old" }]);
+  const owned = synchronizeProjectMounts(override, application([]), previous, model(), "/stack").replace('target: "/old"', 'target: "/child/../old"');
+  assert.throws(() => synchronizeProjectMounts(owned, "{", application([{ id: "new", path: "/new", hostPath: "/host/new" }]), model(), "/stack"), /project-mount-transition-ambiguous/);
+});
+
 test("changes a Project bind while retaining readonly and bind options", () => {
   const current = application([{ id: "project", path: "/worktrees/project", hostPath: "/host/old" }]);
   const candidate = application([{ id: "project", path: "/worktrees/renamed", hostPath: "/host/new" }]);
@@ -280,22 +314,37 @@ test("distinguishes mount pairs containing the former NUL delimiter", () => {
 
 test("ignores application changes that do not alter Project mounts", () => {
   assert.equal(projectMountsChanged(application([{ id: "same", path: "/same" }]), `${JSON.stringify({ name: "Changed", projects: [{ id: "same", path: "/same" }] })}\n`), false);
-  assert.equal(projectMountsChanged("{", application([])), false);
+  assert.equal(projectMountsChanged("{", application([]), false), false);
 });
 
-test("rejects a Compose Project change without an enlisted override candidate", async () => {
+// independently enforce installed override authority while retaining override-free repair
+for (const scenario of [
+  { name: "rejects a Compose Project change without an enlisted override candidate", current: application([]), candidate: application([{ id: "new", path: "/new", hostPath: "/host/new" }]), reject: true },
+  { name: "repairs unknown application bytes to no Projects without an installed override", current: "{", candidate: application([]), reject: false },
+  { name: "rejects unknown empty repair when an installed override was not enlisted", current: "{", candidate: application([]), installedOverride: true, reject: true }
+]) test(scenario.name, async () => {
   const root = mkdtempSync(join(tmpdir(), "rac-project-enlistment-"));
   chmodSync(root, 0o700);
   try {
     const control = join(root, "control");
     const stage = join(control, "staging", "missing-override");
     const app = join(root, "config.json");
-    const current = application([]);
+    const current = scenario.current;
     mkdirSync(stage, { recursive: true, mode: 0o700 });
     writeFileSync(app, current);
-    writeFileSync(join(stage, "app"), application([{ id: "new", path: "/new", hostPath: "/host/new" }]));
+    writeFileSync(join(stage, "app"), scenario.candidate);
     const descriptor = { kind: "compose", controlRoot: control, sources: { app: { path: app, kind: "json", apply: "rac-restart" } } };
-    await assert.rejects(validateRequest(descriptor, { version: 1, id: "missing-override", kind: "validate", generation: 1, sources: [{ id: "app", contentHash: sha256(Buffer.from(current)), candidate: "app" }] }), /project-mount-override-required/);
+    // installed source knowledge is independent of request-supplied candidates
+    if (scenario.installedOverride) {
+      const path = join(root, "compose.override.yaml");
+      writeFileSync(path, override);
+      descriptor.sources["compose-override"] = { path, kind: "compose", apply: "rac-restart" };
+    }
+    const request = { version: 1, id: "missing-override", kind: "validate", generation: 1, sources: [{ id: "app", contentHash: sha256(Buffer.from(current)), candidate: "app" }] };
+    // retain separate success and rejection contracts at the host boundary
+    if (scenario.reject) await assert.rejects(validateRequest(descriptor, request), /project-mount-override-required/);
+    else await validateRequest(descriptor, request);
+    assert.equal(readFileSync(app, "utf8"), current);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -329,6 +378,8 @@ for (const scenario of [
   { name: "short legacy source corrections", style: "short" },
   { name: "long legacy source corrections", style: "long" },
   { name: "committed long-form source corrections", style: "long", commit: true },
+  { name: "committed empty repair with owned mount cleanup", style: "long", cleanup: true, commit: true },
+  { name: "unknown owned transition without publication", style: "long", unknownOwned: true, rejection: true },
   { name: "repeated managed long-form corrections", style: "long", managed: true },
   { name: "unsupported interpolated long-form corrections", style: "long", interpolated: true, rejection: true },
   { name: "distinct authored long-form spelling", style: "long", distinctTarget: true },
@@ -353,7 +404,7 @@ for (const scenario of [
     const oldHostPath = join(root, "host-old");
     const target = legacy ? "/child/../same" : "/worktrees/$cash $$double path";
     const authoredTarget = scenario.distinctTarget ? "/operator/../same" : target;
-    const currentApplication = application(legacy ? [{ id: "project", path: target, hostPath: oldHostPath }] : []);
+    const currentApplication = scenario.cleanup || scenario.unknownOwned ? "{" : application(legacy ? [{ id: "project", path: target, hostPath: oldHostPath }] : []);
     writeFileSync(app, currentApplication);
     writeFileSync(env, `RAC_TEST_TARGET=${target}\n`);
     writeFileSync(compose, `services:\n  remote-agent-console:\n    image: alpine\n    healthcheck:\n      test: ["CMD", "true"]\n    environment:\n      RAC_CONFIG: /workspace/config.json\n      RAC_CONFIG_WRITE_PATH: /workspace/config.json\n      RAC_SERVER_CHECKOUT: /workspace\n      RAC_PASSWORD_HASH: $$argon2id$$fixture\n      RAC_SESSION_SECRET: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n    volumes:\n      - type: bind\n        source: ${JSON.stringify(root)}\n        target: /workspace\n      - type: bind\n        source: ${JSON.stringify(control)}\n        target: /run/rac-settings-control\n`);
@@ -362,14 +413,16 @@ for (const scenario of [
     if (legacy) {
       const longTarget = scenario.interpolated ? "${RAC_TEST_TARGET}" : JSON.stringify(authoredTarget);
       const longMount = `      - type: bind\n        source: ${JSON.stringify(oldHostPath)}\n        target: ${longTarget}\n        read_only: true\n`;
-      currentOverride += scenario.style === "short" ? `      - ${oldHostPath}:${authoredTarget}:ro\n` : longMount;
+      // damaged-current scenarios own only the marked bind and retain a manual sentinel
+      if (scenario.cleanup || scenario.unknownOwned) currentOverride += `      - /manual/source:/manual/target:ro # operator mount\n      # rac-project-mounts:start\n${longMount}      # rac-project-mounts:end\n`;
+      else currentOverride += scenario.style === "short" ? `      - ${oldHostPath}:${authoredTarget}:ro\n` : longMount;
       // identical long-form spellings are valid across operator and owned entries
       if (scenario.managed) currentOverride += `      # rac-project-mounts:start\n${longMount}      # rac-project-mounts:end\n`;
     }
     // parsed key collisions must not bypass reserved metadata ownership
     if (scenario.collision) currentOverride += `${scenario.collision}: {}\n`;
     writeFileSync(composeOverride, currentOverride);
-    writeFileSync(join(stage, "app"), application([{ id: "project", path: target, hostPath }]));
+    writeFileSync(join(stage, "app"), application(scenario.cleanup ? [] : [{ id: "project", path: scenario.unknownOwned ? "/new" : target, hostPath }]));
     writeFileSync(join(stage, "compose-override"), currentOverride);
     const descriptor = {
       generation: 1,
@@ -401,23 +454,36 @@ for (const scenario of [
     }
     // unsupported deferred merge keys must fail before commit publication
     if (scenario.rejection) {
-      await assert.rejects(processOperation(descriptor, { ...request, kind: "commit" }), { code: "invalid-compose" });
+      await assert.rejects(processOperation(descriptor, { ...request, kind: "commit" }), { code: scenario.unknownOwned ? "project-mount-transition-ambiguous" : "invalid-compose" });
       assert.equal(readFileSync(app, "utf8"), currentApplication);
       assert.equal(readFileSync(composeOverride, "utf8"), currentOverride);
+      // ambiguous ownership is rejected before replacing even the private candidate
+      if (scenario.unknownOwned) assert.equal(readFileSync(join(stage, "compose-override"), "utf8"), currentOverride);
       return;
     }
     await validateRequest(descriptor, request);
     const generated = readFileSync(join(stage, "compose-override"), "utf8");
     const validated = await validateComposeCandidates(descriptor, new Map([["app", join(stage, "app")], ["compose-override", join(stage, "compose-override")]]), stage, undefined, true);
     const volume = validated.resolvedModel.services["remote-agent-console"].volumes.find((entry) => posix.resolve(entry.target.replaceAll("$$", "$")) === posix.resolve(target));
-    assert.ok(volume);
-    assert.equal(volume.source.replaceAll("$$", "$"), hostPath);
-    assert.equal(volume.read_only === true, legacy);
-    assert.match(generated, /source: ".*\$\$cash \$\$\$\$double path"/);
+    // empty repair removes only RAC-owned binds and retains manual bytes
+    if (scenario.cleanup) {
+      assert.equal(volume, undefined);
+      assert.ok(generated.includes("- /manual/source:/manual/target:ro # operator mount"));
+      assert.ok(!generated.includes(oldHostPath));
+    } else {
+      assert.ok(volume);
+      assert.equal(volume.source.replaceAll("$$", "$"), hostPath);
+      assert.equal(volume.read_only === true, legacy);
+      assert.match(generated, /source: ".*\$\$cash \$\$\$\$double path"/);
+    }
     const actual = JSON.parse(execFileSync("docker", [...composePrefix(descriptor.compose, [compose, join(stage, "compose-override")]), "config", "--format", "json"], { encoding: "utf8" }));
     const effective = actual.services["remote-agent-console"].volumes.find((entry) => posix.resolve(entry.target.replaceAll("$$", "$")) === posix.resolve(target));
-    assert.equal(effective.source.replaceAll("$$", "$"), hostPath);
-    assert.equal(effective.read_only === true, legacy);
+    // both actual merge outcomes must agree with the staged planning view
+    if (scenario.cleanup) assert.equal(effective, undefined);
+    else {
+      assert.equal(effective.source.replaceAll("$$", "$"), hostPath);
+      assert.equal(effective.read_only === true, legacy);
+    }
     assert.equal(readFileSync(app, "utf8"), currentApplication);
     assert.equal(readFileSync(composeOverride, "utf8"), currentOverride);
     // repeated derivation must retain the same merge key and owned bytes
@@ -437,7 +503,9 @@ for (const scenario of [
       assert.equal(committed.phase, "committed");
       assert.equal(readFileSync(app, "utf8"), readFileSync(join(stage, "app"), "utf8"));
       assert.equal(readFileSync(composeOverride, "utf8"), generated);
-      assert.ok(generated.startsWith(currentOverride));
+      // cleanup intentionally removes owned bytes rather than the manual prefix
+      if (scenario.cleanup) assert.ok(generated.includes("- /manual/source:/manual/target:ro # operator mount"));
+      else assert.ok(generated.startsWith(currentOverride));
       assert.equal(committed.receipt.hashes.app, sha256(readFileSync(app)));
       assert.equal(committed.receipt.hashes["compose-override"], sha256(readFileSync(composeOverride)));
       assert.deepEqual(committed.receipt.targets, ["rac"]);

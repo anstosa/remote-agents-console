@@ -333,7 +333,7 @@ async function projectMountPlanningModel(descriptor, prepared, stageDirectory, r
   for (const volume of volumes) {
     // short syntax already uses normalized merge identities
     if (!isRecord(volume) || typeof volume.target !== "string") continue;
-    const key = posix.resolve(volume.target.replaceAll("$$", "$"));
+    const key = posix.resolve(renderedEnvironmentValue(volume.target));
     const previous = targets.get(key);
     // distinct long-form spellings cannot safely share one effective target
     if (previous !== undefined && previous !== volume.target) throw safeError("project-mount-yaml-unsupported");
@@ -342,7 +342,7 @@ async function projectMountPlanningModel(descriptor, prepared, stageDirectory, r
   const planningModel = structuredClone(resolvedModel);
   // substitute spelling only in the private mount-planning view
   for (const volume of planningModel.services["remote-agent-console"].volumes) {
-    const target = targets.get(posix.resolve(volume.target.replaceAll("$$", "$")));
+    const target = targets.get(posix.resolve(renderedEnvironmentValue(volume.target)));
     // leave canonical model entries without authored long-form counterparts alone
     if (target !== undefined) volume.target = target;
   }

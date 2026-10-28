@@ -143,7 +143,7 @@ export async function validateRequest(descriptor, request, options = {}) {
     const currentApplication = readBoundedFile(descriptor.sources.app.path, MAX_SOURCE_BYTES).toString("utf8");
     const candidateApplication = readBoundedFile(candidates.get("app"), MAX_SOURCE_BYTES).toString("utf8");
     // synchronize only an actual mount projection change
-    if (projectMountsChanged(currentApplication, candidateApplication)) {
+    if (projectMountsChanged(currentApplication, candidateApplication, Boolean(descriptor.sources["compose-override"] && existsSync(descriptor.sources["compose-override"].path)))) {
       // require one crash-recoverable cross-file transaction
       if (!candidates.has("compose-override")) throw safeError("project-mount-override-required");
       const stageDirectory = resolve(descriptor.controlRoot, "staging", request.id);
