@@ -64,6 +64,8 @@ async function mockConsole(page: Page) {
     if (path === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     // report no pending settings restart
     if (path === '/api/settings/status') return route.fulfill({ json: { pending: false, targets: [], effective: 'known', restartAvailable: false } });
+    // keep background tunnel monitoring idle in takeover scenarios
+    if (path === '/api/settings/cloudflare/health') return route.fulfill({ json: { state: 'disabled', failures: 0, reconnecting: false, canReconnect: false } });
     // leave agent installers idle
     if (path === '/api/agents/updates') return route.fulfill({ json: { agents: [] } });
     // disable push enrollment

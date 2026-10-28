@@ -28,6 +28,8 @@ function settingsDouble() {
     restart: vi.fn(async () => ({ id: 'settings_restart_operation', state: 'queued' as const })),
     cloudflareStatus: vi.fn(async () => ({ supported: true, mode: 'unconfigured' as const, enabled: false, tokenPresent: false, serviceUrl: 'http://remote-agent-console:8787' })),
     configureCloudflare: vi.fn(async () => ({ operation: { id: 'cloudflare_setup_operation', state: 'queued' as const, kind: 'cloudflare' as const } })),
+    tunnelHealth: vi.fn(async () => ({ state: 'degraded' as const, checkedAt: '2026-10-28T20:00:00.000Z', failures: 2, reconnecting: false, canReconnect: true, error: 'tunnel_unreachable' as const })),
+    reconnectCloudflare: vi.fn(async () => ({ operation: { id: 'cloudflare_reconnect_operation', state: 'queued' as const, kind: 'cloudflare' as const } })),
     operation: vi.fn(async () => undefined),
     updateApplication: vi.fn(async () => undefined)
   };
@@ -152,18 +154,26 @@ describe('settings browser API authorization', () => {
     const token = 'private-cloudflare-connector-token';
 
     const read = await app.inject({ method: 'GET', url: '/api/settings/cloudflare', headers: { host: 'agents.example.com', cookie: observer.cookie } });
+    const health = await app.inject({ method: 'GET', url: '/api/settings/cloudflare/health', headers: { host: 'agents.example.com', cookie: observer.cookie } });
     const anonymous = await app.inject({ method: 'POST', url: '/api/settings/cloudflare', headers: { host: 'agents.example.com', origin: 'https://agents.example.com' }, payload: { action: 'connect', token } });
     const inactive = await app.inject({ method: 'POST', url: '/api/settings/cloudflare', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: observer.cookie, 'x-csrf-token': observer.csrf }, payload: { action: 'connect', token } });
     const accepted = await app.inject({ method: 'POST', url: '/api/settings/cloudflare', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: first.cookie, 'x-csrf-token': first.csrf }, payload: { action: 'connect', token } });
     const unknown = await app.inject({ method: 'POST', url: '/api/settings/cloudflare', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: first.cookie, 'x-csrf-token': first.csrf }, payload: { action: 'connect', token, command: 'docker compose down' } });
+    const reconnectInactive = await app.inject({ method: 'POST', url: '/api/settings/cloudflare/reconnect', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: observer.cookie, 'x-csrf-token': observer.csrf }, payload: {} });
+    const reconnect = await app.inject({ method: 'POST', url: '/api/settings/cloudflare/reconnect', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: first.cookie, 'x-csrf-token': first.csrf }, payload: {} });
 
     expect(read).toMatchObject({ statusCode: 200, headers: { 'cache-control': 'no-store' } });
+    expect(health).toMatchObject({ statusCode: 200, headers: { 'cache-control': 'no-store' } });
+    expect(health.json()).toMatchObject({ state: 'degraded', canReconnect: true });
     expect(anonymous.statusCode).toBe(401);
     expect(inactive).toMatchObject({ statusCode: 423 });
     expect(accepted).toMatchObject({ statusCode: 202, headers: { 'cache-control': 'no-store' } });
     expect(accepted.body).not.toContain(token);
     expect(unknown.statusCode).toBe(400);
+    expect(reconnectInactive.statusCode).toBe(423);
+    expect(reconnect).toMatchObject({ statusCode: 202, headers: { 'cache-control': 'no-store' } });
     expect(service.configureCloudflare).toHaveBeenCalledExactlyOnceWith({ action: 'connect', token });
+    expect(service.reconnectCloudflare).toHaveBeenCalledTimes(1);
   }, 15_000);
 });
 

@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import type { ProgressKind } from './progress-animation.js';
 
-export type FullscreenAction = 'reload' | 'restart';
+export type FullscreenAction = 'reload' | 'restart' | 'tunnel-reconnect';
 
 type PendingAction = {
   kind: FullscreenAction;

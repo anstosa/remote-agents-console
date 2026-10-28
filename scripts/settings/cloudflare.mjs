@@ -21,7 +21,8 @@ const CONTAINER_ID = /^[0-9a-f]{12,64}$/u;
 const CHALLENGE = /^[0-9a-f]{64}$/u;
 const HEALTH_PROOF = /^[0-9a-f]{64}$/u;
 const RESERVED_SUFFIX = /(?:^|\.)(?:localhost|local|internal|home|lan|test|invalid|example)$/u;
-const blockedAddresses = new BlockList();
+const blockedIpv4 = new BlockList();
+const blockedIpv6 = new BlockList();
 
 // reject nonpublic ipv4 destinations
 for (const [network, prefix] of [
@@ -30,7 +31,7 @@ for (const [network, prefix] of [
   ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24],
   ["224.0.0.0", 4], ["240.0.0.0", 4]
 ]) {
-  blockedAddresses.addSubnet(network, prefix, "ipv4");
+  blockedIpv4.addSubnet(network, prefix, "ipv4");
 }
 // reject nonpublic ipv6 destinations and mapped rebinding forms
 for (const [network, prefix] of [
@@ -38,7 +39,7 @@ for (const [network, prefix] of [
   ["100::", 64], ["2001::", 32], ["2001:db8::", 32], ["2002::", 16], ["3ffe::", 16],
   ["fc00::", 7], ["fec0::", 10], ["fe80::", 10], ["ff00::", 8]
 ]) {
-  blockedAddresses.addSubnet(network, prefix, "ipv6");
+  blockedIpv6.addSubnet(network, prefix, "ipv6");
 }
 
 // process one redacted Cloudflare host action
@@ -46,6 +47,10 @@ export async function processCloudflareRequest(descriptor, request, options = {}
   // return status without staging or host mutation
   if (request.cloudflare.action === "status") {
     return { phase: "inspected", cloudflare: await cloudflareStatus(descriptor, options) };
+  }
+  // restart only the exact installed connector without staging files
+  if (request.cloudflare.action === "reconnect") {
+    return await reconnectCloudflare(descriptor, request, options);
   }
   // fail setup closed outside Compose while retaining legacy native management
   if (descriptor.kind !== "compose") {
@@ -73,6 +78,208 @@ export async function processCloudflareRequest(descriptor, request, options = {}
     }
     throw error;
   }
+}
+
+// restart one exact configured connector without applying saved settings
+async function reconnectCloudflare(descriptor, request, options) {
+  const journalPath = resolve(descriptor.controlRoot, "journal", `${request.id}.json`);
+  const context = { journalPath, runtime: undefined, crashHook: false, ownsJournal: false };
+  try { return await reconnectCloudflareAttempt(descriptor, request, options, context); }
+  catch (error) {
+    // leave only a deliberate crash seam in-flight for replay
+    if (!context.crashHook && context.ownsJournal && existsSync(journalPath)) writeReconnectJournal(journalPath, request, "rolled-back", context.runtime ?? { kind: "unavailable" });
+    throw error;
+  }
+}
+
+// attempt one selector-bound restart under outer failure closure
+async function reconnectCloudflareAttempt(descriptor, request, options, context) {
+  const runner = options.runner ?? runBounded;
+  const { journalPath } = context;
+  const selector = reconnectSelector(descriptor);
+  const journal = existsSync(journalPath) ? readReconnectJournal(journalPath, request, selector) : undefined;
+  context.ownsJournal = journal !== undefined;
+  context.runtime = journal?.runtime;
+  // replay one terminal result without another host mutation
+  if (journal?.phase === "complete") return { phase: "connector-reconnected", cloudflare: journal.cloudflare };
+  // retain a terminal failure without retrying its side effect
+  if (journal?.phase === "rolled-back") throw safeError("cloudflare-reconnect-failed");
+  // select only a fixed enabled compose connector
+  if (descriptor.kind === "compose") {
+    // reject dormant or incomplete tunnel selectors
+    if (selector?.kind !== "compose") throw safeError("cloudflare-reconnect-unavailable");
+    const { service, profile } = selector;
+    const tokenMode = service === TOKEN_SERVICE;
+    // validate the managed token service before invoking it
+    if (tokenMode) await validateTokenService(descriptor, runner);
+    const prefix = tokenMode ? tokenComposePrefix(descriptor) : composePrefix(descriptor.compose);
+    const before = journal?.runtime ?? await composeReconnectRuntime(descriptor, service, profile, runner);
+    context.runtime = before;
+    // reject absent containers and substituted replay selectors
+    if (before.kind !== "compose" || before.service !== service || before.profile !== profile || !CONTAINER_ID.test(before.container)) throw safeError("cloudflare-reconnect-failed");
+    const current = journal === undefined ? before : await composeReconnectRuntime(descriptor, service, profile, runner);
+    // reconcile a completed restart whose terminal journal was interrupted
+    if (journal !== undefined && composeRestarted(before, current)) return await completeReconnect(descriptor, request, options, journalPath, before);
+    // reject ambiguous runtime drift instead of restarting twice
+    if (journal !== undefined && JSON.stringify(current) !== JSON.stringify(before)) throw safeError("cloudflare-reconnect-failed");
+    writeReconnectJournal(journalPath, request, "restarting", before);
+    context.ownsJournal = true;
+    options.onPhase?.("connector-restarting");
+    const restarted = await runner("docker", [...prefix, "restart", service], { cwd: descriptor.compose.projectDirectory, maxBytes: MAX_COMMAND_BYTES, timeoutMs: options.applyTimeoutMs ?? 60_000 });
+    // require command success before liveness proof
+    if (restarted.code !== 0) throw safeError("cloudflare-reconnect-failed");
+    context.crashHook = true;
+    options.afterCloudflareReconnect?.();
+    context.crashHook = false;
+    const after = await composeReconnectRuntime(descriptor, service, profile, runner);
+    // require a changed process start and running exact container
+    if (!composeRestarted(before, after)) throw safeError("cloudflare-reconnect-failed");
+    return await completeReconnect(descriptor, request, options, journalPath, before);
+  }
+  const unit = selector?.kind === "native" ? selector.unit : undefined;
+  // require one exact installed native connector selector
+  if (!unit) throw safeError("cloudflare-reconnect-unavailable");
+  const before = journal?.runtime ?? await nativeReconnectRuntime(unit, runner);
+  context.runtime = before;
+  // reject substituted replay selectors
+  if (before.kind !== "native" || before.unit !== unit) throw safeError("cloudflare-reconnect-failed");
+  const current = journal === undefined ? before : await nativeReconnectRuntime(unit, runner);
+  // reconcile a completed native restart after interrupted publication
+  if (journal !== undefined && nativeRestarted(before, current)) return await completeReconnect(descriptor, request, options, journalPath, before);
+  // reject ambiguous runtime drift instead of restarting twice
+  if (journal !== undefined && JSON.stringify(current) !== JSON.stringify(before)) throw safeError("cloudflare-reconnect-failed");
+  writeReconnectJournal(journalPath, request, "restarting", before);
+  context.ownsJournal = true;
+  options.onPhase?.("connector-restarting");
+  const restarted = await runner("systemctl", ["--user", "restart", unit], { maxBytes: MAX_COMMAND_BYTES, timeoutMs: options.applyTimeoutMs ?? 60_000 });
+  // require command success before identity proof
+  if (restarted.code !== 0) throw safeError("cloudflare-reconnect-failed");
+  context.crashHook = true;
+  options.afterCloudflareReconnect?.();
+  context.crashHook = false;
+  const after = await nativeReconnectRuntime(unit, runner);
+  // require a new active invocation
+  if (!nativeRestarted(before, after)) throw safeError("cloudflare-reconnect-failed");
+  return await completeReconnect(descriptor, request, options, journalPath, before);
+}
+
+// select only the connector authority installed by the current descriptor
+function reconnectSelector(descriptor) {
+  // prefer the managed token connector over a legacy local connector
+  if (descriptor.kind === "compose") {
+    const tokenMode = descriptor.compose.profiles.includes(TOKEN_PROFILE);
+    const localMode = descriptor.compose.profiles.includes("tunnel") && descriptor.sources.cloudflared !== undefined;
+    // reject dormant or incomplete compose selectors
+    if (!tokenMode && !localMode) return undefined;
+    return { kind: "compose", service: tokenMode ? TOKEN_SERVICE : "cloudflared", profile: tokenMode ? TOKEN_PROFILE : "tunnel" };
+  }
+  const unit = descriptor.native?.cloudflaredUnit;
+  // require a distinct configured unit backed by a managed source
+  if (!unit || unit === descriptor.native.unit || descriptor.sources.cloudflared === undefined) return undefined;
+  return { kind: "native", unit };
+}
+
+// publish one durable reconnect result
+async function completeReconnect(descriptor, request, options, journalPath, runtime) {
+  const cloudflare = await cloudflareStatus(descriptor, options);
+  writeReconnectJournal(journalPath, request, "complete", runtime, cloudflare);
+  return { phase: "connector-reconnected", cloudflare };
+}
+
+// require one exact private reconnect journal
+function readReconnectJournal(path, request, selector) {
+  const journal = readJsonFile(path, 2 * MAX_SOURCE_BYTES);
+  const baseKeys = ["version", "id", "kind", "action", "generation", "phase", "runtime", "updatedAt"];
+  // require status only on a successful terminal phase
+  const keys = journal?.phase === "complete" ? [...baseKeys, "cloudflare"] : baseKeys;
+  // reject unknown fields, identity changes and phase substitution
+  if (!matchesRecordKeys(journal, keys, keys) || journal.version !== PROTOCOL_VERSION || journal.id !== request.id || journal.kind !== "cloudflare" || journal.action !== "reconnect" || journal.generation !== request.generation || !["restarting", "complete", "rolled-back"].includes(journal.phase) || !validStatusDateTime(journal.updatedAt)) throw safeError("journal-mismatch");
+  // bind every phase to the exact current connector selector
+  if (!validReconnectRuntime(journal.runtime, selector)) throw safeError("journal-mismatch");
+  // require bounded status data only for successful terminal journals
+  if (journal.phase === "complete" && !validCloudflareStatus(journal.cloudflare)) throw safeError("journal-mismatch");
+  return journal;
+}
+
+// require a plain record with all required keys and no unknown keys
+function matchesRecordKeys(value, required, allowed) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && required.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => allowed.includes(key));
+}
+
+// validate one descriptor-bound compose or native runtime identity
+function validReconnectRuntime(runtime, selector) {
+  // reject runtime data when no current connector authority exists
+  if (!selector || runtime === null || typeof runtime !== "object" || Array.isArray(runtime)) return false;
+  // bind compose replay to its fixed service, profile and container process
+  if (selector.kind === "compose") {
+    const keys = ["kind", "service", "profile", "container", "startedAt", "running"];
+    return matchesRecordKeys(runtime, keys, keys) && runtime.kind === "compose" && runtime.service === selector.service && runtime.profile === selector.profile && typeof runtime.container === "string" && CONTAINER_ID.test(runtime.container) && validStatusDateTime(runtime.startedAt) && typeof runtime.running === "boolean";
+  }
+  const keys = ["kind", "unit", "invocation", "active"];
+  return matchesRecordKeys(runtime, keys, keys) && runtime.kind === "native" && runtime.unit === selector.unit && typeof runtime.invocation === "string" && (runtime.invocation === "" || /^[0-9a-f]{32}$/u.test(runtime.invocation)) && typeof runtime.active === "boolean";
+}
+
+// validate one strict redacted cloudflare status record
+function validCloudflareStatus(value) {
+  const required = ["supported", "mode", "enabled", "tokenPresent", "serviceUrl"];
+  const allowed = [...required, "reason", "hostname", "endpoint", "connected", "verifiedAt"];
+  // reject expanded or incomplete status records
+  if (!matchesRecordKeys(value, required, allowed)) return false;
+  // require the public scalar status contract
+  if (typeof value.supported !== "boolean" || !["unconfigured", "token", "local"].includes(value.mode) || typeof value.enabled !== "boolean" || typeof value.tokenPresent !== "boolean" || typeof value.serviceUrl !== "string" || value.serviceUrl.length > 512 || !validStatusServiceUrl(value.serviceUrl)) return false;
+  // constrain optional public fields independently
+  if (value.reason !== undefined && (typeof value.reason !== "string" || !/^[a-z0-9_-]{1,80}$/u.test(value.reason))) return false;
+  if (value.hostname !== undefined && !validStatusHostname(value.hostname)) return false;
+  if (value.endpoint !== undefined && !validStatusEndpoint(value.endpoint)) return false;
+  if (value.connected !== undefined && typeof value.connected !== "boolean") return false;
+  if (value.verifiedAt !== undefined && !validStatusDateTime(value.verifiedAt)) return false;
+  return true;
+}
+
+// recognize one public hostname without exposing validation errors
+function validStatusHostname(value) {
+  try { return validateHostname(value) === value; }
+  catch {
+    // reject malformed hostnames without leaking validation details
+    return false;
+  }
+}
+
+// accept only one credential-free root http service url
+function validStatusServiceUrl(value) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) && url.username === "" && url.password === "" && url.pathname === "/" && url.search === "" && url.hash === "";
+  } catch {
+    // reject malformed service urls
+    return false;
+  }
+}
+
+// accept only one canonical public https origin
+function validStatusEndpoint(value) {
+  // apply the server status length bound before url parsing
+  if (typeof value !== "string" || value.length > 512) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.origin === value && url.pathname === "/" && validStatusHostname(url.hostname);
+  } catch {
+    // reject malformed public endpoints
+    return false;
+  }
+}
+
+// accept one bounded utc iso date-time
+function validStatusDateTime(value) {
+  // reject malformed timestamps before calendar comparison
+  if (typeof value !== "string" || value.length > 64 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u.test(value) || !Number.isFinite(Date.parse(value))) return false;
+  // reject impossible dates that javascript would normalize
+  return new Date(value).toISOString().slice(0, 19) === value.slice(0, 19);
+}
+
+// write one selector-bound reconnect journal
+function writeReconnectJournal(path, request, phase, runtime, cloudflare) {
+  atomicWriteFile(path, `${JSON.stringify({ version: PROTOCOL_VERSION, id: request.id, kind: "cloudflare", action: "reconnect", generation: request.generation, phase, runtime, ...(cloudflare ? { cloudflare } : {}), updatedAt: new Date().toISOString() })}\n`, 0o600);
 }
 
 // expose only redacted tunnel state
@@ -504,11 +711,11 @@ async function stopTokenService(descriptor, runner) {
 }
 
 // inspect one exact Compose service without emitting logs
-async function listedContainer(descriptor, service, profile, runner) {
+async function listedContainer(descriptor, service, profile, runner, all = false) {
   const prefix = composePrefix({ ...descriptor.compose, profiles: [...new Set([...descriptor.compose.profiles, profile])] });
   let result;
   try {
-    result = await runner("docker", [...prefix, "ps", "-q", service], {
+    result = await runner("docker", [...prefix, "ps", "-q", ...(all ? ["--all"] : []), service], {
       cwd: descriptor.compose.projectDirectory,
       maxBytes: 1024
     });
@@ -525,6 +732,39 @@ async function listedContainer(descriptor, service, profile, runner) {
     throw safeError("cloudflare-connector-status-unavailable");
   }
   return container;
+}
+
+// capture one exact Compose connector start identity
+async function composeReconnectRuntime(descriptor, service, profile, runner) {
+  const container = await listedContainer(descriptor, service, profile, runner, true);
+  // retain an absent container as a closed failure state
+  if (container === "") return { kind: "compose", service, profile, container, startedAt: "", running: false };
+  const running = await listedContainer(descriptor, service, profile, runner) === container;
+  const result = await runner("docker", ["inspect", "--format", "{{.State.StartedAt}}", container], { maxBytes: 256 });
+  const startedAt = result.stdout.toString("utf8").trim();
+  // accept only one bounded Docker timestamp
+  if (result.code !== 0 || !/^[0-9T:.+-]{10,64}Z$/u.test(startedAt)) throw safeError("cloudflare-connector-status-unavailable");
+  return { kind: "compose", service, profile, container, startedAt, running };
+}
+
+// prove one Compose restart through a changed start identity
+function composeRestarted(before, after) {
+  return after.kind === "compose" && after.service === before.service && after.profile === before.profile && after.container === before.container && after.running === true && after.startedAt !== before.startedAt;
+}
+
+// capture one exact native connector invocation identity
+async function nativeReconnectRuntime(unit, runner) {
+  const identity = await runner("systemctl", ["--user", "show", unit, "--property=InvocationID", "--value"], { maxBytes: 256 });
+  const invocation = identity.stdout.toString("utf8").trim();
+  // accept an inactive empty identity or one systemd invocation id
+  if (identity.code !== 0 || invocation !== "" && !/^[0-9a-f]{32}$/u.test(invocation)) throw safeError("cloudflare-connector-status-unavailable");
+  const active = await nativeCloudflaredConnected(unit, runner) === true;
+  return { kind: "native", unit, invocation, active };
+}
+
+// prove one native restart through a new active invocation
+function nativeRestarted(before, after) {
+  return after.kind === "native" && after.unit === before.unit && after.active === true && /^[0-9a-f]{32}$/u.test(after.invocation) && after.invocation !== before.invocation;
 }
 
 // add the managed profile to fixed Compose invocation data
@@ -568,7 +808,7 @@ function publicAddress(address) {
   if (family === 0) {
     return false;
   }
-  return !blockedAddresses.check(address, family === 4 ? "ipv4" : "ipv6");
+  return family === 4 ? !blockedIpv4.check(address, "ipv4") : !blockedIpv6.check(address, "ipv6");
 }
 
 // fetch the private loopback challenge proof
@@ -642,7 +882,11 @@ export function publicHealthProof(hostname, record, challenge, options = {}) {
         method: "GET",
         path: `/healthz?racChallenge=${challenge}`,
         headers: { host: hostname, "cache-control": "no-store" },
-        lookup: (_hostname, _options, callback) => callback(null, record.address, record.family)
+        lookup: (_hostname, lookupOptions, callback) => {
+          // satisfy node's address-list lookup contract
+          if (lookupOptions.all) callback(null, [record]);
+          else callback(null, record.address, record.family);
+        }
       }, (incoming) => {
         // discard a response delivered after the absolute deadline
         if (settled) {

@@ -9,6 +9,7 @@ import { readBounded, writePrivate } from '../src/settings/files.js';
 import { applicationHash, contentHash, environmentProjection } from '../src/settings/proof.js';
 import { SettingsService } from '../src/settings/service.js';
 import type { SettingsTransport } from '../src/settings/transport.js';
+import { TunnelHealthMonitor, type TunnelProbe } from '../src/settings/tunnel-health.js';
 
 type RequestRecord = { request: HostRequest; wait: boolean | undefined };
 type Fixture = { root: string; controlRoot: string; appPath: string; envPath: string; composeOverridePath: string; app: Record<string, unknown>; env: string; config: ValidatedConfig; transport: FakeTransport; service: SettingsService };
@@ -65,6 +66,76 @@ describe('Calendar token-key rotation settings', () => {
 });
 
 describe('simple Cloudflare connector setup', () => {
+  // classify missing capability separately from installed decommission
+  it('distinguishes transient tunnel unavailability from authoritative disablement', async () => {
+    const current = await fixture();
+    const service = current.service as unknown as { probeTunnel: () => Promise<TunnelProbe> };
+    const installation = vi.spyOn(current.transport, 'installation');
+
+    installation.mockResolvedValue(undefined);
+    await expect(service.probeTunnel()).resolves.toEqual({ outcome: 'unavailable', canReconnect: false });
+    installation.mockRestore();
+    await expect(service.probeTunnel()).resolves.toEqual({ outcome: 'disabled', canReconnect: false });
+    current.transport.descriptor.compose!.profiles = ['tunnel'];
+    await expect(service.probeTunnel()).resolves.toEqual({ outcome: 'unavailable', canReconnect: false });
+  });
+
+  // queue only one exact connector restart and coalesce duplicates
+  it('queues and deduplicates connector-only reconnects', async () => {
+    const current = await fixture();
+    current.transport.descriptor.compose!.profiles = ['tunnel-token'];
+
+    const first = await current.service.reconnectCloudflare();
+    const repeated = await current.service.reconnectCloudflare();
+    const requests = current.transport.records.filter(record => record.request.cloudflare?.action === 'reconnect');
+
+    expect(first).toEqual({ operation: { id: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/u), state: 'queued', kind: 'cloudflare' } });
+    expect(repeated).toEqual(first);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ wait: false, request: { kind: 'cloudflare', cloudflare: { action: 'reconnect' } } });
+    expect(requests[0]!.request).not.toHaveProperty('sources');
+    expect(requests[0]!.request).not.toHaveProperty('targets');
+    expect(await current.service.tunnelHealth()).toMatchObject({ reconnecting: true });
+    await writePrivate(join(current.controlRoot, 'status', `${first.operation.id}.json`), JSON.stringify({ version: 1, id: first.operation.id, kind: 'cloudflare', state: 'running', phase: 'connector-restarting' }));
+    expect(await current.service.status()).not.toHaveProperty('operation');
+  });
+
+  // reject reconnect without one installed connector selector
+  it('does not queue reconnect for an unmanaged tunnel', async () => {
+    const current = await fixture();
+
+    await expect(current.service.reconnectCloudflare()).rejects.toMatchObject({ code: 'cloudflare_reconnect_unavailable', statusCode: 409 });
+    expect(current.transport.records.some(record => record.request.cloudflare?.action === 'reconnect')).toBe(false);
+  });
+
+  // surface invalid reconnect metadata instead of returning stale health
+  it('fails health reads when reconnect metadata is corrupt', async () => {
+    const current = await fixture();
+    await writePrivate(join(current.controlRoot, 'latest-deploy.json'), '{');
+
+    await expect(current.service.tunnelHealth()).rejects.toMatchObject({ code: 'settings_metadata_invalid', statusCode: 503 });
+  });
+
+  // do not revive acknowledged failures over newer route evidence
+  it('consumes a reconnect failure after verified public recovery', async () => {
+    const probe = vi.fn()
+      .mockResolvedValueOnce({ outcome: 'healthy', canReconnect: true })
+      .mockResolvedValue({ outcome: 'public-failed', canReconnect: true });
+    const monitor = new TunnelHealthMonitor(probe);
+    const current = await fixture({ tunnelMonitor: monitor });
+    current.transport.descriptor.compose!.profiles = ['tunnel-token'];
+    const reconnect = await current.service.reconnectCloudflare();
+    await writePrivate(join(current.controlRoot, 'status', `${reconnect.operation.id}.json`), JSON.stringify({ version: 1, id: reconnect.operation.id, kind: 'cloudflare', state: 'failed', error: 'cloudflare-reconnect-failed' }));
+
+    expect(await current.service.tunnelHealth()).toMatchObject({ error: 'reconnect_failed' });
+    await monitor.checkNow();
+    expect(await current.service.tunnelHealth()).toMatchObject({ state: 'healthy', failures: 0 });
+    await monitor.checkNow();
+    await monitor.checkNow();
+
+    expect(await current.service.tunnelHealth()).toMatchObject({ state: 'degraded', failures: 2, error: 'tunnel_unreachable' });
+  });
+
   // status inspection must not take ownership of a saved settings restart
   it('keeps pending settings restartable after a read-only connector status query', async () => {
     const current = await fixture();
@@ -321,7 +392,7 @@ class FakeTransport implements SettingsTransport {
 }
 
 // create a full file-backed Settings service without live installation access
-async function fixture(overrides: { app?: Record<string, unknown>; env?: string; composeOverride?: string; live?: SettingsOptions['live']; placeholderRuntime?: SettingsOptions['placeholderRuntime'] } = {}): Promise<Fixture> {
+async function fixture(overrides: { app?: Record<string, unknown>; env?: string; composeOverride?: string; live?: SettingsOptions['live']; placeholderRuntime?: SettingsOptions['placeholderRuntime']; tunnelMonitor?: SettingsOptions['tunnelMonitor'] } = {}): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'rac-settings-service-'));
   roots.push(root);
   const controlRoot = join(root, 'control');
@@ -357,7 +428,7 @@ async function fixture(overrides: { app?: Record<string, unknown>; env?: string;
     compose: { projectDirectory: root, projectName: 'isolated-settings', files: [join(root, 'compose.yaml'), ...(composeOverride === undefined ? [] : [composeOverridePath])], envFiles: [envPath], profiles: [] }
   };
   const transport = new FakeTransport(descriptor, controlRoot);
-  const service = new SettingsService(config, { controlRoot, transport, configPath: appPath, checkout: root, placeholderRuntime: overrides.placeholderRuntime ?? (async () => ({ hostNode: '/host/bin/node', hostPath: '/host/bin:/usr/bin', timeZone: 'America/Los_Angeles' })), ...(overrides.live === undefined ? {} : { live: overrides.live }) });
+  const service = new SettingsService(config, { controlRoot, transport, configPath: appPath, checkout: root, placeholderRuntime: overrides.placeholderRuntime ?? (async () => ({ hostNode: '/host/bin/node', hostPath: '/host/bin:/usr/bin', timeZone: 'America/Los_Angeles' })), ...(overrides.live === undefined ? {} : { live: overrides.live }), ...(overrides.tunnelMonitor === undefined ? {} : { tunnelMonitor: overrides.tunnelMonitor }) });
   return { root, controlRoot, appPath, envPath, composeOverridePath, app, env, config, transport, service };
 }
 

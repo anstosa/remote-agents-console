@@ -10,7 +10,7 @@ import { appApply, environmentDescription, envApply, knownEnvironmentKeys, label
 import { scratchHome } from '../places/places.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
 import { readPlaceholderRuntime, resolvedEnvironmentFallback, type EnvironmentFallbackContext, type PlaceholderRuntime } from './fallbacks.js';
-import { SettingsError, settingsRestartProgress, type CloudflareStatus, type HostReceipt, type HostRequest, type Installation, type InstallationSource, type SettingsFallback, type SettingsInput, type SettingsIssue, type SettingsOperation, type SettingsSnapshot, type SettingsSource, type SettingsStatus, type SettingsTarget, type SettingsValidation } from './contracts.js';
+import { SettingsError, settingsRestartProgress, type CloudflareStatus, type HostReceipt, type HostRequest, type Installation, type InstallationSource, type SettingsFallback, type SettingsInput, type SettingsIssue, type SettingsOperation, type SettingsSnapshot, type SettingsSource, type SettingsStatus, type SettingsTarget, type SettingsValidation, type TunnelHealth } from './contracts.js';
 import { credentialValues, hasEditorMarker, redactEditorSource, restoreEditorSource } from './editor-source.js';
 import { environment, partitionEnvironment, patchEnvironment, restoreManagedEnvironment } from './env.js';
 import { readBounded, writePrivate } from './files.js';
@@ -19,13 +19,14 @@ import { applicationHash, contentHash, environmentProjection } from './proof.js'
 import { applyAuthoredProjectPatch } from './project-normalization.js';
 import { applicationSettingsSchema, installationSettingsPresentationSchema } from './schema.js';
 import { HostSettingsTransport, revealBinding, settingsControlRoot, validateInstallation, type SettingsTransport } from './transport.js';
+import { probeTunnelRoute, TunnelHealthMonitor, type TunnelProbe } from './tunnel-health.js';
 import { installationSettingsSchema, validateApplication, validateEnvironment, validateSvg } from './validation.js';
 
 type Live = { name?: (name: string) => Promise<void> | void; defaultAgent?: (kind: AgentKind | undefined) => Promise<void> | void; davo?: (settings: DavoSettings) => Promise<void> | void };
-type Options = { controlRoot?: string; transport?: SettingsTransport; configPath?: string; checkout?: string; live?: Live; placeholderRuntime?: () => Promise<PlaceholderRuntime> };
+type Options = { controlRoot?: string; transport?: SettingsTransport; configPath?: string; checkout?: string; live?: Live; placeholderRuntime?: () => Promise<PlaceholderRuntime>; tunnelMonitor?: TunnelHealthMonitor };
 type Document = { source: InstallationSource; content?: string; value?: unknown; revisionId: string; hash: string; existed: boolean };
 // retain helper operation kinds independently of the narrower browser contract
-type StoredOperation = Omit<SettingsOperation, 'kind'> & { kind?: HostRequest['kind'] };
+type StoredOperation = Omit<SettingsOperation, 'kind'> & { kind?: HostRequest['kind']; cloudflareAction?: 'connect' | 'activate' | 'reconnect' };
 const patchSchema = z.object({ op: z.enum(['set', 'remove', 'insert', 'move']), path: z.array(z.string()).max(16), value: z.unknown().optional(), index: z.number().int().optional(), from: z.number().int().optional(), to: z.number().int().optional(), revisionId: z.string().max(128).optional() }).strict();
 const inputSchema = z.object({ changes: z.array(z.object({ sourceId: z.string().max(64), revisionId: z.string().min(1).max(128), patches: z.array(patchSchema).max(512).optional(), content: z.string().max(1_048_576).optional(), remove: z.boolean().optional(), migration: z.object({ mode: z.enum(['copy', 'adopt', 'empty']) }).strict().optional() }).strict()).min(1).max(10) }).strict();
 const hostnameSchema = z.string().min(1).max(253).refine(value => value === value.trim() && value === value.toLowerCase() && isIP(value) === 0 && !/(?:^|\.)(?:localhost|local|internal|home|lan|test|invalid|example)$/u.test(value) && value.includes('.') && value.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label)), 'invalid hostname');
@@ -212,8 +213,12 @@ export class SettingsService {
   private sourceIdentities = new Map<string, string[]>();
   private desiredInstallation?: Installation;
   private placeholderCache?: { key: string; expires: number; value: Promise<PlaceholderRuntime> };
+  private readonly tunnelMonitor: TunnelHealthMonitor;
+  // bind reconnect failure display to one operation
+  private projectedReconnectFailure?: string;
+  private acknowledgedReconnectFailure?: string;
   // bind installation identity without an editable environment locator
-  constructor(private readonly config: ValidatedConfig, options: Options = {}) { this.options = options; this.controlRoot = options.controlRoot ?? settingsControlRoot(); this.transport = options.transport ?? new HostSettingsTransport(this.controlRoot); this.liveState = liveProjection(config); }
+  constructor(private readonly config: ValidatedConfig, options: Options = {}) { this.options = options; this.controlRoot = options.controlRoot ?? settingsControlRoot(); this.transport = options.transport ?? new HostSettingsTransport(this.controlRoot); this.liveState = liveProjection(config); this.tunnelMonitor = options.tunnelMonitor ?? new TunnelHealthMonitor(async () => await this.probeTunnel()); }
   // share bounded read-only runtime lookups without letting draft values execute commands
   private placeholderRuntime(): Promise<PlaceholderRuntime> {
     const key = JSON.stringify([process.env.RAC_TMUX_BIN, process.env.RAC_HOST_TMUX_DIR, process.env.RAC_HOST_PATH, process.env.PATH]);
@@ -389,7 +394,7 @@ export class SettingsService {
     return { id: operation.data.id, state: operation.data.state, ...(operation.data.kind === 'cloudflare' ? { kind: operation.data.kind } : {}), ...(operation.data.phase ? { phase: operation.data.phase } : {}), ...(operation.data.error ? { error: operation.data.error } : {}), ...(restart ? { restart } : {}) };
   }
   // follow one durable deployment pointer without trusting arbitrary metadata
-  private async deployment(kind?: HostRequest['kind']): Promise<{ operation: SettingsOperation; kind?: HostRequest['kind']; cloudflare?: Omit<CloudflareStatus, 'operation' | 'reconnectOrigin'>; reconnectOrigin?: string } | undefined> {
+  private async deployment(kind?: HostRequest['kind']): Promise<{ operation: SettingsOperation; kind?: HostRequest['kind']; cloudflareAction?: 'connect' | 'activate' | 'reconnect'; cloudflare?: Omit<CloudflareStatus, 'operation' | 'reconnectOrigin'>; reconnectOrigin?: string } | undefined> {
     const pointer = await this.metadata<Record<string, unknown>>('latest-deploy.json');
     const pointed = this.publicOperation(pointer);
     // retain an honestly absent deployment pointer
@@ -407,7 +412,8 @@ export class SettingsService {
     // reject substituted host status data rather than passing it to browsers
     if (parsedCloudflare !== undefined && !parsedCloudflare.success) throw new SettingsError('settings_metadata_invalid', 503);
     const reconnectOrigin = safeReconnectOrigin(pointer.reconnectOrigin) ? pointer.reconnectOrigin : undefined;
-    return { operation: current, kind: pointerKind.data, ...(parsedCloudflare?.success ? { cloudflare: parsedCloudflare.data } : {}), ...(reconnectOrigin ? { reconnectOrigin } : {}) };
+    const cloudflareAction = z.enum(['connect', 'activate', 'reconnect']).safeParse(pointer.cloudflareAction);
+    return { operation: current, kind: pointerKind.data, ...(cloudflareAction.success ? { cloudflareAction: cloudflareAction.data } : {}), ...(parsedCloudflare?.success ? { cloudflare: parsedCloudflare.data } : {}), ...(reconnectOrigin ? { reconnectOrigin } : {}) };
   }
   // refuse overlapping host mutations while one deployment owns the helper lock
   private async ensureNoDeployment(): Promise<void> {
@@ -438,7 +444,8 @@ export class SettingsService {
     const savedApplication = sourceSchema.safeParse(documents.get('app')?.value);
     // external live-field edits are not effective until a callback or boot consumes them
     if (savedApplication.success && liveProjection(savedApplication.data) !== this.liveState) targets.add('rac');
-    let latest = await this.metadata<StoredOperation>('latest-deploy.json');
+    const deploymentPointer = await this.metadata<StoredOperation>('latest-deploy.json');
+    let latest = deploymentPointer;
     // legacy restart discovery must not promote read-only connector inspections
     if (latest === undefined) {
       const legacy = await this.metadata<StoredOperation>('latest.json');
@@ -448,7 +455,8 @@ export class SettingsService {
     // follow the persisted deployment identity instead of transient read operations
     if (latest !== undefined) latest = await this.metadata<StoredOperation>(`status/${latest.id}.json`) ?? latest;
     const restart = settingsRestartProgress(latest?.restart);
-    const operation = latest !== undefined && ['restart', 'reconcile', 'cloudflare'].includes(latest.kind ?? '') ? { id: latest.id, state: latest.state, ...(latest.kind === 'cloudflare' ? { kind: 'cloudflare' as const } : {}), ...(latest.phase ? { phase: latest.phase } : {}), ...(latest.error ? { error: /^[a-z0-9_-]{1,80}$/u.test(latest.error) ? latest.error : 'Settings apply failed.' } : {}), ...(restart ? { restart } : {}) } : undefined;
+    const connectorReconnect = deploymentPointer?.kind === 'cloudflare' && deploymentPointer.cloudflareAction === 'reconnect' && deploymentPointer.id === latest?.id;
+    const operation = latest !== undefined && !connectorReconnect && ['restart', 'reconcile', 'cloudflare'].includes(latest.kind ?? '') ? { id: latest.id, state: latest.state, ...(latest.kind === 'cloudflare' ? { kind: 'cloudflare' as const } : {}), ...(latest.phase ? { phase: latest.phase } : {}), ...(latest.error ? { error: /^[a-z0-9_-]{1,80}$/u.test(latest.error) ? latest.error : 'Settings apply failed.' } : {}), ...(restart ? { restart } : {}) } : undefined;
     const env = environment(documents.get('env')?.content ?? '');
     const reloginRequired = ['RAC_SESSION_SECRET', 'RAC_PASSWORD_HASH'].some(key => env[key] !== undefined && env[key] !== process.env[key]);
     const publicOrigin = atPath(documents.get('app')?.value, ['publicOrigin']);
@@ -506,6 +514,83 @@ export class SettingsService {
     }
     const current = await this.queryCloudflare(installation);
     return { ...current, ...(deployment ? { operation: deployment.operation } : {}) };
+  }); }
+  // identify only connector selectors installed by fixed host authority
+  private managedTunnel(installation: Installation | undefined): boolean {
+    // reject absent or incomplete installation authority
+    if (installation === undefined) return false;
+    // accept only one enabled fixed compose profile
+    if (installation.kind === 'compose') return installation.compose?.profiles.includes('tunnel-token') === true || installation.compose?.profiles.includes('tunnel') === true && installation.sources.cloudflared !== undefined;
+    return installation.native?.cloudflaredUnit !== undefined && installation.native.cloudflaredUnit !== installation.native.unit && installation.sources.cloudflared !== undefined;
+  }
+  // synchronize one durable reconnect operation into cached health
+  private async syncTunnelReconnect(): Promise<void> {
+    const deployment = await this.deployment('cloudflare');
+    // clear stale progress when another operation owns the pointer
+    if (deployment?.cloudflareAction !== 'reconnect') { this.tunnelMonitor.reconnecting(false); return; }
+    const active = ['queued', 'running'].includes(deployment.operation.state);
+    const failed = deployment.operation.state === 'failed';
+    // project each new failure before recovery can acknowledge it
+    if (failed && this.projectedReconnectFailure !== deployment.operation.id) {
+      this.projectedReconnectFailure = deployment.operation.id;
+      this.acknowledgedReconnectFailure = undefined;
+      this.tunnelMonitor.reconnecting(false, true);
+      return;
+    }
+    const health = this.tunnelMonitor.snapshot();
+    // consume an old failure only after exact public recovery
+    if (failed && health.state === 'healthy' && health.error !== 'reconnect_failed') this.acknowledgedReconnectFailure = deployment.operation.id;
+    this.tunnelMonitor.reconnecting(active, failed && this.acknowledgedReconnectFailure !== deployment.operation.id);
+  }
+  // run one exact public-route proof without entering the host queue
+  private async probeTunnel(): Promise<TunnelProbe> {
+    await this.syncTunnelReconnect();
+    const installation = await this.installation();
+    // treat missing installation authority as transient capability loss
+    if (installation === undefined) return { outcome: 'unavailable', canReconnect: false };
+    const canReconnect = this.managedTunnel(installation);
+    // distinguish explicit decommission from an incomplete selected connector
+    if (!canReconnect) {
+      const selected = installation.kind === 'compose'
+        ? installation.compose?.profiles.some(profile => ['tunnel-token', 'tunnel'].includes(profile)) === true
+        : installation.native?.cloudflaredUnit !== undefined;
+      return { outcome: selected ? 'unavailable' : 'disabled', canReconnect: false };
+    }
+    // require secure public proof for a managed tunnel
+    if (this.config.publicOrigin.protocol !== 'https:') return { outcome: 'origin-failed', canReconnect: true };
+    const listen = this.config.listen;
+    // keep the origin probe on the configured loopback listener
+    if (!['127.0.0.1', '::1', 'localhost'].includes(listen.host)) return { outcome: 'origin-failed', canReconnect: true };
+    const host = listen.host === '::1' ? '[::1]' : listen.host;
+    return await probeTunnelRoute({ localOrigin: `http://${host}:${listen.port}`, hostname: this.config.publicOrigin.hostname, port: Number(this.config.publicOrigin.port || '443') });
+  }
+  // start continuous checks only after the listener is available
+  startTunnelMonitor(): void { this.tunnelMonitor.start(); }
+  // prevent post-close monitor updates
+  stopTunnelMonitor(): void { this.tunnelMonitor.stop(); }
+  // expose only cached health plus local reconnect progress
+  async tunnelHealth(): Promise<TunnelHealth> {
+    // refresh one local durable operation record without probing the network
+    await this.syncTunnelReconnect();
+    return this.tunnelMonitor.snapshot();
+  }
+  // queue one exact connector-only restart
+  async reconnectCloudflare(): Promise<{ operation: SettingsOperation }> { return await this.serialized(async () => {
+    const deployment = await this.deployment();
+    // coalesce a duplicate reconnect request
+    if (deployment?.kind === 'cloudflare' && deployment.cloudflareAction === 'reconnect' && ['queued', 'running'].includes(deployment.operation.state)) return { operation: deployment.operation };
+    // keep connector restart behind any other host mutation
+    if (deployment !== undefined && ['queued', 'running'].includes(deployment.operation.state)) throw new SettingsError('settings_operation_in_progress', 409);
+    const installation = await this.installation();
+    // reject uninstalled and unmanaged connector modes
+    if (!this.managedTunnel(installation) || installation === undefined) throw new SettingsError('cloudflare_reconnect_unavailable', 409);
+    const id = randomBytes(24).toString('base64url');
+    const operation: SettingsOperation = { id, state: 'queued', kind: 'cloudflare' };
+    await this.transport.request({ version: 1, id, kind: 'cloudflare', generation: installation.generation, cloudflare: { action: 'reconnect' } }, false);
+    await writePrivate(join(this.controlRoot, 'latest-deploy.json'), JSON.stringify({ ...operation, kind: 'cloudflare', cloudflareAction: 'reconnect' }));
+    this.tunnelMonitor.reconnecting(true);
+    this.leases.clear();
+    return { operation };
   }); }
   // stage one private connector action and publish only its operation identity
   async configureCloudflare(input: unknown): Promise<{ operation: SettingsOperation; reconnectOrigin?: string }> { return await this.serialized(async () => {

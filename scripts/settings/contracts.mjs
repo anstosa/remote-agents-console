@@ -259,6 +259,13 @@ function validateCloudflareRequest(request, descriptor) {
     }
     return;
   }
+  // reconnect carries only installed selector authority
+  if (cloudflare.action === "reconnect") {
+    if (cloudflare.candidate !== undefined || request.sources !== undefined || request.targets !== undefined) {
+      throw safeError("invalid-request");
+    }
+    return;
+  }
   // require one exact private candidate for mutating actions
   if (!["connect", "activate"].includes(cloudflare.action) || cloudflare.candidate !== "cloudflare-connect" || request.targets !== undefined) {
     throw safeError("invalid-request");

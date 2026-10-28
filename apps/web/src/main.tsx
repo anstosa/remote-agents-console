@@ -58,7 +58,7 @@ import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './s
 import { SettingsHeaderActionsContext } from './settings/header-actions.js';
 import { isSettingsSnapshot, settingsResponseError } from './settings/contracts.js';
 import { SettingsTerminalEditorContext, type SettingsEditorTarget, type SettingsPreviewTarget } from './settings/terminal-editor.js';
-import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, useSettingsRestartNoticeVisible } from './settings/runtime.js';
+import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider, StandaloneSettingsRestartNotice, StandaloneTunnelHealthNotice, TunnelHealthNotice, useSettingsRestartNoticeVisible, useTunnelHealthNoticeVisible } from './settings/runtime.js';
 import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, OpenFolderDialog, type FolderAction, type FolderOpened, type ListedFolder } from './open-folder.js';
 import { installProgressAnimationSync, type ProgressKind } from './progress-animation.js';
 import './styles.css';
@@ -720,6 +720,8 @@ const request = async (url: string, init: RequestInit = {}, observeReachability 
     });
   }
 };
+// keep background monitor failures from declaring the whole console unavailable
+const monitorRequest = (url: string, init?: RequestInit) => request(url, init, false);
 // read a Worktree branch's pull request comments fresh from GitHub
 const loadPullRequestComments = async (worktreeId: string): Promise<PullRequestComments> => {
   const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/pull-request/comments`);
@@ -8353,12 +8355,13 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
     return () => window.cancelAnimationFrame(frame);
   }, [reloadClient, reloadingClient]);
   const showSettingsRestart = useSettingsRestartNoticeVisible();
+  const showTunnelHealth = useTunnelHealthNoticeVisible();
   // keep stale-client guidance visible until the browser reloads
   const showClientUpdate = clientSettings?.clientUpdateAvailable === true;
   // the launch error is redundant while an error-tone operation toast already says the same thing
   const showLaunchError = Boolean(launchErrorMessage) && feedback?.tone !== 'error';
   // omit an empty stack when there is no persistent notice
-  if (children == null && feedback === undefined && !updateError && !showLaunchError && !showClientUpdate && !showSettingsRestart && !noteFeedback?.toasts.length) return null;
+  if (children == null && feedback === undefined && !updateError && !showLaunchError && !showClientUpdate && !showSettingsRestart && !showTunnelHealth && !noteFeedback?.toasts.length) return null;
   return createPortal(<div className="toast-region">
     {noteFeedback?.toasts}
     {showClientUpdate && <section className="toast client-update-notification" role="status" aria-label="UI update available"><div className="client-update-copy"><h2>UI update available</h2><span>Reload to use the latest version.</span></div><button type="button" className="progress-border progress-loading progress-blue" data-fullscreen-focus-return="reload" disabled={reloadingClient} aria-busy={reloadingClient} onClick={() => {
@@ -8367,6 +8370,7 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
       setReloadingClient(true);
     }}>{reloadingClient && <span className="update-progress-ring" aria-hidden="true" />}Reload UI</button></section>}
     <SettingsRestartNotice />
+    <TunnelHealthNotice />
     {feedback && <OperationFeedbackToast key={feedback.id} feedback={feedback} onDismiss={onDismissFeedback} />}
     {/* keep update failures independent from other operation feedback */}
     {updateError && <OperationFeedbackToast ariaLabel="Agent update failed" feedback={{ id: 0, tone: 'error', message: 'Agent update failed', detail: updateError }} onDismiss={onDismissUpdateError} />}
@@ -10385,6 +10389,10 @@ function App() {
   const beforeRestart = useCallback(() => beginFullscreenAction('restart'), [beginFullscreenAction]);
   // release the restart cover only after a proved settled status
   const onRestartSettled = useCallback(() => finishFullscreenAction('restart'), [finishFullscreenAction]);
+  // begin connector recovery only after its fullscreen cover is painted
+  const beforeTunnelReconnect = useCallback(() => beginFullscreenAction('tunnel-reconnect'), [beginFullscreenAction]);
+  // release only the matching connector recovery cover
+  const onTunnelReconnectSettled = useCallback(() => finishFullscreenAction('tunnel-reconnect'), [finishFullscreenAction]);
   // persist the server-wide launch fallback
   const setDefaultAgent = useCallback(async (kind: AgentKind): Promise<string | undefined> => {
     const response = await request('/api/server/default-agent', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind }) });
@@ -10849,7 +10857,7 @@ function App() {
   const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
   // share the current launch settings with every flyout
   const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, updating: updatingAgent, errors: Array.from(new Set([defaultAgentError, versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), defaultAgent: sessionInfo?.defaultAgent, defaultPending: defaultAgentPending, setDefaultAgent: (kind: AgentKind) => { /* persist one default */ void selectDefaultAgent(kind); }, updateAgent: (kind: AgentKind) => { /* run one installer */ void runAgentUpdate(kind); } }), [agentUpdateStatuses, updatingAgent, versionCheckError, defaultAgentError, sessionInfo?.defaultAgent, defaultAgentPending, selectDefaultAgent, runAgentUpdate]);
-  return <SettingsRuntimeProvider request={request} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <StandaloneSettingsRestartNotice />}<ContextMenuHost /><ContextFlyoutEvents /><ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider>;
+  return <SettingsRuntimeProvider request={request} monitorRequest={monitorRequest} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled} beforeTunnelReconnect={beforeTunnelReconnect} onTunnelReconnectSettled={onTunnelReconnectSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <><StandaloneSettingsRestartNotice /><StandaloneTunnelHealthNotice /></>}<ContextMenuHost /><ContextFlyoutEvents /><ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider>;
 }
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js');
 // Reflect the stored flavour before the first render, now that the stylesheet is

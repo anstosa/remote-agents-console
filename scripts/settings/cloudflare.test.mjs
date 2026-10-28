@@ -89,6 +89,11 @@ function request(current, id, action, body, sources = true) {
   };
 }
 
+// create one selector-only connector restart request
+function reconnectRequest(current, id) {
+  return { version: 1, id, kind: "cloudflare", generation: current.descriptor.generation, cloudflare: { action: "reconnect" } };
+}
+
 // render the installer-owned token service
 function composeModel(current, overrides = {}) {
   return {
@@ -127,6 +132,12 @@ function composeModel(current, overrides = {}) {
 function runner(current, options = {}) {
   const calls = [];
   let tokenContainer = options.running ? "c".repeat(64) : "";
+  let tokenExists = options.running || options.stopped;
+  let localContainer = options.localRunning ? "d".repeat(64) : "";
+  let localExists = options.localRunning || options.localStopped;
+  let tokenStartedAt = tokenExists ? "2026-10-28T20:00:00.000000000Z" : "";
+  let localStartedAt = localExists ? "2026-10-28T20:00:00.000000000Z" : "";
+  let restartSequence = 0;
   let racFailures = options.racFailures ?? (options.racFailure ? Number.POSITIVE_INFINITY : 0);
   const run = async (command, args) => {
     calls.push({ command, args: [...args] });
@@ -136,19 +147,38 @@ function runner(current, options = {}) {
     }
     // track connector lifecycle
     if (args.includes("ps") && args.at(-1) === "cloudflared-token") {
-      return { code: options.psFailure ? 1 : 0, stdout: Buffer.from(tokenContainer), stderr: Buffer.alloc(0) };
+      return { code: options.psFailure ? 1 : 0, stdout: Buffer.from(args.includes("--all") && tokenExists ? TOKEN_CONTAINER : tokenContainer), stderr: Buffer.alloc(0) };
     }
     // expose the legacy connector independently from managed token mode
     if (args.includes("ps") && args.at(-1) === "cloudflared") {
-      return { code: 0, stdout: Buffer.from(options.localRunning ? "d".repeat(64) : ""), stderr: Buffer.alloc(0) };
+      return { code: 0, stdout: Buffer.from(args.includes("--all") && localExists ? "d".repeat(64) : localContainer), stderr: Buffer.alloc(0) };
+    }
+    // return one process start identity for replay proof
+    if (command === "docker" && args[0] === "inspect") {
+      const startedAt = args.at(-1) === TOKEN_CONTAINER ? tokenStartedAt : localStartedAt;
+      return { code: startedAt === "" ? 1 : 0, stdout: Buffer.from(startedAt), stderr: Buffer.alloc(0) };
     }
     if (args.includes("up") && args.at(-1) === "cloudflared-token") {
       tokenContainer = TOKEN_CONTAINER;
+      tokenExists = true;
+      tokenStartedAt = "2026-10-28T20:00:01.000000000Z";
       return { code: options.connectorFailure ? 1 : 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
     }
     if (args.includes("stop") && args.at(-1) === "cloudflared-token") {
       tokenContainer = "";
       return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    }
+    // restart only an existing managed connector container
+    if (args.includes("restart") && args.at(-1) === "cloudflared-token") {
+      tokenContainer = tokenExists ? TOKEN_CONTAINER : "";
+      if (tokenExists && !options.connectorFailure) tokenStartedAt = `2026-10-28T20:00:${String(2 + restartSequence++).padStart(2, "0")}.000000000Z`;
+      return { code: options.connectorFailure ? 1 : 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    }
+    // restart only an existing local connector container
+    if (args.includes("restart") && args.at(-1) === "cloudflared") {
+      localContainer = localExists ? "d".repeat(64) : "";
+      if (localExists && !options.connectorFailure) localStartedAt = `2026-10-28T20:00:${String(2 + restartSequence++).padStart(2, "0")}.000000000Z`;
+      return { code: options.connectorFailure ? 1 : 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
     }
     // prove the RAC replacement
     if (args.includes("up") && args.at(-1) === "remote-agent-console") {
@@ -624,6 +654,237 @@ test("native installations report setup unavailable without invoking cloudflared
   assert.equal(calls.length, 0);
 });
 
+test("reconnect restarts only the exact managed token connector", async () => {
+  const current = fixture();
+  const docker = runner(current);
+  await processOperation(current.descriptor, request(current, "cloudflare_connect_restart1", "connect", { token: TOKEN }), proofOptions(docker.run));
+  current.descriptor = reload(current);
+  const before = docker.calls.length;
+
+  const result = await processOperation(current.descriptor, reconnectRequest(current, "cloudflare_reconnect_token1"), proofOptions(docker.run));
+  const reconnectCalls = docker.calls.slice(before);
+
+  assert.equal(result.phase, "connector-reconnected");
+  assert.equal(reconnectCalls.some((call) => call.command === "docker" && call.args.includes("restart") && call.args.at(-1) === "cloudflared-token"), true);
+  assert.equal(reconnectCalls.some((call) => call.args.includes("up") || call.args.includes("build") || call.args.includes("--force-recreate") || call.args.at(-1) === "remote-agent-console"), false);
+});
+
+test("reconnect starts a stopped configured token connector without recreating it", async () => {
+  const current = fixture();
+  const setup = runner(current);
+  await processOperation(current.descriptor, request(current, "cloudflare_connect_stopped1", "connect", { token: TOKEN }), proofOptions(setup.run));
+  current.descriptor = reload(current);
+  const docker = runner(current, { stopped: true });
+
+  const result = await processOperation(current.descriptor, reconnectRequest(current, "cloudflare_reconnect_stop01"), proofOptions(docker.run));
+
+  assert.equal(result.phase, "connector-reconnected");
+  assert.equal(docker.calls.some((call) => call.args.includes("restart") && call.args.at(-1) === "cloudflared-token"), true);
+  assert.equal(docker.calls.some((call) => call.args.includes("up")), false);
+});
+
+test("reconnect replay proves the first restart instead of restarting twice", async () => {
+  const current = fixture();
+  const docker = runner(current);
+  await processOperation(current.descriptor, request(current, "cloudflare_connect_replay01", "connect", { token: TOKEN }), proofOptions(docker.run));
+  current.descriptor = reload(current);
+  const operation = reconnectRequest(current, "cloudflare_reconnect_replay1");
+
+  await assert.rejects(() => processOperation(current.descriptor, operation, proofOptions(docker.run, {
+    // simulate helper death after restart command success
+    afterCloudflareReconnect: () => { throw safeError("simulated-helper-death"); }
+  })), { code: "simulated-helper-death" });
+  const result = await processOperation(current.descriptor, operation, proofOptions(docker.run));
+  const replay = await processOperation(current.descriptor, operation, proofOptions(docker.run));
+  const restarts = docker.calls.filter((call) => call.args.includes("restart") && call.args.at(-1) === "cloudflared-token");
+
+  assert.equal(result.phase, "connector-reconnected");
+  assert.deepEqual(replay, result);
+  assert.equal(restarts.length, 1);
+  assert.equal(JSON.parse(readFileSync(resolve(current.controlRoot, `journal/${operation.id}.json`), "utf8")).phase, "complete");
+});
+
+test("reconnect replay closes unavailable runtime proof for retention", async () => {
+  const current = fixture();
+  const setup = runner(current);
+  await processOperation(current.descriptor, request(current, "cloudflare_connect_replay02", "connect", { token: TOKEN }), proofOptions(setup.run));
+  current.descriptor = reload(current);
+  const operation = reconnectRequest(current, "cloudflare_reconnect_replay2");
+  const journalPath = resolve(current.controlRoot, `journal/${operation.id}.json`);
+  atomicWriteFile(journalPath, `${JSON.stringify({ version: 1, id: operation.id, kind: "cloudflare", action: "reconnect", generation: operation.generation, phase: "restarting", runtime: { kind: "compose", service: "cloudflared-token", profile: "tunnel-token", container: TOKEN_CONTAINER, startedAt: "2026-10-28T20:00:01.000000000Z", running: true }, updatedAt: "2026-10-28T20:00:01.000Z" })}\n`, 0o600);
+
+  await assert.rejects(() => processOperation(current.descriptor, operation, proofOptions(runner(current, { running: true, psFailure: true }).run)), { code: "cloudflare-connector-status-unavailable" });
+
+  assert.equal(JSON.parse(readFileSync(journalPath, "utf8")).phase, "rolled-back");
+});
+
+test("reconnect preserves a mismatched journal for explicit recovery", async () => {
+  const current = fixture();
+  current.descriptor.compose.profiles = ["tunnel-token"];
+  const operation = reconnectRequest(current, "cloudflare_reconnect_mismatch");
+  const journalPath = resolve(current.controlRoot, `journal/${operation.id}.json`);
+  const substituted = `${JSON.stringify({ version: 1, id: "different_reconnect_identity", kind: "cloudflare", action: "reconnect", generation: operation.generation, phase: "restarting", runtime: { kind: "unavailable" } })}\n`;
+  atomicWriteFile(journalPath, substituted, 0o600);
+
+  await assert.rejects(() => processOperation(current.descriptor, operation, proofOptions(runner(current, { running: true }).run)), { code: "journal-mismatch" });
+
+  assert.equal(readFileSync(journalPath, "utf8"), substituted);
+});
+
+test("reconnect rejects forged compose terminal journals before Docker mutation", async () => {
+  const validStatus = { supported: true, mode: "token", enabled: true, tokenPresent: true, serviceUrl: "http://127.0.0.1:8787", connected: true };
+  const validRuntime = { kind: "compose", service: "cloudflared-token", profile: "tunnel-token", container: TOKEN_CONTAINER, startedAt: "2026-10-28T20:00:01.000000000Z", running: true };
+  const forgeries = [
+    ["version", { version: 2 }],
+    ["unknown journal field", { forged: true }],
+    ["missing updated time", { updatedAt: undefined }],
+    ["impossible updated time", { updatedAt: "2026-02-30T20:00:02.000Z" }],
+    ["service", { runtime: { ...validRuntime, service: "remote-agent-console" } }],
+    ["profile", { phase: "rolled-back", cloudflare: undefined, runtime: { ...validRuntime, profile: "tunnel" } }],
+    ["runtime field", { runtime: { ...validRuntime, command: ["restart", "remote-agent-console"] } }],
+    ["runtime type", { runtime: { ...validRuntime, running: "true" } }],
+    ["impossible runtime time", { runtime: { ...validRuntime, startedAt: "2026-02-30T20:00:01.000000000Z" } }],
+    ["expanded status", { cloudflare: { ...validStatus, token: TOKEN } }],
+    ["impossible status time", { cloudflare: { ...validStatus, verifiedAt: "2026-02-30T20:00:02.000Z" } }],
+    ["credentialed status", { cloudflare: { ...validStatus, serviceUrl: "http://operator:secret@127.0.0.1:8787" } }],
+    ["non-complete status", { phase: "rolled-back" }]
+  ];
+  // reject each terminal substitution before consulting docker
+  for (const [index, [name, changes]] of forgeries.entries()) {
+    const current = fixture();
+    current.descriptor.compose.profiles = ["tunnel-token"];
+    const operation = reconnectRequest(current, `cloudflare_forged_compose_${String(index).padStart(2, "0")}`);
+    const journalPath = resolve(current.controlRoot, `journal/${operation.id}.json`);
+    const journal = {
+      version: 1,
+      id: operation.id,
+      kind: "cloudflare",
+      action: "reconnect",
+      generation: operation.generation,
+      phase: "complete",
+      runtime: validRuntime,
+      cloudflare: validStatus,
+      updatedAt: "2026-10-28T20:00:02.000Z",
+      ...changes
+    };
+    // model forbidden fields through omission rather than undefined json values
+    if (changes.updatedAt === undefined && Object.hasOwn(changes, "updatedAt")) delete journal.updatedAt;
+    // retain forbidden status on the rolled-back phase
+    if (name === "non-complete status") journal.cloudflare = validStatus;
+    const bytes = `${JSON.stringify(journal)}\n`;
+    atomicWriteFile(journalPath, bytes, 0o600);
+    const docker = runner(current, { running: true });
+
+    await assert.rejects(() => processOperation(current.descriptor, operation, proofOptions(docker.run)), { code: "journal-mismatch" }, name);
+    assert.equal(docker.calls.length, 0, name);
+    assert.equal(readFileSync(journalPath, "utf8"), bytes, name);
+  }
+});
+
+test("reconnect rejects forged native terminal journals before systemd mutation", async () => {
+  const validStatus = { supported: false, reason: "cloudflare-token-compose-only", mode: "local", enabled: true, tokenPresent: false, serviceUrl: "http://127.0.0.1:8787", connected: true };
+  const validRuntime = { kind: "native", unit: "cloudflared.service", invocation: "a".repeat(32), active: true };
+  const forgeries = [
+    ["unit", { ...validRuntime, unit: "remote-agent-console.service" }],
+    ["invocation", { ...validRuntime, invocation: "a".repeat(33) }],
+    ["active", { ...validRuntime, active: 1 }],
+    ["runtime field", { ...validRuntime, args: ["--token", TOKEN] }]
+  ];
+  // reject each native runtime substitution without consulting systemd
+  for (const [index, [name, runtime]] of forgeries.entries()) {
+    const current = fixture({ kind: "systemd", nativeCloudflare: true });
+    const operation = reconnectRequest(current, `cloudflare_forged_native_${String(index).padStart(2, "0")}`);
+    const journalPath = resolve(current.controlRoot, `journal/${operation.id}.json`);
+    const bytes = `${JSON.stringify({ version: 1, id: operation.id, kind: "cloudflare", action: "reconnect", generation: operation.generation, phase: "complete", runtime, cloudflare: validStatus, updatedAt: "2026-10-28T20:00:02.000Z" })}\n`;
+    atomicWriteFile(journalPath, bytes, 0o600);
+    const calls = [];
+    // record any forbidden systemd consultation
+    const run = async (command, args) => {
+      calls.push({ command, args: [...args] });
+      return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    };
+
+    await assert.rejects(() => processOperation(current.descriptor, operation, { runner: run }), { code: "journal-mismatch" }, name);
+    assert.equal(calls.length, 0, name);
+    assert.equal(readFileSync(journalPath, "utf8"), bytes, name);
+  }
+});
+
+test("reconnect fails closed when the configured connector does not exist or restart fails", async () => {
+  const current = fixture();
+  const setup = runner(current);
+  await processOperation(current.descriptor, request(current, "cloudflare_connect_missing1", "connect", { token: TOKEN }), proofOptions(setup.run));
+  current.descriptor = reload(current);
+
+  const missing = reconnectRequest(current, "cloudflare_reconnect_miss01");
+  const failed = reconnectRequest(current, "cloudflare_reconnect_fail01");
+  await assert.rejects(() => processOperation(current.descriptor, missing, proofOptions(runner(current).run)), { code: "cloudflare-reconnect-failed" });
+  const failingDocker = runner(current, { stopped: true, connectorFailure: true });
+  await assert.rejects(() => processOperation(current.descriptor, failed, proofOptions(failingDocker.run)), { code: "cloudflare-reconnect-failed" });
+  const failedCalls = failingDocker.calls.length;
+  await assert.rejects(() => processOperation(current.descriptor, failed, proofOptions(failingDocker.run)), { code: "cloudflare-reconnect-failed" });
+  assert.equal(existsSync(resolve(current.controlRoot, `journal/${missing.id}.json`)), false);
+  assert.equal(failingDocker.calls.length, failedCalls);
+  assert.equal(JSON.parse(readFileSync(resolve(current.controlRoot, `journal/${failed.id}.json`), "utf8")).phase, "rolled-back");
+});
+
+test("reconnect restarts only the enabled local compose connector", async () => {
+  const current = fixture({ nativeCloudflare: true });
+  current.descriptor.compose.profiles = ["tunnel"];
+  const docker = runner(current, { localRunning: true });
+
+  const result = await processOperation(current.descriptor, reconnectRequest(current, "cloudflare_reconnect_local1"), proofOptions(docker.run));
+
+  assert.equal(result.phase, "connector-reconnected");
+  assert.equal(docker.calls.some((call) => call.args.includes("restart") && call.args.at(-1) === "cloudflared"), true);
+  assert.equal(docker.calls.some((call) => call.args.includes("up") || call.args.at(-1) === "remote-agent-console"), false);
+});
+
+test("native reconnect restarts only a distinct configured cloudflared unit", async () => {
+  const current = fixture({ kind: "systemd", nativeCloudflare: true });
+  const calls = [];
+  let invocation = "a".repeat(32);
+  const run = async (command, args) => {
+    calls.push({ command, args: [...args] });
+    // expose one changing systemd invocation identity
+    if (args.includes("--property=InvocationID")) return { code: 0, stdout: Buffer.from(invocation), stderr: Buffer.alloc(0) };
+    // change only the exact restarted connector identity
+    if (args.includes("restart")) invocation = "b".repeat(32);
+    return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  };
+
+  const result = await processOperation(current.descriptor, reconnectRequest(current, "cloudflare_reconnect_native"), { runner: run });
+
+  assert.equal(result.phase, "connector-reconnected");
+  assert.equal(calls.some((call) => call.command === "systemctl" && call.args.includes("restart") && call.args.at(-1) === "cloudflared.service"), true);
+  assert.equal(calls.some((call) => call.args.includes("restart") && call.args.at(-1) === current.descriptor.native.unit), false);
+  current.descriptor.native.cloudflaredUnit = current.descriptor.native.unit;
+  await assert.rejects(() => processOperation(current.descriptor, reconnectRequest(current, "cloudflare_reconnect_same01"), { runner: run }), { code: "cloudflare-reconnect-unavailable" });
+});
+
+test("reconnect request validation rejects expanded authority", () => {
+  const current = fixture();
+  const requests = [
+    { ...reconnectRequest(current, "cloudflare_reconnect_schema1"), cloudflare: { action: "reconnect", candidate: "cloudflare-connect" } },
+    { ...reconnectRequest(current, "cloudflare_reconnect_schema2"), sources: [] },
+    { ...reconnectRequest(current, "cloudflare_reconnect_schema3"), targets: ["cloudflared"] }
+  ];
+  // reject every added selector independently
+  for (const invalid of requests) {
+    const path = resolve(current.controlRoot, "queued", `${invalid.id}.json`);
+    atomicWriteFile(path, `${JSON.stringify(invalid)}\n`, 0o600);
+    assert.throws(() => readRequest(path, current.descriptor), { code: "invalid-request" });
+  }
+});
+
+test("reconnect rejects an unconfigured compose selector without commands", async () => {
+  const current = fixture();
+  const docker = runner(current);
+
+  await assert.rejects(() => processOperation(current.descriptor, reconnectRequest(current, "cloudflare_reconnect_none01"), proofOptions(docker.run)), { code: "cloudflare-reconnect-unavailable" });
+  assert.equal(docker.calls.length, 0);
+});
+
 test("queue validation rejects expanded source authority and publishes redacted status", async () => {
   const current = fixture();
   const docker = runner(current);
@@ -691,7 +952,10 @@ test("activation rejects private DNS before local or public health requests", as
 
 test("public health proof enforces an absolute deadline against slow-drip responses", async () => {
   let interval;
-  const requester = (_options, receive) => {
+  let pinnedAddresses;
+  const requester = (options, receive) => {
+    // exercise the deployed node address-list lookup form
+    options.lookup("agents.example.com", { all: true }, (_error, addresses) => { pinnedAddresses = addresses; });
     const request = new EventEmitter();
     const response = new EventEmitter();
     response.statusCode = 200;
@@ -712,6 +976,7 @@ test("public health proof enforces an absolute deadline against slow-drip respon
     cloudflareHttpsTimeoutMs: 20
   }), { code: "cloudflare-health-proof-failed" });
   assert.ok(Date.now() - started < 250);
+  assert.deepEqual(pinnedAddresses, [{ address: "8.8.8.8", family: 4 }]);
   clearInterval(interval);
 });
 

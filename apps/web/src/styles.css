@@ -1865,10 +1865,28 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .client-update-copy > span { color: var(--subtext-0); font: 500 .66rem/1.35 var(--font-mono); }
 .client-update-notification > button { flex: none; min-height: 2rem; padding: .25rem .55rem; border-color: color-mix(in srgb, var(--blue) 72%, var(--surface-1)); background: transparent; color: var(--blue); box-shadow: none; font: 700 .68rem var(--font-mono); }
 .client-update-notification > button:hover { background: color-mix(in srgb, var(--blue) 14%, transparent); color: var(--text); }
+/* keep tunnel recovery persistent until a verified public check succeeds */
+.tunnel-health-notice { display: flex; align-items: center; gap: .65rem; min-width: 0; padding: .55rem .7rem; border: 1px solid color-mix(in srgb, var(--yellow) 65%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 92%, var(--yellow)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent); }
+.tunnel-health-notice.failed { border-color: color-mix(in srgb, var(--red) 68%, var(--surface-1)); background: color-mix(in srgb, var(--mantle) 92%, var(--red)); }
+.tunnel-health-icon { display: grid; flex: none; width: 1.5rem; height: 1.5rem; place-items: center; border: 1px solid currentColor; border-radius: 50%; color: var(--yellow); font: 900 .78rem var(--font-mono); }
+.tunnel-health-notice.failed .tunnel-health-icon { color: var(--red); }
+.tunnel-health-copy { display: grid; flex: 1; min-width: 0; gap: .2rem; overflow-wrap: anywhere; }
+.tunnel-health-copy strong { color: var(--text); font: 700 .75rem var(--font-mono); }
+.tunnel-health-copy > span { color: var(--subtext-0); font: 500 .66rem/1.35 var(--font-mono); }
+.tunnel-health-notice > button { display: flex; flex: none; align-items: center; gap: .35rem; min-height: 2rem; padding: .25rem .55rem; border-color: color-mix(in srgb, var(--yellow) 72%, var(--surface-1)); background: transparent; color: var(--yellow); box-shadow: none; font: 700 .68rem var(--font-mono); }
+.tunnel-health-notice.failed > button { border-color: color-mix(in srgb, var(--red) 72%, var(--surface-1)); color: var(--red); }
+.tunnel-health-notice > button:hover:not(:disabled) { background: color-mix(in srgb, var(--yellow) 14%, transparent); color: var(--text); }
+.tunnel-health-notice.failed > button:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 14%, transparent); }
+/* keep passive outage recovery visually subordinate to the fullscreen status */
+.tunnel-outage-recovery { display: grid; justify-items: start; gap: .65rem; max-width: 22rem; padding-top: .2rem; text-align: left; }
+.tunnel-outage-recovery > p { margin: 0; color: var(--subtext-0); font: 500 .7rem/1.45 var(--font-mono); }
+.tunnel-outage-recovery > button { min-height: 2rem; padding: .25rem .65rem; border-color: color-mix(in srgb, var(--yellow) 72%, var(--surface-1)); background: transparent; color: var(--yellow); box-shadow: none; font: 700 .68rem var(--font-mono); }
+.tunnel-outage-recovery > button:hover:not(:disabled) { background: color-mix(in srgb, var(--yellow) 14%, transparent); color: var(--text); }
 .toast-error { display: flex; align-items: center; min-height: 2rem; margin: 0; padding: .5rem .7rem; border: 1px solid color-mix(in srgb, var(--red) 65%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 90%, var(--red)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent); color: var(--red); font-size: .72rem; line-height: 1.35; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-.35rem) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 /* On phones the corner is cramped: span the top edge with side insets instead. */
 @media (max-width: 600px) { .toast-region { --toast-region-top: max(calc(var(--panel-header-clearance) + .5rem + env(safe-area-inset-top, 0px)), var(--settings-header-toast-clearance, 0px)); top: var(--toast-region-top); right: calc(.5rem + env(safe-area-inset-right, 0px)); left: calc(.5rem + env(safe-area-inset-left, 0px)); width: auto; } }
+@media (max-width: 420px) { .tunnel-health-notice { align-items: flex-start; flex-wrap: wrap; } .tunnel-health-copy { min-width: calc(100% - 2.15rem); } .tunnel-health-notice > button { margin-left: 2.15rem; } }
 .console-recovery { width: max-content; max-width: calc(100vw - 2rem); justify-items: start; color: var(--subtext-0); }
 .console-recovery .server-switcher-button { flex: none; max-width: none; }
 .console-recovery strong { color: var(--text); }

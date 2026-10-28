@@ -126,6 +126,16 @@ export type CloudflareStatus = {
   reconnectOrigin?: string;
 };
 
+export type TunnelHealth = {
+  state: 'disabled' | 'checking' | 'healthy' | 'degraded' | 'unknown';
+  checkedAt?: string;
+  lastHealthyAt?: string;
+  failures: number;
+  reconnecting: boolean;
+  canReconnect: boolean;
+  error?: 'origin_unavailable' | 'tunnel_unreachable' | 'tunnel_identity_mismatch' | 'reconnect_failed';
+};
+
 export type GoogleCalendarSummary = {
   enabled: boolean;
   available: boolean;
@@ -216,6 +226,20 @@ export const isCloudflareStatus = (value: unknown): value is CloudflareStatus =>
     && (status.verifiedAt === undefined || typeof status.verifiedAt === 'string')
     && (status.reconnectOrigin === undefined || typeof status.reconnectOrigin === 'string')
     && (status.operation === undefined || isSettingsOperation(status.operation));
+};
+
+// accept only the bounded tunnel-health projection
+export const isTunnelHealth = (value: unknown): value is TunnelHealth => {
+  // reject additions that could expose helper diagnostics
+  if (value === null || typeof value !== 'object' || !hasOnlyKeys(value, new Set(['state', 'checkedAt', 'lastHealthyAt', 'failures', 'reconnecting', 'canReconnect', 'error']))) return false;
+  const health = value as TunnelHealth;
+  return ['disabled', 'checking', 'healthy', 'degraded', 'unknown'].includes(health.state)
+    && (health.checkedAt === undefined || typeof health.checkedAt === 'string')
+    && (health.lastHealthyAt === undefined || typeof health.lastHealthyAt === 'string')
+    && Number.isSafeInteger(health.failures) && health.failures >= 0
+    && typeof health.reconnecting === 'boolean'
+    && typeof health.canReconnect === 'boolean'
+    && (health.error === undefined || ['origin_unavailable', 'tunnel_unreachable', 'tunnel_identity_mismatch', 'reconnect_failed'].includes(health.error));
 };
 
 export type SettingsIssue = {

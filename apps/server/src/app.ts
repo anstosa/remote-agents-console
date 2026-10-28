@@ -368,6 +368,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   } });
   // reuse browser auth without granting integration principals settings capabilities
   await registerSettingsRoutes(app, { service: settings, session, controlled, isController: id => control.ownerSessionId() === id });
+  // monitor public reachability only after the origin listener is accepting requests
+  app.addHook('onListen', async () => { if (typeof settings.startTunnelMonitor === 'function') settings.startTunnelMonitor(); });
+  // stop timers before releasing application state
+  app.addHook('onClose', async () => { if (typeof settings.stopTunnelMonitor === 'function') settings.stopTunnelMonitor(); });
   // keep outbound google authorization separate from inbound integration principals
   await registerGoogleCalendarRoutes(app, {
     service: googleCalendar, session, controlled,
