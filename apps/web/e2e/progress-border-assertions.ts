@@ -1,7 +1,8 @@
 import { expect, type Locator } from '@playwright/test';
 
 export type ProgressColor = 'blue' | 'green' | 'yellow' | 'peach' | 'red' | 'mauve';
-export type ProgressKind = 'loading' | 'working';
+// keep motion semantics private to this assertion module
+type ProgressKind = 'loading' | 'working';
 
 // map semantic motion to its public keyframe contract
 const animationName = (kind: ProgressKind) => kind === 'loading' ? 'loading-border-orbit' : 'update-border-orbit';
