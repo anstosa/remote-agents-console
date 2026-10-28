@@ -1,5 +1,4 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { expectProgressBorder } from "./progress-border-assertions";
 import { mockAccountSocket } from "./account-fixture";
 import {
   confirmSettingsClose,
@@ -172,6 +171,14 @@ const settingsPageHeaderExpectations: SettingsPageHeaderExpectation[] = [
     title: "Cloudflare",
     eyebrow: "Deployment settings",
   },
+];
+
+const settingsNavigationDestinations = [
+  ...settingsPageHeaderExpectations.map(({ id, title }) => ({
+    id,
+    label: title,
+  })),
+  { id: "google-calendar", label: "Google Calendar" },
 ];
 
 // require one complete shared page header without matching nested section copy
@@ -378,6 +385,141 @@ function deferredResponse() {
     resolve = release;
   });
   return { promise, resolve };
+}
+
+// require every semantic destination at inspectable navigation boundaries
+async function expectSettingsNavigationDestinations(
+  settings: Locator,
+  page: Page,
+  width: number,
+) {
+  // inspect mobile choices only after the selector becomes interactive
+  if (width === 390) {
+    const selector = settings.getByRole("combobox", {
+      name: "Settings section",
+      exact: true,
+    });
+    await expect(selector).toBeEnabled();
+    await selector.click();
+    const listbox = page.getByRole("listbox", {
+      name: "Settings section options",
+      exact: true,
+    });
+    const actual = await listbox.getByRole("option").evaluateAll((options) =>
+      options.map((option) => option.getAttribute("data-value")).sort(),
+    );
+    expect(actual).toEqual(
+      settingsNavigationDestinations
+        .map((destination) => destination.id)
+        .sort(),
+    );
+    await page.keyboard.press("Escape");
+    return;
+  }
+
+  const navigation = settings.getByRole("navigation", {
+    name: "Settings sources",
+  });
+  const buttons = navigation.getByRole("button");
+  await expect(buttons).toHaveCount(settingsNavigationDestinations.length);
+  // require each desktop destination by its exact accessible name
+  for (const destination of settingsNavigationDestinations) {
+    await expect(
+      navigation.getByRole("button", {
+        name: destination.label,
+        exact: true,
+      }),
+    ).toHaveCount(1);
+  }
+}
+
+// verify the navigation uses inert neutral placeholders during catalog work
+async function expectSettingsNavigationLoading(
+  settings: Locator,
+  width: number,
+) {
+  const mobile = width === 390;
+  const navigation = mobile
+    ? settings.locator(".settings-source-select")
+    : settings.getByRole("navigation", { name: "Settings sources" });
+  await expect(navigation).toHaveAttribute("aria-busy", "true");
+  await expect(navigation.locator(".update-progress-ring")).toHaveCount(0);
+  await expect(navigation.locator(".progress-border")).toHaveCount(0);
+
+  // lock the single mobile selector instead of exposing pending choices
+  if (mobile) {
+    const selector = settings.getByRole("combobox", {
+      name: "Settings section",
+      exact: true,
+    });
+    await expect(selector).toBeDisabled();
+    await expect(selector).not.toHaveAttribute("aria-busy", "true");
+  } else {
+    const buttons = navigation.getByRole("button");
+    await expect(buttons.first()).toBeVisible();
+    // lock every desktop destination behind the global busy state
+    for (const button of await buttons.all()) {
+      await expect(button).toBeDisabled();
+      await expect(button).toHaveAttribute("aria-busy", "true");
+    }
+  }
+
+  const placeholders = mobile
+    ? navigation.locator(
+        ".settings-select-current-icon, .settings-select-current-label",
+      )
+    : navigation.locator(
+        ".settings-source-nav-icon, .settings-source-nav-label",
+      );
+  await expect(placeholders).toHaveCount(
+    mobile ? 2 : settingsNavigationDestinations.length * 2,
+  );
+  const styles = await placeholders.evaluateAll((elements) =>
+    elements.map((element) => {
+      const style = getComputedStyle(element);
+      return {
+        animationName: style.animationName,
+        backgroundColor: style.backgroundColor,
+        color: style.color,
+      };
+    }),
+  );
+  // paint every accessible label or icon as an animated neutral block
+  for (const style of styles) {
+    expect(style.animationName).toContain("settings-nav-skeleton");
+    expect(style.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+    expect(style.backgroundColor).not.toBe("transparent");
+    expect(style.color).toBe("rgba(0, 0, 0, 0)");
+  }
+  await expect(navigation.locator("svg").first()).toHaveCSS(
+    "visibility",
+    "hidden",
+  );
+}
+
+// verify the selected page keeps its header but removes its editor while loading
+async function expectSettingsContentLoading(settings: Locator, title: string) {
+  const panel = settings.getByRole("region", {
+    name: `${title} settings content`,
+    exact: true,
+  });
+  await expect(
+    panel.getByRole("heading", { name: title, exact: true, level: 2 }),
+  ).toBeVisible();
+  await expect(
+    panel.getByRole("status").filter({
+      hasText: "Loading installation files",
+    }),
+  ).toBeVisible();
+  await expect(
+    settings.getByRole("status").filter({
+      hasText: "Loading installation files",
+    }),
+  ).toHaveCount(1);
+  await expect(
+    panel.locator('input, textarea, [contenteditable="true"], [role="switch"]'),
+  ).toHaveCount(0);
+  await expect(panel.locator(".settings-code-editor-surface")).toHaveCount(0);
 }
 
 // mount a controlled console with a complete redacted settings catalog
@@ -7892,9 +8034,9 @@ test("finds unconfigured Cloudflare fields before opening Cloudflare", async ({
   ).toHaveAttribute("data-settings-search-highlight", "true");
 });
 
-// keep navigation stable before the first file catalog is available
+// replace editors with locked skeleton navigation during initial catalog work
 for (const width of [390, 1440]) {
-  test(`keeps all settings sections visible while initial files load at ${width}px`, async ({
+  test(`locks settings navigation while initial files load at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 900 });
@@ -7904,110 +8046,65 @@ for (const width of [390, 1440]) {
       { wait: initial.promise, status: 503 },
       { wait: retry.promise },
     ]);
-    const search = settings.getByRole("searchbox", {
-      name: "Search settings",
-    });
     await expect.poll(() => state.settingsReads).toBe(1);
-    const catalogLoading = settings.getByRole("status").filter({
-      hasText: "Loading installation files",
-    });
-    await expectProgressBorder(catalogLoading, "blue");
     await expectStandardSettingsHeader(
       settings,
       settingsPageHeaderExpectations.find(
         (candidate) => candidate.id === "browser",
       )!,
     );
-    // inspect the navigation presentation for this breakpoint
-    if (width === 390) {
-      const selector = settings.getByRole("combobox", {
-        name: "Settings section",
-        exact: true,
-      });
-      await expect(selector).toBeEnabled();
-      await selector.click();
-      const listbox = page.getByRole("listbox", {
-        name: "Settings section options",
-      });
-      await expect(listbox.getByRole("option")).toHaveCount(14);
-      const browser = listbox.locator('[role="option"][data-value="browser"]');
-      await expect(browser).not.toHaveAttribute("aria-disabled", "true");
-      await expect(browser.locator(":scope > .update-progress-ring")).toHaveCount(0);
-      // browser-owned pages stay usable before files are ready
-      for (const id of ["interface", "projects"]) {
-        const option = listbox.locator(
-          `[role="option"][data-value=${JSON.stringify(id)}]`,
-        );
-        await expect(option).not.toHaveAttribute("aria-disabled", "true");
-        await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
-      }
-      for (const id of [
-        "voice",
-        "keyboard",
-        ...settingsUnavailableSections.map((source) => source.id),
-      ]) {
-        const option = listbox.locator(
-          `[role="option"][data-value=${JSON.stringify(id)}]`,
-        );
-        await expect(option).toHaveAttribute("aria-disabled", "true");
-        await expectProgressBorder(option, "blue");
-      }
-      await selector.focus();
-      await page.keyboard.press("ArrowDown");
-      await expect(
-        listbox.locator('[role="option"][data-active="true"]'),
-      ).toHaveAttribute("data-value", "interface");
-      await page.keyboard.press("Escape");
-    } else {
-      const nav = settings.getByRole("navigation", {
-        name: "Settings sources",
-      });
-      await expect(nav.getByRole("button")).toHaveCount(14);
-      await expect(
-        nav.getByRole("button", { name: "This browser", exact: true }),
-      ).toBeEnabled();
-      for (const label of ["Interface", "Projects"])
-        await expect(
-          nav.getByRole("button", { name: label, exact: true }),
-        ).toBeEnabled();
-      for (const label of [
-        "Voice",
-        "Keyboard shortcuts",
-        ...settingsUnavailableSections.map((source) => source.label),
-      ]) {
-        const button = nav.getByRole("button", { name: label, exact: true });
-        await expect(button).toBeDisabled();
-        await expect(button).toHaveAttribute("aria-busy", "true");
-        await expectProgressBorder(button, "blue");
-      }
-    }
+    await expectSettingsNavigationLoading(settings, width);
+    // desktop exposes the complete semantic set while its controls stay locked
+    if (width === 1440)
+      await expectSettingsNavigationDestinations(settings, page, width);
+    await expectSettingsContentLoading(settings, "This browser");
     await settings.screenshot({
-      path: `/tmp/remoteagents-loading-borders-settings-${width}.png`,
+      path: `/tmp/remoteagents-settings-loading-initial-${width}.png`,
     });
+    const placeholder =
+      width === 390
+        ? settings.locator(".settings-select-current-label")
+        : settings.locator(".settings-source-nav-label").first();
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(placeholder).toHaveCSS("animation-name", "none");
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await expect(placeholder).toHaveCSS(
+      "animation-name",
+      /settings-nav-skeleton/u,
+    );
 
-    // search results never remove pending destinations from navigation
-    await search.fill("cloudflare");
-    if (width === 390) {
-      await search.press("Escape");
-      const selector = settings.getByRole("combobox", {
-        name: "Settings section",
-        exact: true,
-      });
-      await selector.click();
-      const listbox = page.getByRole("listbox", {
-        name: "Settings section options",
-      });
-      await expect(listbox.getByRole("option")).toHaveCount(14);
-      await expect(
-        listbox.locator('[role="option"][data-value="cloudflare"]'),
-      ).toHaveAttribute("aria-disabled", "true");
-      await page.keyboard.press("Escape");
-    } else {
-      const nav = settings.getByRole("navigation", {
-        name: "Settings sources",
-      });
-      await expect(nav.getByRole("button")).toHaveCount(14);
-    }
+    // exercise the live app preference boundary at each responsive layout
+    await page.evaluate(() => {
+      localStorage.setItem("rac.reduced-motion", "enabled");
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "rac.reduced-motion",
+          newValue: "enabled",
+        }),
+      );
+    });
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-motion",
+      "reduced",
+    );
+    await expect(placeholder).toHaveCSS("animation-name", "none");
+    await page.evaluate(() => {
+      localStorage.removeItem("rac.reduced-motion");
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "rac.reduced-motion",
+          oldValue: "enabled",
+        }),
+      );
+    });
+    await expect(page.locator("html")).not.toHaveAttribute(
+      "data-motion",
+      "reduced",
+    );
+    await expect(placeholder).toHaveCSS(
+      "animation-name",
+      /settings-nav-skeleton/u,
+    );
 
     initial.resolve();
     await expect(
@@ -8015,36 +8112,86 @@ for (const width of [390, 1440]) {
         hasText: "Installation files are unavailable",
       }),
     ).toBeVisible();
-    await search.fill("");
 
-    // unavailable placeholders persist without claiming active work
+    // preserve browser-only fallback navigation after the failed request
     if (width === 390) {
       const selector = settings.getByRole("combobox", {
         name: "Settings section",
         exact: true,
       });
+      await expect(selector).toBeEnabled();
+      await expect(settings.locator(".settings-source-select")).not.toHaveAttribute(
+        "aria-busy",
+        "true",
+      );
+      await expectSettingsNavigationDestinations(settings, page, width);
       await selector.click();
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
+      await expect(listbox.getByRole("option").first()).toBeVisible();
+      // enable only catalog-independent pages after failure
+      for (const id of [
+        "browser",
+        "voice",
+        "keyboard",
+        "interface",
+        "projects",
+      ]) {
+        await expect(
+          listbox.locator(`[role="option"][data-value=${JSON.stringify(id)}]`),
+        ).not.toHaveAttribute("aria-disabled", "true");
+      }
+      // expose exactly the browser-only fallback pages after failure
+      expect(
+        await listbox.getByRole("option").evaluateAll((options) =>
+          options
+            .filter((option) => option.getAttribute("aria-disabled") !== "true")
+            .map((option) => option.getAttribute("data-value")),
+        ),
+      ).toEqual(["browser", "voice", "keyboard", "interface", "projects"]);
+      // retain unavailable file destinations without busy artwork
       for (const source of settingsUnavailableSections) {
         const option = listbox.locator(
           `[role="option"][data-value=${JSON.stringify(source.id)}]`,
         );
         await expect(option).toHaveAttribute("aria-disabled", "true");
         await expect(option).not.toHaveAttribute("aria-busy", "true");
-        await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
-      }
-      for (const id of ["voice", "keyboard", "interface", "projects"]) {
-        await expect(
-          listbox.locator(`[role="option"][data-value=${JSON.stringify(id)}]`),
-        ).not.toHaveAttribute("aria-disabled", "true");
+        await expect(option.locator(".update-progress-ring")).toHaveCount(0);
       }
       await page.keyboard.press("Escape");
     } else {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
+      await expect(nav).not.toHaveAttribute("aria-busy", "true");
+      // enable only catalog-independent pages after failure
+      for (const label of [
+        "This browser",
+        "Voice",
+        "Keyboard shortcuts",
+        "Interface",
+        "Projects",
+      ]) {
+        await expect(
+          nav.getByRole("button", { name: label, exact: true }),
+        ).toBeEnabled();
+      }
+      // expose exactly the browser-only fallback pages after failure
+      expect(
+        await nav.getByRole("button").evaluateAll((buttons) =>
+          buttons
+            .filter((button) => !(button as HTMLButtonElement).disabled)
+            .map((button) => button.textContent?.trim()),
+        ),
+      ).toEqual([
+        "This browser",
+        "Voice",
+        "Keyboard shortcuts",
+        "Interface",
+        "Projects",
+      ]);
+      // retain unavailable file destinations without busy artwork
       for (const source of settingsUnavailableSections) {
         const button = nav.getByRole("button", {
           name: source.label,
@@ -8052,21 +8199,8 @@ for (const width of [390, 1440]) {
         });
         await expect(button).toBeDisabled();
         await expect(button).not.toHaveAttribute("aria-busy", "true");
-        await expect(button.locator(":scope > .update-progress-ring")).toHaveCount(0);
+        await expect(button.locator(".update-progress-ring")).toHaveCount(0);
       }
-      await expect(
-        nav.getByRole("button", { name: "Voice", exact: true }),
-      ).toBeEnabled();
-      await expect(
-        nav.getByRole("button", {
-          name: "Keyboard shortcuts",
-          exact: true,
-        }),
-      ).toBeEnabled();
-      for (const label of ["Interface", "Projects"])
-        await expect(
-          nav.getByRole("button", { name: label, exact: true }),
-        ).toBeEnabled();
     }
 
     // catalog-independent pages retain complete headers after failure
@@ -8081,89 +8215,111 @@ for (const width of [390, 1440]) {
 
     await settings.getByRole("button", { name: "Retry files" }).click();
     await expect.poll(() => state.settingsReads).toBe(2);
+    await expectSettingsNavigationLoading(settings, width);
+    await expectSettingsContentLoading(settings, "This browser");
+    retry.resolve();
     await expect(
       settings.getByRole("status").filter({
         hasText: "Loading installation files",
       }),
-    ).toBeVisible();
-    retry.resolve();
-    await expect(
-      settings.getByText("Loading installation files", { exact: false }),
     ).toHaveCount(0);
+    await expectSettingsNavigationDestinations(settings, page, width);
 
-    // the authoritative response replaces every placeholder
+    // unlock the authoritative catalog after the retry completes
     if (width === 390) {
       const selector = settings.getByRole("combobox", {
         name: "Settings section",
         exact: true,
       });
+      await expect(selector).toBeEnabled();
+      await expect(settings.locator(".settings-source-select")).not.toHaveAttribute(
+        "aria-busy",
+        "true",
+      );
       await selector.click();
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      await expect(listbox.getByRole("option")).toHaveCount(14);
-      for (const id of [
-        "voice",
-        "keyboard",
-        "app",
-        "interface",
-        "agents",
-        "projects",
-        "reviews",
-        "tmux",
-        "storage",
-        "env",
-        "installation",
-        "compose-override",
-        "cloudflare",
-      ]) {
-        const option = listbox.locator(
-          `[role="option"][data-value=${JSON.stringify(id)}]`,
-        );
+      await expect(listbox.getByRole("option").first()).toBeVisible();
+      // unlock every authoritative destination
+      for (const option of await listbox.getByRole("option").all()) {
         await expect(option).not.toHaveAttribute("aria-disabled", "true");
-        await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
+        await expect(option).not.toHaveAttribute("aria-busy", "true");
+        await expect(option.locator(".update-progress-ring")).toHaveCount(0);
       }
-      await expect(
-        listbox.locator('[role="option"][data-value="cloudflared"]'),
-      ).toHaveCount(0);
       await page.keyboard.press("Escape");
     } else {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      await expect(nav.getByRole("button")).toHaveCount(14);
-      for (const label of [
-        "Voice",
-        "Keyboard shortcuts",
-        "Application",
-        "Interface",
-        "Agents",
-        "Projects",
-        "Reviews",
-        "TMUX",
-        "Storage",
-        "Environment & keys",
-        "Installation",
-        "Docker",
-        "Cloudflare",
-      ]) {
-        const button = nav.getByRole("button", { name: label, exact: true });
+      await expect(nav).not.toHaveAttribute("aria-busy", "true");
+      // unlock every authoritative destination
+      for (const button of await nav.getByRole("button").all()) {
         await expect(button).toBeEnabled();
-        await expect(button.locator(":scope > .update-progress-ring")).toHaveCount(0);
+        await expect(button).not.toHaveAttribute("aria-busy", "true");
+        await expect(button.locator(".update-progress-ring")).toHaveCount(0);
       }
-      await expect(
-        nav.getByRole("button", {
-          name: "Cloudflare tunnel",
-          exact: true,
-        }),
-      ).toHaveCount(0);
     }
   });
 }
 
-// retain the loaded catalog while one refresh is pending
+// retain one external destination request until the initial catalog resolves
+test("retains a keyboard settings request while the initial catalog loads", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const initial = deferredResponse();
+  const { settings, state } = await setupSettings(page, false, false, false, [
+    { wait: initial.promise },
+  ]);
+  await expect.poll(() => state.settingsReads).toBe(1);
+  await expectSettingsNavigationLoading(settings, 1440);
+  await expectSettingsNavigationDestinations(settings, page, 1440);
+  await expectSettingsContentLoading(settings, "This browser");
+
+  await page.keyboard.press("Control+?");
+  await page
+    .getByRole("dialog", { name: "Key bindings", exact: true })
+    .getByRole("button", { name: "Edit in Settings", exact: true })
+    .click();
+  await expectSettingsNavigationLoading(settings, 1440);
+  await expectSettingsNavigationDestinations(settings, page, 1440);
+  await expectSettingsContentLoading(settings, "This browser");
+
+  initial.resolve();
+  await expect(
+    settings.getByRole("heading", {
+      name: "Keyboard shortcuts",
+      exact: true,
+      level: 2,
+    }),
+  ).toHaveCount(1);
+  await settings
+    .getByRole("button", { name: "Close settings", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Global settings", exact: true })
+    .first()
+    .click();
+  await expect(
+    settings.getByRole("heading", {
+      name: "This browser",
+      exact: true,
+      level: 2,
+    }),
+  ).toBeVisible();
+  await expect(
+    settings.getByRole("heading", {
+      name: "Keyboard shortcuts",
+      exact: true,
+      level: 2,
+    }),
+  ).toHaveCount(0);
+});
+
+// remove retained editors and lock every destination during a catalog refresh
 for (const width of [390, 1440]) {
-  test(`keeps loaded settings sections visible while files refresh at ${width}px`, async ({
+  test(`locks settings navigation while loaded files refresh at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 900 });
@@ -8172,181 +8328,59 @@ for (const width of [390, 1440]) {
       {},
       { wait: refresh.promise },
     ]);
-    const search = settings.getByRole("searchbox", {
-      name: "Search settings",
-    });
+    await selectSettingsSection(settings, "app", "Application");
+    const serverName = settings.getByLabel("Server name", { exact: true });
+    await expect(serverName).toBeEditable();
     await settings
       .getByRole("button", { name: "Refresh files", exact: true })
       .click();
     await expect.poll(() => state.settingsReads).toBe(2);
-    // refresh disables only the retained file-dependent destinations
+    await expectSettingsNavigationLoading(settings, width);
+    // desktop exposes the complete semantic set while its controls stay locked
+    if (width === 1440)
+      await expectSettingsNavigationDestinations(settings, page, width);
+    await expectSettingsContentLoading(settings, "Application");
+    await expect(serverName).toHaveCount(0);
+
+    refresh.resolve();
+    await expect(
+      settings.getByRole("button", { name: "Refresh files", exact: true }),
+    ).toBeEnabled();
+    await expect(serverName).toBeEditable();
+    await expectSettingsNavigationDestinations(settings, page, width);
+
+    // restore all navigation without stale busy indicators
     if (width === 390) {
       const selector = settings.getByRole("combobox", {
         name: "Settings section",
         exact: true,
       });
       await expect(selector).toBeEnabled();
-      await selector.click();
-      const listbox = page.getByRole("listbox", {
-        name: "Settings section options",
-      });
-      await expect(listbox.getByRole("option")).toHaveCount(14);
-      for (const id of [
-        "voice",
-        "keyboard",
-        "app",
-        "agents",
-        "reviews",
-        "tmux",
-        "storage",
-        "env",
-        "installation",
-        "compose-override",
-        "cloudflare",
-      ]) {
-        const option = listbox.locator(
-          `[role="option"][data-value=${JSON.stringify(id)}]`,
-        );
-        await expect(option).toHaveAttribute("aria-disabled", "true");
-        await expectProgressBorder(option, "blue");
-      }
-      for (const id of ["interface", "projects"]) {
-        const option = listbox.locator(
-          `[role="option"][data-value=${JSON.stringify(id)}]`,
-        );
-        await expect(option).not.toHaveAttribute("aria-disabled", "true");
-        await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
-      }
-      await selector.focus();
-      await page.keyboard.press("ArrowDown");
-      await expect(
-        listbox.locator('[role="option"][data-active="true"]'),
-      ).toHaveAttribute("data-value", "interface");
-      await page.keyboard.press("Escape");
-    } else {
-      const nav = settings.getByRole("navigation", {
-        name: "Settings sources",
-      });
-      await expect(nav.getByRole("button")).toHaveCount(14);
-      for (const label of [
-        "Voice",
-        "Keyboard shortcuts",
-        "Application",
-        "Agents",
-        "Reviews",
-        "TMUX",
-        "Storage",
-        "Environment & keys",
-        "Installation",
-        "Docker",
-        "Cloudflare",
-      ]) {
-        const button = nav.getByRole("button", { name: label, exact: true });
-        await expect(button).toBeDisabled();
-        await expect(button).toHaveAttribute("aria-busy", "true");
-        await expectProgressBorder(button, "blue");
-      }
-      for (const label of ["Interface", "Projects"]) {
-        const button = nav.getByRole("button", { name: label, exact: true });
-        await expect(button).toBeEnabled();
-        await expect(button).not.toHaveAttribute("aria-busy", "true");
-      }
-    }
-
-    // search results leave every retained destination in navigation
-    await search.fill("docker");
-    if (width === 390) {
-      await search.press("Escape");
-      const selector = settings.getByRole("combobox", {
-        name: "Settings section",
-        exact: true,
-      });
-      await selector.click();
-      const listbox = page.getByRole("listbox", {
-        name: "Settings section options",
-      });
-      await expect(listbox.getByRole("option")).toHaveCount(14);
-      const compose = listbox.locator(
-        '[role="option"][data-value="compose-override"]',
+      await expect(settings.locator(".settings-source-select")).not.toHaveAttribute(
+        "aria-busy",
+        "true",
       );
-      await expect(compose).toHaveAttribute("aria-disabled", "true");
-      await expectProgressBorder(compose, "blue");
-      await page.keyboard.press("Escape");
-    } else {
-      const nav = settings.getByRole("navigation", {
-        name: "Settings sources",
-      });
-      const compose = nav.getByRole("button", {
-        name: "Docker",
-        exact: true,
-      });
-      await expect(nav.getByRole("button")).toHaveCount(14);
-      await expect(compose).toBeDisabled();
-      await expectProgressBorder(compose, "blue");
-    }
-
-    await search.fill("");
-    refresh.resolve();
-    await expect(
-      settings.getByRole("button", { name: "Refresh files", exact: true }),
-    ).toBeEnabled();
-
-    // refresh completion restores the retained destinations
-    if (width === 390) {
-      const selector = settings.getByRole("combobox", {
-        name: "Settings section",
-        exact: true,
-      });
       await selector.click();
       const listbox = page.getByRole("listbox", {
         name: "Settings section options",
       });
-      for (const id of [
-        "voice",
-        "keyboard",
-        "app",
-        "interface",
-        "agents",
-        "projects",
-        "reviews",
-        "tmux",
-        "storage",
-        "env",
-        "installation",
-        "compose-override",
-        "cloudflare",
-      ]) {
-        const option = listbox.locator(
-          `[role="option"][data-value=${JSON.stringify(id)}]`,
-        );
+      // unlock every refreshed destination
+      for (const option of await listbox.getByRole("option").all()) {
         await expect(option).not.toHaveAttribute("aria-disabled", "true");
         await expect(option).not.toHaveAttribute("aria-busy", "true");
-        await expect(option.locator(":scope > .update-progress-ring")).toHaveCount(0);
+        await expect(option.locator(".update-progress-ring")).toHaveCount(0);
       }
       await page.keyboard.press("Escape");
     } else {
       const nav = settings.getByRole("navigation", {
         name: "Settings sources",
       });
-      for (const label of [
-        "Voice",
-        "Keyboard shortcuts",
-        "Application",
-        "Interface",
-        "Agents",
-        "Projects",
-        "Reviews",
-        "TMUX",
-        "Storage",
-        "Environment & keys",
-        "Installation",
-        "Docker",
-        "Cloudflare",
-      ]) {
-        const button = nav.getByRole("button", { name: label, exact: true });
+      await expect(nav).not.toHaveAttribute("aria-busy", "true");
+      // unlock every refreshed destination
+      for (const button of await nav.getByRole("button").all()) {
         await expect(button).toBeEnabled();
         await expect(button).not.toHaveAttribute("aria-busy", "true");
-        await expect(button.locator(":scope > .update-progress-ring")).toHaveCount(0);
+        await expect(button.locator(".update-progress-ring")).toHaveCount(0);
       }
     }
   });
@@ -8470,7 +8504,11 @@ test("matches desktop settings icons to mobile navigation without changing names
   await expect(
     pendingApplication.locator(".settings-source-nav-icon"),
   ).toBeVisible();
-  await expectProgressBorder(pendingApplication, "blue");
+  await expect(pendingApplication).toBeDisabled();
+  await expect(pendingApplication).toHaveAttribute("aria-busy", "true");
+  await expect(pendingApplication.locator(".update-progress-ring")).toHaveCount(
+    0,
+  );
   refresh.resolve();
   await expect(refreshButton).toBeEnabled();
 
@@ -10411,10 +10449,15 @@ test("keeps unsafe SVG drafts inert and respects read-only contextual source con
   await settings
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
-  await expect(input).toBeDisabled();
+  // wait for the refreshed content and reopen its remounted disclosure
+  await expect(
+    settings.getByRole("button", { name: "Refresh files", exact: true }),
+  ).toBeEnabled();
   const artwork = settings
     .locator(".settings-icon-source")
     .filter({ hasText: "View / edit Heart icon" });
+  await artwork.getByText("View / edit Heart icon", { exact: true }).click();
+  await expect(input).toBeDisabled();
   await expect(
     artwork.getByRole("button", { name: "Format", exact: true }),
   ).toBeDisabled();

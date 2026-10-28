@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder } from './progress-border-assertions';
+import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions';
 import { installPaneMock } from './pane-stream-mock';
 
 // install the shared streamed-pane fixture so the review console's agent panel mounts
@@ -134,7 +134,7 @@ test('guides a human through active-scope implementation changes and sends conso
   // keep the branch icon steady while the border communicates progress
   await expect(branchButton.locator('.git-branch-icon')).toBeVisible();
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  expect(await branchButton.locator(':scope > .update-progress-ring').evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
+  await expectReducedMotionSpinner(branchButton, 'peach', 'working');
   await expect(branchButton.locator(':scope > .update-progress-ring')).toBeVisible();
   await expect(branchButton.locator('.git-branch-icon')).toBeVisible();
   await page.emulateMedia({ reducedMotion: 'no-preference' });

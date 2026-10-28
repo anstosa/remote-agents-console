@@ -742,14 +742,14 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
           </aside>
         )}
         <div className="code-pane-body">
-          {state === 'loading' && <p className="code-pane-status progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading changes…</p>}
+          {state === 'loading' && <p className="code-pane-status progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading changes…</p>}
           {state === 'error' && <p className="code-pane-status" role="alert">Unable to load changes.{onRetry !== undefined && <> <button type="button" className="code-pane-retry" onClick={onRetry}>Retry</button></>}</p>}
           {state === 'ready' && fileCount === 0 && <p className="code-pane-status">No changes to show.</p>}
           {state === 'ready' && fileCount > 0 && <>
             {missing && <p className="code-pane-status" role="alert">This file isn't part of the current changes. <button type="button" className="code-pane-retry" onClick={backToAll}>Back to all files</button></p>}
             {/* keep binary candidates outside the text diff renderer */}
             {selectedPreviewFile !== undefined ? selectedPreviewBody : <>
-            {plainForSelected !== undefined && plainForSelected.contents === undefined && plainForSelected.error !== true && <p className="code-pane-status progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading file…</p>}
+            {plainForSelected !== undefined && plainForSelected.contents === undefined && plainForSelected.error !== true && <p className="code-pane-status progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading file…</p>}
             {plainForSelected?.error === true && <p className="code-pane-status" role="alert">Unable to load this file.</p>}
             {selectedPath === undefined && patch?.truncated === true && <p className="code-pane-notice">Some files were left out because the change set is very large.</p>}
             {placeholders.length > 0 && (
@@ -770,7 +770,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
                       <>
                         {/* explain failures without removing their recovery control */}
                         {loadStatus[placeholder.path] === 'error' && <span className="code-pane-placeholder-error">Could not load</span>}
-                        <button type="button" className={`code-pane-load${loadStatus[placeholder.path] === 'loading' ? ' progress-border progress-blue' : ''}`} aria-busy={loadStatus[placeholder.path] === 'loading' || undefined} disabled={loadStatus[placeholder.path] === 'loading'} onClick={() => void loadAnyway(placeholder.path)}>{loadStatus[placeholder.path] === 'loading' && <span className="update-progress-ring" aria-hidden="true" />}{loadLabels[loadStatus[placeholder.path] ?? 'idle']}</button>
+                        <button type="button" className={`code-pane-load${loadStatus[placeholder.path] === 'loading' ? ' progress-border progress-blue progress-loading' : ''}`} aria-busy={loadStatus[placeholder.path] === 'loading' || undefined} disabled={loadStatus[placeholder.path] === 'loading'} onClick={() => void loadAnyway(placeholder.path)}>{loadStatus[placeholder.path] === 'loading' && <span className="update-progress-ring" aria-hidden="true" />}{loadLabels[loadStatus[placeholder.path] ?? 'idle']}</button>
                       </>
                     )}
                   </li>
@@ -872,7 +872,7 @@ function ComparisonFilePreview({ path, loadFile, onText, initialContents, option
     if (result.state === 'ready' && isTextComparison(result.contents)) onText(result.contents);
   }, [result, onText]);
   // keep loading and retry feedback inside the selected file
-  if (result.state === 'loading') return <p className="code-pane-status progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading image…</p>;
+  if (result.state === 'loading') return <p className="code-pane-status progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading image…</p>;
   // failed requests never fall through to broken image elements
   if (result.state === 'error') return <p className="code-pane-status" role="alert">Unable to load image preview. <button type="button" className="code-pane-retry" onClick={() => setAttempt(current => current + 1)}>Retry</button></p>;
   const { base, working } = result.contents;
@@ -958,7 +958,7 @@ function FileView({ filePreview, options, style, expanded, onBack, onClose, onOp
         close={{ key: 'close', label: 'Close file', title: 'Close', icon: <PanelIcon path={panelIcons.close} />, onSelect: onClose }} />
       <div className="code-pane-main">
         <div className="code-pane-body">
-          {state === 'loading' && <p className="code-pane-status progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading file…</p>}
+          {state === 'loading' && <p className="code-pane-status progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading file…</p>}
           {state === 'error' && <p className="code-pane-status" role="alert">Preview unavailable.</p>}
           {state === 'ready' && preview !== undefined && <>
             {/* inline only complete supported images */}

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner, expectStationaryStatus } from './progress-border-assertions';
+import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner, expectStationaryStatus, expectSynchronizedProgressBorders } from './progress-border-assertions';
 
 test.describe.configure({ timeout: 60_000 });
 
@@ -54,6 +54,66 @@ test('moves only the working tab border while its icon, label and dot stay stead
   await expectProgressBorder(phoneRow, 'peach');
   await expect(phoneRow.locator('.tab-kind-stack')).toBeVisible();
   await page.screenshot({ path: '/tmp/remoteagents-loading-border-working-sheet-phone.png' });
+});
+
+// align working tabs that join an already running document timeline
+test('synchronizes nonlinear working borders across late tabs and motion restarts', async ({ page }) => {
+  let includeLateTab = false;
+  let dashboardRequests = 0;
+  const agents = [
+    { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeLabel: 'Cora', title: '⠋ Working', attention: 'working', kind: 'codex' },
+    { id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/delta', worktreeLabel: 'Delta', title: '⠙ Working', attention: 'working', kind: 'codex' },
+    { id: 'agent-3', sessionId: 'socket:$3', home: '/worktrees/echo', worktreeLabel: 'Echo', title: '⠹ Working', attention: 'working', kind: 'codex' }
+  ];
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    // restore one controlling browser
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // add the late working tab on the next refresh
+    if (url.pathname === '/api/dashboard') {
+      dashboardRequests += 1;
+      return route.fulfill({ json: { generation: includeLateTab ? 2 : 1, agents: agents.slice(0, includeLateTab ? 3 : 2), projects: [] } });
+    }
+    // disable push enrollment
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    // authorize each agent stream
+    if (/^\/api\/agents\/agent-[123]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
+    // provide empty saved prompts
+    if (/^\/api\/agents\/agent-[123]\/saved-prompts$/u.test(url.pathname) && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  const workingTabs = page.locator('.tabs [role="tab"][aria-busy="true"]');
+  await expectSynchronizedProgressBorders(workingTabs, 2, 'working');
+  await expectClockwiseProgressBorder(workingTabs.first(), 'working');
+  const requestsBeforeLateTab = dashboardRequests;
+  includeLateTab = true;
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(() => dashboardRequests).toBeGreaterThan(requestsBeforeLateTab);
+  await expectSynchronizedProgressBorders(workingTabs, 3, 'working');
+  await expectProgressBorder(page.getByRole('tab', { name: 'Echo — Working' }), 'peach', 'working');
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expectSynchronizedProgressBorders(workingTabs, 3, 'working', true);
+  await expectReducedMotionSpinner(workingTabs.last(), 'peach', 'working');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await expectSynchronizedProgressBorders(workingTabs, 3, 'working');
+
+  // restart motion through the app preference boundary
+  await page.evaluate(() => {
+    localStorage.setItem('rac.reduced-motion', 'enabled');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', newValue: 'enabled' }));
+  });
+  await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
+  await expectSynchronizedProgressBorders(workingTabs, 3, 'working', true);
+  await page.evaluate(() => {
+    localStorage.removeItem('rac.reduced-motion');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', oldValue: 'enabled' }));
+  });
+  await expect(page.locator('html')).not.toHaveAttribute('data-motion', 'reduced');
+  await expectSynchronizedProgressBorders(workingTabs, 3, 'working');
 });
 
 // completion keeps its green attention color without pretending to work

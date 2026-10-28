@@ -271,7 +271,7 @@ export function ConsoleFullscreenLoader({ action, reconnecting, onEntered }: { a
   const progress = serverRestart ? operation?.restart : undefined;
   const label = action === 'reload' ? 'Reloading UI' : restarting ? progress?.state === 'recovering' ? 'Recovering server' : progress?.state === 'restarting' ? 'Restarting server' : 'Preparing restart' : 'Reconnecting to console';
   const detail = serverRestart ? operation?.phase ?? 'Applying saved settings and checking health…' : 'Preparing to apply saved settings…';
-  return <FullscreenLoader label={label} onEntered={action === undefined ? undefined : onEntered} focusReturnKey={action}>
+  return <FullscreenLoader label={label} onEntered={action === undefined ? undefined : onEntered} focusReturnKey={action} progressKind={restarting ? 'working' : 'loading'}>
     {restarting && <div className="fullscreen-restart-details">
       {/* omit the redundant host restart phase */}
       {detail !== 'restarting' && <p>{detail}</p>}

@@ -3,6 +3,7 @@ import { ConfiguredButtonIcon, openConfiguredButtonMenu, type ButtonSlot, useCon
 import { FlyoutPortal } from './flyout-portal.js';
 import { useViewportFlyout } from './viewport-flyout.js';
 import { preserveContextMenuPress } from './selection-context-menu.js';
+import type { ProgressKind } from './progress-animation.js';
 
 // The app-wide phone breakpoint. A phone shows a Workspace's panels one per screen, in a swipe
 // carousel, and expanding a panel there hides the tab row and toolbar instead.
@@ -148,6 +149,8 @@ export type PanelAction = {
   disabled?: boolean;
   pressed?: boolean;
   progress?: ProgressColor;
+  // select data-read motion while busy
+  progressKind?: ProgressKind;
   showLabel?: boolean;
   style?: CSSProperties;
   // aria-expanded, for an action that opens a popup of its own
@@ -158,7 +161,7 @@ export type PanelAction = {
 const actionButton = (action: PanelAction, row = false) => {
   // keep the action glyph stable while its border reports progress
   const busy = action.progress !== undefined;
-  return <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}${busy ? ` progress-border progress-${action.progress}` : ''}`} style={action.style} disabled={action.disabled} aria-busy={busy || undefined} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onPointerDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onMouseDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onContextMenu={action.onContextMenu} onClick={action.onSelect}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{(row || action.showLabel === true || action.icon === undefined) && <span>{action.label}</span>}</button>;
+  return <button key={action.key} type="button" className={`panel-header-action${row ? ' panel-header-row' : ''}${action.className === undefined ? '' : ` ${action.className}`}${busy ? ` progress-border progress-${action.progress}` : ''}${busy && action.progressKind === 'loading' ? ' progress-loading' : ''}`} style={action.style} disabled={action.disabled} aria-busy={busy || undefined} aria-label={action.label} aria-pressed={action.pressed} data-context-flyout={action.popupOpen === undefined ? undefined : true} aria-expanded={action.popupOpen} title={action.title ?? action.label} onPointerDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onMouseDownCapture={action.onContextMenu === undefined ? undefined : preserveContextMenuPress} onContextMenu={action.onContextMenu} onClick={action.onSelect}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon}{!row && action.popupOpen !== undefined && <span className="flyout-caret" aria-hidden="true" />}{(row || action.showLabel === true || action.icon === undefined) && <span>{action.label}</span>}</button>;
 };
 
 export function PanelIcon({ path }: { path: string }) {

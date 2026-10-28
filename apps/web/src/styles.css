@@ -1273,9 +1273,10 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 .agent-composer-column .queued-prompts-toggle:not(:disabled) { border-color: color-mix(in srgb, var(--mauve) 60%, var(--surface-1)); color: var(--mauve); }
 .agent-composer-column button:disabled { opacity: .45; }
 .agent-composer-column .icon-button svg { display: block; width: 1rem; height: 1rem; }
-.agent-composer-column .queue { border-color: color-mix(in srgb, var(--lavender) 54%, transparent); background: linear-gradient(135deg, var(--mauve), var(--blue)); color: var(--crust); filter: none; }
-/* outline the pending submit button without changing its progress indicator */
-.agent-composer-column .queue[aria-busy='true'] { border-color: var(--blue); background: transparent; color: var(--blue); }
+/* keep the send gradient borderless without changing its hit target */
+.agent-composer-column .queue { border: 0; background: linear-gradient(135deg, var(--mauve), var(--blue)); color: var(--crust); filter: none; }
+/* retain pending icon colors and progress feedback without a fixed border */
+.agent-composer-column .queue[aria-busy='true'] { background: transparent; color: var(--blue); }
 .agent-composer-column .queue:not(:disabled):hover { filter: brightness(1.08); }
 .agent-composer-column .queue svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
 .agent-composer .prompt-composer textarea { min-height: calc(var(--standard-control-size) + var(--standard-control-size) + .375rem); }
@@ -1748,9 +1749,12 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .workspace-toolbar-actions .launch-split.updates-available { position: relative; z-index: 1; overflow: visible; outline: 1px solid var(--mauve); outline-offset: -1px; box-shadow: inset 0 0 .65rem color-mix(in srgb, var(--mauve) 30%, transparent), 0 0 .6rem color-mix(in srgb, var(--mauve) 48%, transparent); animation: settings-update-glow 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .workspace-toolbar-actions .launch-split.updates-available { animation: none; } }
 :root[data-motion="reduced"] .workspace-toolbar-actions .launch-split.updates-available { animation: none; }
-/* advance only the border highlight clockwise while the button contents stay still */
+/* advance working borders through two accelerating and decelerating half turns */
 @property --update-orbit-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
-@keyframes update-border-orbit { to { --update-orbit-angle: 360deg; } }
+@keyframes update-border-orbit { 0% { --update-orbit-angle: 0deg; } 50% { --update-orbit-angle: 180deg; } 100% { --update-orbit-angle: 360deg; } }
+/* read-only data loads keep a constant clockwise speed */
+@keyframes loading-border-orbit { from { --update-orbit-angle: 0deg; } to { --update-orbit-angle: 360deg; } }
+.progress-loading > .update-progress-ring { --progress-orbit-animation: loading-border-orbit 2s linear infinite; }
 /* replace the attention pulse with a quiet track beneath the travelling border */
 .tabs .tab-row-lead .server-selector.updates-in-progress, .workspace-toolbar-actions .launch-split.updates-in-progress { animation: none; box-shadow: none; filter: none; }
 /* dim each existing track without overriding the server button's keyboard focus outline */
@@ -1784,7 +1788,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .cleanup-toggle.progress-border, .notes-toggle.unread-queued-prompts.progress-border { animation: none; filter: none; }
 /* apply the glow outside the masked child so it follows the same moving highlight */
 .updates-in-progress > .update-progress-ring, .progress-border > .update-progress-ring { position: absolute; inset: -1px; z-index: 1; display: block; width: auto; height: auto; min-width: 0; max-width: none; margin: 0; padding: 0; overflow: visible; border-radius: inherit; pointer-events: none; filter: var(--progress-indicator-filter, drop-shadow(0 0 .3rem var(--progress-ring-color, var(--mauve)))); }
-.update-progress-ring::before { content: ''; display: var(--progress-border-display, block); position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 35%, transparent) 285deg, var(--progress-ring-color, var(--mauve)) 325deg, var(--progress-ring-highlight, var(--lavender)) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: var(--progress-border-animation, update-border-orbit 2s linear infinite); }
+.update-progress-ring::before { content: ''; display: var(--progress-border-display, block); position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 35%, transparent) 285deg, var(--progress-ring-color, var(--mauve)) 325deg, var(--progress-ring-highlight, var(--lavender)) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: var(--progress-border-animation, var(--progress-orbit-animation, update-border-orbit 2s ease-in-out infinite)); }
 /* keep reduced-motion feedback compact without shifting button contents */
 @keyframes progress-spinner { to { transform: rotate(360deg); } }
 .update-progress-ring::after { content: ''; display: var(--progress-spinner-display, none); position: absolute; top: .25rem; left: .25rem; box-sizing: border-box; width: .65rem; height: .65rem; border: 2px solid var(--progress-ring-color, var(--mauve)); border-left-color: transparent; border-radius: 50%; animation: var(--progress-spinner-animation, none); }

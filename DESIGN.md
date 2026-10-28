@@ -1,7 +1,7 @@
 # Design
 
 ## Source of truth
-Status: Active. Updated: 2026-10-26. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, workspace toolbar decorators, public homepage and policies.
+Status: Active. Updated: 2026-10-28. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls, workspace toolbar decorators, public homepage and policies.
 Evidence: existing Settings forms and split confirmation, `compose.yaml`, the
 host settings queue/applier, and Cloudflare's official Tunnel setup documentation.
 Toolbar evidence: `apps/web/src/styles.css`, browser layout regressions, and the
@@ -55,6 +55,8 @@ a timeout while completing dashboard steps. Keep unsaved entries inside Settings
 discard/close protection. Never copy or return saved tokens to the browser.
 
 ## Visual language
+Keep the prompt Send button borderless in idle and pending states while retaining
+its keyboard focus outline, gradient and in-flight progress feedback.
 Reuse existing theme variables, monospace control typography, outlined secondary
 buttons, purple primary action, and compact single-column Settings spacing.
 Copy blocks wrap or scroll within the content pane, never the page.
@@ -104,6 +106,18 @@ Toasts overlap Settings content like other splits; only the wrapped Settings
 toolbar reserves space. Showing or dismissing notices must not move the tab.
 
 ## Interaction states
+Spinner timing distinguishes work from data loading, independently of color.
+User actions and LLM work use two accelerating/decelerating half turns per
+two-second cycle; read-only fetches, connection and account/branch loading use a
+constant-speed two-second turn. Each type shares the document timeline, including
+late mounts and portals. Reduced motion retains compact, synchronized one-second
+linear spinners instead of travelling borders. Do not animate content or status
+dots, or run a continuous JavaScript animation clock.
+While Settings files load or refresh, replace desktop and mobile navigation icons
+and labels with skeleton placeholders and disable every tab and the mobile selector.
+Keep the selected page header and show a loading message in its content area instead
+of editors. Use static placeholders with reduced motion; restore browser-only
+fallback pages after a catalog failure.
 Show loading/retry, unsupported native setup, legacy configuration, connector
 started but unverified, active verified hostname, in-flight operation, and safe
 failure. Distinguish connector startup from end-to-end route health.

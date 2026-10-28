@@ -50,8 +50,31 @@
 /* distinguish invalid pages from ordinary unsaved drafts */
 .settings-source-nav button[data-has-issues='true'] .settings-source-nav-icon { color: var(--red); }
 .settings-source-nav button[data-has-issues='true'] i { background: var(--red); box-shadow: 0 0 .5rem color-mix(in srgb, var(--red) 50%, transparent); }
+/* keep active skeletons distinct from the selected tab fill */
+.settings-source-nav[aria-busy='true'] button.active { background: transparent; }
+/* replace navigation artwork and labels with stable loading placeholders */
+.settings-source-nav[aria-busy='true'] :is(.settings-source-nav-icon, .settings-source-nav-label),
+.settings-source-select[aria-busy='true'] :is(.settings-select-current-icon, .settings-select-current-label) { border-radius: .2rem; background: var(--surface-1); color: transparent; animation: settings-nav-skeleton 1.4s ease-in-out infinite; }
+/* retain accessible names without exposing artwork through the skeleton */
+.settings-source-nav[aria-busy='true'] .settings-source-nav-icon > *,
+.settings-source-select[aria-busy='true'] .settings-select-current-icon > * { visibility: hidden; }
+/* keep text placeholders compact in both navigation layouts */
+.settings-source-nav[aria-busy='true'] .settings-source-nav-label,
+.settings-source-select[aria-busy='true'] .settings-select-current-label { max-width: 8.5rem; height: .65rem; }
+/* pulse without shifting navigation geometry */
+@keyframes settings-nav-skeleton { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+/* leave static placeholders when motion is reduced */
+@media (prefers-reduced-motion: reduce) {
+  .settings-source-nav[aria-busy='true'] :is(.settings-source-nav-icon, .settings-source-nav-label),
+  .settings-source-select[aria-busy='true'] :is(.settings-select-current-icon, .settings-select-current-label) { animation: none; }
+}
+/* honor the browser preference even when the operating system allows motion */
+:root[data-motion='reduced'] .settings-source-nav[aria-busy='true'] :is(.settings-source-nav-icon, .settings-source-nav-label),
+:root[data-motion='reduced'] .settings-source-select[aria-busy='true'] :is(.settings-select-current-icon, .settings-select-current-label) { animation: none; }
 /* keep content naturally sized while containing wheel and touch scrolling */
 .settings-source-panel { display: grid; min-width: 0; min-height: 0; align-content: start; gap: 1rem; overflow-y: auto; overscroll-behavior: contain; padding: 1rem; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
+/* keep catalog progress inside the selected page instead of showing stale editors */
+.settings-loading { display: flex; min-height: 8rem; align-items: center; justify-content: center; margin: 0; color: var(--subtext-0); font: 600 .7rem/1.5 var(--font-mono); }
 /* keep the keyboard scrolling target visible inside the clipped tab frame */
 .settings-source-panel:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 /* place browser controls in the same field grid as file-backed settings */

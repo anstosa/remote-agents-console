@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import type { ProgressKind } from './progress-animation.js';
 
 export type FullscreenAction = 'reload' | 'restart';
 
@@ -78,7 +79,7 @@ const computedTransitionMs = (style: CSSStyleDeclaration): number => {
 };
 
 // paint one modal fullscreen status before reporting that its action may begin
-export function FullscreenLoader({ label, children, onEntered, focusReturnKey }: { label: string; children?: ReactNode; onEntered?: () => void; focusReturnKey?: string }) {
+export function FullscreenLoader({ label, children, onEntered, focusReturnKey, progressKind = 'working' }: { label: string; children?: ReactNode; onEntered?: () => void; focusReturnKey?: string; progressKind?: ProgressKind }) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const reportedRef = useRef(false);
   const focusReturnRef = useRef(focusReturnKey);
@@ -212,7 +213,7 @@ export function FullscreenLoader({ label, children, onEntered, focusReturnKey }:
 
   return createPortal(<div ref={overlayRef} className={`reconnecting-overlay fullscreen-loader${visible ? ' fullscreen-loader-entered' : ''}`} role="alert" aria-label={label} aria-busy="true" tabIndex={-1}>
     <div className="auth-glow" aria-hidden="true" />
-    <div className="loading-console fullscreen-card progress-border progress-mauve" aria-busy="true">
+    <div className={`loading-console fullscreen-card progress-border progress-mauve${progressKind === 'loading' ? ' progress-loading' : ''}`} aria-busy="true">
       <span className="update-progress-ring" aria-hidden="true" />
       <div className="loading-line">{label}</div>
       {children}

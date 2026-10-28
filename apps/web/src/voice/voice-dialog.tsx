@@ -292,14 +292,14 @@ export function VoiceDialog({ name, open, callRequest, context, request, onClose
         <div className="voice-history-toolbar"><strong>History</strong><label className="voice-history-search"><span className="sr-only">Search {assistantName} history</span><input type="search" value={historyQuery} placeholder="Search history" onChange={event => setHistoryQuery(event.target.value)} /></label></div>
         {history}
       </section>
-      {voice.toolStatus && <p className="voice-tool-status progress-border progress-peach" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />{voice.toolStatus}</p>}
+      {voice.toolStatus && <p className={`voice-tool-status progress-border progress-peach${voice.state === 'connecting' ? ' progress-loading' : ''}`} aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />{voice.toolStatus}</p>}
       {voice.error && <p className="auth-error" role="alert">{voice.error}</p>}
       {voice.state === 'connecting' && <audio className="voice-ringing" src="/davo-ring.wav" autoPlay loop aria-hidden="true" />}
       <audio ref={hangupSound} className="voice-hangup-sound" src="/davo-hangup.wav" preload="auto" aria-hidden="true" />
       <footer>
         {voice.state === 'idle' || voice.state === 'error'
           ? <button type="button" className="voice-start" onClick={() => void voice.start()}>Call {assistantName}</button>
-          : <div className="voice-call-actions"><button type="button" className="voice-mute" aria-pressed={voice.muted} disabled={voice.state === 'connecting'} onClick={voice.toggleMute}>{voice.muted ? 'Unmute' : 'Mute'}</button><button type="button" className={`voice-stop${voice.state === 'connecting' ? ' progress-border progress-green' : ''}`} aria-busy={voice.state === 'connecting' || undefined} disabled={voice.state === 'connecting'} onClick={voice.stop}>{voice.state === 'connecting' && <span className="update-progress-ring" aria-hidden="true" />}{voice.state === 'connecting' ? 'Calling...' : 'Hang up'}</button></div>}
+          : <div className="voice-call-actions"><button type="button" className="voice-mute" aria-pressed={voice.muted} disabled={voice.state === 'connecting'} onClick={voice.toggleMute}>{voice.muted ? 'Unmute' : 'Mute'}</button><button type="button" className={`voice-stop${voice.state === 'connecting' ? ' progress-border progress-green progress-loading' : ''}`} aria-busy={voice.state === 'connecting' || undefined} disabled={voice.state === 'connecting'} onClick={voice.stop}>{voice.state === 'connecting' && <span className="update-progress-ring" aria-hidden="true" />}{voice.state === 'connecting' ? 'Calling...' : 'Hang up'}</button></div>}
         <small>Hanging up does not cancel agent work.</small>
       </footer>
     </div>

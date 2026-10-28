@@ -172,12 +172,12 @@ export function PullRequestCommentsPanel({ load, onLoaded, onAddToPrompt }: { lo
         <span className="pr-comments-show">Show</span>
         <button type="button" className="pr-comments-chip" aria-pressed={showResolved} title="Show resolved and outdated review threads" onClick={() => setShowResolved(value => !value)}>Resolved</button>
         <button type="button" className="pr-comments-chip" aria-pressed={showBots} title="Show comments from bots" onClick={() => setShowBots(value => !value)}>Bots</button>
-        <button type="button" className={`pr-comments-refresh${loading ? ' progress-border progress-blue' : ''}`} aria-busy={loading || undefined} aria-label="Refresh from GitHub" title="Refresh from GitHub" disabled={loading} onClick={() => void refresh()}>{loading && <span className="update-progress-ring" aria-hidden="true" />}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6" /></svg></button>
+        <button type="button" className={`pr-comments-refresh${loading ? ' progress-border progress-blue progress-loading' : ''}`} aria-busy={loading || undefined} aria-label="Refresh from GitHub" title="Refresh from GitHub" disabled={loading} onClick={() => void refresh()}>{loading && <span className="update-progress-ring" aria-hidden="true" />}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6" /></svg></button>
       </span>
     </span>
     <div className="git-status-files pr-comments">
       {error !== undefined && <p className="pr-comments-error" role="alert">{error}</p>}
-      {comments === undefined && error === undefined && <p className="pr-comments-empty progress-border progress-blue" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading review threads…</p>}
+      {comments === undefined && error === undefined && <p className="pr-comments-empty progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading review threads…</p>}
       {empty && <p className="pr-comments-empty">{hiddenThreads + hiddenReviews + hiddenConversation > 0 ? 'Nothing to show. Resolved threads and bot comments are hidden.' : 'No review comments on this PR yet.'}</p>}
       {!empty && comments !== undefined && <>
         {section('thread', 'Review threads', threadItems, hiddenThreads > 0 ? `${hiddenThreads} hidden` : undefined, threadBody)}

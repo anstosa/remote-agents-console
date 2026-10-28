@@ -10,19 +10,36 @@ const queueAppearance = (button: Locator) => button.evaluate(element => {
   probe.style.color = 'var(--blue)';
   element.append(probe);
   const blue = getComputedStyle(probe).color;
+  probe.style.color = 'var(--sky)';
+  const sky = getComputedStyle(probe).color;
   probe.remove();
   return {
     backgroundColor: style.backgroundColor,
     backgroundImage: style.backgroundImage,
     blue,
-    borderColor: style.borderColor,
     borderStyle: style.borderStyle,
     borderWidth: Number.parseFloat(style.borderWidth),
     color: style.color,
+    filter: style.filter,
     iconColor: iconStyle?.color,
-    iconStroke: iconStyle?.stroke
+    iconStroke: iconStyle?.stroke,
+    outlineColor: style.outlineColor,
+    outlineStyle: style.outlineStyle,
+    outlineWidth: Number.parseFloat(style.outlineWidth),
+    sky
   };
 });
+
+// require the send control to rely on shape and fill instead of a fixed border
+const expectQueueWithoutFixedBorder = async (button: Locator) => {
+  await expect.poll(async () => {
+    const appearance = await queueAppearance(button);
+    return {
+      borderStyle: appearance.borderStyle,
+      borderWidth: appearance.borderWidth
+    };
+  }).toEqual({ borderStyle: 'none', borderWidth: 0 });
+};
 
 // preserve composer focus while proving the submit palette across its pending lifecycle
 test('focusing and submitting the prompt keeps keyboard input in the composer', async ({ page }, testInfo) => {
@@ -47,7 +64,10 @@ test('focusing and submitting the prompt keeps keyboard input in the composer', 
   const output = page.getByLabel('Live log');
   const outputPanel = page.locator('.log-output');
   const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  const queue = page.getByRole('button', { name: 'Queue', exact: true });
   await expect(output).toBeVisible();
+  await expect(queue).toBeDisabled();
+  await expectQueueWithoutFixedBorder(queue);
 
   // the output panel's own ring reads sky only while the pane holds keyboard input
   const ring = () => outputPanel.evaluate(element => {
@@ -74,23 +94,50 @@ test('focusing and submitting the prompt keeps keyboard input in the composer', 
   await expect(prompt).toHaveValue('Keep this prompt');
 
   await prompt.fill('Queue this prompt');
-  const queue = page.getByRole('button', { name: 'Queue', exact: true });
   await expect(queue).toBeEnabled();
   // wait for the idle palette to settle
   await expect.poll(async () => (await queueAppearance(queue)).backgroundImage).toContain('linear-gradient');
+  await expect.poll(async () => (await queueAppearance(queue)).filter).toBe('none');
+  await expectQueueWithoutFixedBorder(queue);
+  const idleScreenshot = '/tmp/remoteagents-prompt-submit-idle.png';
+  await page.screenshot({ path: idleScreenshot });
+  await testInfo.attach('prompt-submit-idle', { path: idleScreenshot, contentType: 'image/png' });
+  await queue.hover();
+  await expect.poll(async () => (await queueAppearance(queue)).filter).toBe('brightness(1.08)');
+  await expectQueueWithoutFixedBorder(queue);
+  await page.mouse.move(0, 0);
+  await prompt.focus();
+  await page.keyboard.press('Tab');
+  // focus the submit target while retaining keyboard focus-visible modality
+  await queue.focus();
+  await expect(queue).toBeFocused();
+  // preserve the global keyboard outline independently of the removed border
+  await expect.poll(async () => {
+    const appearance = await queueAppearance(queue);
+    return {
+      outlineIsSky: appearance.outlineColor === appearance.sky,
+      outlineStyle: appearance.outlineStyle,
+      outlineWidth: appearance.outlineWidth
+    };
+  }).toEqual({
+    outlineIsSky: true,
+    outlineStyle: 'solid',
+    outlineWidth: 2
+  });
+  await prompt.focus();
   await prompt.press('Enter');
   const queueing = page.getByRole('button', { name: 'Queueing', exact: true });
   await expect(queueing).toBeDisabled();
   await expectProgressBorder(queueing, 'blue');
+  await expectQueueWithoutFixedBorder(queueing);
   // wait for the pending palette transition to settle
   await expect.poll(async () => {
     const appearance = await queueAppearance(queueing);
     return {
       backgroundColor: appearance.backgroundColor,
       backgroundImage: appearance.backgroundImage,
-      borderBlue: appearance.borderColor === appearance.blue,
       borderStyle: appearance.borderStyle,
-      borderVisible: appearance.borderWidth > 0,
+      borderWidth: appearance.borderWidth,
       colorBlue: appearance.color === appearance.blue,
       iconColorBlue: appearance.iconColor === appearance.blue,
       iconStrokeBlue: appearance.iconStroke === appearance.blue
@@ -98,14 +145,13 @@ test('focusing and submitting the prompt keeps keyboard input in the composer', 
   }).toEqual({
     backgroundColor: 'rgba(0, 0, 0, 0)',
     backgroundImage: 'none',
-    borderBlue: true,
-    borderStyle: 'solid',
-    borderVisible: true,
+    borderStyle: 'none',
+    borderWidth: 0,
     colorBlue: true,
     iconColorBlue: true,
     iconStrokeBlue: true
   });
-  const pendingScreenshot = testInfo.outputPath('prompt-submit-pending.png');
+  const pendingScreenshot = '/tmp/remoteagents-prompt-submit-pending.png';
   await page.screenshot({ path: pendingScreenshot });
   await testInfo.attach('prompt-submit-pending', { path: pendingScreenshot, contentType: 'image/png' });
   await expect(prompt).toHaveValue('');
@@ -118,4 +164,6 @@ test('focusing and submitting the prompt keeps keyboard input in the composer', 
   await expect(queue).not.toHaveAttribute('aria-busy', 'true');
   // wait for the restored idle palette to settle
   await expect.poll(async () => (await queueAppearance(queue)).backgroundImage).toContain('linear-gradient');
+  await expect.poll(async () => (await queueAppearance(queue)).filter).toBe('none');
+  await expectQueueWithoutFixedBorder(queue);
 });

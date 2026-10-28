@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions';
+import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner, expectSynchronizedProgressBorders } from './progress-border-assertions';
+import { mockAccountSocket, openCodexAccounts } from './account-fixture';
+import { installPaneMock } from './pane-stream-mock';
 
 test.describe.configure({ timeout: 60_000 });
 
@@ -73,26 +75,261 @@ test('frames startup with a clockwise border or reduced-motion spinner', async (
   try {
     await expect(loader).toContainText('Restoring secure session');
     await expect(loader.locator('.loading-bars')).toHaveCount(0);
-    await expectProgressBorder(loader, 'mauve');
-    await expectClockwiseProgressBorder(loader);
+    await expectProgressBorder(loader, 'mauve', 'loading');
+    await expectClockwiseProgressBorder(loader, 'loading');
     await expect.poll(() => loader.locator('.loading-line').evaluate(element => ({ animations: element.getAnimations().length, transform: getComputedStyle(element).transform }))).toEqual({ animations: 0, transform: 'none' });
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    await expectReducedMotionSpinner(loader, 'mauve');
+    await expectReducedMotionSpinner(loader, 'mauve', 'loading');
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    await expectProgressBorder(loader, 'mauve');
-    await expectClockwiseProgressBorder(loader);
+    await expectProgressBorder(loader, 'mauve', 'loading');
+    await expectClockwiseProgressBorder(loader, 'loading');
     await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
-    await expectReducedMotionSpinner(loader, 'mauve');
+    await expectReducedMotionSpinner(loader, 'mauve', 'loading');
     await page.evaluate(() => { delete document.documentElement.dataset.motion; });
-    await expectProgressBorder(loader, 'mauve');
-    await expectClockwiseProgressBorder(loader);
+    await expectProgressBorder(loader, 'mauve', 'loading');
+    await expectClockwiseProgressBorder(loader, 'loading');
   } finally {
     // release authentication during failed assertions too
     sessionGate.release();
   }
   await expect(page.getByRole('button', { name: 'Take control', exact: true })).toBeVisible();
   await expect(ring).toHaveCount(0);
+});
+
+// classify account reads as constant loading motion
+test('uses linear loading motion while ChatGPT accounts load', async ({ page }) => {
+  const accountsGate = createGate();
+  await mockAccountSocket(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    // restore one controlling browser
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // expose configured Codex without live agents
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title' } }, scratchLaunch: { kind: 'codex', origin: 'default' }, agents: [], projects: [] } });
+    // authorize the inert dashboard socket
+    if (path === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
+    // hold the real account boundary
+    if (path === '/api/codex/accounts' && request.method() === 'GET') {
+      await accountsGate.promise;
+      return route.fulfill({ json: { accounts: [] } });
+    }
+    // disable push enrollment
+    if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ json: {} });
+  });
+
+  const accounts = await openCodexAccounts(page);
+  const loader = accounts.getByRole('status').filter({ hasText: 'Loading ChatGPT accounts…' });
+  try {
+    await expectProgressBorder(loader, 'blue', 'loading');
+    await expectClockwiseProgressBorder(loader, 'loading');
+  } finally {
+    // release the account read during failed assertions too
+    accountsGate.release();
+  }
+  await expect(loader).toHaveCount(0);
+});
+
+// align branch reads that mount after an existing connection loader
+test('synchronizes late branch loaders with the active connection loader', async ({ page }) => {
+  const branchesGate = createGate();
+  await installPaneMock(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    // restore one controlling browser
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // expose one connected worktree
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', branch: 'feature/current', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }], projects: [] } });
+    // authorize the mocked pane stream
+    if (path === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    // provide empty saved prompts
+    if (path === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
+    // hold repository choices after the connection loader starts
+    if (path === '/api/worktrees/cora/switch-prs') {
+      await branchesGate.promise;
+      return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
+    }
+    // disable push enrollment
+    if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  const connection = page.locator('.agent-output > .log-loading');
+  await expectProgressBorder(connection, 'blue', 'loading');
+  await expectClockwiseProgressBorder(connection, 'loading');
+  await page.getByRole('button', { name: /^Git status:/u }).click();
+  const branchPanel = page.getByRole('region', { name: 'Changed files' });
+  const pullRequests = branchPanel.getByRole('tab', { name: 'PRs', exact: true });
+  const branches = branchPanel.getByRole('tab', { name: 'Branches', exact: true });
+  const loadingBorders = page.locator('.progress-loading:has(> .update-progress-ring)');
+  try {
+    await expectProgressBorder(pullRequests, 'blue', 'loading');
+    await expectProgressBorder(branches, 'blue', 'loading');
+    await expectSynchronizedProgressBorders(loadingBorders, 3, 'loading');
+    await expectClockwiseProgressBorder(branches, 'loading');
+
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await expectSynchronizedProgressBorders(loadingBorders, 3, 'loading', true);
+    await expectReducedMotionSpinner(connection, 'blue', 'loading');
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await expectSynchronizedProgressBorders(loadingBorders, 3, 'loading');
+
+    // restart loading motion through the app preference boundary
+    await page.evaluate(() => {
+      localStorage.setItem('rac.reduced-motion', 'enabled');
+      window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', newValue: 'enabled' }));
+    });
+    await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
+    await expectSynchronizedProgressBorders(loadingBorders, 3, 'loading', true);
+    await page.evaluate(() => {
+      localStorage.removeItem('rac.reduced-motion');
+      window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', oldValue: 'enabled' }));
+    });
+    await expect(page.locator('html')).not.toHaveAttribute('data-motion', 'reduced');
+    await expectSynchronizedProgressBorders(loadingBorders, 3, 'loading');
+  } finally {
+    // release repository choices during failed assertions too
+    branchesGate.release();
+  }
+  await expect(pullRequests.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(branches.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(connection).toBeVisible();
+});
+
+// distinguish cleanup reads from the user-confirmed cleanup mutation
+test('uses loading motion for cleanup reads and working motion for cleanup submission', async ({ page }) => {
+  const initialReadGate = createGate();
+  const cachedReadGate = createGate();
+  const submissionGate = createGate();
+  let cleanupReads = 0;
+  let cleanupSubmissions = 0;
+  const targets = [{ id: 'agent-1', kind: 'stale-agent', label: 'Stale Codex agent', detail: 'old-agent at /worktrees/removed' }];
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    // restore one controlling browser
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // expose one pending cleanup target
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, cleanupPending: 1, agents: [], projects: [] } });
+    // hold each cleanup read independently
+    if (path === '/api/cleanup' && request.method() === 'GET') {
+      cleanupReads += 1;
+      await (cleanupReads === 1 ? initialReadGate.promise : cachedReadGate.promise);
+      return route.fulfill({ json: { targets } });
+    }
+    // hold the explicit cleanup action
+    if (path === '/api/cleanup' && request.method() === 'POST') {
+      cleanupSubmissions += 1;
+      await submissionGate.promise;
+      return route.fulfill({ json: { targets: [] } });
+    }
+    // disable push enrollment
+    if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  const cleanupTrigger = page.getByRole('button', { name: 'Review 1 cleanup target' });
+  await cleanupTrigger.click();
+  const dialog = page.getByRole('dialog', { name: 'Cleanup', exact: true });
+  const footerProgress = dialog.getByRole('button', { name: 'Working…', exact: true });
+  const initialProgress = dialog.locator('.progress-border:has(> .update-progress-ring)');
+  try {
+    await expectProgressBorder(dialog.getByRole('status').filter({ hasText: 'Searching for cleanup targets…' }), 'blue', 'loading');
+    await expectProgressBorder(footerProgress, 'red', 'loading');
+    await expectSynchronizedProgressBorders(initialProgress, 2, 'loading');
+  } finally {
+    // release the initial read during failed assertions too
+    initialReadGate.release();
+  }
+  await expect(dialog.getByRole('checkbox', { name: /Stale Codex agent/u })).toBeVisible();
+
+  await dialog.getByRole('button', { name: 'Close cleanup' }).click();
+  await cleanupTrigger.click();
+  try {
+    await expect.poll(() => cleanupReads).toBe(2);
+    await expect(dialog.getByRole('checkbox', { name: /Stale Codex agent/u })).toBeVisible();
+    await expectProgressBorder(footerProgress, 'red', 'loading');
+    await expectClockwiseProgressBorder(footerProgress, 'loading');
+  } finally {
+    // release the cached-list read during failed assertions too
+    cachedReadGate.release();
+  }
+
+  await dialog.getByRole('button', { name: 'Cleanup', exact: true }).click();
+  try {
+    await expect.poll(() => cleanupSubmissions).toBe(1);
+    await expectProgressBorder(footerProgress, 'red', 'working');
+    await expectClockwiseProgressBorder(footerProgress, 'working');
+  } finally {
+    // release the mutation during failed assertions too
+    submissionGate.release();
+  }
+  await expect(dialog).toHaveCount(0);
+});
+
+// distinguish note list reads from explicit note creation
+test('uses loading motion for note reads and working motion for note creation', async ({ page }) => {
+  const readGate = createGate();
+  const creationGate = createGate();
+  let noteReads = 0;
+  let noteCreations = 0;
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    // restore one controlling browser
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // expose one worktree with persistent notes
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready' }], projects: [] } });
+    // authorize the mocked agent stream
+    if (path === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    // provide empty saved prompts
+    if (path === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
+    // hold the foreground note read
+    if (path === '/api/worktrees/cora/notes' && request.method() === 'GET') {
+      noteReads += 1;
+      await readGate.promise;
+      return route.fulfill({ json: { notes: [] } });
+    }
+    // hold the explicit create action
+    if (path === '/api/worktrees/cora/notes' && request.method() === 'POST') {
+      noteCreations += 1;
+      await creationGate.promise;
+      return route.fulfill({ status: 201, json: { id: 'note-1', text: '' } });
+    }
+    // disable push enrollment
+    if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  const notes = page.locator('.notes-toggle');
+  try {
+    await expect.poll(() => noteReads).toBe(1);
+    await expectProgressBorder(notes, 'blue', 'loading');
+    await expectClockwiseProgressBorder(notes, 'loading');
+  } finally {
+    // release the note read during failed assertions too
+    readGate.release();
+  }
+  await expect(notes).not.toHaveAttribute('aria-busy');
+
+  await notes.click();
+  await page.getByRole('button', { name: '+ New note', exact: true }).click();
+  try {
+    await expect.poll(() => noteCreations).toBe(1);
+    await expectProgressBorder(notes, 'blue', 'working');
+    await expectClockwiseProgressBorder(notes, 'working');
+  } finally {
+    // release note creation during failed assertions too
+    creationGate.release();
+  }
+  await expect(page.getByRole('dialog', { name: 'Note', exact: true })).toBeVisible();
+  await expect(notes).not.toHaveAttribute('aria-busy');
 });
 
 // keep the blue pending border painted before the real document reload begins
@@ -123,7 +360,9 @@ test('paints reload progress before navigating to the fresh client', async ({ pa
   type ReloadPaint = {
     busy: string | null;
     disabled: boolean;
+    kind: 'loading' | 'working';
     progress: string;
+    ringAnimationName: string;
     parentAnimations: number;
     parentTransform: string;
     ringAnimations: number;
@@ -142,10 +381,13 @@ test('paints reload progress before navigating to the fresh client', async ({ pa
         if (ring === null) throw new Error('pending reload button has no progress border');
         const style = getComputedStyle(button);
         const bounds = ring.getBoundingClientRect();
+        const animation = ring.getAnimations({ subtree: true })[0];
         void (window as unknown as { reportReloadPaint: (snapshot: ReloadPaint) => Promise<void> }).reportReloadPaint({
           busy: button.getAttribute('aria-busy'),
           disabled: button.disabled,
+          kind: button.classList.contains('progress-loading') ? 'loading' : 'working',
           progress: style.getPropertyValue('--progress-ring-color').trim(),
+          ringAnimationName: animation instanceof CSSAnimation ? animation.animationName : '',
           parentAnimations: button.getAnimations().length,
           parentTransform: style.transform,
           ringAnimations: ring.getAnimations({ subtree: true }).length,
@@ -160,7 +402,9 @@ test('paints reload progress before navigating to the fresh client', async ({ pa
   await expect.poll(() => painted).toEqual({
     busy: 'true',
     disabled: true,
+    kind: 'loading',
     progress: expectedBlue,
+    ringAnimationName: 'loading-border-orbit',
     parentAnimations: 0,
     parentTransform: 'none',
     ringAnimations: 1,
