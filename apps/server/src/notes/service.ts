@@ -4,7 +4,9 @@ import { dirname } from 'node:path';
 import { maxStoredAttachmentFootprintBytes, promptAttachmentBytes, promptAttachmentName, promptAttachmentsStorageFootprint, validPromptAttachments, type PromptAttachment } from '../prompts/validation.js';
 import { type Schedule, type ScheduleLastRun, validSchedule } from '../schedule/types.js';
 
-export type WorktreeNote = { id: string; text: string; title?: string; source?: 'queued-prompt'; schedule?: Schedule; attachments?: PromptAttachment[]; locked?: boolean; allWorkspaces?: boolean };
+// `source`: a queued prompt saved as the Note, or the Conductor, which owns the Note until the operator saves it (ADR 0018)
+export type NoteSource = 'queued-prompt' | 'conductor';
+export type WorktreeNote = { id: string; text: string; title?: string; source?: NoteSource; schedule?: Schedule; attachments?: PromptAttachment[]; locked?: boolean; allWorkspaces?: boolean };
 export type WorktreeNoteLocation = { key: string; note: WorktreeNote };
 export type WorktreeNoteDeletion = { note: WorktreeNote; undoToken: string };
 export type WorktreeNoteUndo = WorktreeNote | 'gone' | 'conflict' | 'limit';
@@ -42,7 +44,7 @@ const validNote = (value: unknown): value is WorktreeNote => {
   if (value === null || typeof value !== 'object') return false;
   const note = value as { id?: unknown; text?: unknown; title?: unknown; source?: unknown; schedule?: unknown; attachments?: unknown; locked?: unknown; allWorkspaces?: unknown };
   const attachments = note.attachments === undefined ? [] : note.attachments;
-  return typeof note.id === 'string' && validNoteId(note.id) && typeof note.text === 'string' && validText(note.text) && (note.title === undefined || typeof note.title === 'string' && validTitle(note.title)) && (note.source === undefined || note.source === 'queued-prompt') && (note.schedule === undefined || validSchedule(note.schedule)) && (note.locked === undefined || typeof note.locked === 'boolean') && (note.allWorkspaces === undefined || typeof note.allWorkspaces === 'boolean') && Array.isArray(attachments) && attachments.every(attachment => attachment !== null && typeof attachment === 'object' && typeof (attachment as { name?: unknown }).name === 'string' && typeof (attachment as { data?: unknown }).data === 'string') && validPromptAttachments(attachments as PromptAttachment[]) && (attachments as PromptAttachment[]).every(attachment => promptAttachmentName(attachment.name) === attachment.name);
+  return typeof note.id === 'string' && validNoteId(note.id) && typeof note.text === 'string' && validText(note.text) && (note.title === undefined || typeof note.title === 'string' && validTitle(note.title)) && (note.source === undefined || note.source === 'queued-prompt' || note.source === 'conductor') && (note.schedule === undefined || validSchedule(note.schedule)) && (note.locked === undefined || typeof note.locked === 'boolean') && (note.allWorkspaces === undefined || typeof note.allWorkspaces === 'boolean') && Array.isArray(attachments) && attachments.every(attachment => attachment !== null && typeof attachment === 'object' && typeof (attachment as { name?: unknown }).name === 'string' && typeof (attachment as { data?: unknown }).data === 'string') && validPromptAttachments(attachments as PromptAttachment[]) && (attachments as PromptAttachment[]).every(attachment => promptAttachmentName(attachment.name) === attachment.name);
 };
 const totalNoteLength = (stored: StoredNotes) => Object.values(stored).flat().reduce((total, note) => total + note.text.length + (note.title?.length ?? 0), 0);
 // total decoded attachment bytes
@@ -111,7 +113,7 @@ export class WorktreeNoteService {
   // create a titled note with initial text in one mutation — the save-as-note and halt-drain
   // paths write the note atomically before consuming the queued prompt, so a two-step
   // create-then-update (which could leave a blank titled note on failure) will not do
-  async createWithText(worktreeId: string, title: string, text: string, source?: 'queued-prompt', attachments: PromptAttachment[] = []): Promise<WorktreeNote | undefined> {
+  async createWithText(worktreeId: string, title: string, text: string, source?: NoteSource, attachments: PromptAttachment[] = []): Promise<WorktreeNote | undefined> {
     const normalized = normalizedAttachments(attachments);
     // reject invalid note content
     if (!validWorktreeId(worktreeId) || !validTitle(title) || !validText(text) || normalized === undefined) return undefined;
@@ -180,14 +182,21 @@ export class WorktreeNoteService {
     });
   }
 
+  // Whether `by` may change the note: the Conductor only its own. The operator's change makes it the operator's.
+  private claim(note: WorktreeNote, by: 'operator' | 'conductor'): boolean {
+    if (by === 'conductor') return note.source === 'conductor';
+    if (note.source === 'conductor') delete note.source;
+    return true;
+  }
+
   // update one owned or shared note at its canonical storage location
-  async update(worktreeId: string, noteId: string, text: string): Promise<WorktreeNote | undefined> {
+  async update(worktreeId: string, noteId: string, text: string, by: 'operator' | 'conductor' = 'operator'): Promise<WorktreeNote | undefined> {
     // reject malformed identifiers and content
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || !validText(text)) return undefined;
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
       // hide notes outside the requesting scope
-      if (note === undefined) return undefined;
+      if (note === undefined || !this.claim(note, by)) return undefined;
       // preserve the aggregate text budget
       if (totalNoteLength(stored) - note.text.length + text.length > maxTotalNoteLength) return undefined;
       note.text = text;
@@ -196,11 +205,11 @@ export class WorktreeNoteService {
   }
 
   // rename one note
-  async rename(worktreeId: string, noteId: string, title: string): Promise<WorktreeNote | undefined> {
+  async rename(worktreeId: string, noteId: string, title: string, by: 'operator' | 'conductor' = 'operator'): Promise<WorktreeNote | undefined> {
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || !validTitle(title)) return undefined;
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
-      if (note === undefined) return undefined;
+      if (note === undefined || !this.claim(note, by)) return undefined;
       if (totalNoteLength(stored) - (note.title?.length ?? 0) + title.length > maxTotalNoteLength) return undefined;
       note.title = title;
       return { ...note };
@@ -223,7 +232,7 @@ export class WorktreeNoteService {
   }
 
   // delete one note and retain an exact, short-lived restoration snapshot
-  async deleteWithUndo(worktreeId: string, noteId: string): Promise<WorktreeNoteDeletion | 'locked' | undefined> {
+  async deleteWithUndo(worktreeId: string, noteId: string, by: 'operator' | 'conductor' = 'operator'): Promise<WorktreeNoteDeletion | 'locked' | undefined> {
     // reject malformed identifiers before entering the mutation queue
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId)) return undefined;
     return await this.serialize(async () => {
@@ -237,6 +246,7 @@ export class WorktreeNoteService {
       if (index < 0) return undefined;
       // refuse locks before changing the stored collection
       if (notes[index]!.locked === true) return 'locked';
+      if (by === 'conductor' && notes[index]!.source !== 'conductor') return undefined;
       const existingOrder = this.deletionOrders.get(resolved.key);
       const newIds = existingOrder === undefined ? [] : notes.map(note => note.id).filter(id => !existingOrder.includes(id));
       const deletionOrder = existingOrder === undefined ? notes.map(note => note.id) : [...newIds, ...existingOrder];
@@ -297,11 +307,11 @@ export class WorktreeNoteService {
 
   // set or replace one note's Schedule; validates the record's shape (the route validates
   // target existence and cron parseability, which this store cannot see)
-  async setSchedule(worktreeId: string, noteId: string, schedule: Schedule): Promise<WorktreeNote | undefined> {
+  async setSchedule(worktreeId: string, noteId: string, schedule: Schedule, by: 'operator' | 'conductor' = 'operator'): Promise<WorktreeNote | undefined> {
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || !validSchedule(schedule)) return undefined;
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
-      if (note === undefined) return undefined;
+      if (note === undefined || by === 'conductor' && note.source !== 'conductor') return undefined;
       note.schedule = schedule;
       return { ...note };
     });

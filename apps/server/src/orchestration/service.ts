@@ -10,6 +10,8 @@ import type { PullRequestSwitchService } from '../pull-requests/switch-service.j
 import type { StoredReviewTour } from '../review-tour/contracts.js';
 import type { ReviewTourInput } from '../review-tour/contracts.js';
 import type { NewTaskService } from '../new-task/service.js';
+import type { WorktreeNoteService } from '../notes/service.js';
+import type { Schedule } from '../schedule/types.js';
 import type { WorkspaceFileService, WorkspaceFilePreview } from '../workspace-files/service.js';
 import { configuredWorktreeForWorkspace, projectIdOf, worktreeById } from '../workspaces/resolver.js';
 import { processActions, type StackState, type WorktreeCommandService } from '../worktree-commands/service.js';
@@ -91,6 +93,15 @@ export type OrchestrationDependencies = {
    * model is not allowed, the Conductor has its cap of live workers, or it could not start).
    */
   spawnWorker?: (placeId: string, conductor: string, model?: string) => Promise<string | 'not-allowed' | 'at-capacity' | undefined>;
+  /** The Notes of a Place (its notes key, the store, deletion and a Schedule aimed at the Conductor), and telling the web they changed. */
+  notes?: NoteFacade;
+};
+type NoteFacade = {
+  key: (placeId: string) => Promise<string | undefined>;
+  store: Pick<WorktreeNoteService, 'list' | 'resolve' | 'createWithText' | 'update' | 'rename' | 'setSchedule'>;
+  remove: (key: string, noteId: string) => Promise<unknown>;
+  conductorSchedule: (cron: string, enabled: boolean) => Schedule | string;
+  changed: () => void;
 };
 /** Which Places a principal may act on, by the Worktree (or Place) id and its Project. */
 export type PlaceScope = (place: { id: string; projectId: string }) => boolean;
@@ -725,6 +736,77 @@ export class OrchestrationService {
       if (agent === undefined) return failure('not_found', 'Agent not found.');
       if (agent.structured?.spawnedBy !== conductor) return failure('conflict', 'You can close only workers you spawned.');
       return await this.dependencies.prompts.close(agentId) ? success({ closed: true as const }) : failure('not_found', 'Agent not found.');
+    });
+  }
+
+  // a Note store and its key for a Worktree in scope
+  private async notesAt(worktreeId: string): Promise<{ notes: NoteFacade; key: string } | undefined> {
+    const notes = this.dependencies.notes;
+    const key = notes === undefined || this.worktree(worktreeId) === undefined ? undefined : await notes.key(worktreeId);
+    return notes === undefined || key === undefined ? undefined : { notes, key };
+  }
+
+  // list one Worktree's Notes, each saying whether it is the Conductor's
+  async listNotes(worktreeId: string): Promise<OrchestrationResult<{ notes: Array<{ id: string; title?: string; text: string; mine: boolean; schedule?: { cron: string; enabled: boolean; conductor: boolean } }> }>> {
+    if (!validIdentifier(worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
+    return await this.operation(async () => {
+      const at = await this.notesAt(worktreeId);
+      const notes = at === undefined ? undefined : await at.notes.store.list(at.key);
+      if (notes === undefined) return failure('not_found', 'Worktree not found.');
+      return success({ notes: notes.map(note => ({ id: note.id, ...(note.title === undefined ? {} : { title: note.title }), text: redactIntegrationText(note.text), mine: note.source === 'conductor', ...(note.schedule === undefined ? {} : { schedule: { cron: note.schedule.cron, enabled: note.schedule.enabled, conductor: 'conductor' in note.schedule.target } }) })) });
+    });
+  }
+
+  // create a Note the Conductor owns until the operator saves it
+  async createNote(input: { worktreeId: string; title: string; text: string }): Promise<OrchestrationResult<{ note_id: string }>> {
+    if (this.dependencies.conductor === undefined) return failure('unavailable', 'Only the Conductor writes Notes.');
+    if (!validIdentifier(input.worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
+    return await this.operation(async () => {
+      const at = await this.notesAt(input.worktreeId);
+      if (at === undefined) return failure('not_found', 'Worktree not found.');
+      const note = await at.notes.store.createWithText(at.key, input.title, input.text, 'conductor');
+      if (note === undefined) return failure('conflict', 'The Note could not be created: the notes limit is reached.');
+      at.notes.changed();
+      return success({ note_id: note.id });
+    });
+  }
+
+  // run `change` on a Note the Conductor owns; one that is the operator's is refused
+  private async ownNote<T>(worktreeId: string, noteId: string, change: (at: { notes: NoteFacade; key: string }) => Promise<OrchestrationResult<T>>): Promise<OrchestrationResult<T>> {
+    if (this.dependencies.conductor === undefined) return failure('unavailable', 'Only the Conductor writes Notes.');
+    if (!validIdentifier(worktreeId) || !validIdentifier(noteId)) return failure('invalid_request', 'Invalid note identifier.');
+    return await this.operation(async () => {
+      const at = await this.notesAt(worktreeId);
+      const note = at === undefined ? undefined : await at.notes.store.resolve(at.key, noteId);
+      if (at === undefined || note === undefined) return failure('not_found', 'Note not found.');
+      if (note.note.source !== 'conductor') return failure('conflict', 'That Note is the operator\'s: you may change only Notes you wrote that the operator has not saved.');
+      const result = await change(at);
+      if (result.ok) at.notes.changed();
+      return result;
+    });
+  }
+
+  async updateNote(input: { worktreeId: string; noteId: string; title?: string; text?: string }): Promise<OrchestrationResult<{ updated: true }>> {
+    return await this.ownNote(input.worktreeId, input.noteId, async ({ notes, key }) => {
+      if (input.title !== undefined && await notes.store.rename(key, input.noteId, input.title, 'conductor') === undefined) return failure('conflict', 'The Note could not be renamed.');
+      if (input.text !== undefined && await notes.store.update(key, input.noteId, input.text, 'conductor') === undefined) return failure('conflict', 'The Note could not be updated.');
+      return success({ updated: true as const });
+    });
+  }
+
+  async deleteNote(input: { worktreeId: string; noteId: string }): Promise<OrchestrationResult<{ deleted: true }>> {
+    return await this.ownNote(input.worktreeId, input.noteId, async ({ notes, key }) => {
+      const deleted = await notes.remove(key, input.noteId);
+      return typeof deleted === 'object' && deleted !== null ? success({ deleted: true as const }) : failure('conflict', 'The Note could not be deleted (it is locked, or its Schedule is running).');
+    });
+  }
+
+  // aim a Schedule on one of the Conductor's own Notes at the Conductor
+  async scheduleNote(input: { worktreeId: string; noteId: string; cron: string; enabled: boolean }): Promise<OrchestrationResult<{ scheduled: true }>> {
+    return await this.ownNote(input.worktreeId, input.noteId, async ({ notes, key }) => {
+      const schedule = notes.conductorSchedule(input.cron, input.enabled);
+      if (typeof schedule === 'string') return failure('invalid_request', schedule);
+      return await notes.store.setSchedule(key, input.noteId, schedule, 'conductor') === undefined ? failure('conflict', 'The Schedule could not be set.') : success({ scheduled: true as const });
     });
   }
 

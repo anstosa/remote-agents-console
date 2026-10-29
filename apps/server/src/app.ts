@@ -594,6 +594,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         });
         return started;
       },
+      // the Conductor's Notes, at a Place's notes key, and its Schedules aimed at itself (ADR 0018, ADR 0019)
+      notes: {
+        key: id => placeSaveKey(id),
+        store: notes,
+        remove: async (key, noteId) => await deleteNoteWithUndo(key, noteId, 'conductor'),
+        conductorSchedule: (cron, enabled) => buildSchedule({ cron, kind: config.conductor?.kind ?? 'pi', target: { conductor: true }, enabled }),
+        changed: () => publishNotesRevision()
+      },
       // a worker is the Conductor's kind, Sandboxed, on an Allowed model (ADR 0018)
       ...(config.conductor === undefined ? {} : { spawnWorker: async (placeId: string, by: string, model?: string) => {
         const conductorConfig = config.conductor!;
@@ -1081,7 +1089,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // serialize schedule execution and deletion around each canonical note
   const scheduleRunsInFlight = new Set<string>();
   const noteDeletionsInFlight = new Set<string>();
-  const deleteNoteWithUndo = async (saveKey: string, noteId: string) => {
+  const deleteNoteWithUndo = async (saveKey: string, noteId: string, by: 'operator' | 'conductor' = 'operator') => {
     const resolved = await notes.resolve(saveKey, noteId);
     // hide notes outside the requesting scope
     if (resolved === undefined) return undefined;
@@ -1091,7 +1099,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (noteDeletionsInFlight.has(flightKey)) return 'deleting' as const;
     noteDeletionsInFlight.add(flightKey);
     try {
-      return await notes.deleteWithUndo(saveKey, noteId);
+      return await notes.deleteWithUndo(saveKey, noteId, by);
     } finally {
       noteDeletionsInFlight.delete(flightKey);
     }
@@ -1132,6 +1140,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // Project's label; a gone Worktree falls back to a generic word so a "target is gone" skip still notifies.
   const resolveScheduleTarget = (target: ScheduleTarget): { label: string; worktreeId?: string } => {
     if ('scratch' in target) return { label: 'Scratch' };
+    if ('conductor' in target) return { label: 'the Conductor' };
     if ('worktreeId' in target) {
       const worktree = configuredWorktree(target.worktreeId);
       return { label: discovery.projectsNow().find(project => project.id === worktree?.projectId)?.label ?? worktree?.label ?? 'a worktree', worktreeId: target.worktreeId };
@@ -1147,6 +1156,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (typeof raw.kind !== 'string' || !(agentKinds as readonly string[]).includes(raw.kind)) return 'unknown agent kind';
     const target = raw.target;
     if (!validScheduleTarget(target)) return 'invalid schedule target';
+    // a Run aimed at the Conductor queues the Note's text to it: its kind, on its own model
+    if ('conductor' in target) {
+      if (config.conductor === undefined) return 'no Conductor is configured';
+      if (typeof raw.enabled !== 'boolean') return 'invalid enabled flag';
+      return { cron: raw.cron, kind: config.conductor.kind, target, enabled: raw.enabled, updatedAt: new Date().toISOString() };
+    }
     if ('worktreeId' in target) {
       const worktree = configuredWorktree(target.worktreeId);
       if (worktree === undefined) return 'target worktree not found';
@@ -2694,6 +2709,18 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       case 'reset-lost': return { code: 409, error: 'The previous run could not be reset.' };
     }
   };
+  // A Run aimed at the Conductor: the Note's text is queued to it as a Run of its own (counted
+  // against its budget), recorded delivered once queued; no Agent is launched (ADR 0019)
+  const runForConductor = async (note: WorktreeNote): Promise<RunOutcome | { status: 'delivered'; agentId: string }> => {
+    const conductorId = (await structuredAgents.agents()).find(agent => agent.structured?.role === 'conductor')?.id;
+    if (conductorId === undefined) return { status: 'skipped', detail: 'the Conductor is not running' };
+    if ((note.attachments ?? []).length > 0) return { status: 'skipped', detail: 'a Note with attachments cannot be queued to the Conductor' };
+    if (!validPrompt(note.text, [])) return { status: 'skipped', detail: 'note is empty' };
+    const text = `[RAC run] Scheduled Note ${JSON.stringify(note.title ?? 'Untitled note')} (${note.id})\n\n${note.text}`;
+    const queued = await prompts.submitFrom(conductorId, text, { label: 'run' });
+    await dashboardUpdates.refresh().catch(() => undefined);
+    return queued === undefined ? { status: 'failed', reason: 'delivery-failed', detail: 'the note could not be queued to the Conductor', agentId: conductorId } : { status: 'delivered', agentId: conductorId };
+  };
   // the name a managed (unattended) Run gives its fresh conversation, so the pane the reconciler later
   // closes stays findable in the Named list: a clock, the Note's title (or a snippet of its text) and
   // the host-local run time, capped to the 120-char rename limit
@@ -2745,7 +2772,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       try {
         // a Schedule's model is checked against the Allowed models at Run time, as they can change
         const chosen = requestedModel(schedule, schedule.kind);
-        const outcome: RunOutcome = chosen.error !== undefined ? { status: 'skipped', detail: chosen.error } : await performRun({
+        const outcome: RunOutcome | { status: 'delivered'; agentId: string } = 'conductor' in schedule.target ? await runForConductor(note) : chosen.error !== undefined ? { status: 'skipped', detail: chosen.error } : await performRun({
           text: note.text,
           attachments: note.attachments ?? [],
           kind: schedule.kind,
@@ -2760,7 +2787,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         // the immediate `launched`/`skipped`/`failed` outcome and leaves its pane open.
         lastRun = unattended && outcome.status === 'launched'
           ? { at, status: 'running', startedAt: new Date().toISOString(), sawWorking: false, ...(outcome.agentId === undefined ? {} : { agentId: outcome.agentId }) }
-          : { at, status: outcome.status, ...(outcome.status === 'launched' ? {} : { detail: outcome.detail }), ...(outcome.agentId === undefined ? {} : { agentId: outcome.agentId }) };
+          : { at, status: outcome.status, ...(outcome.status === 'launched' || outcome.status === 'delivered' ? {} : { detail: outcome.detail }), ...(outcome.agentId === undefined ? {} : { agentId: outcome.agentId }) };
       } catch (error) {
         // an unexpected dependency failure is still an outcome the operator should see, not a lost run
         console.warn(`[schedule] run errored for ${flightKey}:`, error);

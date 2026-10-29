@@ -6,9 +6,9 @@ import { agentEffort, agentModel } from '../launch/agent-choice.js';
  * Worktree by wire id, an available directory Project by id, or the console's
  * Scratch target. A repository Project is targeted only through its Worktrees.
  */
-export type ScheduleTarget = { worktreeId: string } | { projectId: string } | { scratch: true };
+export type ScheduleTarget = { worktreeId: string } | { projectId: string } | { scratch: true } | { conductor: true };
 
-export const scheduleRunStatuses = ['launched', 'running', 'completed', 'needs-input', 'timed-out', 'skipped', 'failed'] as const;
+export const scheduleRunStatuses = ['launched', 'running', 'completed', 'needs-input', 'timed-out', 'skipped', 'failed', 'delivered'] as const;
 export type ScheduleRunStatus = typeof scheduleRunStatuses[number];
 
 /**
@@ -51,6 +51,8 @@ export const validScheduleTarget = (value: unknown): value is ScheduleTarget => 
   const target = value as Record<string, unknown>;
   if (Object.keys(target).length !== 1) return false;
   if ('scratch' in target) return target.scratch === true;
+  // the Conductor: a Run queues the Note's text to it, and launches nothing (ADR 0019)
+  if ('conductor' in target) return target.conductor === true;
   if ('worktreeId' in target) return typeof target.worktreeId === 'string' && target.worktreeId.length > 0 && target.worktreeId.length <= 200;
   if ('projectId' in target) return typeof target.projectId === 'string' && target.projectId.length > 0 && target.projectId.length <= 200;
   return false;

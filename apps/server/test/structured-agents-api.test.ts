@@ -1707,4 +1707,62 @@ describe('the Conductor\'s dispatches', () => {
     expect(reports()[1]).toContain(`The review you started for Agent ${target} failed (generation_failed).`);
     await app.close();
   });
+  it('writes Notes in its scope, edits and deletes only its own, and one the operator saves becomes the operator\'s', async () => {
+    const fake = fakeAgent();
+    const { app, headers, call } = await conducting(fake);
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects.find((project: { id: string }) => project.id !== 'home').worktrees[0].id as string;
+    const operators = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree)}/notes`, headers, payload: { title: 'Mine', text: 'The operator\'s plan' } })).json().id as string;
+
+    expect(await call('create_note', { worktree_id: 'proj:elsewhere', title: 'Plan', text: 'x' })).toMatchObject({ ok: false, error: { code: 'not_found' } });
+    const created = await call('create_note', { worktree_id: worktree, title: 'Follow-ups', text: 'Check CI' });
+    expect(created).toMatchObject({ ok: true, data: { note_id: expect.any(String) } });
+    const id = created.data.note_id as string;
+    const listed = (await call('list_notes', { worktree_id: worktree }, false)).data.notes;
+    expect(listed).toEqual(expect.arrayContaining([expect.objectContaining({ id, title: 'Follow-ups', text: 'Check CI', mine: true }), expect.objectContaining({ id: operators, mine: false })]));
+    // the operator sees it marked as the Conductor's
+    expect((await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(worktree)}/notes`, headers })).json().notes).toEqual(expect.arrayContaining([expect.objectContaining({ id, source: 'conductor' })]));
+
+    for (const [name, args] of [['update_note', { text: 'Hijacked' }], ['delete_note', {}]] as const) expect(await call(name, { worktree_id: worktree, note_id: operators, ...args })).toMatchObject({ ok: false, error: { code: 'conflict' } });
+    expect(await call('update_note', { worktree_id: worktree, note_id: id, title: 'CI follow-ups', text: 'Check CI twice' })).toMatchObject({ ok: true });
+
+    // once the operator saves it, it is theirs
+    expect((await app.inject({ method: 'PUT', url: `/api/worktrees/${encodeURIComponent(worktree)}/notes/${id}`, headers, payload: { text: 'Check CI, my way' } })).statusCode).toBe(200);
+    expect(await call('update_note', { worktree_id: worktree, note_id: id, text: 'Back to mine' })).toMatchObject({ ok: false, error: { code: 'conflict' } });
+    expect(await call('delete_note', { worktree_id: worktree, note_id: id })).toMatchObject({ ok: false, error: { code: 'conflict' } });
+
+    const another = (await call('create_note', { worktree_id: worktree, title: 'Scratch', text: 'temp' })).data.note_id as string;
+    expect(await call('delete_note', { worktree_id: worktree, note_id: another })).toMatchObject({ ok: true });
+    const remaining = (await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(worktree)}/notes`, headers })).json().notes.map((note: { id: string }) => note.id);
+    expect(remaining).toEqual(expect.arrayContaining([operators, id]));
+    expect(remaining).not.toContain(another);
+    await app.close();
+  });
+
+  it('runs a Schedule aimed at it by queueing the Note\'s text, recorded delivered, and schedules only its own Notes at itself', async () => {
+    const fake = fakeAgent();
+    const { app, headers, conductor, call, history } = await conducting(fake);
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects.find((project: { id: string }) => project.id !== 'home').worktrees[0].id as string;
+    const operators = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree)}/notes`, headers, payload: { title: 'Nightly', text: 'Check every open PR' } })).json().id as string;
+    const launches = fake.launches.length;
+
+    // the operator aims a Schedule at the Conductor
+    const scheduled = await app.inject({ method: 'PUT', url: `/api/worktrees/${encodeURIComponent(worktree)}/notes/${operators}/schedule`, headers, payload: { cron: '0 3 * * *', kind: 'pi', target: { conductor: true }, enabled: true } });
+    expect(scheduled.statusCode).toBe(200);
+    const ran = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree)}/notes/${operators}/schedule/run`, headers });
+    expect(ran.json().schedule.lastRun).toMatchObject({ status: 'delivered', agentId: conductor });
+    expect(fake.delivered.at(-1)).toMatch(/^\[RAC run\][^\n]*Nightly/u);
+    expect(fake.delivered.at(-1)).toContain('Check every open PR');
+    expect((await history(conductor))[0]).toMatchObject({ label: 'run' });
+    // no Agent was launched for it
+    expect(fake.launches).toHaveLength(launches);
+
+    // the Conductor schedules its own Note, at itself only, and never the operator's
+    const own = (await call('create_note', { worktree_id: worktree, title: 'Re-check CI', text: 'Look at CI again' })).data.note_id as string;
+    expect(await call('schedule_note', { worktree_id: worktree, note_id: operators, cron: '0 * * * *', enabled: true })).toMatchObject({ ok: false, error: { code: 'conflict' } });
+    expect(await call('schedule_note', { worktree_id: worktree, note_id: own, cron: 'not a cron', enabled: true })).toMatchObject({ ok: false, error: { code: 'invalid_request' } });
+    expect(await call('schedule_note', { worktree_id: worktree, note_id: own, cron: '0 * * * *', enabled: true })).toMatchObject({ ok: true });
+    const notes = (await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(worktree)}/notes`, headers })).json().notes;
+    expect(notes.find((note: { id: string }) => note.id === own).schedule).toMatchObject({ cron: '0 * * * *', target: { conductor: true }, enabled: true });
+    await app.close();
+  });
 });

@@ -149,6 +149,11 @@ export class IntegrationGateway {
       case 'get_stack_log': return await orchestration.stackStatus(input.worktree_id as string);
       case 'preview_file': return await orchestration.previewFile({ path: input.path as string, ...(input.agent_id === undefined ? {} : { agentId: input.agent_id as string }), ...(input.worktree_id === undefined ? {} : { worktreeId: input.worktree_id as string }), ...(input.max_bytes === undefined ? {} : { maxBytes: input.max_bytes as number }) });
       case 'get_process_log': return await orchestration.processLog(input.worktree_id as string, input.process as string);
+      case 'list_notes': return await orchestration.listNotes(input.worktree_id as string);
+      case 'create_note': return await orchestration.createNote({ worktreeId: input.worktree_id as string, title: input.title as string, text: input.text as string });
+      case 'update_note': return await orchestration.updateNote({ worktreeId: input.worktree_id as string, noteId: input.note_id as string, ...(input.title === undefined ? {} : { title: input.title as string }), ...(input.text === undefined ? {} : { text: input.text as string }) });
+      case 'delete_note': return await orchestration.deleteNote({ worktreeId: input.worktree_id as string, noteId: input.note_id as string });
+      case 'schedule_note': return await orchestration.scheduleNote({ worktreeId: input.worktree_id as string, noteId: input.note_id as string, cron: input.cron as string, enabled: input.enabled as boolean });
       case 'get_pull_request_status': return await orchestration.pullRequestStatus(input.agent_id as string);
       case 'get_review_status': return await orchestration.reviewStatus(input.worktree_id as string);
       case 'summarize_workspace': return await orchestration.workspaceSummary();
