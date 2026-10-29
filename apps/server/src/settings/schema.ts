@@ -64,7 +64,8 @@ function describeButtonSettings(schema: SettingsSchema): void {
     for (const [key, label] of Object.entries(labels)) {
       const list = buttons.properties[key];
       if (list === undefined) continue;
-      Object.assign(list, { label, default: [] });
+      // retain application defaults while project lists start without authored overrides
+      Object.assign(list, { label, ...(project ? { default: [] } : {}) });
       describeButtonList(list);
     }
     const splits = buttons.properties.splits;

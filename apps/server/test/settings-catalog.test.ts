@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { sourceSchema } from '../src/config/schema.js';
+import { defaultButtons } from '../src/config/buttons.js';
 import { builtInTourPrompt } from '../src/review-runs/config.js';
 import { appApply, composeOptionSettings, environmentDescription, environmentFallback, envApply, knownEnvironmentKeys, labels, managedEnvironment, managedEnvironmentKeys, protectedEnvironment, protectedPath } from '../src/settings/catalog.js';
 import { environment, envKey, partitionEnvironment, patchEnvironment, restoreManagedEnvironment } from '../src/settings/env.js';
@@ -409,6 +410,13 @@ describe('settings schema metadata', () => {
     expect(Object.values(applicationSettingsSchema().properties?.buttons?.properties?.splits?.properties ?? {}).map(slot => slot.label)).toEqual(splitLabels);
     expect(button?.properties?.action?.variants?.map(variant => variant.label)).toEqual(['Shell command', 'Agent prompt']);
     expect(button?.properties?.action?.variants?.find(variant => variant.label === 'Agent prompt')?.properties?.agentPrompt).toMatchObject({ multiline: true });
+  });
+
+  // retain application button defaults without authoring project copies
+  it('preserves inherited button defaults separately from empty project overrides', () => {
+    const schema = applicationSettingsSchema();
+    expect(schema.properties?.buttons?.properties?.pullRequest?.default).toEqual(defaultButtons.pullRequest);
+    expect(schema.properties?.projects?.items?.properties?.buttons?.properties?.pullRequest?.default).toEqual([]);
   });
 
   // retain raw preview compatibility outside the structured Project editor

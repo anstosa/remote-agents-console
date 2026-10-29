@@ -1,6 +1,6 @@
 import { createContext, type CSSProperties, type ReactNode, useContext } from 'react';
 import { ConfiguredButtonIcon } from '../configured-buttons.js';
-import type { SettingsSchema } from './contracts.js';
+import type { SettingsSchema, SettingsSource } from './contracts.js';
 
 const ButtonStyleContext = createContext<'outline' | 'solid'>('outline');
 
@@ -12,6 +12,26 @@ export function isConfiguredButtonPath(path: readonly string[]): boolean {
     parts.length === 3 && ['tabLead', 'leftNav', 'rightNav', 'navMenu', 'pullRequest'].includes(slot ?? '')
     || parts.length === 4 && slot === 'splits' && ['agent', 'terminal', 'note', 'browser', 'files', 'code', 'review', 'stack', 'settings'].includes(parts[2] ?? '')
   );
+}
+
+// resolve application buttons not already replaced in this project slot
+export function inheritedProjectButtons(source: SettingsSource, path: readonly string[], projectButtons: readonly unknown[]): Array<Record<string, unknown> & { text: string }> {
+  // restrict inheritance to direct and panel button lists inside projects
+  if (source.id !== 'app' || path[0] !== 'projects' || !isConfiguredButtonPath([...path, '0'])) return [];
+  let value = source.value;
+  let schema = source.schema;
+  // follow authored application values and schema defaults without staging them
+  for (const part of path.slice(2)) {
+    value = value === undefined ? schema?.default : value;
+    value = value !== null && typeof value === 'object' ? (value as Record<string, unknown>)[part] : undefined;
+    schema = schema?.properties?.[part];
+  }
+  value = value === undefined ? schema?.default : value;
+  // leave invalid application lists to their own validation controls
+  if (!Array.isArray(value)) return [];
+  const replaced = new Set(projectButtons.map(button => button !== null && typeof button === 'object' && 'text' in button && typeof button.text === 'string' ? button.text.trim() : undefined));
+  // compare the normalized text identity used by runtime project merging
+  return value.filter((button): button is Record<string, unknown> & { text: string } => button !== null && typeof button === 'object' && typeof button.text === 'string' && button.text.trim() !== '' && !replaced.has(button.text.trim()));
 }
 
 // keep staged style available to editor swatches without a second preview

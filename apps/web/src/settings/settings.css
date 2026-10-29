@@ -123,6 +123,10 @@
 /* keep previews inert without dimming their actual configured appearance */
 .settings-button-preview { display: inline-flex; width: max-content; max-width: 100%; min-width: 0; align-items: center; }
 .settings-center .settings-button-preview .configured-button:disabled { max-width: 100%; opacity: 1; cursor: default; white-space: normal; overflow-wrap: anywhere; }
+/* keep inheritance copy beside its override action without dimming previews */
+.settings-inherited-button-actions { display: flex; min-width: 0; align-items: center; gap: .5rem; }
+.settings-inherited-button-actions > small { min-width: 0; color: var(--overlay-1); font: 500 .6rem/1.35 var(--font-mono); text-align: right; }
+.settings-inherited-button-override { flex: none; }
 /* mirror solid fills and outline borders in the shared color selector */
 .settings-button-color-swatch { display: block; box-sizing: border-box; width: 1rem; height: 1rem; border: 2px solid; border-radius: .2rem; }
 .settings-object-fields > .settings-schema-section,

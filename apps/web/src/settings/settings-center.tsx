@@ -22,7 +22,7 @@ import { SettingsSourceHandover, type SettingsHandoverChoices } from './source-h
 import { isTmuxSettingsChange, tmuxEnvironmentKeys, tmuxEnvironmentKeysForInstallation } from './tmux-settings.js';
 import { agentEnvironmentKeys, agentEnvironmentKeysForAdapter, agentEnvironmentKeysForInstallation, environmentKeysWithDedicatedControls, googleCalendarEnvironmentKeys, storageEnvironmentKeys, voiceEnvironmentKeys } from './environment-fields.js';
 import { SettingsSelect, type SettingsSelectOption } from './select.js';
-import { isConfiguredButtonPath, SettingsButtonColorSwatch, SettingsButtonFields, SettingsButtonPreview } from './button-fields.js';
+import { inheritedProjectButtons, isConfiguredButtonPath, SettingsButtonColorSwatch, SettingsButtonFields, SettingsButtonPreview } from './button-fields.js';
 import { CloudflareSettings, useCloudflareSetupDraft } from './cloudflare-settings.js';
 import { GoogleCalendarSettings, useGoogleCalendarSetup } from './google-calendar-settings.js';
 import { editableIconSources, InstanceIconPreview, instanceIcons, isInstanceIconName } from './icon-preview.js';
@@ -680,6 +680,7 @@ function CollectionEntry({ label, itemLabel, visibleLabel, index, count, firstMo
 function ArrayField({ source, schema, value, path, draft, issues, label, itemLabel, disabled, navigationDisabled, renderChild, onPatch, onHideCollection, pinnedCount = 0, pinnedRows }: { source: SettingsSource; schema: SettingsSchema; value: unknown; path: string[]; draft?: Draft; issues: SettingsIssue[]; label: string; itemLabel: string; disabled: boolean; navigationDisabled: boolean; renderChild: (schema: SettingsSchema, value: unknown, path: string[], key: string) => ReactNode; onPatch: SetPatch; onHideCollection?: HideCollection; pinnedCount?: number; pinnedRows?: ReactNode }) {
   const array = Array.isArray(value) ? value : [];
   const item = schema.items ?? inferSchema(array[0]);
+  const inheritedButtons = inheritedProjectButtons(source, path, array);
   const [openEntries, setOpenEntries] = useState(() => new Set<number>());
   const searchPath = useContext(SettingsSearchPath);
   // reveal a searched descendant without adding or editing list items
@@ -727,6 +728,15 @@ function ArrayField({ source, schema, value, path, draft, issues, label, itemLab
     onPatch(source, { op: 'insert', path, index, value: defaultForSchema(item) });
     setOpenEntries(current => new Set(current).add(index));
   };
+  // copy one inherited button into this slot and open its project editor
+  const overrideButton = (button: Record<string, unknown>) => {
+    // retain the same mutation locks as ordinary collection edits
+    if (disabled || navigationDisabled || protectedDraft) return;
+    const copy = structuredClone(button);
+    // create absent optional ancestry without staging an empty list that normalization prunes
+    onPatch(source, Array.isArray(valueAt(source.value, path)) ? { op: 'insert', path, index: array.length, value: copy } : { op: 'set', path, value: [copy] });
+    setOpenEntries(current => new Set(current).add(array.length));
+  };
   // move only after every index-bound subtree is hidden
   const move = (from: number, to: number) => {
     // never move an editable entry through its fixed source prefix
@@ -753,7 +763,7 @@ function ArrayField({ source, schema, value, path, draft, issues, label, itemLab
   // flatten argument rows without changing other collection cards
   return <div className={`settings-array settings-collection${adapterArgs ? ' settings-array-arguments' : ''}`} data-settings-collection="array" data-settings-collection-path={path.join('.')}>
     {protectedDraft && <p className="settings-collection-protected-note" role="note">{collectionProtectionReason}</p>}
-    <div className="settings-array-list">{pinnedRows}{array.map((entry, index) => {
+    <div className="settings-array-list">{inheritedButtons.map(button => <div key={button.text} className="settings-array-entry settings-inherited-button" role="group" aria-label={`Inherited button ${button.text}`} data-settings-inherited-button={button.text}><div className="settings-collection-entry-header"><div className="settings-collection-entry-copy"><SettingsButtonPreview value={button} schema={item} /></div><div className="settings-inherited-button-actions"><small>Inherited from Application</small><button type="button" className="settings-inherited-button-override" aria-label={`Override ${button.text}`} disabled={disabled || navigationDisabled || protectedDraft} onClick={() => { /* copy only this inherited button */ overrideButton(button); }}>Override</button></div></div></div>)}{pinnedRows}{array.map((entry, index) => {
       // source-owner rows expose navigation instead of collection mutations
       if (index < pinnedCount) return null;
       const entryPath = [...path, String(index)];
