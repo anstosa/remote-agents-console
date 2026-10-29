@@ -221,6 +221,9 @@ for (const width of [1440, 390]) {
     await expect(page.getByRole('menu', { name: 'Open a terminal' })).toHaveCount(0);
     await expect(terminal.locator('.flyout-caret')).toHaveCount(0);
     await expect(terminal).not.toHaveAttribute('aria-haspopup', 'menu');
+    // keep a visible settings sibling so minimizing works on desktop and phone
+    await page.getByRole('button', { name: 'Global settings', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: 'Settings', exact: true })).toBeVisible();
     // a minimized shell becomes a real picker choice
     await page.getByRole('button', { name: /^Minimize terminal zsh/u }).click();
     await expect(terminal.locator('.flyout-caret')).toBeVisible();

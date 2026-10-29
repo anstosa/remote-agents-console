@@ -596,6 +596,24 @@ test('explains in a toast when a merged diff cannot expand', async ({ page }) =>
   await expect(diffPane.getByText('const extra1 = 1;')).toHaveCount(0);
 });
 
+// keep a portal-owned review mounted when it becomes the final visible split
+test('keeps the final guided review visible after a guarded minimize', async ({ page }) => {
+  const { dialog } = await openCommentTour(page);
+  const output = page.locator('.log-split > .log-output');
+  await expect(output).toBeVisible();
+
+  await page.getByRole('button', { name: 'Minimize agent output' }).click();
+  await expect(output).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole('button', { name: 'Minimize guided review' }).click();
+  await expect(dialog).toBeVisible();
+  const error = page.locator('body > .toast-region .operation-feedback.error[role="alert"]').filter({ hasText: /split.*visible|visible.*split/iu });
+  await expect(error).toBeVisible();
+  await expect(error.locator('.toast-timer-bar')).toHaveCSS('animation-duration', '5s');
+  await expect(error).toHaveCount(0, { timeout: 6_500 });
+});
+
 // verify hidden lines expanded in a step come back after a Workspace switch and a minimize, while
 // the step revisited from another starts collapsed
 test('keeps a step\'s expanded lines across a Workspace switch and a minimize', async ({ page }) => {

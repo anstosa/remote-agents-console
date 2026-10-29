@@ -14,7 +14,7 @@ import { FlyoutPortal } from './flyout-portal.js';
 import { ContextMenuHost, contextMenuOwnsFocus, openContextMenu, type ContextMenuItem } from './context-menu.js';
 import { SelectionActionsContext, openSelectionContextMenu, preserveContextMenuPress, useSelectionActions, type ClipboardContents, type SelectionActions } from './selection-context-menu.js';
 import { ContextFlyoutEvents } from './context-flyouts.js';
-import { agentSplitHidden, setAgentSplitHidden, workspaceAlias, setWorkspaceAlias, settingsSplitOpen, setSettingsSplitOpen, useWorkspaceViewRevision, workspaceViews, pendingWorkspaceJumps, type WorkspaceSplit, type WorkspaceView } from './workspace-view.js';
+import { agentSplitHidden, setAgentSplitHidden, workspaceOpenGeneration, workspaceOpenStillCurrent, workspaceIntentionallyEmpty, setWorkspaceIntentionallyEmpty, workspaceAlias, setWorkspaceAlias, settingsSplitOpen, setSettingsSplitOpen, useWorkspaceViewRevision, workspaceViews, pendingWorkspaceJumps, type WorkspaceSplit, type WorkspaceView } from './workspace-view.js';
 import { PanelExpandContext, type PanelAction, type PanelExpansion, PanelHeader, PanelIcon, panelIcons, type ProgressColor, useExpansionScope, usePanelExpand, usePanelExpansion, usePhoneLayout } from './panel-header.js';
 import { ConfiguredButtonList, ConfiguredButtonsProvider, type ButtonActionDraft, type ButtonCatalog, useConfiguredButtons, useConfiguredButtonsBusy } from './configured-buttons.js';
 import { clearTerminalCommand, pruneTerminalCommands, stageTerminalCommand, terminalCommandKey, terminalCommandLimitMessage, TerminalCommandDraft } from './terminal-command-draft.js';
@@ -111,7 +111,8 @@ const comparisonChangeSignal = (status?: GitStatusSummary, pr?: GitComparisonSum
     pr?.files ?? 0, changes(pr?.changes)]);
 };
 type NewTaskAvailability = { enabled: boolean; reason?: string };
-type OperationFeedback = { id: number; tone: 'pending'|'success'|'error'; message: string; detail: string; worktreeId?: string; expires?: number };
+// workspace-local notices opt into scoping without changing existing operation defaults
+type OperationFeedback = { id: number; tone: 'pending'|'success'|'error'; message: string; detail: string; worktreeId?: string; workspaceKey?: string; expires?: number };
 const toastDurationMs = 5_000;
 type CleanupTarget = { id: string; kind: 'orphan-worker'|'stale-agent'|'hud-pane'|'hud-process'|'merged-branch'|'closed-pr-branch'; label: string; detail: string };
 type BranchRemovalFacts = { branch: string; checkedOut: boolean; dirtyCount: number; pushed: boolean; merged: boolean; defaultBranch: boolean };
@@ -143,7 +144,7 @@ type RemovalFacts = { main: boolean; detached: boolean; locked: boolean; lockedR
 type StoredReviewSummary = { worktreeId: string; branch: string; savedAt: string; title: string; scope: ReviewScope; commit?: string; includeTests: boolean; includeDocs: boolean; fingerprint: string };
 // The Review button's state where a review is held. While the review's panel is open in this
 // Worktree, `panel` is its split column and `onMinimize` closes it.
-type ReviewButtonState = ReviewTourIndicator & { onOpen: () => void; panel?: ReactNode; onMinimize?: () => void };
+type ReviewButtonState = ReviewTourIndicator & { onOpen: () => void; panel?: ReactNode };
 // a directory-Project or Scratch Place, listed beside the Worktrees (a Worktree is a Place with the same id)
 // `adhoc` marks a Scratch folder other than the configured one: the console cannot launch into it
 type Place = { id: string; kind: 'directory' | 'scratch'; projectId: string; label: string; home: string; adhoc?: true; pinned: boolean; consoleShells?: number; launch?: LaunchResolution };
@@ -3564,6 +3565,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const [notesProgressKind, setNotesProgressKind] = useState<ProgressKind>('loading');
   // hold split restoration until the saved note has been checked
   const [initialNotesLoaded, setInitialNotesLoaded] = useState(false);
+  // unrelated note failures must not permanently prevent workspace recovery
+  const [initialNotesSettled, setInitialNotesSettled] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [noteMetadataPending, setNoteMetadataPending] = useState(false);
   const [noteMetadataError, setNoteMetadataError] = useState('');
@@ -3739,6 +3742,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     noteLoadSequence.current += 1;
     setLoading(false);
     setInitialNotesLoaded(false);
+    setInitialNotesSettled(false);
     // reset refresh boundaries with the persistence context
     seenGeneration.current = undefined;
     seenNotesRevision.current = notesRevisionKey;
@@ -3804,7 +3808,11 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
       if (!cancelled && sequence === noteLoadSequence.current) setSaveStatus('error');
     }).finally(() => {
       // let the latest foreground request own its loading indicator
-      if (!cancelled && sequence === noteLoadSequence.current) setLoading(false);
+      // a failed initial read still settles the workspace recovery barrier
+      if (!cancelled && sequence === noteLoadSequence.current) {
+        setLoading(false);
+        setInitialNotesSettled(true);
+      }
     });
     return () => { cancelled = true; };
   }, [noteViewId, resourceBase]);
@@ -4007,6 +4015,8 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const create = async (text = '', title?: string): Promise<boolean> => {
     // require one idle persistence context
     if (resourceBase === undefined || loading || noteMetadataMutation.current !== undefined) return false;
+    const workspaceKey = worktreeId === undefined ? `agent-${agentId ?? 'pending'}` : placeItemKey(worktreeId);
+    const generation = workspaceOpenGeneration(workspaceKey);
     // creating a note is user-triggered work rather than a list read
     setNotesProgressKind('working');
     setLoading(true);
@@ -4017,6 +4027,16 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
       if (!isWorktreeNote(note)) throw new Error();
       acknowledgedTexts.current.set(note.id, note.text);
       setNotes(current => [note, ...(current ?? [])]);
+      // preserve created content without reopening a workspace closed during the request
+      if (!workspaceOpenStillCurrent(workspaceKey, generation)) {
+        // selected text must still reach the created note without mounting its editor
+        if (text) {
+          dirtyTexts.current.set(note.id, text);
+          setDirtyCount(dirtyTexts.current.size);
+          persist(note.id, text);
+        }
+        return true;
+      }
       open(note, !text.trim());
       // save selected text through the existing editor queue
       if (text) updateDraft(note, text);
@@ -4418,17 +4438,23 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     }
   };
   // remove an unlocked note from its header or blank-note cleanup
-  const remove = () => {
+  const remove = async (): Promise<boolean> => {
     const note = activeNoteRef.current;
     // serialize pane deletes
-    if (resourceBase === undefined || note === undefined || note.locked || noteMetadataMutation.current !== undefined || deleting || renameBusy || attachmentMutation.current) return;
+    if (resourceBase === undefined || note === undefined || note.locked || noteMetadataMutation.current !== undefined || deleting || renameBusy || attachmentMutation.current) return false;
     setDeleting(true);
-    void deleteNote(note, true).catch(() => {
+    try {
+      await deleteNote(note, true);
+      return true;
+    } catch {
       // preserve dirty state after a failed pane delete
       if (dirtyTexts.current.has(note.id)) failedNotes.current.add(note.id);
       setDirtyCount(dirtyTexts.current.size);
       setSaveStatus('error');
-    }).finally(() => setDeleting(false));
+      return false;
+    } finally {
+      setDeleting(false);
+    }
   };
   // delete one note from the flyout
   const removeFromMenu = async (note: WorktreeNote) => {
@@ -4444,15 +4470,13 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
       setMenuDeletingId(undefined);
     }
   };
-  // retain shared, locked and attachment-only notes when closing the pane
-  const close = () => {
+  // report cleanup failure before a bulk close records completed empty intent
+  const close = async (): Promise<boolean> => {
     // wait for metadata writes before deciding whether a blank note is disposable
-    if (attachmentMutation.current || noteMetadataMutation.current !== undefined) return;
+    if (attachmentMutation.current || noteMetadataMutation.current !== undefined) return false;
+    const note = activeNoteRef.current;
     // remove only local unlocked notes without text or files
-    if (!activeNoteRef.current?.locked && !activeNoteRef.current?.allWorkspaces && !noteHasContent({ text: draftRef.current, attachments: activeNoteRef.current?.attachments })) {
-      remove();
-      return;
-    }
+    if (note !== undefined && !note.locked && !note.allWorkspaces && !noteHasContent({ text: draftRef.current, attachments: note.attachments })) return remove();
     flush();
     activeNoteRef.current = undefined;
     // clear this context's retained note
@@ -4462,6 +4486,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
     setEditing(false);
     setRenaming(false);
     restoreTriggerFocus();
+    return true;
   };
   // merge a server Schedule update (schedule + computed nextRun) into local note state
   const mergeScheduleUpdate = (noteId: string, saved: WorktreeNote) => {
@@ -4755,7 +4780,7 @@ function useWorktreeNotes(worktreeId: string | undefined, expansion: PanelExpans
   const paneExpanded = expanded || expansion.immersive;
   // Esc closes the note, unless it is expanded: then the Workspace restores its siblings first
   const pane = activeNote === undefined ? null : <><section className={`note-pane${paneExpanded ? ' expanded' : ''}${editing ? ' editing' : ' selecting'}`} role="dialog" aria-label="Note" onAuxClickCapture={event => closeOnMiddleClick(event, () => { /* preserve pending note mutations */ if (!noteFilesDisabled) close(); })} onPointerDownCapture={phone && editing ? undefined : preserveContextMenuPress} onMouseDownCapture={phone && editing ? undefined : preserveContextMenuPress} onContextMenu={openNoteContextMenu} onDragEnter={dragNoteFiles} onDragOver={dragNoteFiles} onDragLeave={leaveNoteFiles} onDrop={dropNoteFiles} onPaste={pasteNoteFiles} onKeyDown={event => { if (event.key === 'Escape' && !paneExpanded && !deleting && sendState !== 'sending') { event.preventDefault(); close(); } }}><PanelHeader panelKey="note" label="note" title={noteTitlePill} actions={noteSendAction} secondary={noteSecondary} menuContent={noteOptionsMenu} expandDisabled={noteFilesDisabled} close={{ key: 'close', label: 'Close note', className: 'note-close', disabled: noteFilesDisabled, icon: <PanelIcon path={panelIcons.close} />, onSelect: close }} /><div className="note-pane-head">{noteMetadataError && <p className="note-lock-error" role="alert">{noteMetadataError}</p>}{scheduleArea}{noteAttachmentPicker}{noteAttachmentControls}</div>{draggingNoteFiles && <div className="prompt-drop-overlay" role="status">Drop files to attach to this note</div>}{editing ? <textarea ref={editorRef} aria-label="Note content" value={draft} maxLength={30_000} disabled={deleting || menuDeletingId === activeNote.id || noteVisibilityPending} onChange={event => changeDraft(event.target.value)} onBlur={event => { flush(); /* native mobile popups must retain the editor */ if (phone && event.relatedTarget === null) return; /* menu focus must not unmount the source editor */ if (!contextMenuOwnsFocus(event.currentTarget)) setEditing(false); }} /> : <div className="note-preview-interaction" onPointerDown={() => { selectionAtPointerDown.current = Boolean(window.getSelection()?.toString()); }} onClick={event => inferEditing(event.target)}><NoteMarkdown text={draft} containerRef={previewRef} /></div>}</section>{selectionActions}{noteFilePreview.dialog}{notePicker}</>;
-  return { active: activeNote !== undefined, appendToActive, canAppendToActive, canCreate: !loading && !noteMetadataPending, canClose: activeNote !== undefined && !noteFilesDisabled, close, initialNotesLoaded, control, createWithText: create, pane, toggleMenu: toggle };
+  return { active: activeNote !== undefined, appendToActive, canAppendToActive, canCreate: !loading && !noteMetadataPending, canClose: activeNote !== undefined && !noteFilesDisabled, close, initialNotesSettled: initialNotesSettled || initialNotesLoaded, control, createWithText: create, pane, toggleMenu: toggle };
 }
 type WorktreeNotes = ReturnType<typeof useWorktreeNotes>;
 
@@ -5763,6 +5788,8 @@ const requestTerminalFocus = (placeId: string, terminal: OpenTerminal) => {
 };
 // open a relative editor jump or token-bound host file in a focused terminal
 const openEditorShell = async (placeId: string, target: EditorShellTarget): Promise<string | undefined> => {
+  const key = placeItemKey(placeId);
+  const generation = workspaceOpenGeneration(key);
   const created = await createPlaceShell(placeId, { editor: true, ...target });
   if (!('paneId' in created)) return created.error;
   let panes = await listPlacePanes(placeId);
@@ -5778,7 +5805,8 @@ const openEditorShell = async (placeId: string, target: EditorShellTarget): Prom
     // repeated successful absence means Code is the usable fallback
     if (panes !== undefined && shell === undefined) return 'The editor terminal is no longer available.';
   }
-  requestTerminalFocus(placeId, { paneId: created.paneId, name: shell === undefined ? 'editor' : terminalPaneLabel(shell) });
+  // keep a newer close-all intact while retaining the already-created editor shell
+  if (workspaceOpenStillCurrent(key, generation)) requestTerminalFocus(placeId, { paneId: created.paneId, name: shell === undefined ? 'editor' : terminalPaneLabel(shell) });
   return undefined;
 };
 // The open Terminal panels of one Worktree and the picker's live pane list. Panels persist
@@ -5834,6 +5862,11 @@ function useWorktreeTerminals(worktreeId: string | undefined) {
     saveTerminals(worktreeId, next);
     return next;
   }), [worktreeId]);
+  // clear the latest panels even when a shell opened during close-all confirmation
+  const closeAll = useCallback(() => setOpen(() => {
+    saveTerminals(worktreeId, []);
+    return [];
+  }), [worktreeId]);
   // forget ended panes without counting them as minimized shells
   const forgetPane = useCallback((paneId: string) => {
     // closed panes must not leave an editable draft for a reused identity
@@ -5878,7 +5911,7 @@ function useWorktreeTerminals(worktreeId: string | undefined) {
     });
     return true;
   }, [worktreeId, refreshPanes]);
-  return { open, panes, refreshPanes, openPane, closePane, forgetPane, endPane, renamePane };
+  return { open, panes, refreshPanes, openPane, closePane, closeAll, forgetPane, endPane, renamePane };
 }
 type WorktreeTerminals = ReturnType<typeof useWorktreeTerminals>;
 
@@ -6061,12 +6094,15 @@ const pickableTerminalPane = (pane: WorktreePane, openIds: Set<string>, claimedW
 // make a new Console shell at the Place (running the configured editor when `editor`) and open
 // it as a Terminal panel; returns the error when the shell could not be made
 const openNewShell = async (worktreeId: string, { refreshPanes, openPane }: WorktreeTerminals, editor = false): Promise<string | undefined> => {
+  const key = placeItemKey(worktreeId);
+  const generation = workspaceOpenGeneration(key);
   const created = await createPlaceShell(worktreeId, editor ? { editor: true } : {});
   if (!('paneId' in created)) return created.error;
   const { paneId } = created;
   const list = await refreshPanes();
   const shell = list?.find(pane => pane.paneId === paneId);
-  openPane(paneId, shell ? terminalPaneLabel(shell) : editor ? 'editor' : 'shell');
+  // a later close-all keeps this existing shell minimized
+  if (workspaceOpenStillCurrent(key, generation)) openPane(paneId, shell ? terminalPaneLabel(shell) : editor ? 'editor' : 'shell');
   return undefined;
 };
 
@@ -6160,18 +6196,30 @@ function EditorButton({ worktreeId, terminals, onOperationFeedback }: { worktree
 // The split columns and the toolbar's Terminal (and, with an `editor` configured, Editor) buttons
 // for a Place's Terminals, shared by the Agent tab and the agentless Worktree and Place tabs. A
 // target the dashboard placed nowhere gets neither.
-function useTerminalViews(worktreeId: string | undefined, onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void, onOpenFile?: (path: string) => void): { columns?: TerminalColumn[]; control?: ReactNode; closeAll: () => void; openFocused: (binding?: { table: string; key: string }) => Promise<string | undefined>; end: (paneId: string) => void } {
+function useTerminalViews(worktreeId: string | undefined, onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void, onOpenFile?: (path: string) => void): { columns?: TerminalColumn[]; control?: ReactNode; closeAll: () => void; openFocused: (binding?: { table: string; key: string }) => Promise<string | undefined>; end: (paneId: string) => void; restoreMinimized: () => void } {
   const terminals = useWorktreeTerminals(worktreeId);
   const editorConfigured = useContext(EditorConfiguredContext);
   // minimize every visible shell without ending its process
-  const closeAll = () => terminals.open.forEach(terminal => terminals.closePane(terminal.paneId));
+  const closeAll = terminals.closeAll;
+  // reveal a live picker candidate without creating or restarting a shell
+  const restoreMinimized = () => {
+    const openIds = new Set(terminals.open.map(terminal => terminal.paneId));
+    const windows = claimedTerminalWindows(terminals.panes, openIds);
+    const pane = terminals.panes.find(candidate => pickableTerminalPane(candidate, openIds, windows));
+    // missing or dead candidates leave a genuinely empty workspace alone
+    if (pane !== undefined) terminals.openPane(pane.paneId, terminalPaneLabel(pane));
+  };
   // open a new Console shell, or a key binding's Terminal (the server may hand back the one
   // already running), as a focused panel; resolves to its pane id
   const openFocused = async (binding?: { table: string; key: string }): Promise<string | undefined> => {
     if (worktreeId === undefined) return undefined;
+    const key = placeItemKey(worktreeId);
+    const generation = workspaceOpenGeneration(key);
     const created = await createPlaceShell(worktreeId, binding === undefined ? {} : { binding });
     if (!('paneId' in created)) { onOperationFeedback?.({ tone: 'error', message: 'The terminal did not open', detail: created.error }); return undefined; }
     const shell = (await terminals.refreshPanes())?.find(pane => pane.paneId === created.paneId);
+    // do not focus or reopen a shell superseded by close-all
+    if (!workspaceOpenStillCurrent(key, generation)) return undefined;
     requestTerminalFocus(worktreeId, { paneId: created.paneId, name: shell === undefined ? 'shell' : terminalPaneLabel(shell) });
     return created.paneId;
   };
@@ -6179,16 +6227,18 @@ function useTerminalViews(worktreeId: string | undefined, onOperationFeedback?: 
   const end = (paneId: string) => {
     const pane = terminals.panes.find(candidate => candidate.paneId === paneId);
     if (pane !== undefined && isConsoleShell(pane)) void terminals.endPane(pane);
-    else terminals.closePane(paneId);
+    // unmanaged panes are minimized rather than terminated
+    else if (worktreeId !== undefined) minimizeWorkspacePanel(placeItemKey(worktreeId), paneId, () => terminals.closePane(paneId));
   };
-  if (worktreeId === undefined) return { closeAll, openFocused, end };
+  // unplaced workspaces have no terminal candidates
+  if (worktreeId === undefined) return { closeAll, openFocused, end, restoreMinimized };
   // keep destructive actions limited to managed shells
   const columns = terminals.open.map(terminal => {
     const pane = terminals.panes.find(pane => pane.paneId === terminal.paneId);
     const managedShell = pane?.role === 'shell' && !pane.agent;
-    return { key: terminal.paneId, label: terminal.name, node: <TerminalPane key={terminal.paneId} worktreeId={worktreeId} paneId={terminal.paneId} name={terminal.name} onMinimize={() => { /* keep the shell running */ terminals.closePane(terminal.paneId); }} onExit={() => { /* remove ended shells from the count */ terminals.forgetPane(terminal.paneId); }} onRename={managedShell ? (name => terminals.renamePane(terminal.paneId, name)) : undefined} onDelete={managedShell ? (() => terminals.endPane(pane)) : undefined} {...(onOpenFile === undefined ? {} : { onOpenFile })} /> };
+    return { key: terminal.paneId, label: terminal.name, node: <TerminalPane key={terminal.paneId} worktreeId={worktreeId} paneId={terminal.paneId} name={terminal.name} onMinimize={() => { /* keep one split visible without ending the shell */ minimizeWorkspacePanel(placeItemKey(worktreeId), terminal.paneId, () => terminals.closePane(terminal.paneId)); }} onExit={() => { /* remove ended shells from the count */ terminals.forgetPane(terminal.paneId); }} onRename={managedShell ? (name => terminals.renamePane(terminal.paneId, name)) : undefined} onDelete={managedShell ? (() => terminals.endPane(pane)) : undefined} {...(onOpenFile === undefined ? {} : { onOpenFile })} /> };
   });
-  return { columns, control: <><TerminalPicker worktreeId={worktreeId} terminals={terminals} />{editorConfigured && <EditorButton worktreeId={worktreeId} terminals={terminals} onOperationFeedback={onOperationFeedback} />}</>, closeAll, openFocused, end };
+  return { columns, control: <><TerminalPicker worktreeId={worktreeId} terminals={terminals} />{editorConfigured && <EditorButton worktreeId={worktreeId} terminals={terminals} onOperationFeedback={onOperationFeedback} />}</>, closeAll, openFocused, end, restoreMinimized };
 }
 
 // format one git stat number
@@ -6589,6 +6639,14 @@ type WorkspacePlace = { id?: string; worktreeId?: string; path?: string; stack?:
 // What the Place's notes need from the Agent there (or, with no Agent, how a note's Run launches one).
 type WorkspaceNotesOptions = { agentWorking?: boolean; latestAssistantMessage?: string; latestAssistantMessageOverflows?: boolean; onPromptHistoryChanged?: () => void | Promise<void>; promptHistory?: PromptHistoryEntry[]; schedulePrefill?: SchedulePrefill; onLaunchAndRun?: (noteId: string) => Promise<boolean>; launchRunLabel?: string };
 
+// share the mounted workspace guard with terminal and portal-owned review controls
+const minimizeWorkspacePanel = (workspaceKey: string, panelKey: string, minimize: () => void) => {
+  const view = workspaceViews.get(workspaceKey);
+  // non-workspace viewers have no workspace visibility policy
+  if (view === undefined) minimize();
+  else view.minimizePanel(panelKey, minimize);
+};
+
 // keep all place-scoped panel state behind one tab
 // and git expansion. The tab's card holds it, so it outlives a switch between the Agents there;
 // the agent panel's composer drives the same browser and Terminals, and the Workspace renders it.
@@ -6622,7 +6680,8 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   const [gitExpanded, setGitExpanded] = useState(false);
   const key = place.id === undefined ? `agent-${agentId ?? 'pending'}` : placeItemKey(place.id);
   useWorkspaceViewRevision();
-  const agentHidden = agentSplitHidden(key);
+  const intentionallyEmpty = workspaceIntentionallyEmpty(key);
+  const agentHidden = agentSplitHidden(key) || (agentId !== undefined && intentionallyEmpty);
   // bring a requested split into view; focus its container, or with `input` its terminal or composer
   const jump = (panelKey: string, input = false) => {
     expansion.restore();
@@ -6643,7 +6702,20 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   // the panels focus last visited, newest first, for last-panel and the current panel
   const panelHistory = useRef<string[]>([]);
   const carouselRef = useRef(carousel);
-  carouselRef.current = carousel;
+  // reserve removals until the rendered column list catches up with batched clicks
+  const minimizing = useRef(new Set<string>());
+  // suppress repair while close-all awaits an existing dirty-settings confirmation
+  const closingAll = useRef(false);
+  // only newly opened columns end close-all intent; removals must not clear it
+  const reportCarousel = useCallback((next: PanelCarousel) => {
+    const previous = carouselRef.current;
+    const added = next.panels.some(panel => !previous?.panels.some(candidate => candidate.key === panel.key));
+    carouselRef.current = next;
+    minimizing.current.clear();
+    setCarousel(next);
+    // actual new content resumes the ordinary policy, including on a fresh mount
+    if (added && workspaceIntentionallyEmpty(key)) setWorkspaceIntentionallyEmpty(key, false);
+  }, [key]);
   const panelKeyOf = (element: Element | null): string | undefined => {
     const panel = element?.closest(`[data-workspace-key="${CSS.escape(key)}"] .log-split > *`);
     return panel == null ? undefined : carouselRef.current?.panels.find(candidate => panel.matches(splitPanelSelector(candidate.key)))?.key;
@@ -6659,15 +6731,50 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   }, [key]);
   const openKeys = () => carouselRef.current?.panels.map(panel => panel.key) ?? [];
   const currentPanel = () => panelKeyOf(document.activeElement) ?? panelHistory.current.find(panel => openKeys().includes(panel)) ?? carouselRef.current?.visibleKey ?? openKeys()[0];
+  // reject only minimization, leaving genuine close/end and close-all semantics intact
+  const minimizePanel = (panelKey: string, minimize: () => void) => {
+    const remaining = openKeys().filter(candidate => !minimizing.current.has(candidate));
+    // stale or repeated actions cannot remove a different panel
+    if (!remaining.includes(panelKey)) return;
+    // keep the last panel mounted and report a transient, workspace-scoped error
+    if (remaining.length <= 1) {
+      onOperationFeedback({ tone: 'error', message: 'At least one split must remain visible.', detail: 'Open another split before minimizing this one.', workspaceKey: key, expires: Date.now() + toastDurationMs });
+      return;
+    }
+    minimizing.current.add(panelKey);
+    minimize();
+  };
+  // repair legacy or reconciled empty layouts without undoing an intentional close-all
+  useLayoutEffect(() => {
+    // newly discovered agents must not reopen a deliberately empty workspace
+    if (intentionallyEmpty) {
+      // retain the agent's hidden state when another kind of split is later opened
+      if (agentId !== undefined && !agentSplitHidden(key)) setAgentSplitHidden(key, true);
+      return;
+    }
+    // wait for authoritative columns, note restoration and close-all preflight
+    if (carousel === undefined || !placeNotes.initialNotesSettled || closingAll.current) return;
+    // ordinary nonempty layouts require no repair
+    if (carousel.panels.length > 0) return;
+    // the existing agent is first in layout order and needs no launch
+    if (agentId !== undefined) {
+      // avoid repeated preference writes while the new column is mounting
+      if (agentHidden) setAgentSplitHidden(key, false);
+      return;
+    }
+    terminals.restoreMinimized();
+  });
   // close a panel the way its own header does, except a Console shell, which ends (tmux kill-pane)
   const closePanel = (panelKey: string) => {
-    if (panelKey === 'agent') setAgentSplitHidden(key, true);
+    // hiding an agent is non-destructive minimization
+    if (panelKey === 'agent') minimizePanel(panelKey, () => setAgentSplitHidden(key, true));
     else if (panelKey === 'note') { if (placeNotes.canClose) placeNotes.close(); }
     else if (panelKey === 'browser') browser.close();
     else if (panelKey === 'files') files.close();
     else if (panelKey === 'code') code.close();
     else if (panelKey === 'stack') stackPanel.close();
-    else if (panelKey === 'review') onCloseReview?.();
+    // the cached review remains restorable after this action
+    else if (panelKey === 'review') minimizePanel(panelKey, () => onCloseReview?.());
     else if (panelKey === 'settings') settingsSplit?.close();
     else terminals.end(panelKey);
   };
@@ -6685,21 +6792,28 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
       // preflight settings before external workspace shutdown can stop sessions
       prepareClose: () => settingsSplit?.close() ?? Promise.resolve(true),
       closeAll: async () => {
-        // preserve attachment or metadata mutations before closing any siblings
-        if (placeNotes.active && !placeNotes.canClose) return;
-        // cancelled settings confirmation leaves every sibling split open
-        if (settingsSplit?.open && !await settingsSplit.close()) return;
-        // close only a visible note
-        if (placeNotes.active) placeNotes.close();
-        browser.close();
-        files.close();
-        code.close();
-        stackPanel.close();
-        onCloseReview?.();
-        terminals.closeAll();
-        expansion.restore();
-        // retain a restore action only when an agent or draft was actually visible
-        if (carousel?.panels.some(panel => panel.key === 'agent')) setAgentSplitHidden(key, true);
+        // serialize bulk closes and preserve in-flight note mutations
+        if (closingAll.current || placeNotes.active && !placeNotes.canClose) return;
+        closingAll.current = true;
+        try {
+          // cancelled settings confirmation leaves every sibling split open
+          if (settingsSplit?.open && !await settingsSplit.close()) return;
+          // await disposable note cleanup before committing a completed close-all
+          if (!await placeNotes.close()) return;
+          // retain deliberate emptiness only after every close preflight succeeds
+          setWorkspaceIntentionallyEmpty(key, true);
+          browser.close();
+          files.close();
+          code.close();
+          stackPanel.close();
+          onCloseReview?.();
+          terminals.closeAll();
+          expansion.restore();
+          // retain a restore action only when an agent or draft was actually visible
+          if (carousel?.panels.some(panel => panel.key === 'agent')) setAgentSplitHidden(key, true);
+        } finally {
+          closingAll.current = false;
+        }
       },
       jump,
       currentPanel,
@@ -6707,6 +6821,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
       toggleExpand: expansion.toggle,
       renamePanel: (panelKey: string) => { const open = terminalRenamers.get(panelKey); open?.(); return open !== undefined; },
       closePanel,
+      minimizePanel,
       openTerminal,
       ...(place.worktreeId === undefined ? {} : {
         toggleCode: () => {
@@ -6736,12 +6851,15 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   const placeId = place.id;
   const openInEditor = !editorConfigured || placeId === undefined ? undefined : async (target: EditorShellTarget): Promise<boolean> => {
     expansion.restore();
+    const generation = workspaceOpenGeneration(key);
     const failure = await openEditorShell(placeId, target);
+    // superseded editor failures must not reopen Code as a fallback
+    if (!workspaceOpenStillCurrent(key, generation)) return true;
     // preserve editor failure feedback while allowing a Files preview fallback
     if (failure !== undefined) onOperationFeedback?.({ tone: 'error', message: 'objectToken' in target ? 'The editor did not open; trying Code instead' : 'The editor did not open', detail: failure });
     return failure === undefined;
   };
-  return { place, browser, files, code, stackPanel, openStackPanel, terminals, carousel, setCarousel, conversations, notes: placeNotes, expansion, gitExpanded, setGitExpanded, agentHidden, showAgent, openInEditor, viewKey: key };
+  return { place, browser, files, code, stackPanel, openStackPanel, terminals, carousel, setCarousel: reportCarousel, conversations, notes: placeNotes, expansion, gitExpanded, setGitExpanded, agentHidden, showAgent, minimizePanel, openInEditor, viewKey: key };
 }
 type WorkspaceState = ReturnType<typeof useWorkspace>;
 // The git actions only an Agent offers (push, fixup, guided review); an agentless Workspace passes
@@ -6810,7 +6928,7 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
   const placeId = place.id;
   // the Stack panel shows only for a Worktree whose stack has processes to show
   const stackPane = !stackPanel.open || place.worktreeId === undefined || (place.stack?.processes?.length ?? 0) === 0 ? null : <StackPanel worktreeId={place.worktreeId} title={stackName === undefined ? 'this worktree' : `${stackName.project} / ${stackName.worktree}`} stack={place.stack} selection={stackPanel.selection} onSelect={stackPanel.select} onClose={stackPanel.close} handlers={stackHandlers(place.worktreeId)} onOpenWorktree={onOpenWorktreeStack} onOpenTerminal={placeId === undefined ? undefined : (paneId, name) => { /* on a phone an already-open panel is scrolled to; a new one comes into view as it opens */ workspace.carousel?.show(paneId); requestTerminalFocus(placeId, { paneId, name }); }} readOutput={processOutput} clearOutput={clearProcessOutput} />;
-  return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} codeController={code} review={reviewPanel} stack={stackPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesLoaded} /></div></section></SelectionActionsContext.Provider>;
+  return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} codeController={code} review={reviewPanel} stack={stackPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesSettled} /></div></section></SelectionActionsContext.Provider>;
 }
 
 type LogProps = { id: string; onTurnOff?: () => void; embedded?: boolean; codexScrollControls?: boolean; onQuestion: (question: ChoiceQuestion | undefined) => void; onMetadata?: (response: string | undefined, overflow: boolean) => void; header?: (connection: string) => ReactNode; composer?: ReactNode; notes?: WorktreeNotes; onAddToPrompt?: (text: string) => void; onOpenUrl?: (url: string) => boolean; onOpenFile?: (path: string) => void; processingLabel?: string; processingDetail?: string };
@@ -7465,7 +7583,7 @@ function reviewBindingAgent(agent: Agent | undefined, agents: readonly Agent[]):
   return agents.find(candidate => candidate.reviewRun === undefined && candidate.worktreeId !== undefined && candidate.worktreeId === agent.worktreeId);
 }
 
-function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNotifications, cleanupControl, reviewCapability, review, onReview, onDeleted, onSelectTarget, onNewWorktree, onNavigateWorktree, onOpenWorktreeStack, onPromptFocus, onOperationFeedback, launch, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason, worktreeLabel, schedulePrefill }: { agent: Agent; agents: readonly Agent[]; onSelectAgent: (agentId: string) => void; active: boolean; tabBar: ReactNode; renderNotifications: (content: ReactNode) => ReactNode; cleanupControl?: ReactNode; reviewCapability?: ReviewTourCapability; review?: ReviewButtonState; onReview: (target: ReviewTarget) => void; onDeleted: () => Promise<void>; onSelectTarget: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onNavigateWorktree: (worktreeId: string) => void; onOpenWorktreeStack: (worktreeId: string) => void; onPromptFocus: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; launch?: ToolbarLaunch; pinned?: boolean; onTogglePin?: () => void; onRemoveWorktree?: () => void; removeDisabledReason?: string; worktreeLabel?: string; schedulePrefill?: SchedulePrefill }) {
+function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNotifications, cleanupControl, reviewCapability, review, onCloseReview, onReview, onDeleted, onSelectTarget, onNewWorktree, onNavigateWorktree, onOpenWorktreeStack, onPromptFocus, onOperationFeedback, launch, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason, worktreeLabel, schedulePrefill }: { agent: Agent; agents: readonly Agent[]; onSelectAgent: (agentId: string) => void; active: boolean; tabBar: ReactNode; renderNotifications: (content: ReactNode) => ReactNode; cleanupControl?: ReactNode; reviewCapability?: ReviewTourCapability; review?: ReviewButtonState; onCloseReview: (worktreeId: string) => void; onReview: (target: ReviewTarget) => void; onDeleted: () => Promise<void>; onSelectTarget: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onNavigateWorktree: (worktreeId: string) => void; onOpenWorktreeStack: (worktreeId: string) => void; onPromptFocus: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; launch?: ToolbarLaunch; pinned?: boolean; onTogglePin?: () => void; onRemoveWorktree?: () => void; removeDisabledReason?: string; worktreeLabel?: string; schedulePrefill?: SchedulePrefill }) {
   // an Agent's Worktree label drives its feedback and power-menu copy; the server carries it on
   // the Worktree now, so it is resolved at the top level and passed in
   const displayLabel = worktreeLabel ?? agent.worktreeLabel ?? agentLabel(agent);
@@ -7476,7 +7594,7 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
   const latestAssistantMessageOverflows = latest?.agentId === agent.id && latest.overflows;
   // the current Agent's prompt history (the hook refetches when the switcher changes Agent)
   const promptHistory = usePromptHistory(agent.id);
-  const workspace = useWorkspace({ id: agent.placeId ?? agent.worktreeId, worktreeId: agent.worktreeId, path: agent.home, stack: agent.stack, projectUrl: agent.projectUrl, projectProxied: agent.projectProxied, branch: agent.branch, gitStatus: agent.gitStatus, gitPrStatus: agent.gitPrStatus, pullRequest: agent.pullRequest, attention: agents.map(candidate => candidate.attention ?? '').join(' ') }, { agentId: agent.id, noteOptions: { agentWorking: active, latestAssistantMessage, latestAssistantMessageOverflows, onPromptHistoryChanged: promptHistory.refresh, promptHistory: promptHistory.history, schedulePrefill }, onNavigateWorktree, onOperationFeedback, onCloseReview: review?.onMinimize });
+  const workspace = useWorkspace({ id: agent.placeId ?? agent.worktreeId, worktreeId: agent.worktreeId, path: agent.home, stack: agent.stack, projectUrl: agent.projectUrl, projectProxied: agent.projectProxied, branch: agent.branch, gitStatus: agent.gitStatus, gitPrStatus: agent.gitPrStatus, pullRequest: agent.pullRequest, attention: agents.map(candidate => candidate.attention ?? '').join(' ') }, { agentId: agent.id, noteOptions: { agentWorking: active, latestAssistantMessage, latestAssistantMessageOverflows, onPromptHistoryChanged: promptHistory.refresh, promptHistory: promptHistory.history, schedulePrefill }, onNavigateWorktree, onOperationFeedback, onCloseReview: () => { /* close the latest review even when it arrived during confirmation */ if (agent.worktreeId !== undefined) onCloseReview(agent.worktreeId); } });
   const { browser: projectBrowser, code: projectCode, setGitExpanded } = workspace;
   // keep the latest response each Agent's output reports
   const reportMetadata = useCallback((agentId: string, message: string | undefined, overflows: boolean) => setLatest({ agentId, message, overflows }), []);
@@ -7677,7 +7795,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const power = <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || clearing || deactivating || deleting} progressColor={restarting ? 'yellow' : 'red'} hidden={active} {...(active ? { disabledReason: 'Cancel the agent’s work before restarting, clearing or turning it off' } : {})} onClear={() => void clear()} onTurnOff={() => void (agent.worktreeId === undefined ? remove() : deactivate())} newTask={agent.worktreeId !== undefined || agent.placeId === undefined ? { agentId: agent.id, worktreeId: agent.worktreeId, configured: agent.newTaskConfigured === true, onOperationFeedback } : undefined} {...(agent.worktreeId === undefined ? {} : { onRestart: () => void restart(), restartAs: { label: displayLabel, resolution: agent.launch, onLaunch: choice => void restart(choice) } })} />;
   const title = conversationName ?? displayLabel;
   const switcher = <AgentSwitcher agent={agent} agents={agents} title={title} placeLabel={displayLabel} onSelect={onSelectAgent} />;
-  const header = (connection: string) => <PanelHeader panelKey="agent" label="agent output" title={<AgentPanelTitle kind={agent.kind} sandboxed={agent.sandboxed} title={title} switcher={switcher} state={panelState} connection={connection} />} actions={<>{workspace.conversations.control}{responseFiles.control}</>} close={<>{cancelButton}{power}<button type="button" className="panel-header-action pane-minimize" aria-label="Minimize agent output" title="Minimize agent (it keeps running)" onClick={() => setAgentSplitHidden(workspace.viewKey, true)}><PanelIcon path="M5 12h14" /></button></>} />;
+  const header = (connection: string) => <PanelHeader panelKey="agent" label="agent output" title={<AgentPanelTitle kind={agent.kind} sandboxed={agent.sandboxed} title={title} switcher={switcher} state={panelState} connection={connection} />} actions={<>{workspace.conversations.control}{responseFiles.control}</>} close={<>{cancelButton}{power}<button type="button" className="panel-header-action pane-minimize" aria-label="Minimize agent output" title="Minimize agent (it keeps running)" onClick={() => { /* reject minimizing the last visible split */ workspace.minimizePanel('agent', () => setAgentSplitHidden(workspace.viewKey, true)); }}><PanelIcon path="M5 12h14" /></button></>} />;
   const prompt = <Prompt id={agent.id} history={promptHistory.history} onHistoryChanged={promptHistory.refresh} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} question={dashboardQuestion ?? question} worktreeId={agent.worktreeId} placeId={workspace.place.id} historyControl={<PromptHistoryControl agentId={agent.id} history={promptHistory.history} refreshHistory={promptHistory.refresh} notes={workspace.notes} open={historyOpen} onOpenChange={onHistoryOpenChange} />} />;
   const composer = agent.paneMode === undefined ? prompt : <><PaneModeNotice agentId={agent.id} mode={agent.paneMode} worktreeId={agent.worktreeId} onOperationFeedback={onOperationFeedback} />{prompt}</>;
   // reuse power actions without bypassing lifecycle safeguards
@@ -8285,7 +8403,7 @@ function ToastTimerBar({ expires }: { expires: number }) {
   return <span key={expires} className="toast-timer-bar" aria-hidden="true" style={{ animationDuration: `${toastDurationMs}ms`, animationDelay: `${delay}ms` }} />;
 }
 
-// present timed successes and persistent failures with an optional accessible label
+// present timed successes and opt-in transient errors without changing persistent failures
 function OperationFeedbackToast({ feedback, onDismiss, ariaLabel }: { feedback: OperationFeedback; onDismiss: () => void; ariaLabel?: string }) {
   const role = feedback.tone === 'error' ? 'alert' : 'status';
   const pending = feedback.tone === 'pending';
@@ -8294,7 +8412,8 @@ function OperationFeedbackToast({ feedback, onDismiss, ariaLabel }: { feedback: 
     <span className="operation-feedback-icon" aria-hidden="true">{feedback.tone === 'success' ? '✓' : feedback.tone === 'error' ? '!' : ''}</span>
     <span className="operation-feedback-copy"><strong>{feedback.message}</strong><span>{feedback.detail}</span></span>
     {feedback.tone !== 'pending' && <button type="button" aria-label="Dismiss operation status" title="Dismiss" onClick={onDismiss}><PanelIcon path={panelIcons.close} /></button>}
-    {feedback.tone === 'success' && feedback.expires !== undefined && <ToastTimerBar expires={feedback.expires} />}
+    {/* only explicitly timed notices display a countdown */}
+    {feedback.tone !== 'pending' && feedback.expires !== undefined && <ToastTimerBar expires={feedback.expires} />}
   </div>;
 }
 
@@ -8857,10 +8976,10 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   // retain the last viewed completion across buffered dashboard publications
   const viewedCompletions = useRef(new Map<string, string>());
   const dashboardMounted = useRef(true);
-  // assign one shared deadline to each transient success and its countdown
+  // keep errors persistent unless the caller explicitly provides a deadline
   const showOperationFeedback = useCallback((feedback: Omit<OperationFeedback, 'id'>) => {
     operationFeedbackId.current += 1;
-    setOperationFeedback({ ...feedback, id: operationFeedbackId.current, expires: feedback.tone === 'success' ? Date.now() + toastDurationMs : undefined });
+    setOperationFeedback({ ...feedback, id: operationFeedbackId.current, expires: feedback.tone === 'success' ? Date.now() + toastDurationMs : feedback.tone === 'error' ? feedback.expires : undefined });
   }, []);
   // remember the completion before clearing its optimistic highlight
   const viewAgent = useCallback((agent: Pick<Agent, 'id' | 'worktreeId' | 'completionId'>) => {
@@ -8883,10 +9002,10 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const timer = window.setTimeout(() => setLaunchErrorMessage(''), Math.max(0, launchErrorExpires - Date.now()));
     return () => window.clearTimeout(timer);
   }, [launchErrorExpires]);
-  // expire only the success whose countdown was scheduled
+  // expire only the explicitly timed notice whose countdown was scheduled
   useEffect(() => {
-    // pending operations and failures remain until explicitly resolved
-    if (operationFeedback?.tone !== 'success' || operationFeedback.expires === undefined) return;
+    // ordinary errors and pending operations remain until explicitly resolved
+    if (operationFeedback?.expires === undefined || operationFeedback.tone === 'pending') return;
     const id = operationFeedback.id;
     const timer = window.setTimeout(() => setOperationFeedback(current => current?.id === id ? undefined : current), Math.max(0, operationFeedback.expires - Date.now()));
     return () => window.clearTimeout(timer);
@@ -9794,13 +9913,22 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       closeLauncher();
       return select(index);
     }
+    // explicit empty entry must not auto-reveal an existing hidden shell
+    setWorkspaceIntentionallyEmpty(placeItemKey(placeId), true);
     forgetOpenPanels(placeId);
+    // explicit empty entry also forgets retained Code, Settings and local Review
+    saveCodeOpen(placeId, false);
+    setSettingsSplitOpen(placeItemKey(placeId), false);
+    // retain review content without restoring its column on this empty entry
+    if (reviewSessions[placeId] !== undefined) updateReviewSession(placeId, session => ({ ...session, minimized: true }));
     openPlace(placeId);
   };
   // Terminal from +: open the Place's Workspace with one of its Console shells as a focused
   // Terminal panel (one already open here first), creating a shell only when the Place has none
   // optional staged bytes use the same reveal/create path without reaching terminal input
   const openTerminalAt = async (placeId: string, label: string, draft?: { text: string; paneId?: string }): Promise<boolean> => {
+    const key = placeItemKey(placeId);
+    const generation = workspaceOpenGeneration(key);
     // serialize shell creation without losing a second action silently
     if (terminalOpening.current.has(placeId)) {
       // ordinary launcher repeats remain a no-op while edit requests report the conflict
@@ -9830,6 +9958,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       }
       // mount or update the editable composer before focusing this terminal
       if (draft !== undefined && !stageTerminalCommand(terminalCommandKey(placeId, paneId), draft.text)) throw new Error(terminalCommandLimitMessage);
+      // retain any staged draft but let a newer close-all suppress the panel
+      if (!workspaceOpenStillCurrent(key, generation)) return false;
       requestTerminalFocus(placeId, { paneId, name: shell === undefined ? 'shell' : terminalPaneLabel(shell) });
       // restore narrow or expanded layouts to the staged terminal split
       const view = workspaceViews.get(placeItemKey(placeId));
@@ -9891,6 +10021,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const openStoredReview = async (agent: Agent, stored: StoredReviewSummary) => {
     // prevent duplicate restore requests
     if (reviewRestoringWorktreeId !== undefined) return;
+    const key = placeItemKey(stored.worktreeId);
+    const generation = workspaceOpenGeneration(key);
     void dismissNotification(reviewNotificationTag(stored.worktreeId));
     setReviewRestoringWorktreeId(stored.worktreeId);
     try {
@@ -9904,7 +10036,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       const storedCodeReview = codeReviewFrom(review.codeReview);
       const initialCodeReview = { ...(storedCodeReview === undefined ? {} : { review: storedCodeReview }), ...(isReviewJob(review.codeReviewJob) ? { job: review.codeReviewJob } : {}) };
       const launch: ReviewLaunch = { agentId: agent.id, worktreeId: stored.worktreeId, scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), includeTests: tour.includeTests, includeDocs: tour.includeDocs };
-      setReviewSessions(current => ({ ...current, [stored.worktreeId]: { launch, start: 0, initialTour: tour, initialCodeReview, minimized: false, indicator: { generating: false, stale: false } } }));
+      // keep the restored review cached but hidden after a newer close-all
+      setReviewSessions(current => ({ ...current, [stored.worktreeId]: { launch, start: 0, initialTour: tour, initialCodeReview, minimized: !workspaceOpenStillCurrent(key, generation), indicator: { generating: false, stale: false } } }));
     } catch {
       await refresh();
     } finally { setReviewRestoringWorktreeId(undefined); }
@@ -9985,11 +10118,19 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   };
   const voiceContext = { server: serverInfo.name, serverUrl: serverInfo.url, openWorktrees: otherOpenWorktrees(data.agents, activeWorktreeId, worktreeLabelById), ...(activeWorktreeId === undefined ? {} : { worktreeId: activeWorktreeId, worktree: worktrees.find(worktree => worktree.id === activeWorktreeId)?.label ?? agent?.worktreeLabel ?? (agent === undefined ? activeWorktreeId : agentLabel(agent)) }), ...(agent === undefined ? {} : { agentId: agent.id, agent: activeWorktree?.label ?? agent.worktreeLabel ?? agentLabel(agent) }) };
   const voiceDialog = davo.enabled ? <VoiceDialog name={davo.name} open={voiceOpen} callRequest={voiceCallRequest} context={voiceContext} request={request} onClose={closeVoice} onSelectWorktree={selectVoiceWorktree} onActiveChange={setVoiceActive} /> : null;
-  const visibleOperationFeedback = operationFeedback?.worktreeId === undefined || operationFeedback.worktreeId === activeWorktreeId ? operationFeedback : undefined;
+  // scoped minimize errors never leak into a different workspace
+  const visibleOperationFeedback = (operationFeedback?.workspaceKey === undefined || operationFeedback.workspaceKey === activeItemKey)
+    && (operationFeedback?.worktreeId === undefined || operationFeedback.worktreeId === activeWorktreeId) ? operationFeedback : undefined;
   // minimize without discarding the cached review
-  const minimizeReview = (worktreeId: string) => {
-    updateReviewSession(worktreeId, session => ({ ...session, minimized: true }));
-    window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.workspace-toolbar-actions .git-status-summary')?.focus());
+  const minimizeReview = (worktreeId: string, closeAll = false) => {
+    // preserve focus when a guarded review minimize is rejected
+    const minimize = () => {
+      updateReviewSession(worktreeId, session => ({ ...session, minimized: true }));
+      window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.workspace-toolbar-actions .git-status-summary')?.focus());
+    };
+    // close-all has already confirmed deliberate emptying
+    if (closeAll) minimize();
+    else minimizeWorkspacePanel(placeItemKey(worktreeId), 'review', minimize);
   };
   // announce a newly generated review
   const notifyReviewReady = (launch: ReviewLaunch) => {
@@ -10073,7 +10214,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const storedReview = agent?.worktreeId === undefined ? undefined : data.reviews?.find(review => review.worktreeId === agent.worktreeId);
   const localReview = agent?.worktreeId === undefined ? undefined : reviewSessions[agent.worktreeId];
   const reviewAgent = reviewBindingAgent(agent, item?.agents ?? []);
-  const activeReview = localReview !== undefined ? { ...localReview.indicator, onOpen: () => openLocalReview(localReview.launch.worktreeId), ...(localReview.minimized ? {} : { panel: <ReviewPanelColumn onSlot={setReviewSlot} />, onMinimize: () => minimizeReview(localReview.launch.worktreeId) }) } : reviewAgent !== undefined && storedReview !== undefined ? { generating: reviewRestoringWorktreeId === storedReview.worktreeId, stale: false, onOpen: () => void openStoredReview(reviewAgent, storedReview) } : undefined;
+  const activeReview = localReview !== undefined ? { ...localReview.indicator, onOpen: () => openLocalReview(localReview.launch.worktreeId), ...(localReview.minimized ? {} : { panel: <ReviewPanelColumn onSlot={setReviewSlot} /> }) } : reviewAgent !== undefined && storedReview !== undefined ? { generating: reviewRestoringWorktreeId === storedReview.worktreeId, stale: false, onOpen: () => void openStoredReview(reviewAgent, storedReview) } : undefined;
   // append workspace actions after each place's agent choices
   const placeEntries = (place: { id: string; label: string; consoleShells?: number } | undefined): LaunchMenuEntry[] => place === undefined ? [] : [
     { key: 'terminal', label: 'Terminal', detail: (place.consoleShells ?? 0) > 0 ? 'Focus its shell' : 'Open the Workspace with a new shell', icon: <LauncherRowIcon name="terminal" />, onSelect: () => void openTerminalAt(place.id, place.label) },
@@ -10157,10 +10298,14 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const live = workspaceViews.get(entry.key);
     // flush mounted note drafts before minimizing their panels
     if (live !== undefined) { live.closeAll(); return; }
+    // inactive tabs retain the same deliberate-empty policy across reloads
+    setWorkspaceIntentionallyEmpty(entry.key, true);
     // hiding an inactive settings split does not discard the shared in-memory draft
     setSettingsSplitOpen(entry.key, false);
     // inactive panes have already flushed on unmount
     if (entry.placeId !== undefined) { forgetOpenPanels(entry.placeId); saveCodeOpen(entry.placeId, false); }
+    // inactive local reviews must stay minimized when this workspace is revisited
+    if (entry.placeId !== undefined && reviewSessions[entry.placeId] !== undefined) updateReviewSession(entry.placeId, session => ({ ...session, minimized: true }));
     const selectedAgent = currentAgentOf(entry);
     // clear the unscoped note view without deleting its stored content
     if (entry.placeId === undefined && selectedAgent !== undefined) clearWorktreeNoteView(`agent:${selectedAgent.id}`);
@@ -10311,7 +10456,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const consoleClass = `console${davo.enabled && voiceOpen ? ' voice-visible' : ''}`;
   // preserve editor availability when no workspace can own a terminal yet
   if (items.length === 0) return withConfiguredButtons(<EditorConfiguredContext.Provider value={data.editor === true}><AdaptersContext.Provider value={data.adapters}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey="dashboard"><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<article className="agent-view cleanup-empty-view"><section className="log-shell"><div className="log inactive-log"><ResizableLogSplit withSettings empty={<div className="empty-workspace"><h2>No sessions</h2></div>} /></div></section>{tabBar}<WorkspaceToolbar cleanupControl={cleanupControl} />{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</article></main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></AdaptersContext.Provider></EditorConfiguredContext.Provider>);
-  return withConfiguredButtons(<AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><OpenAgentContext.Provider value={setActivateAgentId}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey={activeItemKey ?? 'dashboard'}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNewWorktree={openNewWorktreeFor(agent.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNewWorktree={openNewWorktreeFor(item.worktree.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></OpenAgentContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>);
+  return withConfiguredButtons(<AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><OpenAgentContext.Provider value={setActivateAgentId}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey={activeItemKey ?? 'dashboard'}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onCloseReview={worktreeId => { /* bulk close already owns the guard or deliberate-empty bypass */ minimizeReview(worktreeId, true); }} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNewWorktree={openNewWorktreeFor(agent.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNewWorktree={openNewWorktreeFor(item.worktree.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></OpenAgentContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>);
 }
 
 // coordinate console session and update lifecycle

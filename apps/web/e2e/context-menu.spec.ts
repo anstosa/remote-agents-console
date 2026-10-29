@@ -305,7 +305,12 @@ test('workspace actions target inactive tabs, restore splits and keep responsive
   await expect(page.locator('.log-output')).toBeVisible();
   await expect(toolbar.locator('.launch-minimized-count')).toHaveCount(0);
 
-  // the agent header minimizes too, and Launch restores it without launching
+  // retain a visible terminal while exercising the minimized agent launcher
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await toolbar.getByRole('button', { name: 'Open a terminal' }).click();
+  await page.getByRole('menu', { name: 'Open a terminal' }).getByRole('menuitem', { name: /build/u }).click();
+  await expect(page.locator('.terminal-pane[data-panel-key="%5"]')).toBeVisible();
+  // the agent header minimizes with a sibling, and launch restores it without launching
   await page.getByRole('button', { name: 'Minimize agent output' }).click();
   await expect(page.locator('.log-output')).toHaveCount(0);
   await expect(toolbar.locator('.launch-minimized-count')).toHaveText('1');
@@ -382,6 +387,7 @@ test('cancelling dirty Settings preflight leaves every close-all sibling mounted
   await expect(
     page.locator('.log-output, .terminal-pane, .note-pane, .browser-pane, .code-pane'),
   ).toHaveCount(5);
+  expect(await page.evaluate(key => localStorage.getItem(key), `rac.workspace-empty:place-${coraId}`)).toBeNull();
   expect(
     fixture.mutations.some(
       entry => entry.method === 'DELETE' || entry.path.endsWith('/deactivate'),

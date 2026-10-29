@@ -1848,7 +1848,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* reserve a thin countdown beneath timed notices without shifting their controls */
 .toast:has(.toast-timer-bar) { padding-bottom: .8rem; }
 .toast-timer-bar { position: absolute; right: .7rem; bottom: .2rem; left: .7rem; background: var(--toast-timer-color, var(--green)); pointer-events: none; }
-.note-deletion-toast, .toast-error { --toast-timer-color: var(--red); }
+/* opt-in timed operation errors retain the error countdown color */
+.note-deletion-toast, .toast-error, .operation-feedback.error { --toast-timer-color: var(--red); }
 /* wrap note names while keeping undo reachable on narrow screens */
 .note-deletion-toast { display: flex; align-items: center; gap: .65rem; min-width: 0; padding: .55rem .7rem; border: 1px solid color-mix(in srgb, var(--red) 65%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 90%, var(--red)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent); }
 .note-deletion-toast > div { display: grid; flex: 1; min-width: 0; gap: .2rem; overflow-wrap: anywhere; }

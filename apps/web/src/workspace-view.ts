@@ -18,6 +18,8 @@ export type WorkspaceView = {
   toggleExpand: (key: string) => void;
   renamePanel: (key: string) => boolean;
   closePanel: (key: string) => void;
+  // guard non-destructive minimization across panel entry points
+  minimizePanel: (key: string, minimize: () => void) => void;
   openTerminal: (binding?: { table: string; key: string }) => void;
   toggleCode?: () => void;
   toggleStack?: () => void;
@@ -27,6 +29,8 @@ export const pendingWorkspaceJumps = new Map<string, string>();
 const listeners = new Set<() => void>();
 let revision = 0;
 const preferences = new Map<string, string | null>();
+// retain close ordering even after an explicit restore clears empty intent
+const openGenerations = new Map<string, number>();
 
 // read optional client-local workspace preferences
 const read = (key: string): string | null => {
@@ -58,8 +62,24 @@ const subscribe = (listener: () => void) => {
 export const useWorkspaceViewRevision = () => useSyncExternalStore(subscribe, () => revision);
 // keep non-destructive agent minimization separate from process lifetime
 export const agentSplitHidden = (key: string) => read(`rac.hidden-agent:${key}`) === '1';
-// expose a minimized agent again without restarting it
-export const setAgentSplitHidden = (key: string, hidden: boolean) => write(`rac.hidden-agent:${key}`, hidden ? '1' : null);
+// capture close-all ordering before an asynchronous explicit open
+export const workspaceOpenGeneration = (key: string) => openGenerations.get(key) ?? 0;
+// distinguish deliberate empty layouts from accidental all-minimized state
+export const workspaceIntentionallyEmpty = (key: string) => read(`rac.workspace-empty:${key}`) !== null;
+// retain close-all intent only in this browser and workspace
+export const setWorkspaceIntentionallyEmpty = (key: string, empty: boolean) => {
+  // a completed close invalidates old opens without invalidating later explicit restores
+  if (empty) openGenerations.set(key, workspaceOpenGeneration(key) + 1);
+  write(`rac.workspace-empty:${key}`, empty ? '1' : null);
+};
+// a newer close-all wins over an open that was already in flight
+export const workspaceOpenStillCurrent = (key: string, generation: number) => workspaceOpenGeneration(key) === generation;
+// exposing an agent explicitly resumes the ordinary visibility policy
+export const setAgentSplitHidden = (key: string, hidden: boolean) => {
+  // restoring a split ends deliberate emptiness
+  if (!hidden && workspaceIntentionallyEmpty(key)) setWorkspaceIntentionallyEmpty(key, false);
+  write(`rac.hidden-agent:${key}`, hidden ? '1' : null);
+};
 // directory and scratch aliases are private to this browser
 export const workspaceAlias = (key: string) => read(`rac.workspace-name:${key}`);
 // clear an empty alias back to the discovered workspace name
