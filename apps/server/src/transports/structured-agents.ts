@@ -124,11 +124,12 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
 // What this console knows of one structured Agent's process while it drives it. `generation`
 // counts the processes it started for the Agent, `cursor` the lines read from the current one,
 // `prompt` is the latest Turn's prompt, and `offPin` is set while the process runs another
-// version than the pinned one, `synced` once it has reported its Conversation. `busy` while an operation (a delivery, a Conversation or model
+// version than the pinned one. `resyncing` from a reattach until the process has reported its
+// Conversation (after the replay) or ended a Turn: until then it may be working. `busy` while an operation (a delivery, a Conversation or model
 // change, a relaunch or reattach) is in flight. `turn` is how the latest
 // Turn ended; `draft` the text offered for the composer until the next prompt or steer, numbered
 // by `offers` so the web takes each one once
-type Live = { generation: number; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; synced?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
+type Live = { generation: number; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -238,7 +239,8 @@ export class StructuredAgents {
       Object.assign(live, { working: false, questions: [], steers: [], guarded: false, connection: undefined, stderr: undefined });
       live.status.clear();
       const started = await this.start(record, live, { id: record.id, kind: record.kind, place, ...(resume === undefined ? {} : { resume }) });
-      if (started === undefined) { record.lifecycle = 'exited'; record.reason = 'It could not be started again.'; await this.save(); this.changed(live); }
+      // one that did not start, or did not report in, stays Exited, so it can be resumed again
+      if (started === undefined || (record.lifecycle as AgentLifecycle) === 'failed') { record.lifecycle = 'exited'; record.reason ??= 'It could not be started again.'; await this.save(); this.changed(live); return false; }
       return started;
     } finally { live.busy = false; }
   }
@@ -275,6 +277,7 @@ export class StructuredAgents {
     await Promise.all((await this.load()).filter(record => record.holder !== undefined && !this.live.has(record.id)).map(async record => {
       const live = this.idle();
       this.live.set(record.id, live);
+      live.resyncing = record.lifecycle === 'live';
       if (record.lifecycle !== 'live') {
         if (record.lifecycle === 'starting') { record.lifecycle = 'exited'; await this.save(); }
         await this.readStderr(record, live);
@@ -294,7 +297,7 @@ export class StructuredAgents {
       }
       await this.adopt(record, live, attached);
       // its state may have arrived before it was adopted
-      if (live.synced === true) this.restartOffPin(record, live);
+      this.restartOffPin(record, live);
       // lines the holder could no longer replay may have held a question, which then waits unseen
       if ((attached.dropped ?? 0) > 0) this.notice(live, `The console missed ${attached.dropped} lines of this Agent's output while it restarted. If a question was asked then, it is waiting unseen: cancel the Turn if it does not finish.`, 'warning');
     }));
@@ -312,7 +315,7 @@ export class StructuredAgents {
 
   // restart an Agent whose process runs another version than the pin, once it is idle, on its Conversation
   private restartOffPin(record: StructuredRecord, live: Live): void {
-    if (live.offPin !== true || live.connection === undefined || live.working || live.busy || live.questions.length > 0) return;
+    if (live.offPin !== true || live.connection === undefined || live.resyncing === true || live.working || live.busy || live.questions.length > 0) return;
     live.offPin = false;
     void this.relaunch(record, live, record.conversationId).catch(error => { console.error(`[structured] ${record.id} could not restart on the pinned version:`, error); });
   }
@@ -337,7 +340,7 @@ export class StructuredAgents {
     const record = (await this.load()).find(candidate => candidate.id === id);
     if (record === undefined) return undefined;
     const live = this.live.get(id);
-    if (record.lifecycle !== 'live' || live?.connection === undefined || live.working || live.busy) return 'busy';
+    if (record.lifecycle !== 'live' || live?.connection === undefined || live.working || live.busy || live.resyncing === true) return 'busy';
     live.busy = true;
     live.queuedNext = queued;
     // the Turn this prompt starts settles afresh, and an offered draft is spent
@@ -427,10 +430,12 @@ export class StructuredAgents {
       const live = this.live.get(agent.id);
       return live?.working === true ? { type: 'started', mark: {} } : live?.turn;
     },
-    externalReset: async () => false,
+    // work the queue adopted while a reattached Agent resynced ended without a Turn: release it
+    externalReset: async id => { const live = this.live.get(id); return live !== undefined && !live.working && live.resyncing !== true; },
     // after a console restart, the answer to a prompt whose Turn settled once the console reattached
     recoverAnswer: async (id, entries) => {
       const live = this.live.get(id);
+      if (live?.resyncing === true) return 'pending';
       const entry = live?.turn?.type === 'settled' ? entries.find(candidate => candidate.answer === undefined && candidate.text === live.prompt) : undefined;
       return entry === undefined || live?.turn?.type !== 'settled' ? 'settled' : { entryId: entry.id, text: live.turn.message };
     },
@@ -520,7 +525,8 @@ export class StructuredAgents {
       const current = live?.model;
       const name = current === undefined ? undefined : live?.models?.find(model => model.id === current.model)?.name;
       const questions = (live?.questions ?? []).map(shaped);
-      const attention = questions.length > 0 ? 'question' : live?.working === true ? 'working' : 'finished';
+      // one resyncing after a reattach may be working: nothing takes it to have finished
+      const attention = questions.length > 0 ? 'question' : live?.working === true || live?.resyncing === true ? 'working' : 'finished';
       const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
       return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), structured: { lifecycle, ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }) } };
     });
@@ -581,7 +587,7 @@ export class StructuredAgents {
         if (record.conversationId !== undefined && record.conversationId !== event.id) live.notices = [];
         record.conversationId = event.id;
         live.conversationName = event.name;
-        live.synced = true;
+        live.resyncing = false;
         void this.save();
         this.restartOffPin(record, live);
         break;
@@ -597,7 +603,7 @@ export class StructuredAgents {
         break;
       case 'turn':
         live.working = event.turn.type === 'started';
-        if (event.turn.type !== 'started') { live.turn = event.turn; this.idlePoint(record, live); this.restartOffPin(record, live); }
+        if (event.turn.type !== 'started') { live.turn = event.turn; live.resyncing = false; this.idlePoint(record, live); this.restartOffPin(record, live); }
         break;
       case 'steers':
         live.steers = event.pending;

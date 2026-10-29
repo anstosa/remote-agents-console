@@ -45,6 +45,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
   let cancels = 0;
   let lines = 0;
   const attaches: HolderRef[] = [];
+  let reporting = reports;
   const connection = (): StructuredConnection => ({
     deliver: async prompt => { delivered.push(prompt); return dispositions.shift() ?? 'started'; },
     newConversation: async () => { operations.push('new'); if (refuses) return false; emit({ type: 'conversation', id: `new-${conversations += 1}` }); return true; },
@@ -69,7 +70,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
     start: async (launch, events) => {
       emit = events;
       launches.push(launch);
-      if (reports) queueMicrotask(() => emit({ type: 'report', report: { ...report, version } }));
+      if (reporting) queueMicrotask(() => emit({ type: 'report', report: { ...report, version } }));
       if (exits) setTimeout(() => emit({ type: 'exited' }), 10);
       return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9' }, connection: connection(), cursor: () => lines, raw: () => [{ from: 'agent' as const, line: '{"type":"agent_start"}' }] };
     },
@@ -84,7 +85,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
     stderr: async () => 'pi: could not load its extension',
     stop: async () => { closed = true; }
   };
-  return { processes, delivered, launches, attaches, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, emit: (event: StructuredEvent) => emit(event), closed: () => closed, read: (count: number) => { lines = count; } };
+  return { processes, delivered, launches, attaches, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, emit: (event: StructuredEvent) => emit(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
 }
 
 // a console with one Project whose only Worktree is a temporary folder, and the Scratch folder beside it
@@ -814,6 +815,8 @@ describe('a structured Agent across a console restart', () => {
     const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
     const next = fakeAgent({ dropped: 40 });
     const restarted = await restart(next);
+    // until its state says otherwise it may be working, so no Run takes it to have finished
+    expect(await restarted.dashboardAgent(id)).toMatchObject({ attention: 'working' });
     next.emit({ type: 'history', items: [{ id: 'h0', kind: 'message', role: 'user', text: 'Reply slowly' }] });
     const items = (await restarted.app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers: restarted.headers })).json().items;
     expect(items).toEqual([{ id: 'h0', kind: 'message', role: 'user', text: 'Reply slowly' }, expect.objectContaining({ kind: 'notice', tone: 'warning', text: expect.stringContaining('missed 40 lines') })]);
@@ -869,7 +872,7 @@ describe('a structured Agent across a console restart', () => {
     const { app, headers, restart } = await consoleWith(fake);
     const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
     let attached = () => {};
-    const next = fakeAgent({ attaching: new Promise<void>(resolve => { attached = resolve; }) });
+    const next = fakeAgent({ attaching: new Promise<void>(resolve => { attached = resolve; }), attached: [{ type: 'conversation', id: 'c1' }] });
     const restarted = await restart(next);
     expect(await restarted.dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'live' } });
     expect((await restarted.app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers: restarted.headers, payload: { prompt: 'Hello', attachments: [] } })).statusCode).toBe(204);
@@ -877,6 +880,13 @@ describe('a structured Agent across a console restart', () => {
     await restarted.reattached;
     await restarted.dashboardAgent(id);
     expect(next.launches).toEqual([]);
+    // the queue took the resync for work, which ended without a Turn: it lets go after the answer grace
+    expect(next.delivered).toEqual([]);
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 11_000 });
+    try {
+      await restarted.dashboardAgent(id);
+      await restarted.dashboardAgent(id);
+    } finally { vi.useRealTimers(); }
     expect(next.delivered).toEqual(['Hello']);
     await restarted.app.close();
   });
@@ -918,8 +928,8 @@ describe('an Exited structured Agent', () => {
   const conversation = '01a188d1-e7d9-711a-aba8-381b96066aa5';
   // a live Agent at the Scratch folder on a saved Pi Conversation, working on `First` with
   // `Second` and `Third` queued, whose process then exits
-  async function exited(fake: ReturnType<typeof fakeAgent>) {
-    const console = await consoleWith(fake);
+  async function exited(fake: ReturnType<typeof fakeAgent>, options: { reportTimeoutMs?: number } = {}) {
+    const console = await consoleWith(fake, options);
     vi.stubEnv('PI_CODING_AGENT_DIR', join(console.root, 'pi'));
     await piSession(join(console.root, 'pi'), console.root, conversation);
     const id: string = (await console.app.inject({ method: 'POST', url: '/api/agents/launch', headers: console.headers, payload: { kind: 'pi' } })).json().agentId;
@@ -1001,6 +1011,15 @@ describe('an Exited structured Agent', () => {
     expect(removed).toEqual([feat.id]);
     expect(fake.closed()).toBe(true);
     expect(await dashboardAgent(id)).toBeUndefined();
+    await app.close();
+  });
+
+  it('stays Exited, and can be resumed again, when a resume does not report in', async () => {
+    const fake = fakeAgent();
+    const { app, headers, dashboardAgent, id } = await exited(fake, { reportTimeoutMs: 50 });
+    fake.quiet();
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/resume`, headers })).statusCode).toBe(409);
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'exited' } });
     await app.close();
   });
 
