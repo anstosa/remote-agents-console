@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Agent } from '../domain/models.js';
 import type { PushMessage } from '../notifications.js';
-import { limitText } from '../orchestration/service.js';
+import { limitText, redactIntegrationText } from '../integrations/text.js';
 import type { PromptHistoryEntry } from '../prompt-history/service.js';
 import type { PromptSender, QueuedPrompt } from '../prompts/queue.js';
 import type { PromptDispatchHooks, PromptOutcome } from '../prompts/service.js';
@@ -54,9 +54,10 @@ export function reportText(record: Pick<DispatchRecord, 'promptId' | 'to'>, outc
 }
 
 /** The report a Conductor is queued once a review it started has ended (ADR 0018). */
-export function reviewReportText(agentId: string, worktreeId: string, outcome: { title: string } | { failed: string }): string {
-  return 'title' in outcome
-    ? `[RAC report] The review you started for Agent ${agentId} is ready: ${outcome.title}.\n\nRead it with get_review_status {"worktree_id": ${JSON.stringify(worktreeId)}}.`
+// (the review's title is a model's text about the Agent's code, so it is not quoted: the Conductor reads the review)
+export function reviewReportText(agentId: string, worktreeId: string, outcome: 'ready' | { failed: string }): string {
+  return outcome === 'ready'
+    ? `[RAC report] The review you started for Agent ${agentId} is ready.\n\nRead it with get_review_status {"worktree_id": ${JSON.stringify(worktreeId)}}.`
     : `[RAC report] The review you started for Agent ${agentId} failed (${outcome.failed}).`;
 }
 
@@ -87,8 +88,9 @@ export class Dispatches implements PromptDispatchHooks {
   private mutation = Promise.resolve();
   private flushing?: Promise<void>;
   private again = false;
-  private readonly selfStarted: number[] = [];
-  private throttled = false;
+  // per Agent: when each of its self-started Turns of the last hour went out, and whether it is throttled
+  private readonly selfStarted = new Map<string, number[]>();
+  private readonly throttled = new Set<string>();
   private readonly missingSince = new Map<string, number>();
   private readonly idleSince = new Map<string, number>();
 
@@ -102,10 +104,11 @@ export class Dispatches implements PromptDispatchHooks {
     const max = this.options.selfStartedPerHour;
     if (prompt.label === undefined || max === undefined) return true;
     const now = this.now();
-    this.selfStarted.splice(0, this.selfStarted.filter(at => now - at >= hourMs).length);
-    if (this.selfStarted.length < max) { this.throttled = false; return true; }
-    if (!this.throttled) {
-      this.throttled = true;
+    const started = (this.selfStarted.get(agentId) ?? []).filter(at => now - at < hourMs);
+    this.selfStarted.set(agentId, started);
+    if (started.length < max) { this.throttled.delete(agentId); return true; }
+    if (!this.throttled.has(agentId)) {
+      this.throttled.add(agentId);
       this.options.notify({ kind: 'conductor', title: 'The Conductor is throttled', body: `It started ${max} Turns of its own in the last hour. Its reports, events and Runs wait in its queue until the hour allows more.`, tag: 'conductor-throttled', url: `/#agent=${encodeURIComponent(agentId)}` });
     }
     return false;
@@ -120,8 +123,8 @@ export class Dispatches implements PromptDispatchHooks {
     });
   }
 
-  async delivered(_agentId: string, promptId: string, sender: PromptSender, entryId: string | undefined): Promise<void> {
-    if (sender.label !== undefined) this.selfStarted.push(this.now());
+  async delivered(agentId: string, promptId: string, sender: PromptSender, entryId: string | undefined): Promise<void> {
+    if (sender.label !== undefined) this.selfStarted.set(agentId, [...this.selfStarted.get(agentId) ?? [], this.now()]);
     if (sender.from === undefined) return;
     await this.mutate(records => {
       const record = records.find(candidate => candidate.promptId === promptId);
@@ -138,7 +141,8 @@ export class Dispatches implements PromptDispatchHooks {
       // the first end counts; one its sender withdrew is not reported
       if (record === undefined || record.ended !== undefined) return false;
       if (outcome === 'withdrawn') records.splice(index, 1);
-      else record.ended = { outcome, ...(answer === undefined ? {} : { answer: limitText(answer, keptAnswerBytes).text }) };
+      // credential-shaped text is redacted, as when the Conductor reads an answer itself
+      else record.ended = { outcome, ...(answer === undefined ? {} : { answer: limitText(redactIntegrationText(answer), keptAnswerBytes).text }) };
       return true;
     }).then(changed => { if (changed) void this.flush(); });
   }

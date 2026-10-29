@@ -130,12 +130,13 @@ export class PromptService {
   useDispatches(hooks: PromptDispatchHooks): void { this.dispatchHooks = hooks; }
 
   /**
-   * Whether the Turn an Agent last started came from another Agent or from the console, not the
-   * operator: a quiet Turn's end pushes nothing (ADR 0019).
+   * Whether the Turn an Agent last started is one the operator need not hear finish (ADR 0019):
+   * one the console started on its behalf, or one the Conductor that spawned it dispatched. A Turn
+   * the Conductor dispatched to the operator's own Agent still pushes.
    */
-  quiet(agentId: string): boolean {
-    const sender = this.senders.get(agentId);
-    return sender?.from !== undefined || sender?.label !== undefined;
+  quiet(agent: Pick<Agent, 'id' | 'structured'>): boolean {
+    const sender = this.senders.get(agent.id);
+    return sender?.label !== undefined || sender?.from !== undefined && sender.from === agent.structured?.spawnedBy;
   }
 
   /** The queued prompt whose Turn the Agent is on now, and who sent it. */

@@ -99,13 +99,15 @@ const outputTail = (value: string): string => {
   return bytes.length <= maxStackLogBytes ? value : bytes.subarray(bytes.length - maxStackLogBytes).toString('utf8');
 };
 
-// read only the newest bounded log output, never through a link
+// read only the newest bounded log output, never through a link, and only from a regular file
+// (a FIFO is opened without blocking, then refused)
 const readLogTail = async (path: string): Promise<string> => {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => undefined);
   // tolerate commands that have not written output yet
   if (file === undefined) return '';
   try {
     const details = await file.stat();
+    if (!details.isFile()) return '';
     const length = Math.min(details.size, maxStackLogBytes);
     // return an empty file directly
     if (length === 0) return '';

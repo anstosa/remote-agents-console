@@ -26,6 +26,7 @@ import { launchTmuxAgent, TmuxTransport } from './transports/tmux.js';
 import { consoleTokenPrefix, holderProcesses, StructuredAgents } from './transports/structured-agents.js';
 import { Conductor } from './conductor/service.js';
 import { Dispatches, reviewReportText } from './conductor/dispatches.js';
+import { redactIntegrationText } from './integrations/text.js';
 import { promptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, validPromptAttachments } from './prompts/validation.js';
 import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin } from './prompts/queue.js';
 import { LaunchService, type TmuxSession } from './launch/service.js';
@@ -516,7 +517,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await prompts.retireDeparted(discovered.agents.map(agent => agent.id)).catch(() => undefined);
     await dispatches.sweep(discovered.agents).catch(() => undefined);
     // suppress completions while more work waits
-    for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered), prompts.quiet?.(agent.id));
+    for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered), prompts.quiet?.(agent));
     notifications.retain(discovered.agents);
     const worktrees = discovery.worktreesNow();
     const controls = new Map(await Promise.all(worktrees.map(async worktree => [worktree.id, { actions: stackCommands.actions(worktree), ...await stackCommands.state(worktree, paneSnapshots) }] as const)));
@@ -542,7 +543,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const discovered = await discovery.dashboard();
     const queuedCounts = await queuedPromptCounts(discovered.agents);
     // update completion and question state for every agent
-    for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered), prompts.quiet?.(agent.id));
+    for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered), prompts.quiet?.(agent));
     notifications.retain(discovered.agents);
     return instanceAttention({ agents: discovered.agents.map(agent => ({ ...agent, unread: notifications.isUnread(agent) })) });
   };
@@ -588,7 +589,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         const started = await reviewJobs.start('integration-gateway', agentId, input);
         if (conductor !== undefined && started.kind === 'pending') reviewJobs.watch(started.job.id, state => {
           const worktreeId = reviewJobs.get('integration-gateway', started.job.id)?.worktreeId ?? '';
-          const text = reviewReportText(agentId, worktreeId, state.kind === 'ready' ? { title: state.tour.title } : { failed: 'code' in state ? state.code : state.kind });
+          const text = reviewReportText(agentId, worktreeId, state.kind === 'ready' ? 'ready' : { failed: 'code' in state ? state.code : state.kind });
           void prompts.submitFrom(conductor, text, { label: 'report' }).catch(() => undefined);
         });
         return started;
@@ -2715,7 +2716,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (conductorId === undefined) return { status: 'skipped', detail: 'the Conductor is not running' };
     if ((note.attachments ?? []).length > 0) return { status: 'skipped', detail: 'a Note with attachments cannot be queued to the Conductor' };
     if (!validPrompt(note.text, [])) return { status: 'skipped', detail: 'note is empty' };
-    const text = `[RAC run] Scheduled Note ${JSON.stringify(note.title ?? 'Untitled note')} (${note.id})\n\n${note.text}`;
+    const text = `[RAC run] Scheduled Note ${JSON.stringify(note.title ?? 'Untitled note')} (${note.id})\n\n${redactIntegrationText(note.text)}`;
     const queued = await prompts.submitFrom(conductorId, text, { label: 'run' });
     await dashboardUpdates.refresh().catch(() => undefined);
     return queued === undefined ? { status: 'failed', reason: 'delivery-failed', detail: 'the note could not be queued to the Conductor', agentId: conductorId } : { status: 'delivered', agentId: conductorId };

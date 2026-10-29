@@ -14,6 +14,7 @@ import type { WorktreeNoteService } from '../notes/service.js';
 import type { Schedule } from '../schedule/types.js';
 import type { WorkspaceFileService, WorkspaceFilePreview } from '../workspace-files/service.js';
 import { configuredWorktreeForWorkspace, projectIdOf, worktreeById } from '../workspaces/resolver.js';
+import { limitText, redactIntegrationText } from '../integrations/text.js';
 import { processActions, type StackState, type WorktreeCommandService } from '../worktree-commands/service.js';
 import type {
   AgentStatusV1,
@@ -106,8 +107,6 @@ type NoteFacade = {
 /** Which Places a principal may act on, by the Worktree (or Place) id and its Project. */
 export type PlaceScope = (place: { id: string; projectId: string }) => boolean;
 
-type TextLimit = { text: string; truncated: boolean };
-
 const safeHiddenPaths = new Set(['.dockerignore', '.editorconfig', '.gitattributes', '.github', '.gitignore']);
 const sensitiveFileNames = new Set(['.npmrc', '.netrc', '.pypirc', 'auth.json', 'credentials', 'credentials.json', 'id_ed25519', 'id_rsa', 'integration-auth.json', 'integration-state.json', 'secrets.json']);
 const sensitiveExtensions = new Set(['.cer', '.crt', '.jks', '.key', '.keystore', '.p12', '.pem', '.pfx']);
@@ -129,18 +128,8 @@ function validIdentifier(value: string): boolean {
 
 // reject prompt payloads that can enter PromptService shell mode
 function validIntegrationPrompt(value: string): boolean {
-  return validPrompt(value) && Buffer.byteLength(value) <= maxIntegrationPromptBytes && !/^\s*!/u.test(value);
-}
-
-// limit UTF-8 output without splitting a code point
-export function limitText(value: string, maxBytes: number): TextLimit {
-  const serialized = Buffer.from(value);
-  // retain complete bounded values
-  if (serialized.byteLength <= maxBytes) return { text: value, truncated: false };
-  let end = maxBytes;
-  // remove a partial trailing sequence
-  while (end > 0 && (serialized[end] & 0xc0) === 0x80) end -= 1;
-  return { text: serialized.subarray(0, end).toString('utf8'), truncated: true };
+  // nor pass for one of the console's own labelled prompts (a report, an event, a Run)
+  return validPrompt(value) && Buffer.byteLength(value) <= maxIntegrationPromptBytes && !/^\s*!/u.test(value) && !/^\[RAC (?:report|event|run)\]/u.test(value);
 }
 
 // reject hidden and credential-bearing integration paths
@@ -157,18 +146,6 @@ function safeIntegrationPath(value: string): boolean {
   // reject deployment-specific private configuration
   if (/^remote-agent-console\.(?!example\.json$).+\.json$/u.test(basename)) return false;
   return true;
-}
-
-// redact credential-shaped values from untrusted text
-function redactIntegrationText(value: string): string {
-  return value
-    .replace(/-----BEGIN [^-\r\n]+-----[\s\S]*?-----END [^-\r\n]+-----/gu, '[REDACTED PRIVATE KEY]')
-    .replace(/(^|\n)([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL|AUTH)[A-Z0-9_]*)\s*=\s*[^\r\n]*/giu, '$1$2=[REDACTED]')
-    .replace(/(^|\n)(\s*[A-Z0-9_.-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|AUTH)[A-Z0-9_.-]*\s*:\s*)[^\r\n]*/giu, '$1$2[REDACTED]')
-    .replace(/("[^"\r\n]*(?:secret|token|password|api[_-]?key|authorization|cookie)[^"\r\n]*"\s*:\s*)"[^"\r\n]*"/giu, '$1"[REDACTED]"')
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]{8,}=?/giu, 'Bearer [REDACTED]')
-    .replace(/\b(?:sk-(?:proj-)?|sk_|ghp_|github_pat_|xox[baprs]_)[A-Za-z0-9_-]{8,}\b/gu, '[REDACTED TOKEN]')
-    .replace(/([?&](?:access_?token|api_?key|auth|password)=)[^&#\s]+/giu, '$1[REDACTED]');
 }
 
 // copy a file preview through the caller's byte boundary

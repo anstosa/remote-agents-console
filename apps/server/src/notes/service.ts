@@ -161,6 +161,7 @@ export class WorktreeNoteService {
       if (totalAttachmentBytes(stored) - previousBytes + nextBytes > this.attachmentStorageLimit) return 'invalid';
       // enforce the serialized attachment footprint budget
       if (totalAttachmentFootprint(stored) - promptAttachmentsStorageFootprint(note.attachments ?? []) + promptAttachmentsStorageFootprint(combined) > this.attachmentFootprintLimit) return 'invalid';
+      this.claim(note, 'operator');
       note.attachments = combined;
       return { ...note };
     });
@@ -177,6 +178,7 @@ export class WorktreeNoteService {
       if (note === undefined || note.attachments === undefined) return undefined;
       const next = note.attachments.filter(attachment => attachment.name !== normalizedName);
       if (next.length === note.attachments.length) return undefined;
+      this.claim(note, 'operator');
       // omit empty attachment arrays
       if (next.length === 0) delete note.attachments;
       else note.attachments = next;
@@ -184,7 +186,8 @@ export class WorktreeNoteService {
     });
   }
 
-  // Whether `by` may change the note: the Conductor only its own. The operator's change makes it the operator's.
+  // Whether `by` may change the note: the Conductor only its own. Any change of the operator's
+  // (text, title, attachments, lock, visibility, Schedule) makes it the operator's.
   private claim(note: WorktreeNote, by: NoteAuthor): boolean {
     if (by === 'conductor') return note.source === 'conductor';
     if (note.source === 'conductor') delete note.source;
@@ -226,6 +229,7 @@ export class WorktreeNoteService {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
       // require an existing note
       if (note === undefined) return undefined;
+      this.claim(note, 'operator');
       // omit the false default for legacy-compatible storage
       if (locked) note.locked = true;
       else delete note.locked;
@@ -300,6 +304,7 @@ export class WorktreeNoteService {
       const resolved = this.visibleNote(stored, worktreeId, noteId);
       // hide notes outside the requesting scope
       if (resolved === undefined) return undefined;
+      this.claim(resolved.note, 'operator');
       // omit the false default for legacy-compatible storage
       if (allWorkspaces) resolved.note.allWorkspaces = true;
       else delete resolved.note.allWorkspaces;

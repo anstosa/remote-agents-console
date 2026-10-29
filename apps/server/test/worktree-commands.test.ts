@@ -1746,6 +1746,11 @@ describe('Stack process log file', () => {
     const webLog = agentPath(main, 'web');
     await symlink(join(main, 'secret.txt'), webLog);
     await expect(commands.processLog(cora.id, 'web')).resolves.toEqual({ name: 'web', path: webLog, output: '' });
+    // nor one swapped for a FIFO, which would block the read forever
+    const devLog = agentPath(main, 'dev');
+    await unlinkFile(devLog);
+    execFileSync('mkfifo', [devLog]);
+    await expect(commands.processLog(cora.id, 'dev')).resolves.toEqual({ name: 'dev', path: devLog, output: '' });
   });
 
   it("pipes a new process window into a fresh log in the Main worktree's git directory before its command runs", async () => {
