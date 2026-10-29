@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +10,7 @@ import { LaunchService } from '../src/launch/service.js';
 import { adhocScratchPlace } from '../src/places/places.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { run } from '../src/tmux/command.js';
+import { interactiveShellName } from '../src/tmux/interactive-shell.js';
 import { holderProcesses } from '../src/transports/structured-agents.js';
 import type { StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
 import type { SocketRef } from '../src/domain/models.js';
@@ -37,6 +38,8 @@ const clients: ContractClient[] = [{
 }];
 
 const tmux = execFileSync('/bin/sh', ['-c', 'command -v tmux || true'], { encoding: 'utf8' }).trim();
+// the window's login shell, as the console-shell suite resolves it (the default /usr/bin/zsh may not exist)
+const loginShell = [process.env.RAC_INTERACTIVE_SHELL?.trim(), process.env.SHELL?.trim(), '/usr/bin/zsh', '/bin/bash'].find((path): path is string => path !== undefined && ['zsh', 'bash', 'fish'].includes(interactiveShellName(path)) && existsSync(path));
 const tmuxSocketsWork = (() => {
   if (tmux === '' || process.platform !== 'linux') return false;
   let dir = '';
@@ -90,8 +93,8 @@ async function launched(client: ContractClient): Promise<{ connection: Structure
   return { connection: started!.connection, events, next };
 }
 
-describe.skipIf(!tmuxSocketsWork).each(clients)('the $name protocol client', client => {
-  beforeAll(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); });
+describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the $name protocol client', client => {
+  beforeAll(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); vi.stubEnv('RAC_INTERACTIVE_SHELL', loginShell!); });
   afterAll(() => { vi.unstubAllEnvs(); });
   it('reports in once launched, unsandboxed, on its pinned version', async () => {
     const { next } = await launched(client);

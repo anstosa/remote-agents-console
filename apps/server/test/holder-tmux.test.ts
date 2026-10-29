@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import { DiscoveryService } from '../src/discovery/service.js';
 import { LaunchService } from '../src/launch/service.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { run } from '../src/tmux/command.js';
+import { interactiveShellName } from '../src/tmux/interactive-shell.js';
 import { connectHolder, type LineChannel } from '../src/transports/structured.js';
 import type { SocketRef } from '../src/domain/models.js';
 import { adhocScratchPlace } from '../src/places/places.js';
@@ -21,6 +22,8 @@ import { testConfig } from './helpers/config.js';
 // on the host and in CI.
 
 const tmux = execFileSync('/bin/sh', ['-c', 'command -v tmux || true'], { encoding: 'utf8' }).trim();
+// the window's login shell, as the console-shell suite resolves it (the default /usr/bin/zsh may not exist)
+const loginShell = [process.env.RAC_INTERACTIVE_SHELL?.trim(), process.env.SHELL?.trim(), '/usr/bin/zsh', '/bin/bash'].find((path): path is string => path !== undefined && ['zsh', 'bash', 'fish'].includes(interactiveShellName(path)) && existsSync(path));
 const tmuxSocketsWork = (() => {
   if (tmux === '' || process.platform !== 'linux') return false;
   let dir = '';
@@ -81,8 +84,8 @@ async function connect(socket: string, from = 0): Promise<{ channel: LineChannel
   return { channel: connected!.channel, lines, dropped: connected!.hello.dropped, closed };
 }
 
-describe.skipIf(!tmuxSocketsWork)('the holder in a Workspace session', () => {
-  beforeAll(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); });
+describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('the holder in a Workspace session', () => {
+  beforeAll(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); vi.stubEnv('RAC_INTERACTIVE_SHELL', loginShell!); });
   afterAll(() => { vi.unstubAllEnvs(); });
   it('passes lines through both ways and replays every line past the cursor a connection brings', async () => {
     const { place, launch } = await workspace();
