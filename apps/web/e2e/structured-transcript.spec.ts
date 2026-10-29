@@ -2,10 +2,11 @@ import { expect, test, type Page } from '@playwright/test';
 
 // A structured (Pi) Agent's transcript Panel, variant D: one group per prompt, one line per tool call.
 
-type Transcript = { items: unknown[]; earlier?: number; status?: { extension: string[]; cost?: number; contextPercent?: number } };
+type Transcript = { items: unknown[]; earlier?: number; status?: { extension: string[]; cost?: number; contextPercent?: number }; stderr?: string };
 
 // stub a console whose one Worktree runs a Pi Agent, serving `transcript` and each item in `full`
-async function mockPi(page: Page, transcript: Transcript, { attention = 'finished', full = {} }: { attention?: 'working' | 'finished'; full?: Record<string, unknown> } = {}) {
+// (`lifecycle` the Agent's process state; `resumed` hears each Resume)
+async function mockPi(page: Page, transcript: Transcript, { attention = 'finished', full = {}, lifecycle = 'live', resumed = () => {} }: { attention?: 'working' | 'finished'; full?: Record<string, unknown>; lifecycle?: 'live' | 'exited'; resumed?: () => void } = {}) {
   const requested: string[] = [];
   await page.route('**/api/**', route => {
     const request = route.request();
@@ -13,7 +14,7 @@ async function mockPi(page: Page, transcript: Transcript, { attention = 'finishe
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') {
       const worktree = { id: 'cora', projectId: 'app', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'cora', available: true, pinned: true, order: 0 };
-      const agent = { id: 'agent-1', transport: 'structured', panel: 'transcript', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: '', branch: 'cora', kind: 'pi', attention, structured: { lifecycle: 'live', revision: 4 }, queuedPromptCount: 0 };
+      const agent = { id: 'agent-1', transport: 'structured', panel: 'transcript', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: '', branch: 'cora', kind: 'pi', attention, structured: { lifecycle, revision: 4 }, queuedPromptCount: 0 };
       return route.fulfill({ json: { generation: 1, agents: [agent], projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] } });
     }
     if (url.pathname === '/api/agents/agent-1/transcript') {
@@ -22,6 +23,9 @@ async function mockPi(page: Page, transcript: Transcript, { attention = 'finishe
       if (item !== null) return full[item] === undefined ? route.fulfill({ status: 404, json: { error: 'transcript item unavailable' } }) : route.fulfill({ json: { item: full[item] } });
       return route.fulfill({ json: { earlier: 0, status: { extension: [] }, ...transcript } });
     }
+    if (url.pathname === '/api/agents/agent-1/raw-events') return route.fulfill({ json: { lines: [{ from: 'console', line: '{"type":"prompt","message":"Hi"}' }, { from: 'agent', line: '{"type":"agent_start"}' }] } });
+    if (url.pathname === '/api/agents/agent-1/holder-window') return route.fulfill({ json: { pane: '%12', text: 'pi: out of memory\n[holder] node exited with status 1' } });
+    if (url.pathname === '/api/agents/agent-1/resume' && request.method() === 'POST') { resumed(); return route.fulfill({ status: 204 }); }
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
@@ -186,4 +190,35 @@ test('on a wide screen the transcript keeps a reading width', async ({ page }) =
   const width = (await log(page).locator('.transcript-group').boundingBox())!.width;
   const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize));
   expect(width).toBeLessThanOrEqual(52 * rem);
+});
+
+test('⋮ offers Raw events and Open holder window, each in a dialog', async ({ page }) => {
+  await mockPi(page, { items: [{ id: 'm1', kind: 'message', role: 'user', text: 'Hi' }] });
+  await page.goto('/');
+  const more = page.locator('.log-split > .log-output').getByRole('button', { name: 'More agent output actions' });
+  await more.click();
+  await page.getByRole('button', { name: 'Raw events' }).click();
+  const raw = page.getByRole('dialog', { name: 'Raw events' });
+  await expect(raw.locator('pre')).toHaveText('→ {"type":"prompt","message":"Hi"}\n← {"type":"agent_start"}');
+  await raw.getByRole('button', { name: 'Close Raw events' }).click();
+  await expect(raw).toHaveCount(0);
+
+  await more.click();
+  await page.getByRole('button', { name: 'Open holder window' }).click();
+  await expect(page.getByRole('dialog', { name: 'Holder window · tmux pane %12' }).locator('pre')).toContainText('pi: out of memory');
+});
+
+test('an Exited Agent shows its stderr tail with Resume, Open holder window and Close in place of the composer', async ({ page }) => {
+  let resumes = 0;
+  await mockPi(page, { items: [{ id: 'm1', kind: 'message', role: 'user', text: 'Run it' }, { id: 'e1', kind: 'settled', outcome: 'failed' }], stderr: 'pi: out of memory' }, { lifecycle: 'exited', resumed: () => { resumes += 1; } });
+  await page.goto('/');
+  const panel = page.locator('.log-split > .log-output');
+  const exited = panel.locator('.transcript-exited');
+  await expect(exited.getByLabel('Standard error')).toHaveText('pi: out of memory');
+  await expect(panel.getByRole('textbox')).toHaveCount(0);
+  await expect(exited.getByRole('button')).toHaveText(['Resume', 'Open holder window', 'Close']);
+  await exited.getByRole('button', { name: 'Resume' }).click();
+  await expect.poll(() => resumes).toBe(1);
+  await exited.getByRole('button', { name: 'Open holder window' }).click();
+  await expect(page.getByRole('dialog', { name: 'Holder window · tmux pane %12' })).toBeVisible();
 });

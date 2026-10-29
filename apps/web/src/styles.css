@@ -400,6 +400,12 @@ button.model-chip:hover, button.model-chip.active { border-color: var(--lavender
 .transcript-status, .transcript-failure { margin: 0 auto; padding: .5rem 1rem; width: 100%; max-width: 52rem; box-sizing: border-box; color: var(--subtext-0); }
 .transcript-failure { color: var(--red); }
 .transcript-failure pre { max-height: 40vh; overflow: auto; color: var(--text); font-family: var(--font-mono); white-space: pre-wrap; }
+.transcript-exited { display: grid; gap: .5rem; padding: .6rem .75rem; border-top: 1px solid var(--surface-0); background: var(--mantle); color: var(--subtext-0); font-size: .78rem; }
+.transcript-exited p { margin: 0; }
+.transcript-exited pre { max-height: 30vh; margin: 0; overflow: auto; color: var(--red); font: .72rem/1.45 var(--font-mono); white-space: pre-wrap; }
+.transcript-exited-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.transcript-exited-actions button { min-height: 2.25rem; }
+.agent-debug-dialog pre { padding: .8rem 1rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 .log-output.agent-panel::after { content: none; }
 .agent-panel .agent-panel-title { flex: 0 1 auto; min-width: 0; overflow: hidden; padding: 0 .2rem; color: var(--text); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 /* the Agent switcher: the title as a button, with the Place's Agent count and an "another Agent

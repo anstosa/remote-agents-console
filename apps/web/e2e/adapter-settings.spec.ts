@@ -5,7 +5,7 @@ type SettingsPatch = { op: string; path: string[]; value?: unknown };
 type SettingsSave = { changes: Array<{ sourceId: string; revisionId: string; patches?: SettingsPatch[] }> };
 
 // stub a controlled console whose dashboard carries the given adapter capabilities
-async function openSettings(page: import('@playwright/test').Page, adapters: unknown, options: { defaultAgent?: string; davo?: VoiceSettings; onDefaultAgent?: (kind: string) => void; onDavo?: (settings: Omit<VoiceSettings, 'available'>) => void; onSettingsSave?: (settings: SettingsSave) => void; agentUpdates?: Array<{ kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string }>; onAgentUpdate?: (kind: string) => { kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string }; emptyWorkspace?: boolean; open?: boolean } = {}) {
+async function openSettings(page: import('@playwright/test').Page, adapters: unknown, options: { defaultAgent?: string; davo?: VoiceSettings; onDefaultAgent?: (kind: string) => void; onDavo?: (settings: Omit<VoiceSettings, 'available'>) => void; onSettingsSave?: (settings: SettingsSave) => void; agentUpdates?: Array<{ kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string; pinned?: true }>; onAgentUpdate?: (kind: string) => { kind: string; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string }; emptyWorkspace?: boolean; open?: boolean } = {}) {
   let davo = options.davo ?? { enabled: false, available: true, name: 'Davo', context: 'Existing Davo persona.' };
   let settingsRevision = 1;
   let agentUpdates = options.agentUpdates ?? [];
@@ -139,6 +139,17 @@ async function startRunningCodexUpdate(page: Page) {
   await expect(toolbar.getByRole('button', { name: /Choose agent — update in progress$/u })).toBeVisible();
   return { toolbar, ring: toolbar.locator('.update-progress-ring') };
 }
+
+test('lists the pinned Pi with its published version and offers no update for it', async ({ page }) => {
+  await openSettings(page, {
+    codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
+    pi: { program: '/usr/bin/node', launchable: true, stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: false, sandbox: false }
+  }, { open: false, agentUpdates: [{ kind: 'pi', currentVersion: '1.4.0', latestVersion: '1.5.0', updateAvailable: true, pinned: true }] });
+  const menu = await openAgentMenu(page);
+  const pi = menu.getByRole('group', { name: 'Pi agent' });
+  await expect(pi.locator('.launch-row')).toContainText('v1.4.0 → v1.5.0');
+  await expect(pi.getByRole('menuitem', { name: /^Update Pi/u })).toHaveCount(0);
+});
 
 test('moves Codex accounts from settings into the launcher submenu', async ({ page }) => {
   const settingsPage = await openSettings(page, {

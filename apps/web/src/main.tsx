@@ -1014,7 +1014,8 @@ const isAgentUpdateStatus = (value: unknown): value is AgentUpdateStatus => valu
   && ((value as AgentUpdateStatus).currentVersion === undefined || typeof (value as AgentUpdateStatus).currentVersion === 'string')
   && ((value as AgentUpdateStatus).latestVersion === undefined || typeof (value as AgentUpdateStatus).latestVersion === 'string')
   && typeof (value as AgentUpdateStatus).updateAvailable === 'boolean'
-  && ((value as AgentUpdateStatus).error === undefined || typeof (value as AgentUpdateStatus).error === 'string');
+  && ((value as AgentUpdateStatus).error === undefined || typeof (value as AgentUpdateStatus).error === 'string')
+  && ((value as AgentUpdateStatus).pinned === undefined || (value as AgentUpdateStatus).pinned === true);
 // validate one background update without trusting its terminal payload
 const isAgentUpdateJob = (value: unknown): value is AgentUpdateJob => {
   // require an object before reading the job envelope
@@ -1075,7 +1076,7 @@ const announceAgentUpdates = (statuses: AgentUpdateStatus[]) => {
     // suppress repeat polling alerts
     if (announcedAgentUpdates.get(status.kind) === fingerprint) continue;
     announcedAgentUpdates.set(status.kind, fingerprint);
-    void showNotification('system', `${agentKindLabel[status.kind]} update available`, `${current} -> ${latest}`, `agent-update-${status.kind}`, '/#launch');
+    void showNotification('system', `${agentKindLabel[status.kind]} update available`, status.pinned === true ? `${current} -> ${latest}: the console pins this version, so it updates with the console` : `${current} -> ${latest}`, `agent-update-${status.kind}`, '/#launch');
   }
 };
 // validate one bounded upstream commit
@@ -7741,6 +7742,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const [deactivating, setDeactivating] = useState(false);
   const [question, setQuestion] = useState<ChoiceQuestion>();
   const [showThinking, setShowThinking] = useState(false);
+  const [debugView, setDebugView] = useState<AgentDebugView>();
   const startingNewTask = usePendingOperation(newTaskOperationKey(agent.worktreeId ?? agent.id));
   const reportMetadata = useCallback((message: string | undefined, overflows: boolean) => onMetadata(agent.id, message, overflows), [onMetadata, agent.id]);
   useEffect(() => {
@@ -7919,9 +7921,15 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   };
   // a transcript Agent has no pane to stream: its Panel shows its transcript
   if (agent.panel === 'transcript') {
-    const thinkingToggle = () => <button type="button" className="panel-header-action panel-header-row" aria-pressed={showThinking} onClick={() => setShowThinking(value => !value)}><span>Show thinking</span></button>;
+    const menu = () => <>
+      <button type="button" className="panel-header-action panel-header-row" aria-pressed={showThinking} onClick={() => setShowThinking(value => !value)}><span>Show thinking</span></button>
+      <button type="button" className="panel-header-action panel-header-row" onClick={() => setDebugView('raw')}><span>Raw events</span></button>
+      <button type="button" className="panel-header-action panel-header-row" onClick={() => setDebugView('holder')}><span>Open holder window</span></button>
+    </>;
     const openDiff = agent.worktreeId === undefined ? undefined : (path: string) => workspace.code.openChanges('working', path.startsWith(`${agent.home}/`) ? path.slice(agent.home.length + 1) : path);
-    return <AgentPanelFrame header={header('Live', thinkingToggle)} composer={composer} onTurnOff={turnOff}><Transcript agent={agent} showThinking={showThinking} onOpenDiff={openDiff} /></AgentPanelFrame>;
+    // an Exited Agent's stderr and its recovery replace the composer
+    const exited = agent.structured?.lifecycle === 'exited' ? <ExitedAgent agent={agent} onOpenHolder={() => setDebugView('holder')} onClose={turnOff} onOperationFeedback={onOperationFeedback} /> : undefined;
+    return <AgentPanelFrame header={header('Live', menu)} composer={exited ?? composer} onTurnOff={turnOff}><Transcript agent={agent} showThinking={showThinking} onOpenDiff={openDiff} />{debugView !== undefined && <AgentDebugDialog agentId={agent.id} view={debugView} onClose={() => setDebugView(undefined)} />}</AgentPanelFrame>;
   }
   // keep codex transcript shortcuts limited to codex and omx agent panels
   return <Log id={agent.id} onTurnOff={turnOff} codexScrollControls={agent.kind === undefined || agent.kind === 'codex' || agent.kind === 'omx'} onQuestion={setQuestion} onMetadata={reportMetadata} onAddToPrompt={onAddToPrompt} header={header} composer={composer} notes={workspace.notes} onOpenUrl={onOpenUrl} onOpenFile={onOpenFile} processingLabel={startingNewTask ? 'Starting new task…' : undefined} processingDetail={startingNewTask ? 'Closing this session and preparing a fresh agent. This can take a few seconds.' : undefined} />;
@@ -8122,7 +8130,6 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
         </section>;
       })}
       {state?.lifecycle === 'starting' && <p className="transcript-status">Starting…</p>}
-      {state?.lifecycle === 'exited' && <p className="transcript-status">The agent’s process has exited.</p>}
       {state?.lifecycle === 'failed' && <div className="transcript-failure" role="alert"><p>{state.reason ?? 'The agent failed to start.'}</p>{current?.stderr !== undefined && current.stderr !== '' && <pre>{current.stderr}</pre>}</div>}
     </div>
     {showStatus && <div className="transcript-statusline" role="status" aria-label="Status line">
@@ -8131,6 +8138,63 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
       {status.cost !== undefined && <span>{transcriptCost(status.cost)}</span>}
     </div>}
   </div>;
+}
+
+// What an Exited Agent shows in place of its composer: its process's stderr tail, read from its
+// holder window, and Resume (on its Conversation, keeping its queue), Open holder window and Close
+function ExitedAgent({ agent, onOpenHolder, onClose, onOperationFeedback }: { agent: Agent; onOpenHolder: () => void; onClose: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+  const [stderr, setStderr] = useState<string>();
+  const [resuming, setResuming] = useState(false);
+  const revision = agent.structured?.revision;
+  useEffect(() => {
+    let cancelled = false;
+    void request(`/api/agents/${encodeURIComponent(agent.id)}/transcript?limit=1`).then(response => response.ok ? response.json() : undefined).then((payload: { stderr?: unknown } | undefined) => {
+      if (!cancelled) setStderr(typeof payload?.stderr === 'string' ? payload.stderr : undefined);
+    }).catch(() => { /* the next revision reads it again */ });
+    return () => { cancelled = true; };
+  }, [agent.id, revision]);
+  const resume = async () => {
+    if (resuming) return;
+    setResuming(true);
+    try {
+      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}/resume`, emptyJsonMutation('POST'));
+      if (!response.ok) onOperationFeedback({ tone: 'error', message: 'The agent could not resume', detail: await launchError(response), worktreeId: agent.worktreeId });
+    } catch { onOperationFeedback({ tone: 'error', message: 'The agent could not resume', detail: 'The console could not be reached.', worktreeId: agent.worktreeId }); }
+    finally { setResuming(false); }
+  };
+  return <div className="transcript-exited" role="alert">
+    <p>The agent’s process exited. Its queue waits for it to resume; a prompt sent now resumes it too.</p>
+    {stderr !== undefined && stderr !== '' && <pre aria-label="Standard error">{stderr}</pre>}
+    <div className="transcript-exited-actions">
+      <button type="button" className={progressBorder(resuming, 'blue')} aria-busy={resuming || undefined} disabled={resuming} onClick={() => void resume()}><ProgressRing busy={resuming} />{resuming ? 'Resuming…' : 'Resume'}</button>
+      <button type="button" onClick={onOpenHolder}>Open holder window</button>
+      <button type="button" onClick={onClose}>Close</button>
+    </div>
+  </div>;
+}
+
+// a structured Agent's debugging views: its Raw events, or what its holder window shows
+type AgentDebugView = 'raw' | 'holder';
+function AgentDebugDialog({ agentId, view, onClose }: { agentId: string; view: AgentDebugView; onClose: () => void }) {
+  const [content, setContent] = useState<{ title: string; text: string }>();
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    const url = `/api/agents/${encodeURIComponent(agentId)}/${view === 'raw' ? 'raw-events' : 'holder-window'}`;
+    void request(url).then(response => response.ok ? response.json() : undefined).then((payload: { lines?: Array<{ from: string; line: string }>; pane?: string; text?: string } | undefined) => {
+      if (cancelled) return;
+      if (payload === undefined) { setFailed(true); return; }
+      setContent(view === 'raw'
+        ? { title: 'Raw events', text: (payload.lines ?? []).map(line => `${line.from === 'agent' ? '←' : '→'} ${line.line}`).join('\n') || 'No events since the console connected.' }
+        : { title: `Holder window · tmux pane ${payload.pane ?? ''}`, text: payload.text || 'The holder window shows nothing.' });
+    }).catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [agentId, view]);
+  const title = content?.title ?? (view === 'raw' ? 'Raw events' : 'Holder window');
+  return createPortal(<div className="dialog response-file-dialog agent-debug-dialog" role="dialog" aria-modal="true" aria-label={title} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); onClose(); } }}><div>
+    <header><strong title={title}>{title}</strong><button type="button" autoFocus aria-label={`Close ${title}`} title="Close" onClick={onClose}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></header>
+    {failed ? <div className="response-file-message error" role="alert">Unavailable</div> : content === undefined ? <div className="response-file-message progress-border progress-loading progress-blue" role="status" aria-busy="true"><ProgressRing busy />Loading…</div> : <pre>{content.text}</pre>}
+  </div></div>, document.body);
 }
 
 // An edit's compact diff: its file, the lines added and removed, a link to the Code panel, and its
