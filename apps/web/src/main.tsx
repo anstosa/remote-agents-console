@@ -25,7 +25,7 @@ import type { CodePanelReview } from './code-panel/code-panel.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
 import { savedCodeOpen, saveCodeOpen, supportingChange, useCodePanel, type CodePanelCommit, type CodePanelController, type CodePanelMode } from './code-panel/comparison.js';
 import { PullRequestCard, PullRequestIndicators, type PullRequestSummary } from './pull-request-card.js';
-import { PullRequestCommentsPanel, unresolvedThreadCount, type PullRequestComments } from './pull-request-comments.js';
+import { hunkClass, PullRequestCommentsPanel, unresolvedThreadCount, type PullRequestComments } from './pull-request-comments.js';
 import { isStackOperationLog, isStackProcessOutput, type StackAction, type StackOperationLog, type StackProcessOutput, type StackProcessState, type StackSelection, type StartableNoticeTarget } from './stack-operations.js';
 import { StackPanel } from './stack-panel.js';
 import { StackIcon, stackGlyphs, type ProcessAction, type StackHandlers } from './stack-controls.js';
@@ -7823,7 +7823,6 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   // a transcript Agent has no pane to stream: its Panel shows its transcript
   if (agent.panel === 'transcript') {
     const thinkingToggle = () => <button type="button" className="panel-header-action panel-header-row" aria-pressed={showThinking} onClick={() => setShowThinking(value => !value)}><span>Show thinking</span></button>;
-    // an edit's diff opens in the Code panel's working changes, at its file
     const openDiff = agent.worktreeId === undefined ? undefined : (path: string) => workspace.code.openChanges('working', path.startsWith(`${agent.home}/`) ? path.slice(agent.home.length + 1) : path);
     return <AgentPanelFrame header={header('Live', thinkingToggle)} composer={composer} onTurnOff={turnOff}><Transcript agent={agent} showThinking={showThinking} onOpenDiff={openDiff} /></AgentPanelFrame>;
   }
@@ -7923,43 +7922,44 @@ function AgentPanelTitle({ kind, sandboxed, title, switcher, state, connection =
 
 // A structured Agent's process state (`revision` changes with its transcript)
 type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number };
-// A tool call as the transcript lists it: its verb and target, state and duration, and one result
-// (a short line, an edit's diff, or a command's last lines with their count). Its full output and
-// a script's source are read when it is opened; `kept: false` marks a result the Conversation lost.
-type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; result?: string; diff?: string; tail?: string; outputLines?: number; output?: string; source?: string; kept?: false };
-// One line of a structured Agent's transcript: a prompt (a steer, or one from the queue), an answer,
-// thinking, an extension's notice, a tool call, or the end of a prompt's Turn with its cost
+// A tool call as the transcript lists it: one result (a short line, an edit's diff, or a command's
+// last lines with their count). Its full output and a script's source are read when it is opened.
+type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; result?: string; diff?: { path: string; patch: string }; tail?: string; outputLines?: number; output?: string; source?: string; kept?: false };
 type TranscriptItem =
   | { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string; steer?: true; queued?: true }
   | { id: string; kind: 'thinking'; text: string; live?: true }
   | { id: string; kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error' }
-  | { id: string; kind: 'settled'; outcome: 'done' | 'cancelled' | 'failed'; cost?: number }
+  | { id: string; kind: 'settled'; outcome: 'done' | 'cancelled' | 'failed'; cost?: number; toolCalls?: number }
   | TranscriptTool;
-type TranscriptPage = { agentId: string; items: TranscriptItem[]; earlier: number; status?: { extension: string[]; cost?: number; contextPercent?: number }; stderr?: string };
+// the latest `limit` lines of an Agent's transcript, how many come before them, and its status line
+type TranscriptPage = { agentId: string; limit: number; items: TranscriptItem[]; earlier: number; status?: { extension: string[]; cost?: number; contextPercent?: number }; stderr?: string };
 const transcriptPageSize = 200;
 const transcriptDuration = (ms: number | undefined): string => ms === undefined ? '' : ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 const transcriptCost = (cost: number): string => `$${cost.toFixed(3)}`;
 
-// One prompt's group: its prompt (none for lines before the first prompt shown), the lines that
-// followed it, and its end once its Turn settled. A call made by another call is never one of its
-// lines; it sits beneath its parent.
+// One prompt's group: its prompt (none for lines before the first prompt shown, or after a Turn
+// that started without one), the lines that followed, and its end once its Turn settled. A call
+// another call made is never a line of its own; it sits beneath its parent.
 type TranscriptGroup = { head?: Extract<TranscriptItem, { kind: 'message' }>; lines: TranscriptItem[]; end?: Extract<TranscriptItem, { kind: 'settled' }> };
 function transcriptGroups(items: readonly TranscriptItem[]): TranscriptGroup[] {
   const groups: TranscriptGroup[] = [];
   for (const item of items) {
     if (item.kind === 'tool' && item.parentId !== undefined) continue;
     if (item.kind === 'message' && item.role === 'user' && item.steer !== true) { groups.push({ head: item, lines: [] }); continue; }
-    if (groups.length === 0) groups.push({ lines: [] });
+    if (groups.length === 0 || groups.at(-1)!.end !== undefined) groups.push({ lines: [] });
     const group = groups.at(-1)!;
     if (item.kind === 'settled') group.end = item; else group.lines.push(item);
   }
   return groups;
 }
 
-// The grouped log of a structured Agent (variant D): one group per prompt ending in its tool calls
-// and cost, one line per tool call, a status line beneath. It reads the latest lines again whenever
-// the revision changes, follows new lines while scrolled to the bottom, and reads earlier ones on
-// request. Thinking shows only while live, unless `showThinking`.
+function TranscriptLine({ className, glyph, children }: { className: string; glyph: string; children: ReactNode }) {
+  return <p className={`transcript-line ${className}`}><span className="transcript-glyph" aria-hidden="true">{glyph}</span><span>{children}</span></p>;
+}
+
+// A structured Agent's transcript as a grouped log with a status line beneath. It reads the latest
+// lines again whenever the revision moves, follows new lines while scrolled to the bottom, and
+// keeps its place while earlier lines load above.
 function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThinking: boolean; onOpenDiff?: (path: string) => void }) {
   const agentId = agent.id;
   const state = agent.structured;
@@ -7967,22 +7967,24 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
   const [transcript, setTranscript] = useState<TranscriptPage>();
   const log = useRef<HTMLDivElement>(null);
   const following = useRef(true);
-  // the distance from the bottom to keep while earlier lines load above
-  const keepFromBottom = useRef<number | undefined>(undefined);
+  // while earlier lines load: the page size asked for, and the distance from the bottom to keep
+  const anchor = useRef<{ limit: number; fromBottom: number } | undefined>(undefined);
   useEffect(() => {
     let cancelled = false;
-    void request(`/api/agents/${encodeURIComponent(agentId)}/transcript?limit=${limit}`).then(response => response.ok ? response.json() : undefined).then((payload: Omit<TranscriptPage, 'agentId'> | undefined) => {
+    void request(`/api/agents/${encodeURIComponent(agentId)}/transcript?limit=${limit}`).then(response => response.ok ? response.json() : undefined).then((payload: Omit<TranscriptPage, 'agentId' | 'limit'> | undefined) => {
       if (cancelled || !Array.isArray(payload?.items)) return;
-      setTranscript({ agentId, items: payload.items, earlier: typeof payload.earlier === 'number' ? payload.earlier : 0, ...(payload.status === undefined ? {} : { status: payload.status }), ...(typeof payload.stderr === 'string' ? { stderr: payload.stderr } : {}) });
+      setTranscript({ agentId, limit, items: payload.items, earlier: typeof payload.earlier === 'number' ? payload.earlier : 0, ...(payload.status === undefined ? {} : { status: payload.status }), ...(typeof payload.stderr === 'string' ? { stderr: payload.stderr } : {}) });
     }).catch(() => { /* keep the last transcript; the next revision reads it again */ });
     return () => { cancelled = true; };
   }, [agentId, state?.revision, limit]);
   useLayoutEffect(() => {
     const list = log.current;
-    if (list === null) return;
-    if (keepFromBottom.current !== undefined) list.scrollTop = list.scrollHeight - keepFromBottom.current;
-    else if (following.current) list.scrollTop = list.scrollHeight;
-    keepFromBottom.current = undefined;
+    if (list === null || transcript === undefined) return;
+    if (anchor.current !== undefined) {
+      if (anchor.current.limit !== transcript.limit) return;
+      list.scrollTop = list.scrollHeight - anchor.current.fromBottom;
+      anchor.current = undefined;
+    } else if (following.current) list.scrollTop = list.scrollHeight;
   }, [transcript]);
   const current = transcript?.agentId === agentId ? transcript : undefined;
   const children = useMemo(() => {
@@ -7991,11 +7993,10 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
     return byParent;
   }, [current]);
   const groups = useMemo(() => transcriptGroups(current?.items ?? []), [current]);
-  const calls = (item: TranscriptItem): number => item.kind !== 'tool' ? 0 : 1 + (children.get(item.id) ?? []).reduce((sum, child) => sum + calls(child), 0);
   const loadEarlier = () => {
     const list = log.current;
-    if (list !== null) keepFromBottom.current = list.scrollHeight - list.scrollTop;
-    setLimit(value => value + transcriptPageSize);
+    if (list !== null) anchor.current = { limit: limit + transcriptPageSize, fromBottom: list.scrollHeight - list.scrollTop };
+    setLimit(limit + transcriptPageSize);
   };
   const status = current?.status;
   const showStatus = status !== undefined && (status.extension.length > 0 || status.cost !== undefined || status.contextPercent !== undefined);
@@ -8004,17 +8005,18 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
       {current !== undefined && current.earlier > 0 && <button type="button" className="transcript-earlier" onClick={loadEarlier}>Load earlier</button>}
       {groups.map((group, index) => {
         const live = index === groups.length - 1 && group.end === undefined && agent.attention === 'working';
-        const toolCalls = group.lines.reduce((sum, line) => sum + calls(line), 0);
-        return <section key={group.head?.id ?? 'before'} className={`transcript-group${live ? ' live' : ''}`}>
-          {group.head !== undefined && <p className="transcript-line transcript-prompt"><span className="transcript-glyph" aria-hidden="true">›</span><span>{group.head.text}{group.head.queued === true && <span className="transcript-dim"> (from the queue)</span>}</span></p>}
+        const toolCalls = group.end?.toolCalls ?? 0;
+        return <section key={group.head?.id ?? group.lines[0]?.id ?? group.end?.id} className={`transcript-group${live ? ' live' : ''}`}>
+          {group.head !== undefined && <TranscriptLine className="transcript-prompt" glyph="›">{group.head.text}{group.head.queued === true && <span className="transcript-dim"> (from the queue)</span>}</TranscriptLine>}
           {group.lines.map(line => {
             if (line.kind === 'tool') return <TranscriptToolLine key={line.id} agentId={agentId} item={line} childrenOf={children} revision={state?.revision} onOpenDiff={onOpenDiff} />;
             if (line.kind === 'message') return line.role === 'user'
-              ? <p key={line.id} className="transcript-line transcript-steer"><span className="transcript-glyph" aria-hidden="true">⤷</span><span>{line.text}<span className="transcript-dim"> (steer)</span></span></p>
-              : <p key={line.id} className="transcript-line transcript-answer"><span className="transcript-glyph" aria-hidden="true">●</span><span>{line.text}</span></p>;
-            if (line.kind === 'notice') return <p key={line.id} className={`transcript-line transcript-notice ${line.tone}`}><span className="transcript-glyph" aria-hidden="true">※</span><span>{line.text}</span></p>;
+              ? <TranscriptLine key={line.id} className="transcript-steer" glyph="⤷">{line.text}<span className="transcript-dim"> (steer)</span></TranscriptLine>
+              : <TranscriptLine key={line.id} className="transcript-answer" glyph="●">{line.text}</TranscriptLine>;
+            if (line.kind === 'notice') return <TranscriptLine key={line.id} className={`transcript-notice ${line.tone}`} glyph="※">{line.text}</TranscriptLine>;
+            // thinking shows only while live, unless Show thinking is on
             if (line.kind !== 'thinking' || (!showThinking && line.live !== true) || (line.text === '' && line.live !== true)) return null;
-            return <p key={line.id} className="transcript-line transcript-thinking"><span className="transcript-glyph" aria-hidden="true">∴</span><span>{showThinking && line.text !== '' ? line.text : 'thinking…'}</span></p>;
+            return <TranscriptLine key={line.id} className="transcript-thinking" glyph="∴">{showThinking && line.text !== '' ? line.text : 'thinking…'}</TranscriptLine>;
           })}
           {group.end !== undefined && <p className="transcript-group-end">{group.end.outcome} · {toolCalls} tool call{toolCalls === 1 ? '' : 's'}{group.end.cost === undefined ? '' : ` · ${transcriptCost(group.end.cost)}`}</p>}
         </section>;
@@ -8023,7 +8025,7 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
       {state?.lifecycle === 'exited' && <p className="transcript-status">The agent’s process has exited.</p>}
       {state?.lifecycle === 'failed' && <div className="transcript-failure" role="alert"><p>{state.reason ?? 'The agent failed to start.'}</p>{current?.stderr !== undefined && current.stderr !== '' && <pre>{current.stderr}</pre>}</div>}
     </div>
-    {showStatus && <div className="transcript-statusline" role="status" aria-label="Agent status">
+    {showStatus && <div className="transcript-statusline" role="status" aria-label="Status line">
       {status.extension.map((text, index) => <span key={index} className="transcript-extension-status">{text}</span>)}
       {status.contextPercent !== undefined && <span>ctx {Math.round(status.contextPercent)}%</span>}
       {status.cost !== undefined && <span>{transcriptCost(status.cost)}</span>}
@@ -8031,23 +8033,21 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
   </div>;
 }
 
-// The lines of an edit's unified diff worth showing: its hunks, without the file header
-const diffLines = (diff: string): string[] => diff.split('\n').filter(line => line !== '' && !line.startsWith('---') && !line.startsWith('+++') && !line.startsWith('Index') && !line.startsWith('===='));
-const diffLineKind = (line: string): string => line.startsWith('+') ? ' added' : line.startsWith('-') ? ' removed' : line.startsWith('@@') ? ' hunk' : '';
-
-// An edit's compact diff: its file with the lines added and removed, a way to see it in the Code
-// panel, and its hunks
-function TranscriptDiff({ path, diff, onOpen }: { path: string; diff: string; onOpen?: (path: string) => void }) {
-  const lines = diffLines(diff);
+// An edit's compact diff: its file, the lines added and removed, a link to the Code panel, and its
+// hunks (the file header ends at the first `@@`)
+function TranscriptDiff({ diff, onOpen }: { diff: { path: string; patch: string }; onOpen?: (path: string) => void }) {
+  const all = diff.patch.split('\n');
+  const start = all.findIndex(line => line.startsWith('@@'));
+  const lines = (start === -1 ? [] : all.slice(start)).filter(line => line !== '');
+  const counted = lines.filter(line => !line.startsWith('@@'));
   return <div className="transcript-diff">
-    <div className="transcript-diff-file"><span className="transcript-diff-path">{path}</span><span className="transcript-added">+{lines.filter(line => line.startsWith('+')).length}</span><span className="transcript-removed">−{lines.filter(line => line.startsWith('-')).length}</span>{onOpen !== undefined && <button type="button" className="transcript-link" onClick={() => onOpen(path)}>Code panel ↗</button>}</div>
-    <pre>{lines.map((line, index) => <span key={index} className={`transcript-diff-line${diffLineKind(line)}`}>{line}</span>)}</pre>
+    <div className="transcript-diff-file"><span className="transcript-diff-path">{diff.path}</span><span className="transcript-added">+{counted.filter(line => line.startsWith('+')).length}</span><span className="transcript-removed">−{counted.filter(line => line.startsWith('-')).length}</span>{onOpen !== undefined && <button type="button" className="transcript-link" onClick={() => onOpen(diff.path)}>Code panel ↗</button>}</div>
+    <pre>{lines.map((line, index) => <span key={index} className={`transcript-diff-line ${hunkClass(line) ?? ''}`}>{line}</span>)}</pre>
   </div>;
 }
 
-// One tool call: a button with its verb, target and duration that opens its full output (read when
-// opened, and again as it changes), one result line beneath it while closed, and the calls it
-// made, indented beneath it
+// One tool call: a button that opens its full output (read when opened, and again as it changes),
+// one result line beneath it while closed, and the calls it made, indented beneath it
 function TranscriptToolLine({ agentId, item, childrenOf, revision, onOpenDiff }: { agentId: string; item: TranscriptTool; childrenOf: ReadonlyMap<string, TranscriptTool[]>; revision?: number; onOpenDiff?: (path: string) => void }) {
   const [open, setOpen] = useState(false);
   const [full, setFull] = useState<TranscriptTool>();
@@ -8060,15 +8060,16 @@ function TranscriptToolLine({ agentId, item, childrenOf, revision, onOpenDiff }:
     return () => { cancelled = true; };
   }, [open, agentId, item.id, revision]);
   const duration = transcriptDuration(item.durationMs);
+  // a command shows its last 3 lines, 5 while it runs
   const tail = item.tail?.split('\n').slice(item.state === 'running' ? -5 : -3) ?? [];
   const earlier = (item.outputLines ?? 0) - tail.length;
   const shown = full ?? item;
   const glyph = <span className="transcript-glyph" aria-hidden="true">└</span>;
-  const result = item.diff !== undefined ? <div className="transcript-result">{glyph}<TranscriptDiff path={item.summary} diff={item.diff} onOpen={onOpenDiff} /></div>
+  const result = item.diff !== undefined ? <div className="transcript-result">{glyph}<TranscriptDiff diff={item.diff} onOpen={onOpenDiff} /></div>
     : item.result !== undefined ? <p className="transcript-result">{glyph}<span>{item.result}</span></p>
     : tail.length > 0 ? <div className="transcript-result">{glyph}<div>{earlier > 0 && <button type="button" className="transcript-link" onClick={() => setOpen(true)}>… {earlier} earlier lines · show all</button>}<pre>{tail.join('\n')}</pre></div></div>
     : null;
-  const kids = childrenOf.get(item.id) ?? [];
+  const calls = childrenOf.get(item.id) ?? [];
   return <div className={`transcript-tool transcript-tool-${item.state}`}>
     <button type="button" className={`transcript-tool-line${open ? ' open' : ''}`} aria-expanded={open} onClick={() => setOpen(value => !value)}>
       <span className="transcript-tool-text"><b>{item.name}</b>{item.summary === '' ? '' : `(${item.summary})`}{duration !== '' && <span className="transcript-dim"> {duration}</span>}{item.kept === false && <span className="transcript-dim"> · result not kept</span>}</span>
@@ -8077,11 +8078,11 @@ function TranscriptToolLine({ agentId, item, childrenOf, revision, onOpenDiff }:
     {open
       ? <div className="transcript-open">
         {shown.source !== undefined && <pre className="transcript-source">{shown.source}</pre>}
-        {shown.diff !== undefined && <TranscriptDiff path={shown.summary} diff={shown.diff} onOpen={onOpenDiff} />}
+        {shown.diff !== undefined && <TranscriptDiff diff={shown.diff} onOpen={onOpenDiff} />}
         {item.kept === false ? <p className="transcript-dim">Its result was not kept.</p> : <pre className="transcript-output">{shown.output ?? item.tail ?? item.result ?? ''}</pre>}
       </div>
       : result}
-    {kids.length > 0 && <div className="transcript-children">{kids.map(child => <TranscriptToolLine key={child.id} agentId={agentId} item={child} childrenOf={childrenOf} revision={revision} onOpenDiff={onOpenDiff} />)}</div>}
+    {calls.length > 0 && <div className="transcript-children">{calls.map(call => <TranscriptToolLine key={call.id} agentId={agentId} item={call} childrenOf={childrenOf} revision={revision} onOpenDiff={onOpenDiff} />)}</div>}
   </div>;
 }
 

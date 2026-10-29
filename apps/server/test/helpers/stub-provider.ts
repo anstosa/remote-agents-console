@@ -29,5 +29,5 @@ export async function stubProvider(reply = 'Hello from the stub provider', toolC
   return { baseUrl: `http://127.0.0.1:${port}/v1`, requests: () => requests, close: () => new Promise(resolve => server.close(() => resolve())) };
 }
 
-/** A Pi agent directory whose only model is the stub provider's `stub/echo`. */
-export const stubModels = (baseUrl: string): string => JSON.stringify({ providers: { stub: { baseUrl, api: 'openai-completions', apiKey: 'stub', models: [{ id: 'echo' }] } } });
+/** A Pi agent directory whose only model is the stub provider's `stub/echo`, priced so a Turn has a cost. */
+export const stubModels = (baseUrl: string): string => JSON.stringify({ providers: { stub: { baseUrl, api: 'openai-completions', apiKey: 'stub', models: [{ id: 'echo', cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } }] } } });

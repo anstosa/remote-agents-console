@@ -13,21 +13,21 @@ import type { TurnEvent } from './transport.js';
 export type LaunchReport = { loaded: true; sandbox: { engaged: boolean; reason?: string }; version: string };
 /**
  * A tool call as the transcript shows it: its verb (`name`) and target (`summary`), its state and
- * duration, and what it gave back: its output, a short `result` line, or an edit's unified `diff`.
+ * duration, and what it gave back: its output, a short `result` line, or an edit's unified `diff` with its file's path.
  * A call another call made (a script's) sits under `parentId`; `kept: false` marks one whose
  * result the Conversation did not keep. A script carries its `source`.
  */
-export type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; output?: string; result?: string; diff?: string; source?: string; kept?: false };
+export type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; output?: string; result?: string; diff?: { path: string; patch: string }; source?: string; kept?: false };
 /**
  * One line of an Agent's transcript, replaced by a later item with the same id: a prompt (a steer
  * when sent mid-Turn, `queued` when it came from the queue), an answer, thinking (`live` while it
- * streams), a notice from the Agent's extension, a tool call, and the end of a Turn with its cost.
+ * streams), a notice from the Agent's extension, a tool call, and the end of a Turn with its cost and tool calls.
  */
 export type TranscriptItem =
   | { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string; steer?: true; queued?: true }
   | { id: string; kind: 'thinking'; text: string; live?: true }
   | { id: string; kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error' }
-  | { id: string; kind: 'settled'; outcome: 'done' | 'cancelled' | 'failed'; cost?: number }
+  | { id: string; kind: 'settled'; outcome: 'done' | 'cancelled' | 'failed'; cost?: number; toolCalls?: number }
   | TranscriptTool;
 /** What an Agent has used of its Conversation: its cost so far and how full its context is. */
 export type AgentUsage = { cost: number; contextPercent?: number };

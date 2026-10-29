@@ -41,23 +41,28 @@ test('each prompt starts a group that ends with its tool calls and cost; the wor
     { id: 'm1', kind: 'message', role: 'user', text: 'Hide the empty badge' },
     { id: 'r1', kind: 'tool', name: 'Read', summary: 'queued-prompts.tsx', state: 'done', durationMs: 3, result: '42 lines' },
     { id: 'm2', kind: 'message', role: 'assistant', text: 'Guarded the badge.' },
-    { id: 'e1', kind: 'settled', outcome: 'done', cost: 0.0123 },
+    { id: 'e1', kind: 'settled', outcome: 'done', cost: 0.0123, toolCalls: 1 },
     { id: 'm3', kind: 'message', role: 'user', text: 'Then commit it', queued: true },
     { id: 'm4', kind: 'message', role: 'user', text: 'Also check main.tsx', steer: true },
-    { id: 'b1', kind: 'tool', name: 'Run', summary: 'git commit', state: 'running' }
+    { id: 'b1', kind: 'tool', name: 'Run', summary: 'git commit', state: 'running' },
+    { id: 'e2', kind: 'settled', outcome: 'cancelled', cost: 0.001, toolCalls: 1 },
+    // a Turn an extension started, with no prompt: its own group, never the one before
+    { id: 'x1', kind: 'tool', name: 'Read', summary: 'notes.txt', state: 'running' }
   ] }, { attention: 'working' });
   await page.goto('/');
   const groups = log(page).locator('.transcript-group');
-  await expect(groups).toHaveCount(2);
+  await expect(groups).toHaveCount(3);
+  await expect(groups.nth(1).locator('.transcript-group-end')).toHaveText('cancelled · 1 tool call · $0.001');
+  await expect(groups.nth(2).locator('.transcript-prompt')).toHaveCount(0);
+  await expect(groups.nth(2)).toHaveClass(/live/u);
   await expect(groups.nth(0).locator('.transcript-prompt')).toHaveText('›Hide the empty badge');
   await expect(groups.nth(0).locator('.transcript-group-end')).toHaveText('done · 1 tool call · $0.012');
   await expect(groups.nth(0)).not.toHaveClass(/live/u);
   // a prompt from the queue says so; a steer sits inside its group
   await expect(groups.nth(1).locator('.transcript-prompt')).toHaveText('›Then commit it (from the queue)');
   await expect(groups.nth(1).locator('.transcript-steer')).toHaveText('⤷Also check main.tsx (steer)');
-  await expect(groups.nth(1)).toHaveClass(/live/u);
-  await expect(groups.nth(1).locator('.transcript-group-end')).toHaveCount(0);
-  const rule = await groups.nth(1).evaluate(element => getComputedStyle(element).borderLeftColor);
+  await expect(groups.nth(1)).not.toHaveClass(/live/u);
+  const rule = await groups.nth(2).evaluate(element => getComputedStyle(element).borderLeftColor);
   const peach = await page.evaluate(() => { const probe = document.createElement('i'); probe.style.color = 'var(--peach)'; document.body.append(probe); const color = getComputedStyle(probe).color; probe.remove(); return color; });
   expect(rule).toBe(peach);
 });
@@ -69,7 +74,7 @@ test('a tool line shows its verb, target, duration and one result line, and expa
     { id: 'm1', kind: 'message', role: 'user', text: 'Run the tests' },
     { id: 'b1', kind: 'tool', name: 'Run', summary: 'pnpm test', state: 'done', durationMs: 4612, tail: 'test 8 ok\ntest 9 ok\ntest 10 ok\ntest 11 ok\ntest 12 ok', outputLines: 12 },
     { id: 'g1', kind: 'tool', name: 'Search', summary: 'saved-prompts-count', state: 'done', durationMs: 18, result: '2 matches' },
-    { id: 'd1', kind: 'tool', name: 'Edit', summary: 'apps/web/src/queued-prompts.tsx', state: 'done', durationMs: 11, diff: '--- apps/web/src/queued-prompts.tsx\n+++ apps/web/src/queued-prompts.tsx\n@@ -15,1 +15,1 @@\n-      <span>{count}</span>\n+      {count > 0 && <span>{count}</span>}\n' },
+    { id: 'd1', kind: 'tool', name: 'Edit', summary: 'apps/web/src/queued-prompts.tsx', state: 'done', durationMs: 11, diff: { path: 'apps/web/src/queued-prompts.tsx', patch: '--- apps/web/src/queued-prompts.tsx\n+++ apps/web/src/queued-prompts.tsx\n@@ -15,2 +15,2 @@\n-      <span>{count}</span>\n+      {count > 0 && <span>{count}</span>}\n----\n+++i;\n' } },
     { id: 'b2', kind: 'tool', name: 'Run', summary: 'pnpm build', state: 'running', tail: 'a\nb\nc\nd\ne', outputLines: 7 }
   ] }, { attention: 'working', full: { b1: { id: 'b1', kind: 'tool', name: 'Run', summary: 'pnpm test', state: 'done', durationMs: 4612, output } } });
   await page.goto('/');
@@ -84,7 +89,9 @@ test('a tool line shows its verb, target, duration and one result line, and expa
   await expect(log(page).locator('.transcript-result').nth(1)).toHaveText('└2 matches');
   // an edit's compact diff, with a way to see it in context
   const diff = log(page).locator('.transcript-result').nth(2);
-  await expect(diff.locator('.transcript-diff-line')).toHaveText(['@@ -15,1 +15,1 @@', '-      <span>{count}</span>', '+      {count > 0 && <span>{count}</span>}']);
+  // only the file header is dropped: a removed `---` line and an added `++i;` stay
+  await expect(diff.locator('.transcript-diff-line')).toHaveText(['@@ -15,2 +15,2 @@', '-      <span>{count}</span>', '+      {count > 0 && <span>{count}</span>}', '----', '+++i;']);
+  await expect(diff.locator('.transcript-diff-file')).toHaveText('apps/web/src/queued-prompts.tsx+2−2Code panel ↗');
   await expect(diff.getByRole('button', { name: 'Code panel ↗' })).toBeVisible();
 
   // the chevron is a real touch target on a phone
@@ -111,7 +118,7 @@ test('a script shows as Script(N tool calls) with its calls beneath it and its s
     { id: 'c1/1', kind: 'tool', name: 'Search', summary: 'badge', state: 'done', parentId: 'c1', durationMs: 18, kept: false },
     { id: 'c1/2', kind: 'tool', name: 'Read', summary: 'main.tsx', state: 'done', parentId: 'c1', durationMs: 9, kept: false },
     { id: 'x9/1', kind: 'tool', name: 'Read', summary: 'orphan.tsx', state: 'done', parentId: 'x9' },
-    { id: 'e1', kind: 'settled', outcome: 'done', cost: 0.004 }
+    { id: 'e1', kind: 'settled', outcome: 'done', cost: 0.004, toolCalls: 3 }
   ] }, { full: { c1: { id: 'c1', kind: 'tool', name: 'Script', summary: '2 tool calls', state: 'done', durationMs: 200, source, output: 'Script completed\nOutput:\n2 hits' } } });
   await page.goto('/');
 
@@ -151,12 +158,12 @@ test('a status line above the composer shows the extension status, context and c
   await mockPi(page, { items: [
     { id: 'm1', kind: 'message', role: 'user', text: 'Run the tests' },
     { id: 'n1', kind: 'notice', text: 'Tests passed', tone: 'info' },
-    { id: 'e1', kind: 'settled', outcome: 'done', cost: 0.02 }
+    { id: 'e1', kind: 'settled', outcome: 'done', cost: 0.02, toolCalls: 0 }
   ], status: { extension: ['sandbox: on'], cost: 0.0812, contextPercent: 31.4 } });
   await page.goto('/');
   await expect(log(page).locator('.transcript-notice')).toHaveText('※Tests passed');
   const panel = page.locator('.log-split > .log-output');
-  const status = panel.getByRole('status', { name: 'Agent status' });
+  const status = panel.getByRole('status', { name: 'Status line' });
   await expect(status).toHaveText('sandbox: onctx 31%$0.081');
   const statusBox = (await status.boundingBox())!;
   const promptBox = (await panel.getByRole('region', { name: 'Prompt composer' }).boundingBox())!;

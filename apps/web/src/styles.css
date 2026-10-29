@@ -326,7 +326,7 @@ html.software-keyboard-open .tabs { display: none; }
 .log-output.agent-panel { --panel-accent: var(--lavender); display: grid; grid-template-rows: minmax(0, 1fr) auto; padding-top: var(--panel-header-clearance); }
 .agent-output { position: relative; min-width: 0; min-height: 0; }
 .structured-transcript { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; }
-/* a structured Agent's grouped log (variant D): one group per prompt, one line per tool call, kept to a reading width */
+/* a structured Agent's transcript: one group per prompt, one line per tool call, kept to a reading width */
 .transcript-log { flex: 1; box-sizing: border-box; width: 100%; max-width: 52rem; min-height: 0; margin: 0 auto; padding: .5rem 1rem 1rem; overflow-y: auto; overscroll-behavior: contain; font-size: .8rem; line-height: 1.45; }
 .transcript-earlier { display: block; margin: 0 auto .5rem; padding: .35rem .8rem; border: 1px solid var(--surface-1); border-radius: 999px; background: var(--surface-0); color: var(--text); font: inherit; font-size: .72rem; cursor: pointer; }
 .transcript-group { margin: .6rem 0 .9rem; padding-left: .55rem; border-left: 2px solid var(--surface-1); }
@@ -361,6 +361,7 @@ html.software-keyboard-open .tabs { display: none; }
 .transcript-result pre, .transcript-open pre { margin: 0; overflow-x: auto; font: inherit; white-space: pre; }
 .transcript-link { padding: 0; border: 0; background: none; color: var(--blue); font: inherit; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; cursor: pointer; }
 .transcript-diff { overflow: hidden; border: 1px solid var(--surface-0); border-radius: .3rem; }
+.transcript-result .transcript-diff pre { max-height: 12rem; overflow-y: auto; }
 .transcript-diff-file { display: flex; align-items: center; gap: .4rem; padding: .2rem .45rem; border-bottom: 1px solid var(--surface-0); background: var(--mantle); }
 .transcript-diff-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transcript-added { color: var(--green); }
@@ -369,7 +370,7 @@ html.software-keyboard-open .tabs { display: none; }
 .transcript-diff-line { display: block; min-width: max-content; padding: 0 .5rem; }
 .transcript-diff-line.added { background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green); }
 .transcript-diff-line.removed { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
-.transcript-diff-line.hunk { background: color-mix(in srgb, var(--blue) 8%, transparent); color: var(--blue); }
+.transcript-diff-line.hunk-header { background: color-mix(in srgb, var(--blue) 8%, transparent); color: var(--blue); }
 /* an opened tool call: its full output as plain text, and a script's source */
 .transcript-open { display: grid; gap: .35rem; max-height: 60vh; margin: .2rem 0 .4rem 1.2rem; padding: .35rem; overflow: auto; border: 1px solid var(--surface-1); border-radius: .3rem; background: var(--crust); color: var(--subtext-0); font-size: .75rem; }
 .transcript-source { padding: .3rem .4rem; border-radius: .25rem; background: var(--mantle); color: var(--text); }

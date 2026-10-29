@@ -115,10 +115,14 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
       { type: 'turn', turn: { type: 'started' } },
       { type: 'transcript', item: { id: expect.any(String), kind: 'message', role: 'user', text: 'Say hello' } },
       { type: 'transcript', item: { id: expect.any(String), kind: 'message', role: 'assistant', text: 'Hello from the stub provider' } },
-      { type: 'transcript', item: { id: expect.any(String), kind: 'settled', outcome: 'done', cost: expect.any(Number) } },
+      { type: 'transcript', item: { id: expect.any(String), kind: 'settled', outcome: 'done', cost: expect.any(Number), toolCalls: 0 } },
       { type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } }
     ]);
-    expect(await next('usage')).toMatchObject({ usage: { cost: expect.any(Number) } });
+    // the Turn's cost, from the stub model's price, is the Conversation's so far
+    const ended = turn.find(event => event.type === 'transcript' && event.item.kind === 'settled') as Extract<StructuredEvent, { type: 'transcript' }>;
+    const cost = ended.item.kind === 'settled' ? ended.item.cost : undefined;
+    expect(cost).toBeGreaterThan(0);
+    expect(await next('usage', event => event.type === 'usage' && event.usage.cost > 0)).toMatchObject({ usage: { cost: expect.closeTo(cost!, 9) } });
   }, 60_000);
 
   it('shows a tool call as one line, running and then with its result', async () => {

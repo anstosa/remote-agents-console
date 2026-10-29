@@ -182,6 +182,9 @@ describe('a structured Agent over HTTP', () => {
 
     fake.emit({ type: 'status', key: 'lint' });
     expect(await status()).toEqual({ extension: ['sandbox: on'], cost: 0.0812, contextPercent: 31 });
+    // a process that exited shows no extension status
+    fake.emit({ type: 'exited' });
+    expect(await status()).toEqual({ extension: [], cost: 0.0812, contextPercent: 31 });
     await app.close();
   });
 
@@ -199,6 +202,12 @@ describe('a structured Agent over HTTP', () => {
     fake.emit({ type: 'transcript', item: { id: 'm2', kind: 'message', role: 'user', text: 'From the queue' } });
     fake.emit({ type: 'transcript', item: { id: 'm3', kind: 'message', role: 'user', text: 'A steer', steer: true } });
     expect((await items()).slice(2)).toEqual([{ id: 'm2', kind: 'message', role: 'user', text: 'From the queue', queued: true }, { id: 'm3', kind: 'message', role: 'user', text: 'A steer', steer: true }]);
+
+    // a prompt sent straight from the composer is not marked
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: '' } });
+    expect(await structuredAgents.deliver(id, 'Typed')).toBe('started');
+    fake.emit({ type: 'transcript', item: { id: 'm4', kind: 'message', role: 'user', text: 'Typed' } });
+    expect((await items()).at(-1)).toEqual({ id: 'm4', kind: 'message', role: 'user', text: 'Typed' });
     await app.close();
   });
 

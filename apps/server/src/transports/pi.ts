@@ -30,33 +30,46 @@ const parseReport = (statusText: unknown): LaunchReport | undefined => {
 };
 const messageCost = (message: Json): number => isObject(message.usage) && isObject(message.usage.cost) && typeof message.usage.cost.total === 'number' ? message.usage.cost.total : 0;
 
+// an assistant message's text, or its error when it failed having said nothing
+const answerText = (message: Json): string => {
+  const said = text(message.content);
+  return said !== '' ? said : message.stopReason === 'error' && typeof message.errorMessage === 'string' ? `Error: ${message.errorMessage}` : '';
+};
+const outcome = (aborted: boolean, failed: boolean): 'done' | 'cancelled' | 'failed' => aborted ? 'cancelled' : failed ? 'failed' : 'done';
+// Pi bounds a tool's output (about 50 KiB); this guards every kept text against a tool or model that does not
+const maxText = 64 * 1024;
+const bounded = (value: string): string => value.length > maxText ? value.slice(-maxText) : value;
+
 // Pi's tool names as the transcript's verbs; any other tool keeps its own name
 const verbs: Record<string, string> = { read: 'Read', write: 'Write', edit: 'Edit', bash: 'Run', grep: 'Search', find: 'Find', ls: 'List', codemode: 'Script', ask_user: 'Ask' };
-// Pi bounds a tool's output (about 50 KiB); this only guards against a tool that does not
-const maxOutput = 64 * 1024;
 
 // a tool call as it starts: its verb and target, and a script's source
 function toolCall(id: string, toolName: string, args: unknown, parentId?: string): TranscriptTool {
   const script = toolName === 'codemode';
-  return { id, kind: 'tool', name: verbs[toolName] ?? toolName, summary: script ? scriptSummary(0) : summary(args), state: 'running', ...(parentId === undefined ? {} : { parentId }), ...(script && isObject(args) && typeof args.code === 'string' ? { source: args.code } : {}) };
+  return { id, kind: 'tool', name: verbs[toolName] ?? toolName, summary: script ? scriptSummary(0) : summary(args), state: 'running', ...(parentId === undefined ? {} : { parentId }), ...(script && isObject(args) && typeof args.code === 'string' ? { source: bounded(args.code) } : {}) };
 }
 
 // What a finished call gave back: its output (a command's last lines are its result line), plus an
-// edit's diff, a read's line count, a search's match count, or any other call's first line.
-function toolResult(toolName: string, result: unknown, failed: boolean): Pick<TranscriptTool, 'output' | 'result' | 'diff'> {
+// edit's diff, a read's line count, a search's match count (`path:line:` lines; context lines and
+// notices are not matches), or any other call's first line.
+function toolResult(toolName: string, args: unknown, result: unknown, failed: boolean): Pick<TranscriptTool, 'output' | 'result' | 'diff'> {
   const output = isObject(result) ? text(result.content) : '';
   const details = isObject(result) && isObject(result.details) ? result.details : undefined;
-  const shown = output === '' ? {} : { output: output.length > maxOutput ? output.slice(-maxOutput) : output };
+  const shown = output === '' ? {} : { output: bounded(output) };
   if (toolName === 'bash') return shown;
-  if (!failed && toolName === 'edit' && typeof details?.patch === 'string') return { ...shown, diff: details.patch };
+  if (!failed && toolName === 'edit' && typeof details?.patch === 'string') return { ...shown, diff: { path: isObject(args) && typeof args.path === 'string' ? args.path : '', patch: bounded(details.patch) } };
   if (!failed && toolName === 'read') {
     const truncation = isObject(details?.truncation) ? details.truncation : undefined;
-    const lines = typeof truncation?.outputLines === 'number' ? truncation.outputLines : output.replace(/\n$/u, '').split('\n').length;
+    const lines = typeof truncation?.outputLines === 'number' ? truncation.outputLines : output === '' ? 0 : output.replace(/\n$/u, '').split('\n').length;
     return { ...shown, result: `${count(lines, 'line', 'lines')}${truncation?.truncated === true ? ' (truncated)' : ''}` };
   }
-  if (!failed && toolName === 'grep') return { ...shown, result: count(output.startsWith('No matches found') ? 0 : output.split('\n').filter(line => line !== '').length, 'match', 'matches') };
+  if (!failed && toolName === 'grep') return { ...shown, result: count(output.split('\n').filter(line => /:\d+: /u.test(line)).length, 'match', 'matches') };
   return output.trim() === '' ? shown : { ...shown, result: oneLine(output.trim().split('\n')[0]!) };
 }
+
+// a finished call's state, duration and result
+const finished = (toolName: string, args: unknown, result: unknown, failed: boolean, durationMs: unknown): Pick<TranscriptTool, 'state' | 'durationMs' | 'output' | 'result' | 'diff'> =>
+  ({ state: failed ? 'failed' : 'done', ...toolResult(toolName, args, result, failed), ...(typeof durationMs === 'number' ? { durationMs: Math.round(durationMs) } : {}) });
 
 /**
  * A Conversation's transcript from its messages (`get_messages`): prompts (a prompt that follows
@@ -66,16 +79,18 @@ function toolResult(toolName: string, result: unknown, failed: boolean): Pick<Tr
  */
 export function piHistory(messages: readonly unknown[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
-  const calls = new Map<string, { toolName: string; index: number }>();
+  const calls = new Map<string, { toolName: string; args: unknown; index: number }>();
   let open = false;
   let cost = 0;
+  let toolCalls = 0;
   let stop: unknown;
   let previous: unknown;
   const id = () => `h${items.length}`;
   const settle = () => {
-    if (open) items.push({ id: id(), kind: 'settled', outcome: stop === 'aborted' ? 'cancelled' : stop === 'error' ? 'failed' : 'done', cost });
+    if (open) items.push({ id: id(), kind: 'settled', outcome: outcome(stop === 'aborted', stop === 'error'), cost, toolCalls });
     open = false;
     cost = 0;
+    toolCalls = 0;
   };
   for (const message of messages) {
     if (!isObject(message)) continue;
@@ -88,14 +103,14 @@ export function piHistory(messages: readonly unknown[]): TranscriptItem[] {
       cost += messageCost(message);
       stop = message.stopReason;
       const blocks = Array.isArray(message.content) ? message.content.filter(isObject) : [];
-      for (const block of blocks) if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking !== '') items.push({ id: id(), kind: 'thinking', text: block.thinking });
-      const said = text(blocks);
-      const shown = said !== '' ? said : stop === 'error' && typeof message.errorMessage === 'string' ? `Error: ${message.errorMessage}` : '';
+      for (const block of blocks) if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking !== '') items.push({ id: id(), kind: 'thinking', text: bounded(block.thinking) });
+      const shown = answerText(message);
       if (shown !== '') items.push({ id: id(), kind: 'message', role: 'assistant', text: shown });
       for (const block of blocks) {
         if (block.type !== 'toolCall' || typeof block.id !== 'string' || typeof block.name !== 'string') continue;
-        calls.set(block.id, { toolName: block.name, index: items.length });
+        calls.set(block.id, { toolName: block.name, args: block.arguments, index: items.length });
         items.push({ ...toolCall(block.id, block.name, block.arguments), state: 'done' });
+        toolCalls += 1;
       }
     } else if (message.role === 'toolResult' && typeof message.toolCallId === 'string') {
       const call = calls.get(message.toolCallId);
@@ -103,10 +118,11 @@ export function piHistory(messages: readonly unknown[]): TranscriptItem[] {
       if (call === undefined || item?.kind !== 'tool') continue;
       const failed = message.isError === true;
       const nested = isObject(message.nestedCalls) && Array.isArray(message.nestedCalls.calls) ? message.nestedCalls.calls.filter(isObject) : [];
-      items[call.index] = { ...item, state: failed ? 'failed' : 'done', ...toolResult(call.toolName, message, failed), ...(typeof message.durationMs === 'number' ? { durationMs: message.durationMs } : {}), ...(call.toolName === 'codemode' ? { summary: scriptSummary(nested.length) } : {}) };
+      items[call.index] = { ...item, ...finished(call.toolName, call.args, message, failed, message.durationMs), ...(call.toolName === 'codemode' ? { summary: scriptSummary(nested.length) } : {}) };
       for (const child of nested) {
         if (typeof child.id !== 'string' || typeof child.name !== 'string') continue;
         items.push({ ...toolCall(child.id, child.name, child.arguments, message.toolCallId), state: child.status === 'ok' ? 'done' : 'failed', ...(typeof child.durationMs === 'number' ? { durationMs: Math.round(child.durationMs) } : {}), kept: false });
+        toolCalls += 1;
       }
     }
     previous = message.role;
@@ -126,9 +142,10 @@ export const piClient: ProtocolClient = (channel, emit) => {
   let answer = '';
   let errored = false;
   let cost = 0;
+  let toolCalls = 0;
   let assistantMessages = 0;
   // the calls in flight, as last shown; a script's count of the calls it made
-  const tools = new Map<string, { toolName: string; item: TranscriptTool; calls: number }>();
+  const tools = new Map<string, { toolName: string; args: unknown; item: TranscriptTool; calls: number }>();
   const request = (command: Json): Promise<Json> => new Promise(resolve => {
     const id = `rac-${requests += 1}`;
     pending.set(id, resolve);
@@ -161,12 +178,12 @@ export const piClient: ProtocolClient = (channel, emit) => {
       }
       case 'extension_ui_request':
         if (record.method === 'notify' && typeof record.message === 'string') {
-          transcript({ id: next('n'), kind: 'notice', text: record.message, tone: record.notifyType === 'warning' || record.notifyType === 'error' ? record.notifyType : 'info' });
+          transcript({ id: next('n'), kind: 'notice', text: bounded(record.message), tone: record.notifyType === 'warning' || record.notifyType === 'error' ? record.notifyType : 'info' });
           return;
         }
         if (record.method !== 'setStatus' || typeof record.statusKey !== 'string') return;
         if (record.statusKey !== piReportStatusKey) {
-          emit({ type: 'status', key: record.statusKey, ...(typeof record.statusText === 'string' && record.statusText !== '' ? { text: record.statusText } : {}) });
+          emit({ type: 'status', key: record.statusKey, ...(typeof record.statusText === 'string' && record.statusText !== '' ? { text: bounded(record.statusText) } : {}) });
           return;
         }
         if (reported) return;
@@ -188,16 +205,18 @@ export const piClient: ProtocolClient = (channel, emit) => {
         return;
       case 'agent_start':
         if (working) return;
-        working = true; prompted = false; answer = ''; errored = false; cost = 0;
+        working = true; prompted = false; answer = ''; errored = false; cost = 0; toolCalls = 0;
         emit({ type: 'turn', turn: { type: 'started' } });
         return;
       case 'message_start':
         if (isObject(record.message) && record.message.role === 'assistant') assistantMessages += 1;
         return;
       case 'message_update': {
-        // only that thinking is under way: its text arrives whole with the message
+        // thinking is live from its start to its end, and shown whole then
         const update = isObject(record.assistantMessageEvent) ? record.assistantMessageEvent : undefined;
-        if (update?.type === 'thinking_start' && typeof update.contentIndex === 'number') transcript({ id: `t${assistantMessages}.${update.contentIndex}`, kind: 'thinking', text: '', live: true });
+        if (typeof update?.contentIndex !== 'number') return;
+        if (update.type === 'thinking_start') transcript({ id: `t${assistantMessages}.${update.contentIndex}`, kind: 'thinking', text: '', live: true });
+        if (update.type === 'thinking_end') transcript({ id: `t${assistantMessages}.${update.contentIndex}`, kind: 'thinking', text: typeof update.content === 'string' ? bounded(update.content) : '' });
         return;
       }
       case 'message_end': {
@@ -211,11 +230,11 @@ export const piClient: ProtocolClient = (channel, emit) => {
         cost += messageCost(message);
         const blocks = Array.isArray(message.content) ? message.content : [];
         blocks.forEach((block, index) => {
-          if (isObject(block) && block.type === 'thinking') transcript({ id: `t${assistantMessages}.${index}`, kind: 'thinking', text: typeof block.thinking === 'string' ? block.thinking : '' });
+          if (isObject(block) && block.type === 'thinking') transcript({ id: `t${assistantMessages}.${index}`, kind: 'thinking', text: typeof block.thinking === 'string' ? bounded(block.thinking) : '' });
         });
         errored = message.stopReason === 'error';
         const said = text(message.content);
-        const shown = said !== '' ? said : errored && typeof message.errorMessage === 'string' ? `Error: ${message.errorMessage}` : '';
+        const shown = answerText(message);
         if (said !== '') answer = said;
         if (shown !== '') transcript({ id: next('m'), kind: 'message', role: 'assistant', text: shown });
         usage();
@@ -225,7 +244,8 @@ export const piClient: ProtocolClient = (channel, emit) => {
         if (typeof record.toolCallId !== 'string' || typeof record.toolName !== 'string') return;
         const parentId = typeof record.parentToolCallId === 'string' ? record.parentToolCallId : undefined;
         const item = toolCall(record.toolCallId, record.toolName, record.args, parentId);
-        tools.set(record.toolCallId, { toolName: record.toolName, item, calls: 0 });
+        tools.set(record.toolCallId, { toolName: record.toolName, args: record.args, item, calls: 0 });
+        toolCalls += 1;
         transcript(item);
         const parent = parentId === undefined ? undefined : tools.get(parentId);
         if (parent?.toolName === 'codemode') showTool(parentId!, { ...parent.item, summary: scriptSummary(parent.calls += 1) });
@@ -234,7 +254,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
       case 'tool_execution_update': {
         const tool = typeof record.toolCallId === 'string' ? tools.get(record.toolCallId) : undefined;
         const output = isObject(record.partialResult) ? text(record.partialResult.content) : '';
-        if (tool !== undefined && output !== '' && output !== tool.item.output) showTool(record.toolCallId as string, { ...tool.item, output: output.length > maxOutput ? output.slice(-maxOutput) : output });
+        if (tool !== undefined && output !== '' && bounded(output) !== tool.item.output) showTool(record.toolCallId as string, { ...tool.item, output: bounded(output) });
         return;
       }
       case 'tool_execution_end': {
@@ -244,13 +264,13 @@ export const piClient: ProtocolClient = (channel, emit) => {
         const failed = record.isError === true;
         const calls = isObject(record.result) && isObject(record.result.details) && Array.isArray(record.result.details.calls) ? record.result.details.calls.length : undefined;
         const { output: _streamed, ...started } = tool.item;
-        transcript({ ...started, state: failed ? 'failed' : 'done', ...toolResult(tool.toolName, record.result, failed), ...(typeof record.durationMs === 'number' ? { durationMs: Math.round(record.durationMs) } : {}), ...(calls === undefined ? {} : { summary: scriptSummary(calls) }) });
+        transcript({ ...started, ...finished(tool.toolName, tool.args, record.result, failed, record.durationMs), ...(calls === undefined ? {} : { summary: scriptSummary(calls) }) });
         return;
       }
       case 'agent_settled':
         if (!working) return;
         working = false;
-        transcript({ id: next('e'), kind: 'settled', outcome: record.aborted === true ? 'cancelled' : errored ? 'failed' : 'done', cost });
+        transcript({ id: next('e'), kind: 'settled', outcome: outcome(record.aborted === true, errored), cost, toolCalls });
         emit({ type: 'turn', turn: record.aborted === true ? { type: 'aborted' } : errored ? { type: 'failed' } : { type: 'settled', message: answer } });
         return;
     }

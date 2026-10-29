@@ -49,7 +49,7 @@ function age(iso: string, now: number): string {
   return `${Math.round(minutes / (60 * 24))}d`;
 }
 
-function hunkClass(line: string): string | undefined {
+export function hunkClass(line: string): string | undefined {
   if (line.startsWith('@@')) return 'hunk-header';
   if (line.startsWith('+')) return 'added';
   if (line.startsWith('-')) return 'removed';

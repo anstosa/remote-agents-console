@@ -73,8 +73,10 @@ export type TranscriptLine = TranscriptItem | (Omit<TranscriptTool, 'output' | '
 const transcriptLine = (item: TranscriptItem): TranscriptLine => {
   if (item.kind !== 'tool') return item;
   const { output, source: _source, ...line } = item;
-  if (output === undefined) return line;
-  const lines = output.replace(/\n+$/u, '').split('\n');
+  // a call with a result line or a diff shows no output lines
+  if (output === undefined || line.result !== undefined || line.diff !== undefined) return line;
+  const lines = output.split('\n');
+  while (lines.length > 1 && lines.at(-1) === '') lines.pop();
   return { ...line, tail: lines.slice(-5).join('\n'), outputLines: lines.length };
 };
 const isStoredRecord = (value: unknown): value is StructuredRecord => {
@@ -218,7 +220,7 @@ export class StructuredAgents {
         break;
       case 'transcript': {
         let item = event.item;
-        // the first prompt of a Turn delivered from the queue
+        // one prompt is delivered at a time, so the next prompt shown (not a steer) is the delivered one
         if (item.kind === 'message' && item.role === 'user' && item.steer !== true && live.queuedNext !== undefined) {
           if (live.queuedNext) item = { ...item, queued: true };
           live.queuedNext = undefined;
@@ -240,6 +242,7 @@ export class StructuredAgents {
       case 'exited':
         live.working = false;
         live.connection = undefined;
+        live.status.clear();
         live.reported?.(false);
         if (record.lifecycle === 'starting') { void this.fail(record, live, 'Its process exited before reporting in.'); return; }
         if (record.lifecycle === 'live') { record.lifecycle = 'exited'; void this.save(); }
