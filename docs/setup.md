@@ -498,14 +498,16 @@ The Conductor is one always-running Pi Agent that can act on the console itself,
 {
   "projects": [{ "id": "conductor", "label": "Conductor", "path": "/home/me/conductor" }],
   "adapters": { "pi": { "allowedModels": [{ "model": "openai/gpt-5.6", "effort": "medium" }] } },
-  "conductor": { "kind": "pi", "project": "conductor", "model": "openai/gpt-5.6", "effort": "high", "scriptDeadlineMinutes": 10 }
+  "integrations": { "mcp": { "writeEnabled": true } },
+  "conductor": { "kind": "pi", "project": "conductor", "model": "openai/gpt-5.6", "effort": "high", "maxWorkers": 4, "maxSelfStartedTurnsPerHour": 30, "scriptDeadlineMinutes": 10 }
 }
 ```
 
 - `kind` is `pi`, the only kind that can host it. `adapters.pi` must be configured, and `model` must be one of its Allowed models; `effort` is optional.
-- `project` names a directory Project (a folder that is not a git checkout). It is the Conductor's working folder and the only place its commands may write, and its `AGENTS.md` is your standing guidance to it. Its tab sorts first.
-- `scopes` chooses what it may call, from `status:read`, `logs:read`, `files:read`, `prompts:write`, `agents:control`, `stack:operate`, `review:write` and `admin:dangerous`. The default is every scope but `admin:dangerous`. Its tool list shows only what its scopes allow. So far it gets the read tools only (Agents and their latest answers, logs and history, Worktrees, Stack state, reviews, file previews), and never `answer_agent_question` or the `launch_*` tools, whatever its scopes: one Agent never consents for you, and those launches are unsandboxed.
-- `maxWorkers` (4) and `maxSelfStartedTurnsPerHour` (30) are read but not used yet.
+- `project` names a directory Project (a folder that is not a git checkout). It is the Conductor's working folder and the only place its commands may write, and its `AGENTS.md` is your standing guidance to it. Its tab sorts first. If that folder is missing, the console still starts: the Conductor stays off and you get one push saying why.
+- `scopes` chooses what it may call, from `status:read`, `logs:read`, `files:read`, `prompts:write`, `agents:control`, `stack:operate`, `review:write`, `agents:spawn`, `notes:write` and `admin:dangerous` (the two before last are the Conductor's own). The default is every scope but `admin:dangerous`. Its tool list shows only what its scopes allow; `deactivate_agent`, `start_new_task` and `switch_pull_request` need `admin:dangerous`. It never gets `answer_agent_question`, `move_queued_prompt` or the `launch_*` tools, whatever its scopes: one Agent never consents for you, and those launches are unsandboxed. A tool added to the console later stays closed to it until it is listed for it.
+- `maxWorkers` (default 4) caps the workers it has starting or live at once.
+- `maxSelfStartedTurnsPerHour` (default 30) caps the Turns it did not get from you: reports, Watch events and Schedule Runs aimed at it. The excess waits in its queue, behind any prompt of yours, and you get one push that it is throttled.
 - `scriptDeadlineMinutes` (default 10): a code mode script that runs longer cancels its Turn, and its transcript says so.
 
 **Lifecycle.** The console launches the Conductor when it starts and again whenever it exits, on the same Conversation, keeping its queue. After 3 exits in 10 minutes it stays Exited and you get a push; prompts to it keep queueing until you resume it. It is always Sandboxed (see Pi's sandbox above). Its menu offers Restart, which starts its process again in place, and its Conversations menu offers New Conversation; there is no Close or Turn off. Remove the `conductor` block to turn it off. Its model chip shows its configured model without a picker, and it loads no skills or prompt templates from its folder.
@@ -514,11 +516,21 @@ The Conductor is one always-running Pi Agent that can act on the console itself,
 
 - The Conductor needs no `integrations` block: `/mcp` is served whenever a Conductor is configured, though the OAuth and voice parts are not. `integrations.mcp.readEnabled` (on by default), `writeEnabled` and `dangerousEnabled` still gate what it can call.
 - It acts without Davo's voice mode, has its own rate limit (120 calls a minute, counted per MCP call, so one script cannot hammer the console), and never reaches another console through federation. Every call is in the integration audit log.
-- It reads only within its scope: every configured Project, and any other Place while its Workspace exists.
+- It acts only within its scope: every configured Project, and any other Place while its Workspace exists. Worktrees and Agents elsewhere are not listed, and a call on one answers not found.
 - Its commands share every Pi's network allowlist (`sandbox` and `adapters.pi.sandbox`). Since it can read across your Projects, keep that list to what you would let it send data to. The denied console hosts are names and the listener address; a wildcard you allow that resolves to the same proxy can still reach `/mcp`, where only the token admits a caller.
 - It uses code mode to batch and filter console calls: a script calls them as `tools.mcp__rac__<tool>(args)`, and each result carries its data in `structuredContent`. Scripts get no `models` (no direct provider calls outside the Allowed models).
 
-**Why only Pi.** The console can arm and confirm Pi's sandbox itself, and hold the token inside Pi's process where commands cannot read it. It cannot see whether Claude's or Codex's own sandbox is on, and an Agent whose commands are unconfined could read another process's token from `/proc` or drive any pane. So only Pi can be the Conductor, and later only Sandboxed Pi workers can be spawned by it.
+**What it does with them.**
+
+- `queue_prompt` sends a prompt to another Agent and returns its `prompt_id`. The prompt shows a "from Conductor" chip in that Agent's queue and history. When the Turn it started ends, the console queues a report back to the Conductor: the target, how it ended (completed, failed, interrupted, the Agent's process exited, the prompt never went out, or the Agent is gone), the answer up to 8 KiB, and how to read the rest. Reports survive a deploy. A report is not a dispatch, so it reports nothing itself. It may list, edit and remove only the prompts it queued (one it removes is not reported), and cancel only a Turn it dispatched.
+- Questions from Agents it dispatched to still come to you. No `finished` push comes for a Turn the Conductor dispatched, or for a Turn of its own it started from a report, event or Run, unless that ends in a question.
+- `spawn_agent` launches a worker: a Sandboxed Pi Agent in a Worktree within its scope, optionally on an Allowed model. Workers get no console tools, so spawning is one level deep, and their header shows the Conductor as their origin. `close_agent` closes only its own workers; their queue becomes Notes.
+- It may start, stop and restart a stack or one Stack process (never build or migrate), read a Stack process's log (`get_process_log`), and start a review, which is reported back ready or failed.
+- With `notes:write` it may create Notes in its scope. It may edit, delete and schedule only its own, which are marked "Conductor"; once you save one, it is yours. A Schedule it sets is aimed at itself.
+- A Schedule may target the Conductor (the target picker offers it while one runs). A Run queues the Note's text to it as a labelled "scheduled run" and is recorded `delivered`; it launches no Agent.
+- In its transcript, reports and Runs are labelled rows, and another Agent's answer inside a report is shown as plain text in a box marked untrusted.
+
+**Why only Pi.** The console can arm and confirm Pi's sandbox itself, and hold the token inside Pi's process where commands cannot read it. It cannot see whether Claude's or Codex's own sandbox is on, and an Agent whose commands are unconfined could read another process's token from `/proc` or drive any pane. So only Pi can be the Conductor, and it can spawn only Sandboxed Pi workers.
 
 ## Reviews
 

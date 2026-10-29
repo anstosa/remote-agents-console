@@ -34,7 +34,27 @@
         "latest": "npm view oh-my-codex version",
         "run": "/usr/local/bin/omx update --stable"
       }
+    },
+    "pi": {
+      "allowedModels": [
+        { "model": "openai/gpt-5.6", "effort": "medium" },
+        { "model": "openrouter/z-ai/glm-4.6" }
+      ],
+      "sandbox": { "allowedDomains": ["registry.npmjs.org", "github.com"] }
     }
+  },
+  "integrations": {
+    "mcp": { "readEnabled": true, "writeEnabled": true, "dangerousEnabled": false }
+  },
+  "conductor": {
+    "kind": "pi",
+    "project": "conductor",
+    "model": "openai/gpt-5.6",
+    "effort": "high",
+    "scopes": ["status:read", "logs:read", "files:read", "prompts:write", "agents:control", "stack:operate", "review:write", "agents:spawn", "notes:write"],
+    "maxWorkers": 4,
+    "maxSelfStartedTurnsPerHour": 30,
+    "scriptDeadlineMinutes": 10
   },
   "projects": [
     {
@@ -44,6 +64,11 @@
       "path": "/home/me/code/example",
       "worktreesDirectory": "../example.worktrees",
       "commands": { "setup": "pnpm install", "processes": { "dev": "pnpm dev" } }
+    },
+    {
+      "id": "conductor",
+      "label": "Conductor",
+      "path": "/home/me/conductor"
     }
   ],
   "review": {
