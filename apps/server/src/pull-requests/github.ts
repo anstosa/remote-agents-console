@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { run } from '../tmux/command.js';
 
 // The console's one way to talk to GitHub: which token, which repository an origin names, how a
 // failure reads, and a small client. A query (a REST GET or a GraphQL query) is retried on a
@@ -45,6 +46,12 @@ export function at(value: unknown, ...keys: string[]): unknown {
 export function githubRepository(remote: string): GithubRepository | undefined {
   const match = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https:\/\/github\.com\/)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i.exec(remote.trim());
   return match === null ? undefined : { owner: match[1]!, name: match[2]! };
+}
+
+/** The GitHub repository a checkout's origin names, if it names one. */
+export async function originRepository(checkout: string): Promise<GithubRepository | undefined> {
+  const remote = await run('/usr/bin/git', ['-C', checkout, 'remote', 'get-url', 'origin']).catch(() => undefined);
+  return remote?.code === 0 ? githubRepository(remote.stdout) : undefined;
 }
 
 // the active github.com token in gh's hosts.yml: the host-level `oauth_token` of the `github.com:`

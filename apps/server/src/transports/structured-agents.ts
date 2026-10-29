@@ -20,9 +20,9 @@ import type { StructuredTurnTransport } from '../prompts/service.js';
  * console that restarts reconnects from.
  */
 export type HolderRef = { agentId: string; socket: string; pane: string; tmuxSocket?: string; pid?: number; read?: number };
-/** The command a holder runs: the program and its arguments, its environment, and the setup run first. */
 /** Whether a holder's process has exited, with its exit status. */
 export type HolderStatus = { dead: boolean; status?: number };
+/** The command a holder runs: the program and its arguments, its environment, and the setup run first. */
 export type HolderLaunch = { program: string; args: string[]; env: Record<string, string>; setup?: string };
 /**
  * A structured Agent as the console stores it, from launch until Close: its kind, Place, whether
@@ -285,15 +285,14 @@ export class StructuredAgents {
     const live = this.live.get(id) ?? this.idle();
     if (record === undefined || live.busy) return false;
     this.live.set(id, live);
-    // its process's last events (its exit) change nothing now
+    // its process's last events change nothing now: it ends here as an exit does, its queue waiting for a resume
     live.generation += 1;
     live.connection?.close();
-    this.endScripts(live);
+    this.processExited(record, live);
+    live.resyncing = false;
     if (record.holder !== undefined) await this.processes.stop(record.holder, record);
     record.holder = undefined;
     Object.assign(record, { lifecycle: 'exited', reason });
-    delete record.access;
-    Object.assign(live, { working: false, questions: [], steers: [], connection: undefined });
     await this.save();
     this.changed(live);
     return true;
@@ -782,19 +781,7 @@ export class StructuredAgents {
         live.usage = event.usage;
         break;
       case 'exited':
-        // a Turn in flight ends failed, and the queue waits for a resume
-        if (live.working) live.transcript.push({ id: `exited-${live.revision}`, kind: 'settled', outcome: 'failed' });
-        live.turn = { type: 'exited' };
-        live.working = false;
-        live.questions = [];
-        live.steers = [];
-        live.connection = undefined;
-        live.status.clear();
-        live.reported?.(false);
-        // the console token its process held works no more
-        delete record.access;
-        delete live.access;
-        this.endScripts(live);
+        this.processExited(record, live);
         if (record.lifecycle === 'starting') { void this.fail(record, live, 'Its process exited before reporting in.'); return; }
         if (record.lifecycle === 'live') { record.lifecycle = 'exited'; void this.save(); void this.readStderr(record, live); }
         break;
@@ -817,6 +804,22 @@ export class StructuredAgents {
       this.notice(live, `A script ran past its ${Math.round(deadline / 60_000)}-minute deadline, so its Turn was cancelled.`, 'warning');
       void this.interrupt(record.id).catch(() => undefined);
     }, deadline));
+  }
+
+  // an Agent's process is gone: a Turn in flight ends failed, the queue waits for a resume, and
+  // the console token the process held works no more
+  private processExited(record: StructuredRecord, live: Live): void {
+    if (live.working) live.transcript.push({ id: `exited-${live.revision}`, kind: 'settled', outcome: 'failed' });
+    live.turn = { type: 'exited' };
+    live.working = false;
+    live.questions = [];
+    live.steers = [];
+    live.connection = undefined;
+    live.status.clear();
+    live.reported?.(false);
+    delete record.access;
+    delete live.access;
+    this.endScripts(live);
   }
 
   // a Turn's end ends its scripts' deadlines

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -108,13 +108,23 @@ export function sessionGit(cwd: string): Pick<SessionPaths, 'git'> {
   }
   return { git: { dir, commonDir } };
 }
+/** Pi's state directory, as Pi's own `getAgentDir` reads it from its environment. */
+export const piStateDir = (env: NodeJS.ProcessEnv): string => env.PI_CODING_AGENT_DIR === undefined || env.PI_CODING_AGENT_DIR === '' ? join(homedir(), '.pi', 'agent') : expandHome(env.PI_CODING_AGENT_DIR);
+
+/**
+ * The policy of a session in `cwd`: the rendered one in `policyFile` with the session's own paths,
+ * its state directory and temp directory given, its git and tmux socket found.
+ */
+export const sessionPolicyFrom = (policyFile: string, { cwd, stateDir, tempDir }: Pick<SessionPaths, 'cwd' | 'stateDir' | 'tempDir'>, env: NodeJS.ProcessEnv): SandboxPolicy =>
+  sessionPolicy(JSON.parse(readFileSync(policyFile, 'utf8')) as SandboxPolicy, { cwd, stateDir, ...sessionGit(cwd), tempDir, ...sessionTmuxSocket(env) });
+
 /** The socket of the tmux server a process runs in (`TMUX` is `<socket>,<pid>,<session>`). */
 export function sessionTmuxSocket(env: NodeJS.ProcessEnv): Pick<SessionPaths, 'tmuxSocket'> {
   const socket = env.TMUX?.split(',')[0];
   return socket === undefined || socket === '' ? {} : { tmuxSocket: socket };
 }
 
-export const expandHome = (path: string): string => path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path;
+const expandHome = (path: string): string => path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path;
 // a path as Pi's file tools read it (`resolveToCwd`): spaces normalised, a leading `@` dropped,
 // `~` and `file://` expanded, then resolved against the session's cwd
 function toolPath(raw: string, cwd: string): string {

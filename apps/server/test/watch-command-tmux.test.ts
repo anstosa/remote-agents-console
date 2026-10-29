@@ -66,7 +66,8 @@ async function workspace(env: Record<string, string> = {}) {
   const socket: SocketRef = { fingerprint: 'work', path: socketPath, device: 0, inode: 0 };
   const launch = new LaunchService(testConfig(), socketFinder([socket]), new TmuxAdapter(), undefined, undefined, () => [], () => new Set(), async () => ({ socket, session: 'work' }), join(root, 'private'));
   const policy = join(root, 'sandbox.json');
-  await writeFile(policy, JSON.stringify({ network: { allowedDomains: [], deniedDomains: [] }, filesystem: { denyRead: [], allowWrite: [], denyWrite: [] }, env: [], repositories: [] }));
+  // as the console renders it: its private directory (holder sockets) unreadable and unwritable
+  await writeFile(policy, JSON.stringify({ network: { allowedDomains: [], deniedDomains: [] }, filesystem: { denyRead: [join(root, 'private')], allowWrite: [], denyWrite: [join(root, 'private')] }, env: [], repositories: [] }));
   const windows = commandWindows(launch, { pi: { program: process.execPath, args: [], env: { PI_CODING_AGENT_DIR: join(root, 'pi'), ...env }, launchable: true } } as never, async () => ({ 'sandbox.json': policy }));
   return { root, home, place, socketPath, windows };
 }
@@ -116,6 +117,16 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined || bwrap === '')('a
     expect(next!.from).toBe(1);
     expect(await read(next!, 1)).toEqual(['second']);
     expect(await windows.status(holder!)).toEqual({ dead: false });
+  });
+
+  it('keeps Pi\'s credentials and the console\'s private directory out of the command\'s reach', async () => {
+    const { root, place, windows } = await workspace();
+    await mkdir(join(root, 'pi'), { recursive: true });
+    await writeFile(join(root, 'pi', 'auth.json'), '{"openai":"key"}');
+    await mkdir(join(root, 'private', 'holders'), { recursive: true });
+    await writeFile(join(root, 'private', 'note'), 'console state');
+    const holder = await windows.open(place, 'watch-4', `cat '${join(root, 'pi', 'auth.json')}' 2>/dev/null || echo no auth; ls '${join(root, 'private')}' 2>/dev/null || echo no private`, 'pi');
+    expect(await read((await windows.connect(holder!, 0))!, 2)).toEqual(['no auth', 'no private']);
   });
 
   it('gives the command only the allowlisted environment, never the kind\'s other variables', async () => {

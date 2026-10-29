@@ -1,9 +1,8 @@
-import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Agent } from '../domain/models.js';
 import type { PushMessage } from '../notifications.js';
-import { limitText, redactIntegrationText } from '../integrations/text.js';
+import { fenced, limitText, redactIntegrationText } from '../integrations/text.js';
 import type { PromptHistoryEntry } from '../prompt-history/service.js';
 import type { PromptSender, QueuedPrompt } from '../prompts/queue.js';
 import type { PromptDispatchHooks, PromptOutcome } from '../prompts/service.js';
@@ -35,16 +34,6 @@ const outcomeText: Record<PromptOutcome, string> = {
   gone: 'ended: the Agent is gone'
 };
 
-
-/**
- * Another's text as data, under a fence it cannot close: `intro` says what follows and whose it
- * is, and `cut` is said when the text was cut at 8 KiB.
- */
-export function fenced(text: string, intro: (fence: string) => string, cut: string): string[] {
-  const fence = `untrusted-${randomBytes(6).toString('hex')}`;
-  const shown = limitText(text, maxAnswerBytes);
-  return [intro(fence), `<<<${fence}`, shown.text, `${fence}>>>`, ...(shown.truncated ? ['', cut] : [])];
-}
 
 /**
  * The report a sender is queued once a prompt it dispatched has ended: the target, the outcome,

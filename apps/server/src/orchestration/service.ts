@@ -17,8 +17,7 @@ import { configuredWorktreeForWorkspace, projectIdOf, worktreeById } from '../wo
 import { limitText, redactIntegrationText } from '../integrations/text.js';
 import { processActions, type StackState, type WorktreeCommandService } from '../worktree-commands/service.js';
 import { declaredProcesses } from '../domain/stack-processes.js';
-import { GithubRequestError, type GithubRepository } from '../pull-requests/github.js';
-import { originRepository } from '../watches/github.js';
+import { GithubRequestError, originRepository, type GithubRepository } from '../pull-requests/github.js';
 import type { WatchRefusal, Watches } from '../watches/service.js';
 import type {
   AgentStatusV1,

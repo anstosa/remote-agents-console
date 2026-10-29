@@ -279,7 +279,7 @@ test('the Conductor\'s header counts its Watches and lists each with Remove', as
   const list = page.getByRole('dialog', { name: 'Watches' });
   await expect(list.getByText('Pull request octo/repo#7')).toBeVisible();
   await expect(list.getByText(/^Command · since /u)).toBeVisible();
-  // the console removes it and its next dashboard no longer lists it
+  // Remove asks the console to remove it (its next dashboard no longer lists it)
   const removed = page.waitForRequest(request => request.method() === 'DELETE' && new URL(request.url()).pathname === '/api/agents/agent-1/watches/watch-2');
   await list.getByRole('button', { name: 'Remove the build log' }).click();
   await removed;

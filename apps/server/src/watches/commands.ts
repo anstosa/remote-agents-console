@@ -25,8 +25,8 @@ export function commandWindows(windows: HolderWindows & { holderStatus(holder: H
       const adapter = structuredAdapterFor(kind);
       const env = configs[kind]?.env ?? {};
       const policy = (await files(kind))?.['sandbox.json'];
-      if (adapter?.sandbox !== true || adapter.stateDir === undefined || policy === undefined) return undefined;
-      return await windows.openHolderWindow(place, watchId, { program: process.execPath, args: [...runner(), command], env: { ...env, RAC_SANDBOX_POLICY: policy, RAC_SANDBOX_STATE_DIR: adapter.stateDir(env) } });
+      if (adapter?.sandbox !== true || policy === undefined) return undefined;
+      return await windows.openHolderWindow(place, watchId, { program: process.execPath, args: [...runner(), command], env: { ...env, RAC_SANDBOX_POLICY: policy } });
     },
     async connect(holder, from) {
       const connected = await connectHolder(holder.socket, { from });

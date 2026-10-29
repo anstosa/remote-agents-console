@@ -796,11 +796,12 @@ export class LaunchService implements HolderWindows {
 
   // the tmux arguments that reach a holder's pane, or none once the pane is not that holder's any
   // more: a tmux server restart reuses pane ids
-  private async holderPane(holder: HolderRef): Promise<{ socketArgs: string[]; dead: boolean } | undefined> {
+  private async holderPane(holder: HolderRef): Promise<{ socketArgs: string[] } & HolderStatus | undefined> {
     const socketArgs = holder.tmuxSocket === undefined ? [] : ['-S', holder.tmuxSocket];
-    const marks = await run(this.tmux, [...socketArgs, 'display-message', '-p', '-t', holder.pane, `#{@rac_role} #{${holderAgentOption}} #{pane_dead}`]).catch(() => undefined);
-    const [role, agentId, dead] = marks?.code === 0 ? marks.stdout.trim().split(' ') : [];
-    return role === holderPaneRole && agentId === holder.agentId ? { socketArgs, dead: dead === '1' } : undefined;
+    const marks = await run(this.tmux, [...socketArgs, 'display-message', '-p', '-t', holder.pane, `#{@rac_role} #{${holderAgentOption}} #{pane_dead} #{pane_dead_status}`]).catch(() => undefined);
+    const [role, agentId, dead, status] = marks?.code === 0 ? marks.stdout.trim().split(' ') : [];
+    if (role !== holderPaneRole || agentId !== holder.agentId) return undefined;
+    return { socketArgs, dead: dead === '1', ...(status === undefined || status === '' || Number.isNaN(Number(status)) ? {} : { status: Number(status) }) };
   }
 
   // whether a holder's pane is this Agent's and its holder still runs (a dead pane's holder, and
@@ -811,12 +812,8 @@ export class LaunchService implements HolderWindows {
 
   // whether a holder's process has exited, with its exit status; undefined once its pane is gone
   async holderStatus(holder: HolderRef): Promise<HolderStatus | undefined> {
-    const socketArgs = (await this.holderPane(holder))?.socketArgs;
-    if (socketArgs === undefined) return undefined;
-    const shown = await run(this.tmux, [...socketArgs, 'display-message', '-p', '-t', holder.pane, '#{pane_dead} #{pane_dead_status}']).catch(() => undefined);
-    if (shown?.code !== 0) return undefined;
-    const [dead, status] = shown.stdout.trim().split(' ');
-    return { dead: dead === '1', ...(status === undefined || status === '' || Number.isNaN(Number(status)) ? {} : { status: Number(status) }) };
+    const pane = await this.holderPane(holder);
+    return pane === undefined ? undefined : { dead: pane.dead, ...(pane.status === undefined ? {} : { status: pane.status }) };
   }
 
   // the last `lines` a holder's pane shows: its child's stderr, and the holder's exit line

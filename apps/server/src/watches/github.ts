@@ -1,11 +1,4 @@
-import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, githubToken, type GithubRepository, type Request, type Token } from '../pull-requests/github.js';
-import { run } from '../tmux/command.js';
-
-/** The GitHub repository a checkout's origin names, if it names one. */
-export async function originRepository(checkout: string): Promise<GithubRepository | undefined> {
-  const remote = await run('/usr/bin/git', ['-C', checkout, 'remote', 'get-url', 'origin']).catch(() => undefined);
-  return remote?.code === 0 ? githubRepository(remote.stdout) : undefined;
-}
+import { at, GithubClient, GithubRequestError, graphqlError, githubToken, type GithubRepository, type Request, type Token } from '../pull-requests/github.js';
 
 /** A pull request as a Watch compares it: its state, head commit, settled checks, mergeability and review threads. */
 export type PullRequestState = {

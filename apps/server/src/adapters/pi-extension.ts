@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import { createBashToolDefinition, createCodemodeExtension, createLocalBashOperations, createMcpExtension, getAgentDir, VERSION, type BashOperations, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { commandEnv, pathRefusal, sessionGit, sessionPolicy, sessionTmuxSocket, type SandboxPolicy } from './pi-sandbox.js';
+import { commandEnv, pathRefusal, sessionPolicyFrom, type SandboxPolicy } from './pi-sandbox.js';
 
 /**
  * The RAC Pi extension, loaded into every Pi the console launches (ADR 0017). Pi loads it
@@ -88,7 +88,7 @@ export default function rac(pi: ExtensionAPI): void {
       try {
         if (tempDir !== undefined) rmSync(tempDir, { recursive: true, force: true });
         tempDir = mkdtempSync(join(tmpdir(), 'rac-pi-'));
-        policy = sessionPolicy(JSON.parse(readFileSync(policyFile, 'utf8')) as SandboxPolicy, { cwd: ctx.cwd, stateDir: getAgentDir(), ...sessionGit(ctx.cwd), tempDir, ...sessionTmuxSocket(process.env) });
+        policy = sessionPolicyFrom(policyFile, { cwd: ctx.cwd, stateDir: getAgentDir(), tempDir }, process.env);
         // the runtime points each command's TMPDIR here
         process.env.CLAUDE_CODE_TMPDIR = tempDir;
         await SandboxManager.initialize({ network: policy.network, filesystem: policy.filesystem });

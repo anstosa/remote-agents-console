@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/app.js';
@@ -1892,7 +1892,7 @@ describe('the Conductor\'s Watches', () => {
       status: async holder => status.get(holder.pane),
       close: async holder => { closed.push(holder.pane); status.delete(holder.pane); }
     };
-    return { windows, opened, connects, closed, print: (...lines: string[]) => { for (const text of lines) line(text); }, exit: (pane: string, code: number) => { status.set(pane, { dead: true, status: code }); close(); }, vanish: (pane: string) => { status.delete(pane); } };
+    return { windows, opened, connects, closed, print: (...lines: string[]) => { for (const text of lines) line(text); }, exit: (pane: string, code: number) => { close(); setTimeout(() => status.set(pane, { dead: true, status: code }), 150); }, vanish: (pane: string) => { status.delete(pane); } };
   }
 
   // every event a console told the Conductor: the Turns its process was given and the prompts still queued for it
@@ -1939,13 +1939,13 @@ describe('the Conductor\'s Watches', () => {
     github.pull.threads.push({ id: 'T1', resolved: false, author: 'alice' }, { id: 'T0', resolved: true, author: 'bob' });
     await app.watches.check();
     await app.watches.check();
-    expect(await told()).toEqual([`[RAC event] Watch ${id} #1 (Pull request octo/repo#7): its checks failed on aaaaaaaaaaaa; a new unresolved review thread from alice. https://github.com/octo/repo/pull/7`]);
+    expect(await told()).toEqual([`[RAC event] Watch ${id} #1 "Pull request octo/repo#7": its checks failed on aaaaaaaaaaaa; a new unresolved review thread from alice. https://github.com/octo/repo/pull/7`]);
     // the checks run again on the same head and fail again
     github.pull.rollup = 'PENDING';
     await app.watches.check();
     github.pull.rollup = 'FAILURE';
     await app.watches.check();
-    expect((await told())[1]).toBe(`[RAC event] Watch ${id} #2 (Pull request octo/repo#7): its checks failed on aaaaaaaaaaaa. https://github.com/octo/repo/pull/7`);
+    expect((await told())[1]).toBe(`[RAC event] Watch ${id} #2 "Pull request octo/repo#7": its checks failed on aaaaaaaaaaaa. https://github.com/octo/repo/pull/7`);
     // a conflict, and checks passing on a new head
     github.pull.mergeable = 'CONFLICTING';
     github.pull.head = 'b'.repeat(40);
@@ -1969,7 +1969,7 @@ describe('the Conductor\'s Watches', () => {
     // the checks fail while no console looks
     github.pull.rollup = 'FAILURE';
     const deployed = await deploy(fakeAgent());
-    expect(await deployed.told()).toEqual([expect.stringContaining(`Watch ${id} #1 (Pull request octo/repo#7): its checks failed`)]);
+    expect(await deployed.told()).toEqual([expect.stringContaining(`Watch ${id} #1 "Pull request octo/repo#7": its checks failed`)]);
     await deployed.app.watches.check();
     expect(await deployed.told()).toHaveLength(1);
 
@@ -1977,8 +1977,30 @@ describe('the Conductor\'s Watches', () => {
     github.pull.threads.push({ id: 'T9', resolved: false, author: 'carol' });
     await redeployed.app.watches.check();
     // the first still waits in its queue (the Conductor has not settled since the deploy), told once
-    expect(await redeployed.told()).toEqual([expect.stringContaining(`Watch ${id} #1 `), expect.stringContaining(`Watch ${id} #2 (Pull request octo/repo#7): a new unresolved review thread from carol`)]);
+    expect(await redeployed.told()).toEqual([expect.stringContaining(`Watch ${id} #1 `), expect.stringContaining(`Watch ${id} #2 "Pull request octo/repo#7": a new unresolved review thread from carol`)]);
     await redeployed.app.close();
+  });
+
+  it('neither repeats nor drops the events a console stopped between recording and queueing', async () => {
+    const fake = fakeAgent();
+    const { app, call, worktree, github, told, deploy, root } = await watching(fake);
+    const id = (await call('watch_pull_request', { worktree_id: worktree, number: 7 })).data.watch_id as string;
+    github.pull.rollup = 'FAILURE';
+    await app.watches.check();
+    const [first] = await told();
+    expect(first).toContain(`Watch ${id} #1 `);
+    // the console stopped after queueing #1 but before taking it off the Watch's outbox, and after recording #2
+    const second = `[RAC event] Watch ${id} #2 "Pull request octo/repo#7": its checks all passed on aaaaaaaaaaaa. https://github.com/octo/repo/pull/7`;
+    const file = join(root, 'watches.json');
+    const stored = JSON.parse(await readFile(file, 'utf8')) as Array<{ outbox: string[]; sequence: number }>;
+    stored[0]!.outbox = [first!, second];
+    stored[0]!.sequence = 2;
+    await writeFile(file, JSON.stringify(stored));
+    const deployed = await deploy(fakeAgent());
+    expect(await deployed.told()).toEqual([second]);
+    await deployed.app.watches.check();
+    expect(await deployed.told()).toEqual([second]);
+    await deployed.app.close();
   });
 
   it('watches review requests to the operator: a first request and a re-request are told, another user\'s are not', async () => {
@@ -1993,20 +2015,24 @@ describe('the Conductor\'s Watches', () => {
 
     github.requests.push({ number: 5, events: [{ id: 'RR2', login: 'someone-else' }, { id: 'RR3', login: 'me' }] });
     await app.watches.check();
-    expect(await told()).toEqual([`[RAC event] Watch ${id} #1 (Review requests in octo/repo): #5 requests your review: https://github.com/octo/repo/pull/5`]);
+    expect(await told()).toEqual([`[RAC event] Watch ${id} #1 "Review requests in octo/repo": #5 requests your review: https://github.com/octo/repo/pull/5`]);
     // reviewed (no longer requested), then requested again
     github.requests.splice(0, 1);
     await app.watches.check();
     github.requests.push({ number: 3, events: [{ id: 'RR1', login: 'me' }, { id: 'RR4', login: 'me' }] });
     await app.watches.check();
     await app.watches.check();
-    expect(await told()).toEqual([expect.any(String), `[RAC event] Watch ${id} #2 (Review requests in octo/repo): #3 re-requests your review: https://github.com/octo/repo/pull/3`]);
+    expect(await told()).toEqual([expect.any(String), `[RAC event] Watch ${id} #2 "Review requests in octo/repo": #3 re-requests your review: https://github.com/octo/repo/pull/3`]);
     // a request GitHub's latest timeline items do not name is told once, and naming it later is no re-request
     github.requests.push({ number: 9, events: [] });
     await app.watches.check();
     github.requests[github.requests.length - 1]!.events.push({ id: 'RR9', login: 'me' });
     await app.watches.check();
-    expect((await told()).slice(2)).toEqual([`[RAC event] Watch ${id} #3 (Review requests in octo/repo): #9 requests your review: https://github.com/octo/repo/pull/9`]);
+    expect((await told()).slice(2)).toEqual([`[RAC event] Watch ${id} #3 "Review requests in octo/repo": #9 requests your review: https://github.com/octo/repo/pull/9`]);
+    // a teammate's review requested after the operator's is not a request of the operator's
+    github.requests[github.requests.length - 1]!.events.push({ id: 'RR10', login: 'teammate' });
+    await app.watches.check();
+    expect(await told()).toHaveLength(3);
     await app.close();
   });
 
@@ -2033,7 +2059,7 @@ describe('the Conductor\'s Watches', () => {
 
     await pane(true, '3');
     await dashboard();
-    await vi.waitFor(async () => expect(await told()).toEqual([expect.stringContaining(`[RAC event] Watch ${id} #1 (Stack process dev in `)]));
+    await vi.waitFor(async () => expect(await told()).toEqual([expect.stringContaining(`[RAC event] Watch ${id} #1 "Stack process dev in `)]));
     expect((await told())[0]).toContain('the process exited with status 3.');
     expect((await told())[0]).toContain(join(repo, '.git', 'rac', 'processes', 'dev.log'));
     await dashboard();
@@ -2045,7 +2071,7 @@ describe('the Conductor\'s Watches', () => {
     await pane(true, '1');
     const deployed = await deploy(fakeAgent());
     await deployed.app.inject({ method: 'GET', url: '/api/dashboard', headers: deployed.headers });
-    await vi.waitFor(async () => expect(await deployed.told()).toEqual([expect.stringContaining(`Watch ${id} #2 (Stack process dev in `)]));
+    await vi.waitFor(async () => expect(await deployed.told()).toEqual([expect.stringContaining(`Watch ${id} #2 "Stack process dev in `)]));
     expect((await deployed.told())[0]).toContain('with status 1.');
     await deployed.app.close();
   });
@@ -2064,7 +2090,7 @@ describe('the Conductor\'s Watches', () => {
     windows.print('done');
     await vi.waitFor(async () => expect(await told()).toHaveLength(1), { timeout: 2_000 });
     const event = (await told())[0]!;
-    expect(event).toMatch(new RegExp(`^\\[RAC event\\] Watch ${id} #1 \\(the build log\\): it printed:`, 'u'));
+    expect(event).toMatch(new RegExp(`^\\[RAC event\\] Watch ${id} #1 "the build log": it printed:`, 'u'));
     expect(event).toMatch(/<<<untrusted-[0-9a-f]+\ncompiling\nlinked\ndone\nuntrusted-[0-9a-f]+>>>/u);
     windows.print('warning: slow');
     await vi.waitFor(async () => expect(await told()).toHaveLength(2), { timeout: 2_000 });
@@ -2074,12 +2100,12 @@ describe('the Conductor\'s Watches', () => {
     expect(windows.opened).toHaveLength(1);
     expect(windows.connects).toEqual([{ pane: '%1', from: 0 }, { pane: '%1', from: 4 }]);
     windows.print('deployed');
-    await vi.waitFor(async () => expect((await deployed.told()).at(-1)).toContain(`Watch ${id} #3 (the build log): it printed:`), { timeout: 2_000 });
+    await vi.waitFor(async () => expect((await deployed.told()).at(-1)).toContain(`Watch ${id} #3 "the build log": it printed:`), { timeout: 2_000 });
     expect((await deployed.told()).filter(text => text.includes('\ndeployed\n'))).toHaveLength(1);
     expect((await deployed.told()).filter(text => text.includes('compiling'))).toHaveLength(0);
     windows.exit('%1', 2);
-    await vi.waitFor(async () => expect((await deployed.told()).at(-1)).toBe(`[RAC event] Watch ${id} #4 (the build log): the command exited with status 2, so this Watch ends.`), { timeout: 2_000 });
-    expect(windows.closed).toEqual(['%1']);
+    await vi.waitFor(async () => expect((await deployed.told()).at(-1)).toBe(`[RAC event] Watch ${id} #4 "the build log": the command exited with status 2, so this Watch ends.`), { timeout: 2_000 });
+    await vi.waitFor(() => expect(windows.closed).toEqual(['%1']));
     await deployed.app.close();
   });
 
@@ -2088,7 +2114,7 @@ describe('the Conductor\'s Watches', () => {
     const { app, call, told, windows, deploy, conductor } = await watching(fake, { deps: { watchBatchMs: 1 } });
     const noisy = (await call('watch_command', { command: 'while :; do date; done', description: 'noise' })).data.watch_id as string;
     for (let index = 0; index < 21; index += 1) { windows.print(`line ${index}`); await new Promise(resolve => setTimeout(resolve, 15)); }
-    await vi.waitFor(async () => expect((await told()).at(-1)).toBe(`[RAC event] Watch ${noisy} #21 (noise): it was stopped: it sent more than 20 events in a minute. Set it again with a quieter command if you still need it.`), { timeout: 2_000 });
+    await vi.waitFor(async () => expect((await told()).at(-1)).toBe(`[RAC event] Watch ${noisy} #21 "noise": it was stopped: it sent more than 20 events in a minute. Set it again with a quieter command if you still need it.`), { timeout: 2_000 });
     expect(await told()).toHaveLength(21);
     expect(windows.closed).toEqual(['%1']);
     expect((await call('list_watches', {}, false)).data.watches).toEqual([]);

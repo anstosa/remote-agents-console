@@ -498,8 +498,6 @@ export interface StructuredAdapter {
   readonly files?: (context: AdapterFileContext) => Record<string, string>;
   /** The kind confines its own tool calls when launched Sandboxed, failing its launch if it cannot. */
   readonly sandbox?: true;
-  /** Where the kind keeps its state and credentials, under its configured environment, which its sandbox protects. */
-  readonly stateDir?: (env: Readonly<Record<string, string>>) => string;
 }
 /**
  * What a structured launch starts: a new Conversation, the one at `resume` (located by the
