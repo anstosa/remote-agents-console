@@ -260,7 +260,8 @@ test.describe('mobile Fn input', () => {
     await pushBytes(page, 'agent-1', 'ready\r\n');
 
     const output = page.locator('.log-output');
-    await output.locator('.xterm-accessibility-tree').tap();
+    // tap visible output rather than an accessibility node beneath the selection surface
+    await output.locator('.xterm-screen').tap();
     const textarea = output.locator('.xterm-helper-textarea');
     const keys = output.getByLabel('Terminal keys');
     const modifiers = keys.locator('.mobile-key-modifiers');

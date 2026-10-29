@@ -20,7 +20,7 @@ export interface StreamedTerminalOptions {
   scrollback?: number;
   // prefer ordinary text selection over application mouse gestures in agent output
   preferNativeMouseSelection?: boolean;
-  // recognize codex/omx's app-owned transcript return control
+  // route codex/omx's app-owned transcript scrolling and return control
   codexScrollControls?: boolean;
   // Route a same-stack URL into the in-app browser; return true when it was handled.
   onOpenUrl?: (url: string) => boolean;
@@ -510,7 +510,59 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   terminal.onBinary(data => sendBytes(Uint8Array.from(data, character => character.charCodeAt(0))));
   terminal.onScroll(() => { syncFollowState(); scheduleOverlayRender(); });
 
-  // Console-owned touch scrolling and long-press selection; the wheel stays native.
+  let codexWheelRemainder = 0;
+  let codexWheelGeneration = outputGeneration;
+  let codexWheelDirection = 0;
+  let codexWheelSentAt = Number.NEGATIVE_INFINITY;
+  // codex disables capture under mouse-off tmux; use page keys instead of prompt arrows
+  terminal.attachCustomWheelEventHandler(event => {
+    // preserve native history and application mouse protocols outside this fallback
+    if (!options.codexScrollControls || terminal.buffer.active.type !== 'alternate' || terminal.modes.mouseTrackingMode !== 'none') {
+      codexWheelRemainder = 0;
+      codexWheelDirection = 0;
+      return true;
+    }
+    // leave browser zoom and horizontal gestures alone without synthesizing arrows
+    if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.deltaY === 0) {
+      codexWheelRemainder = 0;
+      return false;
+    }
+    event.preventDefault();
+    // never carry a partial gesture or an application shortcut across stream snapshots
+    if (codexWheelGeneration !== outputGeneration || parsedSeedGeneration !== outputGeneration) {
+      codexWheelRemainder = 0;
+      codexWheelDirection = 0;
+      codexWheelGeneration = outputGeneration;
+      // wait until the retained screen belongs to the current stream
+      if (parsedSeedGeneration !== outputGeneration) return false;
+    }
+    const height = terminal.element?.querySelector('.xterm-screen')?.getBoundingClientRect().height;
+    // wait for measurable rows before accumulating fractional trackpad movement
+    if (!height) return false;
+    let amount = event.deltaY;
+    // match xterm's fractional trackpad threshold and page-sized wheel units
+    if (event.deltaMode === WheelEvent.DOM_DELTA_PIXEL) amount = amount / (height / terminal.rows) * (Math.abs(amount) < 50 ? 0.3 : 1);
+    else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) amount *= terminal.rows;
+    const direction = Math.sign(amount);
+    // a reversed gesture must not cancel against old motion or inherit its page throttle
+    if (direction !== codexWheelDirection) {
+      codexWheelRemainder = 0;
+      codexWheelDirection = direction;
+      codexWheelSentAt = Number.NEGATIVE_INFINITY;
+    }
+    codexWheelRemainder += amount;
+    const lines = Math.trunc(codexWheelRemainder);
+    codexWheelRemainder -= lines;
+    const now = performance.now();
+    // cap bursts and synthetic touch rows at one page per 150ms without queued input
+    if (lines !== 0 && now - codexWheelSentAt >= 150) {
+      // complete keyboard sequences work in both the transcript and non-mouse overlays
+      if (sendInput(lines < 0 ? '\x1b[5~' : '\x1b[6~')) codexWheelSentAt = now;
+    }
+    return false;
+  });
+
+  // share wheel routing with vertical touch gestures without changing keyboard focus
   const releaseTouchScroll = attachTerminalTouchScroll(host, terminal);
   const releaseLongPress = preserveOutputLongPressSelection(host, () => { suppressFocusUntil = performance.now() + 250; });
 
