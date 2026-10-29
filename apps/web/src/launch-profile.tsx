@@ -24,7 +24,9 @@ export const AgentAccountsMenuContext = createContext<AgentAccountsMenu | undefi
 // The capability record the Dashboard publishes per registered kind (ADR 0002). The web
 // reads presence and reasons; it never re-derives capabilities. `sandbox*` stay undefined
 // until chunk 4 arms the sandbox, so every launch is unsandboxed here.
-export type AdapterCapability = { launchable: boolean; unavailableReason?: string; program?: string; stateSource: 'reported' | 'title' | 'both'; turnCapture: boolean; inlineQuestions: boolean; commands: boolean; sandbox: boolean; sandboxUnavailableReason?: string };
+export type AdapterCapability = { launchable: boolean; unavailableReason?: string; program?: string; stateSource: 'reported' | 'title' | 'both'; turnCapture: boolean; inlineQuestions: boolean; commands: boolean; sandbox: boolean; sandboxUnavailableReason?: string; allowedModels?: AllowedModel[]; efforts?: string[] };
+// one of a kind's Allowed models: an exact `provider/id`, with the Effort it defaults to
+export type AllowedModel = { model: string; effort?: string };
 export type AdapterCapabilities = Partial<Record<AgentKind, AdapterCapability>>;
 
 export type LaunchScope = 'worktree' | 'project' | 'scratch';
@@ -32,8 +34,8 @@ export type LaunchOrigin = LaunchScope | 'default';
 // The Launch profile resolution the server publishes so the web renders the menu without
 // re-deriving it: which kind a one-click Launch uses, why, and any remembered kind skipped.
 export type LaunchResolution = { kind?: AgentKind; origin?: LaunchOrigin; skipped?: { kind: AgentKind; origin: LaunchScope; reason: string } };
-// what a launch/restart row sends to a launch-family route; sandboxed is never remembered
-export type LaunchChoice = { kind: AgentKind; sandboxed: boolean };
+// what a launch/restart row sends to a launch-family route; sandboxed, model and Effort are never remembered
+export type LaunchChoice = { kind: AgentKind; sandboxed: boolean; model?: string; effort?: string };
 
 // the per-kind adapter capabilities from the active dashboard, for the Launch controls
 export const AdaptersContext = createContext<AdapterCapabilities | undefined>(undefined);
@@ -139,8 +141,24 @@ export function LaunchMenu({ verb, label, resolution, onLaunch, onDismiss, entri
     })}
     {/* retain distinct version and operation errors */}{settings?.errors.map(error => <p key={error} className="launch-menu-error" role="alert">{error}</p>)}
     {unsandboxable.length > 0 && <><hr className="more-menu-divider" /><p className="launch-menu-heading launch-menu-subheading">Without sandbox — this launch only</p>{unsandboxable.map(kind => <button key={`${kind}-unsandboxed`} type="button" role="menuitem" className="launch-row launch-row-unsandboxed" disabled={launchDisabled} onClick={() => onLaunch({ kind, sandboxed: false })}><KindMark kind={kind} /><span className="launch-row-copy"><strong>{agentKindLabel[kind]}</strong><small>{sandboxCopy(kind, adapters?.[kind], false)}</small></span><UnlockIcon /></button>)}</>}
+    {kinds.filter(kind => adapters?.[kind]?.launchable === true && (adapters[kind]?.allowedModels?.length ?? 0) > 0).map(kind => <ModelLaunchRows key={`${kind}-models`} kind={kind} capability={adapters![kind]!} disabled={launchDisabled} onLaunch={onLaunch} />)}
     {skipped !== undefined && <p className="launch-menu-note">Remembered {agentKindLabel[skipped.kind]} ({scopeCopy(skipped.origin)}) skipped — {skipped.reason}</p>}
     <LaunchMenuEntries entries={entries} />
+  </>;
+}
+
+// a kind's Allowed models, each a launch on that model at the Effort picked here, else the
+// model's default Effort
+function ModelLaunchRows({ kind, capability, disabled, onLaunch }: { kind: AgentKind; capability: AdapterCapability; disabled: boolean; onLaunch: (choice: LaunchChoice) => void }) {
+  const [effort, setEffort] = useState('');
+  return <>
+    <hr className="more-menu-divider" />
+    <p className="launch-menu-heading launch-menu-subheading">{agentKindLabel[kind]} on a model — this launch only</p>
+    <label className="launch-effort">Effort <select value={effort} disabled={disabled} onChange={event => setEffort(event.target.value)}><option value="">Model default</option>{capability.efforts?.map(level => <option key={level} value={level}>{level}</option>)}</select></label>
+    {capability.allowedModels?.map(entry => <button key={entry.model} type="button" role="menuitem" className="launch-row" disabled={disabled} onClick={() => onLaunch({ kind, sandboxed: defaultSandboxed(capability), model: entry.model, ...(effort === '' ? {} : { effort }) })}>
+      <KindMark kind={kind} />
+      <span className="launch-row-copy"><strong>{entry.model}</strong><small>{effort !== '' ? `Effort ${effort}` : entry.effort !== undefined ? `Effort ${entry.effort}` : `${agentKindLabel[kind]}’s default Effort`}</small></span>
+    </button>)}
   </>;
 }
 

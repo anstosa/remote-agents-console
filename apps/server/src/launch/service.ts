@@ -17,10 +17,13 @@ import { resolveLaunchProfile, type LaunchResolution, type LaunchScope } from '.
 import { WorktreeLaunchStore, scratchLaunchKey } from '../worktrees/store.js';
 import type { Pane, SocketRef, Worktree } from '../domain/models.js';
 import { updateAdvisorPendingLabel } from '../update-advisor.js';
-import { holderArgv } from '../transports/structured.js';
+import { holderArgv, type ModelSetting } from '../transports/structured.js';
 import type { HolderLaunch, HolderRef, HolderWindows } from '../transports/structured-agents.js';
 import { isFullGitSha } from '../git/revision.js';
 import { accountHome, configuredPlaces, placeHostRoot, scratchHome, scratchPlaceLabel, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
+
+/** How a structured Agent launches: resuming one Conversation, or a new one on a chosen model. */
+export type StructuredLaunchOptions = { resume?: string; model?: ModelSetting };
 
 export function expandCommand(command: string, worktree: Pick<Worktree, 'identity'>): string {
   const directory = `'${worktree.identity.replaceAll("'", "'\\''")}'`;
@@ -139,7 +142,7 @@ export class LaunchService implements HolderWindows {
   // `openTerminals` returns the `fingerprint\0paneId` keys of panes a browser currently has
   // open as a Terminal (a live pane-socket subscriber); Remove's blind kill skips them.
   // `placeAgentSession` finds the session of a live Agent at a Place, which a Place launch joins.
-  constructor(private readonly config: ValidatedConfig, private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly panes: TmuxAdapter = new TmuxAdapter(), private readonly paneRoot: (path: string) => Promise<string> = workspaceRoot, private readonly worktreeStore: WorktreeLaunchStore = new WorktreeLaunchStore(), private readonly discoveredWorktrees: () => Worktree[] = () => [], private readonly openTerminals: () => ReadonlySet<string> = () => new Set(), private readonly placeAgentSession: (placeId: string) => Promise<TmuxSession | undefined> = async () => undefined, private readonly root = `/tmp/remote-agent-console-${process.getuid?.() ?? 0}`, private readonly launchStructured: (place: Place, kind: AgentKind) => Promise<boolean> = async () => false) {}
+  constructor(private readonly config: ValidatedConfig, private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly panes: TmuxAdapter = new TmuxAdapter(), private readonly paneRoot: (path: string) => Promise<string> = workspaceRoot, private readonly worktreeStore: WorktreeLaunchStore = new WorktreeLaunchStore(), private readonly discoveredWorktrees: () => Worktree[] = () => [], private readonly openTerminals: () => ReadonlySet<string> = () => new Set(), private readonly placeAgentSession: (placeId: string) => Promise<TmuxSession | undefined> = async () => undefined, private readonly root = `/tmp/remote-agent-console-${process.getuid?.() ?? 0}`, private readonly launchStructured: (place: Place, kind: AgentKind, options: StructuredLaunchOptions) => Promise<boolean> = async () => false) {}
 
   // a pane the operator currently has open as a Terminal (a live pane-socket subscriber)
   private paneHasOpenTerminal(pane: Pane): boolean {
@@ -361,8 +364,8 @@ export class LaunchService implements HolderWindows {
   }
   // launch one ordinary scratch agent of the resolved (or requested) kind at the Scratch Place:
   // the configured Scratch directory when set, else the account home
-  async launchHome(kind?: AgentKind): Promise<boolean> {
-    return await this.launchRemembering(await this.scratchPlace(), scratchLaunchKey, kind);
+  async launchHome(kind?: AgentKind, model?: ModelSetting): Promise<boolean> {
+    return await this.launchRemembering(await this.scratchPlace(), scratchLaunchKey, kind, model);
   }
 
   // launch one agent directly in a non-git `directory` Project — the same in-place spawn
@@ -371,27 +374,27 @@ export class LaunchService implements HolderWindows {
   // under the Scratch persistence key for the directory. Only an available `directory` Project
   // launches this way: a `repository` Project launches through its Worktrees, and an
   // unavailable one has nothing to launch into. Remembers the kind under the Project scope.
-  async launchProjectDirectory(projectId: string, kind?: AgentKind): Promise<boolean> {
+  async launchProjectDirectory(projectId: string, kind?: AgentKind, model?: ModelSetting): Promise<boolean> {
     const place = await this.directoryPlace(projectId);
-    return place !== undefined && await this.launchRemembering(place, projectId, kind);
+    return place !== undefined && await this.launchRemembering(place, projectId, kind, model);
   }
 
   // launch a fresh agent at any Place through its own launch: a Worktree's, a directory
   // Project's, the Scratch folder's, or in place in an ad-hoc Scratch folder, remembering the kind
   // under that folder's own scope. Only Open folder launches in an ad-hoc folder.
-  async launchAt(place: Place, kind?: AgentKind): Promise<boolean> {
-    if (place.kind === 'worktree') return await this.launch(place.id, kind);
-    if (place.kind === 'directory') return await this.launchProjectDirectory(place.projectId, kind);
-    return place.adhoc === true ? await this.launchRemembering(place, place.id, kind) : await this.launchHome(kind);
+  async launchAt(place: Place, kind?: AgentKind, model?: ModelSetting): Promise<boolean> {
+    if (place.kind === 'worktree') return await this.launch(place.id, kind, model);
+    if (place.kind === 'directory') return await this.launchProjectDirectory(place.projectId, kind, model);
+    return place.adhoc === true ? await this.launchRemembering(place, place.id, kind, model) : await this.launchHome(kind, model);
   }
 
   // launch in place at a directory-Project or Scratch Place with the resolved (or requested) kind,
   // remembering it under `scope`; a storage failure never fails a live launch
-  private async launchRemembering(place: Place, scope: string, kind?: AgentKind): Promise<boolean> {
+  private async launchRemembering(place: Place, scope: string, kind?: AgentKind, model?: ModelSetting): Promise<boolean> {
     const resolved = await this.resolveLaunchKind(scope, kind);
     // refuse an unconfigured or unlaunchable kind
     if (resolved === undefined) return false;
-    const launched = await this.launchInPlace(place, resolved);
+    const launched = await this.launchInPlace(place, resolved, model);
     if (launched && rememberable(resolved)) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
     return launched;
   }
@@ -425,12 +428,12 @@ export class LaunchService implements HolderWindows {
   }
 
   // launch into a directory-Project or Scratch Place without modifying an idle shell's input
-  private async launchInPlace(place: Place, kind: AgentKind): Promise<boolean> {
+  private async launchInPlace(place: Place, kind: AgentKind, model?: ModelSetting): Promise<boolean> {
     if (this.pending.has(place.id)) { console.warn(`[launch] ${place.home}: a launch is already in progress`); return false; }
     this.pending.add(place.id);
     try {
       // a structured Agent runs under a holder rather than in a pane (ADR 0015)
-      if (structuredAdapterFor(kind) !== undefined) return await this.launchStructured(place, kind);
+      if (structuredAdapterFor(kind) !== undefined) return await this.launchStructured(place, kind, model === undefined ? {} : { model });
       // under the Docker bridge the host-visible path is what the host tmux can cd into; HOME is
       // the default account home for every directory-Project and Scratch launch
       const site: LaunchSite = { cwd: placeHostRoot(place), home: this.agentHome() };
@@ -496,8 +499,8 @@ export class LaunchService implements HolderWindows {
   }
 
   // launch a fresh agent in a worktree, resolving the kind (or using the requested one)
-  async launch(worktreeId: string, kind?: AgentKind): Promise<boolean> {
-    return await this.launchWorktree(worktreeId, { mode: 'fresh', ...(kind === undefined ? {} : { kind }) });
+  async launch(worktreeId: string, kind?: AgentKind, model?: ModelSetting): Promise<boolean> {
+    return await this.launchWorktree(worktreeId, { mode: 'fresh', ...(kind === undefined ? {} : { kind }), ...(model === undefined ? {} : { model }) });
   }
 
   // launch a Review run's Agent (ADR 0010): a `kind` pane in the Worktree's Workspace, fresh or
@@ -557,7 +560,7 @@ export class LaunchService implements HolderWindows {
     // kind whose ids are not UUIDs still resumes; a validated id also keeps the host command
     // free of shell input, whether the id is quoted or substituted
     const resumeKind = kind ?? await this.resolveLaunchKind(worktreeId);
-    if (resumeKind === undefined || adapterFor(resumeKind)?.conversations?.validId(threadId) !== true) return false;
+    if (resumeKind === undefined || (adapterFor(resumeKind) ?? structuredAdapterFor(resumeKind))?.conversations?.validId(threadId) !== true) return false;
     return await this.launchWorktree(worktreeId, { mode: 'resume', conversationId: threadId, kind: resumeKind });
   }
 
@@ -568,7 +571,7 @@ export class LaunchService implements HolderWindows {
   }
 
   // start one worktree in the requested mode, composing its command from the Adapter
-  private async launchWorktree(worktreeId: string, input: { mode: LaunchMode; conversationId?: string; sandboxed?: boolean; kind?: AgentKind }): Promise<boolean> {
+  private async launchWorktree(worktreeId: string, input: { mode: LaunchMode; conversationId?: string; sandboxed?: boolean; kind?: AgentKind; model?: ModelSetting }): Promise<boolean> {
     const worktree = this.worktreeById(worktreeId);
     // Every refusal below logs its reason. The web only ever sees a bare "couldn't
     // start", so without this the operator has nothing to diagnose from — the cause
@@ -584,9 +587,9 @@ export class LaunchService implements HolderWindows {
       const sandboxed = input.sandboxed === true;
       let launched: boolean;
       if (structuredAdapterFor(kind) !== undefined) {
-        // a structured Agent launches fresh and unsandboxed so far
-        if (input.mode !== 'fresh' || sandboxed) { console.warn(`[launch] ${worktree.identity}: ${kind} launches only fresh and unsandboxed`); return false; }
-        launched = await this.launchStructured(worktreePlace(worktree), kind);
+        // a structured Agent launches fresh or on one exact Conversation, unsandboxed so far
+        if (input.mode === 'continue' || sandboxed) { console.warn(`[launch] ${worktree.identity}: ${kind} launches only fresh or on a named conversation, unsandboxed`); return false; }
+        launched = await this.launchStructured(worktreePlace(worktree), kind, { ...(input.conversationId === undefined ? {} : { resume: input.conversationId }), ...(input.model === undefined ? {} : { model: input.model }) });
       } else {
         const id = randomBytes(18).toString('base64url');
         const command = await this.worktreeCommand(worktree, kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), sandboxed });

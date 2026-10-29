@@ -64,6 +64,7 @@ import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, Op
 import { installProgressAnimationSync, type ProgressKind } from './progress-animation.js';
 import { Skeleton } from './skeleton.js';
 import { CodeLoading } from './code-panel/loading.js';
+import { ModelChip, type AgentModel } from './model-picker.js';
 import './styles.css';
 
 // preserve both middle-click and context-menu presses
@@ -3203,7 +3204,8 @@ function persistenceResourceBase(worktreeId?: string, agentId?: string): string 
 
 // keep search and conversation actions in one immediately opening flyout
 // provider recency and resume authority remain on the existing scoped endpoints
-function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?: { directory?: string; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+// `newInPlace` offers New conversation for an Agent that starts one in place (a structured Agent)
+function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?: { directory?: string; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void; newInPlace?: boolean }) {
   const adapters = useContext(AdaptersContext);
   const [conversations, setConversations] = useState<ListedConversation[]>();
   // list authority is separate from recoverable mutation errors
@@ -3219,6 +3221,7 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
   const [editingKey, setEditingKey] = useState<string>();
   const searchRef = useRef<HTMLInputElement>(null);
   const [naming, setNaming] = useState(false);
+  const [startingNew, setStartingNew] = useState(false);
   const loadGeneration = useRef(0);
   const resourceBase = persistenceResourceBase(worktreeId, agentId);
   const { anchorRef, flyoutRef, style: flyoutStyle } = useViewportFlyout<HTMLDivElement>(menuOpen);
@@ -3397,6 +3400,22 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
     }
   };
 
+  // start a new Conversation in place; the Agent keeps its queue, model and Effort
+  const startNew = async () => {
+    if (startingNew || agentId === undefined) return;
+    setStartingNew(true);
+    setError('');
+    try {
+      const response = await request(`/api/agents/${encodeURIComponent(agentId)}/conversations/new`, { method: 'POST' });
+      if (!response.ok) throw new Error(await launchError(response));
+      setMenuOpen(false);
+    } catch (reason) {
+      setError(reason instanceof Error && reason.message ? reason.message : 'Unable to start a new conversation');
+    } finally {
+      setStartingNew(false);
+    }
+  };
+
   // hide conversations without any persistence context
   if (resourceBase === undefined) return { control: null, currentName: undefined };
   const ownRows = (conversations ?? []).filter(conversation => !conversation.reviewRun);
@@ -3446,6 +3465,7 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
       {!loading && validatedListContext === contextIdentity && agentId !== undefined && currentConversation === undefined && (editingKey === 'current' ? nameForm : <button type="button" className="conversation-name-current" onClick={() => { /* start a confirmed rename independently of a generated title */ setNameDraft(''); setEditingKey('current'); }}>Name current conversation</button>)}
       {/* expand in place without opening another conversation surface */}
       {!loading && validatedListContext === contextIdentity && (hasHiddenRows || showAll) && <button type="button" className="conversations-show-all" aria-expanded={showAll} disabled={naming || resumingKey !== undefined} onClick={() => { /* keep the scope and search while changing the list breadth */ setShowAll(value => !value); }}>{showAll ? 'Show fewer conversations' : 'Show all conversations'}</button>}
+      {resume?.newInPlace === true && agentId !== undefined && <button className={`log-control conversations-new${progressBorder(startingNew, 'blue')}`} type="button" aria-busy={startingNew || undefined} disabled={startingNew} onClick={() => void startNew()}><ProgressRing busy={startingNew} />New conversation</button>}
     </div></FlyoutPortal>}
   </div>;
   return { control, currentName };
@@ -6642,7 +6662,7 @@ const minimizeWorkspacePanel = (workspaceKey: string, panelKey: string, minimize
 // and git expansion. The tab's card holds it, so it outlives a switch between the Agents there;
 // the agent panel's composer drives the same browser and Terminals, and the Workspace renders it.
 // `onCloseReview`, given while the guided review's panel is open here, minimizes it.
-function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNavigateWorktree, onOperationFeedback, onCloseReview }: { agentId?: string; noteOptions: WorkspaceNotesOptions; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; onCloseReview?: () => void }) {
+function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, noteOptions: notes, onNavigateWorktree, onOperationFeedback, onCloseReview }: { agentId?: string; newConversationInPlace?: boolean; noteOptions: WorkspaceNotesOptions; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void; onCloseReview?: () => void }) {
   const browser = useProjectBrowser(place.projectUrl, place.id, place.projectProxied);
   const code = useCodePanel(place.worktreeId, request, comparisonChangeSignal(place.gitStatus, place.gitPrStatus, place.attention));
   const files = useFilesController(place.id, request);
@@ -6651,7 +6671,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   // keep the toolbar dots aligned with the visible phone panel
   const [carousel, setCarousel] = useState<PanelCarousel>();
   const settingsSplit = useContext(ClientSettingsSplitContext);
-  const conversations = useWorktreeConversations(place.worktreeId, agentId, { directory: place.path, onNavigateWorktree, onOperationFeedback });
+  const conversations = useWorktreeConversations(place.worktreeId, agentId, { directory: place.path, onNavigateWorktree, onOperationFeedback, newInPlace: newConversationInPlace });
   // the panel filling the Workspace; the notes restore theirs, so they share it
   const expansion = usePanelExpansion();
   const terminalPlaceId = place.id;
@@ -7599,7 +7619,7 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
   const latestAssistantMessageOverflows = latest?.agentId === agent.id && latest.overflows;
   // the current Agent's prompt history (the hook refetches when the switcher changes Agent)
   const promptHistory = usePromptHistory(agent.id);
-  const workspace = useWorkspace({ id: agent.placeId ?? agent.worktreeId, worktreeId: agent.worktreeId, path: agent.home, stack: agent.stack, projectUrl: agent.projectUrl, projectProxied: agent.projectProxied, branch: agent.branch, gitStatus: agent.gitStatus, gitPrStatus: agent.gitPrStatus, pullRequest: agent.pullRequest, attention: agents.map(candidate => candidate.attention ?? '').join(' ') }, { agentId: agent.id, noteOptions: { agentWorking: active, latestAssistantMessage, latestAssistantMessageOverflows, onPromptHistoryChanged: promptHistory.refresh, promptHistory: promptHistory.history, schedulePrefill }, onNavigateWorktree, onOperationFeedback, onCloseReview: () => { /* close the latest review even when it arrived during confirmation */ if (agent.worktreeId !== undefined) onCloseReview(agent.worktreeId); } });
+  const workspace = useWorkspace({ id: agent.placeId ?? agent.worktreeId, worktreeId: agent.worktreeId, path: agent.home, stack: agent.stack, projectUrl: agent.projectUrl, projectProxied: agent.projectProxied, branch: agent.branch, gitStatus: agent.gitStatus, gitPrStatus: agent.gitPrStatus, pullRequest: agent.pullRequest, attention: agents.map(candidate => candidate.attention ?? '').join(' ') }, { agentId: agent.id, newConversationInPlace: agent.panel === 'transcript', noteOptions: { agentWorking: active, latestAssistantMessage, latestAssistantMessageOverflows, onPromptHistoryChanged: promptHistory.refresh, promptHistory: promptHistory.history, schedulePrefill }, onNavigateWorktree, onOperationFeedback, onCloseReview: () => { /* close the latest review even when it arrived during confirmation */ if (agent.worktreeId !== undefined) onCloseReview(agent.worktreeId); } });
   const { browser: projectBrowser, preview: projectPreview, setGitExpanded } = workspace;
   // keep the latest response each Agent's output reports
   const reportMetadata = useCallback((agentId: string, message: string | undefined, overflows: boolean) => setLatest({ agentId, message, overflows }), []);
@@ -7805,7 +7825,9 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const power = <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || clearing || deactivating || deleting} progressColor={restarting ? 'yellow' : 'red'} hidden={active} {...(active ? { disabledReason: 'Cancel the agent’s work before restarting, clearing or turning it off' } : {})} onClear={() => void clear()} onTurnOff={() => void (agent.worktreeId === undefined ? remove() : deactivate())} newTask={agent.worktreeId !== undefined || agent.placeId === undefined ? { agentId: agent.id, worktreeId: agent.worktreeId, configured: agent.newTaskConfigured === true, onOperationFeedback } : undefined} {...(agent.worktreeId === undefined ? {} : { onRestart: () => void restart(), restartAs: { label: displayLabel, resolution: agent.launch, onLaunch: choice => void restart(choice) } })} />;
   const title = conversationName ?? displayLabel;
   const switcher = <AgentSwitcher agent={agent} agents={agents} title={title} placeLabel={displayLabel} onSelect={onSelectAgent} />;
-  const header = (connection: string, menuContent?: (closeMenu: () => void) => ReactNode) => <PanelHeader panelKey="agent" label="agent output" menuContent={menuContent} title={<AgentPanelTitle kind={agent.kind} sandboxed={agent.sandboxed} title={title} switcher={switcher} state={panelState} connection={connection} />} actions={<>{workspace.conversations.control}</>} close={<>{cancelButton}{power}<button type="button" className="panel-header-action pane-minimize" aria-label="Minimize agent output" title="Minimize agent (it keeps running)" onClick={() => { /* reject minimizing the last visible split */ workspace.minimizePanel('agent', () => setAgentSplitHidden(workspace.viewKey, true)); }}><PanelIcon path="M5 12h14" /></button></>} />;
+  const model = agent.structured?.model;
+  const modelChip = model === undefined ? undefined : <ModelChip agentId={agent.id} model={model} switchable={agent.structured?.models === true} working={active} request={request} onError={detail => onOperationFeedback({ tone: 'error', message: 'Model not switched', detail, worktreeId: agent.worktreeId })} />;
+  const header = (connection: string, menuContent?: (closeMenu: () => void) => ReactNode) => <PanelHeader panelKey="agent" label="agent output" menuContent={menuContent} title={<AgentPanelTitle kind={agent.kind} sandboxed={agent.sandboxed} title={title} switcher={switcher} state={panelState} connection={connection} chip={modelChip} />} actions={<>{workspace.conversations.control}</>} close={<>{cancelButton}{power}<button type="button" className="panel-header-action pane-minimize" aria-label="Minimize agent output" title="Minimize agent (it keeps running)" onClick={() => { /* reject minimizing the last visible split */ workspace.minimizePanel('agent', () => setAgentSplitHidden(workspace.viewKey, true)); }}><PanelIcon path="M5 12h14" /></button></>} />;
   const prompt = <Prompt id={agent.id} history={promptHistory.history} onHistoryChanged={promptHistory.refresh} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} question={dashboardQuestion ?? question} worktreeId={agent.worktreeId} placeId={workspace.place.id} historyControl={<PromptHistoryControl agentId={agent.id} history={promptHistory.history} refreshHistory={promptHistory.refresh} notes={workspace.notes} open={historyOpen} onOpenChange={onHistoryOpenChange} />} />;
   const paneMode = agent.pane?.paneMode;
   const composer = paneMode === undefined ? prompt : <><PaneModeNotice agentId={agent.id} mode={paneMode} worktreeId={agent.worktreeId} onOperationFeedback={onOperationFeedback} />{prompt}</>;
@@ -7910,18 +7932,19 @@ function useCurrentConversationName(agentId: string, refreshOn: readonly unknown
 
 // The agent panel's title pill: the kind mark, the title (the Agent switcher, once an Agent runs),
 // the state and, while the output is not live, its connection status.
-function AgentPanelTitle({ kind, sandboxed, title, switcher, state, connection = 'Live' }: { kind?: AgentKind; sandboxed?: boolean; title: string; switcher?: ReactNode; state: AgentPanelState; connection?: string }) {
+function AgentPanelTitle({ kind, sandboxed, title, switcher, state, connection = 'Live', chip }: { kind?: AgentKind; sandboxed?: boolean; title: string; switcher?: ReactNode; state: AgentPanelState; connection?: string; chip?: ReactNode }) {
   const progress = agentStateProgress(state);
   return <>
     {kind !== undefined && <LaunchTabBadge kind={kind} sandboxed={sandboxed} />}
     {switcher ?? <span className="agent-panel-title" title={title}>{title}</span>}
     <span className={`agent-state-pill ${state.tone}${progress === undefined ? '' : ` progress-border progress-${progress}`}`} aria-busy={agentStateBusy(state) || undefined}><ProgressRing busy={progress !== undefined} />{state.label}</span>
+    {chip}
     {connection !== 'Live' && <span className={`status log-status ${connection.toLowerCase()}`}>{connection}</span>}
   </>;
 }
 
 // A structured Agent's process state (`revision` changes with its transcript)
-type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number };
+type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number; model?: AgentModel; models?: boolean };
 // A tool call as the transcript lists it: one result (a short line, an edit's diff, or a command's
 // last lines with their count). Its full output and a script's source are read when it is opened.
 type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; result?: string; diff?: { path: string; patch: string }; tail?: string; outputLines?: number; output?: string; source?: string; kept?: false };
@@ -10277,7 +10300,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     // the Adapter picker rows: one per configured kind, with the launcher's sandbox line and reason
     const adapters: ScheduleAdapterOption[] = configuredKinds(data.adapters).map(kind => {
       const capability = data.adapters?.[kind];
-      return { kind, launchable: capability?.launchable === true, detail: sandboxCopy(kind, capability, defaultSandboxed(capability)), ...(capability?.unavailableReason === undefined ? {} : { unavailableReason: capability.unavailableReason }) };
+      return { kind, launchable: capability?.launchable === true, detail: sandboxCopy(kind, capability, defaultSandboxed(capability)), ...(capability?.unavailableReason === undefined ? {} : { unavailableReason: capability.unavailableReason }), ...(capability?.allowedModels === undefined ? {} : { models: capability.allowedModels, efforts: capability.efforts ?? [] }) };
     });
     // the target picker rows: Scratch, then every Project's worktrees (repository) or its own
     // directory row, grouped by Project with the main worktree marked

@@ -130,7 +130,7 @@ describe('opening a folder', () => {
       const response = await app.inject(open({ path: folder, action: 'agent', kind: 'codex' }));
       expect(response.statusCode).toBe(201);
       expect(response.json()).toEqual({ placeId: `scratch:${folder}`, agentId: 'socket:%3' });
-      expect(launchAt).toHaveBeenCalledWith(adhoc(folder), 'codex');
+      expect(launchAt).toHaveBeenCalledWith(adhoc(folder), 'codex', undefined);
     } finally { await app.close(); }
   });
 

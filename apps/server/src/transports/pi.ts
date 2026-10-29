@@ -1,4 +1,4 @@
-import type { LaunchReport, ProtocolClient, TranscriptItem, TranscriptTool } from './structured.js';
+import type { LaunchReport, ModelInfo, ModelSetting, ProtocolClient, TranscriptItem, TranscriptTool } from './structured.js';
 
 /**
  * The Pi protocol client (ADR 0017): a thin client over `pi --mode rpc` JSON lines. It speaks
@@ -131,6 +131,37 @@ export function piHistory(messages: readonly unknown[]): TranscriptItem[] {
   return items;
 }
 
+/** Pi's thinking levels, which RAC calls Efforts. */
+export const piEfforts = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+// the levels a model supports, decided as Pi's own `getSupportedThinkingLevels` does
+const modelEfforts = (model: Json): string[] => {
+  if (model.reasoning !== true) return ['off'];
+  const map = isObject(model.thinkingLevelMap) ? model.thinkingLevelMap : {};
+  return piEfforts.filter(level => map[level] !== null && (level !== 'xhigh' && level !== 'max' || map[level] !== undefined));
+};
+const modelInfo = (model: unknown): ModelInfo | undefined => {
+  if (!isObject(model) || typeof model.provider !== 'string' || typeof model.id !== 'string') return undefined;
+  const cost = isObject(model.cost) ? model.cost : {};
+  return {
+    id: `${model.provider}/${model.id}`, name: typeof model.name === 'string' && model.name !== '' ? model.name : model.id, provider: model.provider,
+    ...(typeof cost.input === 'number' ? { inputPrice: cost.input } : {}), ...(typeof cost.output === 'number' ? { outputPrice: cost.output } : {}),
+    ...(typeof model.contextWindow === 'number' ? { contextWindow: model.contextWindow } : {}), efforts: modelEfforts(model)
+  };
+};
+// the model and thinking level a session last changed to, from its entries
+const sessionModel = (entries: unknown): ModelSetting | undefined => {
+  if (!Array.isArray(entries)) return undefined;
+  let setting: ModelSetting | undefined;
+  for (const entry of entries) {
+    if (!isObject(entry)) continue;
+    if (entry.type === 'model_change' && typeof entry.provider === 'string' && typeof entry.modelId === 'string') setting = { model: `${entry.provider}/${entry.modelId}`, ...(setting?.effort === undefined ? {} : { effort: setting.effort }) };
+    if (entry.type === 'thinking_level_change' && typeof entry.thinkingLevel === 'string' && setting !== undefined) setting = { ...setting, effort: entry.thinkingLevel };
+  }
+  return setting;
+};
+// a session command Pi accepted and no extension cancelled
+const accepted = (response: Json): boolean => response.success === true && !(isObject(response.data) && response.data.cancelled === true);
+
 export const piClient: ProtocolClient = (channel, emit) => {
   const pending = new Map<string, (response: Json) => void>();
   let requests = 0;
@@ -164,6 +195,28 @@ export const piClient: ProtocolClient = (channel, emit) => {
     const percent = isObject(data.contextUsage) && typeof data.contextUsage.percent === 'number' ? data.contextUsage.percent : undefined;
     emit({ type: 'usage', usage: { cost: data.cost, ...(percent === undefined ? {} : { contextPercent: percent }) } });
   });
+  // the Conversation's transcript from its history: on a launch only when it has one, and after
+  // a Conversation change always, so a new one starts empty
+  const history = (always: boolean) => void request({ type: 'get_messages' }).then(response => {
+    const messages = isObject(response.data) && Array.isArray(response.data.messages) ? response.data.messages : undefined;
+    if (messages !== undefined && (always || messages.length > 0)) emit({ type: 'history', items: piHistory(messages) });
+  });
+  let current: ModelSetting | undefined;
+  // report the Conversation and the model Pi is on now
+  const refresh = async (): Promise<void> => {
+    const state = (await request({ type: 'get_state' })).data;
+    if (!isObject(state)) return;
+    if (typeof state.sessionId === 'string' && state.sessionId !== '') emit({ type: 'conversation', id: state.sessionId, ...(typeof state.sessionName === 'string' ? { name: state.sessionName } : {}) });
+    const model = modelInfo(state.model);
+    if (model === undefined) return;
+    current = { model: model.id, ...(typeof state.thinkingLevel === 'string' ? { effort: state.thinkingLevel } : {}) };
+    emit({ type: 'model', current });
+  };
+  const apply = async ({ model, effort }: ModelSetting): Promise<boolean> => {
+    const slash = model.indexOf('/');
+    if (slash <= 0 || (await request({ type: 'set_model', provider: model.slice(0, slash), modelId: model.slice(slash + 1) })).success !== true) return false;
+    return effort === undefined || (await request({ type: 'set_thinking_level', level: effort })).success === true;
+  };
 
   channel.onLine(line => {
     let record: unknown;
@@ -193,14 +246,8 @@ export const piClient: ProtocolClient = (channel, emit) => {
           reported = true;
           emit({ type: 'report', report });
         }
-        void request({ type: 'get_state' }).then(response => {
-          const id = isObject(response.data) ? response.data.sessionId : undefined;
-          if (typeof id === 'string' && id !== '') emit({ type: 'conversation', id });
-        });
-        void request({ type: 'get_messages' }).then(response => {
-          const messages = isObject(response.data) && Array.isArray(response.data.messages) ? response.data.messages : undefined;
-          if (messages !== undefined && messages.length > 0) emit({ type: 'history', items: piHistory(messages) });
-        });
+        void refresh();
+        history(false);
         usage();
         return;
       case 'agent_start':
@@ -287,6 +334,41 @@ export const piClient: ProtocolClient = (channel, emit) => {
       if (response.success !== true) return 'refused';
       // a prompt sent without `streamingBehavior` is refused while Pi works, never `queued`
       return isObject(response.data) && response.data.disposition === 'handled' ? 'handled' : 'started';
+    },
+    async newConversation() {
+      const keep = current;
+      if (!accepted(await request({ type: 'new_session' }))) return false;
+      // a new session starts on the launch's model at no thinking; keep the current ones
+      if (keep !== undefined) await apply(keep);
+      await refresh();
+      history(true);
+      usage();
+      return true;
+    },
+    async switchConversation(reference) {
+      if (!accepted(await request({ type: 'switch_session', sessionPath: reference }))) return false;
+      // Pi keeps the launch's `--model` across a switch; restore the Conversation's own
+      const entries = (await request({ type: 'get_entries' })).data;
+      const own = sessionModel(isObject(entries) ? entries.entries : undefined);
+      if (own !== undefined) await apply(own);
+      await refresh();
+      history(true);
+      usage();
+      return true;
+    },
+    async renameConversation(name) {
+      if ((await request({ type: 'set_session_name', name })).success !== true) return false;
+      await refresh();
+      return true;
+    },
+    async models() {
+      const data = (await request({ type: 'get_available_models' })).data;
+      return isObject(data) && Array.isArray(data.models) ? data.models.flatMap(model => modelInfo(model) ?? []) : [];
+    },
+    async setModel(setting) {
+      const applied = await apply(setting);
+      await refresh();
+      return applied;
     },
     close: () => channel.close()
   };

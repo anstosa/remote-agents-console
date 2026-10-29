@@ -14,6 +14,8 @@ import { instanceIconNames, type InstanceIcon } from '../instance-icon.js';
 import { isIP } from 'node:net';
 import { defaultDavoContext, defaultDavoName } from '../integrations/realtime/settings.js';
 import { resolveReviewConfig, reviewConfigSchema, type ResolvedReviewConfig } from '../review-runs/config.js';
+import { agentModel } from '../launch/agent-choice.js';
+import { piEfforts } from '../transports/pi.js';
 import { parseKeysConfig, type KeysConfig } from './keys.js';
 import { applicationButtonsSchema, countButtonDefinitions, projectButtonsSchema, type ButtonSlots } from './buttons.js';
 import { googleCalendarConfigSchema, type GoogleCalendarConfig } from '../google-calendar/contracts.js';
@@ -90,8 +92,12 @@ const adapterUpdates = z.object({ current: adapterUpdateCommand, latest: adapter
 // aborts the launch on failure; `teardown` runs best-effort after the console stops an
 // agent of this kind, in the stopped agent's home.
 const adapterEntry = z.object({ program: adapterProgram, args: z.array(adapterArgument).max(64).optional(), env: z.record(adapterEnvName, adapterArgument).optional(), setup: command.optional(), teardown: command.optional(), updates: adapterUpdates.optional() }).strict();
+// Pi's Allowed models: exact `provider/id` entries in the operator's order (the first is the
+// default), each with an optional default Effort; the only models a Pi Agent may run on
+const allowedModels = z.array(z.object({ model: agentModel.refine(value => /^[^/]+\/./u.test(value), 'an Allowed model is an exact `provider/id`'), effort: z.enum(piEfforts).optional() }).strict()).max(50)
+  .refine(entries => new Set(entries.map(entry => entry.model)).size === entries.length, 'each Allowed model is listed once');
 // the console pins Pi and supplies its program (ADR 0017), so `adapters.pi` only enables the kind
-const piEntry = adapterEntry.omit({ program: true, updates: true }).strict('adapters.pi takes only args, env, setup and teardown: Pi is pinned by the console as its own dependency, so it has no program or update commands');
+const piEntry = adapterEntry.omit({ program: true, updates: true }).extend({ allowedModels: allowedModels.optional() }).strict('adapters.pi takes only args, env, setup, teardown and allowedModels: Pi is pinned by the console as its own dependency, so it has no program or update commands');
 // keyed by kind, one strict entry each; an omitted block is observe-only (nothing launches)
 const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: adapterEntry.optional(), pi: piEntry.optional(), opencode: adapterEntry.optional() }).strict();
 // constrain icons to supported aliases
@@ -403,7 +409,7 @@ async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean
 // CLI), which only a console driving the host's tmux directly can start: the host bridge's tmux
 // runs on the host, where the container's copy is not
 function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message: string) => void): AdapterLaunchConfig {
-  const config: AdapterLaunchConfig = { program: process.execPath, args: entry.args ?? [], env: entry.env ?? {}, launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }) };
+  const config: AdapterLaunchConfig = { program: process.execPath, args: entry.args ?? [], env: entry.env ?? {}, launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.allowedModels === undefined || entry.allowedModels.length === 0 ? {} : { allowedModels: entry.allowedModels }) };
   if (process.env.RAC_HOST_TMUX_DIR === undefined) return config;
   config.launchable = false;
   config.unavailableReason = 'Pi cannot launch under the host bridge: the console runs its pinned Pi itself';

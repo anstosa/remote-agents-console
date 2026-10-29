@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { adapters as adaptersUnderTest, adapterFor } from '../../src/adapters/registry.js';
+import { adapters as adaptersUnderTest, adapterFor, structuredAdapters } from '../../src/adapters/registry.js';
 import { inlineQuestionId } from '../../src/adapters/inline-questions.js';
 import { agentKinds, type AttentionState, type LaunchReadiness, type PaneSnapshot, type ResetSettling, type Submission, type SubmissionMode, type TmuxKey } from '../../src/adapters/types.js';
 
@@ -197,5 +197,33 @@ describe('Adapter contract suite', () => {
   it('OMX shares Codex\'s new-conversation object and fixtures', () => {
     expect(adapterFor('omx')?.newConversation).toBe(adapterFor('codex')?.newConversation);
     expect(load('omx', 'new-conversation.json')).toEqual(load('codex', 'new-conversation.json'));
+  });
+
+  // a structured kind's Conversation store, read from its fixture store as the kind writes it
+  for (const adapter of structuredAdapters) describe(`${adapter.kind} structured adapter`, () => {
+    it('accepts only well-formed Conversation ids', () => {
+      const { valid, invalid } = load<ConversationsFixture>(adapter.kind, 'conversations.json');
+      for (const id of valid) expect(adapter.conversations.validId(id), `valid ${JSON.stringify(id)}`).toBe(true);
+      for (const id of invalid) expect(adapter.conversations.validId(id), `invalid ${JSON.stringify(id)}`).toBe(false);
+    });
+  });
+
+  describe('pi Conversation store', () => {
+    afterEach(() => { vi.unstubAllEnvs(); });
+    it('lists the Named Conversations started in each folder, those named in a hand-started TUI included, and locates them', async () => {
+      const pi = structuredAdapters.find(adapter => adapter.kind === 'pi')!.conversations;
+      vi.stubEnv('PI_CODING_AGENT_DIR', join(fixturesRoot, 'pi', 'agent'));
+      // unnamed, cleared and header-less session files are not listed; the latest name wins
+      expect(await pi.list(['/work/repo'])).toEqual([
+        { id: '01a17f2c-1111-7aaa-8bbb-000000000001', name: 'Flaky test, take two', lastActiveAt: Date.parse('2026-10-30T07:00:00.000Z'), directory: '/work/repo' },
+        { id: '01a188d1-e7d9-711a-aba8-381b96066aa5', name: 'Fix the parser', lastActiveAt: Date.parse('2026-10-29T18:00:31.000Z'), directory: '/work/repo' }
+      ]);
+      expect((await pi.list(['/work/repo/sub'])).map(row => row.name)).toEqual(['In the subfolder']);
+      expect(await pi.readName('01a17f2c-1111-7aaa-8bbb-000000000001', '/work/repo')).toBe('Flaky test, take two');
+      expect(await pi.readName('01a16000-3333-7aaa-8bbb-000000000003', '/work/repo')).toBeUndefined();
+      expect(await pi.readName('01a17f2c-1111-7aaa-8bbb-000000000001')).toBeUndefined();
+      expect(await pi.locate('01a188d1-e7d9-711a-aba8-381b96066aa5', '/work/repo')).toBe(join(fixturesRoot, 'pi', 'agent', 'sessions', '--work-repo--', '2026-10-29T18-00-20-186Z_01a188d1-e7d9-711a-aba8-381b96066aa5.jsonl'));
+      expect(await pi.locate('01a188d1-e7d9-711a-aba8-381b96066aa5', '/work/repo/sub')).toBeUndefined();
+    });
   });
 });

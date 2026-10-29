@@ -520,3 +520,16 @@ test('the Place entries stay out of the launch menus the + rows share', async ({
   await expect(menu.getByText('Launch · Scratch')).toBeVisible();
   await expect(placeEntries).toHaveCount(0);
 });
+
+// a kind on Allowed models offers each for this launch only, at the Effort picked beside them
+test('launches Pi on a chosen Allowed model and Effort, this launch only', async ({ page }) => {
+  const pi = adapter('/usr/bin/node', { allowedModels: [{ model: 'openai/gpt-5.6', effort: 'medium' }, { model: 'openrouter/~anthropic/claude-opus-latest' }], efforts: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] });
+  const posts = await mount(page, { generation: 1, adapters: { claude, pi }, agents: [], projects: [{ id: 'proj', label: 'Proj', available: true, worktrees: [pinnedWorktree({ kind: 'claude', origin: 'worktree' })] }] });
+  await toolbar(page).getByRole('button', { name: 'Choose agent' }).click();
+  const menu = page.locator('.launch-menu');
+  await expect(menu.getByText('Pi on a model — this launch only')).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: /openai\/gpt-5\.6/u })).toContainText('Effort medium');
+  await menu.getByRole('combobox').selectOption('high');
+  await menu.getByRole('menuitem', { name: /claude-opus-latest/u }).click();
+  await expect.poll(() => posts).toEqual([{ path: '/api/worktrees/cora/launch', body: { kind: 'pi', sandboxed: false, model: 'openrouter/~anthropic/claude-opus-latest', effort: 'high' } }]);
+});

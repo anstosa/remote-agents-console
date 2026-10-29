@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"01a17f2c-1111-7aaa-8bbb-000000000001","timestamp":"2026-10-28T09:12:00.000Z","cwd":"/work/repo"}
+{"type":"message","id":"b1","parentId":null,"timestamp":"2026-10-28T09:12:05.000Z","message":{"role":"user","content":"Look at the flaky test","timestamp":0}}
+{"type":"session_info","id":"b2","parentId":"b1","timestamp":"2026-10-28T09:13:00.000Z","name":"Flaky test"}
+{"type":"message","id":"b3","parentId":"b2","timestamp":"2026-10-30T07:00:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"It times out."}],"timestamp":0}}
+{"type":"session_info","id":"b4","parentId":"b3","timestamp":"2026-10-28T09:20:00.000Z","name":"  Flaky   test,   take two "}

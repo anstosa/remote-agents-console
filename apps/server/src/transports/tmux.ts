@@ -19,7 +19,7 @@ import type { AgentWaiter } from '../launch/wait.js';
 import { configuredWorktreeForWorkspace } from '../workspaces/resolver.js';
 import { updateAdvisorLabel, updateAdvisorPendingLabel } from '../update-advisor.js';
 import { isFullGitSha } from '../git/revision.js';
-import type { AgentTransport, InterruptOutcome, QuestionAnswer, RenameOutcome, TurnEvent } from './transport.js';
+import type { AgentTransport, ConversationTarget, InterruptOutcome, QuestionAnswer, RenameOutcome, SwitchOutcome, TurnEvent } from './transport.js';
 
 export const answerCaptureGraceMs = 10_000;
 // preserve prompts through reset startup but do not strand them behind a dead pane
@@ -100,7 +100,13 @@ export class TmuxTransport implements AgentTransport {
   private readonly reconciliationPendingSince = new Map<string, number>();
   private readonly openedQueuedQuestions = new Set<string>();
 
-  constructor(private readonly discovery: DiscoveryService, private readonly tmux: TmuxAdapter, private readonly locks: AgentLocks, private readonly history?: PromptHistoryService, private readonly queued?: QueuedPromptService, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, private readonly teardownFor: (kind: AgentKind) => string | undefined = () => undefined, private readonly attachmentStaging?: AttachmentStagingWorkspace, private readonly calendar?: PromptCalendarLifecycle) {}
+  constructor(private readonly discovery: DiscoveryService, private readonly tmux: TmuxAdapter, private readonly locks: AgentLocks, private readonly history?: PromptHistoryService, private readonly queued?: QueuedPromptService, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, private readonly teardownFor: (kind: AgentKind) => string | undefined = () => undefined, private readonly attachmentStaging?: AttachmentStagingWorkspace, private readonly calendar?: PromptCalendarLifecycle, private readonly restart?: (agentId: string, to: ConversationTarget) => Promise<SwitchOutcome>) {}
+
+  // A pane's CLI cannot switch Conversation in place: the switch closes it and launches the kind
+  // resuming the Conversation, under the queue's restart reservation and hand-over (in `app.ts`)
+  async switchConversation(agentId: string, to: ConversationTarget): Promise<SwitchOutcome> {
+    return await this.restart?.(agentId, to) ?? { status: 'unavailable', error: 'The agent cannot switch conversations.' };
+  }
 
   async target(agentId: string, force = false): Promise<TmuxTarget | undefined> {
     return await this.discovery.target(agentId, force);

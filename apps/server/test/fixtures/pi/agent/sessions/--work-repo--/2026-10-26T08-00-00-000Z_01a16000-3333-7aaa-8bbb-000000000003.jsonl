@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"01a16000-3333-7aaa-8bbb-000000000003","timestamp":"2026-10-26T08:00:00.000Z","cwd":"/work/repo"}
+{"type":"session_info","id":"d1","parentId":null,"timestamp":"2026-10-26T08:00:01.000Z","name":"Old name"}
+{"type":"session_info","id":"d2","parentId":"d1","timestamp":"2026-10-26T08:00:02.000Z","name":""}

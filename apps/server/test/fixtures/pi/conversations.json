@@ -1,0 +1,15 @@
+{
+  "_note": "Pi session ids follow Pi's own rule: alphanumerics with inner `.`, `_` and `-` (uuidv7 by default). `agent/` is a Pi agent directory whose sessions the store lists for `/work/repo`.",
+  "valid": [
+    "01a188d1-e7d9-711a-aba8-381b96066aa5",
+    "my.session_1"
+  ],
+  "invalid": [
+    "",
+    "-starts-with-a-dash",
+    "ends-with.",
+    "has space",
+    "has/slash",
+    "$(touch x)"
+  ]
+}

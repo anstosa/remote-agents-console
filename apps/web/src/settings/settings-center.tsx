@@ -790,10 +790,10 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   const fileOnlyPreview = source.id === 'app' && path[0] === 'projects' && (path.length === 3 || path.length === 5 && path[2] === 'worktreeOverrides') && path.at(-1) === 'externalUrl' && ['hostname', 'port'].some(key => valueAt(source.value, [...path.slice(0, -1), key]) !== undefined);
   const schema = fileOnlyPreview ? { ...baseSchema, placeholder: 'Managed in application file', description: 'This preview is managed in the application file. Use Application’s Edit base file action to change it.' } : baseSchema;
   // retain unsupported adapter values without offering inactive controls
-  const unimplementedAdapter = source.id === 'app' && path.length === 2 && path[0] === 'adapters' && (path[1] === 'pi' || path[1] === 'opencode');
+  const unimplementedAdapter = source.id === 'app' && path.length === 2 && path[0] === 'adapters' && path[1] === 'opencode';
   const disabled = inheritedDisabled || unimplementedAdapter || fileOnlyPreview;
   const navigationDisabled = inheritedNavigationDisabled || unimplementedAdapter;
-  const label = unimplementedAdapter ? path[1] === 'pi' ? 'Pi' : 'OpenCode' : schema.label ?? labelForKey(path.at(-1) ?? source.label);
+  const label = unimplementedAdapter ? 'OpenCode' : schema.label ?? labelForKey(path.at(-1) ?? source.label);
   // inline argument fields keep their labels available to assistive technology only
   const inlineArgument = source.id === 'app' && path.length === 4 && path[0] === 'adapters' && path[2] === 'args' && schema.type === 'string';
   const projectItem = source.id === 'app' && path[0] === 'projects' && path.length === 2 && /^\d+$/u.test(path[1]!);

@@ -399,6 +399,49 @@ directory must resolve to the same bytes inside the container and on the host �
 bind mount at the same path, or an explicit shared `RAC_ADAPTER_FILES_DIR` — so the
 host-side agent reads the file the container wrote.
 
+### Pi
+
+`adapters.pi` enables Pi Agents. The console runs its own pinned Pi, so the entry
+takes no `program` or `updates`, only `args`, `env`, `setup`, `teardown` and
+`allowedModels`.
+
+**Allowed models** are the only models a Pi Agent may run on: one ordered list,
+edited under **Global settings → Agents → Pi**, each entry an exact Pi
+`provider/id` (no globs) with an optional default Effort (Pi's thinking level:
+`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`):
+
+```json
+{ "adapters": { "pi": { "allowedModels": [
+  { "model": "openai/gpt-5.6", "effort": "medium" },
+  { "model": "openrouter/~anthropic/claude-opus-latest" }
+] } } }
+```
+
+- The first entry is the default for a new Conversation. A launch passes the list
+  as `--models` and the model as `--model`.
+- The model chip in a Pi Agent's header switches between them while the Agent is
+  idle, with an Effort control offering only the levels that model supports. A
+  switch applies from the next prompt and is marked in the transcript.
+- The launch menu and a Schedule can name a model and Effort for that launch or
+  Schedule only; neither is remembered.
+- The model belongs to the Conversation. Resuming or switching to one restores
+  its model, unless that model is no longer allowed: then the Agent moves to the
+  first entry and the transcript says so.
+- When an entry matches no model Pi can reach (a typo, or a lapsed login), the
+  Agent's transcript says so once it starts.
+- With no entries, Pi uses its own default model (and a Worktree's
+  `.pi/settings.json` can choose it), and the model picker is hidden.
+
+**Named conversations.** A Pi Agent names, starts and switches Conversations in
+place while it is idle, keeping its queued prompts. The Named list includes Pi
+Conversations started in a Pi TUI by hand, once they have a name (`/name` in
+the TUI); resuming one launches a Pi Agent on it. The console reads Pi's sessions
+from `PI_CODING_AGENT_DIR` (else `~/.pi/agent`) in its own environment.
+
+**Do not resume a Conversation by hand while a console Agent holds it.** Two Pi
+processes writing one session file interleave their entries, and neither sees
+the other's turns.
+
 ## Reviews
 
 The guided **Review tour** and the opt-in AI **Code review** are both a *Review

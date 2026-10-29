@@ -7,7 +7,7 @@ import { TmuxAdapter } from '../tmux/adapter.js';
 import { ProcInspector, type ProcessInspector } from './processes.js';
 import { PullRequestService } from '../pull-requests/service.js';
 import { messageAsksQuestion, parseReportedAttention, resolveAttention } from '../adapters/attention.js';
-import { adapterCapabilities, adapterFor, adapters, paneExcluded } from '../adapters/registry.js';
+import { adapterCapabilities, adapterFor, adapters, paneExcluded, structuredAdapters } from '../adapters/registry.js';
 import { projectIdOf, worktreeMatchesWorkspace, worktreePathOf, worktreeWireId } from '../workspaces/resolver.js';
 import { gitCommonDir, listWorktrees, type WorktreeEntry } from '../git/worktrees.js';
 import { worktreeManagementAvailability } from '../worktrees/management.js';
@@ -524,9 +524,10 @@ export class DiscoveryService {
       seen.add(list);
       return true;
     });
-    const perKind = await Promise.all(listers
-      .map(async adapter => (await adapter.conversations!.list!(directories).catch(() => []))
-        .map(summary => ({ ...summary, kind: adapter.kind }))));
+    const stores = [...listers.map(adapter => ({ kind: adapter.kind, list: adapter.conversations!.list! })), ...structuredAdapters.map(adapter => ({ kind: adapter.kind, list: adapter.conversations.list }))];
+    const perKind = await Promise.all(stores
+      .map(async store => (await store.list(directories).catch(() => []))
+        .map(summary => ({ ...summary, kind: store.kind }))));
     return perKind.flat();
   }
   // the Worktrees discovered from every available Project (bare and stale entries

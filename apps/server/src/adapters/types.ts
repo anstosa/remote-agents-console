@@ -13,7 +13,7 @@
  */
 import type { HostProcess } from '../discovery/processes.js';
 import type { CleanupTarget, Pane } from '../domain/models.js';
-import type { ProtocolClient } from '../transports/structured.js';
+import type { ModelSetting, ProtocolClient } from '../transports/structured.js';
 
 export const agentKinds = ['codex', 'omx', 'claude', 'pi', 'opencode'] as const;   // closed union in resolution order; the registry is code, not plugins
 export type AgentKind = typeof agentKinds[number];
@@ -466,9 +466,30 @@ export interface Adapter {
 export interface StructuredAdapter {
   readonly kind: AgentKind;
   /** The CLI arguments for a launch; the console prepends the program and runs it under a holder. */
-  launch(input: LaunchInput): LaunchSpec;
+  launch(input: StructuredLaunchInput): LaunchSpec;
   readonly client: ProtocolClient;
+  /** Every Effort the kind's models may take; each model offers some of them. */
+  readonly efforts: readonly string[];
+  /**
+   * The kind's Conversation store: the Named conversations under directories (`list`), a
+   * Conversation's name (`readName`), and the reference a launch resumes and a switch takes
+   * (`locate`), each for a Conversation started in `cwd`.
+   */
+  readonly conversations: {
+    validId(id: string): boolean;
+    list(directories: readonly string[]): Promise<ConversationSummary[]>;
+    readName(id: string, cwd?: string): Promise<string | undefined>;
+    locate(id: string, cwd: string): Promise<string | undefined>;
+  };
 }
+/**
+ * What a structured launch starts: a new Conversation, or the one at `resume` (located by the
+ * kind's store); with Allowed models configured, `models` scopes the Agent to them and names the
+ * model a new Conversation starts on.
+ */
+export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; resume?: string; models?: { allowed: readonly string[]; start?: ModelSetting } };
+/** One Allowed model (`adapters.pi.allowedModels`): an exact `provider/id` and an optional default Effort. */
+export type AllowedModel = { model: string; effort?: string };
 
 /**
  * One configured adapter program (config `adapters.<kind>`). The console launches
@@ -481,7 +502,7 @@ export interface StructuredAdapter {
  */
 /** Trusted shell commands used to inspect and update one configured agent CLI. */
 export type AdapterUpdateCommands = { current: string; latest: string; run: string };
-export type AdapterLaunchConfig = { program: string; args: string[]; env: Record<string, string>; launchable: boolean; unavailableReason?: string; setup?: string; teardown?: string; updates?: AdapterUpdateCommands };
+export type AdapterLaunchConfig = { program: string; args: string[]; env: Record<string, string>; launchable: boolean; unavailableReason?: string; setup?: string; teardown?: string; updates?: AdapterUpdateCommands; allowedModels?: AllowedModel[] };
 /** The configured adapters, keyed by kind; empty for an observe-only console. */
 export type AdapterConfigs = Partial<Record<AgentKind, AdapterLaunchConfig>>;
 
@@ -505,4 +526,7 @@ export type AdapterCapability = {
   inlineQuestions: boolean;
   commands: boolean;
   sandbox: boolean;
+  /** a structured kind's Allowed models, in the operator's order, which a launch may choose from, and every Effort its models may take */
+  allowedModels?: AllowedModel[];
+  efforts?: string[];
 };

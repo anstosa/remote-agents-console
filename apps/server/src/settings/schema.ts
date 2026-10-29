@@ -105,6 +105,15 @@ function describeButtonList(list: SettingsSchema): void {
 function describeApplicationCommands(schema: SettingsSchema): void {
   Object.assign(schema.properties!.editor!, { editor: 'shell' as const, singleLine: true });
   const adapters = schema.properties!.adapters!.properties!;
+  const allowed = adapters.pi!.properties!.allowedModels!;
+  Object.assign(allowed, {
+    label: 'Allowed models',
+    description: 'The only models Pi Agents may run on, in your order; the first is the default for a new conversation. Enter each as an exact provider/id, such as openai/gpt-5.6, or openrouter/ followed by the id from openrouter.ai.',
+    placeholder: 'None: Pi uses its own default model and the model picker is hidden. Add models to choose them per Agent.'
+  });
+  Object.assign(allowed.items!, { label: 'Allowed model' });
+  Object.assign(allowed.items!.properties!.model!, { label: 'Model (provider/id)' });
+  Object.assign(allowed.items!.properties!.effort!, { label: 'Default Effort', description: 'Pi\'s thinking level when switching to this model. Unset keeps the current Effort.' });
   // annotate every supported adapter's lifecycle and update commands
   for (const adapter of Object.values(adapters)) {
     Object.assign(adapter.properties!.args!, { default: [] });

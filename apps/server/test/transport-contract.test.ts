@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { piAdapter } from '../src/adapters/pi.js';
 import type { StructuredAdapter } from '../src/adapters/types.js';
 import { LaunchService } from '../src/launch/service.js';
@@ -24,15 +24,18 @@ import { stubModels, stubProvider } from './helpers/stub-provider.js';
 // `clients`; the cases are shared. Unix sockets are blocked in the build sandbox, so this is
 // skipped there and runs on the host and in CI.
 
-// One protocol client under test: its Adapter, and the launch arguments and environment that point
-// its CLI at the stub provider and away from the operator's own state.
-type ContractClient = { name: string; adapter: StructuredAdapter; pinned: string; stub(baseUrl: string, state: string): Promise<{ args: string[]; env: Record<string, string> }> };
+// One protocol client under test: its Adapter, the launch arguments and environment that point
+// its CLI at the stub provider and away from the operator's own state (the console reads the
+// same Conversation store), and two of the stub's models: the one it starts on and one with Efforts.
+type ContractClient = { name: string; adapter: StructuredAdapter; pinned: string; models: { start: string; reasoning: string }; stub(baseUrl: string, state: string): Promise<{ args: string[]; env: Record<string, string> }> };
 const clients: ContractClient[] = [{
   name: 'pi',
   adapter: piAdapter,
   pinned: (JSON.parse(readFileSync(new URL('../node_modules/@earendil-works/pi-coding-agent/package.json', import.meta.url), 'utf8')) as { version: string }).version,
+  models: { start: 'stub/echo', reasoning: 'stub/think' },
   async stub(baseUrl, state) {
     await writeFile(join(state, 'models.json'), stubModels(baseUrl));
+    vi.stubEnv('PI_CODING_AGENT_DIR', state);
     return { args: ['--model', 'stub/echo'], env: { PI_CODING_AGENT_DIR: state, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' } };
   }
 }];
@@ -60,7 +63,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => undefined); });
 
 // launch `client`'s CLI under the holder in a Workspace session, its events collected in order
-async function launched(client: ContractClient, toolCall?: Parameters<typeof stubProvider>[1]): Promise<{ connection: StructuredConnection; events: StructuredEvent[]; next(type: StructuredEvent['type'], match?: (event: StructuredEvent) => boolean): Promise<StructuredEvent> }> {
+async function launched(client: ContractClient, toolCall?: Parameters<typeof stubProvider>[1]): Promise<{ connection: StructuredConnection; events: StructuredEvent[]; home: string; next(type: StructuredEvent['type'], match?: (event: StructuredEvent) => boolean): Promise<StructuredEvent> }> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-contract-')));
   const socketPath = join(root, 'tmux');
   const state = join(root, 'state');
@@ -90,12 +93,12 @@ async function launched(client: ContractClient, toolCall?: Parameters<typeof stu
     }
     throw new Error(`no ${type} event within 30 s; saw ${JSON.stringify(events)}; holder pane: ${await processes.stderr(started!.holder)}`);
   };
-  return { connection: started!.connection, events, next };
+  return { connection: started!.connection, events, home: root, next };
 }
 
 describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the $name protocol client', client => {
-  beforeAll(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); vi.stubEnv('RAC_INTERACTIVE_SHELL', loginShell!); });
-  afterAll(() => { vi.unstubAllEnvs(); });
+  beforeEach(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); vi.stubEnv('RAC_INTERACTIVE_SHELL', loginShell!); });
+  afterEach(() => { vi.unstubAllEnvs(); });
   it('reports in once launched, unsandboxed, on its pinned version', async () => {
     const { next } = await launched(client);
     const report = await next('report');
@@ -134,5 +137,43 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     const lines = events.flatMap(event => event.type === 'transcript' && event.item.kind === 'tool' ? [event.item] : []);
     expect(lines[0]).toEqual({ id: 'call_stub', kind: 'tool', name: 'Run', summary: 'printf "one\\ntwo\\n"', state: 'running' });
     expect(lines.at(-1)).toEqual({ id: 'call_stub', kind: 'tool', name: 'Run', summary: 'printf "one\\ntwo\\n"', state: 'done', output: 'one\ntwo\n', durationMs: expect.any(Number) });
+  }, 60_000);
+
+  it('switches model and Effort between Turns, among the models it can reach', async () => {
+    const { connection, next } = await launched(client);
+    await next('report');
+    expect(await next('model')).toMatchObject({ current: { model: client.models.start } });
+    const reasoning = (await connection.models()).find(model => model.id === client.models.reasoning);
+    expect(reasoning?.efforts).toContain('high');
+
+    expect(await connection.setModel({ model: client.models.reasoning, effort: 'high' })).toBe(true);
+    expect(await next('model')).toEqual({ type: 'model', current: { model: client.models.reasoning, effort: 'high' } });
+    expect(await connection.setModel({ model: 'nowhere/nothing' })).toBe(false);
+  }, 60_000);
+
+  it('names, starts and switches Conversations in place, each keeping its own model', async () => {
+    const { connection, next, home } = await launched(client);
+    await next('report');
+    const first = (await next('conversation') as Extract<StructuredEvent, { type: 'conversation' }>).id;
+    expect(await connection.setModel({ model: client.models.reasoning, effort: 'high' })).toBe(true);
+    expect(await connection.deliver('Say hello')).toBe('started');
+    await next('turn', event => event.type === 'turn' && event.turn.type === 'settled');
+    expect(await connection.renameConversation('First')).toBe(true);
+    await next('conversation', event => event.type === 'conversation' && event.id === first && event.name === 'First');
+
+    // a new Conversation keeps the current model and Effort
+    expect(await connection.newConversation()).toBe(true);
+    const second = (await next('conversation', event => event.type === 'conversation' && event.id !== first) as Extract<StructuredEvent, { type: 'conversation' }>).id;
+    expect(await next('model')).toEqual({ type: 'model', current: { model: client.models.reasoning, effort: 'high' } });
+    expect(await connection.setModel({ model: client.models.start, effort: 'off' })).toBe(true);
+
+    // switching back restores the first Conversation's own model and name, and its store lists it
+    const reference = await client.adapter.conversations.locate(first, home);
+    expect(reference).toBeDefined();
+    expect(await connection.switchConversation(reference!)).toBe(true);
+    await next('conversation', event => event.type === 'conversation' && event.id === first && event.name === 'First');
+    expect(await next('model')).toEqual({ type: 'model', current: { model: client.models.reasoning, effort: 'high' } });
+    expect((await client.adapter.conversations.list([home])).map(row => row.id)).toEqual([first]);
+    expect(second).not.toBe(first);
   }, 60_000);
 });

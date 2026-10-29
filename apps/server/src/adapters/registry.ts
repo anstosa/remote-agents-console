@@ -66,18 +66,21 @@ export function paneExcluded(pane: Pane): boolean {
 export function adapterCapabilities(configs: AdapterConfigs): Partial<Record<AgentKind, AdapterCapability>> {
   return Object.fromEntries([
     ...adapters.map((adapter) => [adapter.kind, capability(adapter, 'tmux', configs[adapter.kind])]),
-    ...structuredAdapters.map(adapter => [adapter.kind, structuredCapability(configs[adapter.kind])])
+    ...structuredAdapters.map(adapter => [adapter.kind, structuredCapability(adapter, configs[adapter.kind])])
   ]);
 }
 
-// a structured kind reports its own state and Turns; the rest arrive with later protocol features
-function structuredCapability(configured: AdapterConfigs[AgentKind]): AdapterCapability {
+// a structured kind reports its own state and Turns, and names its Conversations in place; the
+// rest arrive with later protocol features
+function structuredCapability(adapter: StructuredAdapter, configured: AdapterConfigs[AgentKind]): AdapterCapability {
   return {
     ...launchability(configured),
     stateSource: 'reported',
     turnCapture: true,
-    conversations: false,
-    naming: false,
+    conversations: true,
+    naming: true,
+    allowedModels: configured?.allowedModels ?? [],
+    efforts: [...adapter.efforts],
     inlineQuestions: false,
     commands: false,
     sandbox: false,

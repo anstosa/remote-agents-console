@@ -2,7 +2,8 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { piClient } from '../transports/pi.js';
+import { piClient, piEfforts } from '../transports/pi.js';
+import { locatePiSession, piConversationName, piConversationSummaries, validPiSessionId } from './pi-conversations.js';
 import type { StructuredAdapter } from './types.js';
 
 const piPackage = '@earendil-works/pi-coding-agent';
@@ -28,10 +29,17 @@ const extension = (): string => {
  * The Pi Adapter: structured-only (ADR 0002 amendment). Pi is never recognised in a pane, so it
  * has no `recognizes` match and no pane members; the console drives `pi --mode rpc` through the
  * Pi client, with the RAC extension always loaded. Its program is the console's own Node, which
- * runs the pinned CLI.
+ * runs the pinned CLI. A resume names the session file and no model, since `--model` would
+ * override the model the Conversation was on.
  */
 export const piAdapter = {
   kind: 'pi',
-  launch: () => ({ args: [piProgram(), '--mode', 'rpc', '-e', extension()] }),
-  client: piClient
+  launch: ({ resume, models }) => ({ args: [
+    piProgram(), '--mode', 'rpc', '-e', extension(),
+    ...(models === undefined || models.allowed.length === 0 ? [] : ['--models', models.allowed.join(',')]),
+    ...(resume !== undefined ? ['--session', resume] : models?.start === undefined ? [] : ['--model', models.start.model, ...(models.start.effort === undefined ? [] : ['--thinking', models.start.effort])])
+  ] }),
+  client: piClient,
+  efforts: piEfforts,
+  conversations: { validId: validPiSessionId, list: piConversationSummaries, readName: piConversationName, locate: locatePiSession }
 } satisfies StructuredAdapter;

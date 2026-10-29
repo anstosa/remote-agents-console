@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { adapterFor } from '../adapters/registry.js';
+import { adapterFor, structuredAdapterFor } from '../adapters/registry.js';
 import type { AgentKind } from '../adapters/types.js';
 
 /**
@@ -15,9 +15,9 @@ export const agentEffort = z.string().min(1).max(20);
 /** The fields of an Agent choice, for a schema that names its own `agent` enum. */
 export const agentChoiceShape = <K extends z.ZodTypeAny>(agent: K) => ({ agent, model: agentModel.optional(), effort: agentEffort.optional() });
 
-/** The Efforts a kind accepts: a Review run kind's CLI levels; none for any other kind yet. */
+/** The Efforts a kind accepts: a Review run kind's CLI levels, or a structured kind's. */
 export function agentEfforts(kind: AgentKind): readonly string[] {
-  return adapterFor(kind)?.reviewRuns?.efforts ?? [];
+  return adapterFor(kind)?.reviewRuns?.efforts ?? structuredAdapterFor(kind)?.efforts ?? [];
 }
 
 /** Why a choice is refused (an Effort its kind does not accept), or undefined when it is fine. */

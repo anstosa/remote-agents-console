@@ -31,6 +31,13 @@ export type TranscriptItem =
   | TranscriptTool;
 /** What an Agent has used of its Conversation: its cost so far and how full its context is. */
 export type AgentUsage = { cost: number; contextPercent?: number };
+/**
+ * A model an Agent can run on: its `provider/id`, display name and provider, its price per 1M
+ * input and output tokens, its context window, and the Efforts it supports.
+ */
+export type ModelInfo = { id: string; name: string; provider: string; inputPrice?: number; outputPrice?: number; contextWindow?: number; efforts: string[] };
+/** A model (`provider/id`) and the Effort to run it at. */
+export type ModelSetting = { model: string; effort?: string };
 export type StructuredEvent =
   | { type: 'report'; report: LaunchReport }
   | { type: 'turn'; turn: TurnEvent }
@@ -40,13 +47,26 @@ export type StructuredEvent =
   // a status line the Agent's extension set, or cleared (no `text`)
   | { type: 'status'; key: string; text?: string }
   | { type: 'usage'; usage: AgentUsage }
-  | { type: 'conversation'; id: string }
+  | { type: 'conversation'; id: string; name?: string }
+  | { type: 'model'; current: ModelSetting }
   | { type: 'exited' };
 /** What became of a delivered prompt: a Turn started, it was handled at once without one, or it was refused. */
 export type Delivery = 'started' | 'handled' | 'refused';
-/** A protocol client's connection to one Agent process; closing it leaves the process running. */
+/**
+ * A protocol client's connection to one Agent process; closing it leaves the process running.
+ * The Conversation and model operations run between Turns; each answers false when the Agent
+ * refused it. A Conversation change reports a `conversation` event, and the model it runs on a
+ * `model` event: a switch restores that Conversation's own model, and a new one keeps the current.
+ */
 export interface StructuredConnection {
   deliver(prompt: string): Promise<Delivery>;
+  newConversation(): Promise<boolean>;
+  /** Switch to a Conversation by the reference its kind's store located. */
+  switchConversation(reference: string): Promise<boolean>;
+  renameConversation(name: string): Promise<boolean>;
+  /** The models the Agent can reach now. */
+  models(): Promise<ModelInfo[]>;
+  setModel(setting: ModelSetting): Promise<boolean>;
   close(): void;
 }
 /** A line-oriented connection to an Agent process; lines carry no terminator. */

@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"01a17000-2222-7aaa-8bbb-000000000002","timestamp":"2026-10-27T08:00:00.000Z","cwd":"/work/repo"}
+{"type":"message","id":"c1","parentId":null,"timestamp":"2026-10-27T08:00:01.000Z","message":{"role":"user","content":"hello","timestamp":0}}

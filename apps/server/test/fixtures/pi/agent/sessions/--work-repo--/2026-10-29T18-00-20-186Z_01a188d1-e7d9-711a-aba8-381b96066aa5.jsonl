@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"01a188d1-e7d9-711a-aba8-381b96066aa5","timestamp":"2026-10-29T18:00:20.186Z","cwd":"/work/repo"}
+{"type":"message","id":"a1","parentId":null,"timestamp":"2026-10-29T18:00:21.000Z","message":{"role":"user","content":"Fix the parser","timestamp":0}}
+{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-10-29T18:00:30.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"timestamp":0}}
+{"type":"session_info","id":"a3","parentId":"a2","timestamp":"2026-10-29T18:00:31.000Z","name":"Fix the parser"}

@@ -1,3 +1,5 @@
+import type { AgentKind } from '../adapters/types.js';
+
 /**
  * The seam between the console and an Agent (ADR 0015). An Agent carries a Transport beside its
  * kind: `tmux` drives the CLI's TUI in a pane, `structured` exchanges messages with the CLI.
@@ -16,6 +18,10 @@ export type QuestionAnswer = number | string | { dismiss: true };
 export type InterruptOutcome = 'ok' | 'unavailable' | 'not-working';
 /** `unsent` reached nothing; `stuck` may have left the name unsubmitted in the composer. */
 export type RenameOutcome = 'sent' | 'unavailable' | 'busy' | 'unsent' | 'stuck';
+/** A Conversation to switch an Agent to: its kind and id, homed in the Worktree `worktreeId`. */
+export type ConversationTarget = { kind: AgentKind; id: string; worktreeId: string };
+/** The Agent now on the Conversation (a new one when the switch restarted it), or why there is none. */
+export type SwitchOutcome = { status: 'switched'; agentId: string } | { status: 'unavailable' | 'busy' | 'failed' | 'timed-out'; error: string };
 
 /**
  * The operations every Transport performs on an Agent it looks up by id. `answer` and `rename`
@@ -28,4 +34,5 @@ export interface AgentTransport {
   close(agentId: string): Promise<boolean>;
   rename(agentId: string, name: string): Promise<RenameOutcome>;
   newConversation(agentId: string): Promise<boolean>;
+  switchConversation(agentId: string, to: ConversationTarget): Promise<SwitchOutcome>;
 }

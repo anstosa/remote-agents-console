@@ -5787,7 +5787,6 @@ test("hides unused application fields and marks unsupported adapters unimplement
   await expect(panel.locator('[data-settings-path="proxy"]')).toHaveCount(0);
   await selectSettingsSection(settings, "agents", "Agents");
   for (const [path, label] of [
-    ["adapters.pi", "Pi"],
     ["adapters.opencode", "OpenCode"],
   ] as const) {
     const adapter = panel.locator(

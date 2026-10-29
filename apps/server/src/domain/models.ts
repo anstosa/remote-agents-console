@@ -63,9 +63,11 @@ export type GitUpstreamSummary = { upstream: string; ahead: number; behind: numb
 // and the pane mode (a picker or copy mode) it is in, if any
 export type AgentPane = { paneId: string; sessionId: string; socketFingerprint: string; paneMode?: string };
 // Whether a structured Agent's process is starting, live, Exited, or failed to start (`reason`);
-// `revision` changes with everything its transcript shows
+// `revision` changes with everything its transcript shows. `model` is the model and Effort it runs
+// on (`name` once the console has read its models), and `models` says whether Allowed models are
+// configured for its kind, so it can switch between them
 export type AgentLifecycle = 'starting' | 'live' | 'exited' | 'failed';
-export type StructuredAgentState = { lifecycle: AgentLifecycle; reason?: string; revision: number };
+export type StructuredAgentState = { lifecycle: AgentLifecycle; reason?: string; revision: number; model?: { id: string; name?: string; effort?: string }; models: boolean };
 // `transport` says how the console drives the Agent and `panel` what its Panel shows (ADR 0015).
 // A tmux Agent carries its pane details in `pane`, a structured one its process state in `structured`.
 export type Agent = { id: string; transport: Transport; panel: AgentPanel; pane?: AgentPane; structured?: StructuredAgentState; home: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind: AgentKind; attention: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; newTaskConfigured?: boolean; push?: PromptAction; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: ShapedQuestion; reviewRun?: string };

@@ -2,13 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { structuredAdapterFor } from '../adapters/registry.js';
-import type { AdapterConfigs, AgentKind } from '../adapters/types.js';
+import type { AdapterConfigs, AgentKind, AllowedModel } from '../adapters/types.js';
 import type { Agent, AgentLifecycle } from '../domain/models.js';
 import type { Place } from '../places/places.js';
 import { expandCommand } from '../launch/service.js';
 import { run } from '../tmux/command.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
-import { connectHolder, type Delivery, type StructuredConnection, type AgentUsage, type StructuredEvent, type TranscriptItem, type TranscriptTool } from './structured.js';
+import { connectHolder, type AgentUsage, type Delivery, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type TranscriptItem, type TranscriptTool } from './structured.js';
 import { agentPanel } from './transport.js';
 
 /** Where a structured Agent's process runs: its holder's socket and tmux pane (ADR 0016). */
@@ -21,8 +21,11 @@ export type HolderLaunch = { program: string; args: string[]; env: Record<string
  * role (the Conductor's, later).
  */
 export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; home: string; sandboxed: boolean; conversationId?: string; holder?: HolderRef; lifecycle: AgentLifecycle; reason?: string; origin: 'operator'; role?: 'conductor'; launchedAt: number };
-/** What a launch starts: one process of `kind` at `place`, for the Agent `id`. */
-export type StructuredLaunch = { id: string; kind: AgentKind; place: Place };
+/**
+ * What a launch starts: one process of `kind` at `place`, for the Agent `id`, on a new
+ * Conversation (on `model` when Allowed models are configured) or resuming the Conversation `resume`.
+ */
+export type StructuredLaunch = { id: string; kind: AgentKind; place: Place; resume?: string; model?: ModelSetting };
 /** Starts, reads and stops structured Agent processes; the holder in tmux outside tests. */
 export interface StructuredProcesses {
   /** Start the process and connect its protocol client, which reports through `emit`. */
@@ -42,11 +45,14 @@ export interface HolderWindows {
 /** The structured Agents' processes, each run under a holder in its Place's Workspace session. */
 export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs): StructuredProcesses {
   return {
-    async start({ id, kind, place }, emit) {
+    async start({ id, kind, place, resume, model }, emit) {
       const adapter = structuredAdapterFor(kind);
       const configured = configs[kind];
       if (adapter === undefined || configured?.launchable !== true) return undefined;
-      const spec = adapter.launch({ mode: 'fresh', cwd: place.home, sandboxed: false });
+      const located = resume === undefined ? undefined : await adapter.conversations.locate(resume, place.home);
+      if (resume !== undefined && located === undefined) return undefined;
+      const allowed = configured.allowedModels ?? [];
+      const spec = adapter.launch({ cwd: place.home, sandboxed: false, ...(located === undefined ? {} : { resume: located }), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
       const holder = await windows.openHolderWindow(place, id, { program: configured.program, args: [...spec.args, ...configured.args], env: { ...spec.env, ...configured.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
       if (holder === undefined) return undefined;
       const connected = await connectHolder(holder.socket);
@@ -63,8 +69,11 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
   };
 }
 
-// what this console knows of one structured Agent's process while it drives it
-type Live = { connection?: StructuredConnection; working: boolean; delivering: boolean; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void };
+// what this console knows of one structured Agent's process while it drives it; `busy` while an
+// operation (a delivery, a Conversation or model change) is in flight
+type Live = { connection?: StructuredConnection; working: boolean; busy: boolean; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; notices: number; marked: TranscriptItem[] };
+/** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
+export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
 /** The status line above an Agent's composer: its extension's statuses, its cost so far and how full its context is. */
 export type AgentStatusLine = { extension: string[] } & Partial<AgentUsage>;
@@ -99,25 +108,37 @@ export class StructuredAgents {
   private readonly listeners = new Set<() => void>();
   private mutation = Promise.resolve();
 
-  constructor(private readonly processes: StructuredProcesses, private readonly options: { file?: string; reportTimeoutMs?: number } = {}) {
+  /**
+   * `allowedModels` is the approval boundary for a kind's models (`adapters.<kind>.allowedModels`),
+   * in the operator's order: the first is the default, and none means the kind's own default.
+   */
+  constructor(private readonly processes: StructuredProcesses, private readonly options: { file?: string; reportTimeoutMs?: number; allowedModels?: (kind: AgentKind) => readonly AllowedModel[] } = {}) {
     this.file = options.file ?? join(serverCheckout(), '.data/structured-agents.json');
   }
 
   /** Called whenever an Agent's state or transcript changes. */
   onChange(listener: () => void): void { this.listeners.add(listener); }
 
-  /** Launch a `kind` Agent at the Place; false when its process could not start. */
-  async launch(place: Place, kind: AgentKind): Promise<boolean> {
+  /**
+   * Launch a `kind` Agent at the Place, resuming `resume` on the model it was on, or on a new
+   * Conversation on `model`, else the first Allowed model, at the Effort asked for, else the
+   * entry's default. False when its process could not start, or `model` is not an Allowed model.
+   */
+  async launch(place: Place, kind: AgentKind, { resume, model }: { resume?: string; model?: ModelSetting } = {}): Promise<boolean> {
+    const entry = model === undefined ? (resume === undefined ? this.allowed(kind)[0] : undefined) : this.allowed(kind).find(candidate => candidate.model === model.model);
+    if (model !== undefined && entry === undefined) return false;
     const records = await this.load();
     const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed: false, lifecycle: 'starting', origin: 'operator', launchedAt: Date.now() };
-    const live: Live = { working: false, delivering: false, transcript: [], revision: 0, status: new Map() };
+    const live: Live = { working: false, busy: false, transcript: [], revision: 0, status: new Map(), notices: 0, marked: [] };
     const reported = new Promise<boolean>(resolve => {
       live.reported = resolve;
       setTimeout(() => resolve(false), this.options.reportTimeoutMs ?? 30_000).unref();
     });
     records.push(record);
     this.live.set(record.id, live);
-    const started = await this.processes.start({ id: record.id, kind, place }, event => this.observe(record, live, event)).catch(() => undefined);
+    const effort = model?.effort ?? entry?.effort;
+    const launch = { id: record.id, kind, place, ...(resume === undefined ? {} : { resume }), ...(entry === undefined ? {} : { model: { model: entry.model, ...(effort === undefined ? {} : { effort }) } }) };
+    const started = await this.processes.start(launch, event => this.observe(record, live, event)).catch(() => undefined);
     // closed while it started: nothing may keep running for it
     if (this.live.get(record.id) !== live) {
       if (started !== undefined) { started.connection.close(); await this.processes.stop(started.holder, record); }
@@ -133,7 +154,8 @@ export class StructuredAgents {
     record.holder = started.holder;
     await this.save();
     this.changed(live);
-    if (!await reported && record.lifecycle === 'starting') await this.fail(record, live, 'Its process did not report in after starting.', true);
+    if (await reported) await this.checkAllowed(record, live);
+    else if (record.lifecycle === 'starting') await this.fail(record, live, 'Its process did not report in after starting.', true);
     return true;
   }
 
@@ -145,14 +167,62 @@ export class StructuredAgents {
     const record = (await this.load()).find(candidate => candidate.id === id);
     if (record === undefined) return undefined;
     const live = this.live.get(id);
-    if (record.lifecycle !== 'live' || live?.connection === undefined || live.working || live.delivering) return 'refused';
-    live.delivering = true;
+    if (record.lifecycle !== 'live' || live?.connection === undefined || live.working || live.busy) return 'refused';
+    live.busy = true;
     live.queuedNext = queued;
     try {
       const delivery = await live.connection.deliver(prompt);
       if (delivery !== 'started') live.queuedNext = undefined;
       return delivery;
-    } finally { live.delivering = false; }
+    } finally { live.busy = false; }
+  }
+
+  /** Start a new Conversation in place while the Agent is idle; it keeps the model and Effort. */
+  async newConversation(id: string): Promise<'ok' | StructuredRefusal> {
+    return await this.between(id, async ({ connection }) => await connection.newConversation());
+  }
+
+  /** Switch to one of the kind's Conversations in place while idle, restoring its model if allowed. */
+  async switchConversation(id: string, conversationId: string): Promise<'ok' | StructuredRefusal> {
+    return await this.between(id, async ({ record, live, connection }) => {
+      const reference = await structuredAdapterFor(record.kind)?.conversations.locate(conversationId, record.home);
+      if (reference === undefined || !await connection.switchConversation(reference)) return false;
+      await this.guard(record, live);
+      return true;
+    });
+  }
+
+  /** Name the current Conversation while the Agent is idle. */
+  async rename(id: string, name: string): Promise<'ok' | StructuredRefusal> {
+    return await this.between(id, async ({ connection }) => await connection.renameConversation(name));
+  }
+
+  /** The Allowed models the Agent can reach, in the operator's order, and the one it is on. */
+  async models(id: string): Promise<{ models: ModelInfo[]; current?: ModelSetting } | undefined> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    const live = this.live.get(id);
+    if (record === undefined || live?.connection === undefined || record.lifecycle !== 'live') return undefined;
+    live.models ??= await live.connection.models();
+    const reachable = live.models;
+    return { models: this.allowed(record.kind).flatMap(entry => reachable.find(model => model.id === entry.model) ?? []), ...(live.model === undefined ? {} : { current: live.model }) };
+  }
+
+  /**
+   * Switch the Agent's model or Effort between Turns: only to an Allowed model, at the Effort asked
+   * for, else the entry's default, else the current one. The transcript marks the change.
+   */
+  async setModel(id: string, setting: ModelSetting): Promise<'ok' | 'not-allowed' | StructuredRefusal> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    const entry = record === undefined ? undefined : this.allowed(record.kind).find(candidate => candidate.model === setting.model);
+    if (record !== undefined && entry === undefined) return 'not-allowed';
+    return await this.between(id, async ({ live, connection }) => {
+      const previous = live.model;
+      const effort = setting.effort ?? entry?.effort ?? previous?.effort;
+      if (!await connection.setModel({ model: setting.model, ...(effort === undefined ? {} : { effort }) })) return false;
+      const now = live.model?.effort ?? effort;
+      this.notice(live, previous?.model === setting.model ? `Effort → ${now}` : `Model → ${this.modelName(live, setting.model)}, effort ${now}`);
+      return true;
+    });
   }
 
   /** Close an Agent: stop its process, remove its holder and forget it. */
@@ -179,8 +249,20 @@ export class StructuredAgents {
       const live = this.live.get(record.id);
       // an Agent this console never connected to has no process it can drive
       const lifecycle: AgentLifecycle = live === undefined && (record.lifecycle === 'starting' || record.lifecycle === 'live') ? 'exited' : record.lifecycle;
-      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention: live?.working === true ? 'working' : 'finished', placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), structured: { lifecycle, ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0 } };
+      const current = live?.model;
+      const name = current === undefined ? undefined : live?.models?.find(model => model.id === current.model)?.name;
+      const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
+      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention: live?.working === true ? 'working' : 'finished', placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), structured: { lifecycle, ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), models: this.allowed(record.kind).length > 0 } };
     });
+  }
+
+  async agent(id: string): Promise<Agent | undefined> {
+    return (await this.agents()).find(agent => agent.id === id);
+  }
+
+  /** The current Conversation's name, as the Agent last reported it. */
+  conversationName(id: string): string | undefined {
+    return this.live.get(id)?.conversationName;
   }
 
   /**
@@ -212,8 +294,16 @@ export class StructuredAgents {
         void this.save();
         break;
       case 'conversation':
+        // the console's own notices belong to the Conversation they were made in
+        if (record.conversationId !== undefined && record.conversationId !== event.id) live.marked = [];
         record.conversationId = event.id;
+        live.conversationName = event.name;
         void this.save();
+        break;
+      case 'model':
+        live.model = event.current;
+        // the first model a launch reports is held to the Allowed models, as a resume may restore any
+        if (live.guarded !== true) { live.guarded = true; void this.guard(record, live); }
         break;
       case 'turn':
         live.working = event.turn.type === 'started';
@@ -231,7 +321,8 @@ export class StructuredAgents {
         break;
       }
       case 'history':
-        live.transcript = event.items.slice(-maxTranscriptItems);
+        // a history replaces the transcript, but not the notices the console made for this Conversation
+        live.transcript = [...event.items, ...live.marked].slice(-maxTranscriptItems);
         break;
       case 'status':
         if (event.text === undefined) live.status.delete(event.key); else live.status.set(event.key, event.text);
@@ -249,6 +340,55 @@ export class StructuredAgents {
         break;
     }
     this.changed(live);
+  }
+
+  private allowed(kind: AgentKind): readonly AllowedModel[] {
+    return this.options.allowedModels?.(kind) ?? [];
+  }
+
+  private modelName(live: Live, model: string): string {
+    return live.models?.find(candidate => candidate.id === model)?.name ?? model;
+  }
+
+  private notice(live: Live, text: string, tone: 'info' | 'warning' = 'info'): void {
+    live.notices += 1;
+    const item: TranscriptItem = { id: `notice-${live.notices}`, kind: 'notice', text, tone };
+    live.marked.push(item);
+    live.transcript.push(item);
+    this.changed(live);
+  }
+
+  // run one operation on a live, idle Agent, refusing while it works or another operation runs
+  private async between(id: string, operation: (agent: { record: StructuredRecord; live: Live; connection: StructuredConnection }) => Promise<boolean>): Promise<'ok' | StructuredRefusal> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    const live = this.live.get(id);
+    if (record === undefined || record.lifecycle !== 'live' || live?.connection === undefined) return 'unavailable';
+    if (live.working || live.busy) return 'busy';
+    live.busy = true;
+    try { return await operation({ record, live, connection: live.connection }) ? 'ok' : 'refused'; } finally { live.busy = false; }
+  }
+
+  // read the models the Agent can reach once it reports in, and say which Allowed models match none
+  private async checkAllowed(record: StructuredRecord, live: Live): Promise<void> {
+    const allowed = this.allowed(record.kind);
+    if (allowed.length === 0 || live.connection === undefined) return;
+    const reachable = await live.connection.models().catch(() => undefined);
+    if (reachable === undefined) return;
+    live.models = reachable;
+    const unmatched = allowed.filter(entry => !reachable.some(model => model.id === entry.model)).map(entry => entry.model);
+    if (unmatched.length > 0) this.notice(live, `Allowed models that match nothing reachable: ${unmatched.join(', ')}. Check the spelling and the login.`, 'warning');
+    else this.changed(live);
+  }
+
+  // hold the Agent to its Allowed models: one on any other moves to the first, marked in the transcript
+  private async guard(record: StructuredRecord, live: Live): Promise<void> {
+    const allowed = this.allowed(record.kind);
+    const current = live.model;
+    const fallback = allowed[0];
+    if (fallback === undefined || current === undefined || live.connection === undefined || allowed.some(entry => entry.model === current.model)) return;
+    const effort = fallback.effort ?? current.effort;
+    if (!await live.connection.setModel({ model: fallback.model, ...(effort === undefined ? {} : { effort }) })) return;
+    this.notice(live, `Model → ${this.modelName(live, fallback.model)}, effort ${live.model?.effort ?? effort}: ${current.model} is not an Allowed model`, 'warning');
   }
 
   // mark the Agent failed with its stderr; a process still running unheard is stopped, its stderr kept

@@ -567,6 +567,16 @@ describe('claude adapter configuration', () => {
     await expect(validateConfig({ ...scratch, adapters: { pi: { updates: { current: 'a', latest: 'b', run: 'c' } } } })).rejects.toThrow(/pinned/u);
   });
 
+  it('carries Pi\'s Allowed models in order, each an exact provider/id listed once with a Pi Effort', async () => {
+    const allowedModels = [{ model: 'openai/gpt-5.6', effort: 'medium' }, { model: 'openrouter/~anthropic/claude-opus-latest' }];
+    expect((await validateConfig({ ...scratch, adapters: { pi: { allowedModels } } })).adapters?.pi?.allowedModels).toEqual(allowedModels);
+    // an empty list is no list: Pi runs on its own default
+    expect((await validateConfig({ ...scratch, adapters: { pi: { allowedModels: [] } } })).adapters?.pi?.allowedModels).toBeUndefined();
+    await expect(validateConfig({ ...scratch, adapters: { pi: { allowedModels: [{ model: 'gpt-5.6' }] } } })).rejects.toThrow(/provider\/id/u);
+    await expect(validateConfig({ ...scratch, adapters: { pi: { allowedModels: [{ model: 'openai/gpt-5.6' }, { model: 'openai/gpt-5.6' }] } } })).rejects.toThrow(/once/u);
+    await expect(validateConfig({ ...scratch, adapters: { pi: { allowedModels: [{ model: 'openai/gpt-5.6', effort: 'extreme' }] } } })).rejects.toThrow();
+  });
+
   it('leaves Pi unlaunchable under the host bridge', async () => {
     setEnv('RAC_HOST_TMUX_DIR', '/host/tmux');
     const config = await validateConfig({ ...scratch, adapters: { pi: {} } });

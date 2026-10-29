@@ -1,4 +1,5 @@
 import { agentKinds, type AgentKind } from '../adapters/types.js';
+import { agentEffort, agentModel } from '../launch/agent-choice.js';
 
 /**
  * Where a Schedule's Run happens, mirroring the launcher rows exactly: a specific
@@ -26,13 +27,16 @@ export type ScheduleLastRun = { at: string; status: ScheduleRunStatus; detail?: 
 
 /**
  * A standing instruction on a Note: when to run it (a 5-field, host-local cron
- * expression), with which Adapter, and in which target. At most one per Note.
+ * expression), with which Adapter (and, for a kind on Allowed models, which model and
+ * Effort), and in which target. At most one per Note.
  * `updatedAt` is stamped on create, edit, pause and resume — it is the no-catch-up
  * anchor the scheduler evaluates from.
  */
 export type Schedule = {
   cron: string;
   kind: AgentKind;
+  model?: string;
+  effort?: string;
   target: ScheduleTarget;
   enabled: boolean;
   updatedAt: string;
@@ -74,6 +78,8 @@ export const validSchedule = (value: unknown): value is Schedule => {
   const schedule = value as Record<string, unknown>;
   if (typeof schedule.cron !== 'string' || schedule.cron.length === 0 || schedule.cron.length > 200) return false;
   if (!isKind(schedule.kind)) return false;
+  if (schedule.model !== undefined && !agentModel.safeParse(schedule.model).success) return false;
+  if (schedule.effort !== undefined && !agentEffort.safeParse(schedule.effort).success) return false;
   if (!validScheduleTarget(schedule.target)) return false;
   if (typeof schedule.enabled !== 'boolean') return false;
   if (typeof schedule.updatedAt !== 'string' || Number.isNaN(Date.parse(schedule.updatedAt))) return false;

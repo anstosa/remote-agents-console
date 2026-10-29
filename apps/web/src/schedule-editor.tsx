@@ -1,18 +1,18 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { agentKindGlyph, agentKindLabel, type AgentKind } from './launch-profile.js';
+import { agentKindGlyph, agentKindLabel, type AgentKind, type AllowedModel } from './launch-profile.js';
 
 // The wire shape of a Schedule (mirrors the server's `Schedule`). `updatedAt` and
 // `lastRun` are server-owned; the editor emits only the four fields the set route reads.
 export type ScheduleTarget = { worktreeId: string } | { projectId: string } | { scratch: true };
 export type ScheduleRunStatus = 'launched' | 'running' | 'completed' | 'needs-input' | 'timed-out' | 'skipped' | 'failed';
 export type ScheduleLastRun = { at: string; status: ScheduleRunStatus; detail?: string; agentId?: string };
-export type Schedule = { cron: string; kind: AgentKind; target: ScheduleTarget; enabled: boolean; updatedAt?: string; lastRun?: ScheduleLastRun };
-export type ScheduleSetBody = { cron: string; kind: AgentKind; target: ScheduleTarget; enabled: boolean };
+export type Schedule = { cron: string; kind: AgentKind; model?: string; effort?: string; target: ScheduleTarget; enabled: boolean; updatedAt?: string; lastRun?: ScheduleLastRun };
+export type ScheduleSetBody = { cron: string; kind: AgentKind; model?: string; effort?: string; target: ScheduleTarget; enabled: boolean };
 
 // The Adapter picker's rows, one per configured kind, precomputed by the note pane so the editor
 // stays free of dashboard logic: `detail` is the launcher's sandbox line when launchable, else the
 // disabled reason. Choosing one writes the kind and marks the choice explicit.
-export type ScheduleAdapterOption = { kind: AgentKind; launchable: boolean; detail: string; unavailableReason?: string };
+export type ScheduleAdapterOption = { kind: AgentKind; launchable: boolean; detail: string; unavailableReason?: string; models?: AllowedModel[]; efforts?: string[] };
 // One target row, mirroring a launcher row: its wire target, the picker label/sublabel/grouping,
 // its availability, and the launch kind it resolves to — the Adapter follows this kind on a
 // target change until the operator picks a kind explicitly. The "Runs on" sentence is derived
@@ -189,6 +189,9 @@ export function ScheduleEditor({ schedule, nextRun, prefill, runsOnText, adapter
   const derived = cronToEdit(cron);
   const edit: ScheduleEdit = rawCron ? { ...derived, preset: 'cron' } : derived;
   const kind = schedule?.kind ?? prefill.kind;
+  // the chosen kind's Allowed models, offered for this Schedule alone
+  const kindOption = adapterOptions.find(option => option.kind === kind);
+  const kindModels = kindOption?.models;
   const invalid = scheduleInvalid({ schedule, nextRun });
   // the target row the stored Schedule points at; absent → its target has disappeared (a removed
   // Worktree, an unavailable Project), so the Schedule is kept but shown as unable to run
@@ -236,7 +239,13 @@ export function ScheduleEditor({ schedule, nextRun, prefill, runsOnText, adapter
     else setRawCron(false);
   }, [openSlot, cron]);
 
-  const apply = (next: ScheduleSetBody) => { void onSet(next); };
+  // a Schedule keeps its model and Effort until its kind changes or they are picked again
+  const apply = (next: ScheduleSetBody) => { void onSet(schedule === undefined || next.kind !== schedule.kind ? next : { ...next, ...(schedule.model === undefined ? {} : { model: schedule.model }), ...(schedule.effort === undefined ? {} : { effort: schedule.effort }) }); };
+  // run this Schedule on one of its kind's Allowed models (else the first) at an Effort (else the model's default)
+  const pickModel = (model: string | undefined, effort: string | undefined) => {
+    if (schedule === undefined) return;
+    void onSet({ cron, kind: schedule.kind, target: schedule.target, enabled: schedule.enabled, ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) });
+  };
   const applyEdit = (nextEdit: ScheduleEdit) => { if (schedule === undefined) return; apply({ cron: editToCron(nextEdit), kind: schedule.kind, target: schedule.target, enabled: schedule.enabled }); };
   // pick an Adapter: the choice is explicit from now on, so it survives later target changes
   const pickKind = (nextKind: AgentKind) => {
@@ -312,7 +321,7 @@ export function ScheduleEditor({ schedule, nextRun, prefill, runsOnText, adapter
       </p>
       <p className="schedule-line">
         <span>with</span>
-        <button type="button" className="schedule-slot schedule-slot-kind" aria-label="Agent" data-context-flyout aria-expanded={openSlot === 'kind'} disabled={busy} onClick={() => setOpenSlot(current => current === 'kind' ? null : 'kind')}><KindMark kind={kind} />{agentKindLabel[kind]}</button>
+        <button type="button" className="schedule-slot schedule-slot-kind" aria-label="Agent" data-context-flyout aria-expanded={openSlot === 'kind'} disabled={busy} onClick={() => setOpenSlot(current => current === 'kind' ? null : 'kind')}><KindMark kind={kind} />{agentKindLabel[kind]}{schedule.model === undefined ? '' : ` · ${schedule.model}`}{schedule.effort === undefined ? '' : ` · ${schedule.effort}`}</button>
         <span>on</span>
         <button type="button" className={`schedule-slot${gone ? ' schedule-slot-bad' : ''}`} aria-label="Target" data-context-flyout aria-expanded={openSlot === 'target'} disabled={busy} onClick={() => setOpenSlot(current => current === 'target' ? null : 'target')}>{gone ? goneTargetLabel(currentTarget) : targetText}</button>
       </p>
@@ -377,6 +386,14 @@ export function ScheduleEditor({ schedule, nextRun, prefill, runsOnText, adapter
               </button>
             ))}
           </div>
+          {kindModels !== undefined && kindModels.length > 0 && <>
+            <p className="schedule-popover-title">Model · this Schedule only</p>
+            <div className="schedule-rows" role="radiogroup" aria-label="Model">
+              <button type="button" role="radio" aria-checked={schedule.model === undefined} className="launch-row" onClick={() => pickModel(undefined, schedule.effort)}><span className="launch-row-copy"><strong>Default</strong><small>The first Allowed model</small></span></button>
+              {kindModels.map(entry => <button key={entry.model} type="button" role="radio" aria-checked={schedule.model === entry.model} className="launch-row" onClick={() => pickModel(entry.model, schedule.effort)}><span className="launch-row-copy"><strong>{entry.model}</strong><small>{entry.effort === undefined ? 'Default Effort' : `Effort ${entry.effort}`}</small></span></button>)}
+            </div>
+            <label className="schedule-effort">Effort <select value={schedule.effort ?? ''} onChange={event => pickModel(schedule.model, event.target.value === '' ? undefined : event.target.value)}><option value="">Model default</option>{kindOption?.efforts?.map(level => <option key={level} value={level}>{level}</option>)}</select></label>
+          </>}
         </div>
       )}
       {openSlot === 'target' && (
