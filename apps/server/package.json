@@ -14,6 +14,9 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.81",
+    "@earendil-works/pi-codemode": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@fastify/cookie": "^11.0.2",
     "@fastify/rate-limit": "^10.2.1",
     "@fastify/static": "^9.3.0",
