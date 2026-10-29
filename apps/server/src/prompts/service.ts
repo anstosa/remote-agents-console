@@ -11,7 +11,7 @@ import { promptScope, QueuedPromptService, type QueuedPrompt, type QueuedPromptO
 import { validPrompt, type PromptAttachment } from './validation.js';
 import { updateAdvisorPendingLabel } from '../update-advisor.js';
 import { isFullGitSha } from '../git/revision.js';
-import { reportsOwnState, TmuxTransport, type AdapterView, type AttachmentStagingWorkspace, type DeliveryOptions, type FailedDraft, type TurnMark } from '../transports/tmux.js';
+import { answerCaptureGraceMs, reportsOwnState, TmuxTransport, type AdapterView, type AttachmentStagingWorkspace, type DeliveryOptions, type FailedDraft, type TurnMark } from '../transports/tmux.js';
 import type { InterruptOutcome } from '../transports/transport.js';
 export { maxPromptAttachmentBytes, promptAttachmentBytes, validPromptAttachments, type PromptAttachment } from './validation.js';
 export { promptScope } from './queue.js';
@@ -22,7 +22,6 @@ export type { AttachmentStagingWorkspace } from '../transports/tmux.js';
 // false return leaves the prompt queued and the queue halted (see saveQueued).
 export type UndeliveredDrain = (scope: string, prompt: QueuedPrompt) => Promise<boolean>;
 
-const answerCaptureGraceMs = 10_000;
 // a pane missing from a few discovery ticks (a socket that briefly fails to list) is not a departed Agent
 const departedAgentGraceMs = 30_000;
 // the sweep reads both stores, history from disk; it need not run every dashboard tick
@@ -588,8 +587,10 @@ export class PromptService {
       this.settleTrackedRequest(requestId, 'complete');
       // release the provisional render phase instead of waiting for a nonexistent answer
       this.phases.delete(scope);
+      if (delivery.reset !== undefined) await this.transport.rememberReset(scope, delivery.reset, 'pending');
       return true;
     }
+    await this.transport.consumeReset(scope, delivery.anchoredReset);
     // track real prompts and their answers rather than reset commands
     const entry = await this.history?.record(scope, delivery.prompt).catch(() => undefined);
     // monitor managed prompt completion

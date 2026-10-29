@@ -17,7 +17,11 @@ export type InterruptOutcome = 'ok' | 'unavailable' | 'not-working';
 /** `unsent` reached nothing; `stuck` may have left the name unsubmitted in the composer. */
 export type RenameOutcome = 'sent' | 'unavailable' | 'busy' | 'unsent' | 'stuck';
 
-/** The operations every Transport performs on an Agent it looks up by id. */
+/**
+ * The operations every Transport performs on an Agent it looks up by id. `answer` and `rename`
+ * take the Agent's input reservation (refused during a restart); `interrupt`, `close` and
+ * `newConversation` do not, and prompt delivery runs under the reservation its caller holds.
+ */
 export interface AgentTransport {
   answer(agentId: string, questionId: string, answer: QuestionAnswer): Promise<boolean>;
   interrupt(agentId: string): Promise<InterruptOutcome>;

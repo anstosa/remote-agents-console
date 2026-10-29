@@ -21,7 +21,7 @@ import { updateAdvisorLabel, updateAdvisorPendingLabel } from '../update-advisor
 import { isFullGitSha } from '../git/revision.js';
 import type { AgentTransport, InterruptOutcome, QuestionAnswer, RenameOutcome, TurnEvent } from './transport.js';
 
-const answerCaptureGraceMs = 10_000;
+export const answerCaptureGraceMs = 10_000;
 // preserve prompts through reset startup but do not strand them behind a dead pane
 const conversationResetGraceMs = 10_000;
 // a queued submit key can be swallowed when it races an unrendered composer
@@ -44,7 +44,7 @@ const normalizedPrompt = (value: string) => value.replace(/\s+/gu, ' ').trim();
 const normalizedTerminalText = (value: string) => normalizedPrompt(value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, ''));
 type PromptReconciliation = 'pending' | 'settled' | 'recorded';
 // the console never composes submission through an unknown kind
-export type AdapterView = Pick<Adapter, 'stateSource' | 'submission' | 'turns' | 'questions' | 'completion' | 'managedPromptLifecycleV1' | 'newConversation'>;
+export type AdapterView = Pick<Adapter, 'stateSource' | 'submission' | 'turns' | 'questions' | 'completion' | 'managedPromptLifecycleV1' | 'newConversation' | 'conversations'>;
 // an Adapter that announces its own Attention state (rather than the console
 // inferring it from the title): it must report `working` before a prompt counts
 // as complete, and fires no Stop hook on an interrupt, so the console writes
@@ -59,8 +59,9 @@ export type TurnMark = { baselineCompletion?: string; rolloutBaseline?: Completi
 export type TurnWatch = TurnMark & { state?: 'awaiting-start' | 'working' | 'awaiting-answer' | 'halted'; historyPrompt?: string };
 export type TmuxTurnEvent = Exclude<TurnEvent, { type: 'started' }> | { type: 'started'; mark: TurnMark };
 // how one delivery ended: refused before anything reached the pane, held with the queue (keeping
-// a draft to clear), or submitted; an `instant` prompt completes without a Turn
-export type Delivery = { status: 'refused' } | { status: 'held'; failedDraft?: FailedDraft } | { status: 'submitted'; instant: boolean; prompt: string; rolloutBaseline?: CompletionBaseline };
+// a draft to clear), or submitted; an `instant` prompt completes without a Turn. A submitted reset
+// command carries the boundary to remember, and a real prompt the id of the reset it anchored on.
+export type Delivery = { status: 'refused' } | { status: 'held'; failedDraft?: FailedDraft } | { status: 'submitted'; instant: boolean; prompt: string; rolloutBaseline?: CompletionBaseline; reset?: Omit<ResetBoundary, 'id'>; anchoredReset?: string };
 export type DeliveryOptions = { discovered?: TmuxTarget; submission?: 'queue' | 'enter' | 'confirmed-enter'; durable?: boolean; resetAt?: number; queuedPromptId?: string };
 // pair the shared staging directory with its agent-visible host namespace
 export type AttachmentStagingWorkspace = { workspace: string; hostWorkspace: string | undefined };
@@ -101,7 +102,6 @@ export class TmuxTransport implements AgentTransport {
 
   constructor(private readonly discovery: DiscoveryService, private readonly tmux: TmuxAdapter, private readonly locks: AgentLocks, private readonly history?: PromptHistoryService, private readonly queued?: QueuedPromptService, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, private readonly teardownFor: (kind: AgentKind) => string | undefined = () => undefined, private readonly attachmentStaging?: AttachmentStagingWorkspace, private readonly calendar?: PromptCalendarLifecycle) {}
 
-  // look one Agent up by id
   async target(agentId: string, force = false): Promise<TmuxTarget | undefined> {
     return await this.discovery.target(agentId, force);
   }
@@ -135,7 +135,7 @@ export class TmuxTransport implements AgentTransport {
   // landed while its Enter did not.
   async rename(agentId: string, name: string, again = false): Promise<RenameOutcome> {
     const target = await this.discovery.target(agentId);
-    const rename = target === undefined ? undefined : adapterFor(target.agent.kind)?.conversations?.rename?.(name);
+    const rename = target === undefined ? undefined : this.resolveAdapter(target.agent.kind)?.conversations?.rename?.(name);
     if (target === undefined || rename === undefined) return 'unavailable';
     // hold the agent's lifecycle mutation lock across the paste so a concurrent restart/switch
     // cannot close the pane mid-delivery (and so it, in turn, defers to this rename), exactly as
@@ -158,7 +158,6 @@ export class TmuxTransport implements AgentTransport {
     finally { release(); }
   }
 
-  // the Agent's pane as it reads now
   async capture(target: TmuxTarget): Promise<string | undefined> {
     return await this.tmux.capture(target.socket, target.agent.paneId).catch(() => undefined);
   }
@@ -397,17 +396,12 @@ export class TmuxTransport implements AgentTransport {
       // halt only when a durable prompt is still waiting
       return { status: 'held', failedDraft };
     }
-    if (instant) {
+    return {
+      status: 'submitted', instant, prompt: attachmentPrompt, ...(rolloutBaseline === undefined ? {} : { rolloutBaseline }),
       // hold follow-ups through startup and anchor their completion on the new thread
-      if (reset && this.queued !== undefined) {
-        await this.rememberReset(scope, { agentId, at: submittedAt, before: resetBefore, ...(queuedPromptId === undefined ? {} : { resetPromptId: queuedPromptId }) }, 'pending');
-      }
-    } else {
-      // consume the durable boundary only once a real post-reset prompt is accepted
-      if (matchingReset !== undefined) await this.queued?.resets.clear(scope, matchingReset.id);
-      this.conversationResets.delete(scope);
-    }
-    return { status: 'submitted', instant, prompt: attachmentPrompt, ...(rolloutBaseline === undefined ? {} : { rolloutBaseline }) };
+      ...(reset && this.queued !== undefined ? { reset: { agentId, at: submittedAt, before: resetBefore, ...(queuedPromptId === undefined ? {} : { resetPromptId: queuedPromptId }) } } : {}),
+      ...(!instant && matchingReset !== undefined ? { anchoredReset: matchingReset.id } : {})
+    };
   }
 
   // recover a reset even when its command was consumed before the server restarted
@@ -438,6 +432,12 @@ export class TmuxTransport implements AgentTransport {
       // preserve any replacement recorded during the fresh discovery read
       if (this.conversationResets.get(scope) === reset) this.conversationResets.delete(scope);
     }
+  }
+
+  // consume the durable boundary once a real post-reset prompt is accepted
+  async consumeReset(scope: string, resetId: string | undefined): Promise<void> {
+    if (resetId !== undefined) await this.queued?.resets.clear(scope, resetId);
+    this.conversationResets.delete(scope);
   }
 
   // persist before the reset command leaves the queue, including an empty follow-up queue
