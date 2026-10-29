@@ -209,13 +209,14 @@ export class StructuredAgents {
   /**
    * Launch a `kind` Agent at the Place, Sandboxed or not, resuming `resume` on the model it was on,
    * or on a new Conversation on `model`, else the first Allowed model, at the Effort asked for, else
-   * the entry's default. False when its process could not start, or `model` is not an Allowed model.
+   * the entry's default. Answers the new Agent's id once its process started (it may then have
+   * failed to report in); undefined when it could not start, or `model` is not an Allowed model.
    */
-  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, role }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; role?: 'conductor' } = {}): Promise<boolean> {
+  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, role }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; role?: 'conductor' } = {}): Promise<string | undefined> {
     // the Conductor starts on its configured model
     if (role === 'conductor') model ??= this.conductor?.model;
     const entry = model === undefined ? (resume === undefined && latest !== true ? this.allowed(kind)[0] : undefined) : this.allowed(kind).find(candidate => candidate.model === model.model);
-    if (model !== undefined && entry === undefined) return false;
+    if (model !== undefined && entry === undefined) return undefined;
     const records = await this.load();
     const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, lifecycle: 'starting', origin: 'operator', ...(role === undefined ? {} : { role }), launchedAt: Date.now() };
     const live = this.idle();
@@ -228,7 +229,7 @@ export class StructuredAgents {
       this.live.delete(record.id);
       this.changed();
     }
-    return started === true;
+    return started === true ? record.id : undefined;
   }
 
   /** How the console gives the Conductor its access, model and script deadline. */
