@@ -1,6 +1,6 @@
 import type { AttentionState } from '../adapters/types.js';
 import type { Agent } from '../domain/models.js';
-import type { LaunchOutcome } from '../transports/tmux.js';
+import type { LaunchOutcome } from '../transports/transport.js';
 
 // ── Managed runs ──────────────────────────────────────────────────────────────────
 // A managed run launches a fresh Agent, delivers one prompt, watches its attention to an end

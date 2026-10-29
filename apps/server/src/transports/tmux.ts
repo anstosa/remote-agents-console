@@ -18,7 +18,7 @@ import type { AgentWaiter } from '../launch/wait.js';
 import { configuredWorktreeForWorkspace } from '../workspaces/resolver.js';
 import { updateAdvisorLabel, updateAdvisorPendingLabel } from '../update-advisor.js';
 import { isFullGitSha } from '../git/revision.js';
-import type { AgentTransport, ConversationTarget, Gate, InterruptOutcome, QuestionAnswer, RenameOutcome, SwitchOutcome, TurnEvent } from './transport.js';
+import type { AgentTransport, ConversationTarget, Gate, InterruptOutcome, LaunchOutcome, QuestionAnswer, RenameOutcome, SwitchOutcome, TurnEvent } from './transport.js';
 
 export const answerCaptureGraceMs = 10_000;
 // preserve prompts through reset startup but do not strand them behind a dead pane
@@ -79,7 +79,7 @@ type ConversationReset = ResetBoundary & { observed: PaneSnapshot[]; state: 'pen
 // share the adapter's reset and readiness snapshot shape
 export const paneSnapshot = (agent: Agent): PaneSnapshot => ({ title: agent.title, attention: agentAttentionState(agent), ...(agent.conversationId === undefined ? {} : { conversationId: agent.conversationId }) });
 
-export type LaunchOutcome = { agent: Agent } | { failure: 'refused' | 'timed-out' };
+
 /**
  * Launch a tmux Agent and return it: `start` opens its pane, and the new Agent is the first one
  * outside `before` that `matches`, waited for as its CLI starts.

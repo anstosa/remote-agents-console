@@ -29,7 +29,7 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // until the Agent takes it or a cancel returns it, and a cancel aborts the Turn before it answers.
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to.
-function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version } = {}) {
+function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve() } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -72,6 +72,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
     },
     attach: async (holder, _kind, events) => {
       attaches.push(holder);
+      await attaching;
       emit = events;
       return { holder, connection: connection(), cursor: () => lines };
     },
@@ -105,8 +106,10 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
   const restart = async (next: ReturnType<typeof fakeAgent>) => {
     await started.app.close();
     const console = await start(next.processes);
-    await console.structuredAgents.reattach();
-    return console;
+    const reattached = console.structuredAgents.reattach();
+    // a reattach held up by its holder (`attaching`) goes on behind the console that started
+    await Promise.race([reattached, new Promise(resolve => setTimeout(resolve, 50))]);
+    return { ...console, reattached };
   };
   return { ...started, restart };
 }
@@ -796,6 +799,23 @@ describe('a structured Agent across a console restart', () => {
     expect(next.delivered).toEqual(['Third']);
     const history = (await restarted.app.inject({ method: 'GET', url: `/api/agents/${id}/prompt-history`, headers: restarted.headers })).json().prompts;
     expect(history).toMatchObject([{ text: 'Third' }, { text: 'Second', answer: 'Second answered' }, { text: 'First', answer: 'First answered' }]);
+    await restarted.app.close();
+  });
+
+  it('holds an Agent being reattached as live: a prompt sent meanwhile waits in its queue and never relaunches it', async () => {
+    const fake = fakeAgent();
+    const { app, headers, restart } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    let attached = () => {};
+    const next = fakeAgent({ attaching: new Promise<void>(resolve => { attached = resolve; }) });
+    const restarted = await restart(next);
+    expect(await restarted.dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'live' } });
+    expect((await restarted.app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers: restarted.headers, payload: { prompt: 'Hello', attachments: [] } })).statusCode).toBe(204);
+    attached();
+    await restarted.reattached;
+    await restarted.dashboardAgent(id);
+    expect(next.launches).toEqual([]);
+    expect(next.delivered).toEqual(['Hello']);
     await restarted.app.close();
   });
 

@@ -118,11 +118,11 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
   };
 }
 
-// what this console knows of one structured Agent's process while it drives it (`generation`
-// counts the processes it started for the Agent; `cursor` the lines read from the current one,
-// `prompt` the latest Turn's prompt; `offPin` while its process runs another version than the
-// pinned one); `busy` while an
-// operation (a delivery, a Conversation or model change) is in flight. `turn` is how the latest
+// What this console knows of one structured Agent's process while it drives it. `generation`
+// counts the processes it started for the Agent, `cursor` the lines read from the current one,
+// `prompt` is the latest Turn's prompt, and `offPin` is set while the process runs another
+// version than the pinned one. `busy` while an operation (a delivery, a Conversation or model
+// change, a relaunch or reattach) is in flight. `turn` is how the latest
 // Turn ended; `draft` the text offered for the composer until the next prompt or steer, numbered
 // by `offers` so the web takes each one once
 type Live = { generation: number; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
@@ -145,12 +145,12 @@ const transcriptLine = (item: TranscriptItem): TranscriptLine => {
   while (lines.length > 1 && lines.at(-1) === '') lines.pop();
   return { ...line, tail: lines.slice(-5).join('\n'), outputLines: lines.length };
 };
-const count = (value: unknown): boolean => value === undefined || Number.isSafeInteger(value) && (value as number) >= 0;
+const nonNegativeInt = (value: unknown): boolean => value === undefined || Number.isSafeInteger(value) && (value as number) >= 0;
 const isStoredRecord = (value: unknown): value is StructuredRecord => {
   const record = value as Partial<StructuredRecord> | null;
   const holder = record?.holder;
   return typeof record === 'object' && record !== null && typeof record.id === 'string' && typeof record.kind === 'string' && typeof record.placeId === 'string' && typeof record.home === 'string'
-    && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && count(holder.read) && (holder.pid === undefined || count(holder.pid) && holder.pid > 1));
+    && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && nonNegativeInt(holder.read) && (holder.pid === undefined || nonNegativeInt(holder.pid) && holder.pid > 1));
 };
 
 /**
@@ -187,7 +187,7 @@ export class StructuredAgents {
     if (model !== undefined && entry === undefined) return false;
     const records = await this.load();
     const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed: false, lifecycle: 'starting', origin: 'operator', launchedAt: Date.now() };
-    const live: Live = { generation: 0, working: false, busy: false, questions: [], steers: [], offers: 0, transcript: [], revision: 0, status: new Map(), noticeCount: 0, notices: [] };
+    const live = this.idle();
     records.push(record);
     this.live.set(record.id, live);
     const effort = model?.effort ?? entry?.effort;
@@ -277,7 +277,8 @@ export class StructuredAgents {
       const live = this.idle();
       this.live.set(record.id, live);
       const generation = live.generation += 1;
-      const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event)).catch(() => undefined);
+      live.busy = true;
+      const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event)).catch(() => undefined).finally(() => { live.busy = false; });
       if (this.live.get(record.id) !== live || live.generation !== generation) { attached?.connection.close(); return; }
       if (attached === undefined) {
         record.lifecycle = 'exited';
@@ -316,8 +317,10 @@ export class StructuredAgents {
   }
 
   // the Agent's lifecycle: one this console holds no connection to has no process it can drive
+  // (one being reattached is still live, so nothing resumes it under its running process)
   private lifecycle(record: StructuredRecord): AgentLifecycle {
-    return this.live.get(record.id)?.connection === undefined && record.lifecycle === 'live' || this.live.get(record.id) === undefined && record.lifecycle === 'starting' ? 'exited' : record.lifecycle;
+    const live = this.live.get(record.id);
+    return live?.connection === undefined && live?.busy !== true && record.lifecycle === 'live' || live === undefined && record.lifecycle === 'starting' ? 'exited' : record.lifecycle;
   }
 
   /**

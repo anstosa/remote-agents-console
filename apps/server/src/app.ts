@@ -16,13 +16,13 @@ import { DiscoveryService } from './discovery/service.js';
 import { adapterFor, structuredAdapterFor } from './adapters/registry.js';
 import { agentChoiceProblem, agentEffort, agentEfforts, agentModel } from './launch/agent-choice.js';
 import type { ModelSetting } from './transports/structured.js';
-import type { ConversationTarget, SwitchOutcome } from './transports/transport.js';
+import type { ConversationTarget, LaunchOutcome, SwitchOutcome } from './transports/transport.js';
 import { withQuestionShape } from './adapters/inline-questions.js';
 import { agentKinds, codexFamily, sameConversation, type Adapter, type AgentKind, type ConversationSummary, type PaneSnapshot, type ShapedQuestion, type ResetSettling } from './adapters/types.js';
 import { TmuxCommandRegistry } from './tmux/command-registry.js';
 import { TmuxAdapter } from './tmux/adapter.js';
 import { maxPromptAttachmentBytes, PromptService, promptScope, type PromptAttachment } from './prompts/service.js';
-import { launchTmuxAgent, TmuxTransport, type LaunchOutcome } from './transports/tmux.js';
+import { launchTmuxAgent, TmuxTransport } from './transports/tmux.js';
 import { holderProcesses, StructuredAgents } from './transports/structured-agents.js';
 import { promptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, validPromptAttachments } from './prompts/validation.js';
 import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin } from './prompts/queue.js';
@@ -2431,8 +2431,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   };
   // wait for slow agent startup, shared with the Run primitive (launch/wait.ts)
   const waitForAgent = createAgentWaiter(discovery, launchPollDelay);
-  // launch an Agent through its Transport: `start` opens it, and the new Agent is the first one
-  // that `matches` among those not running before
+  // launch an Agent and answer with it: `start` opens it (a pane, or a structured Agent's holder),
+  // and the new Agent is the first one that `matches` among those not running before
   const launchAgent = async (matches: (agent: Agent) => boolean, start: () => Promise<boolean>): Promise<LaunchOutcome> =>
     await launchTmuxAgent(waitForAgent, new Set((await discovery.dashboard()).agents.map(agent => agent.id)), matches, start);
   // the pane snapshot an Adapter's `newConversation` rules read, from one discovered agent

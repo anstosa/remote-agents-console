@@ -5,7 +5,7 @@ import type { AttentionState } from '../adapters/types.js';
 import type { Agent } from '../domain/models.js';
 import { launchFresh, managedRunProgress, managedRunStartWindowMs, type ReadinessOutcome } from '../launch/managed-run.js';
 import type { ReviewRunLaunch } from '../launch/service.js';
-import type { LaunchOutcome } from '../transports/tmux.js';
+import type { LaunchOutcome } from '../transports/transport.js';
 import { MAX_REVIEW_GENERATED_BYTES } from '../review-tour/contracts.js';
 import { conversationKey, isReviewAgentKind, reviewRunsFor, validConversationId, type ReviewAgentKind } from './kinds.js';
 import { reviewReplacedFlags } from './launch-args.js';
