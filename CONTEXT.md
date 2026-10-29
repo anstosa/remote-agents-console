@@ -125,6 +125,14 @@ _Avoid_: Exchange, round, message pair
 The one Agent that acts on the console itself, through the console's MCP server: it sends prompts to other Agents and hears back when their Turns end, spawns new Agents, keeps Notes of its own, and reacts to what it Watches. It lives in a directory Project the operator chooses, is always running, and is always Sandboxed; the Agents it spawns are Sandboxed Pi Agents. A role any kind could fill once the console can arm and confirm that kind's sandbox; Pi so far. No other Agent can act on the console.
 _Avoid_: Foreman, Overseer, Supervisor (a process that keeps processes alive), orchestrator, Steward
 
+**Worker**:
+An Agent the Conductor spawned: always a Sandboxed Pi Agent, with no access to the console of its own. The Conductor may close only its workers; it is their origin.
+_Avoid_: Child, sub-agent
+
+**Report**:
+What the console queues to the Conductor when a prompt it sent to another Agent has ended (or never went out), or a review it started is ready or failed: the target, the outcome, and that Agent's answer, marked as untrusted. One per prompt; a report reports nothing itself.
+_Avoid_: Callback, notification (a push)
+
 **Watch**:
 Something the Conductor asked to hear about: a pull request, a Stack process, a Project's review requests, or a command whose output lines it reads. Each change the Watch sees reaches the Conductor once, as a queued prompt; nothing it did not Watch ever wakes it. Belongs to the Conductor, not its Conversation.
 _Avoid_: Subscription, monitor (Claude's tool), trigger

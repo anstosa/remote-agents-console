@@ -6,6 +6,8 @@ import { type Schedule, type ScheduleLastRun, validSchedule } from '../schedule/
 
 // `source`: a queued prompt saved as the Note, or the Conductor, which owns the Note until the operator saves it (ADR 0018)
 export type NoteSource = 'queued-prompt' | 'conductor';
+/** Who changes a Note: the operator, or the Conductor, which may change only its own. */
+export type NoteAuthor = 'operator' | 'conductor';
 export type WorktreeNote = { id: string; text: string; title?: string; source?: NoteSource; schedule?: Schedule; attachments?: PromptAttachment[]; locked?: boolean; allWorkspaces?: boolean };
 export type WorktreeNoteLocation = { key: string; note: WorktreeNote };
 export type WorktreeNoteDeletion = { note: WorktreeNote; undoToken: string };
@@ -183,14 +185,14 @@ export class WorktreeNoteService {
   }
 
   // Whether `by` may change the note: the Conductor only its own. The operator's change makes it the operator's.
-  private claim(note: WorktreeNote, by: 'operator' | 'conductor'): boolean {
+  private claim(note: WorktreeNote, by: NoteAuthor): boolean {
     if (by === 'conductor') return note.source === 'conductor';
     if (note.source === 'conductor') delete note.source;
     return true;
   }
 
   // update one owned or shared note at its canonical storage location
-  async update(worktreeId: string, noteId: string, text: string, by: 'operator' | 'conductor' = 'operator'): Promise<WorktreeNote | undefined> {
+  async update(worktreeId: string, noteId: string, text: string, by: NoteAuthor = 'operator'): Promise<WorktreeNote | undefined> {
     // reject malformed identifiers and content
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || !validText(text)) return undefined;
     return await this.mutate(stored => {
@@ -205,7 +207,7 @@ export class WorktreeNoteService {
   }
 
   // rename one note
-  async rename(worktreeId: string, noteId: string, title: string, by: 'operator' | 'conductor' = 'operator'): Promise<WorktreeNote | undefined> {
+  async rename(worktreeId: string, noteId: string, title: string, by: NoteAuthor = 'operator'): Promise<WorktreeNote | undefined> {
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || !validTitle(title)) return undefined;
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
@@ -232,7 +234,7 @@ export class WorktreeNoteService {
   }
 
   // delete one note and retain an exact, short-lived restoration snapshot
-  async deleteWithUndo(worktreeId: string, noteId: string, by: 'operator' | 'conductor' = 'operator'): Promise<WorktreeNoteDeletion | 'locked' | undefined> {
+  async deleteWithUndo(worktreeId: string, noteId: string, by: NoteAuthor = 'operator'): Promise<WorktreeNoteDeletion | 'locked' | undefined> {
     // reject malformed identifiers before entering the mutation queue
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId)) return undefined;
     return await this.serialize(async () => {
@@ -246,7 +248,7 @@ export class WorktreeNoteService {
       if (index < 0) return undefined;
       // refuse locks before changing the stored collection
       if (notes[index]!.locked === true) return 'locked';
-      if (by === 'conductor' && notes[index]!.source !== 'conductor') return undefined;
+      if (!this.claim(notes[index]!, by)) return undefined;
       const existingOrder = this.deletionOrders.get(resolved.key);
       const newIds = existingOrder === undefined ? [] : notes.map(note => note.id).filter(id => !existingOrder.includes(id));
       const deletionOrder = existingOrder === undefined ? notes.map(note => note.id) : [...newIds, ...existingOrder];
@@ -307,11 +309,11 @@ export class WorktreeNoteService {
 
   // set or replace one note's Schedule; validates the record's shape (the route validates
   // target existence and cron parseability, which this store cannot see)
-  async setSchedule(worktreeId: string, noteId: string, schedule: Schedule, by: 'operator' | 'conductor' = 'operator'): Promise<WorktreeNote | undefined> {
+  async setSchedule(worktreeId: string, noteId: string, schedule: Schedule, by: NoteAuthor = 'operator'): Promise<WorktreeNote | undefined> {
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || !validSchedule(schedule)) return undefined;
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
-      if (note === undefined || by === 'conductor' && note.source !== 'conductor') return undefined;
+      if (note === undefined || !this.claim(note, by)) return undefined;
       note.schedule = schedule;
       return { ...note };
     });

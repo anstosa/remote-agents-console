@@ -1774,6 +1774,32 @@ describe('the Conductor\'s dispatches', () => {
     expect(await call('schedule_note', { worktree_id: worktree, note_id: own, cron: '0 * * * *', enabled: true })).toMatchObject({ ok: true });
     const notes = (await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(worktree)}/notes`, headers })).json().notes;
     expect(notes.find((note: { id: string }) => note.id === own).schedule).toMatchObject({ cron: '0 * * * *', target: { conductor: true }, enabled: true });
+    // a Schedule the operator sets on it makes it the operator's
+    expect((await app.inject({ method: 'PUT', url: `/api/worktrees/${encodeURIComponent(worktree)}/notes/${own}/schedule`, headers, payload: { cron: '0 4 * * *', kind: 'pi', target: { conductor: true }, enabled: false } })).statusCode).toBe(200);
+    expect(await call('update_note', { worktree_id: worktree, note_id: own, text: 'Mine again' })).toMatchObject({ ok: false, error: { code: 'conflict' } });
+    await app.close();
+  });
+  it('cuts a long answer in its report at 8 KiB and says so, and a worker\'s question still pushes to the operator', async () => {
+    const pushed: AgentNotification[] = [];
+    const fake = fakeAgent();
+    const { app, call, worker, tick } = await conducting(fake, { deps: { notifications: new AgentNotificationCoordinator(notification => { pushed.push(notification); }, 0) } });
+    const target = await worker();
+    await call('queue_prompt', { agent_id: target, prompt: 'Explain everything' });
+    fake.emitTo(target, { type: 'turn', turn: { type: 'started' } });
+    await tick();
+    // a question from the Turn the Conductor dispatched is the operator's to answer
+    fake.emitTo(target, { type: 'question', question: { id: 'q1', text: 'Delete the branch?', field: { kind: 'choice', choices: ['Yes', 'No'] } } });
+    await tick();
+    expect(pushed.filter(notification => notification.kind === 'question').map(notification => notification.url)).toEqual([`/#agent=${target}`]);
+    fake.emitTo(target, { type: 'question-closed', id: 'q1' });
+    fake.emitTo(target, { type: 'turn', turn: { type: 'settled', message: `${'x'.repeat(9_000)}END` } });
+    await tick();
+    await tick();
+    const report = fake.delivered.at(-1)!;
+    expect(report).toMatch(/^\[RAC report\]/u);
+    expect(report).toContain('The answer was cut at 8 KiB.');
+    expect(report).not.toContain('END');
+    expect(report.length).toBeLessThan(9_000);
     await app.close();
   });
 });

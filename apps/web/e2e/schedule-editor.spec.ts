@@ -372,3 +372,19 @@ test('shows a stored cron that no longer parses as invalid', async ({ page }) =>
   await expect(editor).toContainText('invalid cron');
   await expect(editor.getByRole('button', { name: 'Cadence' })).toHaveText('on cron nonsense');
 });
+
+test('aims a Schedule at the Conductor, and shows a Run it was delivered as a quiet outcome', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await mount(page);
+  const editor = editorOf(page);
+  await editor.getByRole('button', { name: 'Schedule this note' }).click();
+  await editor.getByRole('button', { name: 'Target' }).click();
+  await editor.getByRole('dialog', { name: 'Target' }).getByRole('radio', { name: /Conductor/ }).click();
+  expect(await lastBody(page)).toEqual({ cron: '0 9 * * *', kind: 'pi', target: { conductor: true }, enabled: true });
+  await expect(editor.getByRole('button', { name: 'Target' })).toHaveText('Conductor');
+
+  await mount(page, { cron: '0 9 * * *', kind: 'pi', target: { conductor: true }, enabled: true, lastRun: { at: '2026-09-06T09:00:00-07:00', status: 'delivered', agentId: 'conductor-1' } });
+  const last = editorOf(page).locator('.schedule-last');
+  await expect(last).toContainText('delivered');
+  await expect(last).not.toHaveClass(/bad/u);
+});

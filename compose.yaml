@@ -24,6 +24,8 @@ services:
       RAC_SAVED_PROMPTS_FILE: /workspace/.data/saved-prompts.json
       RAC_PROMPT_HISTORY_FILE: /workspace/.data/prompt-history.json
       RAC_QUEUED_PROMPTS_FILE: /workspace/.data/queued-prompts.json
+      # prompts the Conductor queued, kept until it has been told how each ended
+      RAC_DISPATCHES_FILE: /workspace/.data/dispatches.json
       # persist browser registrations and their automatically managed signing identity
       RAC_PUSH_SUBSCRIPTIONS_FILE: /workspace/.data/push-subscriptions.json
       RAC_TEMP_PREVIEWS_DIR: /workspace/.data/temp-previews

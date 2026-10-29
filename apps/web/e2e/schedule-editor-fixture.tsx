@@ -18,6 +18,7 @@ const targetOptions: ScheduleTargetOption[] = [
   { target: { worktreeId: 'wt-feature' }, label: 'feature', group: 'atlas', available: true, kind: 'claude', origin: 'last used in this project' },
   { target: { worktreeId: 'wt-locked' }, label: 'locked', group: 'atlas', available: false, unavailableReason: 'Worktree is locked', kind: 'claude' },
   { target: { projectId: 'notes-dir' }, label: 'notes', sublabel: 'directory', group: 'notes', available: true, kind: 'codex', origin: 'default agent' },
+  { target: { conductor: true }, label: 'Conductor', sublabel: 'queued to it', available: true, kind: 'pi' },
 ];
 
 // Stands in for the server's parser: a real croner check lives on the server, so the fixture treats

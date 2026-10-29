@@ -48,7 +48,7 @@ import { LatestViewportScheduler, PaneViewportCoordinator } from './logs/viewpor
 import { boundedViewport } from './logs/viewport.js';
 import { PaneStreamRegistry, type PaneStreamProvider } from './tmux/control.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from './dashboard/updates.js';
-import { WorktreeNoteService, type WorktreeNote } from './notes/service.js';
+import { WorktreeNoteService, type NoteAuthor, type WorktreeNote } from './notes/service.js';
 import { promptNoteContent } from './notes/from-prompt.js';
 import { cronError, previewRuns, scheduleNextRun } from './schedule/cron.js';
 import { Scheduler } from './schedule/scheduler.js';
@@ -212,7 +212,6 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // what one Agent queues to another is reported back to it, and the Turns the console starts on an
   // Agent's behalf are held to the Conductor's budget (ADR 0018, ADR 0019)
   const dispatches = new Dispatches({
-    file: process.env.RAC_DISPATCHES_FILE ?? '.data/dispatches.json',
     submit: (agentId, text, sender) => prompts.submitFrom(agentId, text, sender),
     queued: agentId => queuedPrompts.list(promptScope(agentId)),
     history: agentId => promptHistory.list(promptScope(agentId)),
@@ -1089,7 +1088,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // serialize schedule execution and deletion around each canonical note
   const scheduleRunsInFlight = new Set<string>();
   const noteDeletionsInFlight = new Set<string>();
-  const deleteNoteWithUndo = async (saveKey: string, noteId: string, by: 'operator' | 'conductor' = 'operator') => {
+  const deleteNoteWithUndo = async (saveKey: string, noteId: string, by: NoteAuthor = 'operator') => {
     const resolved = await notes.resolve(saveKey, noteId);
     // hide notes outside the requesting scope
     if (resolved === undefined) return undefined;

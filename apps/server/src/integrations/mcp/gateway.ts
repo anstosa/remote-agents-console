@@ -120,7 +120,7 @@ export class IntegrationGateway {
   // apply deployment feature gates independently of OAuth scopes; the Conductor has its own parent
   // gate (its configuration), independent of the integrations', and calls only what it may
   private enabled(definition: IntegrationTool, principal: IntegrationPrincipal): boolean {
-    if (principal.authentication === 'conductor' ? !conductorCallable(definition) : !this.options.config.enabled) return false;
+    if (principal.authentication === 'conductor' ? !conductorCallable(definition) : !this.options.config.enabled || definition.conductorOnly === true) return false;
     // apply read-only deployment policy
     if (definition.feature === 'read') return this.options.config.mcp.readEnabled;
     // apply ordinary write deployment policy
@@ -171,7 +171,7 @@ export class IntegrationGateway {
       case 'run_stack_action': return await orchestration.runStackAction({ worktreeId: input.worktree_id as string, action: input.action as 'start' | 'stop' | 'build' | 'restart' | 'migrate', ...(input.process === undefined ? {} : { process: input.process as string }) });
       case 'start_review': return await orchestration.startReview({ agentId: input.agent_id as string, scope: input.scope as 'working' | 'pr', includeTests: input.include_tests as boolean, includeDocs: input.include_docs as boolean });
       case 'spawn_agent': return await orchestration.spawnAgent({ worktreeId: input.worktree_id as string, ...(input.model === undefined ? {} : { model: input.model as string }) });
-      case 'close_agent': return await orchestration.closeWorker(input.agent_id as string);
+      case 'close_agent': return await orchestration.closeAgent(input.agent_id as string);
       case 'switch_pull_request': return await orchestration.switchPullRequest({ agentId: input.agent_id as string, number: input.number as number });
       default: return { ok: false, version: 'v1', error: { code: 'invalid_request', message: 'Unknown tool.', retryable: false } };
     }

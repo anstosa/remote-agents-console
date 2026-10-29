@@ -133,7 +133,7 @@ function validIntegrationPrompt(value: string): boolean {
 }
 
 // limit UTF-8 output without splitting a code point
-function limitText(value: string, maxBytes: number): TextLimit {
+export function limitText(value: string, maxBytes: number): TextLimit {
   const serialized = Buffer.from(value);
   // retain complete bounded values
   if (serialized.byteLength <= maxBytes) return { text: value, truncated: false };
@@ -727,7 +727,7 @@ export class OrchestrationService {
   }
 
   // close one worker the Conductor spawned, never another Agent; its queue becomes Notes
-  async closeWorker(agentId: string): Promise<OrchestrationResult<{ closed: true }>> {
+  async closeAgent(agentId: string): Promise<OrchestrationResult<{ closed: true }>> {
     const conductor = this.dependencies.conductor;
     if (!validIdentifier(agentId)) return failure('invalid_request', 'Invalid agent identifier.');
     if (conductor === undefined) return failure('unavailable', 'Only the Conductor closes its workers.');

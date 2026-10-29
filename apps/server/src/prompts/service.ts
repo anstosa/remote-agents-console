@@ -74,7 +74,7 @@ export type PromptOutcome = 'completed' | 'failed' | 'interrupted' | 'exited' | 
 export interface PromptDispatchHooks {
   admits(agentId: string, prompt: QueuedPrompt): boolean;
   queued(agentId: string, promptId: string, sender: PromptSender): Promise<void>;
-  delivered(agentId: string, promptId: string, sender: PromptSender, entryId: string | undefined): void;
+  delivered(agentId: string, promptId: string, sender: PromptSender, entryId: string | undefined): Promise<void>;
   ended(promptId: string, outcome: PromptOutcome, answer?: string): void;
 }
 // the outcome a tracked request's settling means for its prompt
@@ -681,6 +681,7 @@ export class PromptService {
 
   private async forget(scope: string): Promise<void> {
     this.departedSince.delete(scope);
+    this.senders.delete(scope.slice(promptScope('').length));
     this.settleTrackedRequest(this.phases.get(scope)?.requestId, 'interrupted', 'agent_departed');
     this.phases.delete(scope);
     for (const state of [this.reconciled, this.observedWorking, this.reconciliationPendingSince]) state.delete(scope);
@@ -765,7 +766,8 @@ export class PromptService {
     const entry = await this.history?.record(scope, delivery.prompt, sender).catch(() => undefined);
     // monitor managed prompt completion
     if (this.queued !== undefined || requestId !== undefined) this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), historyPrompt: delivery.prompt, ...(entry === undefined ? {} : { historyEntryId: entry.id }), ...(delivery.rolloutBaseline === undefined ? {} : { rolloutBaseline: delivery.rolloutBaseline }), sender });
-    if (requestId !== undefined) this.dispatchHooks?.delivered(agentId, requestId, sender, entry?.id);
+    // recorded before the prompt leaves the queue, so a restart never takes a Turn that ran for one that did not
+    if (requestId !== undefined) await this.dispatchHooks?.delivered(agentId, requestId, sender, entry?.id).catch(() => undefined);
     return 'submitted';
   }
 
@@ -844,6 +846,7 @@ export class PromptService {
     }
     // the Turn it was on ends with it, tracked or not
     this.settleTrackedRequest(this.phases.get(promptScope(agentId))?.requestId, 'interrupted', 'agent_closed');
+    this.senders.delete(agentId);
     if (transport === this.structured) await this.saveQueued(promptScope(agentId));
     return true;
   }

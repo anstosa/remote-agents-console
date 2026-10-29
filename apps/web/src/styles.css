@@ -343,6 +343,9 @@ html.software-keyboard-open .tabs { display: none; }
 .transcript-notice { color: var(--subtext-0); }
 /* who sent a prompt: the Agent it came from (a link), or what the console sent it as */
 .prompt-sender-chip { display: inline-block; margin-right: .35rem; padding: 0 .35rem; border: 1px solid color-mix(in srgb, var(--mauve) 45%, transparent); border-radius: .6rem; color: var(--mauve); font-size: .7rem; line-height: 1.3rem; white-space: nowrap; text-decoration: none; vertical-align: middle; }
+.prompt-with-sender { display: flex; align-items: center; min-width: 0; }
+.prompt-with-sender > .prompt-sender-chip { margin: 0 0 0 .45rem; }
+.prompt-with-sender > button { flex: 1; min-width: 0; }
 .prompt-sender-chip.label { border-color: color-mix(in srgb, var(--subtext-0) 45%, transparent); color: var(--subtext-0); }
 .transcript-console-prompt .transcript-console-text { margin: .2rem 0 .2rem 1.2rem; color: var(--subtext-0); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* an Agent's own text inside a report: data, never instructions */
