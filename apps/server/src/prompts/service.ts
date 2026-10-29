@@ -11,7 +11,7 @@ import { promptScope, QueuedPromptService, type QueuedPrompt, type QueuedPromptO
 import { validPrompt, type PromptAttachment } from './validation.js';
 import { updateAdvisorPendingLabel } from '../update-advisor.js';
 import { isFullGitSha } from '../git/revision.js';
-import { answerCaptureGraceMs, reportsOwnState, TmuxTransport, type AdapterView, type AttachmentStagingWorkspace, type DeliveryOptions, type FailedDraft, type TurnMark } from '../transports/tmux.js';
+import { answerCaptureGraceMs, reportsOwnState, TmuxTransport, type AdapterView, type AttachmentStagingWorkspace, type DeliveryOptions, type FailedDraft, type SendIntent, type TurnMark } from '../transports/tmux.js';
 import type { InterruptOutcome } from '../transports/transport.js';
 export { maxPromptAttachmentBytes, promptAttachmentBytes, validPromptAttachments, type PromptAttachment } from './validation.js';
 export { promptScope } from './queue.js';
@@ -51,6 +51,11 @@ export class PromptService {
   private readonly activeMutations = new Map<string, number>();
   private readonly mutationVersions = new Map<string, number>();
   private readonly departedSince = new Map<string, number>();
+  // restart recovery: work seen since the console started, scopes whose lost answers are
+  // recovered, and when an unfinished recovery began
+  private readonly observedWorking = new Set<string>();
+  private readonly reconciled = new Set<string>();
+  private readonly reconciliationPendingSince = new Map<string, number>();
   private sweptAt = -Infinity;
   private lifecycleMutationVersion = 0;
 
@@ -58,8 +63,15 @@ export class PromptService {
   // the Transport is built from the delivery arguments unless one is given, whose input
   // reservations must then be this service's
   constructor(discovery: DiscoveryService, tmux: TmuxAdapter, private readonly history?: PromptHistoryService, private readonly queued?: QueuedPromptService, private readonly drainUndelivered?: UndeliveredDrain, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, teardownFor: (kind: AgentKind) => string | undefined = () => undefined, attachmentStaging?: AttachmentStagingWorkspace, private readonly calendar?: PromptCalendarLifecycle, transport?: TmuxTransport) {
-    const locks = { begin: (agentId: string) => this.beginAgentMutation(agentId), version: (agentId: string) => this.mutationVersion(agentId), busy: (agentId: string) => this.mutating(agentId) };
-    this.transport = transport ?? new TmuxTransport(discovery, tmux, locks, history, queued, resolveAdapter, teardownFor, attachmentStaging, calendar);
+    const hooks = { begin: (agentId: string) => this.beginAgentMutation(agentId), version: (agentId: string) => this.mutationVersion(agentId), busy: (agentId: string) => this.mutating(agentId), restored: (scope: string, deliveredPromptId?: string) => this.resetRestored(scope, deliveredPromptId) };
+    this.transport = transport ?? new TmuxTransport(discovery, tmux, hooks, queued?.resets, resolveAdapter, teardownFor, attachmentStaging);
+  }
+
+  // a reset boundary restored after a console restart: the reset command it delivered leaves the
+  // queue, and no answer from before the reset is recovered
+  async resetRestored(scope: string, deliveredPromptId?: string): Promise<void> {
+    if (deliveredPromptId !== undefined) await this.queued?.remove(scope, deliveredPromptId);
+    this.reconciled.add(scope);
   }
 
   // submit or durably queue one prompt. `resetAt` marks the prompt as the first
@@ -107,13 +119,11 @@ export class PromptService {
       return { accepted: queued !== undefined, ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) };
     }
     try {
-      await this.transport.restoreReset(scope, agentId);
-      const previousReset = this.transport.reset(scope);
-      this.transport.retryExpiredReset(scope, agentId);
+      const gate = await this.transport.gate(agentId, 'retry');
       const waiting = await this.queued?.list(scope);
       // retain prompts behind active or halted work
-      if (this.queued !== undefined && (agentAttentionState(first.agent) !== 'finished' || this.phases.has(scope) || previousReset?.state === 'pending' || previousReset !== undefined && previousReset.agentId !== agentId || (waiting?.length ?? 0) > 0)) {
-        const adopting = agentAttentionState(first.agent) !== 'finished' && !this.phases.has(scope) && previousReset === undefined;
+      if (this.queued !== undefined && (agentAttentionState(first.agent) !== 'finished' || this.phases.has(scope) || gate === 'pending' || gate === 'foreign' || (waiting?.length ?? 0) > 0)) {
+        const adopting = agentAttentionState(first.agent) !== 'finished' && !this.phases.has(scope) && gate === 'none';
         const mark = adopting ? await this.transport.mark(first.agent) : {};
         const queued = await this.queued.enqueue(scope, prompt, attachments, origin);
         if (queued !== undefined) await this.admitCalendar(queued.id, agentId, first.agent.kind, queued.createdAt, prompt, attachments);
@@ -221,11 +231,10 @@ export class PromptService {
     // require a current target
     if (target === undefined) return undefined;
     const scope = promptScope(agentId);
-    await this.transport.restoreReset(scope, agentId);
     // reject overlapping input and lifecycle work
-    const reset = this.transport.reset(scope);
+    const gate = await this.transport.gate(agentId);
     // reserve a live owner's reset even when a sibling shares the queue scope
-    if (this.restartLocks.has(scope) || this.lockedAgentIds.has(agentId) || this.phases.has(scope) || reset?.state === 'pending' || reset !== undefined && reset.agentId !== agentId || this.mutating(agentId)
+    if (this.restartLocks.has(scope) || this.lockedAgentIds.has(agentId) || this.phases.has(scope) || gate === 'pending' || gate === 'foreign' || this.mutating(agentId)
       || (expectedMutationVersion !== undefined && this.mutationVersion(agentId) !== expectedMutationVersion)
       || (expectedMutationGeneration !== undefined && this.mutationGeneration() !== expectedMutationGeneration)) return undefined;
     this.restartLocks.add(scope);
@@ -322,23 +331,22 @@ export class PromptService {
   // advance managed prompt completion over the Transport's Turn feed
   async observe(agent: Pick<Agent, 'id' | 'displayLabel' | 'home' | 'attention' | 'kind'>): Promise<void> {
     const scope = promptScope(agent.id);
-    await this.transport.restoreReset(scope, agent.id);
+    const gate = await this.transport.gate(agent.id);
     // pause observation during restart handoffs and in-flight delivery
     if (this.restartLocks.has(scope) || this.dispatching.has(scope)) return;
-    const reset = this.transport.reset(scope);
     // duplicate agents cannot settle, expire, or dispatch another pane's reset
-    if (reset !== undefined && reset.agentId !== agent.id) return;
+    if (gate === 'foreign') return;
     // an Adapter without Turn capture cannot read an answer back: complete on
     // working -> finished, store the prompt alone, and skip the grace/halt path
     const adapter = this.resolveAdapter(agent.kind);
     // reconcile durable correlations even when process-local prompt phases were lost on restart
     await this.reconcileCalendar(undefined, agent.id);
     // a reset spinner is not a model turn and must never enter answer recovery
-    if (this.transport.reset(scope)?.state === 'pending' && !this.phases.has(scope)) {
+    if (!this.phases.has(scope) && this.transport.held(agent.id)) {
       // use fresh reset readiness rather than a possibly stale dashboard attention snapshot
-      const settled = await this.transport.settleReset(agent.id, scope, adapter);
+      const settled = await this.transport.gate(agent.id, 'settle');
       if (settled === 'expired') await this.holdFailedSubmission(scope);
-      if (settled === 'ready') await this.dispatch(agent.id, scope);
+      if (settled === 'anchored') await this.dispatch(agent.id, scope);
       return;
     }
     if (adapter !== undefined && adapter.turns === undefined) return this.observeTurnless(agent, scope, reportsOwnState(adapter));
@@ -353,8 +361,11 @@ export class PromptService {
     // wait through active agent work
     if (busy) {
       // recover one submitted prompt after a server restart
-      const restartedEntry = phase === undefined && !this.transport.sawWorking(scope) ? await this.latestUnanswered(scope) : undefined;
-      this.transport.working(scope);
+      const restartedEntry = phase === undefined && !this.observedWorking.has(scope) ? await this.latestUnanswered(scope) : undefined;
+      // work seen: restart recovery starts over once it finishes
+      this.observedWorking.add(scope);
+      this.reconciled.delete(scope);
+      this.reconciliationPendingSince.delete(scope);
       // mark the prompt as started
       if (phase?.state === 'awaiting-start' || phase?.state === 'awaiting-answer') {
         const started = await this.transport.observe(agent, phase);
@@ -384,18 +395,19 @@ export class PromptService {
       if (completion === 'pending' && Date.now() - phase.changedAt < answerCaptureGraceMs) return;
       // external resets can spin without a turn; never fail work we have not attempted
       if (completion === 'pending' && phase.historyPrompt === undefined && phase.historyEntryId === undefined) {
-        // preserve the queue until the actual pane is ready
-        const before = await this.transport.externalReset(agent.id, adapter);
-        if (before === undefined) return;
-        // reserve the adopted phase while its durable reset boundary is written
-        if (this.phases.get(scope) !== phase || this.dispatching.has(scope)) return;
+        // reserve the adopted phase while the pane is read and its reset boundary written;
+        // the queue waits until the actual pane is ready
+        if (this.dispatching.has(scope)) return;
         this.dispatching.add(scope);
+        let anchored = false;
         try {
-          // the reset time is unknown; follow the pane's first rollout replacement instead
-          await this.transport.rememberReset(scope, { agentId: agent.id, at: Date.now(), before, external: true }, 'ready');
-          this.phases.delete(scope);
+          anchored = await this.transport.externalReset(agent.id, () => this.phases.get(scope) === phase);
+          if (anchored) {
+            this.phases.delete(scope);
+            this.resetDelivered(scope);
+          }
         } finally { this.dispatching.delete(scope); }
-        await this.dispatch(agent.id, scope);
+        if (anchored) await this.dispatch(agent.id, scope);
         return;
       }
       // save the queue after failed, cancelled, or unrecordable work
@@ -409,15 +421,57 @@ export class PromptService {
       // reconcile adopted work before releasing its queue
       if (phase.historyEntryId === undefined) {
         // wait for restart recovery before releasing queued work
-        if (!await this.transport.reconcile(agent.id, scope)) return;
+        if (!await this.reconcile(agent.id, scope)) return;
       }
       // release completed prompts
       this.settleTrackedRequest(phase.requestId, 'complete');
       this.phases.delete(scope);
     }
     // recover answer tracking lost across restarts
-    if (phase === undefined && !this.transport.isReconciled(scope) && !await this.transport.reconcile(agent.id, scope)) return;
+    if (phase === undefined && !this.reconciled.has(scope) && !await this.reconcile(agent.id, scope)) return;
     await this.dispatch(agent.id, scope);
+  }
+
+  // Recover an answer the Agent finished while the console was down, retrying through the grace
+  // window while the pane renders; true once recovery is done and queued work may go out.
+  private async reconcile(agentId: string, scope: string): Promise<boolean> {
+    const result = await this.recoverAnswer(agentId, scope);
+    // wait briefly for terminal rendering or storage recovery
+    if (result === 'pending') {
+      const startedAt = this.reconciliationPendingSince.get(scope) ?? Date.now();
+      this.reconciliationPendingSince.set(scope, startedAt);
+      // retain queued work during the recovery window
+      if (Date.now() - startedAt < answerCaptureGraceMs) return false;
+    }
+    this.reconciliationPendingSince.delete(scope);
+    this.reconciled.add(scope);
+    this.observedWorking.delete(scope);
+    return true;
+  }
+
+  // record the answer the Transport reads back for the latest matching unanswered entry
+  private async recoverAnswer(agentId: string, scope: string): Promise<'pending' | 'settled' | 'recorded'> {
+    // require prompt history
+    if (this.history === undefined || typeof this.history.list !== 'function') return 'settled';
+    let entries: Awaited<ReturnType<PromptHistoryService['list']>>;
+    // contain history read failures
+    try { entries = await this.history.list(scope); }
+    catch { entries = undefined; }
+    // retry failed history reads
+    if (entries === undefined) return 'pending';
+    // stop when no response needs recovery
+    if (!entries.some(candidate => candidate.answer === undefined)) return 'settled';
+    const recovered = await this.transport.recoverAnswer(agentId, entries, this.observedWorking.has(scope));
+    if (typeof recovered === 'string') return recovered;
+    const recorded = await this.history.recordAnswer(scope, recovered.entryId, recovered.text).catch(() => undefined);
+    return recorded === undefined ? 'pending' : 'recorded';
+  }
+
+  // a new Conversation started on the Agent: its earlier answers need no recovery
+  private resetDelivered(scope: string): void {
+    this.reconciled.add(scope);
+    this.observedWorking.delete(scope);
+    this.reconciliationPendingSince.delete(scope);
   }
 
   // split departed-owner recovery from each live agent's observation
@@ -495,8 +549,7 @@ export class PromptService {
         continue;
       }
       await this.history?.clearScope(scope);
-      await this.queued.resets.clear(scope);
-      this.forget(scope);
+      await this.forget(scope);
     }
   }
 
@@ -515,15 +568,15 @@ export class PromptService {
       else this.trackedRequests.set(requestId, { ...request, agentId: toAgentId });
     }
     await this.history?.moveScope(from, to);
-    await this.queued?.resets.clear(from);
-    this.forget(from);
+    await this.forget(from);
   }
 
-  private forget(scope: string): void {
+  private async forget(scope: string): Promise<void> {
     this.departedSince.delete(scope);
     this.settleTrackedRequest(this.phases.get(scope)?.requestId, 'interrupted', 'agent_departed');
     this.phases.delete(scope);
-    this.transport.forget(scope);
+    for (const state of [this.reconciled, this.observedWorking, this.reconciliationPendingSince]) state.delete(scope);
+    await this.transport.forget(scope);
   }
 
   // drain a halted queue's prompts into Notes, in order, one Note per prompt
@@ -553,7 +606,7 @@ export class PromptService {
   // scheduled runs may supply a reset instant; interactive resets retain their own
   private async dispatch(agentId: string, scope: string, resetAt?: number): Promise<void> {
     // reject overlapping or held dispatches
-    if (this.dispatching.has(scope) || this.phases.has(scope) || this.restartLocks.has(scope) || this.transport.reset(scope)?.state === 'pending') return;
+    if (this.dispatching.has(scope) || this.phases.has(scope) || this.restartLocks.has(scope) || this.transport.held(agentId)) return;
     this.dispatching.add(scope);
     try {
       const prompt = await this.queued?.next(scope);
@@ -575,10 +628,15 @@ export class PromptService {
   private async send(agentId: string, prompt: string, attachments: PromptAttachment[], options: DeliveryOptions): Promise<boolean> {
     const scope = promptScope(agentId);
     const requestId = options.queuedPromptId;
+    const calendar = this.calendar;
+    // the Calendar records the exact send intent before the submit keys
+    const intent = requestId === undefined || calendar === undefined ? {} : { intent: (send: SendIntent) => calendar.beforeSend({ id: requestId, agentId, submittedAt: send.sentAt, ...send }) };
     // hold the scope so a quick second submit queues behind this one while its draft renders
-    const delivery = await this.transport.deliver(agentId, prompt, attachments, options, historyPrompt => {
+    const delivery = await this.transport.deliver(agentId, prompt, attachments, { ...options, ...intent }, historyPrompt => {
       this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), historyPrompt });
     });
+    // a rejected target cannot leave an admitted interval eligible for later delivery
+    if (delivery.status === 'held' && delivery.intended === true && requestId !== undefined) await calendar?.invalid(requestId, 'missing_lifecycle_evidence').catch(() => undefined);
     // halt only when a durable prompt is still waiting
     if (delivery.status === 'held') await this.holdFailedSubmission(scope, delivery.failedDraft);
     if (delivery.status !== 'submitted') return false;
@@ -587,10 +645,9 @@ export class PromptService {
       this.settleTrackedRequest(requestId, 'complete');
       // release the provisional render phase instead of waiting for a nonexistent answer
       this.phases.delete(scope);
-      if (delivery.reset !== undefined) await this.transport.rememberReset(scope, delivery.reset, 'pending');
+      if (delivery.reset === true) this.resetDelivered(scope);
       return true;
     }
-    await this.transport.consumeReset(scope, delivery.anchoredReset);
     // track real prompts and their answers rather than reset commands
     const entry = await this.history?.record(scope, delivery.prompt).catch(() => undefined);
     // monitor managed prompt completion

@@ -6,20 +6,19 @@ import type { TmuxAdapter } from '../tmux/adapter.js';
 import { codexCollapsedPasteLabel, failedTurnFromCapture, lastPromptFromHistory, latestCompletedAssistantTurn, queueReadyPrompt } from '../adapters/codex-turns.js';
 import { adapterFor } from '../adapters/registry.js';
 import { codexFamily, type Adapter, type AgentKind, type CompletionBaseline, type CompletionEvent, type PaneSnapshot, type Submission, type SubmissionDraftState, type SubmissionMode, type TmuxKey } from '../adapters/types.js';
-import type { PromptCalendarLifecycle } from '../google-calendar/lifecycle.js';
 import type { Agent } from '../domain/models.js';
 import { run } from '../tmux/command.js';
-import type { PromptHistoryService } from '../prompt-history/service.js';
+import type { PromptHistoryEntry } from '../prompt-history/service.js';
 import { agentAttentionState } from '../notifications.js';
-import { promptScope, type QueuedPromptService } from '../prompts/queue.js';
-import type { ResetBoundary } from '../prompts/reset-boundaries.js';
+import { promptScope } from '../prompts/queue.js';
+import type { ResetBoundary, ResetBoundaryStore } from '../prompts/reset-boundaries.js';
 import { maxPromptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, type PromptAttachment } from '../prompts/validation.js';
 import { expandCommand } from '../launch/service.js';
 import type { AgentWaiter } from '../launch/wait.js';
 import { configuredWorktreeForWorkspace } from '../workspaces/resolver.js';
 import { updateAdvisorLabel, updateAdvisorPendingLabel } from '../update-advisor.js';
 import { isFullGitSha } from '../git/revision.js';
-import type { AgentTransport, ConversationTarget, InterruptOutcome, QuestionAnswer, RenameOutcome, SwitchOutcome, TurnEvent } from './transport.js';
+import type { AgentTransport, ConversationTarget, Gate, InterruptOutcome, QuestionAnswer, RenameOutcome, SwitchOutcome, TurnEvent } from './transport.js';
 
 export const answerCaptureGraceMs = 10_000;
 // preserve prompts through reset startup but do not strand them behind a dead pane
@@ -42,7 +41,6 @@ const updateAdvisorPollMs = 100;
 const normalizedPrompt = (value: string) => value.replace(/\s+/gu, ' ').trim();
 // normalize one styled terminal snapshot
 const normalizedTerminalText = (value: string) => normalizedPrompt(value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, ''));
-type PromptReconciliation = 'pending' | 'settled' | 'recorded';
 // the console never composes submission through an unknown kind
 export type AdapterView = Pick<Adapter, 'stateSource' | 'submission' | 'turns' | 'questions' | 'completion' | 'managedPromptLifecycleV1' | 'newConversation' | 'conversations'>;
 // an Adapter that announces its own Attention state (rather than the console
@@ -59,14 +57,23 @@ export type TurnMark = { baselineCompletion?: string; rolloutBaseline?: Completi
 export type TurnWatch = TurnMark & { state?: 'awaiting-start' | 'working' | 'awaiting-answer' | 'halted'; historyPrompt?: string };
 export type TmuxTurnEvent = Exclude<TurnEvent, { type: 'started' }> | { type: 'started'; mark: TurnMark };
 // how one delivery ended: refused before anything reached the pane, held with the queue (keeping
-// a draft to clear), or submitted; an `instant` prompt completes without a Turn. A submitted reset
-// command carries the boundary to remember, and a real prompt the id of the reset it anchored on.
-export type Delivery = { status: 'refused' } | { status: 'held'; failedDraft?: FailedDraft } | { status: 'submitted'; instant: boolean; prompt: string; rolloutBaseline?: CompletionBaseline; reset?: Omit<ResetBoundary, 'id'>; anchoredReset?: string };
-export type DeliveryOptions = { discovered?: TmuxTarget; submission?: 'queue' | 'enter' | 'confirmed-enter'; durable?: boolean; resetAt?: number; queuedPromptId?: string };
+// a draft to clear; `intended` once the send intent was recorded), or submitted. An `instant`
+// prompt completes without a Turn; `reset` is a new-conversation command whose boundary now
+// holds the queue until the pane settles.
+export type Delivery = { status: 'refused' } | { status: 'held'; failedDraft?: FailedDraft; intended?: true } | { status: 'submitted'; instant: boolean; prompt: string; rolloutBaseline?: CompletionBaseline; reset?: true };
+// the pane facts a send intent is recorded with, just before the submit keys
+export type SendIntent = { kind: AgentKind; prompt: string; baseline?: CompletionBaseline; socketFingerprint: string; socketPath: string; paneId: string; processId?: number; sentAt: string };
+// `intent` records the send once the draft is proven and before any key; an `arm` it returns is
+// sent in the same tmux batch as the keys
+export type DeliveryOptions = { discovered?: TmuxTarget; submission?: 'queue' | 'enter' | 'confirmed-enter'; durable?: boolean; resetAt?: number; queuedPromptId?: string; intent?: (send: SendIntent) => Promise<{ arm?: string }> };
+// what restart recovery reads back from the pane: nothing yet, nothing to recover, or one entry's answer
+export type RecoveredAnswer = 'pending' | 'settled' | { entryId: string; text: string };
 // pair the shared staging directory with its agent-visible host namespace
 export type AttachmentStagingWorkspace = { workspace: string; hostWorkspace: string | undefined };
-// the console's per-Agent input reservation, owned by the queue policy and taken by every delivery
-export type AgentLocks = { begin(agentId: string): (() => void) | undefined; version(agentId: string): number; busy(agentId: string): boolean };
+// what the queue policy lends the Transport: its per-Agent input reservation, taken by every
+// delivery, and word that a reset boundary was restored after a console restart, with the reset
+// command it had already delivered (which leaves the queue)
+export type PolicyHooks = { begin(agentId: string): (() => void) | undefined; version(agentId: string): number; busy(agentId: string): boolean; restored(scope: string, deliveredPromptId?: string): Promise<void> };
 // keep reset readiness and its first-turn boundary separate from model completion
 type ConversationReset = ResetBoundary & { observed: PaneSnapshot[]; state: 'pending' | 'ready' | 'expired' };
 // share the adapter's reset and readiness snapshot shape
@@ -94,13 +101,11 @@ export class TmuxTransport implements AgentTransport {
   private readonly conversationResets = new Map<string, ConversationReset>();
   // hydrate each scope once before input or observation can race its durable boundary
   private readonly restoredResets = new Map<string, Promise<void>>();
-  private readonly reconciled = new Set<string>();
-  // track work observed after service startup
-  private readonly observedWorking = new Set<string>();
-  private readonly reconciliationPendingSince = new Map<string, number>();
   private readonly openedQueuedQuestions = new Set<string>();
 
-  constructor(private readonly discovery: DiscoveryService, private readonly tmux: TmuxAdapter, private readonly locks: AgentLocks, private readonly history?: PromptHistoryService, private readonly queued?: QueuedPromptService, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, private readonly teardownFor: (kind: AgentKind) => string | undefined = () => undefined, private readonly attachmentStaging?: AttachmentStagingWorkspace, private readonly calendar?: PromptCalendarLifecycle, private readonly restart?: (agentId: string, to: ConversationTarget) => Promise<SwitchOutcome>) {}
+  // reset boundaries survive a console restart in `resets`; without it there is no durable
+  // queue, so nothing is held behind a reset and delivery is best-effort
+  constructor(private readonly discovery: DiscoveryService, private readonly tmux: TmuxAdapter, private readonly locks: PolicyHooks, private readonly resets?: ResetBoundaryStore, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, private readonly teardownFor: (kind: AgentKind) => string | undefined = () => undefined, private readonly attachmentStaging?: AttachmentStagingWorkspace, private readonly restart?: (agentId: string, to: ConversationTarget) => Promise<SwitchOutcome>) {}
 
   // A pane's CLI cannot switch Conversation in place: the switch closes it and launches the kind
   // resuming the Conversation, under the queue's restart reservation and hand-over (in `app.ts`)
@@ -189,36 +194,32 @@ export class TmuxTransport implements AgentTransport {
     return await this.tmux.label(target.socket, target.agent.pane.paneId, updateAdvisorLabel(targetSha));
   }
 
-  // the reset boundary holding this scope's queue: the Agent that owns it and how far it settled
-  reset(scope: string): Readonly<Pick<ConversationReset, 'agentId' | 'state'>> | undefined {
-    return this.conversationResets.get(scope);
-  }
-
-  // retry readiness for new input without forgetting the original conversation boundary
-  retryExpiredReset(scope: string, agentId: string): void {
+  // Whether the Agent's reset boundary holds its queue, restoring a durable one first. `retry`
+  // makes an expired boundary pending again for new input (answering as it stood before), and
+  // `settle` checks whether a pending one settled into a ready pane (`anchored`) or expired.
+  async gate(agentId: string, step?: 'retry' | 'settle'): Promise<Gate> {
+    const scope = promptScope(agentId);
+    await this.restoreReset(scope, agentId);
     const reset = this.conversationResets.get(scope);
-    if (reset?.agentId === agentId && reset.state === 'expired') reset.state = 'pending';
+    if (reset === undefined) return 'none';
+    if (reset.agentId !== agentId) return 'foreign';
+    if (step === 'settle') {
+      const settled = await this.settleReset(agentId, scope);
+      return settled === 'ready' ? 'anchored' : settled;
+    }
+    const gate = reset.state === 'pending' ? 'pending' : 'anchored';
+    if (step === 'retry' && reset.state === 'expired') reset.state = 'pending';
+    return gate;
   }
 
-  // whether answer recovery after a console restart is done for this scope
-  isReconciled(scope: string): boolean {
-    return this.reconciled.has(scope);
+  // whether a pending reset holds the Agent's queue, as last restored or read by `gate`
+  held(agentId: string): boolean {
+    return this.conversationResets.get(promptScope(agentId))?.state === 'pending';
   }
 
-  // whether this scope has been seen working since the console started
-  sawWorking(scope: string): boolean {
-    return this.observedWorking.has(scope);
-  }
-
-  // note work seen on the pane: restart recovery restarts once it finishes
-  working(scope: string): void {
-    this.observedWorking.add(scope);
-    this.reconciled.delete(scope);
-    this.reconciliationPendingSince.delete(scope);
-  }
-
-  forget(scope: string): void {
-    for (const state of [this.conversationResets, this.restoredResets, this.reconciled, this.observedWorking, this.reconciliationPendingSince]) state.delete(scope);
+  async forget(scope: string): Promise<void> {
+    await this.resets?.clear(scope);
+    for (const state of [this.conversationResets, this.restoredResets]) state.delete(scope);
   }
 
   // The Turn feed, polled: while the Agent works the Turn has `started` (with the marks its
@@ -239,15 +240,18 @@ export class TmuxTransport implements AgentTransport {
   }
 
   // An externally reset pane (a `/clear` typed by hand) spins without a Turn: once the actual pane
-  // is ready with an empty composer, not merely its cached title, its snapshot is the boundary.
-  async externalReset(agentId: string, adapter: AdapterView | undefined): Promise<PaneSnapshot | undefined> {
+  // is ready with an empty composer, not merely its cached title, its snapshot becomes the boundary
+  // the next prompt anchors on, while the work it ended is still `current`. True once remembered.
+  async externalReset(agentId: string, current: () => boolean): Promise<boolean> {
     const target = await this.discovery.target(agentId, true);
-    const capability = adapter?.newConversation;
+    const capability = target === undefined ? undefined : this.resolveAdapter(target.agent.kind)?.newConversation;
     const capture = target === undefined ? undefined : await this.tmux.capture(target.socket, target.agent.pane.paneId).catch(() => undefined);
     if (target === undefined || capability === undefined || capture === undefined
       || agentAttentionState(target.agent) !== 'finished' || capability.ready(paneSnapshot(target.agent), capture).state !== 'ready'
-      || !capability.composerEmpty(capture)) return undefined;
-    return paneSnapshot(target.agent);
+      || !capability.composerEmpty(capture) || !current()) return false;
+    // the reset time is unknown; follow the pane's first rollout replacement instead
+    await this.rememberReset(promptScope(agentId), { agentId, at: Date.now(), before: paneSnapshot(target.agent), external: true }, 'ready');
+    return true;
   }
 
   // send one prompt to a stable pane. `resetAt`, when set, anchors the completion
@@ -285,7 +289,7 @@ export class TmuxTransport implements AgentTransport {
     const composed = adapter.submission.prepare(attachmentPrompt, mode);
     const observeDraft = adapter.submission.observeDraft;
     // adapters without draft observation retain best-effort tmux delivery
-    const settle = durable && submission === 'queue' && observeDraft !== undefined && typeof this.tmux.capture === 'function' && this.queued !== undefined;
+    const settle = durable && submission === 'queue' && observeDraft !== undefined && typeof this.tmux.capture === 'function' && this.resets !== undefined;
     // retain cleanup coordinates through every post-paste failure
     const failedDraft = settle ? { agentId, target: first, prompt: composed.text, submission: adapter.submission } : undefined;
     const buffer = `rac-${randomBytes(18).toString('base64url')}`;
@@ -333,29 +337,22 @@ export class TmuxTransport implements AgentTransport {
     const previousReset = this.conversationResets.get(scope);
     const matchingReset = previousReset?.agentId === agentId ? previousReset : undefined;
     const baselineResetAt = resetAt ?? (matchingReset?.external ? undefined : matchingReset?.at);
-    const rolloutBaseline = this.queued === undefined && queuedPromptId === undefined || instant ? undefined : await this.captureRolloutBaseline(agentId, adapter, baselineResetAt, matchingReset?.external);
-    // retain Calendar's pre-intent instant separately from transport and reset deadlines
-    const calendarSentAt = new Date().toISOString();
-    // persist exact pre-key intent before the tracked submit path proceeds
-    const calendarIntent: { arm?: string } | undefined = queuedPromptId === undefined || this.calendar === undefined ? undefined : await this.calendar.beforeSend({
-      id: queuedPromptId,
-      agentId,
+    const rolloutBaseline = this.resets === undefined && queuedPromptId === undefined || instant ? undefined : await this.captureRolloutBaseline(agentId, adapter, baselineResetAt, matchingReset?.external);
+    // the send intent's instant, separate from transport and reset deadlines
+    const sentAt = new Date().toISOString();
+    // the exact pre-key intent, recorded before the tracked submit path proceeds
+    const calendarIntent: { arm?: string } | undefined = options.intent === undefined ? undefined : await options.intent({
       kind: first.agent.kind,
-      submittedAt: calendarSentAt,
       prompt: attachmentPrompt,
       ...(rolloutBaseline === undefined ? {} : { baseline: rolloutBaseline }),
       socketFingerprint: second.socket.fingerprint,
       socketPath: second.socket.path,
       paneId: second.agent.pane.paneId,
       ...(first.processId === undefined ? {} : { processId: first.processId }),
-      sentAt: calendarSentAt
+      sentAt
     }).catch(() => ({}));
-    // invalidate only this intent and retain durable ownership when the final proof fails
-    const abortBeforeKeys = async (): Promise<Delivery> => {
-      // a rejected target cannot leave an admitted interval eligible for later delivery
-      if (queuedPromptId !== undefined) await this.calendar?.invalid(queuedPromptId, 'missing_lifecycle_evidence').catch(() => undefined);
-      return { status: 'held', failedDraft };
-    };
+    // retain durable ownership when the final proof fails; a recorded intent no longer holds
+    const abortBeforeKeys = (): Delivery => ({ status: 'held', failedDraft, ...(calendarIntent === undefined ? {} : { intended: true as const }) });
     // refresh after every settle/baseline delay so key selection reflects send-time state
     let submitTarget = await this.submissionTarget(agentId, second).catch(() => undefined);
     // never submit through a replacement pane or native question
@@ -397,33 +394,29 @@ export class TmuxTransport implements AgentTransport {
     if (submitted && submission === 'confirmed-enter') submitted = await this.waitForUpdateAdvisorStart(agentId, submitTarget, attachmentPrompt);
     // clear stale prose questions after delivery
     if (submitted) this.discovery.invalidateMessageQuestion?.(agentId);
-    if (!submitted) {
-      if (queuedPromptId !== undefined) await this.calendar?.invalid(queuedPromptId, 'missing_lifecycle_evidence').catch(() => undefined);
-      // halt only when a durable prompt is still waiting
-      return { status: 'held', failedDraft };
-    }
-    return {
-      status: 'submitted', instant, prompt: attachmentPrompt, ...(rolloutBaseline === undefined ? {} : { rolloutBaseline }),
-      // hold follow-ups through startup and anchor their completion on the new thread
-      ...(reset && this.queued !== undefined ? { reset: { agentId, at: submittedAt, before: resetBefore, ...(queuedPromptId === undefined ? {} : { resetPromptId: queuedPromptId }) } } : {}),
-      ...(!instant && matchingReset !== undefined ? { anchoredReset: matchingReset.id } : {})
-    };
+    // halt only when a durable prompt is still waiting
+    if (!submitted) return abortBeforeKeys();
+    // hold follow-ups through startup and anchor their completion on the new thread
+    const remembered = reset && this.resets !== undefined;
+    if (remembered) await this.rememberReset(scope, { agentId, at: submittedAt, before: resetBefore, ...(queuedPromptId === undefined ? {} : { resetPromptId: queuedPromptId }) }, 'pending');
+    // a real prompt consumes the boundary it anchored on
+    if (!instant) await this.consumeReset(scope, matchingReset?.id);
+    return { status: 'submitted', instant, prompt: attachmentPrompt, ...(rolloutBaseline === undefined ? {} : { rolloutBaseline }), ...(remembered ? { reset: true as const } : {}) };
   }
 
   // recover a reset even when its command was consumed before the server restarted
-  async restoreReset(scope: string, agentId: string): Promise<void> {
+  private async restoreReset(scope: string, agentId: string): Promise<void> {
     // deployments without durable queues have no boundary to restore
-    if (this.queued === undefined) return;
+    if (this.resets === undefined) return;
     let restoration = this.restoredResets.get(scope);
     // share one in-flight read so an observer cannot reinstall a consumed boundary
     if (restoration === undefined) {
-      restoration = this.queued.resets.get(scope).then(async boundary => {
+      restoration = this.resets.get(scope).then(async boundary => {
         // missing boundaries leave normal completion recovery unchanged
         if (boundary === undefined) return;
         // close the crash window between durable reset acknowledgement and queue removal
-        if (boundary.resetPromptId !== undefined) await this.queued!.remove(scope, boundary.resetPromptId);
+        await this.locks.restored(scope, boundary.resetPromptId);
         this.conversationResets.set(scope, { ...boundary, observed: [], state: 'pending' });
-        this.reconciled.add(scope);
       }).catch(error => {
         this.restoredResets.delete(scope);
         throw error;
@@ -434,36 +427,33 @@ export class TmuxTransport implements AgentTransport {
     const reset = this.conversationResets.get(scope);
     // distinguish a live sibling from a genuinely removed reset owner
     if (reset !== undefined && reset.agentId !== agentId && await this.discovery.target(reset.agentId, true) === undefined) {
-      await this.queued.resets.clear(scope, reset.id);
+      await this.resets.clear(scope, reset.id);
       // preserve any replacement recorded during the fresh discovery read
       if (this.conversationResets.get(scope) === reset) this.conversationResets.delete(scope);
     }
   }
 
   // consume the durable boundary once a real post-reset prompt is accepted
-  async consumeReset(scope: string, resetId: string | undefined): Promise<void> {
-    if (resetId !== undefined) await this.queued?.resets.clear(scope, resetId);
+  private async consumeReset(scope: string, resetId: string | undefined): Promise<void> {
+    if (resetId !== undefined) await this.resets?.clear(scope, resetId);
     this.conversationResets.delete(scope);
   }
 
   // persist before the reset command leaves the queue, including an empty follow-up queue
-  async rememberReset(scope: string, boundary: Omit<ResetBoundary, 'id'>, state: 'pending' | 'ready'): Promise<void> {
+  private async rememberReset(scope: string, boundary: Omit<ResetBoundary, 'id'>, state: 'pending' | 'ready'): Promise<void> {
     const durable = { ...boundary, id: randomBytes(18).toString('base64url') };
-    await this.queued?.resets.set(scope, durable);
+    await this.resets?.set(scope, durable);
     this.conversationResets.set(scope, { ...durable, observed: [], state });
-    this.reconciled.add(scope);
-    this.observedWorking.delete(scope);
-    this.reconciliationPendingSince.delete(scope);
   }
 
   // retain queued work until the reset settles into a genuinely ready empty composer;
   // `expired` is a reset lost or blocked past its grace, whose queue the caller holds
-  async settleReset(agentId: string, scope: string, adapter: AdapterView | undefined): Promise<'ready' | 'pending' | 'expired'> {
+  private async settleReset(agentId: string, scope: string): Promise<'ready' | 'pending' | 'expired'> {
     const reset = this.conversationResets.get(scope);
     // normal turns and already settled resets need no additional terminal reads
     if (reset === undefined || reset.state !== 'pending') return 'ready';
-    const capability = adapter?.newConversation;
     const target = reset.agentId === agentId ? await this.discovery.target(agentId, true) : undefined;
+    const capability = target === undefined ? undefined : this.resolveAdapter(target.agent.kind)?.newConversation;
     let lost = false;
     // never release a reset into a different pane or unsupported adapter
     if (target !== undefined && capability !== undefined) {
@@ -717,19 +707,10 @@ export class TmuxTransport implements AgentTransport {
     return false;
   }
 
-  // restore the latest matching unanswered entry
-  private async reconcileLatestAnswer(agentId: string, scope: string): Promise<PromptReconciliation> {
-    // require prompt history
-    if (this.history === undefined || typeof this.history.list !== 'function') return 'settled';
-    let entries: Awaited<ReturnType<PromptHistoryService['list']>>;
-    // contain history read failures
-    try { entries = await this.history.list(scope); }
-    catch { entries = undefined; }
-    // retry failed history reads
-    if (entries === undefined) return 'pending';
-    const unanswered = entries.filter(candidate => candidate.answer === undefined);
-    // stop when no response needs recovery
-    if (unanswered.length === 0) return 'settled';
+  // What restart recovery reads back from the pane: the latest completed Turn on screen, matched
+  // to an unanswered entry by its prompt; with the prompt scrolled away, only to the newest entry,
+  // and only for work the console `sawWorking` since it started.
+  async recoverAnswer(agentId: string, entries: readonly PromptHistoryEntry[], sawWorking: boolean): Promise<RecoveredAnswer> {
     const target = await this.discovery.target(agentId);
     // require a stable pane
     if (target === undefined) return 'pending';
@@ -740,35 +721,16 @@ export class TmuxTransport implements AgentTransport {
     // require a completed turn
     if (turn === undefined) return 'pending';
     const newest = entries[0];
-    let entry: (typeof entries)[number] | undefined;
+    let entry: PromptHistoryEntry | undefined;
     // recover only observed work when its prompt text scrolled away
     if (turn.prompt === undefined) {
-      entry = this.observedWorking.has(scope) && newest?.answer === undefined && !entries.some(candidate => candidate.answer === turn.text) ? newest : undefined;
+      entry = sawWorking && newest?.answer === undefined && !entries.some(candidate => candidate.answer === turn.text) ? newest : undefined;
     } else {
       const capturedPrompt = turn.prompt;
-      entry = unanswered.find(candidate => normalizedPrompt(candidate.text) === normalizedPrompt(capturedPrompt));
+      entry = entries.find(candidate => candidate.answer === undefined && normalizedPrompt(candidate.text) === normalizedPrompt(capturedPrompt));
     }
     // require an unanswered match
-    if (entry === undefined) return 'settled';
-    const recorded = await this.history.recordAnswer(scope, entry.id, turn.text).catch(() => undefined);
-    return recorded === undefined ? 'pending' : 'recorded';
-  }
-
-  // Recover answers the pane finished while the console was down, retrying through the shared
-  // render grace window; true once recovery is done and queued work may go out.
-  async reconcile(agentId: string, scope: string): Promise<boolean> {
-    const result = await this.reconcileLatestAnswer(agentId, scope);
-    // wait briefly for terminal rendering or storage recovery
-    if (result === 'pending') {
-      const startedAt = this.reconciliationPendingSince.get(scope) ?? Date.now();
-      this.reconciliationPendingSince.set(scope, startedAt);
-      // retain queued work during the recovery window
-      if (Date.now() - startedAt < answerCaptureGraceMs) return false;
-    }
-    this.reconciliationPendingSince.delete(scope);
-    this.reconciled.add(scope);
-    this.observedWorking.delete(scope);
-    return true;
+    return entry === undefined ? 'settled' : { entryId: entry.id, text: turn.text };
   }
 
   // the settled Turn's answer, read past its marks

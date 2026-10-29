@@ -15,7 +15,14 @@ export const agentPanel = (transport: Transport): AgentPanel => transport === 't
 export type TurnEvent = { type: 'started' } | { type: 'settled'; message: string } | { type: 'failed' } | { type: 'aborted' };
 /** An answer to an Inline question: a choice's index, text, or dismissing the question. */
 export type QuestionAnswer = number | string | { dismiss: true };
-export type InterruptOutcome = 'ok' | 'unavailable' | 'not-working';
+/**
+ * Whether a Transport holds an Agent's queue before the next delivery: `none` holds nothing,
+ * `pending` holds it while a new Conversation starts, `expired` gave up on that start (the queue
+ * halts), `anchored` no longer holds it (the next prompt reads its answer past the new
+ * Conversation's start), and `foreign` is another Agent's hold on the same queue.
+ */
+export type Gate = 'none' | 'anchored' | 'pending' | 'expired' | 'foreign';
+export type InterruptOutcome ='ok' | 'unavailable' | 'not-working';
 /** `unsent` reached nothing; `stuck` may have left the name unsubmitted in the composer. */
 export type RenameOutcome = 'sent' | 'unavailable' | 'busy' | 'unsent' | 'stuck';
 /**
