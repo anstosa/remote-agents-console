@@ -18,6 +18,7 @@ import type { SocketRef } from '../src/domain/models.js';
 import { testConfig } from './helpers/config.js';
 import { socketFinder } from './helpers/discovery-stubs.js';
 import { stubModels, stubProvider, type StubReply } from './helpers/stub-provider.js';
+import { stubMcp } from './helpers/stub-mcp.js';
 
 // The Transport contract suite (ADR 0017's gate on pin bumps): each protocol client drives its
 // pinned CLI under the real holder in a tmux window, against a stub OpenAI-compatible provider,
@@ -86,13 +87,13 @@ function collector(describe: () => Promise<string | undefined>): { events: Struc
 // makes first), environment the CLI and its holder get beyond the stub's (the operator's
 // `adapters.<kind>.env`), the policy's extra names, and whether the place is a repository's main
 // checkout or a linked Worktree of one.
-type LaunchOptions = { sandboxed?: boolean; replies?: StubReply[]; toolCall?: { name: string; arguments: object }; env?: Record<string, string>; sandboxEnv?: string[]; git?: 'main' | 'linked' };
+type LaunchOptions = { sandboxed?: boolean; replies?: StubReply[]; toolCall?: { name: string; arguments: object }; env?: Record<string, string>; sandboxEnv?: string[]; git?: 'main' | 'linked'; role?: 'conductor' };
 const nonce = 'contract-nonce-0123456789abcdef';
 
 // launch `client`'s CLI under the holder in a Workspace session, its events collected in order;
 // the place is `<root>/place` (a repository, or a linked Worktree of `<root>/repo`, when asked),
 // the console's private directory `<root>/private`
-async function launched(client: ContractClient, { sandboxed = false, replies, toolCall, env = {}, sandboxEnv = [], git: checkout }: LaunchOptions = {}) {
+async function launched(client: ContractClient, { sandboxed = false, replies, toolCall, env = {}, sandboxEnv = [], git: checkout, role }: LaunchOptions = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-contract-')));
   const socketPath = join(root, 'tmux');
   const state = join(root, 'state');
@@ -119,12 +120,12 @@ async function launched(client: ContractClient, { sandboxed = false, replies, to
   const processes = holderProcesses(launch, { [client.adapter.kind]: configured }, kind => launch.adapterFiles(kind));
   let started: StructuredProcess | undefined;
   const { events, emit, next } = collector(async () => started === undefined ? undefined : await processes.stderr(started.holder));
-  started = await processes.start({ id: 'contract', kind: client.adapter.kind, place, sandboxed, nonce }, emit);
+  started = await processes.start({ id: 'contract', kind: client.adapter.kind, place, sandboxed, nonce, ...(role === undefined ? {} : { role }) }, emit);
   expect(started).toBeDefined();
   cleanups.push(async () => { started!.connection.close(); await processes.stop(started!.holder, { kind: client.adapter.kind, home }); });
   // what the CLI told the provider a tool call returned, for the `n`th completion's request (from 0)
   const toolResult = (n: number): string => JSON.stringify((JSON.parse(provider.bodies[n] ?? '{}') as { messages?: Array<{ role: string; content: unknown }> }).messages?.filter(message => message.role === 'tool').at(-1)?.content ?? '');
-  return { connection: started!.connection, events, next, toolResult, root, home, started: started!, processes, socketPath };
+  return { connection: started!.connection, events, next, toolResult, bodies: provider.bodies, root, home, started: started!, processes, socketPath };
 }
 
 // reconnect to a launched process as a console that restarted would, from the lines read through its last idle point
@@ -500,4 +501,56 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(await closed.processes.stderr(closed.started.holder)).toBeUndefined();
     expect(await closed.next('exited')).toEqual({ type: 'exited' });
   }, 90_000);
+
+  // the Conductor (ADR 0018): the console's MCP server reaches its process in-band, and its scripts call it
+  const conductor = async (code: string, options: LaunchOptions = {}) => {
+    const mcp = await stubMcp();
+    cleanups.push(mcp.close);
+    const agent = await launched(client, { role: 'conductor', replies: [{ tool: 'codemode', args: { code } }, 'done'], ...options });
+    await agent.next('report');
+    expect(await agent.connection.consoleAccess!({ url: mcp.url, token: 'rac-conductor.contract-token' })).toBe(true);
+    return { ...agent, mcp };
+  };
+  // what a script printed, from the Script line's output
+  const scriptOutput = (agent: Awaited<ReturnType<typeof launched>>): string => {
+    const script = agent.events.flatMap(event => event.type === 'transcript' && event.item.kind === 'tool' && event.item.name === 'Script' ? [event.item] : []).at(-1);
+    return script?.output ?? '';
+  };
+
+  it('gives the Conductor the console\'s MCP server in-band, which its scripts call without `models`', async () => {
+    const agent = await conductor('const listed = await tools.mcp__rac__list_agents({}); return JSON.stringify({ models: typeof models, agents: listed.structuredContent.data.length });');
+    await turn(agent);
+    expect(agent.mcp.requests).toContainEqual({ method: 'tools/call', name: 'list_agents', authorization: 'Bearer rac-conductor.contract-token' });
+    expect(scriptOutput(agent)).toContain('{"models":"undefined","agents":1}');
+    // the script's call is its child line
+    expect(agent.events).toContainEqual({ type: 'transcript', item: expect.objectContaining({ name: 'mcp__rac__list_agents', parentId: 'call_1', state: 'done' }) });
+    // the token went to the console's server only, never to the model
+    expect(agent.bodies.some(body => body.includes('contract-token'))).toBe(false);
+  }, 60_000);
+
+  it('ends a Conductor script that spins when its Turn is cancelled', async () => {
+    const agent = await conductor('while (true) await tools.mcp__rac__list_agents({});');
+    expect(await agent.connection.deliver('Use the console')).toBe('started');
+    await agent.next('transcript', event => event.type === 'transcript' && event.item.kind === 'tool' && event.item.parentId === 'call_1');
+    expect(await agent.connection.cancel()).toEqual([]);
+    expect(await agent.next('turn', event => event.type === 'turn' && event.turn.type !== 'started')).toEqual({ type: 'turn', turn: { type: 'aborted' } });
+    expect(scriptOutput(agent)).toContain('Script aborted');
+  }, 60_000);
+
+  it('refuses a Sandboxed Conductor script\'s out-of-policy commands and file writes', async () => {
+    const agent = await conductor([
+      'const results = await Promise.allSettled([',
+      '  tools.bash({ command: "touch ../outside-bash.txt" }),',
+      '  tools.write({ path: "../outside-write.txt", content: "x" }),',
+      '  tools.read({ path: "/proc/self/environ" }),',
+      '  tools.write({ path: "inside-write.txt", content: "x" })',
+      ']);',
+      'return JSON.stringify(results.map(result => result.status === "rejected" ? String(result.reason) : "ok"));'
+    ].join('\n'), { sandboxed: true });
+    await turn(agent);
+    expect(existsSync(join(agent.root, 'outside-bash.txt'))).toBe(false);
+    expect(existsSync(join(agent.root, 'outside-write.txt'))).toBe(false);
+    expect(existsSync(join(agent.home, 'inside-write.txt'))).toBe(true);
+    expect(scriptOutput(agent)).toContain('outside the paths the sandbox may write');
+  }, 60_000);
 });
