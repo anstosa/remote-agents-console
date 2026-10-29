@@ -13,6 +13,7 @@
  */
 import type { HostProcess } from '../discovery/processes.js';
 import type { CleanupTarget, Pane } from '../domain/models.js';
+import type { ProtocolClient } from '../transports/structured.js';
 
 export const agentKinds = ['codex', 'omx', 'claude', 'pi', 'opencode'] as const;   // closed union in resolution order; the registry is code, not plugins
 export type AgentKind = typeof agentKinds[number];
@@ -455,6 +456,18 @@ export interface Adapter {
   };
   /** How this kind runs a Review run; the kinds that can run one are the Adapters that have it. */
   readonly reviewRuns?: ReviewRuns;
+}
+
+/**
+ * An Adapter for a kind driven only over a structured Transport (ADR 0015, ADR 0002 amendment).
+ * It is never recognised in a pane, so it has none of the pane members: it describes the launch
+ * and names the protocol client the console drives the process with.
+ */
+export interface StructuredAdapter {
+  readonly kind: AgentKind;
+  /** The CLI arguments for a launch; the console prepends the program and runs it under a holder. */
+  launch(input: LaunchInput): LaunchSpec;
+  readonly client: ProtocolClient;
 }
 
 /**

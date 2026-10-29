@@ -19,11 +19,13 @@ describe('shell command settings metadata', () => {
 
     expect(property(application, 'editor')).toMatchObject({ editor: 'shell', singleLine: true });
     // verify every supported adapter has the same explicit command metadata
-    for (const adapter of Object.values(adapters.properties ?? {})) {
+    for (const [kind, adapter] of Object.entries(adapters.properties ?? {})) {
       expect(property(adapter, 'setup').editor).toBe('shell');
       expect(property(adapter, 'teardown').editor).toBe('shell');
       expect(property(adapter, 'setup').singleLine).toBeUndefined();
       expect(property(adapter, 'teardown').singleLine).toBeUndefined();
+      // the console pins Pi: it has no program and no update commands (ADR 0017)
+      if (kind === 'pi') { expect(adapter.properties?.program).toBeUndefined(); expect(adapter.properties?.updates).toBeUndefined(); continue; }
       const updates = property(adapter, 'updates');
       // verify the complete update-command contract
       for (const command of ['current', 'latest', 'run']) {

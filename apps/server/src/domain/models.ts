@@ -62,9 +62,13 @@ export type GitUpstreamSummary = { upstream: string; ahead: number; behind: numb
 // An Agent's tmux pane: the pane and session it runs in, on the socket of that fingerprint,
 // and the pane mode (a picker or copy mode) it is in, if any
 export type AgentPane = { paneId: string; sessionId: string; socketFingerprint: string; paneMode?: string };
+// Whether a structured Agent's process is starting, live, Exited, or failed to start (`reason`);
+// `revision` changes with everything its transcript shows
+export type AgentLifecycle = 'starting' | 'live' | 'exited' | 'failed';
+export type StructuredAgentState = { lifecycle: AgentLifecycle; reason?: string; revision: number };
 // `transport` says how the console drives the Agent and `panel` what its Panel shows (ADR 0015).
-// A tmux Agent carries its pane details in `pane`.
-export type Agent = { id: string; transport: Transport; panel: AgentPanel; pane?: AgentPane; home: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind: AgentKind; attention: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; newTaskConfigured?: boolean; push?: PromptAction; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: ShapedQuestion; reviewRun?: string };
+// A tmux Agent carries its pane details in `pane`, a structured one its process state in `structured`.
+export type Agent = { id: string; transport: Transport; panel: AgentPanel; pane?: AgentPane; structured?: StructuredAgentState; home: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind: AgentKind; attention: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; newTaskConfigured?: boolean; push?: PromptAction; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: ShapedQuestion; reviewRun?: string };
 // an Agent driven over tmux, which always has its pane part
 export type TmuxAgent = Agent & { pane: AgentPane };
 // whether an Agent is an interactive Review run's own (ADR 0010): it belongs to its run, so the

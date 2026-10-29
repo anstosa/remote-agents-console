@@ -2,21 +2,22 @@ import { expect, test, type Page } from '@playwright/test';
 import { installPaneMock, paneConnectCount, pushBytes, seedPaneSize } from './pane-stream-mock.js';
 import { expectSplitProgressBorder } from './progress-border-assertions.js';
 
-type MockAgent = { attention?: 'working' | 'finished' | 'question'; kind?: 'claude' | 'codex'; panel?: 'terminal' | 'transcript' };
-type MockOptions = { conversationName?: string; notes?: Array<{ id: string; text: string }> };
+type MockAgent = { attention?: 'working' | 'finished' | 'question'; kind?: 'claude' | 'codex' | 'pi'; panel?: 'terminal' | 'transcript'; structured?: { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number } };
+type MockOptions = { conversationName?: string; notes?: Array<{ id: string; text: string }>; transcript?: { items: unknown[]; stderr?: string } };
 
 // stub the routes a live Worktree agent (or, with no agent, its pinned Worktree) preloads
-async function mockConsole(page: Page, agent: MockAgent | undefined, { conversationName, notes = [] }: MockOptions = {}) {
+async function mockConsole(page: Page, agent: MockAgent | undefined, { conversationName, notes = [], transcript }: MockOptions = {}) {
   await page.route('**/api/**', route => {
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') {
       const worktree = { id: 'cora', projectId: 'app', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'cora', available: true, pinned: true, order: 0 };
-      const agents = agent === undefined ? [] : [{ id: 'agent-1', panel: agent.panel ?? 'terminal', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', branch: 'cora', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, kind: agent.kind ?? 'claude', ...(agent.attention === undefined ? {} : { attention: agent.attention }), queuedPromptCount: 0 }];
+      const agents = agent === undefined ? [] : [{ id: 'agent-1', panel: agent.panel ?? 'terminal', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', branch: 'cora', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, kind: agent.kind ?? 'claude', ...(agent.attention === undefined ? {} : { attention: agent.attention }), ...(agent.structured === undefined ? {} : { structured: agent.structured }), queuedPromptCount: 0 }];
       return route.fulfill({ json: { generation: 1, agents, projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] } });
     }
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (url.pathname === '/api/agents/agent-1/transcript' && transcript !== undefined) return route.fulfill({ json: transcript });
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: [] } });
@@ -126,6 +127,28 @@ test('an Agent whose Panel is a transcript opens no terminal', async ({ page }) 
   await expect(panel.locator('.agent-state-pill')).toHaveText('Idle');
   await expect(panel.locator('.log-canvas')).toHaveCount(0);
   expect(await paneConnectCount(page, 'agent-1')).toBe(0);
+});
+
+test('a transcript Agent shows its prompts, its answers and a plain line per tool call', async ({ page }) => {
+  await mockConsole(page, { kind: 'pi', attention: 'finished', panel: 'transcript', structured: { lifecycle: 'live', revision: 3 } }, { transcript: { items: [
+    { id: 'm1', kind: 'message', role: 'user', text: 'Read the readme' },
+    { id: 't1', kind: 'tool', name: 'read', summary: 'README.md', state: 'done' },
+    { id: 't2', kind: 'tool', name: 'bash', summary: 'ls nowhere', state: 'failed' },
+    { id: 'm2', kind: 'message', role: 'assistant', text: 'It describes the console.' }
+  ] } });
+  await page.goto('/');
+  const transcript = agentPanel(page).getByRole('list', { name: 'Transcript' });
+  await expect(transcript.getByRole('listitem')).toHaveText(['Read the readme', '● read(README.md)', '✕ bash(ls nowhere)', 'It describes the console.']);
+  await expect(agentPanel(page).locator('.agent-state-pill')).toHaveText('Idle');
+});
+
+test('a transcript Agent that failed to start shows why, with its stderr', async ({ page }) => {
+  await mockConsole(page, { kind: 'pi', attention: 'finished', panel: 'transcript', structured: { lifecycle: 'failed', reason: 'Its process exited before reporting in.', revision: 2 } }, { transcript: { items: [], stderr: 'Error: Cannot find module rac-extension' } });
+  await page.goto('/');
+  const failure = agentPanel(page).getByRole('alert');
+  await expect(failure).toContainText('Its process exited before reporting in.');
+  await expect(failure.locator('pre')).toHaveText('Error: Cannot find module rac-extension');
+  await expect(agentPanel(page).locator('.agent-state-pill')).toHaveText('Failed');
 });
 
 test('turning off the last agent closes the agent panel and keeps a pinned tab', async ({ page }) => {

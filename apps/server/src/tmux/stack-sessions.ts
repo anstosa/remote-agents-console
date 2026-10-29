@@ -10,3 +10,6 @@ export const probeHolderSession = `${stackSessionPrefix}probes`;
 export const processWorktreeOption = '@rac_worktree';
 export const processNameOption = '@rac_process';
 export const processPaneRole = 'process';
+// A structured Agent's process runs under a holder in its own window of its Place's Workspace
+// session (ADR 0016); the pane role keeps it from ever being a Terminal or a recognised Agent.
+export const holderPaneRole = 'holder';

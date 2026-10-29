@@ -315,11 +315,13 @@ describe('settings schema metadata', () => {
     const adapters = applicationSettingsSchema().properties!.adapters!.properties!;
 
     // apply the same presentation contract to every supported adapter
-    for (const adapter of Object.values(adapters)) {
+    for (const [kind, adapter] of Object.entries(adapters)) {
       expect(adapter.properties!.args).toMatchObject({ type: 'array', optional: true, default: [], items: { type: 'string' } });
       expect(adapter.properties!.env).toMatchObject({ type: 'record', optional: true, label: 'Environment & keys', items: { type: 'string' } });
       expect(adapter.properties!.setup).toMatchObject({ type: 'string', optional: true, editor: 'shell', default: '', placeholder: 'Disabled (when blank)' });
       expect(adapter.properties!.teardown).toMatchObject({ type: 'string', optional: true, editor: 'shell', default: '', placeholder: 'Disabled (when blank)' });
+      // the console pins Pi, which has no update commands (ADR 0017)
+      if (kind === 'pi') { expect(adapter.properties!.updates).toBeUndefined(); continue; }
       expect(adapter.properties!.updates).toMatchObject({
         type: 'object',
         optional: true,

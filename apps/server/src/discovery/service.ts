@@ -18,6 +18,7 @@ import { agentPanel } from '../transports/transport.js';
 import { withQuestionShape } from '../adapters/inline-questions.js';
 import { addUntrackedLineStats, comparisonAgainst, prComparisonCandidates, workingStatus } from '../git/comparison.js';
 import { isUpdateAdvisorLabel } from '../update-advisor.js';
+import { holderPaneRole } from '../tmux/stack-sessions.js';
 import { adhocScratchPlace, configuredPlaces, markedPlace, placeForRoot, scratchHome, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
 import { implicitProject } from '../config/schema.js';
 
@@ -179,10 +180,17 @@ export class DiscoveryService {
   // a workspace's common git dir (null = none), cached so a persistent Scratch pane does not
   // re-spawn `git rev-parse` on every poll; invalidateWorktrees() clears it
   private readonly commonDirCache = new Map<string, string | null>();
+  // the structured Agents (ADR 0015), recorded at their Places rather than found in panes
+  private structuredAgents: () => Promise<readonly Agent[]> = async () => [];
   private static readonly refreshCacheMs = 2_000;
   private static readonly gitMetadataCacheMs = 30_000;
   // accept only the PR operations used by discovery
   constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly pullRequests: PullRequestLookup = new PullRequestService(), private readonly adapters: AdapterConfigs = {}, private readonly configuredProjects: readonly Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string) {}
+  // list the structured Agents on the dashboard beside the panes' Agents, fresh on every change
+  useStructuredAgents(source: { agents(): Promise<readonly Agent[]>; onChange(listener: () => void): void }): void {
+    this.structuredAgents = () => source.agents();
+    source.onChange(() => { this.dashboardSnapshot = undefined; });
+  }
   // every Project the console knows right now; the list may change between calls, so callers
   // read it each time rather than keeping it
   projectsNow(): readonly Project[] { return this.projectList ?? this.configuredProjects; }
@@ -193,6 +201,7 @@ export class DiscoveryService {
   }
   // the Place a discovered agent belongs to: its session's; a modal update advisor is never placed
   private placeOf(agent: Agent, places: readonly Place[]): Place | undefined {
+    if (agent.pane === undefined) return agent.placeId === undefined ? undefined : markedPlace(places, agent.placeId);
     const mark = agent.pane === undefined ? undefined : this.sessionMarks.get(agent.pane.sessionId);
     return isUpdateAdvisorLabel(agent.displayLabel) || mark === undefined ? undefined : markedPlace(places, mark);
   }
@@ -356,7 +365,8 @@ export class DiscoveryService {
     const paneReported = new Map<string, AttentionState>();
     const paneQuestionPayloads = new Map<string, string>();
     const places = await this.places(this.worktreeSnapshot);
-    const discovered: Agent[] = (await Promise.all(panes.filter(pane => !paneExcluded(pane)).map(async (pane): Promise<Agent | undefined> => {
+    // a holder's pane runs a structured Agent's process, never a recognised Agent's
+    const discovered: Agent[] = (await Promise.all(panes.filter(pane => pane.role !== holderPaneRole && !paneExcluded(pane)).map(async (pane): Promise<Agent | undefined> => {
       // ordinary polling revalidates established lineages; lifecycle scans walk afresh
       const recognized = await this.processes.recognizeAgent(pane.pid, { reusePositive: !force });
       if (recognized === undefined) {
@@ -747,7 +757,7 @@ export class DiscoveryService {
 
   // enrich live agent state with independently cached worktree metadata
   private async buildDashboard(force = false, freshAgents = false): Promise<Dashboard> {
-    const discovered = await this.refresh(force, freshAgents);
+    const discovered = [...await this.refresh(force, freshAgents), ...await this.structuredAgents()];
     let worktrees = await this.worktrees(force);
     // a `git worktree add` from a terminal appears within one tick: if a live agent sits
     // in a checkout we do not know yet whose repository is a configured Project, re-scan once
@@ -805,7 +815,8 @@ export class DiscoveryService {
         ? { ...agent, branch, ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }) }
         : { ...agent, branch, ...(meta.gitStatus === undefined ? {} : { gitStatus: meta.gitStatus }), ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }), home: worktree.identity, projectId: worktree.projectId, worktreeId: worktree.id, ...(worktree.newTask === undefined ? {} : { newTaskConfigured: true }), ...(worktree.projectUrl === undefined ? {} : { projectUrl: worktree.projectUrl, projectProxied: worktree.projectPort !== undefined }) };
       // re-resolve now that a pending Inline question is known (precedence: reported → question → inferred → finished)
-      const attention = resolveAttention({ kind: agent.kind, title: agent.title, reported: this.paneReported.get(agent.id), hasQuestion: question !== undefined });
+      // a structured Agent's Transport reports its Attention exactly
+      const attention = agent.transport === 'structured' ? agent.attention : resolveAttention({ kind: agent.kind, title: agent.title, reported: this.paneReported.get(agent.id), hasQuestion: question !== undefined });
       return { ...details, attention, ...(pullRequest === undefined ? {} : { pullRequest }), ...(question === undefined ? {} : { question: withQuestionShape(question) }) };
     }));
     // a Worktree with a live agent carries its git metadata on the Agent; an idle one carries

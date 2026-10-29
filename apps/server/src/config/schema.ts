@@ -90,8 +90,10 @@ const adapterUpdates = z.object({ current: adapterUpdateCommand, latest: adapter
 // aborts the launch on failure; `teardown` runs best-effort after the console stops an
 // agent of this kind, in the stopped agent's home.
 const adapterEntry = z.object({ program: adapterProgram, args: z.array(adapterArgument).max(64).optional(), env: z.record(adapterEnvName, adapterArgument).optional(), setup: command.optional(), teardown: command.optional(), updates: adapterUpdates.optional() }).strict();
+// the console pins Pi and supplies its program (ADR 0017), so `adapters.pi` only enables the kind
+const piEntry = adapterEntry.omit({ program: true, updates: true }).strict('adapters.pi takes only args, env, setup and teardown: Pi is pinned by the console as its own dependency, so it has no program or update commands');
 // keyed by kind, one strict entry each; an omitted block is observe-only (nothing launches)
-const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: adapterEntry.optional(), pi: adapterEntry.optional(), opencode: adapterEntry.optional() }).strict();
+const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: adapterEntry.optional(), pi: piEntry.optional(), opencode: adapterEntry.optional() }).strict();
 // constrain icons to supported aliases
 const instanceIcon = z.enum(instanceIconNames);
 const remoteServer = z.object({ url: z.string(), name: serverName.optional(), icon: instanceIcon.optional() }).strict();
@@ -345,8 +347,9 @@ type ParsedAdapters = z.output<typeof adaptersSchema>;
 // (unless bridged), and warn about operator arguments the Adapter reserves.
 async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean, warn: (message: string) => void): Promise<AdapterConfigs> {
   const configs: AdapterConfigs = {};
+  if (parsed.pi !== undefined) configs.pi = piConfig(parsed.pi, warn);
   for (const kind of agentKinds) {
-    const entry = parsed[kind];
+    const entry = kind === 'pi' ? undefined : parsed[kind] as z.output<typeof adapterEntry> | undefined;
     if (entry === undefined) continue;
     const config: AdapterLaunchConfig = { program: entry.program, args: entry.args ?? [], env: entry.env ?? {}, launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.updates === undefined ? {} : { updates: entry.updates }) };
     // a missing program, a directory, or a non-executable file never refuses boot;
@@ -395,6 +398,17 @@ async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean
   }
   warnCrossedPrograms(parsed, warn);
   return configs;
+}
+// Pi runs the console's own pinned copy under the console's own Node (the Pi Adapter names the
+// CLI), which only a console driving the host's tmux directly can start: the host bridge's tmux
+// runs on the host, where the container's copy is not
+function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message: string) => void): AdapterLaunchConfig {
+  const config: AdapterLaunchConfig = { program: process.execPath, args: entry.args ?? [], env: entry.env ?? {}, launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }) };
+  if (process.env.RAC_HOST_TMUX_DIR === undefined) return config;
+  config.launchable = false;
+  config.unavailableReason = 'Pi cannot launch under the host bridge: the console runs its pinned Pi itself';
+  warn(`adapters.pi: ${config.unavailableReason}`);
+  return config;
 }
 // OMX was once launched through `adapters.codex` (one kind recognised both). Now that
 // OMX is its own kind (ADR 0005), a Codex entry whose program is OMX — or an OMX entry

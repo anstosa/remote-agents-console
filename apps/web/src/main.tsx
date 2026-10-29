@@ -144,7 +144,7 @@ function CleanupSkeletons() {
 // `worktreeLabel`/`worktreeOrder` are no longer on the wire (the server carries them on the
 // Worktree); they remain as optional read-only fallbacks the tab bar consults when an Agent's
 // Worktree is not present in the payload, absent from the real server.
-type Agent = { id: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; queuedPromptCount: number; launch?: LaunchResolution };
+type Agent = { id: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; structured?: StructuredAgentState; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; queuedPromptCount: number; launch?: LaunchResolution };
 type Worktree = { id: string; projectId: string; label: string; customLabel?: boolean; path: string; main: boolean; detached: boolean; locked: boolean; branch?: string; sha?: string; consoleShells?: number; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; available: boolean; pinned: boolean; order: number; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; stack?: Stack; launch?: LaunchResolution };
 // `mode: 'directory'` marks a non-git Project the console launches in place (like Scratch);
 // `launch` is its resolved Launch profile for the Project-level Launch button. A git
@@ -7819,8 +7819,8 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     if (restarting || clearing || deactivating || deleting || agentPendingOperation(agent) !== undefined || pendingOperations.has(deactivateOperationKey(workspace.place.id ?? agent.id))) return;
     void (agent.worktreeId === undefined ? remove() : deactivate());
   };
-  // a transcript Agent has no pane to stream; its transcript is not drawn yet
-  if (agent.panel === 'transcript') return <AgentPanelFrame header={header('Live')} composer={composer} onTurnOff={turnOff} />;
+  // a transcript Agent has no pane to stream: its Panel shows its transcript
+  if (agent.panel === 'transcript') return <AgentPanelFrame header={header('Live')} composer={composer} onTurnOff={turnOff}><Transcript agentId={agent.id} state={agent.structured} /></AgentPanelFrame>;
   // keep codex transcript shortcuts limited to codex and omx agent panels
   return <Log id={agent.id} onTurnOff={turnOff} codexScrollControls={agent.kind === undefined || agent.kind === 'codex' || agent.kind === 'omx'} onQuestion={setQuestion} onMetadata={reportMetadata} onAddToPrompt={onAddToPrompt} header={header} composer={composer} notes={workspace.notes} onOpenUrl={onOpenUrl} onOpenFile={onOpenFile} processingLabel={startingNewTask ? 'Starting new task…' : undefined} processingDetail={startingNewTask ? 'Closing this session and preparing a fresh agent. This can take a few seconds.' : undefined} />;
 }
@@ -7876,7 +7876,9 @@ const agentStateBusy = (state: AgentPanelState): boolean => state.tone === 'work
 
 // A live Agent's state pill, from its attention and whether its finished turn is unread.
 function agentPanelState(agent: Agent, starting: boolean): AgentPanelState {
-  if (starting) return { label: 'Starting', tone: 'starting' };
+  if (starting || agent.structured?.lifecycle === 'starting') return { label: 'Starting', tone: 'starting' };
+  if (agent.structured?.lifecycle === 'failed') return { label: 'Failed', tone: 'failed' };
+  if (agent.structured?.lifecycle === 'exited') return { label: 'Exited', tone: 'off' };
   const state = agentState(agent);
   if (state === 'action-required') return { label: 'Needs answer', tone: 'needs-answer' };
   if (state === 'working') return { label: 'Working', tone: 'working' };
@@ -7914,6 +7916,40 @@ function AgentPanelTitle({ kind, sandboxed, title, switcher, state, connection =
 }
 
 // fill one agent split with a header, output, footer and full-frame overlay
+// A structured Agent's process state (`revision` changes with its transcript) and its transcript:
+// messages, and one plain line per tool call
+type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number };
+type TranscriptItem = { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string } | { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed' };
+const toolGlyph = { running: '○', done: '●', failed: '✕' } as const;
+
+// The bare transcript of a structured Agent, read again whenever its revision changes, following
+// new lines while scrolled to the bottom
+function Transcript({ agentId, state }: { agentId: string; state?: StructuredAgentState }) {
+  const [transcript, setTranscript] = useState<{ agentId: string; items: TranscriptItem[]; stderr?: string }>();
+  const log = useRef<HTMLOListElement>(null);
+  const following = useRef(true);
+  useEffect(() => {
+    let cancelled = false;
+    void request(`/api/agents/${encodeURIComponent(agentId)}/transcript`).then(response => response.ok ? response.json() : undefined).then((payload: { items?: TranscriptItem[]; stderr?: string } | undefined) => {
+      if (cancelled || !Array.isArray(payload?.items)) return;
+      setTranscript({ agentId, items: payload.items, ...(typeof payload.stderr === 'string' ? { stderr: payload.stderr } : {}) });
+    }).catch(() => { /* keep the last transcript; the next revision reads it again */ });
+    return () => { cancelled = true; };
+  }, [agentId, state?.revision]);
+  useEffect(() => { if (following.current && log.current !== null) log.current.scrollTop = log.current.scrollHeight; }, [transcript]);
+  const current = transcript?.agentId === agentId ? transcript : undefined;
+  return <div className="structured-transcript">
+    <ol ref={log} className="transcript-log" aria-label="Transcript" onScroll={event => { const list = event.currentTarget; following.current = list.scrollHeight - list.scrollTop - list.clientHeight < 8; }}>
+      {current?.items.map(item => item.kind === 'message'
+        ? <li key={item.id} className={`transcript-message transcript-${item.role}`}>{item.text}</li>
+        : <li key={item.id} className={`transcript-tool transcript-tool-${item.state}`}><span aria-hidden="true">{toolGlyph[item.state]} </span>{item.name}{item.summary === '' ? '' : `(${item.summary})`}</li>)}
+    </ol>
+    {state?.lifecycle === 'starting' && <p className="transcript-status">Starting…</p>}
+    {state?.lifecycle === 'exited' && <p className="transcript-status">The agent’s process has exited.</p>}
+    {state?.lifecycle === 'failed' && <div className="transcript-failure" role="alert"><p>{state.reason ?? 'The agent failed to start.'}</p>{current?.stderr !== undefined && current.stderr !== '' && <pre>{current.stderr}</pre>}</div>}
+  </div>;
+}
+
 function AgentPanelFrame({ header, composer, mobileKeys, overlay, className = '', children, onTurnOff }: { header: ReactNode; composer?: ReactNode; mobileKeys?: ReactNode; overlay?: ReactNode; className?: string; children?: ReactNode; onTurnOff?: () => void }) {
   const expanded = usePanelExpand('agent')?.expanded === true;
   // keep whole-split transitions outside the output cell and preserve footer controls

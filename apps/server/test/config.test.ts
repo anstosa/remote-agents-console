@@ -560,6 +560,20 @@ describe('claude adapter configuration', () => {
     expect(warnings.some(w => w.includes('adapters.claude') && w.includes('--settings') && w.includes('--continue') && w.includes('-p'))).toBe(true);
   });
 
+  it('enables Pi with the pinned program and refuses a program or update commands of its own', async () => {
+    const config = await validateConfig({ ...scratch, adapters: { pi: { args: ['--verbose'], env: { RAC_TEST: '1' } } } });
+    expect(config.adapters?.pi).toEqual({ program: process.execPath, args: ['--verbose'], env: { RAC_TEST: '1' }, launchable: true });
+    await expect(validateConfig({ ...scratch, adapters: { pi: { program: process.execPath } } })).rejects.toThrow(/pinned/u);
+    await expect(validateConfig({ ...scratch, adapters: { pi: { updates: { current: 'a', latest: 'b', run: 'c' } } } })).rejects.toThrow(/pinned/u);
+  });
+
+  it('leaves Pi unlaunchable under the host bridge', async () => {
+    setEnv('RAC_HOST_TMUX_DIR', '/host/tmux');
+    const config = await validateConfig({ ...scratch, adapters: { pi: {} } });
+    expect(config.adapters?.pi).toMatchObject({ launchable: false });
+    expect(config.adapters?.pi?.unavailableReason).toContain('bridge');
+  });
+
   it('leaves Claude unlaunchable under a bridge without RAC_HOST_REPOSITORY', async () => {
     setEnv('RAC_HOST_TMUX_DIR', '/host/tmux'); setEnv('RAC_HOST_REPOSITORY', undefined);
     const config = await validateConfig({ ...scratch, adapters: { claude: { program: '/abs/claude' } } });

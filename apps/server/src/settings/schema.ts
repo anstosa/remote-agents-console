@@ -111,11 +111,13 @@ function describeApplicationCommands(schema: SettingsSchema): void {
     Object.assign(adapter.properties!.env!, { label: 'Environment & keys' });
     Object.assign(adapter.properties!.setup!, { editor: 'shell' as const, default: '', placeholder: 'Disabled (when blank)' });
     Object.assign(adapter.properties!.teardown!, { editor: 'shell' as const, default: '', placeholder: 'Disabled (when blank)' });
-    Object.assign(adapter.properties!.updates!, {
+    // Pi is pinned by the console and has no update commands (ADR 0017)
+    if (adapter.properties!.updates === undefined) continue;
+    Object.assign(adapter.properties!.updates, {
       default: {},
       description: 'Set all three commands to enable agent updates. Leave all three blank to disable updates.'
     });
-    const updates = adapter.properties!.updates!.properties!;
+    const updates = adapter.properties!.updates.properties!;
     Object.assign(updates.current!, { label: 'Get current version command', editor: 'shell' as const });
     Object.assign(updates.latest!, { label: 'Get latest version command', editor: 'shell' as const });
     Object.assign(updates.run!, { label: 'Update command', editor: 'shell' as const });

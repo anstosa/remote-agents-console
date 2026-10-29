@@ -7,16 +7,18 @@ import { TmuxAdapter } from '../tmux/adapter.js';
 import { hostCommand, hostInteractiveShellPath, interactiveShellBootstrap, interactiveShellName, interactiveShellPath } from '../tmux/interactive-shell.js';
 import { availableSessionName, worktreeSessionName } from '../tmux/session-name.js';
 import { terminalColorFallbackArgv } from '../tmux/terminal-colors.js';
-import { processPaneRole } from '../tmux/stack-sessions.js';
+import { holderPaneRole, processPaneRole } from '../tmux/stack-sessions.js';
 import { ProcSocketFinder, workspaceRoot, type SocketFinder } from '../discovery/service.js';
 import { projectIdOf, worktreeHostRoot, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
-import { adapterCapabilities, adapterFor } from '../adapters/registry.js';
+import { adapterCapabilities, adapterFor, structuredAdapterFor } from '../adapters/registry.js';
 import { renderAdapterFiles, type RenderedAdapterFiles } from '../adapters/files.js';
 import { agentKinds, type AgentKind, type LaunchInput, type LaunchMode, type ReplacedFlagValue } from '../adapters/types.js';
 import { resolveLaunchProfile, type LaunchResolution, type LaunchScope } from './resolution.js';
 import { WorktreeLaunchStore, scratchLaunchKey } from '../worktrees/store.js';
 import type { Pane, SocketRef, Worktree } from '../domain/models.js';
 import { updateAdvisorPendingLabel } from '../update-advisor.js';
+import { holderArgv } from '../transports/structured.js';
+import type { HolderRef, HolderWindows } from '../transports/structured-agents.js';
 import { isFullGitSha } from '../git/revision.js';
 import { accountHome, configuredPlaces, placeHostRoot, scratchHome, scratchPlaceLabel, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
 
@@ -117,7 +119,7 @@ const updateAdvisorReplacedFlags = new Map<string, ReplacedFlagValue>([
   ['-C', 'one'], ['--cd', 'one'], ['--worktree', 'none']
 ]);
 
-export class LaunchService {
+export class LaunchService implements HolderWindows {
   private pending = new Set<string>();
   // the configured Scratch folder's realpath, resolved once
   private scratchHomeValue?: Promise<string>;
@@ -132,7 +134,7 @@ export class LaunchService {
   // `openTerminals` returns the `fingerprint\0paneId` keys of panes a browser currently has
   // open as a Terminal (a live pane-socket subscriber); Remove's blind kill skips them.
   // `placeAgentSession` finds the session of a live Agent at a Place, which a Place launch joins.
-  constructor(private readonly config: ValidatedConfig, private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly panes: TmuxAdapter = new TmuxAdapter(), private readonly paneRoot: (path: string) => Promise<string> = workspaceRoot, private readonly worktreeStore: WorktreeLaunchStore = new WorktreeLaunchStore(), private readonly discoveredWorktrees: () => Worktree[] = () => [], private readonly openTerminals: () => ReadonlySet<string> = () => new Set(), private readonly placeAgentSession: (placeId: string) => Promise<TmuxSession | undefined> = async () => undefined, private readonly root = `/tmp/remote-agent-console-${process.getuid?.() ?? 0}`) {}
+  constructor(private readonly config: ValidatedConfig, private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly panes: TmuxAdapter = new TmuxAdapter(), private readonly paneRoot: (path: string) => Promise<string> = workspaceRoot, private readonly worktreeStore: WorktreeLaunchStore = new WorktreeLaunchStore(), private readonly discoveredWorktrees: () => Worktree[] = () => [], private readonly openTerminals: () => ReadonlySet<string> = () => new Set(), private readonly placeAgentSession: (placeId: string) => Promise<TmuxSession | undefined> = async () => undefined, private readonly root = `/tmp/remote-agent-console-${process.getuid?.() ?? 0}`, private readonly launchStructured: (place: Place, kind: AgentKind) => Promise<boolean> = async () => false) {}
 
   // a pane the operator currently has open as a Terminal (a live pane-socket subscriber)
   private paneHasOpenTerminal(pane: Pane): boolean {
@@ -170,7 +172,7 @@ export class LaunchService {
 
   // the launchable kinds in registry (resolution) order for the current configuration
   private launchableKinds(): AgentKind[] {
-    return agentKinds.filter(kind => (this.config.adapters[kind]?.launchable ?? false) && adapterFor(kind) !== undefined);
+    return agentKinds.filter(kind => (this.config.adapters[kind]?.launchable ?? false) && (adapterFor(kind) ?? structuredAdapterFor(kind)) !== undefined);
   }
 
   // expose the effective server default, falling back when its configured kind is unavailable
@@ -293,7 +295,7 @@ export class LaunchService {
   private async placeSession(place: Pick<Place, 'id'>): Promise<TmuxSession | undefined> {
     const agent = await this.placeAgentSession(place.id);
     if (agent !== undefined) return agent;
-    const panes = await this.placePanes(place);
+    const panes = await this.markedPanes(place);
     const member = panes.find(pane => pane.role === 'shell') ?? panes.find(pane => pane.role === processPaneRole) ?? panes[0];
     return member === undefined ? undefined : { socket: member.socket, session: member.sessionId };
   }
@@ -324,7 +326,13 @@ export class LaunchService {
   // and nothing from any other session, even a pane sat in the Place's folder. Membership for
   // the Place pane socket and the source of the panes-API listing. The console's own
   // `rac-stack-*` sessions are never marked, so their transient command runs never count.
+  // A holder's pane is never one: the process it holds is an Agent's, driven without its pane.
   async placePanes(place: Pick<Place, 'id'>): Promise<Pane[]> {
+    return (await this.markedPanes(place)).filter(pane => pane.role !== holderPaneRole);
+  }
+
+  // every pane of the sessions marked as the Place's Workspace
+  private async markedPanes(place: Pick<Place, 'id'>): Promise<Pane[]> {
     const sockets = await this.finder.find();
     return (await Promise.all(sockets.map(socket => this.panes.listPanes(socket)))).flat().filter(pane => pane.placeMark === place.id);
   }
@@ -378,7 +386,7 @@ export class LaunchService {
     const resolved = await this.resolveLaunchKind(scope, kind);
     // refuse an unconfigured or unlaunchable kind
     if (resolved === undefined) return false;
-    const launched = await this.launchInPlace(place, resolved);
+    const launched = structuredAdapterFor(resolved) !== undefined ? await this.launchStructuredAt(place, resolved) : await this.launchInPlace(place, resolved);
     if (launched) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
     return launched;
   }
@@ -566,12 +574,19 @@ export class LaunchService {
       const kind = await this.resolveLaunchKind(worktreeId, input.kind);
       // refuse an unconfigured or unlaunchable kind
       if (kind === undefined) { console.warn(`[launch] ${worktree.identity}: no launchable agent kind (check adapters.*.launchable and the agent binary)`); return false; }
-      const id = randomBytes(18).toString('base64url');
       const sandboxed = input.sandboxed === true;
-      const command = await this.worktreeCommand(worktree, kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), sandboxed });
-      // a worktree with no launch command (and no override) cannot start
-      if (command === undefined) { console.warn(`[launch] ${worktree.identity}: agent kind ${kind} produced no launch command`); return false; }
-      const launched = await this.dispatchWorktreeLaunch(worktree, command, id, sandboxed);
+      let launched: boolean;
+      if (structuredAdapterFor(kind) !== undefined) {
+        // a structured Agent launches fresh and unsandboxed so far
+        if (input.mode !== 'fresh' || sandboxed) { console.warn(`[launch] ${worktree.identity}: ${kind} launches only fresh and unsandboxed`); return false; }
+        launched = await this.launchStructuredAt(worktreePlace(worktree), kind);
+      } else {
+        const id = randomBytes(18).toString('base64url');
+        const command = await this.worktreeCommand(worktree, kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), sandboxed });
+        // a worktree with no launch command (and no override) cannot start
+        if (command === undefined) { console.warn(`[launch] ${worktree.identity}: agent kind ${kind} produced no launch command`); return false; }
+        launched = await this.dispatchWorktreeLaunch(worktree, command, id, sandboxed);
+      }
       // record the kind so it resolves first next time — for this Worktree and for its
       // Project (which seeds a fresh Worktree); storage failure never fails a live launch
       if (launched) {
@@ -736,5 +751,47 @@ export class LaunchService {
     if (!sandboxed) return true;
     const socket = socketPath === undefined ? [] : ['-S', socketPath];
     return (await run(this.tmux, [...socket, 'set-option', '-p', '-t', target, '@rac_sandboxed', '1'])).code === 0;
+  }
+
+  // launch a structured Agent at the Place (ADR 0015), which runs under a holder rather than in a pane
+  private async launchStructuredAt(place: Place, kind: AgentKind): Promise<boolean> {
+    if (this.hostSocket !== undefined) { console.warn(`[launch] ${place.home}: ${kind} cannot launch under the host bridge`); return false; }
+    return await this.launchStructured(place, kind);
+  }
+
+  // Open a structured Agent's holder window in its Place's Workspace session, creating the session
+  // when the Place has none (ADR 0016). The holder serves `argv`'s stdio on a socket in the
+  // console's private directory; the window is kept after its process exits so its stderr stays
+  // readable, and its pane role keeps it from ever being a Terminal or a recognised Agent.
+  async openHolderWindow(place: Place, agentId: string, argv: string[], env: Record<string, string>, setup?: string): Promise<HolderRef | undefined> {
+    if (this.hostSocket !== undefined) return undefined;
+    const directory = join(this.root, 'holders');
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const socket = join(directory, `${agentId}.sock`);
+    const holder = holderArgv(socket, argv);
+    // the setup command runs first and aborts the launch when it fails, as it does for a pane
+    const command = setup === undefined ? holder : ['/bin/sh', '-c', `${setup} && exec "$@"`, 'sh', ...holder];
+    const joined = await this.placeSession(place);
+    const tmuxSocket = joined?.socket.path;
+    const create = joined === undefined ? ['new-session', '-d', '-s', tmuxFormatLiteral(await this.availableSessionName(placeSessionName(place)))] : ['-S', joined.socket.path, 'new-window', '-d', '-t', joined.session];
+    const opened = await run(this.tmux, [...create, '-c', tmuxFormatLiteral(placeHostRoot(place)), ...Object.entries(env).flatMap(([name, value]) => ['-e', `${name}=${value}`]), '-P', '-F', '#{window_id} #{pane_id}', '--', ...command]);
+    const [window, pane] = opened.stdout.trim().split(' ');
+    if (opened.code !== 0 || window === undefined || pane === undefined) { console.error(`[launch] ${place.home}: holder window failed (code ${opened.code}) ${opened.stderr.trim()}`); return undefined; }
+    const socketArgs = tmuxSocket === undefined ? [] : ['-S', tmuxSocket];
+    const configured = await this.finishCreatedPane(tmuxSocket, pane, place.home, async () =>
+      (await run(this.tmux, [...socketArgs, 'set-option', '-w', '-t', window, 'remain-on-exit', 'on', ';', 'set-option', '-p', '-t', pane, '@rac_role', holderPaneRole])).code === 0
+      && (joined !== undefined || await this.markSessionPlace(tmuxSocket, pane, place.id)));
+    return configured ? { socket, window, pane, ...(tmuxSocket === undefined ? {} : { tmuxSocket }) } : undefined;
+  }
+
+  // the last lines a holder's pane shows: its child's stderr, and the holder's exit line
+  async captureHolder(holder: HolderRef): Promise<string | undefined> {
+    const captured = await run(this.tmux, [...(holder.tmuxSocket === undefined ? [] : ['-S', holder.tmuxSocket]), 'capture-pane', '-p', '-J', '-t', holder.pane, '-S', '-40']);
+    return captured.code === 0 ? captured.stdout.trim() : undefined;
+  }
+
+  // remove a holder's window, which hangs up the holder and its child
+  async closeHolder(holder: HolderRef): Promise<void> {
+    await run(this.tmux, [...(holder.tmuxSocket === undefined ? [] : ['-S', holder.tmuxSocket]), 'kill-window', '-t', holder.window]).catch(() => undefined);
   }
 }
