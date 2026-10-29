@@ -587,11 +587,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         return { authentication: 'conductor' as const, subjectId: holder.id, clientId: 'conductor', audience: resource, scopes: [...conductorConfig.scopes], places: (worktree: { id: string; projectId: string }) => configured.has(worktree.projectId) || workspaces.has(worktree.id) };
       }
     };
-    if (!integrationConfig.enabled) registerMcpServer({ app, publicOrigin: config.publicOrigin.origin, gateway: integrationGateway, realtimeScopes, ...(conductorAccess === undefined ? {} : { conductor: conductorAccess }) });
-    else {
-      const derivedRealtimeToken = createHmac('sha256', process.env.RAC_SESSION_SECRET ?? '').update('remote-agents:realtime-mcp:v1').digest('base64url');
-      const realtimeToken = process.env.RAC_REALTIME_MCP_TOKEN?.trim() || derivedRealtimeToken;
-      const integrationAuth = new IntegrationAuthService({ issuer: config.publicOrigin.origin, resource, stateFile: process.env.RAC_INTEGRATION_AUTH_FILE ?? '.data/integration-auth.json', realtimeToken, realtimeSubjectId: 'local-voice' });
+    const derivedRealtimeToken = createHmac('sha256', process.env.RAC_SESSION_SECRET ?? '').update('remote-agents:realtime-mcp:v1').digest('base64url');
+    const realtimeToken = process.env.RAC_REALTIME_MCP_TOKEN?.trim() || derivedRealtimeToken;
+    // OAuth and the Realtime credential only while the integrations are enabled
+    const integrationAuth = integrationConfig.enabled ? new IntegrationAuthService({ issuer: config.publicOrigin.origin, resource, stateFile: process.env.RAC_INTEGRATION_AUTH_FILE ?? '.data/integration-auth.json', realtimeToken, realtimeSubjectId: 'local-voice' }) : undefined;
+    registerMcpServer({ app, publicOrigin: config.publicOrigin.origin, ...(integrationAuth === undefined ? {} : { auth: integrationAuth }), gateway: integrationGateway, realtimeScopes, ...(conductorAccess === undefined ? {} : { conductor: conductorAccess }) });
+    if (integrationAuth !== undefined) {
       registerIntegrationAuthServer({
         app,
         auth: integrationAuth,
@@ -606,7 +607,6 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
           } catch { return undefined; }
         }
       });
-      registerMcpServer({ app, publicOrigin: config.publicOrigin.origin, auth: integrationAuth, gateway: integrationGateway, realtimeScopes, ...(conductorAccess === undefined ? {} : { conductor: conductorAccess }) });
       app.post('/api/integration-federation', { config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (request, reply) => {
         browser(request);
         // keep cross-instance execution independently disabled

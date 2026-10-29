@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { IntegrationAuthService, IntegrationPrincipal, IntegrationScope, OAuthResult } from '../auth/index.js';
 import type { IntegrationGateway } from './gateway.js';
+import { digest } from '../policy/service.js';
 
 type JsonRpcId = string | number | null;
 type JsonRpcRequest = { jsonrpc: '2.0'; id?: JsonRpcId; method: string; params?: unknown };
@@ -37,7 +37,7 @@ export function registerMcpServer(options: McpServerOptions): void {
   };
   const keyGenerator = (request: FastifyRequest): string => {
     const token = conductorToken(request);
-    return token === undefined ? request.ip : `conductor:${createHash('sha256').update(token).digest('base64url')}`;
+    return token === undefined ? request.ip : `conductor:${digest(token)}`;
   };
   options.app.post('/mcp', { config: { rateLimit: { max: 120, timeWindow: '1 minute', keyGenerator } } }, async (request, reply) => {
     // bind the public resource to its configured authority

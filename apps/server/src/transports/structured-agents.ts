@@ -144,7 +144,7 @@ export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
 /** What every console MCP token a structured Agent holds starts with, so the gateway can tell it from OAuth's. */
 export const consoleTokenPrefix = 'rac-conductor.';
-const consoleTokenPattern = /rac-conductor\.[A-Za-z0-9_-]+/gu;
+const consoleTokenPattern = new RegExp(`${consoleTokenPrefix.replace('.', '\\.')}[A-Za-z0-9_-]+`, 'gu');
 const tokenHash = (token: string): string => createHash('sha256').update(token).digest('base64url');
 /** What the console gives the Conductor: its MCP endpoint, the model a fresh Conversation starts on, and how long a script may run. */
 export type ConductorOptions = { endpoint: string; model: ModelSetting; scriptDeadlineMs: number };
@@ -212,6 +212,8 @@ export class StructuredAgents {
    * the entry's default. False when its process could not start, or `model` is not an Allowed model.
    */
   async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, role }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; role?: 'conductor' } = {}): Promise<boolean> {
+    // the Conductor starts on its configured model
+    if (role === 'conductor') model ??= this.conductor?.model;
     const entry = model === undefined ? (resume === undefined && latest !== true ? this.allowed(kind)[0] : undefined) : this.allowed(kind).find(candidate => candidate.model === model.model);
     if (model !== undefined && entry === undefined) return false;
     const records = await this.load();

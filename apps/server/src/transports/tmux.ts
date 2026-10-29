@@ -1041,7 +1041,7 @@ export class TmuxTransport implements AgentTransport {
     return true;
   }
 
-  // the latest completed answer the pane's deep capture shows
+  // the latest completed answer the pane's deep capture shows (over a window of its usual 120 rows)
   async latestAnswer(agentId: string): Promise<string | undefined> {
     const target = await this.discovery.target(agentId);
     return target === undefined ? undefined : (await this.tmux.captureWindow(target.socket, target.agent.pane.paneId, 120).catch(() => undefined))?.latestAssistantMessage;

@@ -76,7 +76,7 @@ export class Conductor {
         return;
       }
     }
-    if (kept === undefined) await this.agents.launch(place, config.kind, { sandboxed: true, role: 'conductor', model: { model: config.model, ...(config.effort === undefined ? {} : { effort: config.effort }) } });
+    if (kept === undefined) await this.agents.launch(place, config.kind, { sandboxed: true, role: 'conductor' });
     else await this.agents.restart(kept.id);
     this.seen = 'starting';
   }
