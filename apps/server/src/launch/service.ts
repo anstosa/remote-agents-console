@@ -18,7 +18,7 @@ import { WorktreeLaunchStore, scratchLaunchKey } from '../worktrees/store.js';
 import type { Pane, SocketRef, Worktree } from '../domain/models.js';
 import { updateAdvisorPendingLabel } from '../update-advisor.js';
 import { holderArgv, type ModelSetting } from '../transports/structured.js';
-import type { HolderLaunch, HolderRef, HolderWindows } from '../transports/structured-agents.js';
+import type { HolderLaunch, HolderRef, HolderStatus, HolderWindows } from '../transports/structured-agents.js';
 import { isFullGitSha } from '../git/revision.js';
 import { accountHome, configuredPlaces, placeHostRoot, scratchHome, scratchPlaceLabel, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
@@ -810,7 +810,7 @@ export class LaunchService implements HolderWindows {
   }
 
   // whether a holder's process has exited, with its exit status; undefined once its pane is gone
-  async holderStatus(holder: HolderRef): Promise<{ dead: boolean; status?: number } | undefined> {
+  async holderStatus(holder: HolderRef): Promise<HolderStatus | undefined> {
     const socketArgs = (await this.holderPane(holder))?.socketArgs;
     if (socketArgs === undefined) return undefined;
     const shown = await run(this.tmux, [...socketArgs, 'display-message', '-p', '-t', holder.pane, '#{pane_dead} #{pane_dead_status}']).catch(() => undefined);

@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { AdapterConfigs, AgentKind } from '../adapters/types.js';
 import { structuredAdapterFor } from '../adapters/registry.js';
-import type { HolderRef, HolderWindows } from '../transports/structured-agents.js';
+import type { HolderRef, HolderStatus, HolderWindows } from '../transports/structured-agents.js';
 import { connectHolder } from '../transports/structured.js';
 import type { CommandWindows } from './service.js';
 
@@ -19,7 +19,7 @@ const runner = (): string[] => {
  * commands, with the kind's configured environment for the allowlist to pick from. A kind with no
  * sandbox runs none.
  */
-export function commandWindows(windows: HolderWindows & { holderStatus(holder: HolderRef): Promise<{ dead: boolean; status?: number } | undefined> }, configs: AdapterConfigs, files: (kind: AgentKind) => Promise<Record<string, string> | undefined>): CommandWindows {
+export function commandWindows(windows: HolderWindows & { holderStatus(holder: HolderRef): Promise<HolderStatus | undefined> }, configs: AdapterConfigs, files: (kind: AgentKind) => Promise<Record<string, string> | undefined>): CommandWindows {
   return {
     async open(place, watchId, command, kind) {
       const adapter = structuredAdapterFor(kind);

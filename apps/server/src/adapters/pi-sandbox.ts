@@ -114,7 +114,7 @@ export function sessionTmuxSocket(env: NodeJS.ProcessEnv): Pick<SessionPaths, 't
   return socket === undefined || socket === '' ? {} : { tmuxSocket: socket };
 }
 
-const expandHome = (path: string): string => path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path;
+export const expandHome = (path: string): string => path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path;
 // a path as Pi's file tools read it (`resolveToCwd`): spaces normalised, a leading `@` dropped,
 // `~` and `file://` expanded, then resolved against the session's cwd
 function toolPath(raw: string, cwd: string): string {

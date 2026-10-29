@@ -3284,7 +3284,6 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await dashboardUpdates.refresh().catch(() => undefined);
     return reply.code(201).send({ agentId: launched.agent.id });
   });
-  // restart one idle configured agent by resuming its last conversation
   // the operator removes a Watch an Agent set
   app.delete('/api/agents/:id/watches/:watchId', async (request, reply) => {
     controlled(request, true);
@@ -3293,6 +3292,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await dashboardUpdates.refresh().catch(() => undefined);
     return reply.code(204).send();
   });
+  // restart one idle configured agent by resuming its last conversation
   app.post('/api/agents/:id/restart', async (request, reply) => {
     controlled(request, true);
     const id = (request.params as { id: string }).id;

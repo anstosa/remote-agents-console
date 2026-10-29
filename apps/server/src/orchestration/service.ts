@@ -710,9 +710,9 @@ export class OrchestrationService {
   }
 
   // the Conductor and its Watches, or why these operations are not offered
-  private watching(): { owner: string; watches: NonNullable<OrchestrationDependencies['watches']> } | undefined {
+  private watching(): { owner: string; watches: NonNullable<OrchestrationDependencies['watches']> } | OrchestrationResult<never> {
     const { conductor, watches } = this.dependencies;
-    return conductor === undefined || watches === undefined ? undefined : { owner: conductor, watches };
+    return conductor === undefined || watches === undefined ? failure('unavailable', 'Only the Conductor sets Watches.') : { owner: conductor, watches };
   }
 
   // a Watch set, or the reason it was not; GitHub's own failure is said as GitHub said it
@@ -728,17 +728,22 @@ export class OrchestrationService {
     });
   }
 
+  // a Worktree in scope, or why there is none
+  private scopedWorktree(worktreeId: string): Worktree | OrchestrationResult<never> {
+    if (!validIdentifier(worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
+    return this.worktree(worktreeId) ?? failure('not_found', 'Worktree not found.');
+  }
+
   // the GitHub repository a Worktree in scope pushes to, or why there is none
   private async repositoryAt(worktreeId: string): Promise<GithubRepository | OrchestrationResult<never>> {
-    if (!validIdentifier(worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
-    const worktree = this.worktree(worktreeId);
-    if (worktree === undefined) return failure('not_found', 'Worktree not found.');
+    const worktree = this.scopedWorktree(worktreeId);
+    if ('ok' in worktree) return worktree;
     return await originRepository(worktree.path) ?? failure('invalid_request', 'The worktree has no GitHub origin.');
   }
 
   async watchPullRequest(input: { worktreeId: string; number: number }): Promise<OrchestrationResult<unknown>> {
     const watching = this.watching();
-    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    if ('ok' in watching) return watching;
     const repository = await this.repositoryAt(input.worktreeId);
     if ('ok' in repository) return repository;
     return await this.watched(() => watching.watches.watchPullRequest(watching.owner, repository, input.number));
@@ -746,7 +751,7 @@ export class OrchestrationService {
 
   async watchReviewRequests(worktreeId: string): Promise<OrchestrationResult<unknown>> {
     const watching = this.watching();
-    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    if ('ok' in watching) return watching;
     const repository = await this.repositoryAt(worktreeId);
     if ('ok' in repository) return repository;
     return await this.watched(() => watching.watches.watchReviewRequests(watching.owner, repository));
@@ -754,29 +759,28 @@ export class OrchestrationService {
 
   async watchProcess(input: { worktreeId: string; process: string }): Promise<OrchestrationResult<unknown>> {
     const watching = this.watching();
-    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
-    if (!validIdentifier(input.worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
-    const worktree = this.worktree(input.worktreeId);
-    if (worktree === undefined) return failure('not_found', 'Worktree not found.');
+    if ('ok' in watching) return watching;
+    const worktree = this.scopedWorktree(input.worktreeId);
+    if ('ok' in worktree) return worktree;
     if (!declaredProcesses(worktree.commands).some(process => process.name === input.process)) return failure('not_found', 'The worktree declares no such Stack process.');
     return await this.watched(() => watching.watches.watchProcess(watching.owner, worktree.id, input.process, worktree.label));
   }
 
   async watchCommand(input: { command: string; description: string }): Promise<OrchestrationResult<unknown>> {
     const watching = this.watching();
-    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    if ('ok' in watching) return watching;
     return await this.watched(() => watching.watches.watchCommand(watching.owner, input.command, input.description));
   }
 
   async listWatches(): Promise<OrchestrationResult<unknown>> {
     const watching = this.watching();
-    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    if ('ok' in watching) return watching;
     return await this.operation(async () => success({ watches: (await watching.watches.list(watching.owner)).map(({ id, kind, description, createdAt }) => ({ watch_id: id, kind, description, created_at: createdAt })) }));
   }
 
   async unwatch(watchId: string): Promise<OrchestrationResult<{ removed: true }>> {
     const watching = this.watching();
-    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    if ('ok' in watching) return watching;
     if (!validIdentifier(watchId)) return failure('invalid_request', 'Invalid watch identifier.');
     return await this.operation(async () => await watching.watches.remove(watching.owner, watchId) ? success({ removed: true as const }) : failure('not_found', 'Watch not found.'));
   }

@@ -69,7 +69,8 @@ export class Conductor {
     // an unavailable Project leaves it off: nothing is launched, and one still running (its holder
     // outlived a console restart) is stopped, its record and queue kept for when the Project is back
     if (config.unavailable !== undefined) {
-      if (kept !== undefined && !down(lifecycle)) await this.agents.stop(kept.id, `Its Project is unavailable: ${config.unavailable}`);
+      // one busy with an operation is stopped once that ends (its end is a change)
+      if (kept !== undefined && !down(lifecycle) && !await this.agents.stop(kept.id, `Its Project is unavailable: ${config.unavailable}`)) this.fingerprint = undefined;
       return;
     }
     const before = this.seen;

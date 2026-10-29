@@ -8,9 +8,9 @@ import type { ConsoleEvents } from '../events.js';
 import { redactIntegrationText } from '../integrations/text.js';
 import type { Place } from '../places/places.js';
 import type { GithubRepository } from '../pull-requests/github.js';
-import type { HolderRef } from '../transports/structured-agents.js';
+import type { HolderRef, HolderStatus } from '../transports/structured-agents.js';
 import type { LineChannel } from '../transports/structured.js';
-import type { PullRequestState, ReviewRequest, WatchGithub } from './github.js';
+import { standInRequest, type PullRequestState, type ReviewRequest, type WatchGithub } from './github.js';
 
 type Base = { id: string; owner: string; description: string; createdAt: string; sequence: number; outbox: string[]; ended?: true };
 type PullRequestWatch = Base & { kind: 'pull_request'; repository: GithubRepository; number: number; url: string; seen: { checks?: { head: string; state: 'passed' | 'failed' }; conflict: boolean; threads: string[] } };
@@ -32,7 +32,7 @@ export interface CommandWindows {
   open(place: Place, watchId: string, command: string, kind: AgentKind): Promise<HolderRef | undefined>;
   connect(holder: HolderRef, from: number): Promise<{ channel: LineChannel; from: number } | undefined>;
   /** Whether its process has exited, with its status; undefined once the window is gone. */
-  status(holder: HolderRef): Promise<{ dead: boolean; status?: number } | undefined>;
+  status(holder: HolderRef): Promise<HolderStatus | undefined>;
   close(holder: HolderRef): Promise<void>;
 }
 
@@ -59,6 +59,7 @@ const maxThreadIds = 500;
 const maxRequests = 200;
 // a command whose events come faster than this is stopped
 const maxEventsPerMinute = 20;
+const maxWaiting = 20;
 // an owner missing from the dashboard this long is gone, and its Watches with it
 const goneAfterMs = 30_000;
 // a command's connection: the line it was read from, the lines its events took since, those waiting, lines the holder no longer had, and when its last events went
@@ -66,6 +67,7 @@ type Run = { channel: LineChannel; base: number; taken: number; lines: string[];
 export type WatchRefusal = { refused: string };
 const oneLine = (text: string) => text.replace(/\s+/gu, ' ').trim();
 const summary = ({ id, kind, description, createdAt }: Watch): WatchSummary => ({ id, kind, description, createdAt });
+const isStandIn = (request: string) => request.startsWith(standInRequest);
 
 /**
  * The Watches Agents set (ADR 0019), above the seam and keyed by their owner's Agent id: a pull
@@ -90,11 +92,13 @@ export class Watches {
   private readonly stacks = new Map<string, StackProcessState[]>();
   private timer?: NodeJS.Timeout;
   private polling?: Promise<void>;
+  private observing = Promise.resolve();
   private closed = false;
 
   constructor(private readonly options: WatchOptions) {
     this.file = options.file ?? process.env.RAC_WATCHES_FILE ?? '.data/watches.json';
-    options.events.on('stack', ({ worktrees }) => { void this.observeStacks(worktrees).catch(error => { console.error('[watches]', error); }); });
+    // one snapshot at a time, so no exit is told twice by two overlapping ones
+    options.events.on('stack', ({ worktrees }) => { this.observing = this.observing.then(() => this.observeStacks(worktrees)).catch(error => { console.error('[watches]', error); }); });
     options.events.on('agents', ({ agents }) => { void this.observeOwners(agents.map(({ agent }) => agent.id)).catch(error => { console.error('[watches]', error); }); });
   }
 
@@ -111,8 +115,7 @@ export class Watches {
   close(): void {
     this.closed = true;
     clearInterval(this.timer);
-    for (const run of this.runs.values()) { clearTimeout(run.timer); run.channel.close(); }
-    this.runs.clear();
+    for (const id of [...this.runs.keys()]) this.unread(id);
   }
 
   /** Every Agent's Watches, by its id. */
@@ -185,11 +188,23 @@ export class Watches {
 
   // end a Watch with nothing more to say: its command window closes and it goes once its outbox is empty
   private async drop(watch: Watch): Promise<void> {
-    const run = this.runs.get(watch.id);
-    if (run !== undefined) { clearTimeout(run.timer); run.channel.close(); this.runs.delete(watch.id); }
     await this.mutate(() => { watch.ended = true; });
-    if (watch.kind === 'command' && watch.holder !== undefined) await this.options.commands.close(watch.holder);
+    await this.stop(watch);
     await this.flush();
+  }
+
+  // stop reading a command Watch's command and close its window
+  private async stop(watch: Watch): Promise<void> {
+    this.unread(watch.id);
+    if (watch.kind === 'command' && watch.holder !== undefined) await this.options.commands.close(watch.holder);
+  }
+
+  private unread(id: string): void {
+    const run = this.runs.get(id);
+    if (run === undefined) return;
+    clearTimeout(run.timer);
+    run.channel.close();
+    this.runs.delete(id);
   }
 
   // record what a Watch saw and the event it makes of that, in one write, then deliver it
@@ -236,11 +251,7 @@ export class Watches {
       this.missingSince.set(owner, since);
       if (now - since < goneAfterMs) continue;
       // nobody is left to tell: its Watches go, events and all
-      for (const watch of (await this.load()).filter(candidate => candidate.owner === owner)) {
-        if (watch.kind === 'command' && watch.holder !== undefined) await this.options.commands.close(watch.holder);
-        const run = this.runs.get(watch.id);
-        if (run !== undefined) { clearTimeout(run.timer); run.channel.close(); this.runs.delete(watch.id); }
-      }
+      for (const watch of (await this.load()).filter(candidate => candidate.owner === owner)) await this.stop(watch);
       await this.mutate(watches => { for (let index = watches.length - 1; index >= 0; index -= 1) if (watches[index]!.owner === owner) watches.splice(index, 1); });
       this.missingSince.delete(owner);
     }
@@ -276,22 +287,26 @@ export class Watches {
     const ended = now.state !== 'OPEN';
     if (ended) changes.push(`it was ${now.state === 'MERGED' ? 'merged' : 'closed without merging'}, so this Watch ends`);
     const known = [...new Set([...seen.threads, ...now.threads.map(thread => thread.id)])].slice(-maxThreadIds);
-    const moved = checks || conflict || now.conflict === false && seen.conflict || known.length !== seen.threads.length;
+    // checks running again forget how they last settled, so a re-run that fails again is told
+    const rerun = now.checks === 'pending' && seen.checks !== undefined;
+    const moved = checks || rerun || conflict || now.conflict === false && seen.conflict || known.length !== seen.threads.length;
     if (!moved && !ended) return;
     await this.emit(watch, () => {
-      watch.seen = { ...(checks ? { checks: { head: now.head, state: settled! } } : seen.checks === undefined ? {} : { checks: seen.checks }), conflict: now.conflict ?? seen.conflict, threads: known };
+      watch.seen = { ...(checks ? { checks: { head: now.head, state: settled! } } : seen.checks === undefined || rerun ? {} : { checks: seen.checks }), conflict: now.conflict ?? seen.conflict, threads: known };
       return changes.length === 0 ? undefined : `${changes.join('; ')}. ${now.url}`;
     }, ended);
   }
 
   private async compareReviewRequests(watch: ReviewRequestsWatch, now: ReviewRequest[]): Promise<void> {
     // each request is its own event on GitHub, so a re-request has a new id; one no longer listed is kept, so it is never new again
-    const fresh = now.filter(request => watch.seen[String(request.number)] !== request.request);
-    if (fresh.length === 0) return;
+    const changed = now.filter(request => watch.seen[String(request.number)] !== request.request);
+    if (changed.length === 0) return;
+    // a pull request seen before is re-requested only by a new request GitHub named, never by the stand-in for one it did not list
+    const fresh = changed.filter(request => { const before = watch.seen[String(request.number)]; return before === undefined || !isStandIn(before) && !isStandIn(request.request); });
     await this.emit(watch, () => {
       const lines = fresh.map(request => `#${request.number} ${watch.seen[String(request.number)] === undefined ? 'requests' : 're-requests'} your review: ${request.url}`);
-      watch.seen = Object.fromEntries([...Object.entries(watch.seen).filter(([number]) => !fresh.some(request => String(request.number) === number)), ...fresh.map(request => [String(request.number), request.request])].slice(-maxRequests));
-      return lines.join('; ');
+      watch.seen = Object.fromEntries([...Object.entries(watch.seen).filter(([number]) => !changed.some(request => String(request.number) === number)), ...changed.map(request => [String(request.number), request.request])].slice(-maxRequests));
+      return lines.length === 0 ? undefined : lines.join('; ');
     });
   }
 
@@ -346,6 +361,12 @@ export class Watches {
       await this.drop(watch);
       return;
     }
+    // events its owner's queue does not take (it is full, or throttled) are not kept without end
+    if (watch.outbox.length >= maxWaiting) {
+      await this.emit(watch, () => `it was stopped: ${maxWaiting} of its events are still waiting to reach you. Set it again once your queue has room.`, true);
+      await this.drop(watch);
+      return;
+    }
     run.recent.push(now);
     await this.emit(watch, () => {
       watch.read = run.base + run.taken;
@@ -364,7 +385,7 @@ export class Watches {
 
   private async exited(watch: CommandWatch, status: number | undefined): Promise<void> {
     await this.emit(watch, () => `the command exited${status === undefined ? ' on a signal' : ` with status ${status}`}, so this Watch ends.`, true);
-    if (watch.holder !== undefined) await this.options.commands.close(watch.holder);
+    await this.stop(watch);
   }
 
   // queue each Watch's waiting events to its owner in order; one that cannot be queued yet is tried again

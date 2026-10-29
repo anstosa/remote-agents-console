@@ -21,10 +21,8 @@ type Listener<T extends ConsoleEvent['type']> = (event: Extract<ConsoleEvent, { 
 export class ConsoleEvents {
   private readonly listeners = new Set<{ type: ConsoleEvent['type']; listener: (event: never) => void }>();
 
-  on<T extends ConsoleEvent['type']>(type: T, listener: Listener<T>): () => void {
-    const entry = { type, listener: listener as (event: never) => void };
-    this.listeners.add(entry);
-    return () => { this.listeners.delete(entry); };
+  on<T extends ConsoleEvent['type']>(type: T, listener: Listener<T>): void {
+    this.listeners.add({ type, listener: listener as (event: never) => void });
   }
 
   // a subscriber that throws never keeps the event from the others

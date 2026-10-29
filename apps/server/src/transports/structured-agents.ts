@@ -21,6 +21,8 @@ import type { StructuredTurnTransport } from '../prompts/service.js';
  */
 export type HolderRef = { agentId: string; socket: string; pane: string; tmuxSocket?: string; pid?: number; read?: number };
 /** The command a holder runs: the program and its arguments, its environment, and the setup run first. */
+/** Whether a holder's process has exited, with its exit status. */
+export type HolderStatus = { dead: boolean; status?: number };
 export type HolderLaunch = { program: string; args: string[]; env: Record<string, string>; setup?: string };
 /**
  * A structured Agent as the console stores it, from launch until Close: its kind, Place, whether

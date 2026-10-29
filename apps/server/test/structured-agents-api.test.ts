@@ -1940,16 +1940,22 @@ describe('the Conductor\'s Watches', () => {
     await app.watches.check();
     await app.watches.check();
     expect(await told()).toEqual([`[RAC event] Watch ${id} #1 (Pull request octo/repo#7): its checks failed on aaaaaaaaaaaa; a new unresolved review thread from alice. https://github.com/octo/repo/pull/7`]);
+    // the checks run again on the same head and fail again
+    github.pull.rollup = 'PENDING';
+    await app.watches.check();
+    github.pull.rollup = 'FAILURE';
+    await app.watches.check();
+    expect((await told())[1]).toBe(`[RAC event] Watch ${id} #2 (Pull request octo/repo#7): its checks failed on aaaaaaaaaaaa. https://github.com/octo/repo/pull/7`);
     // a conflict, and checks passing on a new head
     github.pull.mergeable = 'CONFLICTING';
     github.pull.head = 'b'.repeat(40);
     github.pull.rollup = 'SUCCESS';
     await app.watches.check();
-    expect((await told())[1]).toContain('its checks all passed on bbbbbbbbbbbb; a merge conflict appeared');
+    expect((await told())[2]).toContain('its checks all passed on bbbbbbbbbbbb; a merge conflict appeared');
     github.pull.state = 'MERGED';
     await app.watches.check();
-    expect((await told())[2]).toContain('it was merged, so this Watch ends');
-    expect(await told()).toHaveLength(3);
+    expect((await told())[3]).toContain('it was merged, so this Watch ends');
+    expect(await told()).toHaveLength(4);
     expect((await call('list_watches', {}, false)).data.watches).toEqual([]);
     // a pull request already merged is not watched
     expect(await call('watch_pull_request', { worktree_id: worktree, number: 7 })).toMatchObject({ ok: false, error: { code: 'conflict' } });
@@ -1995,6 +2001,12 @@ describe('the Conductor\'s Watches', () => {
     await app.watches.check();
     await app.watches.check();
     expect(await told()).toEqual([expect.any(String), `[RAC event] Watch ${id} #2 (Review requests in octo/repo): #3 re-requests your review: https://github.com/octo/repo/pull/3`]);
+    // a request GitHub's latest timeline items do not name is told once, and naming it later is no re-request
+    github.requests.push({ number: 9, events: [] });
+    await app.watches.check();
+    github.requests[github.requests.length - 1]!.events.push({ id: 'RR9', login: 'me' });
+    await app.watches.check();
+    expect((await told()).slice(2)).toEqual([`[RAC event] Watch ${id} #3 (Review requests in octo/repo): #9 requests your review: https://github.com/octo/repo/pull/9`]);
     await app.close();
   });
 
@@ -2109,11 +2121,8 @@ describe('the Conductor\'s Watches', () => {
     windows.print('two');
     await vi.waitFor(async () => expect(await told()).toHaveLength(2), { timeout: 2_000 });
     fake.emitTo(conductor, { type: 'turn', turn: { type: 'settled', message: 'Noted.' } });
-    await dashboard();
-    await new Promise(resolve => setTimeout(resolve, 50));
-    await dashboard();
+    await vi.waitFor(async () => { await dashboard(); expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: 'conductor', tag: 'conductor-throttled' })); }, { timeout: 2_000 });
     expect(events()).toHaveLength(1);
-    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: 'conductor', tag: 'conductor-throttled' }));
     await app.close();
   });
 });

@@ -17,6 +17,8 @@ export type PullRequestState = {
   checks?: 'pending' | 'passed' | 'failed';
   threads: Array<{ id: string; unresolved: boolean; author?: string }>;
 };
+/** What stands in for a request's id when GitHub's latest timeline items do not name it. */
+export const standInRequest = 'pull-';
 /** An open pull request asking the token's own user for a review, by the latest such request. */
 export type ReviewRequest = { number: number; url: string; request: string };
 
@@ -29,7 +31,7 @@ export interface WatchGithub {
 const pullRequestQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){
   state mergeable url headRefOid
   commits(last:1){nodes{commit{statusCheckRollup{state}}}}
-  reviewThreads(first:100){nodes{id isResolved isOutdated comments(first:1){nodes{author{login}}}}}
+  reviewThreads(last:100){nodes{id isResolved isOutdated comments(first:1){nodes{author{login}}}}}
 }}}`;
 // `user-review-requested` matches a request naming the user, not one of their teams
 const reviewRequestsQuery = `query($q:String!){viewer{login} search(query:$q,type:ISSUE,first:50){nodes{... on PullRequest{
@@ -70,7 +72,7 @@ export class GithubWatchReader implements WatchGithub {
       if (!Number.isInteger(number) || typeof url !== 'string') return [];
       // the latest request naming the user; a request GitHub no longer lists still counts once
       const request = nodes(at(pull, 'timelineItems')).filter(event => at(event, 'requestedReviewer', 'login') === viewer).map(event => at(event, 'id')).filter((id): id is string => typeof id === 'string').at(-1);
-      return [{ number: number as number, url, request: request ?? `pull-${String(number)}` }];
+      return [{ number: number as number, url, request: request ?? `${standInRequest}${String(number)}` }];
     });
   }
 
