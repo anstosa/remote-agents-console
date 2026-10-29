@@ -1,9 +1,11 @@
 packages:
   - apps/*
 allowBuilds:
+  '@google/genai': true
   argon2: true
   esbuild: true
   node-pty: true
+  protobufjs: true
 onlyBuiltDependencies:
   - argon2
   - esbuild
