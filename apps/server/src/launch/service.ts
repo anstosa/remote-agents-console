@@ -22,8 +22,8 @@ import type { HolderLaunch, HolderRef, HolderWindows } from '../transports/struc
 import { isFullGitSha } from '../git/revision.js';
 import { accountHome, configuredPlaces, placeHostRoot, scratchHome, scratchPlaceLabel, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
 
-/** How a structured Agent launches: resuming one Conversation, or a new one on a chosen model. */
-export type StructuredLaunchOptions = { resume?: string; model?: ModelSetting };
+/** How a structured Agent launches: resuming one Conversation, continuing the latest, or a new one on a chosen model. */
+export type StructuredLaunchOptions = { resume?: string; continue?: true; model?: ModelSetting };
 
 export function expandCommand(command: string, worktree: Pick<Worktree, 'identity'>): string {
   const directory = `'${worktree.identity.replaceAll("'", "'\\''")}'`;
@@ -111,9 +111,6 @@ export const scratchLabel = scratchPlaceLabel;
 // The session a directory-Project or Scratch Place's launches and Console shells start in, named
 // for its folder. tmux turns `.` into `_` in a session name, so the name is written that way up
 // front and the free-name check compares what tmux will actually list.
-// A structured kind is never remembered as a scope's Launch profile yet: resumes, Runs and New
-// task launch the remembered kind and then drive it as a pane, which a structured Agent has not
-const rememberable = (kind: AgentKind): boolean => structuredAdapterFor(kind) === undefined;
 // what a holder window runs while it is tagged, before the holder itself
 const holderPlaceholder = ['/bin/sh', '-c', 'sleep 30'];
 const placeSessionName = (place: Pick<Place, 'home' | 'hostPath'>): string => worktreeSessionName(placeHostRoot(place)).replaceAll('.', '_');
@@ -395,7 +392,7 @@ export class LaunchService implements HolderWindows {
     // refuse an unconfigured or unlaunchable kind
     if (resolved === undefined) return false;
     const launched = await this.launchInPlace(place, resolved, model);
-    if (launched && rememberable(resolved)) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
+    if (launched) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
     return launched;
   }
 
@@ -587,9 +584,9 @@ export class LaunchService implements HolderWindows {
       const sandboxed = input.sandboxed === true;
       let launched: boolean;
       if (structuredAdapterFor(kind) !== undefined) {
-        // a structured Agent launches fresh or on one exact Conversation, unsandboxed so far
-        if (input.mode === 'continue' || sandboxed) { console.warn(`[launch] ${worktree.identity}: ${kind} launches only fresh or on a named conversation, unsandboxed`); return false; }
-        launched = await this.launchStructured(worktreePlace(worktree), kind, { ...(input.conversationId === undefined ? {} : { resume: input.conversationId }), ...(input.model === undefined ? {} : { model: input.model }) });
+        // a structured Agent launches unsandboxed so far
+        if (sandboxed) { console.warn(`[launch] ${worktree.identity}: ${kind} launches only unsandboxed`); return false; }
+        launched = await this.launchStructured(worktreePlace(worktree), kind, { ...(input.conversationId === undefined ? {} : { resume: input.conversationId }), ...(input.mode === 'continue' ? { continue: true as const } : {}), ...(input.model === undefined ? {} : { model: input.model }) });
       } else {
         const id = randomBytes(18).toString('base64url');
         const command = await this.worktreeCommand(worktree, kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), sandboxed });
@@ -599,7 +596,7 @@ export class LaunchService implements HolderWindows {
       }
       // record the kind so it resolves first next time — for this Worktree and for its
       // Project (which seeds a fresh Worktree); storage failure never fails a live launch
-      if (launched && rememberable(kind)) {
+      if (launched) {
         await this.worktreeStore.rememberLaunchProfile(worktreeId, kind).catch(() => {});
         await this.worktreeStore.rememberLaunchProfile(worktree.projectId, kind).catch(() => {});
       }

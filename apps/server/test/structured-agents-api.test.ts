@@ -191,6 +191,22 @@ describe('a structured Agent over HTTP', () => {
     await app.close();
   });
 
+  it('remembers a Pi launch as the Worktree\'s Launch profile, and a restart continues its latest Conversation as Pi', async () => {
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake);
+    const worktreeOf = async () => (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects[0].worktrees[0];
+    const worktree = await worktreeOf();
+    expect(worktree.launch.origin).not.toBe('worktree');
+
+    const id: string = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers, payload: { kind: 'pi' } })).json().agentId;
+    expect((await worktreeOf()).launch).toMatchObject({ kind: 'pi', origin: 'worktree' });
+    const restarted = await app.inject({ method: 'POST', url: `/api/agents/${id}/restart`, headers });
+    expect(restarted.statusCode).toBe(201);
+    expect(fake.launches.at(-1)).toMatchObject({ kind: 'pi', continue: true });
+    expect(fake.launches.at(-1)!.model).toBeUndefined();
+    await app.close();
+  });
+
   it('launches in a Worktree, where the Agent is that Worktree\'s', async () => {
     const fake = fakeAgent();
     const { app, headers, dashboardAgent } = await consoleWith(fake);
@@ -855,6 +871,24 @@ describe('an Exited structured Agent', () => {
     await dashboardAgent(id);
     expect(fake.delivered).toEqual(['First', 'Second']);
     expect((await queued()).map((queued: { text: string }) => queued.text)).toEqual(['Third', 'Fourth']);
+    await app.close();
+  });
+
+  it('resumes onto a Conversation switched to from the Named list, keeping its id', async () => {
+    const fake = fakeAgent();
+    const { app, headers, dashboardAgent, root } = await consoleWith(fake);
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'pi'));
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects[0].worktrees[0];
+    const id: string = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'exited' });
+    const chosen = '01a188d1-e7d9-711a-aba8-381b96066aa6';
+    await piSession(join(root, 'pi'), join(root, 'repo'), chosen, 'Fix the parser');
+
+    const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/conversations/switch`, headers, payload: { kind: 'pi', id: chosen } });
+    expect(switched.statusCode).toBe(201);
+    expect(switched.json()).toEqual({ agentId: id });
+    expect(fake.launches.at(-1)).toMatchObject({ id, resume: chosen });
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'live' } });
     await app.close();
   });
 

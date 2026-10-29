@@ -32,7 +32,7 @@ export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; h
  * What a launch starts: one process of `kind` at `place`, for the Agent `id`, on a new
  * Conversation (on `model` when Allowed models are configured) or resuming the Conversation `resume`.
  */
-export type StructuredLaunch = { id: string; kind: AgentKind; place: Place; resume?: string; model?: ModelSetting };
+export type StructuredLaunch = { id: string; kind: AgentKind; place: Place; resume?: string; continue?: true; model?: ModelSetting };
 /** A running process the console is connected to, and how many of its lines the console has read. */
 export type StructuredProcess = { connection: StructuredConnection; holder: HolderRef; cursor?: () => number };
 /** Starts, reads and stops structured Agent processes; the holder in tmux outside tests. */
@@ -74,14 +74,14 @@ function clientOver(adapter: StructuredAdapter, holder: HolderRef, { channel, he
 /** The structured Agents' processes, each run under a holder in its Place's Workspace session. */
 export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs): StructuredProcesses {
   return {
-    async start({ id, kind, place, resume, model }, emit) {
+    async start({ id, kind, place, resume, continue: latest, model }, emit) {
       const adapter = structuredAdapterFor(kind);
       const configured = configs[kind];
       if (adapter === undefined || configured?.launchable !== true) return undefined;
       const located = resume === undefined ? undefined : await adapter.conversations.locate(resume, place.home);
       if (resume !== undefined && located === undefined) return undefined;
       const allowed = configured.allowedModels ?? [];
-      const spec = adapter.launch({ cwd: place.home, sandboxed: false, ...(located === undefined ? {} : { resume: located }), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
+      const spec = adapter.launch({ cwd: place.home, sandboxed: false, ...(located === undefined ? {} : { resume: located }), ...(latest === true ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
       const holder = await windows.openHolderWindow(place, id, { program: configured.program, args: [...spec.args, ...configured.args], env: { ...spec.env, ...configured.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
       if (holder === undefined) return undefined;
       const connected = await connectHolder(holder.socket);
@@ -171,8 +171,8 @@ export class StructuredAgents {
    * Conversation on `model`, else the first Allowed model, at the Effort asked for, else the
    * entry's default. False when its process could not start, or `model` is not an Allowed model.
    */
-  async launch(place: Place, kind: AgentKind, { resume, model }: { resume?: string; model?: ModelSetting } = {}): Promise<boolean> {
-    const entry = model === undefined ? (resume === undefined ? this.allowed(kind)[0] : undefined) : this.allowed(kind).find(candidate => candidate.model === model.model);
+  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model }: { resume?: string; continue?: true; model?: ModelSetting } = {}): Promise<boolean> {
+    const entry = model === undefined ? (resume === undefined && latest !== true ? this.allowed(kind)[0] : undefined) : this.allowed(kind).find(candidate => candidate.model === model.model);
     if (model !== undefined && entry === undefined) return false;
     const records = await this.load();
     const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed: false, lifecycle: 'starting', origin: 'operator', launchedAt: Date.now() };
@@ -180,7 +180,7 @@ export class StructuredAgents {
     records.push(record);
     this.live.set(record.id, live);
     const effort = model?.effort ?? entry?.effort;
-    const started = await this.start(record, live, { id: record.id, kind, place, ...(resume === undefined ? {} : { resume }), ...(entry === undefined ? {} : { model: { model: entry.model, ...(effort === undefined ? {} : { effort }) } }) });
+    const started = await this.start(record, live, { id: record.id, kind, place, ...(resume === undefined ? {} : { resume }), ...(latest === true ? { continue: true as const } : {}), ...(entry === undefined ? {} : { model: { model: entry.model, ...(effort === undefined ? {} : { effort }) } }) });
     if (started === undefined) {
       records.splice(records.indexOf(record), 1);
       this.live.delete(record.id);

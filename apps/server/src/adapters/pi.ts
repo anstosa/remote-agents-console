@@ -36,15 +36,15 @@ const extension = (): string => {
  * The Pi Adapter: structured-only (ADR 0002 amendment). Pi is never recognised in a pane, so it
  * has no `recognizes` match and no pane members; the console drives `pi --mode rpc` through the
  * Pi client, with the RAC extension always loaded. Its program is the console's own Node, which
- * runs the pinned CLI. A resume names the session file and no model, since `--model` would
- * override the model the Conversation was on.
+ * runs the pinned CLI. A resume names the session file (or continues the latest) and no model,
+ * since `--model` would override the model the Conversation was on.
  */
 export const piAdapter = {
   kind: 'pi',
-  launch: ({ resume, models }) => ({ args: [
+  launch: ({ resume, continue: latest, models }) => ({ args: [
     piProgram(), '--mode', 'rpc', '-e', extension(),
     ...(models === undefined || models.allowed.length === 0 ? [] : ['--models', models.allowed.join(',')]),
-    ...(resume !== undefined ? ['--session', resume] : models?.start === undefined ? [] : ['--model', models.start.model, ...(models.start.effort === undefined ? [] : ['--thinking', models.start.effort])])
+    ...(resume !== undefined ? ['--session', resume] : latest === true ? ['--continue'] : models?.start === undefined ? [] : ['--model', models.start.model, ...(models.start.effort === undefined ? [] : ['--thinking', models.start.effort])])
   ] }),
   client: piClient,
   steers: true,

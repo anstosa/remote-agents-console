@@ -487,11 +487,11 @@ export interface StructuredAdapter {
   pinned(): string | undefined;
 }
 /**
- * What a structured launch starts: a new Conversation, or the one at `resume` (located by the
- * kind's store); with Allowed models configured, `models` scopes the Agent to them and names the
- * model a new Conversation starts on.
+ * What a structured launch starts: a new Conversation, the one at `resume` (located by the
+ * kind's store), or (`continue`) the latest one started in `cwd`; with Allowed models configured,
+ * `models` scopes the Agent to them and names the model a new Conversation starts on.
  */
-export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; resume?: string; models?: { allowed: readonly string[]; start?: ModelSetting } };
+export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting } };
 /** One Allowed model (`adapters.pi.allowedModels`): an exact `provider/id` and an optional default Effort. */
 export type AllowedModel = { model: string; effort?: string };
 

@@ -3120,7 +3120,18 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const open = worktreeAgents(current.agents, worktree.id);
     // avoid an ambiguous destructive handoff
     if (open.length > 1) return reply.code(409).send({ error: 'Close duplicate worktree agents before switching chats.' });
-    const activeAgent = open[0];
+    let activeAgent: Agent | undefined = open[0];
+    // an Exited structured Agent of the row's kind resumes onto the Conversation, keeping its id
+    // and queue; one of another kind, or one that failed, is closed and replaced
+    if (activeAgent !== undefined && withoutProcess(activeAgent)) {
+      if (activeAgent.kind === resumeKind && activeAgent.structured?.lifecycle === 'exited') {
+        if (!await structuredAgents.resume(activeAgent.id, conversationId)) return reply.code(409).send({ error: 'Could not resume the conversation.' });
+        await dashboardUpdates.refresh().catch(() => undefined);
+        return reply.code(201).send({ agentId: activeAgent.id });
+      }
+      if (!await prompts.close(activeAgent.id)) return reply.code(409).send({ error: 'The worktree agent could not be closed.' });
+      activeAgent = undefined;
+    }
     // a structured Agent of the row's kind switches in place, between Turns, keeping its queue
     if (activeAgent?.transport === 'structured') {
       if (activeAgent.kind !== resumeKind) return reply.code(409).send({ error: 'Close this agent before resuming another kind\'s conversation here.' });
