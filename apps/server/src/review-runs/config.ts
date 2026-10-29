@@ -1,9 +1,10 @@
 import { z } from 'zod';
-import { acceptsReviewEffort, byReviewAgentKind, reviewAgentKinds, reviewEfforts, type ReviewAgentKind } from './kinds.js';
+import { agentChoiceProblem, agentChoiceShape, type AgentChoice } from '../launch/agent-choice.js';
+import { byReviewAgentKind, reviewAgentKinds, type ReviewAgentKind } from './kinds.js';
 
 export type ReviewRunMode = 'headless' | 'interactive';
-export type ResolvedReviewTour = { agent: ReviewAgentKind; model?: string; effort?: string; prompt: string };
-export type ReviewPreset = { id: string; label: string; agent: ReviewAgentKind; model?: string; effort?: string; prompt: string };
+export type ResolvedReviewTour = AgentChoice<ReviewAgentKind> & { prompt: string };
+export type ReviewPreset = AgentChoice<ReviewAgentKind> & { id: string; label: string; prompt: string };
 // the `review` section with every default filled: a run mode per kind, the tour's agent and
 // prompt, at least one preset, and a defaultPreset naming one of them (ADR 0010)
 export type ResolvedReviewConfig = { agents: Record<ReviewAgentKind, { mode: ReviewRunMode }>; tour: ResolvedReviewTour; presets: ReviewPreset[]; defaultPreset: string };
@@ -25,23 +26,21 @@ export const builtInCorrectnessPrompt = [
 ].join('\n\n');
 
 const reviewPrompt = z.string().trim().min(1).max(8_000).refine(value => !value.includes('\0'), 'NUL is forbidden');
-// a model name is one argv value after `-m`/`--model`, so it never starts like a flag
-export const reviewModel = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,199}$/u, 'model names are letters, digits and `._:/@[]-`');
-const reviewEffort = z.string().min(1).max(20);
 const reviewAgent = z.enum(reviewAgentKinds);
 const reviewMode = z.object({ mode: z.enum(['headless', 'interactive']).default('headless') }).strict();
 // a run mode per Review run kind, each optional
 const reviewAgents = z.object(byReviewAgentKind(() => reviewMode.optional())).strict();
-const reviewTour = z.object({ agent: reviewAgent.optional(), model: reviewModel.optional(), effort: reviewEffort.optional(), prompt: reviewPrompt.optional() }).strict();
+const reviewTour = z.object({ ...agentChoiceShape(reviewAgent.optional()), prompt: reviewPrompt.optional() }).strict();
 const reviewPresetId = z.string().regex(/^[a-zA-Z0-9_-]{1,40}$/u, 'preset ids are 1-40 letters, digits, `_` and `-`');
-const reviewPreset = z.object({ id: reviewPresetId, label: z.string().trim().min(1).max(80).refine(value => !value.includes('\0'), 'NUL is forbidden'), agent: reviewAgent, model: reviewModel.optional(), effort: reviewEffort.optional(), prompt: reviewPrompt }).strict();
+const reviewPreset = z.object({ id: reviewPresetId, label: z.string().trim().min(1).max(80).refine(value => !value.includes('\0'), 'NUL is forbidden'), ...agentChoiceShape(reviewAgent), prompt: reviewPrompt }).strict();
 export const reviewConfigSchema = z.object({ agents: reviewAgents.optional(), tour: reviewTour.optional(), presets: z.array(reviewPreset).max(20).optional(), defaultPreset: reviewPresetId.optional() }).strict();
 type ParsedReviewConfig = z.output<typeof reviewConfigSchema>;
 
 // refuse an agent that is not configured under `adapters`, or an effort it does not accept
 function checkRun(label: string, agent: ReviewAgentKind, effort: string | undefined, configured: (kind: ReviewAgentKind) => boolean, explicitAgent: boolean): void {
   if (explicitAgent && !configured(agent)) throw new Error(`${label} runs on ${agent}, which is not configured under adapters`);
-  if (effort !== undefined && !acceptsReviewEffort(agent, effort)) throw new Error(`${label} effort \`${effort}\` is not one of ${agent}'s levels: ${reviewEfforts[agent].join(', ')}`);
+  const problem = agentChoiceProblem(label, { agent, ...(effort === undefined ? {} : { effort }) });
+  if (problem !== undefined) throw new Error(problem);
 }
 
 // fill the `review` section's defaults and cross-check it against the configured adapters:

@@ -64,6 +64,8 @@ describe('review tour contracts', () => {
     expect(parseReviewTour({ ...tour, guide: { ...guide, extra: true } })).toBeUndefined();
     // a model is one argv value, so a stored one never starts like a flag
     expect(parseReviewTour({ ...tour, guide: { ...guide, model: '--dangerously-skip-permissions' } })).toBeUndefined();
+    // OpenRouter's rolling ids start with `~`
+    expect(parseReviewTour({ ...tour, guide: { ...guide, model: 'openrouter/~anthropic/claude-opus-latest' } })?.guide?.model).toBe('openrouter/~anthropic/claude-opus-latest');
   });
 });
 

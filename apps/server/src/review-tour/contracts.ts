@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ReviewCategory } from '../git/change-classification.js';
 import { objectId } from '../git/comparison.js';
-import { reviewModel } from '../review-runs/config.js';
+import { agentChoiceShape } from '../launch/agent-choice.js';
 import { reviewAgentKinds, validConversationId, type ReviewAgentKind } from '../review-runs/kinds.js';
 import type { ReviewRunCapability } from '../review-runs/runner.js';
 
@@ -77,7 +77,7 @@ const requestIdSchema = z.string().min(16).max(128).regex(/^[A-Za-z0-9_-]+$/u);
 const generatedStepSchema = z.object({ id: z.string().min(1).max(80), title: z.string().trim().min(1).max(240), explanation: z.string().trim().min(1).max(4_000), changeIds: z.array(z.string().min(8).max(100)).min(1).max(MAX_REVIEW_CHANGES) }).strict();
 const generatedTourSchema = z.object({ title: z.string().trim().min(1).max(240), overview: z.string().trim().min(1).max(2_000), steps: z.array(generatedStepSchema).min(1).max(MAX_REVIEW_CHANGES) }).strict();
 const reviewChangeSchema = z.object({ id: z.string().min(8).max(100), file: z.string().min(1).max(4_096), originalFile: z.string().min(1).max(4_096).optional(), category: z.enum(['implementation', 'test', 'doc']), kind: z.enum(['hunk', 'binary', 'rename', 'metadata', 'untracked']), oldStart: z.number().int().nonnegative().optional(), oldLines: z.number().int().nonnegative().optional(), newStart: z.number().int().nonnegative().optional(), newLines: z.number().int().nonnegative().optional(), patch: z.string().max(MAX_REVIEW_FILE_BYTES) }).strict();
-const guideSchema = z.object({ agent: z.enum(reviewAgentKinds), conversation: z.string().min(1).max(200), model: reviewModel.optional(), effort: z.string().min(1).max(20).optional() }).strict().refine(guide => validConversationId(guide.agent, guide.conversation));
+const guideSchema = z.object({ ...agentChoiceShape(z.enum(reviewAgentKinds)), conversation: z.string().min(1).max(200) }).strict().refine(guide => validConversationId(guide.agent, guide.conversation));
 // validate a stored conversation and how it runs, such as a tour's guide
 export function parseTourGuide(value: unknown): TourGuide | undefined {
   const parsed = guideSchema.safeParse(value);
