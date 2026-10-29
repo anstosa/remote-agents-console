@@ -2027,6 +2027,18 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if ((await structuredAgents.agent(id))?.structured?.lifecycle === 'exited') void structuredAgents.resume(id);
     return reply.code(204).send();
   });
+  // a structured Agent's Raw events: the latest lines between the console and its process
+  app.get('/api/agents/:id/raw-events', async (request, reply) => {
+    controlled(request);
+    const lines = await structuredAgents.rawEvents((request.params as { id: string }).id);
+    return lines === undefined ? reply.code(404).send({ error: 'target unavailable' }) : { lines };
+  });
+  // what a structured Agent's holder window shows, and its pane, which a tmux client can select
+  app.get('/api/agents/:id/holder-window', async (request, reply) => {
+    controlled(request);
+    const window = await structuredAgents.holderWindow((request.params as { id: string }).id);
+    return window ?? reply.code(404).send({ error: 'target unavailable' });
+  });
   // relaunch an Exited structured Agent on its Conversation, keeping its id and queue
   app.post('/api/agents/:id/resume', async (request, reply) => {
     controlled(request, true);

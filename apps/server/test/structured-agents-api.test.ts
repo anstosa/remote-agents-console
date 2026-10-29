@@ -68,7 +68,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
       launches.push(launch);
       if (reports) queueMicrotask(() => emit({ type: 'report', report: { ...report, version } }));
       if (exits) setTimeout(() => emit({ type: 'exited' }), 10);
-      return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9' }, connection: connection(), cursor: () => lines };
+      return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9' }, connection: connection(), cursor: () => lines, raw: () => [{ from: 'agent' as const, line: '{"type":"agent_start"}' }] };
     },
     attach: async (holder, _kind, events) => {
       attaches.push(holder);
@@ -204,6 +204,16 @@ describe('a structured Agent over HTTP', () => {
     expect(restarted.statusCode).toBe(201);
     expect(fake.launches.at(-1)).toMatchObject({ kind: 'pi', continue: true });
     expect(fake.launches.at(-1)!.model).toBeUndefined();
+    await app.close();
+  });
+
+  it('shows its raw event stream and its holder window, for debugging', async () => {
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/raw-events`, headers })).json()).toEqual({ lines: [{ from: 'agent', line: '{"type":"agent_start"}' }] });
+    expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/holder-window`, headers })).json()).toEqual({ pane: '%9', text: 'pi: could not load its extension' });
+    expect((await app.inject({ method: 'GET', url: '/api/agents/nobody/raw-events', headers })).statusCode).toBe(404);
     await app.close();
   });
 

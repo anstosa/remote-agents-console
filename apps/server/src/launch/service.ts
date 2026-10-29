@@ -793,11 +793,11 @@ export class LaunchService implements HolderWindows {
     return marks?.code === 0 && marks.stdout.trim() === `${holderPaneRole} ${holder.agentId}` ? socketArgs : undefined;
   }
 
-  // the last lines a holder's pane shows: its child's stderr, and the holder's exit line
-  async captureHolder(holder: HolderRef): Promise<string | undefined> {
+  // the last `lines` a holder's pane shows: its child's stderr, and the holder's exit line
+  async captureHolder(holder: HolderRef, lines = 40): Promise<string | undefined> {
     const socketArgs = await this.holderPane(holder);
     if (socketArgs === undefined) return undefined;
-    const captured = await run(this.tmux, [...socketArgs, 'capture-pane', '-p', '-J', '-t', holder.pane, '-S', '-40']);
+    const captured = await run(this.tmux, [...socketArgs, 'capture-pane', '-p', '-J', '-t', holder.pane, '-S', `-${lines}`]);
     return captured.code === 0 ? captured.stdout.trim() : undefined;
   }
 

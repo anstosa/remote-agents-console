@@ -19,11 +19,11 @@ function piRoot(): string {
   return root;
 }
 const piProgram = (): string => join(piRoot(), 'dist', 'bundle', 'cli.js');
-// the pinned Pi's version, read once
+// the pinned Pi's package and version, read once
 let pinnedVersion: string | undefined;
-const piVersion = (): string | undefined => {
+const piPinned = (): { package: string; version: string } | undefined => {
   try { pinnedVersion ??= (JSON.parse(readFileSync(join(piRoot(), 'package.json'), 'utf8')) as { version?: unknown }).version as string; } catch { return undefined; }
-  return typeof pinnedVersion === 'string' ? pinnedVersion : undefined;
+  return typeof pinnedVersion === 'string' ? { package: piPackage, version: pinnedVersion } : undefined;
 };
 
 // the RAC Pi extension beside this module, compiled in a build, its source otherwise (Pi loads both)
@@ -48,7 +48,7 @@ export const piAdapter = {
   ] }),
   client: piClient,
   steers: true,
-  pinned: piVersion,
+  pinned: piPinned,
   efforts: piEfforts,
   conversations: { validId: validPiSessionId, list: piConversationSummaries, readName: piConversationName, locate: locatePiSession }
 } satisfies StructuredAdapter;

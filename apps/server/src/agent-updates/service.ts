@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { gt, valid } from 'semver';
 import type { AgentKind } from '../adapters/types.js';
 import { agentKinds } from '../adapters/types.js';
+import { structuredAdapterFor } from '../adapters/registry.js';
 import type { ValidatedConfig } from '../config/schema.js';
 import { run } from '../tmux/command.js';
 import { serverCheckout, serverCheckoutOnHost } from '../workspaces/server-checkout.js';
@@ -18,7 +19,15 @@ const failedCacheTtlMs = 60_000;
 // quote one trusted command wrapper value for the host shell
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
-export type AgentUpdateStatus = { kind: AgentKind; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string };
+// a `pinned` kind's current version is the console's pin: it updates only with the console, never by a Run
+export type AgentUpdateStatus = { kind: AgentKind; currentVersion?: string; latestVersion?: string; updateAvailable: boolean; error?: string; pinned?: true };
+// the version an npm package's registry publishes as latest
+export type PublishedVersion = (name: string) => Promise<string | undefined>;
+const npmLatest: PublishedVersion = async name => {
+  const response = await fetch(`https://registry.npmjs.org/${name}/latest`, { signal: AbortSignal.timeout(statusTimeoutMs) });
+  const version = response.ok ? (await response.json() as { version?: unknown }).version : undefined;
+  return typeof version === 'string' ? normalizedVersion(version) : undefined;
+};
 type AgentUpdateResult = { outcome: 'updated'; status: AgentUpdateStatus } | { outcome: 'unavailable' } | { outcome: 'busy' } | { outcome: 'failed'; error?: string };
 export type AgentUpdateJob =
   | { id: string; kind: AgentKind; state: 'running' }
@@ -78,16 +87,16 @@ export class AgentUpdateService {
   private updating: AgentKind | undefined;
 
   // bind update commands to the launch account and host bridge
-  constructor(private readonly config: ValidatedConfig, private readonly home: string, runner?: AgentUpdateRunner, checkout: string = serverCheckout()) {
+  constructor(private readonly config: ValidatedConfig, private readonly home: string, runner?: AgentUpdateRunner, checkout: string = serverCheckout(), private readonly published: PublishedVersion = npmLatest) {
     this.checkout = checkout;
     // prefer the update repository while preserving legacy workspace overrides
     this.hostCheckout = serverCheckoutOnHost(config.projects, process.env.RAC_HOST_REPOSITORY?.trim() || process.env.RAC_HOST_WORKSPACE, checkout);
     this.runner = runner ?? ((command, timeoutMs) => this.runConfigured(command, timeoutMs));
   }
 
-  // publish every configured update-capable agent in registry order
+  // publish every configured update-capable or pinned agent in registry order
   async statuses(): Promise<AgentUpdateStatus[]> {
-    const kinds = agentKinds.filter(kind => this.config.adapters?.[kind]?.updates !== undefined);
+    const kinds = agentKinds.filter(kind => this.config.adapters?.[kind]?.updates !== undefined || this.config.adapters?.[kind] !== undefined && structuredAdapterFor(kind)?.pinned() !== undefined);
     return await Promise.all(kinds.map(kind => this.status(kind)));
   }
 
@@ -189,6 +198,8 @@ export class AgentUpdateService {
 
   // run and compare the configured current and upstream version commands
   private async refresh(kind: AgentKind): Promise<AgentUpdateStatus> {
+    const pin = structuredAdapterFor(kind)?.pinned();
+    if (pin !== undefined) return this.cached(kind, await this.pinnedStatus(kind, pin));
     const commands = this.config.adapters?.[kind]?.updates;
     // retain a safe fallback for a configuration change during runtime
     if (commands === undefined) return { kind, updateAvailable: false, error: 'Version check unavailable' };
@@ -200,10 +211,19 @@ export class AgentUpdateService {
     const latestVersion = latest.code === 0 ? normalizedVersion(latest.output) : undefined;
     const updateAvailable = currentVersion === undefined || latestVersion === undefined ? undefined : semanticUpdateAvailable(currentVersion, latestVersion);
     const failed = updateAvailable === undefined;
-    const status: AgentUpdateStatus = failed
-      ? { kind, updateAvailable: false, error: 'Version check failed' }
-      : { kind, currentVersion, latestVersion, updateAvailable };
-    this.cache.set(kind, { status, expiresAt: Date.now() + (failed ? failedCacheTtlMs : cacheTtlMs) });
+    return this.cached(kind, failed ? { kind, updateAvailable: false, error: 'Version check failed' } : { kind, currentVersion, latestVersion, updateAvailable });
+  }
+
+  // a pinned kind: its pin against the version its package's registry publishes
+  private async pinnedStatus(kind: AgentKind, pin: { package: string; version: string }): Promise<AgentUpdateStatus> {
+    const latestVersion = await this.published(pin.package).catch(() => undefined);
+    const updateAvailable = latestVersion === undefined ? undefined : semanticUpdateAvailable(pin.version, latestVersion);
+    return updateAvailable === undefined ? { kind, currentVersion: pin.version, updateAvailable: false, error: 'Version check failed', pinned: true } : { kind, currentVersion: pin.version, latestVersion, updateAvailable, pinned: true };
+  }
+
+  // keep a comparison, a failed one for less time
+  private cached(kind: AgentKind, status: AgentUpdateStatus): AgentUpdateStatus {
+    this.cache.set(kind, { status, expiresAt: Date.now() + (status.error === undefined ? cacheTtlMs : failedCacheTtlMs) });
     return status;
   }
 

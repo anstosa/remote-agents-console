@@ -33,8 +33,13 @@ export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; h
  * Conversation (on `model` when Allowed models are configured) or resuming the Conversation `resume`.
  */
 export type StructuredLaunch = { id: string; kind: AgentKind; place: Place; resume?: string; continue?: true; model?: ModelSetting };
-/** A running process the console is connected to, and how many of its lines the console has read. */
-export type StructuredProcess = { connection: StructuredConnection; holder: HolderRef; cursor?: () => number };
+/** One line between the console and an Agent's process, as it went over the wire. */
+export type RawLine = { from: 'agent' | 'console'; line: string };
+/**
+ * A running process the console is connected to, how many of its lines the console has read, and
+ * the latest lines either way (Raw events).
+ */
+export type StructuredProcess = { connection: StructuredConnection; holder: HolderRef; cursor?: () => number; raw?: () => readonly RawLine[] };
 /** Starts, reads and stops structured Agent processes; the holder in tmux outside tests. */
 export interface StructuredProcesses {
   /** Start the process and connect its protocol client, which reports through `emit`. */
@@ -44,15 +49,15 @@ export interface StructuredProcesses {
    * read (`holder.read`); undefined when the process is gone.
    */
   attach(holder: HolderRef, kind: AgentKind, emit: (event: StructuredEvent) => void): Promise<StructuredProcess | undefined>;
-  /** The process's recent stderr, shown when it fails. */
-  stderr(holder: HolderRef): Promise<string | undefined>;
+  /** The process's recent stderr, shown when it fails: what its holder window shows, its last `lines` (40). */
+  stderr(holder: HolderRef, lines?: number): Promise<string | undefined>;
   /** Stop the process and remove its holder, then run its kind's teardown in its home. */
   stop(holder: HolderRef, agent: { kind: AgentKind; home: string }): Promise<void>;
 }
 /** Opens, reads and removes holder windows in a Place's Workspace session. */
 export interface HolderWindows {
   openHolderWindow(place: Place, agentId: string, launch: HolderLaunch): Promise<HolderRef | undefined>;
-  captureHolder(holder: HolderRef): Promise<string | undefined>;
+  captureHolder(holder: HolderRef, lines?: number): Promise<string | undefined>;
   closeHolder(holder: HolderRef): Promise<void>;
 }
 
@@ -64,11 +69,17 @@ async function terminate(pid: number, graceMs = 5_000): Promise<void> {
   if (running(pid)) try { process.kill(pid, 'SIGKILL'); } catch { /* gone meanwhile */ }
 }
 
-// a protocol client over a holder connection, counting the child's lines it reads from the holder's cursor
+// the Raw events kept per Agent, each line cut short
+const maxRawLines = 500;
+const maxRawLine = 4_096;
+// a protocol client over a holder connection, counting the child's lines it reads from the
+// holder's cursor and keeping the latest lines either way
 function clientOver(adapter: StructuredAdapter, holder: HolderRef, { channel, hello }: { channel: LineChannel; hello: HolderHello }, emit: (event: StructuredEvent) => void, attached?: { dropped: number }): StructuredProcess {
   let read = hello.from;
-  const counted: LineChannel = { ...channel, onLine: listener => channel.onLine(line => { read += 1; listener(line); }) };
-  return { holder: { ...holder, pid: hello.pid }, connection: adapter.client(counted, emit, attached), cursor: () => read };
+  const raw: RawLine[] = [];
+  const keep = (from: RawLine['from'], line: string) => { raw.push({ from, line: line.slice(0, maxRawLine) }); raw.splice(0, raw.length - maxRawLines); };
+  const counted: LineChannel = { ...channel, send: line => { keep('console', line); channel.send(line); }, onLine: listener => channel.onLine(line => { read += 1; keep('agent', line); listener(line); }) };
+  return { holder: { ...holder, pid: hello.pid }, connection: adapter.client(counted, emit, attached), cursor: () => read, raw: () => raw };
 }
 
 /** The structured Agents' processes, each run under a holder in its Place's Workspace session. */
@@ -95,7 +106,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
       const connected = await connectHolder(holder.socket, { from: holder.read ?? 0, attempts: 3 });
       return connected === undefined ? undefined : clientOver(adapter, holder, connected, emit, { dropped: connected.hello.dropped });
     },
-    stderr: holder => windows.captureHolder(holder),
+    stderr: (holder, lines) => windows.captureHolder(holder, lines),
     async stop(holder, { kind, home }) {
       // the process is asked to stop, then killed; only while the window is still this Agent's holder
       if (holder.pid !== undefined && await windows.captureHolder(holder) !== undefined) await terminate(holder.pid);
@@ -114,7 +125,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
 // operation (a delivery, a Conversation or model change) is in flight. `turn` is how the latest
 // Turn ended; `draft` the text offered for the composer until the next prompt or steer, numbered
 // by `offers` so the web takes each one once
-type Live = { generation: number; connection?: StructuredConnection; cursor?: () => number; prompt?: string; offPin?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
+type Live = { generation: number; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -247,6 +258,7 @@ export class StructuredAgents {
     if (started === undefined) return undefined;
     live.connection = started.connection;
     live.cursor = started.cursor;
+    live.raw = started.raw;
     record.holder = started.holder;
     await this.save();
     this.changed(live);
@@ -275,9 +287,10 @@ export class StructuredAgents {
       }
       live.connection = attached.connection;
       live.cursor = attached.cursor;
+      live.raw = attached.raw;
       record.holder = attached.holder;
       // a deploy may have moved the pin on under it: it restarts on the pinned version once idle
-      const pinned = structuredAdapterFor(record.kind)?.pinned();
+      const pinned = structuredAdapterFor(record.kind)?.pinned()?.version;
       live.offPin = record.version !== undefined && pinned !== undefined && record.version !== pinned;
       await this.save();
       this.changed(live);
@@ -524,6 +537,18 @@ export class StructuredAgents {
     const shown = items.slice(-limit);
     const status: AgentStatusLine = { extension: [...live?.status.values() ?? []], ...live?.usage };
     return { items: shown.map(transcriptLine), earlier: items.length - shown.length, status, ...(live?.stderr === undefined ? {} : { stderr: live.stderr }) };
+  }
+
+  /** The latest lines between the console and the Agent's process (Raw events), oldest first. */
+  async rawEvents(id: string): Promise<readonly RawLine[] | undefined> {
+    return await this.has(id) ? this.live.get(id)?.raw?.() ?? [] : undefined;
+  }
+
+  /** What the Agent's holder window shows (its process's stderr), and its tmux pane. */
+  async holderWindow(id: string): Promise<{ pane: string; text: string } | undefined> {
+    const holder = (await this.load()).find(record => record.id === id)?.holder;
+    if (holder === undefined) return undefined;
+    return { pane: holder.pane, text: await this.processes.stderr(holder, 500).catch(() => undefined) ?? '' };
   }
 
   /** One transcript item in full, with a tool call's whole output and a script's source. */
