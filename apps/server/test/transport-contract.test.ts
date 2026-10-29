@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { piAdapter } from '../src/adapters/pi.js';
 import type { StructuredAdapter } from '../src/adapters/types.js';
 import { LaunchService } from '../src/launch/service.js';
@@ -91,6 +91,8 @@ async function launched(client: ContractClient): Promise<{ connection: Structure
 }
 
 describe.skipIf(!tmuxSocketsWork).each(clients)('the $name protocol client', client => {
+  beforeAll(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); });
+  afterAll(() => { vi.unstubAllEnvs(); });
   it('reports in once launched, unsandboxed, on its pinned version', async () => {
     const { next } = await launched(client);
     const report = await next('report');

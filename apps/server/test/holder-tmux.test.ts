@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DiscoveryService } from '../src/discovery/service.js';
 import { LaunchService } from '../src/launch/service.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
@@ -82,6 +82,8 @@ async function connect(socket: string, from = 0): Promise<{ channel: LineChannel
 }
 
 describe.skipIf(!tmuxSocketsWork)('the holder in a Workspace session', () => {
+  beforeAll(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); });
+  afterAll(() => { vi.unstubAllEnvs(); });
   it('passes lines through both ways and replays every line past the cursor a connection brings', async () => {
     const { place, launch } = await workspace();
     const holder = await launch.openHolderWindow(place, 'agent-1', echo(300));
