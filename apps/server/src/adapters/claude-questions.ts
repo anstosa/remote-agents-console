@@ -84,7 +84,7 @@ function withChat(question: Renderable, window: string): InlineQuestion {
   if (!window.includes(normalize(`${count + 2}. ${chatChoice}`))) return asInline(question);
   const descriptions = question.descriptions === undefined ? undefined : [...question.descriptions, ''];
   const rows = [...question.choices.keys(), count + 1];
-  return { ...asInline({ text: question.text, choices: [...question.choices, chatChoice], descriptions }), rows };
+  return { ...asInline({ text: question.text, choices: [...question.choices, chatChoice], descriptions }), pane: { rows } };
 }
 
 // the normalised last-80-line window. Claude pads blank rows below the dialog to
@@ -137,7 +137,7 @@ export function reportedClaudeQuestion(payload: string, capture: string): Inline
 export function claudeQuestionTextEntry(question: InlineQuestion, capture: string): TmuxKey[] | undefined {
   if (question.source !== 'structured') return undefined;
   // the text input is the row right after the options — the one row the choices skip
-  const options = question.rows === undefined ? question.choices.length : question.choices.length - 1;
+  const options = question.pane?.rows === undefined ? question.choices.length : question.choices.length - 1;
   const row = normalize(`${options + 1}. Type something.`);
   if (!captureWindow(capture).includes(row)) return undefined;
   return Array.from({ length: options }, (): TmuxKey => 'Down');

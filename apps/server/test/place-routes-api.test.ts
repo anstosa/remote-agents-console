@@ -64,7 +64,7 @@ async function tempFile(name: string): Promise<string> {
 
 describe('Terminals at a directory-Project or Scratch Place with no Agent', () => {
   it('lists the Place panes, disabling any live Agent pane', async () => {
-    const agent = stated({ id: 'socket:%1', paneId: '%1', sessionId: 'socket:$4', socketFingerprint: 'socket', home: '/data/notes', placeId: directoryPlace.id, title: 'Ready' });
+    const agent = stated({ id: 'socket:%1', pane: { paneId: '%1', sessionId: 'socket:$4', socketFingerprint: 'socket' }, home: '/data/notes', placeId: directoryPlace.id, title: 'Ready' });
     const placePanes = vi.fn(async () => [shell(), shell({ paneId: '%1', role: undefined, command: 'codex' })]);
     const app = await start({ launch: { placePanes }, discovery: { dashboard: async () => ({ ...idleDashboard, agents: [agent] }) } });
     try {
@@ -91,8 +91,8 @@ describe('Terminals at a directory-Project or Scratch Place with no Agent', () =
 
   it("opens a Console shell beside the Place's own Agent, not another Place's", async () => {
     // an Agent at another Place comes first, so only the Place match picks the right session
-    const elsewhere = stated({ id: 'socket:%3', paneId: '%3', sessionId: 'socket:$2', socketFingerprint: 'socket', home: '/repo', placeId: worktree.id, worktreeId: worktree.id, title: 'Ready' });
-    const agent = stated({ id: 'socket:%1', paneId: '%1', sessionId: 'socket:$7', socketFingerprint: 'socket', home: '/home/me/scratch', placeId: scratchPlace.id, title: 'Ready' });
+    const elsewhere = stated({ id: 'socket:%3', pane: { paneId: '%3', sessionId: 'socket:$2', socketFingerprint: 'socket' }, home: '/repo', placeId: worktree.id, worktreeId: worktree.id, title: 'Ready' });
+    const agent = stated({ id: 'socket:%1', pane: { paneId: '%1', sessionId: 'socket:$7', socketFingerprint: 'socket' }, home: '/home/me/scratch', placeId: scratchPlace.id, title: 'Ready' });
     const createConsoleShellWindow = vi.fn(async () => '%9');
     const app = await start({
       realLaunch: true,
@@ -183,7 +183,7 @@ describe('Notes at an idle directory-Project or Scratch Place', () => {
     const notes = new WorktreeNoteService(await tempFile('notes.json'));
     const placeNote = await notes.createWithText(folderNoteKey('/host/notes'), 'Plan', 'Draft the plan');
     // started by hand in a subfolder of the directory Project, on the host side of the bridge
-    const agent = stated({ id: 'socket:%3', paneId: '%3', sessionId: 'socket:$4', socketFingerprint: 'socket', home: '/host/notes/2026', placeId: directoryPlace.id, title: 'Ready' });
+    const agent = stated({ id: 'socket:%3', pane: { paneId: '%3', sessionId: 'socket:$4', socketFingerprint: 'socket' }, home: '/host/notes/2026', placeId: directoryPlace.id, title: 'Ready' });
     const app = await start({ notes, discovery: { target: async (id: string) => id === agent.id ? { agent, socket: testSocket } : undefined } });
     try {
       const listed = await app.inject({ method: 'GET', url: `/api/agents/${encodeURIComponent(agent.id)}/notes`, headers: read });

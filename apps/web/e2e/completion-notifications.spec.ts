@@ -166,7 +166,7 @@ for (const questionKind of ['structured', 'message'] as const) {
 
     await page.goto('/');
     await expect.poll(() => dashboardSocketReady(page)).toBe(true);
-    const question = questionKind === 'structured' ? { id: 'question-1', text: 'Choose a deployment target?', choices: ['Staging', 'Production'], paneId: '%1' } : undefined;
+    const question = questionKind === 'structured' ? { id: 'question-1', text: 'Choose a deployment target?', field: { kind: 'choice', choices: ['Staging', 'Production'] }, pane: { targetPaneId: '%1' } } : undefined;
     await emitDashboard(page, { generation: 2, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', projectId: 'remote-agents', worktreeId: 'cora', title: question === undefined ? 'Ready' : 'Action required', attention: question === undefined ? 'finished' : 'question', hasMessageQuestion: questionKind === 'message' ? true : undefined, worktreeLabel: 'Cora', question }], projects: [{ id: 'remote-agents', label: 'Remote Agents', available: true, worktrees: [{ id: 'cora', projectId: 'remote-agents', label: 'Cora', path: '/worktrees/cora', main: true, detached: false, locked: false, available: true, pinned: true, order: 0 }, { id: 'dave', projectId: 'remote-agents', label: 'Dave', path: '/worktrees/dave', main: false, detached: false, locked: false, available: true, pinned: true, order: 1 }] }] });
 
     await expect.poll(async () => await page.evaluate(() => (window as unknown as { __testNotifications: Array<{ title: string }> }).__testNotifications.map(notification => notification.title)), { timeout: 15_000 }).toEqual(['Question in Remote Agents']);

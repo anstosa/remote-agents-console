@@ -5,7 +5,7 @@ import { omxAdapter } from '../src/adapters/omx.js';
 
 const banner = '• Queued follow-up inputs\n  ? 1 question\n    alt + ↑ to answer\n\n› Ask Codex to do anything\n  gpt-6-astra · /repo · main';
 const socket = { fingerprint: 'socket', path: '/tmp/queued-question-test', device: 1, inode: 1 };
-const agent = { id: 'socket:%1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/repo', kind: 'codex', title: 'Ready', attention: 'finished' };
+const agent = { id: 'socket:%1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/repo', kind: 'codex', title: 'Ready', attention: 'finished' };
 
 // exercise real prompt guards without typing into a live agent
 function fixture() {
@@ -63,7 +63,7 @@ describe('native queued question activation', () => {
       { capture: async () => banner, sendKeys } as never,
       undefined, undefined, undefined,
       // expose an independent question on the adapter's structured channel
-      () => ({ ...omxAdapter, questions: { ...omxAdapter.questions, pending: async () => ({ id: 'structured-question', text: 'Which plan?', choices: ['Small', 'Broad'], source: 'structured', targetPaneId: '%2' }) } })
+      () => ({ ...omxAdapter, questions: { ...omxAdapter.questions, pending: async () => ({ id: 'structured-question', text: 'Which plan?', choices: ['Small', 'Broad'], source: 'structured', pane: { targetPaneId: '%2' } }) } })
     );
     await service.openQueuedQuestion(agent.id, banner, () => true);
     await expect(service.answerQuestion(agent.id, 'structured-question', 0)).resolves.toBe(true);
@@ -121,7 +121,7 @@ describe('native queued question activation', () => {
 
   // refuse a target replaced between capture and delivery
   it.each([
-    { agent: { ...agent, paneId: '%2' }, socket },
+    { agent: { ...agent, pane: { ...agent.pane, paneId: '%2' } }, socket },
     { agent, socket: { ...socket, fingerprint: 'other' } },
     { agent: { ...agent, kind: 'claude' }, socket }
   ])('revalidates target identity %j', async changed => {

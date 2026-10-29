@@ -34,7 +34,7 @@ describe('Codex question content', () => {
       '',
       'enter submit   ctrl+] skip   shift+→ main prompt'
     ].join('\n');
-    expect(parseCodexQuestion(capture)).toEqual({ text: question, choices, selectedIndex: 0, id: inlineQuestionId(question, choices), source: 'parsed' });
+    expect(parseCodexQuestion(capture)).toEqual({ text: question, choices, pane: { selectedIndex: 0 }, id: inlineQuestionId(question, choices), source: 'parsed' });
   });
 
   // width and highlight changes must not lose answer text or change its identity
@@ -56,8 +56,8 @@ describe('Codex question content', () => {
       'shift+→ main prompt'
     ].join('\n');
     const expected = { text: 'Which approach should I take?', choices: ['Small change Keep the existing API and add focused tests.', 'Broad change Replace the API and update every caller.', 'Other'], source: 'parsed' };
-    expect(parseCodexQuestion(wide)).toMatchObject({ ...expected, selectedIndex: 0 });
-    expect(parseCodexQuestion(narrow)).toEqual({ ...expected, selectedIndex: 1, id: parseCodexQuestion(wide)!.id });
+    expect(parseCodexQuestion(wide)).toMatchObject({ ...expected, pane: { selectedIndex: 0 } });
+    expect(parseCodexQuestion(narrow)).toEqual({ ...expected, pane: { selectedIndex: 1 }, id: parseCodexQuestion(wide)!.id });
   });
 
   // native hints and later prose are not part of the last answer
@@ -74,7 +74,7 @@ describe('Codex question content', () => {
   // current native counters use a slash and an unanswered count
   it.each(['Question 1/2 (2 unanswered)', 'Question 1/2 (1 unanswered)'])('excludes the native counter %s', header => {
     const capture = `${header}\nChoose an option.\n\n  1. First\n› 2. Second\n\ntab to add notes | enter to submit answer\n←/→ to navigate questions | esc to interrupt`;
-    expect(parseCodexQuestion(capture)).toEqual({ text: 'Choose an option.', choices: ['First', 'Second'], selectedIndex: 1, source: 'parsed', id: inlineQuestionId('Choose an option.', ['First', 'Second']) });
+    expect(parseCodexQuestion(capture)).toEqual({ text: 'Choose an option.', choices: ['First', 'Second'], pane: { selectedIndex: 1 }, source: 'parsed', id: inlineQuestionId('Choose an option.', ['First', 'Second']) });
   });
 
   // native labels and descriptions wrap independently in aligned terminal columns
@@ -91,7 +91,7 @@ describe('Codex question content', () => {
       '  tab to add notes | enter to submit answer | esc to interrupt'
     ].join('\n');
     const choices = ['Keep the complete status model Preserve the existing statuses and include debugging context.', 'Simplify labels Use fewer states.'];
-    expect(parseCodexQuestion(capture)).toEqual({ text: 'Choose an option.', choices, selectedIndex: 0, source: 'parsed', id: inlineQuestionId('Choose an option.', choices) });
+    expect(parseCodexQuestion(capture)).toEqual({ text: 'Choose an option.', choices, pane: { selectedIndex: 0 }, source: 'parsed', id: inlineQuestionId('Choose an option.', choices) });
     const wide = 'Choose an option.\n› 1. Keep the complete status model  Preserve the existing statuses and include debugging context.\n  2. Simplify labels                 Use fewer states.\ntab to add notes | enter to submit answer | esc to interrupt';
     expect(parseCodexQuestion(wide)).toEqual(parseCodexQuestion(capture));
   });
@@ -100,7 +100,7 @@ describe('Codex question content', () => {
   it('retains every option in a deeply wrapped menu', () => {
     const description = Array.from({ length: 20 }, (_, index) => `description part ${index + 1}`);
     const capture = ['Choose an approach', '', '› 1. First', ...description.map(line => `     ${line}`), '  2. Second', ...description.map(line => `     ${line}`), '  3. Other', 'enter submit   ctrl+] skip   shift+→ main prompt'].join('\n');
-    expect(parseCodexQuestion(capture)).toMatchObject({ text: 'Choose an approach', choices: [`First ${description.join(' ')}`, `Second ${description.join(' ')}`, 'Other'], selectedIndex: 0 });
+    expect(parseCodexQuestion(capture)).toMatchObject({ text: 'Choose an approach', choices: [`First ${description.join(' ')}`, `Second ${description.join(' ')}`, 'Other'], pane: { selectedIndex: 0 } });
   });
 
   // expanding a long active menu must not revive old menus from scrollback
@@ -113,7 +113,7 @@ describe('Codex question content', () => {
   it('skips a long rejected block before the current menu', () => {
     const staleChoices = Array.from({ length: 2000 }, (_, index) => `${index + 1}. Earlier item`);
     const capture = ['Which earlier item?', ...staleChoices, '• Working', '', 'Choose the current target', '› 1. First', '  2. Second'].join('\n');
-    expect(parseChoiceQuestion(capture)).toMatchObject({ text: 'Choose the current target', choices: ['First', 'Second'], selectedIndex: 0 });
+    expect(parseChoiceQuestion(capture)).toMatchObject({ text: 'Choose the current target', choices: ['First', 'Second'], pane: { selectedIndex: 0 } });
   });
 
   // later prose, progress, and drafts cannot own a previous menu's answer buttons
@@ -173,27 +173,27 @@ describe('Codex menu highlight', () => {
   it('retains the highlighted choice and keeps the id stable when it moves', () => {
     const first = parseChoiceQuestion(menu(0));
     const second = parseChoiceQuestion(menu(1));
-    expect(first).toMatchObject({ selectedIndex: 0 });
-    expect(second).toMatchObject({ selectedIndex: 1, choices: ['First model (current)', 'Second model', 'Third model'] });
+    expect(first).toMatchObject({ pane: { selectedIndex: 0 } });
+    expect(second).toMatchObject({ pane: { selectedIndex: 1 }, choices: ['First model (current)', 'Second model', 'Third model'] });
     expect(second?.id).toBe(first?.id);
   });
 
   // parse colored reasoning menus without treating a checked box as the cursor
   it('uses the caret rather than a checked option', () => {
     const question = parseChoiceQuestion('Choose reasoning\n  [x] 1. Low\n\x1b[32m❯ [ ] 2. High\x1b[0m\n  [ ] 3. Extra high');
-    expect(question).toMatchObject({ selectedIndex: 1, choices: ['Low', 'High', 'Extra high'] });
+    expect(question).toMatchObject({ pane: { selectedIndex: 1 }, choices: ['Low', 'High', 'Extra high'] });
   });
 
   // preserve the existing fallback for noninteractive numbered lists
   it('leaves the cursor unspecified when there is no highlight', () => {
-    expect(parseChoiceQuestion('Which environment?\n1. Staging\n2. Production')).not.toHaveProperty('selectedIndex');
+    expect(parseChoiceQuestion('Which environment?\n1. Staging\n2. Production')).not.toHaveProperty('pane');
   });
 
   // quoted or malformed lists do not identify a unique keyboard cursor
   it.each(['>', '›', '❯'])('ignores ambiguous %s markers on multiple rows', marker => {
     const question = parseChoiceQuestion(`Which environment?\n${marker} 1. Staging\n${marker} 2. Production\n${marker} 3. Cancel`);
     expect(question).toMatchObject({ choices: ['Staging', 'Production', 'Cancel'] });
-    expect(question).not.toHaveProperty('selectedIndex');
+    expect(question).not.toHaveProperty('pane');
   });
 });
 
@@ -208,7 +208,7 @@ describe('Codex menu navigation', () => {
     { selected: 0, index: 2, keys: ['Down', 'Down', 'Enter'] }
   ])('selects index $index from highlighted index $selected', ({ selected, index, keys }) => {
     const question = parseCodexQuestion(menu(selected));
-    expect(question).toMatchObject({ selectedIndex: selected });
-    expect(codexSubmission.selectOption(index, question?.selectedIndex)).toEqual(keys);
+    expect(question).toMatchObject({ pane: { selectedIndex: selected } });
+    expect(codexSubmission.selectOption(index, question?.pane?.selectedIndex)).toEqual(keys);
   });
 });

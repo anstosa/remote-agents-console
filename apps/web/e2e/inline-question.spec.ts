@@ -9,24 +9,24 @@ import { installPaneMock, seedPaneSize, pushBytes, pushQuestion } from './pane-s
 const strictQuestion = {
   id: 'question-strict',
   text: 'Which strict-mode end state should govern this cleanup?',
-  choices: [
+  field: { kind: 'choice', choices: [
     'Global strict only (Recommended)   Set the UI project to strict.',
     'Keep targeted checker              Enable global strict with a targeted checker.',
     'Markers only',
     'None of the above                  Optionally type a different answer.'
-  ],
+  ] },
   source: 'parsed'
 };
 const deployQuestion = {
   id: 'question-deploy',
   text: 'Which deployment environment should receive this release?',
-  choices: ['Staging', 'Production', 'Cancel'],
+  field: { kind: 'choice', choices: ['Staging', 'Production', 'Cancel'] },
   source: 'parsed'
 };
 const modelQuestion = {
   id: 'question-model',
   text: 'Select Model and Effort',
-  choices: [
+  field: { kind: 'choice', choices: [
     'gpt-6-astra (current)  Our most capable model for complex, demanding work.',
     'gpt-5.6-sol            Reliable agentic workhorse for everyday tasks.',
     'gpt-5.6-terra          Balanced agentic coding model for everyday work.',
@@ -34,7 +34,7 @@ const modelQuestion = {
     'gpt-5.5                Proven previous-generation model for coding and general work.',
     'gpt-5.4-mini           Small, fast, and cost-efficient model for simpler coding tasks.',
     'gpt-5.3-codex-spark    Ultra-fast coding model.'
-  ],
+  ] },
   source: 'parsed'
 };
 
@@ -232,7 +232,7 @@ test('shows reported option descriptions and switches the picker to the normal p
   });
   await page.goto('/');
   await seedPaneSize(page, 'agent-1', 80, 24);
-  await pushQuestion(page, 'agent-1', { id: 'question-fruit', text: 'Which fruit?', choices: ['Apple', 'Banana'], descriptions: ['A crisp red fruit', ''], source: 'structured' });
+  await pushQuestion(page, 'agent-1', { id: 'question-fruit', text: 'Which fruit?', field: { kind: 'choice', choices: ['Apple', 'Banana'], descriptions: ['A crisp red fruit', ''] }, source: 'structured' });
 
   const choices = page.locator('.question-choice');
   await expect(choices.nth(0).locator('small')).toHaveText('A crisp red fruit');

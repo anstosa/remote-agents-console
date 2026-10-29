@@ -13,7 +13,7 @@ import { gitCommonDir, listWorktrees, type WorktreeEntry } from '../git/worktree
 import { worktreeManagementAvailability } from '../worktrees/management.js';
 import type { WorktreeLaunchStore } from '../worktrees/store.js';
 import type { Adapter, AdapterConfigs, AgentKind, AttentionState, Conversation, ConversationSummary, InlineQuestion } from '../adapters/types.js';
-import type { Agent, AgentPane, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree, GitComparisonSummary, GitStatusSummary, GitUpstreamSummary, Pane, Project, SocketRef, Worktree } from '../domain/models.js';
+import type { Agent, AgentPane, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree, GitComparisonSummary, GitStatusSummary, GitUpstreamSummary, Pane, Project, SocketRef, TmuxAgent, Worktree } from '../domain/models.js';
 import { agentPanel } from '../transports/transport.js';
 import { withQuestionShape } from '../adapters/inline-questions.js';
 import { addUntrackedLineStats, comparisonAgainst, prComparisonCandidates, workingStatus } from '../git/comparison.js';
@@ -193,7 +193,7 @@ export class DiscoveryService {
   }
   // the Place a discovered agent belongs to: its session's; a modal update advisor is never placed
   private placeOf(agent: Agent, places: readonly Place[]): Place | undefined {
-    const mark = this.sessionMarks.get(agent.sessionId);
+    const mark = agent.pane === undefined ? undefined : this.sessionMarks.get(agent.pane.sessionId);
     return isUpdateAdvisorLabel(agent.displayLabel) || mark === undefined ? undefined : markedPlace(places, mark);
   }
   // Claim each unmarked session the last scan saw, once: a session the console did not create
@@ -375,7 +375,7 @@ export class DiscoveryService {
       const attention = resolveAttention({ kind: recognized.kind, title: pane.title, reported, hasQuestion: false });
       const conversationId = pane.reportedSession !== undefined && pane.reportedSession.length > 0 ? pane.reportedSession : undefined;
       const agentPane: AgentPane = { paneId: pane.paneId, sessionId: `${pane.socket.fingerprint}:${pane.sessionId}`, socketFingerprint: pane.socket.fingerprint, ...(pane.paneMode === undefined ? {} : { paneMode: pane.paneMode }) };
-      const agent: Agent = { id, ...agentPane, home, title: pane.title, kind: recognized.kind, attention, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }), transport: 'tmux', panel: agentPanel('tmux'), pane: agentPane };
+      const agent: Agent = { id, home, title: pane.title, kind: recognized.kind, attention, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }), transport: 'tmux', panel: agentPanel('tmux'), pane: agentPane };
       return agent;
     }))).filter((agent): agent is Agent => agent !== undefined);
     const sessionKey = (pane: Pane) => `${pane.socket.fingerprint}:${pane.sessionId}`;
@@ -408,7 +408,7 @@ export class DiscoveryService {
     return agents;
   }
   // resolve known panes without blocking on dashboard enrichment
-  async target(id: string, force = false): Promise<{ agent: Agent; socket: SocketRef } | undefined> {
+  async target(id: string, force = false): Promise<{ agent: TmuxAgent; socket: SocketRef } | undefined> {
     // refresh launch-sensitive pane state on demand
     if (force) await this.refresh(true);
     // discover only targets absent from the runtime snapshot
@@ -416,10 +416,10 @@ export class DiscoveryService {
     return await this.snapshotTarget(id);
   }
   // resolve a pane from the current snapshot only, for callers that must not wait on a scan
-  async snapshotTarget(id: string): Promise<{ agent: Agent; socket: SocketRef } | undefined> {
-    const agent = this.snapshot.find(candidate => candidate.id === id);
+  async snapshotTarget(id: string): Promise<{ agent: TmuxAgent; socket: SocketRef } | undefined> {
+    const agent = this.snapshot.find((candidate): candidate is TmuxAgent => candidate.id === id && candidate.pane !== undefined);
     if (agent === undefined) return undefined;
-    const socket = (await this.sockets()).find(candidate => candidate.fingerprint === agent.socketFingerprint);
+    const socket = (await this.sockets()).find(candidate => candidate.fingerprint === agent.pane.socketFingerprint);
     return socket === undefined ? undefined : { agent, socket };
   }
 
@@ -666,14 +666,15 @@ export class DiscoveryService {
   // fresh capture. One capture per dashboard build per agent that holds a payload.
   private async agentQuestion(agent: Agent, workspace: string): Promise<InlineQuestion | undefined> {
     const questions = adapterFor(agent.kind)?.questions;
-    if (questions === undefined) return undefined;
-    const pending = await questions.pending?.(workspace, agent.paneId);
+    if (questions === undefined || agent.pane === undefined) return undefined;
+    const { paneId, socketFingerprint } = agent.pane;
+    const pending = await questions.pending?.(workspace, paneId);
     if (pending !== undefined || questions.reported === undefined) return pending;
     const payload = this.paneQuestionPayloads.get(agent.id);
     if (payload === undefined) return undefined;
-    const socket = this.socketSnapshot.find(candidate => candidate.fingerprint === agent.socketFingerprint);
+    const socket = this.socketSnapshot.find(candidate => candidate.fingerprint === socketFingerprint);
     if (socket === undefined) return undefined;
-    const capture = await this.tmux.capture(socket, agent.paneId).catch(() => undefined);
+    const capture = await this.tmux.capture(socket, paneId).catch(() => undefined);
     return capture === undefined ? undefined : questions.reported(payload, capture);
   }
 

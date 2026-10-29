@@ -7,9 +7,7 @@ const secret = 'status-secret-with-at-least-thirty-two-bytes';
 const remote = { url: new URL('https://framework.example') };
 const agent = (title: string, unread = false, overrides: Partial<Agent> = {}) => ({
   id: 'socket:%1',
-  paneId: '%1',
-  sessionId: '$1',
-  socketFingerprint: 'socket',
+  pane: { paneId: '%1', sessionId: '$1', socketFingerprint: 'socket' },
   home: '/workspace',
   title,
   kind: 'codex' as const,
@@ -29,7 +27,7 @@ describe('instance attention', () => {
   });
 
   it('prioritizes questions over active work', () => {
-    const question = { id: 'question-1', text: 'Deploy?', choices: ['Yes', 'No'], source: 'structured' as const, targetPaneId: '%2' };
+    const question = { id: 'question-1', text: 'Deploy?', choices: ['Yes', 'No'], source: 'structured' as const, pane: { targetPaneId: '%2' } };
 
     expect(instanceAttention({ agents: [agent('⠋ Working'), agent('Ready', false, { question })] })).toBe('question');
   });

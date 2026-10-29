@@ -118,13 +118,13 @@ export class TmuxTransport implements AgentTransport {
     if (adapter === undefined || reset === undefined) return false;
     const composed = adapter.submission.prepare(reset, 'prompt');
     const buffer = `rac-${randomBytes(18).toString('base64url')}`;
-    if (!await this.tmux.pastePrompt(first.socket, first.agent.paneId, buffer, composed.text)) return false;
+    if (!await this.tmux.pastePrompt(first.socket, first.agent.pane.paneId, buffer, composed.text)) return false;
     // re-read so the submit keys reflect send-time state and the pane is still the same one
     const submitTarget = await this.discovery.target(agentId, true);
-    if (submitTarget === undefined || submitTarget.socket.fingerprint !== first.socket.fingerprint || submitTarget.agent.paneId !== first.agent.paneId) return false;
+    if (submitTarget === undefined || submitTarget.socket.fingerprint !== first.socket.fingerprint || submitTarget.agent.pane.paneId !== first.agent.pane.paneId) return false;
     // an idle pane takes the Adapter's idle keys (Codex submits `/new` with Enter, not Tab)
     const keys = agentAttentionState(submitTarget.agent) === 'finished' ? composed.idleKeys ?? composed.keys : composed.keys;
-    const submitted = await this.tmux.sendKeys(submitTarget.socket, submitTarget.agent.paneId, keys);
+    const submitted = await this.tmux.sendKeys(submitTarget.socket, submitTarget.agent.pane.paneId, keys);
     // clear stale prose questions after delivery
     if (submitted) this.discovery.invalidateMessageQuestion?.(agentId);
     return submitted;
@@ -143,8 +143,8 @@ export class TmuxTransport implements AgentTransport {
     const release = this.locks.begin(agentId);
     if (release === undefined) return 'busy';
     try {
-      if (!again && !await this.tmux.pastePrompt(target.socket, target.agent.paneId, `rac-${randomBytes(18).toString('base64url')}`, rename.text)) return 'unsent';
-      return await this.tmux.sendKeys(target.socket, target.agent.paneId, rename.keys) ? 'sent' : 'stuck';
+      if (!again && !await this.tmux.pastePrompt(target.socket, target.agent.pane.paneId, `rac-${randomBytes(18).toString('base64url')}`, rename.text)) return 'unsent';
+      return await this.tmux.sendKeys(target.socket, target.agent.pane.paneId, rename.keys) ? 'sent' : 'stuck';
     } finally { release(); }
   }
 
@@ -154,24 +154,24 @@ export class TmuxTransport implements AgentTransport {
     const release = submission === undefined ? undefined : this.locks.begin(target.agent.id);
     if (submission === undefined || release === undefined) return;
     const composed = submission.prepare(prompt, 'prompt');
-    try { await this.tmux.sendKeys(target.socket, target.agent.paneId, composed.idleKeys ?? composed.keys).catch(() => false); }
+    try { await this.tmux.sendKeys(target.socket, target.agent.pane.paneId, composed.idleKeys ?? composed.keys).catch(() => false); }
     finally { release(); }
   }
 
   async capture(target: TmuxTarget): Promise<string | undefined> {
-    return await this.tmux.capture(target.socket, target.agent.paneId).catch(() => undefined);
+    return await this.tmux.capture(target.socket, target.agent.pane.paneId).catch(() => undefined);
   }
 
   // leave a pane mode (a picker or copy mode) the Agent's pane is in
   async exitPaneMode(agentId: string): Promise<boolean | undefined> {
     const target = await this.discovery.target(agentId);
-    return target === undefined ? undefined : await this.tmux.exitPaneMode(target.socket, target.agent.paneId);
+    return target === undefined ? undefined : await this.tmux.exitPaneMode(target.socket, target.agent.pane.paneId);
   }
 
   // hand an interactive Review run's Agent back to its Worktree by dropping its run mark
   async unmarkReviewRun(agentId: string): Promise<boolean> {
     const target = await this.discovery.target(agentId);
-    return target !== undefined && await this.tmux.unmarkReviewRun(target.socket, target.agent.paneId);
+    return target !== undefined && await this.tmux.unmarkReviewRun(target.socket, target.agent.pane.paneId);
   }
 
   // mark one advisor reusable only after its initial prompt is scheduled
@@ -180,7 +180,7 @@ export class TmuxTransport implements AgentTransport {
     if (!isFullGitSha(targetSha)) return false;
     const target = await this.discovery.target(agentId);
     if (target === undefined || target.agent.displayLabel !== updateAdvisorPendingLabel(targetSha)) return false;
-    return await this.tmux.label(target.socket, target.agent.paneId, updateAdvisorLabel(targetSha));
+    return await this.tmux.label(target.socket, target.agent.pane.paneId, updateAdvisorLabel(targetSha));
   }
 
   // the reset boundary holding this scope's queue: the Agent that owns it and how far it settled
@@ -237,7 +237,7 @@ export class TmuxTransport implements AgentTransport {
   async externalReset(agentId: string, adapter: AdapterView | undefined): Promise<PaneSnapshot | undefined> {
     const target = await this.discovery.target(agentId, true);
     const capability = adapter?.newConversation;
-    const capture = target === undefined ? undefined : await this.tmux.capture(target.socket, target.agent.paneId).catch(() => undefined);
+    const capture = target === undefined ? undefined : await this.tmux.capture(target.socket, target.agent.pane.paneId).catch(() => undefined);
     if (target === undefined || capability === undefined || capture === undefined
       || agentAttentionState(target.agent) !== 'finished' || capability.ready(paneSnapshot(target.agent), capture).state !== 'ready'
       || !capability.composerEmpty(capture)) return undefined;
@@ -295,7 +295,7 @@ export class TmuxTransport implements AgentTransport {
       return { status: 'refused' };
     }
     // a rejected paste does not establish ownership of pre-existing native text
-    if (!await this.tmux.pastePrompt(pasteTarget.socket, pasteTarget.agent.paneId, buffer, composed.text)) {
+    if (!await this.tmux.pastePrompt(pasteTarget.socket, pasteTarget.agent.pane.paneId, buffer, composed.text)) {
       await this.removeStaged(workspace, staged);
       return { status: 'refused' };
     }
@@ -340,7 +340,7 @@ export class TmuxTransport implements AgentTransport {
       ...(rolloutBaseline === undefined ? {} : { baseline: rolloutBaseline }),
       socketFingerprint: second.socket.fingerprint,
       socketPath: second.socket.path,
-      paneId: second.agent.paneId,
+      paneId: second.agent.pane.paneId,
       ...(first.processId === undefined ? {} : { processId: first.processId }),
       sentAt: calendarSentAt
     }).catch(() => ({}));
@@ -358,7 +358,7 @@ export class TmuxTransport implements AgentTransport {
     }
     // preserve operator edits made while the initial baseline was being read
     if (settle) {
-      const captured = await this.tmux.capture(submitTarget.socket, submitTarget.agent.paneId).catch(() => undefined);
+      const captured = await this.tmux.capture(submitTarget.socket, submitTarget.agent.pane.paneId).catch(() => undefined);
       // first-paste delivery permits an exact collapsed label but never known edits
       if (captured === undefined || observeDraft(captured, composed.text) !== 'visible' || adapter.submission.ownsDraft?.(captured, composed.text) === false) {
         return abortBeforeKeys();
@@ -368,7 +368,7 @@ export class TmuxTransport implements AgentTransport {
       if (!submitTarget || agentAttentionState(submitTarget.agent) === 'question') {
         return abortBeforeKeys();
       }
-      const latestCapture = await this.tmux.capture(submitTarget.socket, submitTarget.agent.paneId).catch(() => undefined);
+      const latestCapture = await this.tmux.capture(submitTarget.socket, submitTarget.agent.pane.paneId).catch(() => undefined);
       // lifecycle scans can outlast the draft and must not authorize stale input
       if (latestCapture === undefined || observeDraft(latestCapture, composed.text) !== 'visible' || adapter.submission.ownsDraft?.(latestCapture, composed.text) === false || !this.submissionProcessCurrent(agentId, second) || agentAttentionState(submitTarget.agent) === 'question') {
         return abortBeforeKeys();
@@ -381,8 +381,8 @@ export class TmuxTransport implements AgentTransport {
     const submittedAt = Date.now();
     const resetBefore = paneSnapshot(submitTarget.agent);
     // arm and submit Claude in one ordered tmux batch after exact draft ownership
-    const submittedWithArm = calendarIntent?.arm === undefined ? undefined : await this.tmux.armAndSendKeys(submitTarget.socket, submitTarget.agent.paneId, calendarIntent.arm, keys).catch(() => false);
-    let submitted = submittedWithArm ?? await this.tmux.sendKeys(submitTarget.socket, submitTarget.agent.paneId, keys).catch(() => false);
+    const submittedWithArm = calendarIntent?.arm === undefined ? undefined : await this.tmux.armAndSendKeys(submitTarget.socket, submitTarget.agent.pane.paneId, calendarIntent.arm, keys).catch(() => false);
+    let submitted = submittedWithArm ?? await this.tmux.sendKeys(submitTarget.socket, submitTarget.agent.pane.paneId, keys).catch(() => false);
     // allow reset redraws their startup budget without weakening prompt acknowledgement
     const acceptUntil = reset ? submittedAt + conversationResetGraceMs : Date.now() + submissionAcceptGraceMs;
     // inspect ambiguous transport failures too before abandoning a pasted draft
@@ -470,7 +470,7 @@ export class TmuxTransport implements AgentTransport {
       lost = settling === 'lost';
       // a visible composer during startup is not permission to submit
       if (settling === 'settled' && snapshot.attention === 'finished') {
-        const capture = await this.tmux.capture(target.socket, target.agent.paneId).catch(() => undefined);
+        const capture = await this.tmux.capture(target.socket, target.agent.pane.paneId).catch(() => undefined);
         // wait through loading, drafts, and dialogs without pasting into them
         if (capture !== undefined && capability.ready(snapshot, capture).state === 'ready' && capability.composerEmpty(capture)) {
           // another observer may already have advanced to a newer reset
@@ -499,7 +499,7 @@ export class TmuxTransport implements AgentTransport {
       const current = await this.submissionTarget(agentId, target, false).catch(() => undefined);
       // never render-gate a replacement pane or native question
       if (current === undefined || agentAttentionState(current.agent) === 'question') return false;
-      const captured = await this.tmux.capture(current.socket, current.agent.paneId).catch(() => undefined);
+      const captured = await this.tmux.capture(current.socket, current.agent.pane.paneId).catch(() => undefined);
       const rendered = captured !== undefined && observeDraft(captured, prompt) === 'visible';
       // retain only uninterrupted live-composer rendering
       if (!rendered) renderedSince = undefined;
@@ -519,7 +519,7 @@ export class TmuxTransport implements AgentTransport {
       const current = await this.submissionTarget(agentId, target, false).catch(() => undefined);
       // read the original pane without writing when discovery temporarily loses it
       const observed = current ?? target;
-      const captured = await this.tmux.capture(observed.socket, observed.agent.paneId).catch(() => undefined);
+      const captured = await this.tmux.capture(observed.socket, observed.agent.pane.paneId).catch(() => undefined);
       draft = captured === undefined ? undefined : submission.observeDraft!(captured, composed.text);
       // bound rollout reads while checking before retries and final recovery
       const checkReceipt = draft === 'cleared' || attempt === 0 || submissionRetryAttempts.has(attempt) || attempt === acceptAttempts - 1;
@@ -538,7 +538,7 @@ export class TmuxTransport implements AgentTransport {
         if (retryTarget === undefined || agentAttentionState(retryTarget.agent) === 'question') return false;
         // a slow identity scan cannot extend the retry deadline
         if (Date.now() >= acceptUntil) break;
-        const latestCapture = await this.tmux.capture(retryTarget.socket, retryTarget.agent.paneId).catch(() => undefined);
+        const latestCapture = await this.tmux.capture(retryTarget.socket, retryTarget.agent.pane.paneId).catch(() => undefined);
         // terminal captures also consume the bounded acceptance window
         if (Date.now() >= acceptUntil) break;
         // preserve any replacement or question observed during capture
@@ -550,7 +550,7 @@ export class TmuxTransport implements AgentTransport {
         if (latestCapture === undefined || latestDraft !== 'visible' || submission.ownsDraft?.(latestCapture, composed.text) !== true || !this.submissionProcessCurrent(agentId, target)) continue;
         const keys = agentAttentionState(retryTarget.agent) === 'finished' ? composed.idleKeys ?? composed.keys : composed.keys;
         // inspect again after transport failure rather than immediately giving up
-        await this.tmux.sendKeys(retryTarget.socket, retryTarget.agent.paneId, keys).catch(() => false);
+        await this.tmux.sendKeys(retryTarget.socket, retryTarget.agent.pane.paneId, keys).catch(() => false);
       }
       await new Promise(resolve => setTimeout(resolve, composerRenderPollMs));
     }
@@ -559,7 +559,7 @@ export class TmuxTransport implements AgentTransport {
       const current = await this.submissionTarget(agentId, target).catch(() => undefined);
       // never recover through a replacement pane
       if (current === undefined) return false;
-      const captured = await this.tmux.capture(current.socket, current.agent.paneId).catch(() => undefined);
+      const captured = await this.tmux.capture(current.socket, current.agent.pane.paneId).catch(() => undefined);
       draft = captured === undefined ? undefined : submission.observeDraft!(captured, composed.text);
       // a last-moment native acceptance must not become an undelivered note
       if (draft === 'cleared') return this.submissionProcessCurrent(agentId, target);
@@ -576,7 +576,7 @@ export class TmuxTransport implements AgentTransport {
     const current = await this.discovery.target(agentId, force);
     // reject replaced sockets, panes, and agent kinds
     return current !== undefined && current.socket.fingerprint === expected.socket.fingerprint
-      && current.agent.paneId === expected.agent.paneId && current.agent.kind === expected.agent.kind
+      && current.agent.pane.paneId === expected.agent.pane.paneId && current.agent.kind === expected.agent.kind
       && this.submissionProcessCurrent(agentId, expected)
       ? { ...current, ...(expected.processId === undefined ? {} : { processId: expected.processId }) } : undefined;
   }
@@ -610,11 +610,11 @@ export class TmuxTransport implements AgentTransport {
         if (snapshots === undefined) return true;
         const listing = snapshots.get(expected.socket.path);
         // only a complete listing that omits the exact pane proves removal
-        return listing?.status === 'available' && !listing.panes.some(pane => pane.paneId === expected.agent.paneId && pane.dead !== true);
+        return listing?.status === 'available' && !listing.panes.some(pane => pane.paneId === expected.agent.pane.paneId && pane.dead !== true);
       }
       // an unanswered native question cannot authorize cleanup
       if (agentAttentionState(current.agent) === 'question') return false;
-      const captured = await this.tmux.capture(current.socket, current.agent.paneId).catch(() => undefined);
+      const captured = await this.tmux.capture(current.socket, current.agent.pane.paneId).catch(() => undefined);
       // matching scrollback or an unknown composer cannot authorize deletion
       if (captured === undefined) return false;
       const draft = submission.observeDraft(captured, prompt);
@@ -630,7 +630,7 @@ export class TmuxTransport implements AgentTransport {
       const clearTarget = await this.submissionTarget(agentId, expected).catch(() => undefined);
       // revalidate after capture before injecting a destructive key
       if (clearTarget === undefined || agentAttentionState(clearTarget.agent) === 'question') return false;
-      const latestCapture = await this.tmux.capture(clearTarget.socket, clearTarget.agent.paneId).catch(() => undefined);
+      const latestCapture = await this.tmux.capture(clearTarget.socket, clearTarget.agent.pane.paneId).catch(() => undefined);
       // do not clear stale input after a slow lifecycle scan
       if (latestCapture === undefined) return false;
       const latestDraft = submission.observeDraft(latestCapture, prompt);
@@ -643,11 +643,11 @@ export class TmuxTransport implements AgentTransport {
       if (!latestOwned) return true;
       // account for identity or question changes observed during the final capture
       if (!this.submissionProcessCurrent(agentId, expected) || agentAttentionState(clearTarget.agent) === 'question') return false;
-      await this.tmux.sendKeys(clearTarget.socket, clearTarget.agent.paneId, submission.clearDraft).catch(() => false);
+      await this.tmux.sendKeys(clearTarget.socket, clearTarget.agent.pane.paneId, submission.clearDraft).catch(() => false);
       await new Promise(resolve => setTimeout(resolve, composerRenderPollMs));
     }
     // verify the native redraw even after the final clearing attempt
-    const captured = await this.tmux.capture(expected.socket, expected.agent.paneId).catch(() => undefined);
+    const captured = await this.tmux.capture(expected.socket, expected.agent.pane.paneId).catch(() => undefined);
     return captured !== undefined && submission.observeDraft(captured, prompt) === 'cleared';
   }
 
@@ -658,8 +658,8 @@ export class TmuxTransport implements AgentTransport {
     for (let attempt = 0; attempt < updateAdvisorComposerAttempts; attempt += 1) {
       const target = await this.discovery.target(agentId, true);
       // reject pane replacement during launch
-      if (target === undefined || target.socket.fingerprint !== expected.socket.fingerprint || target.agent.paneId !== expected.agent.paneId || target.agent.displayLabel !== expected.agent.displayLabel) return false;
-      const captured = await this.tmux.capture(target.socket, target.agent.paneId);
+      if (target === undefined || target.socket.fingerprint !== expected.socket.fingerprint || target.agent.pane.paneId !== expected.agent.pane.paneId || target.agent.displayLabel !== expected.agent.displayLabel) return false;
+      const captured = await this.tmux.capture(target.socket, target.agent.pane.paneId);
       const plain = captured?.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, '');
       const ready = agentAttentionState(target.agent) === 'finished' && plain !== undefined && /(?:^|\n)›(?:\s|$)/u.test(plain);
       // retain only uninterrupted readiness
@@ -682,8 +682,8 @@ export class TmuxTransport implements AgentTransport {
     for (let attempt = 0; attempt < updateAdvisorComposerAttempts; attempt += 1) {
       const target = await this.discovery.target(agentId, true);
       // reject pane replacement during launch
-      if (target === undefined || target.socket.fingerprint !== expected.socket.fingerprint || target.agent.paneId !== expected.agent.paneId || target.agent.displayLabel !== expected.agent.displayLabel) return false;
-      const captured = await this.tmux.capture(target.socket, target.agent.paneId);
+      if (target === undefined || target.socket.fingerprint !== expected.socket.fingerprint || target.agent.pane.paneId !== expected.agent.pane.paneId || target.agent.displayLabel !== expected.agent.displayLabel) return false;
+      const captured = await this.tmux.capture(target.socket, target.agent.pane.paneId);
       // submit only after the pasted prompt begins rendering
       const composer = captured === undefined ? '' : normalizedTerminalText(captured);
       if (composer.includes(visibleSuffix) || composer.includes(collapsedPaste)) return true;
@@ -699,13 +699,13 @@ export class TmuxTransport implements AgentTransport {
     for (let attempt = 0; attempt < updateAdvisorStartAttempts; attempt += 1) {
       const target = await this.discovery.target(agentId, true);
       // reject pane replacement during submission
-      if (target === undefined || target.socket.fingerprint !== expected.socket.fingerprint || target.agent.paneId !== expected.agent.paneId || target.agent.displayLabel !== expected.agent.displayLabel) return false;
+      if (target === undefined || target.socket.fingerprint !== expected.socket.fingerprint || target.agent.pane.paneId !== expected.agent.pane.paneId || target.agent.displayLabel !== expected.agent.displayLabel) return false;
       // accept working, questioning, or already completed prompts
       if (agentAttentionState(target.agent) !== 'finished') return true;
-      const captured = await this.tmux.capture(target.socket, target.agent.paneId);
+      const captured = await this.tmux.capture(target.socket, target.agent.pane.paneId);
       if (normalizedPrompt(lastPromptFromHistory(captured ?? '') ?? '') === normalized) return true;
       // retry only after Codex had time to process the first key
-      if ((attempt === 9 || attempt === 24) && !await this.tmux.sendKeys(target.socket, target.agent.paneId, ['Enter'])) return false;
+      if ((attempt === 9 || attempt === 24) && !await this.tmux.sendKeys(target.socket, target.agent.pane.paneId, ['Enter'])) return false;
       await new Promise(resolve => setTimeout(resolve, updateAdvisorPollMs));
     }
     return false;
@@ -727,7 +727,7 @@ export class TmuxTransport implements AgentTransport {
     const target = await this.discovery.target(agentId);
     // require a stable pane
     if (target === undefined) return 'pending';
-    const capture = await this.tmux.capture(target.socket, target.agent.paneId).catch(() => undefined);
+    const capture = await this.tmux.capture(target.socket, target.agent.pane.paneId).catch(() => undefined);
     // require terminal history
     if (capture === undefined) return 'pending';
     const turn = latestCompletedAssistantTurn(capture);
@@ -781,7 +781,7 @@ export class TmuxTransport implements AgentTransport {
     const target = await this.discovery.target(agentId);
     // require the original pane
     if (target === undefined) return undefined;
-    const capture = await this.tmux.capture(target.socket, target.agent.paneId).catch(() => undefined);
+    const capture = await this.tmux.capture(target.socket, target.agent.pane.paneId).catch(() => undefined);
     // require a completed response
     if (capture === undefined) return undefined;
     // fail explicit terminal errors without waiting through the grace window
@@ -845,7 +845,7 @@ export class TmuxTransport implements AgentTransport {
   async completionSignature(agentId: string): Promise<string | undefined> {
     const target = await this.discovery.target(agentId);
     if (target === undefined) return undefined;
-    const capture = await this.tmux.capture(target.socket, target.agent.paneId).catch(() => undefined);
+    const capture = await this.tmux.capture(target.socket, target.agent.pane.paneId).catch(() => undefined);
     if (capture === undefined) return undefined;
     const completion = this.completionSignatureFromCapture(capture);
     if (completion !== undefined) return completion;
@@ -949,14 +949,14 @@ export class TmuxTransport implements AgentTransport {
     if (release === undefined) return false;
     const version = this.locks.version(agentId);
     try {
-      const capture = await this.tmux.capture(first.socket, first.agent.paneId).catch(() => undefined);
+      const capture = await this.tmux.capture(first.socket, first.agent.pane.paneId).catch(() => undefined);
       // never act on a footer that changed since the pane derive
       if (capture === undefined || queued(capture)?.key !== key) return false;
       const second = await this.discovery.target(agentId);
       // require the same live target, viewer lease, and untouched input generation
-      if (second === undefined || second.socket.fingerprint !== first.socket.fingerprint || second.agent.paneId !== first.agent.paneId
+      if (second === undefined || second.socket.fingerprint !== first.socket.fingerprint || second.agent.pane.paneId !== first.agent.pane.paneId
         || second.agent.kind !== first.agent.kind || !mayOpen() || this.locks.version(agentId) !== version) return false;
-      const opened = await this.tmux.sendKeys(second.socket, second.agent.paneId, [key]);
+      const opened = await this.tmux.sendKeys(second.socket, second.agent.pane.paneId, [key]);
       // suppress duplicate opening shortcuts until the native dialog changes the footer
       if (opened) this.openedQueuedQuestions.add(agentId);
       return opened;
@@ -987,36 +987,36 @@ export class TmuxTransport implements AgentTransport {
       const adapter = this.resolveAdapter(first.agent.kind);
       if (adapter?.questions === undefined) return false;
       const workspace = this.workspaceFor(first.agent.home);
-      let question = await adapter.questions.pending?.(workspace, first.agent.paneId);
+      let question = await adapter.questions.pending?.(workspace, first.agent.pane.paneId);
       let capture: string | undefined;
       // re-derive reported questions from their current hook payload and pane
       if (question === undefined && adapter.questions.reported !== undefined) {
         const payload = this.reportedQuestionPayload(agentId);
-        capture = payload === undefined ? undefined : await this.tmux.capture(first.socket, first.agent.paneId).catch(() => undefined);
+        capture = payload === undefined ? undefined : await this.tmux.capture(first.socket, first.agent.pane.paneId).catch(() => undefined);
         question = capture === undefined ? undefined : adapter.questions.reported(payload!, capture);
       }
       // re-derive native questions from the current terminal capture
       if (question === undefined && adapter.questions.parse !== undefined) {
-        capture = await this.tmux.capture(first.socket, first.agent.paneId).catch(() => undefined);
+        capture = await this.tmux.capture(first.socket, first.agent.pane.paneId).catch(() => undefined);
         question = capture === undefined ? undefined : adapter.questions.parse(capture);
       }
       // refuse stale answers and out-of-range choices
       if (question === undefined || question.id !== questionId || (!textAnswer && answer >= question.choices.length)) return false;
       // only native queued-editor answers may release that editor's suppression
       const queuedQuestion = capture === undefined ? undefined : adapter.questions.queued?.(capture);
-      const targetPane = question.targetPaneId ?? first.agent.paneId;
+      const targetPane = question.pane?.targetPaneId ?? first.agent.pane.paneId;
       // verify the target and manual-input generation before each delivery stage
       const stillCurrent = async () => {
         const current = await this.discovery.target(agentId);
         return current !== undefined && current.socket.fingerprint === first.socket.fingerprint
-          && current.agent.paneId === first.agent.paneId && current.agent.kind === first.agent.kind
+          && current.agent.pane.paneId === first.agent.pane.paneId && current.agent.kind === first.agent.kind
           && this.locks.version(agentId) === version;
       };
       // refuse replacement panes or intervening operator input
       if (!await stillCurrent()) return false;
       // preserve cursor-aware numbered selection
       if (!textAnswer) {
-        const sent = await this.tmux.sendKeys(first.socket, targetPane, adapter.submission.selectOption(question.rows?.[answer] ?? answer, question.selectedIndex));
+        const sent = await this.tmux.sendKeys(first.socket, targetPane, adapter.submission.selectOption(question.pane?.rows?.[answer] ?? answer, question.pane?.selectedIndex));
         // rearm the next follow-up without requiring an observed empty queue
         if (sent && queuedQuestion !== undefined && queuedQuestion.key === undefined) this.openedQueuedQuestions.delete(agentId);
         return sent;
@@ -1049,10 +1049,10 @@ export class TmuxTransport implements AgentTransport {
     if (adapter === undefined) return 'unavailable';
     // the interrupt is sent only while the Agent is working or a question is pending
     if (agentAttentionState(target.agent) === 'finished') return 'not-working';
-    if (!await this.tmux.sendKeys(target.socket, target.agent.paneId, adapter.submission.interrupt)) return 'unavailable';
+    if (!await this.tmux.sendKeys(target.socket, target.agent.pane.paneId, adapter.submission.interrupt)) return 'unavailable';
     // a reported-state Agent fires no Stop hook on an interrupt; write `finished`
     // ourselves so the pane does not keep looking busy (Codex's title already stops)
-    if (reportsOwnState(adapter)) await this.tmux.setReportedAttention(target.socket, target.agent.paneId, 'finished').catch(() => false);
+    if (reportsOwnState(adapter)) await this.tmux.setReportedAttention(target.socket, target.agent.pane.paneId, 'finished').catch(() => false);
     return 'ok';
   }
 
@@ -1061,7 +1061,7 @@ export class TmuxTransport implements AgentTransport {
   // (never on cleanup or new-task pane kills, which bypass this path)
   async close(agentId: string): Promise<boolean> {
     const target = await this.discovery.target(agentId);
-    if (target === undefined || !await this.tmux.close(target.socket, target.agent.paneId)) return false;
+    if (target === undefined || !await this.tmux.close(target.socket, target.agent.pane.paneId)) return false;
     const teardown = this.teardownFor(target.agent.kind);
     if (teardown !== undefined) {
       const done = await this.tmux.runShell(target.socket, expandCommand(teardown, { identity: target.agent.home })).catch(() => false);

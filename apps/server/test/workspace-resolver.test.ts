@@ -43,7 +43,7 @@ describe('worktreePrBase', () => {
   const idleProject = (base?: string) => ({ id: 'p1', label: 'P', mode: 'repository' as const, available: true, manageWorktrees: false, stalePaths: [], worktrees: [{ id: 'w1', projectId: 'p1', label: 'W', path: '/w1', available: true, pinned: false, main: false, detached: false, locked: false, order: 0, ...(base === undefined ? {} : { gitPrStatus: { base, files: 0 } }) }] });
 
   it('reads a live agent resolved base for its worktree', () => {
-    const board = dashboard({ agents: [{ id: 'a1', paneId: '%1', sessionId: 's', socketFingerprint: 'sf', home: '/w1', kind: 'codex', attention: 'finished', title: 'Ready', worktreeId: 'w1', gitPrStatus: { base: 'origin/main', files: 0 } }] });
+    const board = dashboard({ agents: [{ id: 'a1', pane: { paneId: '%1', sessionId: 's', socketFingerprint: 'sf' }, home: '/w1', kind: 'codex', attention: 'finished', title: 'Ready', worktreeId: 'w1', gitPrStatus: { base: 'origin/main', files: 0 } }] });
     expect(worktreePrBase(board, 'w1')).toBe('origin/main');
   });
 
@@ -53,7 +53,7 @@ describe('worktreePrBase', () => {
 
   it('prefers the live agent base over the idle worktree view', () => {
     const board = dashboard({
-      agents: [{ id: 'a1', paneId: '%1', sessionId: 's', socketFingerprint: 'sf', home: '/w1', kind: 'codex', attention: 'finished', title: 'Ready', worktreeId: 'w1', gitPrStatus: { base: 'origin/main', files: 0 } }],
+      agents: [{ id: 'a1', pane: { paneId: '%1', sessionId: 's', socketFingerprint: 'sf' }, home: '/w1', kind: 'codex', attention: 'finished', title: 'Ready', worktreeId: 'w1', gitPrStatus: { base: 'origin/main', files: 0 } }],
       projects: [idleProject('origin/dev')]
     });
     expect(worktreePrBase(board, 'w1')).toBe('origin/main');
@@ -67,7 +67,7 @@ describe('worktreePrBase', () => {
   // distinguish a known but unavailable PR base from an ordinary branch fallback
   it('preserves unavailable PR bases for live and idle workspaces', () => {
     const pullRequest = { number: 1, title: 'Unavailable', status: 'open' as const, url: 'https://github.com/acme/app/pull/1', baseBranch: 'release' };
-    const live = dashboard({ agents: [{ id: 'a1', paneId: '%1', sessionId: 's', socketFingerprint: 'sf', home: '/w1', kind: 'codex', attention: 'finished', title: 'Ready', worktreeId: 'w1', pullRequest }] });
+    const live = dashboard({ agents: [{ id: 'a1', pane: { paneId: '%1', sessionId: 's', socketFingerprint: 'sf' }, home: '/w1', kind: 'codex', attention: 'finished', title: 'Ready', worktreeId: 'w1', pullRequest }] });
     expect(worktreePrBase(live, 'w1')).toBeNull();
     const idle = idleProject();
     expect(worktreePrBase(dashboard({ projects: [{ ...idle, worktrees: [{ ...idle.worktrees[0]!, pullRequest }] }] }), 'w1')).toBeNull();

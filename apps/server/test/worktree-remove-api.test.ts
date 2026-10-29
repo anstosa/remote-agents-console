@@ -51,7 +51,7 @@ async function app(deps: Record<string, unknown>) {
 describe('GET /api/worktrees/:id/removal', () => {
   it('returns the fresh facts and the runtime blockers', async () => {
     const worktreeManagement = { removal: async () => ({ ok: true, facts: cleanFacts }) } as never;
-    const agent = stated({ id: 'agent-x', paneId: '%1', sessionId: 's:$1', socketFingerprint: 's', home: linked.identity, worktreeId: linked.id, title: 'Ready' });
+    const agent = stated({ id: 'agent-x', pane: { paneId: '%1', sessionId: 's:$1', socketFingerprint: 's' }, home: linked.identity, worktreeId: linked.id, title: 'Ready' });
     const server = await app({ discovery: discoveryStub([agent]), worktreeManagement, ...(await stores()) });
     try {
       const response = await server.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(linked.id)}/removal`, headers: readHeaders });
@@ -62,7 +62,7 @@ describe('GET /api/worktrees/:id/removal', () => {
 
   it('still blocks on a Review run\'s Agent, named as a Review run', async () => {
     const worktreeManagement = { removal: async () => ({ ok: true, facts: cleanFacts }) } as never;
-    const reviewer = stated({ id: 'agent-r', paneId: '%2', sessionId: 's:$1', socketFingerprint: 's', home: linked.identity, worktreeId: linked.id, title: 'Ready', reviewRun: 'run_abcdefgh1234' });
+    const reviewer = stated({ id: 'agent-r', pane: { paneId: '%2', sessionId: 's:$1', socketFingerprint: 's' }, home: linked.identity, worktreeId: linked.id, title: 'Ready', reviewRun: 'run_abcdefgh1234' });
     const server = await app({ discovery: discoveryStub([reviewer]), worktreeManagement, ...(await stores()) });
     try {
       const response = await server.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(linked.id)}/removal`, headers: readHeaders });
@@ -160,7 +160,7 @@ describe('DELETE /api/worktrees/:id', () => {
       expect(response.statusCode).toBe(409);
       expect(response.json()).toEqual({ error: 'Locked worktrees cannot be removed' });
     } finally { await withLocked.close(); }
-    const agent = stated({ id: 'agent-x', paneId: '%1', sessionId: 's:$1', socketFingerprint: 's', home: linked.identity, worktreeId: linked.id, title: 'Ready' });
+    const agent = stated({ id: 'agent-x', pane: { paneId: '%1', sessionId: 's:$1', socketFingerprint: 's' }, home: linked.identity, worktreeId: linked.id, title: 'Ready' });
     const withAgent = await app({ discovery: discoveryStub([agent]), worktreeManagement, launch, ...(await stores()) });
     try {
       const response = await withAgent.inject({ method: 'DELETE', url: `/api/worktrees/${encodeURIComponent(linked.id)}`, headers: mutationHeaders });
@@ -228,7 +228,7 @@ describe('DELETE /api/worktrees/:id', () => {
     const agents: unknown[] = [];
     const worktreeManagement = { removal: async () => ({ ok: true, facts: cleanFacts }), removeCheckout: async () => { removeCalls += 1; return { ok: true }; } } as never;
     const launch = { placeConsoleShells: async () => [], killWorktreeShells: async () => {} } as never;
-    const agent = stated({ id: 'agent-x', paneId: '%1', sessionId: 's:$1', socketFingerprint: 's', home: linked.identity, worktreeId: linked.id, title: 'Ready' });
+    const agent = stated({ id: 'agent-x', pane: { paneId: '%1', sessionId: 's:$1', socketFingerprint: 's' }, home: linked.identity, worktreeId: linked.id, title: 'Ready' });
     const worktreeCommands = { sessionRunning: async () => false, stopForRemoval: async (_w: unknown, remove: () => Promise<unknown>) => { agents.push(agent); return await remove(); } } as never;
     const server = await app({ discovery: discoveryStub(agents as never), worktreeManagement, launch, worktreeCommands, ...(await stores()) });
     try {

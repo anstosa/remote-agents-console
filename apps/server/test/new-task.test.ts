@@ -4,7 +4,7 @@ import { testConfig, testWorktree } from './helpers/config.js';
 
 const worktree = testWorktree({ id: 'proj:/worktrees/cora', projectId: 'proj', label: 'Cora', path: '/worktrees/cora', hostPath: '/home/ubuntu/cora', pinned: false, newTask: 'detach && new {taskId}' });
 const config = testConfig();
-const agent = { id: 'agent-1', paneId: '%1', sessionId: '$1', socketFingerprint: 'socket', home: worktree.identity, title: 'Ready' };
+const agent = { id: 'agent-1', pane: { paneId: '%1', sessionId: '$1', socketFingerprint: 'socket' }, home: worktree.identity, title: 'Ready' };
 const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
 const discoveryStub = () => ({ target: async () => ({ agent, socket }), worktreesNow: () => [worktree] });
 

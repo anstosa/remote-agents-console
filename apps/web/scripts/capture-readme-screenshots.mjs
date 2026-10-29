@@ -16,7 +16,7 @@ const dashboard = {
   agents: [
     {
       id: 'agent-atlas',
-      sessionId: 'local:$1',
+      pane: { paneId: '%1', sessionId: 'local:$1', socketFingerprint: 'local' },
       home: '/worktrees/atlas',
       worktreeId: 'atlas',
       worktreeLabel: 'Atlas',
@@ -50,7 +50,7 @@ const dashboard = {
     },
     {
       id: 'agent-docs',
-      sessionId: 'local:$2',
+      pane: { paneId: '%2', sessionId: 'local:$2', socketFingerprint: 'local' },
       home: '/worktrees/docs',
       worktreeId: 'docs',
       worktreeLabel: 'Docs',
@@ -62,7 +62,7 @@ const dashboard = {
     },
     {
       id: 'agent-api',
-      sessionId: 'local:$3',
+      pane: { paneId: '%3', sessionId: 'local:$3', socketFingerprint: 'local' },
       home: '/worktrees/api',
       worktreeId: 'api',
       worktreeLabel: 'API migration',
@@ -70,7 +70,7 @@ const dashboard = {
       branch: 'refactor/api-boundary',
       gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 },
       title: 'Action required | Choose migration strategy',
-      question: { id: 'question-migration', paneId: '%3', text: 'How should the migration proceed?', choices: ['Compatibility layer', 'Clean break'] }
+      question: { id: 'question-migration', text: 'How should the migration proceed?', field: { kind: 'choice', choices: ['Compatibility layer', 'Clean break'] }, source: 'structured' }
     }
   ],
   worktrees: [

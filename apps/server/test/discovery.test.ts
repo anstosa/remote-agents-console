@@ -342,7 +342,7 @@ describe('DiscoveryService dashboard', () => {
 
     const dashboard = await service.dashboard();
 
-    expect(dashboard.agents).toEqual([expect.objectContaining({ paneId: '%2', home: '/host/remoteagents', displayLabel: 'Update Advisor Starting v4 2222222' })]);
+    expect(dashboard.agents).toEqual([expect.objectContaining({ pane: expect.objectContaining({ paneId: '%2' }), home: '/host/remoteagents', displayLabel: 'Update Advisor Starting v4 2222222' })]);
     // a modal advisor never claims the Project's Main worktree, which stays idle in projects[]
     expect(dashboard.agents[0]).not.toHaveProperty('worktreeId');
     expect(dashboard.projects[0]?.worktrees).toEqual([expect.objectContaining({ id: 'remoteagents:/workspace' })]);
@@ -622,8 +622,8 @@ describe('DiscoveryService dashboard', () => {
 
     const dashboard = await service.dashboard();
 
-    expect(dashboard.agents.find(agent => agent.paneId === '%1')).toMatchObject({ paneMode: 'tree-mode' });
-    expect(dashboard.agents.find(agent => agent.paneId === '%2')).not.toHaveProperty('paneMode');
+    expect(dashboard.agents.find(agent => agent.pane?.paneId === '%1')).toMatchObject({ pane: { paneMode: 'tree-mode' } });
+    expect(dashboard.agents.find(agent => agent.pane?.paneId === '%2')?.pane).not.toHaveProperty('paneMode');
   });
 
   it('records a sandboxed agent only for the exact @rac_sandboxed sentinel and ignores an empty session', async () => {
@@ -652,7 +652,7 @@ describe('DiscoveryService dashboard', () => {
 
     const dashboard = await service.dashboard();
 
-    expect(dashboard.agents).toEqual([expect.objectContaining({ paneId: '%1', title: 'Cora', kind })]);
+    expect(dashboard.agents).toEqual([expect.objectContaining({ pane: expect.objectContaining({ paneId: '%1' }), title: 'Cora', kind })]);
   });
 
   it('coalesces concurrent discovery requests and reuses a fresh snapshot', async () => {
@@ -816,7 +816,7 @@ describe('DiscoveryService dashboard', () => {
       const [agent] = await service.refresh();
       vi.advanceTimersByTime(2_100);
 
-      await expect(service.target(agent!.id)).resolves.toMatchObject({ agent: { paneId: '%1' }, socket });
+      await expect(service.target(agent!.id)).resolves.toMatchObject({ agent: { pane: { paneId: '%1' } }, socket });
 
       expect(finds).toBe(2);
       expect(listings).toBe(1);
@@ -1025,7 +1025,7 @@ describe('DiscoveryService dashboard', () => {
       const questions = join(workspace, '.omx', 'state', 'sessions', 'session', 'questions');
       await mkdir(questions, { recursive: true });
       await writeFile(join(questions, 'question-test.json'), JSON.stringify({ kind: 'omx.question/v1', question_id: 'question-test', status: 'prompting', question: 'Choose one?', options: [{ label: 'Yes' }, { label: 'No' }], renderer: { target: '%22', return_target: '%1' } }));
-      await expect(pendingOmxQuestion(workspace, '%1')).resolves.toEqual({ id: inlineQuestionId('Choose one?', ['Yes', 'No']), text: 'Choose one?', choices: ['Yes', 'No'], source: 'structured', targetPaneId: '%22' });
+      await expect(pendingOmxQuestion(workspace, '%1')).resolves.toEqual({ id: inlineQuestionId('Choose one?', ['Yes', 'No']), text: 'Choose one?', choices: ['Yes', 'No'], source: 'structured', pane: { targetPaneId: '%22' } });
     } finally { await rm(workspace, { recursive: true, force: true }); }
   });
 
@@ -1048,7 +1048,7 @@ describe('DiscoveryService dashboard', () => {
       const dashboard = await service.dashboard();
 
       // the title infers 'finished', but the pending question outranks it
-      expect(dashboard.agents[0]).toMatchObject({ kind: 'omx', attention: 'question', question: { id: inlineQuestionId('Deploy?', ['Yes', 'No']), text: 'Deploy?', choices: ['Yes', 'No'], source: 'structured', targetPaneId: '%9' } });
+      expect(dashboard.agents[0]).toMatchObject({ kind: 'omx', attention: 'question', question: { id: inlineQuestionId('Deploy?', ['Yes', 'No']), text: 'Deploy?', choices: ['Yes', 'No'], source: 'structured', pane: { targetPaneId: '%9' } } });
     } finally { await rm(workspace, { recursive: true, force: true }); }
   });
 
@@ -1115,7 +1115,7 @@ describe('DiscoveryService Places', () => {
   it('tags every Agent with the Place it belongs to and sets home to the Place home', async () => {
     const dashboard = await service(agentPanes('/worktrees/ferry', '/data/notes/2026', '/home/me/scratch/probe', '/srv/tools')).dashboard();
 
-    expect(dashboard.agents.map(agent => ({ paneId: agent.paneId, placeId: agent.placeId, home: agent.home, worktreeId: agent.worktreeId }))).toEqual([
+    expect(dashboard.agents.map(agent => ({ paneId: agent.pane?.paneId, placeId: agent.placeId, home: agent.home, worktreeId: agent.worktreeId }))).toEqual([
       { paneId: '%1', placeId: 'ferry:/worktrees/ferry', home: '/worktrees/ferry', worktreeId: 'ferry:/worktrees/ferry' },
       // a directory-Project Agent in a subfolder
       { paneId: '%2', placeId: 'notes:/data/notes', home: '/data/notes', worktreeId: undefined },
@@ -1220,7 +1220,7 @@ describe('DiscoveryService Places', () => {
 
     const dashboard = await discovery.dashboard();
 
-    expect(dashboard.agents).toMatchObject([{ paneId: '%1', placeId: 'notes:/data/notes', home: '/data/notes' }]);
+    expect(dashboard.agents).toMatchObject([{ pane: { paneId: '%1' }, placeId: 'notes:/data/notes', home: '/data/notes' }]);
     expect(dashboard.agents[0]).not.toHaveProperty('worktreeId');
     expect(dashboard.projects.find(project => project.id === 'ferry')?.worktrees[0]).not.toHaveProperty('consoleShells');
     expect(dashboard.places.map(place => [place.id, place.consoleShells])).toEqual([['notes:/data/notes', 1], ['scratch:/home/me/scratch', undefined]]);

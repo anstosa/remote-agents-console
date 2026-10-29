@@ -14,6 +14,7 @@ import { DeviceService } from './auth/devices.js';
 import { TicketStore } from './auth/tickets.js';
 import { DiscoveryService } from './discovery/service.js';
 import { adapterFor } from './adapters/registry.js';
+import { withQuestionShape } from './adapters/inline-questions.js';
 import { agentKinds, codexFamily, sameConversation, type Adapter, type AgentKind, type ConversationSummary, type InlineQuestion, type PaneSnapshot, type ResetSettling } from './adapters/types.js';
 import { TmuxCommandRegistry } from './tmux/command-registry.js';
 import { TmuxAdapter } from './tmux/adapter.js';
@@ -35,7 +36,7 @@ import { PullRequestSwitchService } from './pull-requests/switch-service.js';
 import { NewTaskService } from './new-task/service.js';
 import { WorktreeManagementService } from './worktrees/management.js';
 import { agentAttentionState, AgentNotificationCoordinator, reviewNotification, scheduleNotification, type AgentNotificationContext } from './notifications.js';
-import { agentTmuxSession, isReviewRun, stackActions, worktreeAgents, type Agent, type Pane, type SocketRef, type StackAction, type Worktree } from './domain/models.js';
+import { agentTmuxSession, isReviewRun, stackActions, worktreeAgents, type Agent, type Pane, type SocketRef, type StackAction, type TmuxAgent, type Worktree } from './domain/models.js';
 import { CommandCatalogService } from './commands/service.js';
 import { LatestViewportScheduler, PaneViewportCoordinator } from './logs/viewport-scheduler.js';
 import { boundedViewport } from './logs/viewport.js';
@@ -2408,7 +2409,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // reuse the Schedule's own idle pane: reset the conversation, wait for the Adapter's settle
   // rule, then submit the Note's text with the reset instant so Codex completion anchors on the
   // fresh thread. Attention working/question and a non-empty composer are skipped, not forced.
-  const runReuse = async (prior: { agent: Agent; socket: SocketRef }, capability: NonNullable<Adapter['newConversation']>, text: string, attachments: PromptAttachment[]): Promise<RunOutcome> => {
+  const runReuse = async (prior: { agent: TmuxAgent; socket: SocketRef }, capability: NonNullable<Adapter['newConversation']>, text: string, attachments: PromptAttachment[]): Promise<RunOutcome> => {
     const agentId = prior.agent.id;
     const attention = agentAttentionState(prior.agent);
     if (attention === 'working') return { status: 'skipped', detail: 'previous run still working', agentId };
@@ -2678,7 +2679,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // retain only the newest pane for each protected target
     for (const label of protectedLabels) {
       const candidates = dashboard.agents.filter(candidate => candidate.displayLabel === label);
-      const newest = candidates.sort((left, right) => Number(right.paneId.slice(1)) - Number(left.paneId.slice(1)))[0];
+      const newest = candidates.sort((left, right) => Number(right.pane?.paneId.slice(1)) - Number(left.pane?.paneId.slice(1)))[0];
       // preserve one current advisor
       if (newest !== undefined) protectedIds.add(newest.id);
     }
@@ -3170,7 +3171,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const agent = (await discovery.dashboard(true)).agents.find(candidate => candidate.placeId === placeId);
     if (agent === undefined) return undefined;
     const target = await discovery.target(agent.id);
-    return target === undefined ? undefined : { socket: target.socket, session: agentTmuxSession(target.agent) };
+    return target === undefined ? undefined : { socket: target.socket, session: agentTmuxSession(target.agent.pane) };
   };
   // shape one Worktree pane for the wire: its id, session, role/name markers (a Stack
   // process's pane is named for its process) and the busy flag for a Console shell, and
@@ -3629,14 +3630,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (agentTarget !== undefined) {
         agent = agentTarget.agent;
         socketRef = agentTarget.socket;
-        session = agentTmuxSession(agentTarget.agent);
-        pane = agentTarget.agent.paneId;
+        session = agentTmuxSession(agentTarget.agent.pane);
+        pane = agentTarget.agent.pane.paneId;
         // the Agent's own pane by default; a requested pane must belong to its session
         if (typeof requestedPane === 'string' && requestedPane !== '') {
           if (!/^%\d+$/u.test(requestedPane) || !(await tmux.sessionPaneIds(socketRef, session)).includes(requestedPane)) throw new Error();
           pane = requestedPane;
         }
-        isAgentPane = pane === agentTarget.agent.paneId;
+        isAgentPane = pane === agentTarget.agent.pane.paneId;
       } else {
         if (typeof requestedPane !== 'string' || !/^%\d+$/u.test(requestedPane)) throw new Error();
         if (place === undefined) throw new Error();
@@ -3757,7 +3758,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
             await prompts.openQueuedQuestion(id, captured.text, () => control.active(s.id) && socket.readyState === socket.OPEN).catch(() => false);
           }
           const parseInput = captured.latestAgentMessage ?? captured.text;
-          if (parseInput !== lastParseInput) { lastParseInput = parseInput; lastQuestion = adapter?.questions?.parse?.(parseInput); }
+          if (parseInput !== lastParseInput) { lastParseInput = parseInput; const parsed = adapter?.questions?.parse?.(parseInput); lastQuestion = parsed === undefined ? undefined : withQuestionShape(parsed); }
           const question = lastQuestion;
           const metadata = { message: captured.latestAssistantMessage ?? '', overflow: captured.latestAssistantMessageOverflows === true };
           const questionKey = JSON.stringify(question ?? null);

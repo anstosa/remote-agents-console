@@ -591,7 +591,7 @@ test('mouse-open agent menu consumes ordinary keys instead of sending terminal i
 
 test('Answer notes retains its native context menu without redirecting clipboard actions to agent output', async ({ page }) => {
   await mountConsole(page);
-  await pushQuestion(page, 'agent-1', { id: 'context-question', text: 'Which option?', choices: ['First', 'Second'], source: 'structured' });
+  await pushQuestion(page, 'agent-1', { id: 'context-question', text: 'Which option?', field: { kind: 'choice', choices: ['First', 'Second'] }, source: 'structured' });
   await page.getByRole('button', { name: 'Add notes' }).click();
   const notes = page.getByRole('textbox', { name: 'Answer notes' });
   await notes.fill('native notes');

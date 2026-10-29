@@ -499,7 +499,7 @@ test('opens an advisor for flagged update paths before enabling Update', async (
   await expect(dialog.getByLabel('Approval or feedback')).toBeDisabled();
   await expect(dialog.getByRole('button', { name: 'Send' })).toBeDisabled();
   // show a streamed approval even though the prior completed metadata is still the baseline
-  const followupApproval = { id: 'followup-approval', text: 'Approve the reviewed host action?', choices: ['Approve', 'Cancel'], source: 'parsed' as const };
+  const followupApproval = { id: 'followup-approval', text: 'Approve the reviewed host action?', field: { kind: 'choice', choices: ['Approve', 'Cancel'] }, source: 'parsed' as const };
   await pushQuestion(page, 'update-advisor', followupApproval);
   await expect(dialog.getByText(followupApproval.text)).toBeVisible();
   await expect(dialog.locator('.update-advisor-state')).toHaveText('Needs input');
@@ -525,9 +525,9 @@ test('opens an advisor for flagged update paths before enabling Update', async (
 // keep approval questions interactive before the advisor publishes a completed response
 test('shows and answers advisor questions while completed guidance is pending', async ({ page }) => {
   const targetSha = '5'.repeat(40);
-  const initialQuestion = { id: 'initial-approval', text: 'Confirm the deployment window.', choices: ['Proceed', 'Wait'], source: 'structured' as const };
-  const dashboardFollowup = { id: 'dashboard-followup', text: 'Use the existing host override?', choices: ['Continue', 'Stop'], source: 'structured' as const };
-  const streamFollowup = { id: 'stream-followup', text: 'Approve the final host action?', choices: ['Approve', 'Cancel'], source: 'parsed' as const };
+  const initialQuestion = { id: 'initial-approval', text: 'Confirm the deployment window.', field: { kind: 'choice', choices: ['Proceed', 'Wait'] }, source: 'structured' as const };
+  const dashboardFollowup = { id: 'dashboard-followup', text: 'Use the existing host override?', field: { kind: 'choice', choices: ['Continue', 'Stop'] }, source: 'structured' as const };
+  const streamFollowup = { id: 'stream-followup', text: 'Approve the final host action?', field: { kind: 'choice', choices: ['Approve', 'Cancel'] }, source: 'parsed' as const };
   let advisorLaunched = false;
   let dashboardQuestion: typeof initialQuestion | typeof dashboardFollowup | undefined = initialQuestion;
   let dashboardRequests = 0;
@@ -663,7 +663,7 @@ test('shows and answers advisor questions while completed guidance is pending', 
 for (const requestKind of ['question', 'prompt'] as const) {
   test(`retains fresh advisor metadata received while ${requestKind} submission is pending`, async ({ page }) => {
     const targetSha = '6'.repeat(40);
-    const approvalQuestion = { id: 'race-approval', text: 'Approve this host action?', choices: ['Approve', 'Cancel'], source: 'structured' as const };
+    const approvalQuestion = { id: 'race-approval', text: 'Approve this host action?', field: { kind: 'choice', choices: ['Approve', 'Cancel'] }, source: 'structured' as const };
     let advisorLaunched = false;
     let dashboardQuestion = requestKind === 'question' ? approvalQuestion : undefined;
     let dashboardRequests = 0;

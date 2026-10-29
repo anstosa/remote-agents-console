@@ -22,7 +22,7 @@ const mutate = { host, origin: `https://${host}`, cookie: '__Host-rac=x', 'x-csr
 const dashboardUpdates = { setLoader: () => {}, refresh: async () => {}, close: () => {} } as never;
 
 const worktree = testWorktree({ id: 'wt-main', projectId: 'proj', label: 'Proj · main', path: '/repo', identity: '/repo', main: true });
-const codexPane = { id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/repo', worktreeId: 'wt-main', title: 'Ready', kind: 'codex' as const };
+const codexPane = { id: 'agent-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/repo', worktreeId: 'wt-main', title: 'Ready', kind: 'codex' as const };
 const claudePane = { ...codexPane, kind: 'claude' as const };
 
 // seed a note keyed under the project with a Schedule (and optionally a remembered agent id)

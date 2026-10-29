@@ -20,8 +20,8 @@ describe('prompt reset restart recovery', () => {
     vi.setSystemTime(100_000);
     const directory = await mkdtemp(join(tmpdir(), 'rac-reset-restart-'));
     const socket = { fingerprint: 'socket', path: '/tmp/sock', device: 1, inode: 1 };
-    const agent = { id: 'socket:%1', paneId: '%1', home: '/tmp', kind: 'codex' as const, title: 'Ready', attention: 'finished' as 'finished' | 'working' };
-    const sibling = { ...agent, id: 'socket:%2', paneId: '%2' };
+    const agent = { id: 'socket:%1', pane: { paneId: '%1' }, home: '/tmp', kind: 'codex' as const, title: 'Ready', attention: 'finished' as 'finished' | 'working' };
+    const sibling = { ...agent, id: 'socket:%2', pane: { ...agent.pane, paneId: '%2' } };
     const worktree = testWorktree({ path: '/tmp' });
     const scope = `agent:${agent.id}`;
     const pasted: string[] = [];

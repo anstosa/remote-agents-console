@@ -89,7 +89,7 @@ async function eventually(check: () => boolean): Promise<void> {
 
 async function openPane(fixture: Awaited<ReturnType<typeof fixtureSession>>, pane?: string) {
   const socket = fixture.socket;
-  const agent = { id: 'agent-1', paneId: pane ?? fixture.pane, sessionId: 'fixture:fixture', socketFingerprint: 'fixture', home: '/repo', title: 'Ready', kind: 'claude', attention: 'finished' };
+  const agent = { id: 'agent-1', pane: { paneId: pane ?? fixture.pane, sessionId: 'fixture:fixture', socketFingerprint: 'fixture' }, home: '/repo', title: 'Ready', kind: 'claude', attention: 'finished' };
   const target = async (id: string) => (id === 'agent-1' ? { agent, socket } : undefined);
   const discovery = { target, snapshotTarget: target, worktreesNow: () => [] } as never;
   const port = await freePort();

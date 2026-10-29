@@ -45,7 +45,7 @@ describe('attachment staging', () => {
   // deliver every file while keeping filesystem concurrency bounded
   it('stages a large batch with bounded writes and intact attachment bytes', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'rac-large-attachment-batch-'));
-    const agent = stated({ id: 'socket:%1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: directory, title: 'Ready' });
+    const agent = stated({ id: 'socket:%1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: directory, title: 'Ready' });
     const socket = { fingerprint: 'socket', path: '/tmp/sock', device: 1, inode: 1 };
     // distinguish every file in a batch well beyond the former cap
     const attachments = Array.from({ length: 256 }, (_, index) => ({ name: `context-${index}.txt`, data: Buffer.from(`context ${index}`).toString('base64') }));
@@ -74,7 +74,7 @@ describe('attachment staging', () => {
   // retain the durable batch when storage fails after partial staging
   it('cleans partial staging and retains the complete queue after a write failure', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'rac-failed-attachment-batch-'));
-    const agent = stated({ id: 'socket:%1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: directory, title: 'Ready' });
+    const agent = stated({ id: 'socket:%1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: directory, title: 'Ready' });
     const socket = { fingerprint: 'socket', path: '/tmp/sock', device: 1, inode: 1 };
     const queue = new QueuedPromptService(join(directory, 'queue.json'));
     // retain a batch larger than the former cap on failure

@@ -9,9 +9,7 @@ const agent = (overrides: Partial<Agent> = {}): Agent => {
   const title = overrides.title ?? 'Ready';
   return {
     id: 'socket:%1',
-    paneId: '%1',
-    sessionId: '$1',
-    socketFingerprint: 'socket',
+    pane: { paneId: '%1', sessionId: '$1', socketFingerprint: 'socket' },
     home: '/workspace',
     title,
     kind: 'codex',
@@ -27,7 +25,7 @@ describe('agent notifications', () => {
   afterEach(() => vi.useRealTimers());
 
   it('distinguishes questions from completed work', () => {
-    const questioning = agent({ title: '⠋ Working', question: { id: 'question-1', text: 'Deploy now?', choices: ['Yes', 'No'], source: 'structured', targetPaneId: '%2' } });
+    const questioning = agent({ title: '⠋ Working', question: { id: 'question-1', text: 'Deploy now?', choices: ['Yes', 'No'], source: 'structured', pane: { targetPaneId: '%2' } } });
 
     expect(agentAttentionState(questioning)).toBe('question');
     expect(agentNotification('working', 'question', questioning, context)).toEqual({
@@ -65,7 +63,7 @@ describe('agent notifications', () => {
   });
 
   it('omits the worktree name from a single-worktree question', () => {
-    const questioning = agent({ question: { id: 'question-1', text: 'Deploy now?', choices: ['Yes', 'No'], source: 'structured', targetPaneId: '%2' } });
+    const questioning = agent({ question: { id: 'question-1', text: 'Deploy now?', choices: ['Yes', 'No'], source: 'structured', pane: { targetPaneId: '%2' } } });
 
     expect(agentNotification('working', 'question', questioning, { ...context, multipleWorktrees: false })?.body).toBe('Deploy now?');
   });
@@ -215,8 +213,8 @@ describe('agent notifications', () => {
     const delivered: AgentNotification[] = [];
     const coordinator = new AgentNotificationCoordinator(notification => delivered.push(notification), 2_000);
     const working = agent({ title: '⠋ Working' });
-    const sibling = agent({ id: 'socket:%2', paneId: '%2', title: 'Ready' });
-    coordinator.observe(agent({ id: sibling.id, paneId: sibling.paneId, title: '⠋ Working' }));
+    const sibling = agent({ id: 'socket:%2', pane: { paneId: '%2', sessionId: '$1', socketFingerprint: 'socket' }, title: 'Ready' });
+    coordinator.observe(agent({ id: sibling.id, pane: sibling.pane, title: '⠋ Working' }));
     coordinator.observe(sibling);
     await vi.advanceTimersByTimeAsync(2_000);
     coordinator.view(sibling, coordinator.completionId(sibling));

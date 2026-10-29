@@ -63,17 +63,18 @@ export type GitUpstreamSummary = { upstream: string; ahead: number; behind: numb
 // and the pane mode (a picker or copy mode) it is in, if any
 export type AgentPane = { paneId: string; sessionId: string; socketFingerprint: string; paneMode?: string };
 // `transport` says how the console drives the Agent and `panel` what its Panel shows (ADR 0015).
-// A tmux Agent carries its pane details in `pane`; the flat pane fields beside it remain until the
-// web reads the pane part.
-export type Agent = { id: string; transport: Transport; panel: AgentPanel; pane?: AgentPane; paneId: string; sessionId: string; socketFingerprint: string; home: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind: AgentKind; attention: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; newTaskConfigured?: boolean; push?: PromptAction; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; paneMode?: string; reviewRun?: string };
-// An Agent's `sessionId` is the console's composite id `${socketFingerprint}:${tmuxSession}`
-// (discovery keys agents that way). Recover the raw tmux session name a command targets.
+// A tmux Agent carries its pane details in `pane`.
+export type Agent = { id: string; transport: Transport; panel: AgentPanel; pane?: AgentPane; home: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind: AgentKind; attention: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; newTaskConfigured?: boolean; push?: PromptAction; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; reviewRun?: string };
+// an Agent driven over tmux, which always has its pane part
+export type TmuxAgent = Agent & { pane: AgentPane };
 // whether an Agent is an interactive Review run's own (ADR 0010): it belongs to its run, so the
 // Worktree's own flows (launch matching, Restart, switch chat, a Run's reuse) never count or take it
 export const isReviewRun = (agent: Pick<Agent, 'reviewRun'>): boolean => agent.reviewRun !== undefined;
 // the operator's own Agents in one Worktree: every Agent there but a Review run's
 export const worktreeAgents = <T extends Pick<Agent, 'worktreeId' | 'reviewRun'>>(agents: readonly T[], worktreeId: string): T[] => agents.filter(agent => agent.worktreeId === worktreeId && !isReviewRun(agent));
-export const agentTmuxSession = (agent: Pick<Agent, 'sessionId' | 'socketFingerprint'>): string => agent.sessionId.slice(agent.socketFingerprint.length + 1);
+// A pane's `sessionId` is the console's composite id `${socketFingerprint}:${tmuxSession}`
+// (discovery keys agents that way). Recover the raw tmux session name a command targets.
+export const agentTmuxSession = (pane: Pick<AgentPane, 'sessionId' | 'socketFingerprint'>): string => pane.sessionId.slice(pane.socketFingerprint.length + 1);
 /**
  * A configured directory the console manages (config `projects[]`). A `repository`
  * Project's identity is the realpath of its common git directory, so two entries

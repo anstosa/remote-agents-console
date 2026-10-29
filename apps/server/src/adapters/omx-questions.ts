@@ -22,7 +22,7 @@ const readOmxQuestion = (raw: OmxRecord, paneId: string): InlineQuestion | undef
   const options = Array.isArray(first?.options) ? first.options : Array.isArray(raw.options) ? raw.options : [];
   const choices = options.map(option => option && typeof option === 'object' && typeof (option as { label?: unknown }).label === 'string' ? (option as { label: string }).label : undefined).filter((value): value is string => value !== undefined);
   return text && choices.length >= 2 && choices.length <= 16
-    ? { id: inlineQuestionId(text, choices), text, choices, source: 'structured', targetPaneId: raw.renderer.target }
+    ? { id: inlineQuestionId(text, choices), text, choices, source: 'structured', pane: { targetPaneId: raw.renderer.target } }
     : undefined;
 };
 

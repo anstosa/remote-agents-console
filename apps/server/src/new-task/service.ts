@@ -38,7 +38,7 @@ export class NewTaskService {
     const task = worktree.newTask.replaceAll('{taskId}', taskId());
     const script = hostCommand(`cd -- ${quote(path)} && eval ${quote(task)}`, home);
     const session = worktreeSessionName(path);
-    const currentSession = agentTmuxSession(target.agent);
+    const currentSession = agentTmuxSession(target.agent.pane);
     const shell = process.env.RAC_HOST_TMUX_DIR === undefined ? interactiveShellPath() : hostInteractiveShellPath();
     const pane = await startNamedReplacementSession(this.tmuxBinary, target.socket.path, currentSession, session, ['-c', tmuxFormatLiteral(path), shell, '-lc', interactiveShellBootstrap(script, home, shell, true)], this.command);
     if (pane === undefined) return false;

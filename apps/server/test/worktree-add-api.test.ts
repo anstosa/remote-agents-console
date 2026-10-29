@@ -28,7 +28,7 @@ const newWorktree = testWorktree({ id: 'proj:/repo/wts/feat', projectId: 'proj',
 // after the launch call so waitForAgent sees a genuinely new agent id
 function discoveryStub(agentAfterLaunch = true) {
   let dashboardCalls = 0;
-  const agent = stated({ id: 'agent-new', paneId: '%9', sessionId: 'socket:$9', socketFingerprint: 'socket', home: '/repo/wts/feat', projectId: 'proj', worktreeId: newWorktree.id, title: 'Ready' });
+  const agent = stated({ id: 'agent-new', pane: { paneId: '%9', sessionId: 'socket:$9', socketFingerprint: 'socket' }, home: '/repo/wts/feat', projectId: 'proj', worktreeId: newWorktree.id, title: 'Ready' });
   return {
     invalidateWorktrees: () => {},
     worktreesNow: () => [newWorktree],

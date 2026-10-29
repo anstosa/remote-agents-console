@@ -10,7 +10,7 @@ const implementationChange = { id: 'chg_12345678', file: 'src/feature.ts', categ
 // build one stable prepared Comparison
 function prepared(worktreeId = 'cora'): PreparedReviewTour {
   const comparison: ReviewComparison = { agentId: `agent-${worktreeId}`, worktreeId, workspace: `/worktrees/${worktreeId}`, branch: 'feature/review-tour', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: `fingerprint-${worktreeId}`, changes: [implementationChange] };
-  return { comparison, resolved: { workspace: comparison.workspace, agent: { id: comparison.agentId, paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: comparison.workspace, branch: comparison.branch, title: 'Ready' }, worktree: { id: worktreeId, label: worktreeId, path: comparison.workspace, identity: comparison.workspace, available: true, pinned: false } } };
+  return { comparison, resolved: { workspace: comparison.workspace, agent: { id: comparison.agentId, pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: comparison.workspace, branch: comparison.branch, title: 'Ready' }, worktree: { id: worktreeId, label: worktreeId, path: comparison.workspace, identity: comparison.workspace, available: true, pinned: false } } };
 }
 
 // complete a deferred operation

@@ -3,7 +3,7 @@ import { PromptService } from '../src/prompts/service.js';
 import { inlineQuestionId } from '../src/adapters/inline-questions.js';
 
 const socket = { fingerprint: 'socket', path: '/tmp/question-text', device: 1, inode: 1 };
-const agent = { id: 'socket:%1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/repo', kind: 'codex', title: 'Question', attention: 'question' };
+const agent = { id: 'socket:%1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/repo', kind: 'codex', title: 'Question', attention: 'question' };
 const questionId = inlineQuestionId('Which approach?', ['Small', 'Broad', 'Other']);
 const legacyQuestionId = inlineQuestionId('Which approach?', ['Small', 'Broad', 'None of the above']);
 const choices = 'Which approach?\n› 1. Small\n  2. Broad\n  3. Other';
@@ -76,7 +76,7 @@ describe('text question answers', () => {
   it('does not submit after the target changes during paste', async () => {
     const { service, target, tmux } = fixture();
     tmux.pastePrompt.mockImplementation(async () => {
-      target.mockResolvedValue({ agent: { ...agent, paneId: '%2' }, socket });
+      target.mockResolvedValue({ agent: { ...agent, pane: { ...agent.pane, paneId: '%2' } }, socket });
       return true;
     });
     await expect(service.answerQuestion(agent.id, questionId, 'Answer')).resolves.toBe(false);

@@ -16,12 +16,8 @@ export function inlineQuestionId(text: string, choices: readonly string[]): stri
   return createHash('sha256').update([text, ...choices].join('\0')).digest('base64url').slice(0, 22);
 }
 
-/** A pane question with its Transport-neutral shape: a choice field, and its pane fields as the pane part. */
+/** A pane question with its Transport-neutral answer field: one of its choices. */
 export function withQuestionShape(question: InlineQuestion): InlineQuestion {
-  const { choices, descriptions, rows, selectedIndex, targetPaneId } = question;
-  return {
-    ...question,
-    field: { kind: 'choice', choices, ...(descriptions === undefined ? {} : { descriptions }) },
-    pane: { ...(rows === undefined ? {} : { rows }), ...(selectedIndex === undefined ? {} : { selectedIndex }), ...(targetPaneId === undefined ? {} : { targetPaneId }) }
-  };
+  const { choices, descriptions } = question;
+  return { ...question, field: { kind: 'choice', choices, ...(descriptions === undefined ? {} : { descriptions }) } };
 }

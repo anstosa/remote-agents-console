@@ -24,7 +24,7 @@ describe('pendingOmxQuestion', () => {
   it('reads a pending question addressed at the pane into the unified shape', async () => {
     await withQuestionFile(record(), async workspace => {
       await expect(pendingOmxQuestion(workspace, '%1')).resolves.toEqual({
-        id: inlineQuestionId('Choose one?', ['Yes', 'No']), text: 'Choose one?', choices: ['Yes', 'No'], source: 'structured', targetPaneId: '%22'
+        id: inlineQuestionId('Choose one?', ['Yes', 'No']), text: 'Choose one?', choices: ['Yes', 'No'], source: 'structured', pane: { targetPaneId: '%22' }
       });
     });
   });

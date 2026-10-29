@@ -21,8 +21,8 @@ const mutate = { host, origin: `https://${host}`, cookie: '__Host-rac=x', 'x-csr
 const dashboardUpdates = { setLoader: () => {}, refresh: async () => {}, close: () => {} } as never;
 
 const worktree = testWorktree({ id: 'wt-main', projectId: 'proj', label: 'Proj · main', path: '/repo', identity: '/repo', main: true });
-const codexAgent = () => stated({ id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/repo', worktreeId: 'wt-main', title: 'Ready' });
-const claudeAgent = (): Agent => ({ id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/repo', worktreeId: 'wt-main', title: 'Ready', kind: 'claude', attention: 'finished' });
+const codexAgent = () => stated({ id: 'agent-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/repo', worktreeId: 'wt-main', title: 'Ready' });
+const claudeAgent = (): Agent => ({ id: 'agent-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/repo', worktreeId: 'wt-main', title: 'Ready', kind: 'claude', attention: 'finished' });
 
 async function stores(): Promise<{ notes: WorktreeNoteService; queued: QueuedPromptService; noteId: string }> {
   const root = await mkdtemp(join(tmpdir(), 'rac-note-run-')); dirs.push(root);
@@ -45,7 +45,7 @@ describe('POST /api/worktrees/:id/notes/:noteId/run', () => {
   it('launches and runs an attachment-only note with its staged file', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rac-note-run-attachments-')); dirs.push(root);
     const localWorktree = testWorktree({ id: 'wt-main', projectId: 'proj', label: 'Proj · main', path: root, identity: root, main: true });
-    const localAgent = stated({ id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: root, worktreeId: 'wt-main', title: 'Ready' });
+    const localAgent = stated({ id: 'agent-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: root, worktreeId: 'wt-main', title: 'Ready' });
     const notes = new WorktreeNoteService(join(root, 'notes.json'));
     const attachment = { name: 'context.txt', data: Buffer.from('attachment body').toString('base64') };
     const note = await notes.createWithText('proj', 'Files only', '', undefined, [attachment]);

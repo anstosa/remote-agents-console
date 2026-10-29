@@ -50,7 +50,7 @@ describe('reportedClaudeQuestion', () => {
       text: deploy.question,
       choices,
       descriptions: ['Rehearse first', 'Ship to live', 'Wait', ''],
-      rows: [0, 1, 2, 4],
+      pane: { rows: [0, 1, 2, 4] },
       source: 'structured',
     });
   });
@@ -83,7 +83,7 @@ describe('reportedClaudeQuestion', () => {
   it('still matches when the caret sits on another option', () => {
     const choices = ['Staging', 'Production', 'Neither, hold the build until the smoke tests finish', 'Chat about this'];
     expect(reportedClaudeQuestion(encode([deploy]), wideDialog(2))).toEqual({
-      id: inlineQuestionId(deploy.question, choices), text: deploy.question, choices, descriptions: ['Rehearse first', 'Ship to live', 'Wait', ''], rows: [0, 1, 2, 4], source: 'structured',
+      id: inlineQuestionId(deploy.question, choices), text: deploy.question, choices, descriptions: ['Rehearse first', 'Ship to live', 'Wait', ''], pane: { rows: [0, 1, 2, 4] }, source: 'structured',
     });
   });
 

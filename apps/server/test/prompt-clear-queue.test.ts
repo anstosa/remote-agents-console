@@ -14,7 +14,7 @@ const socket = { fingerprint: 'socket', path: '/tmp/sock', device: 1, inode: 1 }
 // represent mutable adapter state across scenarios
 type ResetTestAgent = {
   id: string;
-  paneId: string;
+  pane: { paneId: string };
   home: string;
   kind: 'claude' | 'codex' | 'omx';
   title: string;
@@ -30,7 +30,7 @@ const createResetFixture = async (kind: ResetTestAgent['kind'] = 'codex') => {
   const history = new PromptHistoryService(join(directory, 'history.json'));
   const agent: ResetTestAgent = {
     id: 'socket:%1',
-    paneId: '%1',
+    pane: { paneId: '%1' },
     home: '/tmp',
     kind,
     title: 'Ready',

@@ -36,7 +36,7 @@ describe('note all-workspace visibility API', () => {
     directories.push(directory);
     const alpha = testWorktree({ id: 'alpha', projectId: 'alpha-project', label: 'Alpha', path: '/alpha', identity: '/alpha' });
     const beta = testWorktree({ id: 'beta', projectId: 'beta-project', label: 'Beta', path: '/beta', identity: '/beta' });
-    const betaAgent = stated({ id: 'beta-agent', paneId: '%2', sessionId: 'socket:$2', socketFingerprint: 'socket', home: beta.path, title: 'Ready' });
+    const betaAgent = stated({ id: 'beta-agent', pane: { paneId: '%2', sessionId: 'socket:$2', socketFingerprint: 'socket' }, home: beta.path, title: 'Ready' });
     const discovery = {
       // expose both independent persistence scopes
       worktreesNow: () => [alpha, beta],

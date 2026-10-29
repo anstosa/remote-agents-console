@@ -40,7 +40,7 @@ async function fixture(): Promise<ResolvedWorkspace> {
   ]);
   return {
     workspace: root,
-    agent: { id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: root, title: 'Ready' },
+    agent: { id: 'agent-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: root, title: 'Ready' },
     worktree: { id: 'cora', projectId: 'cora', label: 'Cora', path: root, identity: root, available: true, pinned: false, main: true, detached: false, locked: false }
   };
 }

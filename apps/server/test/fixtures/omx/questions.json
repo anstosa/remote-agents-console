@@ -29,7 +29,7 @@
       "  Press enter to confirm",
       "› "
     ],
-    "question": { "text": "Which plan should I follow?", "choices": ["Approve the plan", "Revise the plan", "Reject"], "source": "parsed", "selectedIndex": 0 }
+    "question": { "text": "Which plan should I follow?", "choices": ["Approve the plan", "Revise the plan", "Reject"], "source": "parsed", "pane": { "selectedIndex": 0 } }
   },
   {
     "name": "a completed turn with no choices is not a question",

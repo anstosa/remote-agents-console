@@ -15,7 +15,7 @@ describe('leave pane mode API', () => {
       tmux: { exitPaneMode } as never,
       dashboardUpdates: { refresh, setLoader: () => {}, subscribe: () => () => {}, close: () => {} } as never,
       discovery: {
-        target: async (id: string) => id === 'agent-1' ? { agent: { id: 'agent-1', paneId: '%7' }, socket } : undefined,
+        target: async (id: string) => id === 'agent-1' ? { agent: { id: 'agent-1', pane: { paneId: '%7' } }, socket } : undefined,
         worktreesNow: () => [],
         dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [] })
       } as never

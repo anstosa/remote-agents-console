@@ -19,7 +19,7 @@ const dashboardUpdates = { setLoader: () => {}, refresh: async () => {}, close: 
 
 const worktree = testWorktree({ id: 'wt-main', projectId: 'proj', label: 'Proj · main', path: '/repo', identity: '/repo', main: true });
 const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
-const scratchAgent = stated({ id: 'agent-scratch', paneId: '%3', sessionId: 'socket:$3', socketFingerprint: 'socket', home: '/home/user/scratch', title: 'Ready' });
+const scratchAgent = stated({ id: 'agent-scratch', pane: { paneId: '%3', sessionId: 'socket:$3', socketFingerprint: 'socket' }, home: '/home/user/scratch', title: 'Ready' });
 
 const discoveryStub = () => ({
   invalidateWorktrees: () => {},

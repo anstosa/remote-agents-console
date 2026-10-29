@@ -323,7 +323,7 @@ export class OrchestrationService {
       const target = await this.dependencies.discovery.target(agentId);
       // require a live target for terminal identity
       if (target === undefined) return failure('not_found', 'Agent not found.');
-      const captured = await this.dependencies.tmux.captureWindow(target.socket, target.agent.paneId, defaultLogRows).catch(() => undefined);
+      const captured = await this.dependencies.tmux.captureWindow(target.socket, target.agent.pane.paneId, defaultLogRows).catch(() => undefined);
       // prefer the terminal's prompt-coherent response
       if (captured?.latestAssistantMessage !== undefined) {
         const limited = limitText(redactIntegrationText(captured.latestAssistantMessage), maxTerminalBytes);
@@ -349,7 +349,7 @@ export class OrchestrationService {
       const target = await this.dependencies.discovery.target(agentId);
       // require a current pane
       if (target === undefined) return failure('not_found', 'Agent not found.');
-      const captured = await this.dependencies.tmux.captureRecentWindow(target.socket, target.agent.paneId, rows);
+      const captured = await this.dependencies.tmux.captureRecentWindow(target.socket, target.agent.pane.paneId, rows);
       // distinguish capture failure from missing agents
       if (captured === undefined) return failure('unavailable', 'Agent log is unavailable.', true);
       const limited = limitText(redactIntegrationText(captured.text), maxTerminalBytes);

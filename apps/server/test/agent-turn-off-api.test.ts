@@ -17,7 +17,7 @@ describe('agent turn-off transport', () => {
     { method: 'DELETE' as const, url: '/api/agents/agent-1', configured: false }
   ])('accepts $method $url with chunked JSON framing', async ({ method, url, configured }) => {
     const worktree = testWorktree({ id: 'cora', path: '/worktrees/cora' });
-    const agent = stated({ id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: worktree.path, title: 'Ready', ...(configured ? { worktreeId: worktree.id } : {}) });
+    const agent = stated({ id: 'agent-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: worktree.path, title: 'Ready', ...(configured ? { worktreeId: worktree.id } : {}) });
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
     // isolate discovery from real agent sessions
     const discovery = {
@@ -42,6 +42,6 @@ describe('agent turn-off transport', () => {
     const response = await app.inject({ method, url, headers: { ...headers, 'content-type': 'application/json' }, payload: Readable.from(['{}']) });
     expect(framing).toEqual([{ transferEncoding: 'chunked', contentLength: undefined }]);
     expect(response.statusCode).toBe(204);
-    expect(close).toHaveBeenCalledExactlyOnceWith(socket, agent.paneId);
+    expect(close).toHaveBeenCalledExactlyOnceWith(socket, agent.pane.paneId);
   }, 15_000);
 });

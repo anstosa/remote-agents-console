@@ -32,7 +32,7 @@ async function authenticatedHeaders(app: Awaited<ReturnType<typeof buildApp>>) {
 }
 
 // a live agent target the naming route resolves through discovery
-const agentTarget = (kind: AgentKind, attention = 'finished') => ({ id: 'agent-1', kind, paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: cwd, title: 'Ready', attention });
+const agentTarget = (kind: AgentKind, attention = 'finished') => ({ id: 'agent-1', kind, pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: cwd, title: 'Ready', attention });
 
 // a discovery fake shaped for the naming route, listing one row for the named Conversation
 function namingDiscovery(kind: AgentKind, conversationId: string, worktrees: ReturnType<typeof testWorktree>[], attention = 'finished') {

@@ -10,7 +10,7 @@ import { inlineQuestionId } from '../src/adapters/inline-questions.js';
 import { QueuedPromptService, type QueuedPrompt } from '../src/prompts/queue.js';
 import { PromptHistoryService } from '../src/prompt-history/service.js';
 import { stated } from './helpers/agent.js';
-const socket={fingerprint:'socket',path:'/tmp/sock',device:1,inode:1}; const agent=stated({id:'socket:%1',paneId:'%1',sessionId:'socket:$1',socketFingerprint:'socket',home:'/tmp',title:''});
+const socket={fingerprint:'socket',path:'/tmp/sock',device:1,inode:1}; const agent=stated({id:'socket:%1',pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' },home:'/tmp',title:''});
 // records every prompt a halted queue drains into Notes, in drain order (front of the queue first)
 const drainRecorder = () => { const drained: QueuedPrompt[] = []; const drain: UndeliveredDrain = async (_scope, prompt) => { drained.push(prompt); return true; }; return { drained, drain }; };
 it('allows prompt attachments totaling 25 MiB', () => {
@@ -189,8 +189,8 @@ it('records successful submissions in the Agent\'s own history', async () => {
 it.each(['ordinary', 'unicode'] as const)('isolates %s update advisor prompts from the configured repository queue', async mode => {
   const directory = await mkdtemp(join(tmpdir(), 'rac-advisor-scope-'));
   const queue = new QueuedPromptService(join(directory, 'queue.json'));
-  const normalAgent = { ...agent, id: 'socket:%1', paneId: '%1', home: '/tmp' };
-  const advisorAgent = { ...agent, id: 'socket:%2', paneId: '%2', home: '/tmp', displayLabel: 'Update Advisor Starting v4 2222222' };
+  const normalAgent = { ...agent, id: 'socket:%1', pane: { ...agent.pane, paneId: '%1' }, home: '/tmp' };
+  const advisorAgent = { ...agent, id: 'socket:%2', pane: { ...agent.pane, paneId: '%2' }, home: '/tmp', displayLabel: 'Update Advisor Starting v4 2222222' };
   const pasted: string[][] = [];
   const entered: string[] = [];
   const queued: string[] = [];
@@ -246,8 +246,8 @@ it('keeps a Review run prompt out of the Worktree queue the operator Agent drain
   const queue = new QueuedPromptService(join(directory, 'queue.json'));
   const pasted: string[][] = [];
   const worktree = { id: 'cora:/tmp', projectId: 'cora', label: 'Cora', path: '/tmp', identity: '/tmp', available: true, pinned: true, main: true, detached: false, locked: false };
-  const operator = { ...agent, id: 'socket:%1', paneId: '%1' };
-  const reviewer = { ...agent, id: 'socket:%2', paneId: '%2', reviewRun: 'run-1' };
+  const operator = { ...agent, id: 'socket:%1', pane: { ...agent.pane, paneId: '%1' } };
+  const reviewer = { ...agent, id: 'socket:%2', pane: { ...agent.pane, paneId: '%2' }, reviewRun: 'run-1' };
   const discovery = { worktreesNow: () => [worktree], target: async (id: string) => ({ agent: id === reviewer.id ? reviewer : operator, socket }) };
   const tmux = {
     pastePrompt: async (_socket: unknown, pane: string, _buffer: string, prompt: string) => { pasted.push([pane, prompt]); return true; },
@@ -286,8 +286,8 @@ describe('per-Agent prompt scope', () => {
   it('keeps a prompt queued for a busy Agent out of its idle sibling at the same Worktree', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'rac-sibling-scope-'));
     const queue = new QueuedPromptService(join(directory, 'queue.json'));
-    const idle = { id: 'socket:%1', paneId: '%1', home: '/tmp', kind: 'claude' as const, title: '', attention: 'finished' as 'finished' | 'working' };
-    const busy = { ...idle, id: 'socket:%2', paneId: '%2', attention: 'working' as 'finished' | 'working' };
+    const idle = { id: 'socket:%1', pane: { paneId: '%1' }, home: '/tmp', kind: 'claude' as const, title: '', attention: 'finished' as 'finished' | 'working' };
+    const busy = { ...idle, id: 'socket:%2', pane: { ...idle.pane, paneId: '%2' }, attention: 'working' as 'finished' | 'working' };
     const pasted: string[] = [];
     const discovery = { worktreesNow: () => [worktree], target: async (id: string) => ({ agent: id === busy.id ? busy : idle, socket }) };
     const tmux = { pastePrompt: async (_socket: unknown, pane: string) => { pasted.push(pane); return true; }, sendKeys: async () => true, capture: async () => '' };
@@ -1290,7 +1290,7 @@ it('answers a Codex menu relative to its fresh highlight without changing its qu
 
 it('answers a Claude reported question by re-deriving it from a fresh payload and capture', async () => {
   const sent: string[][] = [];
-  const claudeAgent = { id: 'socket:%1', paneId: '%1', home: '/tmp', kind: 'claude' as const, title: '' };
+  const claudeAgent = { id: 'socket:%1', pane: { paneId: '%1' }, home: '/tmp', kind: 'claude' as const, title: '' };
   const payload = Buffer.from(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Deploy where?', options: [{ label: 'Staging' }, { label: 'Production' }], multiSelect: false }] } })).toString('base64');
   const capture = [' ☐ Target', '│ Deploy where?', '❯ 1. Staging', '  2. Production', '  3. Type something.'].join('\n');
   const discovery = { worktreesNow: () => [], target: async () => ({ agent: claudeAgent, socket }), reportedQuestionPayload: () => payload };
@@ -1306,7 +1306,7 @@ it('answers a Claude reported question by re-deriving it from a fresh payload an
 });
 
 it('refuses a Claude reported answer once the payload is cleared', async () => {
-  const claudeAgent = { id: 'socket:%1', paneId: '%1', home: '/tmp', kind: 'claude' as const, title: '' };
+  const claudeAgent = { id: 'socket:%1', pane: { paneId: '%1' }, home: '/tmp', kind: 'claude' as const, title: '' };
   const id = inlineQuestionId('Deploy where?', ['Staging', 'Production']);
   // PostToolUse cleared @rac_question: no payload, so nothing is re-derived
   const discovery = { worktreesNow: () => [], target: async () => ({ agent: claudeAgent, socket }), reportedQuestionPayload: () => undefined };

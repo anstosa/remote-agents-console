@@ -117,7 +117,7 @@ describe('opening a folder', () => {
   it('launches an Agent of the given kind at an ad-hoc Scratch folder and returns it', async () => {
     const launchAt = vi.fn(async () => true);
     const adhoc = (folder: string): Place => ({ id: `scratch:${folder}`, kind: 'scratch', projectId: 'scratch', label: 'repo', home: folder, adhoc: true });
-    const codex = (folder: string) => stated({ id: 'socket:%3', paneId: '%3', placeId: `scratch:${folder}`, title: 'Ready' });
+    const codex = (folder: string) => stated({ id: 'socket:%3', pane: { paneId: '%3' }, placeId: `scratch:${folder}`, title: 'Ready' });
     let opened = '';
     const { app, folder } = await start({
       place: adhoc,
@@ -135,7 +135,7 @@ describe('opening a folder', () => {
   });
 
   it('reports a Claude trust prompt in the opened folder as needing the operator, not as a failed launch', async () => {
-    const claude = (folder: string) => ({ ...stated({ id: 'socket:%3', paneId: '%3', title: 'Claude Code', placeId: `ferry-1:${folder}`, worktreeId: `ferry-1:${folder}` }), kind: 'claude' });
+    const claude = (folder: string) => ({ ...stated({ id: 'socket:%3', pane: { paneId: '%3' }, title: 'Claude Code', placeId: `ferry-1:${folder}`, worktreeId: `ferry-1:${folder}` }), kind: 'claude' });
     const capture = vi.fn(async () => 'Quick safety check: Is this a project you created or one you trust?\n❯ 1. Yes, I trust this folder\n  2. No, exit');
     let opened = '';
     const { app, folder } = await start({
@@ -155,7 +155,7 @@ describe('opening a folder', () => {
   it('refuses a launch whose agent closes as it starts', async () => {
     const { app, folder } = await start({
       launch: { launchAt: async () => true },
-      dashboard: (call, folder) => call === 0 ? idleDashboard : { ...idleDashboard, agents: [stated({ id: 'socket:%3', paneId: '%3', title: 'Ready', placeId: `ferry-1:${folder}`, worktreeId: `ferry-1:${folder}` })] },
+      dashboard: (call, folder) => call === 0 ? idleDashboard : { ...idleDashboard, agents: [stated({ id: 'socket:%3', pane: { paneId: '%3' }, title: 'Ready', placeId: `ferry-1:${folder}`, worktreeId: `ferry-1:${folder}` })] },
       target: () => undefined,
     });
     try {

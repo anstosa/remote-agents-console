@@ -5,18 +5,19 @@ import type { InlineQuestion, TmuxKey } from './types.js';
 // admit text only in native question editors, never in arbitrary numbered menus
 export function codexQuestionTextEntry(question: InlineQuestion, capture: string): TmuxKey[] | undefined {
   // structured OMX renderers have a different text-entry protocol
-  if (question.targetPaneId !== undefined) return undefined;
+  if (question.pane?.targetPaneId !== undefined) return undefined;
   const lines = normalizedLines(capture).filter(Boolean);
   const footer = lines.slice(-8).join(' ');
   // the asynchronous editor moves bracketed pastes directly into its other field
   const queued = queuedCodexQuestion(capture);
   if (queued !== undefined && queued.key === undefined) return [];
   // the blocking editor retains its selected option when notes are pasted
-  if (!/\benter to submit answer\b/u.test(footer) || question.selectedIndex === undefined) return undefined;
+  const selectedIndex = question.pane?.selectedIndex;
+  if (!/\benter to submit answer\b/u.test(footer) || selectedIndex === undefined) return undefined;
   const other = question.choices.findIndex(choice => /^None of the above(?:\s|$)/u.test(choice));
   // custom text must not silently endorse the preselected recommendation
   if (other < 0) return undefined;
-  const distance = other - question.selectedIndex;
+  const distance = other - selectedIndex;
   return Array.from({ length: Math.abs(distance) }, () => distance < 0 ? 'Up' : 'Down');
 }
 
@@ -131,7 +132,7 @@ export function parseChoiceQuestion(message: string): InlineQuestion | undefined
   let lastContent = lines.length - 1;
   // find the live content boundary once rather than rescanning every rejected suffix
   while (lastContent >= 0 && (!lines[lastContent]!.trim() || questionFooter.test(lines[lastContent]!.trim()))) lastContent -= 1;
-  let detected: { text: string; choices: string[]; selectedIndex?: number } | undefined;
+  let detected: { text: string; choices: string[]; pane?: { selectedIndex: number } } | undefined;
   // inspect complete choice blocks even when narrow panes wrap them over many rows
   for (let start = 0; start < lines.length; start += 1) {
     // skip prose without rescanning it as an option block
@@ -184,7 +185,7 @@ export function parseChoiceQuestion(message: string): InlineQuestion | undefined
     if (caretCount !== 1) selectedIndex = undefined;
     const question = choiceQuestionText(lines, choiceStart, interactive);
     // retain the latest question
-    if (question) detected = { text: question, choices: choiceLabels(blocks), ...(selectedIndex === undefined ? {} : { selectedIndex }) };
+    if (question) detected = { text: question, choices: choiceLabels(blocks), ...(selectedIndex === undefined ? {} : { pane: { selectedIndex } }) };
   }
   return detected === undefined
     ? undefined

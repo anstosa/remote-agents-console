@@ -47,17 +47,17 @@ export type Turn = { prompt?: string; text: string; rows?: number };
 // `parsed` question the client may optimistically dismiss, a `structured` one (OMX's
 // file, Claude's reported payload) is server-published and waits for the server to
 // stop reporting it. Not the same as the CONTEXT.md "Inline question" provenance.
-// selectedIndex is the live zero-based keyboard cursor, not part of the question id;
-// descriptions parallel choices ('' where an option has none) and are not part of it either;
-// rows maps each choice to its zero-based on-screen row when the menu skips a row
-// the picker does not offer (Claude's `Type something.` input), identity otherwise
+// descriptions parallel choices ('' where an option has none) and are not part of the id.
 // `field` and `pane` are the Transport-neutral shape (ADR 0015): the one answer the question takes,
-// and where a question drawn on a tmux pane is answered. Adapters fill the flat fields; the tmux
-// Transport derives the shape from them (`withQuestionShape`), and the flat fields stay until the
-// web reads the shape.
-export type InlineQuestion = { id: string; text: string; choices: string[]; descriptions?: string[]; rows?: number[]; source: 'structured' | 'parsed'; targetPaneId?: string; selectedIndex?: number; field?: QuestionField; pane?: QuestionPane };
+// and where a question drawn on a tmux pane is answered. Adapters fill `choices` and `pane`; the
+// tmux Transport derives `field` from the choices (`withQuestionShape`).
+export type InlineQuestion = { id: string; text: string; choices: string[]; descriptions?: string[]; source: 'structured' | 'parsed'; field?: QuestionField; pane?: QuestionPane };
 // one of the question's choices, or text: one line or several, prefilled or with a placeholder
 export type QuestionField = { kind: 'choice'; choices: string[]; descriptions?: string[] } | { kind: 'text'; multiline: boolean; prefill?: string; placeholder?: string };
+// selectedIndex is the live zero-based keyboard cursor, not part of the question id; rows maps
+// each choice to its zero-based on-screen row when the menu skips a row the picker does not offer
+// (Claude's `Type something.` input), identity otherwise; targetPaneId is the pane that draws the
+// question when it is not the Agent's own (OMX's renderer)
 export type QuestionPane = { rows?: number[]; selectedIndex?: number; targetPaneId?: string };
 export type PromptCommand = { name: string; description?: string };
 

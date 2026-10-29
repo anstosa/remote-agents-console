@@ -363,7 +363,7 @@ test('reveals the normal prompt when editing an action during a structured quest
   const prepared = 'Use this as a normal follow-up instead.';
   const controls = await mount(page, { draft: () => ({ json: { draft: { kind: 'prompt', text: prepared, placeId: worktree.id, agentId: 'agent-1' } } }) });
   await seedPaneSize(page, 'agent-1', 80, 24);
-  await pushQuestion(page, 'agent-1', { id: 'configured-question', text: 'Which path?', choices: ['First', 'Second'], source: 'structured' });
+  await pushQuestion(page, 'agent-1', { id: 'configured-question', text: 'Which path?', field: { kind: 'choice', choices: ['First', 'Second'] }, source: 'structured' });
   await expect(page.getByRole('region', { name: 'Agent question' })).toBeVisible();
 
   await editBeforeSubmit(page, page.locator('.agent-panel .panel-header-actions').getByRole('button', { name: 'Agent action' }));

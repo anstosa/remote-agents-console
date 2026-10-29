@@ -33,7 +33,7 @@ const fixture = async (kind: AgentKind = 'codex') => {
   const directory = await mkdtemp(join(tmpdir(), 'rac-submit-recovery-'));
   const queue = new QueuedPromptService(join(directory, 'queue.json'));
   const history = new PromptHistoryService(join(directory, 'history.json'));
-  const agent = { ...stated({ id: 'socket:%1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: directory, title: 'Ready' }), kind };
+  const agent = { ...stated({ id: 'socket:%1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: directory, title: 'Ready' }), kind };
   const scope = `agent:${agent.id}`;
   const notes: string[] = [];
   // preserve undelivered text before removing queue items
@@ -220,7 +220,7 @@ describe('failed queue submission recovery', () => {
     const { agent, queue, scope, notes, drain, cleanup } = await fixture();
     const sent: string[][] = [];
     let submitted = false;
-    const replacement = { ...agent, paneId: '%2' };
+    const replacement = { ...agent, pane: { ...agent.pane, paneId: '%2' } };
     const discovery = {
       worktreesNow: () => [],
       // replace the pane only after the original submit
@@ -621,7 +621,7 @@ describe('failed queue submission recovery', () => {
     const tmux = {
       pastePrompt: async () => true,
       capture: async () => '› dead pane draft',
-      paneSnapshotsNow: () => new Map([[socket.path, { status: 'available' as const, panes: [{ paneId: agent.paneId, dead: true }] }]]),
+      paneSnapshotsNow: () => new Map([[socket.path, { status: 'available' as const, panes: [{ paneId: agent.pane.paneId, dead: true }] }]]),
       // the native process never acknowledges the original draft
       sendKeys: async () => { submittedAt ||= Date.now(); return true; }
     };
@@ -786,7 +786,7 @@ describe('failed queue submission recovery', () => {
       pastePrompt: async () => true,
       capture: async () => `› ${composer}`,
       // expose the same incomplete inventory marker as the production transport
-      paneSnapshotsNow: () => new Map([[socket.path, listing === 'unavailable' ? { status: 'unavailable' as const } : { status: 'available' as const, panes: [{ paneId: agent.paneId }] }]]),
+      paneSnapshotsNow: () => new Map([[socket.path, listing === 'unavailable' ? { status: 'unavailable' as const } : { status: 'available' as const, panes: [{ paneId: agent.pane.paneId }] }]]),
       // preserve the draft until lifecycle discovery becomes available again
       sendKeys: async (_socket: unknown, _pane: string, keys: string[]) => {
         submittedAt ||= Date.now();

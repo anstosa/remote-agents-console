@@ -10,7 +10,7 @@ const optionContent = [
 const completeQuestion = {
   id: 'question-editor-benchmark',
   text: questionText,
-  choices: [optionContent[0], optionContent[1], optionContent[2]],
+  field: { kind: 'choice', choices: [optionContent[0], optionContent[1], optionContent[2]] },
   source: 'parsed'
 };
 const viewports = [

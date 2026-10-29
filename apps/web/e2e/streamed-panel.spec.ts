@@ -10,7 +10,7 @@ import { installPaneMock, seedPaneSize, pushBytes, pushQuestion, pushMetadata, p
 const question = {
   id: 'question-deploy',
   text: 'Which deployment environment should receive this release?',
-  choices: ['Staging', 'Production', 'Cancel'],
+  field: { kind: 'choice', choices: ['Staging', 'Production', 'Cancel'] },
   source: 'parsed'
 };
 

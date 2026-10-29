@@ -21,7 +21,7 @@ const dashboardUpdates = { setLoader: () => {}, refresh: async () => {}, close: 
 
 const socket = { fingerprint: 'sockfp', path: '/tmp/rac-pane-test.sock', device: 0, inode: 0 };
 // the composite agent id embeds the raw tmux session ($1) behind the socket fingerprint
-const agentOf = (kind: string) => ({ id: 'agent-1', paneId: '%1', sessionId: 'sockfp:$1', socketFingerprint: 'sockfp', home: '/repo', title: 'Ready', kind, attention: 'finished' });
+const agentOf = (kind: string) => ({ id: 'agent-1', pane: { paneId: '%1', sessionId: 'sockfp:$1', socketFingerprint: 'sockfp' }, home: '/repo', title: 'Ready', kind, attention: 'finished' });
 const discoveryOf = (kind: string) => {
   const target = async (id: string) => (id === 'agent-1' ? { agent: agentOf(kind), socket } : undefined);
   // the project proxy inspects every WS upgrade; no worktrees means it passes ours to Fastify
@@ -564,7 +564,7 @@ describe('/ws/pane derive (Codex)', () => {
     Object.assign(tmux, fakeTmux(stream).tmux);
     stream.activity();
     await waitFor(() => conn.frames.some(frame => frame.type === 'question' && (frame.question as { text?: string })?.text === 'Which approach?'));
-    expect(conn.frames.find(frame => (frame.question as { text?: string })?.text === 'Which approach?')?.question).toMatchObject({ choices: ['Small', 'Other'], selectedIndex: 0 });
+    expect(conn.frames.find(frame => (frame.question as { text?: string })?.text === 'Which approach?')?.question).toMatchObject({ choices: ['Small', 'Other'], field: { kind: 'choice', choices: ['Small', 'Other'] }, pane: { selectedIndex: 0 } });
     expect(sendKeys).toHaveBeenCalledTimes(1);
 
     // do not override a deliberate return to the main prompt
@@ -595,10 +595,12 @@ describe('/ws/pane derive (Codex)', () => {
     await waitFor(() => conn.frames.some(frame => frame.type === 'metadata'));
     expect(conn.frames.find(frame => frame.type === 'metadata')!.metadata).toEqual({ message: 'the answer', overflow: false });
 
-    // the pane prints a Codex-shaped choice list; the next frame carries the question
+    // the pane prints a Codex-shaped choice list; the next frame carries the question in its
+    // Transport-neutral shape: the choices as its answer field
     stream.setCapture('CHOOSE an option');
     stream.activity();
-    await waitFor(() => conn.frames.some(frame => frame.type === 'question' && JSON.stringify(frame.question) === JSON.stringify(question)));
+    const shaped = { ...question, field: { kind: 'choice', choices: ['1. keep', '2. drop'] } };
+    await waitFor(() => conn.frames.some(frame => frame.type === 'question' && JSON.stringify(frame.question) === JSON.stringify(shaped)));
 
     // an idle re-capture of the same pane must not run the parser again nor frame again
     const parsesAfter = parse.mock.calls.length;
@@ -827,7 +829,7 @@ describe('/ws/pane window-keyed Size claim', () => {
       }
     } as never;
     const panes: Record<string, string> = { 'agent-1': '%1', 'agent-2': '%2' };
-    const target = async (id: string) => (panes[id] ? { agent: { ...agentOf('claude'), id, paneId: panes[id]! }, socket } : undefined);
+    const target = async (id: string) => (panes[id] ? { agent: { ...agentOf('claude'), id, pane: { ...agentOf('claude').pane, paneId: panes[id]! } }, socket } : undefined);
     const discovery = {
       target,
       snapshotTarget: target,

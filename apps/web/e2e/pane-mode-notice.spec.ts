@@ -4,7 +4,7 @@ import { dashboardSocketReady, emitDashboard, installDashboardSocket } from './d
 // a tmux picker (a `session-closed` → `choose-tree` hook) can land on the Agent's pane: tmux
 // never draws it into the streamed output, and it refuses every prompt and keystroke
 const worktree = { id: 'cora', projectId: 'app', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'cora', available: true, pinned: true, order: 0 };
-const dashboard = (paneMode?: string, generation = 1) => ({ generation, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', branch: 'cora', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, kind: 'claude', attention: 'finished', queuedPromptCount: 1, ...(paneMode === undefined ? {} : { paneMode }) }], projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] });
+const dashboard = (paneMode?: string, generation = 1) => ({ generation, agents: [{ id: 'agent-1', panel: 'terminal', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', ...(paneMode === undefined ? {} : { paneMode }) }, home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', branch: 'cora', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, kind: 'claude', attention: 'finished', queuedPromptCount: 1 }], projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] });
 
 async function mockConsole(page: Page, paneMode: string | undefined, exits: string[], exitStatus = 204) {
   await page.route('**/api/**', route => {

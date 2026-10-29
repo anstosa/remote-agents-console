@@ -21,9 +21,7 @@ const directories: string[] = [];
 // create one mutable discovered agent
 const testAgent = (kind: 'codex' | 'claude', home: string, attention: AttentionState = 'finished') => ({
   id: 'socket:%1',
-  paneId: '%1',
-  sessionId: 'socket:$1',
-  socketFingerprint: 'socket',
+  pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' },
   home,
   title: attention === 'working' ? 'Working' : 'Ready',
   attention,

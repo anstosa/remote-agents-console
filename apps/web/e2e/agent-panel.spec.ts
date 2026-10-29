@@ -1,8 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
-import { installPaneMock, pushBytes, seedPaneSize } from './pane-stream-mock.js';
+import { installPaneMock, paneConnectCount, pushBytes, seedPaneSize } from './pane-stream-mock.js';
 import { expectSplitProgressBorder } from './progress-border-assertions.js';
 
-type MockAgent = { attention?: 'working' | 'finished' | 'question'; kind?: 'claude' | 'codex' };
+type MockAgent = { attention?: 'working' | 'finished' | 'question'; kind?: 'claude' | 'codex'; panel?: 'terminal' | 'transcript' };
 type MockOptions = { conversationName?: string; notes?: Array<{ id: string; text: string }> };
 
 // stub the routes a live Worktree agent (or, with no agent, its pinned Worktree) preloads
@@ -13,7 +13,7 @@ async function mockConsole(page: Page, agent: MockAgent | undefined, { conversat
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') {
       const worktree = { id: 'cora', projectId: 'app', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'cora', available: true, pinned: true, order: 0 };
-      const agents = agent === undefined ? [] : [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', branch: 'cora', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, kind: agent.kind ?? 'claude', ...(agent.attention === undefined ? {} : { attention: agent.attention }), queuedPromptCount: 0 }];
+      const agents = agent === undefined ? [] : [{ id: 'agent-1', panel: agent.panel ?? 'terminal', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', branch: 'cora', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, kind: agent.kind ?? 'claude', ...(agent.attention === undefined ? {} : { attention: agent.attention }), queuedPromptCount: 0 }];
       return route.fulfill({ json: { generation: 1, agents, projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] } });
     }
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
@@ -116,13 +116,25 @@ test('the composer stays inside the agent panel on a phone', async ({ page }) =>
   await expect(workspaceControls(page).getByRole('button', { name: 'More options' })).toBeVisible();
 });
 
+// an Agent driven without a pane shows its transcript, never a pane stream
+test('an Agent whose Panel is a transcript opens no terminal', async ({ page }) => {
+  await installPaneMock(page);
+  await mockConsole(page, { attention: 'finished', panel: 'transcript' });
+  await page.goto('/');
+  const panel = agentPanel(page);
+  await expect(panel.getByRole('region', { name: 'Prompt composer' })).toBeVisible();
+  await expect(panel.locator('.agent-state-pill')).toHaveText('Idle');
+  await expect(panel.locator('.log-canvas')).toHaveCount(0);
+  expect(await paneConnectCount(page, 'agent-1')).toBe(0);
+});
+
 test('turning off the last agent closes the agent panel and keeps a pinned tab', async ({ page }) => {
   let agent: MockAgent | undefined = { attention: 'finished' };
   await mockConsole(page, undefined);
   // serve the dashboard from the mutable agent so Turn off takes effect on the next refresh
   await page.route('**/api/dashboard', route => {
     const worktree = { id: 'cora', projectId: 'app', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'cora', available: true, pinned: true, order: 0 };
-    const agents = agent === undefined ? [] : [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', kind: 'claude', attention: 'finished', queuedPromptCount: 0 }];
+    const agents = agent === undefined ? [] : [{ id: 'agent-1', panel: 'terminal', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', kind: 'claude', attention: 'finished', queuedPromptCount: 0 }];
     return route.fulfill({ json: { generation: 1, agents, projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] } });
   });
   await page.route('**/api/agents/agent-1/deactivate', route => { agent = undefined; return route.fulfill({ status: 204 }); });

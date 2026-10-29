@@ -11,7 +11,7 @@ import * as commands from '../src/tmux/command.js';
 
 const worktree = { id: 'cora:/worktrees/cora', projectId: 'cora', label: 'Cora', path: '/worktrees/cora', identity: '/worktrees/cora', available: true, pinned: true, main: true, detached: false, locked: false };
 const config: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen: { host: '127.0.0.1', port: 8787 }, publicOrigin: new URL('https://agents.example.com'), trustedProxyIps: new Set(), pollIntervalMs: 500, adapters: {}, projects: [] };
-const agent = { id: 'agent-1', paneId: '%1', sessionId: '$1', socketFingerprint: 'socket', home: worktree.identity, branch: 'feature/current', title: 'Ready', attention: 'finished' as AttentionState };
+const agent = { id: 'agent-1', pane: { paneId: '%1', sessionId: '$1', socketFingerprint: 'socket' }, home: worktree.identity, branch: 'feature/current', title: 'Ready', attention: 'finished' as AttentionState };
 const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
 const headSha = 'a'.repeat(40);
 const choices = [{ number: 7, title: 'Draft work', branch: 'feature/draft', headSha, headOnOrigin: true, draft: true, url: 'https://github.com/octo/repo/pull/7' }];

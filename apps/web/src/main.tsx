@@ -83,9 +83,11 @@ const actionIconPaths = {
   add: 'M12 5v14M5 12h14'
 };
 
-// the fields the web reads off the server's inline-question payload; the server
-// also carries targetPaneId for its own keystroke targeting, which the web ignores
-type InlineQuestion = { id: string; text: string; choices: string[]; descriptions?: string[]; source: 'structured' | 'parsed' };
+// the fields the web reads off the server's inline-question payload: the one answer field it
+// takes (ADR 0015). A question on a tmux pane also carries a pane part for the server's own
+// keystroke targeting, which the web ignores
+type QuestionField = { kind: 'choice'; choices: string[]; descriptions?: string[] } | { kind: 'text'; multiline: boolean; prefill?: string; placeholder?: string };
+type InlineQuestion = { id: string; text: string; field: QuestionField; source: 'structured' | 'parsed' };
 type Stack = { actions: StackAction[]; running?: boolean; transition?: 'starting'|'migrating'; operation?: StackAction; tunnel?: boolean; processes?: StackProcessState[] };
 // `headOnOrigin` false marks a fork pull request, whose code the console opens without setup or an agent
 type PullRequestChoice = { number: number; title: string; branch: string; draft: boolean; url: string; headOnOrigin?: boolean } & Pick<PullRequestSummary, 'checks' | 'issues'>;
@@ -142,7 +144,7 @@ function CleanupSkeletons() {
 // `worktreeLabel`/`worktreeOrder` are no longer on the wire (the server carries them on the
 // Worktree); they remain as optional read-only fallbacks the tab bar consults when an Agent's
 // Worktree is not present in the payload, absent from the real server.
-type Agent = { id: string; sessionId: string; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; paneMode?: string; stack?: Stack; unread?: boolean; completionId?: string; queuedPromptCount: number; launch?: LaunchResolution };
+type Agent = { id: string; panel: 'terminal' | 'transcript'; pane?: { paneMode?: string }; home: string; reviewRun?: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind?: AgentKind; attention?: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; worktreeLabel?: string; worktreeOrder?: number; newTaskConfigured?: boolean; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; stack?: Stack; unread?: boolean; completionId?: string; queuedPromptCount: number; launch?: LaunchResolution };
 type Worktree = { id: string; projectId: string; label: string; customLabel?: boolean; path: string; main: boolean; detached: boolean; locked: boolean; branch?: string; sha?: string; consoleShells?: number; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; available: boolean; pinned: boolean; order: number; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; stack?: Stack; launch?: LaunchResolution };
 // `mode: 'directory'` marks a non-git Project the console launches in place (like Scratch);
 // `launch` is its resolved Launch profile for the Project-level Launch button. A git
@@ -658,11 +660,14 @@ const choiceFromLabel = (label: string, answerIndex: number): ChoiceOption => {
 // project one server inline question into the renderable choice model. The
 // server parses numbered lists and reads OMX files now, so the web no longer
 // parses pane text; it only maps the labels to numbered choices.
-const choiceQuestionFromInline = (question: InlineQuestion): ChoiceQuestion => ({ id: question.id, text: question.text, choices: question.choices.map((label, index) => {
-  const choice = choiceFromLabel(label, index);
-  const description = question.descriptions?.[index];
-  return description ? { ...choice, description } : choice;
-}), source: question.source });
+const choiceQuestionFromInline = (question: InlineQuestion): ChoiceQuestion => {
+  const { choices, descriptions } = question.field.kind === 'choice' ? question.field : { choices: [], descriptions: undefined };
+  return { id: question.id, text: question.text, choices: choices.map((label, index) => {
+    const choice = choiceFromLabel(label, index);
+    const description = descriptions?.[index];
+    return description ? { ...choice, description } : choice;
+  }), source: question.source };
+};
 
 let csrf = '';
 const currentUiVersion = (() => {
@@ -7801,7 +7806,8 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const switcher = <AgentSwitcher agent={agent} agents={agents} title={title} placeLabel={displayLabel} onSelect={onSelectAgent} />;
   const header = (connection: string) => <PanelHeader panelKey="agent" label="agent output" title={<AgentPanelTitle kind={agent.kind} sandboxed={agent.sandboxed} title={title} switcher={switcher} state={panelState} connection={connection} />} actions={<>{workspace.conversations.control}</>} close={<>{cancelButton}{power}<button type="button" className="panel-header-action pane-minimize" aria-label="Minimize agent output" title="Minimize agent (it keeps running)" onClick={() => { /* reject minimizing the last visible split */ workspace.minimizePanel('agent', () => setAgentSplitHidden(workspace.viewKey, true)); }}><PanelIcon path="M5 12h14" /></button></>} />;
   const prompt = <Prompt id={agent.id} history={promptHistory.history} onHistoryChanged={promptHistory.refresh} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} question={dashboardQuestion ?? question} worktreeId={agent.worktreeId} placeId={workspace.place.id} historyControl={<PromptHistoryControl agentId={agent.id} history={promptHistory.history} refreshHistory={promptHistory.refresh} notes={workspace.notes} open={historyOpen} onOpenChange={onHistoryOpenChange} />} />;
-  const composer = agent.paneMode === undefined ? prompt : <><PaneModeNotice agentId={agent.id} mode={agent.paneMode} worktreeId={agent.worktreeId} onOperationFeedback={onOperationFeedback} />{prompt}</>;
+  const paneMode = agent.pane?.paneMode;
+  const composer = paneMode === undefined ? prompt : <><PaneModeNotice agentId={agent.id} mode={paneMode} worktreeId={agent.worktreeId} onOperationFeedback={onOperationFeedback} />{prompt}</>;
   // reuse power actions without bypassing lifecycle safeguards
   const turnOff = () => {
     // keep active work protected like the power menu
@@ -7813,6 +7819,8 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     if (restarting || clearing || deactivating || deleting || agentPendingOperation(agent) !== undefined || pendingOperations.has(deactivateOperationKey(workspace.place.id ?? agent.id))) return;
     void (agent.worktreeId === undefined ? remove() : deactivate());
   };
+  // a transcript Agent has no pane to stream; its transcript is not drawn yet
+  if (agent.panel === 'transcript') return <AgentPanelFrame header={header('Live')} composer={composer} onTurnOff={turnOff} />;
   // keep codex transcript shortcuts limited to codex and omx agent panels
   return <Log id={agent.id} onTurnOff={turnOff} codexScrollControls={agent.kind === undefined || agent.kind === 'codex' || agent.kind === 'omx'} onQuestion={setQuestion} onMetadata={reportMetadata} onAddToPrompt={onAddToPrompt} header={header} composer={composer} notes={workspace.notes} onOpenUrl={onOpenUrl} onOpenFile={onOpenFile} processingLabel={startingNewTask ? 'Starting new task…' : undefined} processingDetail={startingNewTask ? 'Closing this session and preparing a fresh agent. This can take a few seconds.' : undefined} />;
 }

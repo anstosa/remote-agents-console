@@ -36,7 +36,7 @@ describe('note deletion lock API', () => {
     const directory = await mkdtemp(join(tmpdir(), 'rac-note-lock-api-'));
     directories.push(directory);
     const worktree = testWorktree({ id: 'wt-main', projectId: 'proj', path: '/repo', identity: '/repo' });
-    const scratch = stated({ id: 'scratch-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/scratch', title: 'Ready' });
+    const scratch = stated({ id: 'scratch-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/scratch', title: 'Ready' });
     const discovery = {
       // expose one project persistence scope
       worktreesNow: () => [worktree],

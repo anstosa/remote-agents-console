@@ -88,7 +88,7 @@ describe('conversations listing API', () => {
     // two Linked worktrees of one Project; the host-visible checkout root is what the Adapters scan
     const cora = testWorktree({ id: 'potato:/wt/cora', projectId: 'potato', label: 'Cora', path: '/wt/cora', identity: '/wt/cora', hostPath: '/host/cora' });
     const owen = testWorktree({ id: 'potato:/wt/owen', projectId: 'potato', label: 'Owen', path: '/wt/owen', identity: '/wt/owen', hostPath: '/host/owen', main: false });
-    const agent = stated({ id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/host/cora', projectId: 'potato', worktreeId: cora.id, title: 'Ready' });
+    const agent = stated({ id: 'agent-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/host/cora', projectId: 'potato', worktreeId: cora.id, title: 'Ready' });
     const scanned: string[][] = [];
     const discovery = {
       target: async (id: string) => id === agent.id ? { agent, socket } : undefined,
@@ -268,7 +268,7 @@ describe('conversations listing API', () => {
 
   it('keys a Scratch agent to its one directory, with no worktreeId and no resume', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
-    const agent = stated({ id: 'scratch-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/home/me', title: 'Scratch' });
+    const agent = stated({ id: 'scratch-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/home/me', title: 'Scratch' });
     const scanned: string[][] = [];
     const discovery = {
       target: async (id: string) => id === agent.id ? { agent, socket } : undefined,

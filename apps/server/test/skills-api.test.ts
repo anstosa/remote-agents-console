@@ -17,7 +17,7 @@ describe('agent command catalog API', () => {
     vi.stubEnv('HOME', '/service-home');
     vi.stubEnv('CODEX_HOME', '/service-codex');
     const seen: Array<{ kind: string; workspace: string; stateDirectory: string }> = [];
-    const agent = { id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/home/ubuntu/ferry.fyi', title: 'Ready', kind: 'codex' };
+    const agent = { id: 'agent-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/home/ubuntu/ferry.fyi', title: 'Ready', kind: 'codex' };
     app = await buildApp(config, {
       auth: { unsign: () => 'session', get: () => ({ id: 'session', csrf: 'csrf' }) } as never,
       control: { connect: () => true } as never,
