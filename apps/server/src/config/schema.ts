@@ -86,9 +86,9 @@ const adapterArgument = z.string().max(4096).refine(value => !value.includes('\0
 // the Conductor runs Pi, which must be enabled, on an Allowed model, in a directory Project; by
 // default it gets every scope but `admin:dangerous`
 function conductorConfig({ project, scopes, ...conductor }: z.output<typeof conductorSchema>, projects: readonly Project[], adapters: AdapterConfigs): ConductorConfig {
-  const pi = adapters.pi;
-  if (pi?.launchable !== true) throw new Error(`conductor: adapters.pi must be configured and launchable${pi?.unavailableReason === undefined ? '' : ` (${pi.unavailableReason})`}`);
-  if (!(pi.allowedModels ?? []).some(entry => entry.model === conductor.model)) throw new Error(`conductor: ${conductor.model} is not an Allowed model (adapters.pi.allowedModels)`);
+  const adapter = adapters[conductor.kind];
+  if (adapter?.launchable !== true) throw new Error(`conductor: adapters.${conductor.kind} must be configured and launchable${adapter?.unavailableReason === undefined ? '' : ` (${adapter.unavailableReason})`}`);
+  if (!(adapter.allowedModels ?? []).some(entry => entry.model === conductor.model)) throw new Error(`conductor: ${conductor.model} is not an Allowed model (adapters.${conductor.kind}.allowedModels)`);
   if (!projects.some(candidate => candidate.id === project && candidate.mode === 'directory' && candidate.available)) throw new Error(`conductor: ${project} must name a directory Project`);
   return { ...conductor, projectId: project, scopes: scopes ?? supportedIntegrationScopes.filter(scope => scope !== 'admin:dangerous') };
 }

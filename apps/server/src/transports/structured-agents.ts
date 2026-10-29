@@ -256,7 +256,7 @@ export class StructuredAgents {
   async restart(id: string): Promise<boolean> {
     const record = (await this.load()).find(candidate => candidate.id === id);
     const live = this.live.get(id) ?? this.idle();
-    if (record === undefined || live.busy) return false;
+    if (record === undefined || live.busy || record.lifecycle === 'starting') return false;
     this.live.set(id, live);
     return await this.relaunch(record, live, record.conversationId) === true;
   }
@@ -278,6 +278,7 @@ export class StructuredAgents {
       // the old process's last events (its exit) are not this Agent's any more
       live.generation += 1;
       live.connection?.close();
+      this.endScripts(live);
       if (record.holder !== undefined) await this.processes.stop(record.holder, record);
       record.holder = undefined;
       record.lifecycle = 'starting';
@@ -335,7 +336,10 @@ export class StructuredAgents {
       this.live.set(record.id, live);
       live.resyncing = record.lifecycle === 'live';
       if (record.lifecycle !== 'live') {
-        if (record.lifecycle === 'starting') { record.lifecycle = 'exited'; await this.save(); }
+        // only a live process this console reattaches to keeps its console token
+        delete record.access;
+        if (record.lifecycle === 'starting') record.lifecycle = 'exited';
+        await this.save();
         await this.readStderr(record, live);
         return;
       }
@@ -347,6 +351,7 @@ export class StructuredAgents {
       if (this.live.get(record.id) !== live || live.generation !== generation) { attached?.connection.close(); return; }
       if (attached === undefined) {
         record.lifecycle = 'exited';
+        delete record.access;
         await this.save();
         await this.readStderr(record, live);
         return;
@@ -375,7 +380,10 @@ export class StructuredAgents {
     const token = live.access;
     delete live.access;
     if (token === undefined || record.lifecycle !== 'starting') return true;
+    const generation = live.generation;
     const granted = this.conductor !== undefined && await live.connection?.consoleAccess?.({ url: this.conductor.endpoint, token }).catch(() => false) === true;
+    // a process that exited or was replaced meanwhile has been dealt with
+    if (live.generation !== generation || record.lifecycle !== 'starting') return false;
     if (!granted) { await this.fail(record, live, 'It could not be given the console\'s tools: its kind cannot host the Conductor.', true); return false; }
     record.lifecycle = 'live';
     this.idlePoint(record, live);
@@ -670,7 +678,7 @@ export class StructuredAgents {
         }
         record.version = event.report.version;
         // a Conductor goes live once it holds the console's access
-        if (live.access === undefined) { record.lifecycle = 'live'; this.idlePoint(record, live); }
+        if (record.role !== 'conductor') { record.lifecycle = 'live'; this.idlePoint(record, live); }
         live.reported?.(true);
         break;
       case 'conversation':
@@ -694,7 +702,7 @@ export class StructuredAgents {
         break;
       case 'turn':
         live.working = event.turn.type === 'started';
-        if (event.turn.type !== 'started') { live.turn = event.turn; live.resyncing = false; this.idlePoint(record, live); this.restartOffPin(record, live); }
+        if (event.turn.type !== 'started') { live.turn = event.turn; live.resyncing = false; this.endScripts(live); this.idlePoint(record, live); this.restartOffPin(record, live); }
         break;
       case 'steers':
         live.steers = event.pending;
@@ -748,8 +756,7 @@ export class StructuredAgents {
         // the console token its process held works no more
         delete record.access;
         delete live.access;
-        for (const timer of live.scripts?.values() ?? []) clearTimeout(timer);
-        live.scripts?.clear();
+        this.endScripts(live);
         if (record.lifecycle === 'starting') { void this.fail(record, live, 'Its process exited before reporting in.'); return; }
         if (record.lifecycle === 'live') { record.lifecycle = 'exited'; void this.save(); void this.readStderr(record, live); }
         break;
@@ -767,10 +774,17 @@ export class StructuredAgents {
     if (timers.has(script.id)) return;
     timers.set(script.id, setTimeout(() => {
       timers.delete(script.id);
-      if (this.live.get(record.id) !== live) return;
+      const shown = live.transcript.find(item => item.id === script.id);
+      if (this.live.get(record.id) !== live || shown?.kind !== 'tool' || shown.state !== 'running') return;
       this.notice(live, `A script ran past its ${Math.round(deadline / 60_000)}-minute deadline, so its Turn was cancelled.`, 'warning');
       void this.interrupt(record.id).catch(() => undefined);
     }, deadline));
+  }
+
+  // a Turn's end ends its scripts' deadlines
+  private endScripts(live: Live): void {
+    for (const timer of live.scripts?.values() ?? []) clearTimeout(timer);
+    live.scripts?.clear();
   }
 
   private allowed(kind: AgentKind): readonly AllowedModel[] {

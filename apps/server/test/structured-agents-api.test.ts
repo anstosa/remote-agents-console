@@ -21,7 +21,7 @@ import { testConfig, testProject } from './helpers/config.js';
 import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
 
 const dirs: string[] = [];
-afterEach(async () => { vi.unstubAllEnvs(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { vi.unstubAllEnvs(); vi.restoreAllMocks(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
 // the pinned Pi's report, so a fake is on the pin unless a test says otherwise
 const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not sandboxed' }, version: piAdapter.pinned()!.version };
@@ -1198,6 +1198,41 @@ describe('the Conductor', () => {
     await app.close();
   });
 
+  it('counts only exits within 10 minutes, and is kept up again once the operator resumes it after a stop', async () => {
+    const notify = vi.spyOn(PushService.prototype, 'notify').mockResolvedValue(undefined);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const fake = fakeAgent();
+      const { app, headers } = await consoleWith(fake, { conductor: {} });
+      await app.conductor.start();
+      const exit = async (minutes: number) => {
+        const launches = fake.launches.length;
+        vi.setSystemTime(Date.now() + minutes * 60_000);
+        fake.emit({ type: 'exited' });
+        await vi.waitFor(async () => expect((await conductorOf(app, headers)).structured.lifecycle).toBe(fake.launches.length > launches ? 'live' : 'exited'), { timeout: 2_000 });
+        await new Promise(resolve => setTimeout(resolve, 50));
+      };
+      // exits 11 minutes apart never add up to a stop
+      await exit(11);
+      await exit(11);
+      await exit(11);
+      expect(fake.launches).toHaveLength(4);
+      // two more soon after make three in 10 minutes
+      await exit(1);
+      await exit(1);
+      expect(fake.launches).toHaveLength(5);
+      expect((await conductorOf(app, headers)).structured.lifecycle).toBe('exited');
+      expect(notify).toHaveBeenCalledTimes(1);
+
+      // resumed by the operator, it is kept up again
+      const id = (await conductorOf(app, headers)).id;
+      expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/resume`, headers, payload: {} })).statusCode).toBe(204);
+      await exit(1);
+      expect(fake.launches).toHaveLength(7);
+      await app.close();
+    } finally { vi.useRealTimers(); }
+  });
+
   it('is relaunched on its Conversation when it exits, survives a deploy, and is turned off once its configuration is removed', async () => {
     await integrationFiles();
     const fake = fakeAgent();
@@ -1233,17 +1268,19 @@ describe('the Conductor', () => {
 
   it('offers Restart but no Close, and keeps its configured model', async () => {
     const fake = fakeAgent({ models: [{ id: 'openai/gpt-5.6', name: 'GPT', provider: 'openai', efforts: ['low'] }, { id: 'openai/gpt-4', name: 'Old', provider: 'openai', efforts: [] }] });
-    const { app, headers } = await consoleWith(fake, { conductor: {}, allowedModels: [{ model: 'openai/gpt-5.6' }, { model: 'openai/gpt-4' }] });
+    const { app, headers } = await consoleWith(fake, { conductor: { model: 'openai/gpt-4' }, allowedModels: [{ model: 'openai/gpt-5.6' }, { model: 'openai/gpt-4' }] });
     await app.conductor.start();
     const id = (await conductorOf(app, headers)).id;
 
     expect((await app.inject({ method: 'DELETE', url: `/api/agents/${id}`, headers })).statusCode).toBe(409);
     expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/deactivate`, headers })).statusCode).toBe(409);
-    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: 'openai/gpt-4' } })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: 'openai/gpt-5.6' } })).statusCode).toBe(409);
     expect(await conductorOf(app, headers)).toMatchObject({ id, structured: { lifecycle: 'live', switchable: false } });
 
     expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/restart`, headers, payload: {} })).statusCode).toBe(204);
     expect(fake.launches.map(launch => launch.id)).toEqual([id, id]);
+    // with no Conversation yet, it starts again on its configured model, not the first Allowed one
+    expect(fake.launches.map(launch => launch.model?.model)).toEqual(['openai/gpt-4', 'openai/gpt-4']);
     expect(fake.grants).toHaveLength(2);
     expect((await mcp(app, fake.grants[0]!.token, 'tools/list')).status).toBe(401);
     expect((await mcp(app, fake.grants[1]!.token, 'tools/list')).status).toBe(200);
@@ -1310,19 +1347,33 @@ describe('the Conductor', () => {
     const { app, headers } = await consoleWith(fake, { conductor: { scriptDeadlineMinutes: 1 } });
     await app.conductor.start();
     const id = (await conductorOf(app, headers)).id;
+    // the timers are faked; what a fired one starts runs on once the event loop turns
+    const settle = () => new Promise(resolve => setImmediate(resolve));
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       fake.emit({ type: 'turn', turn: { type: 'started' } });
+      // a script that finished in time leaves no deadline behind
       fake.emit({ type: 'transcript', item: { id: 'quick', kind: 'tool', name: 'Script', summary: '1 tool call', state: 'running', source: 'return 1' } });
       fake.emit({ type: 'transcript', item: { id: 'quick', kind: 'tool', name: 'Script', summary: '1 tool call', state: 'done', source: 'return 1' } });
+      vi.advanceTimersByTime(30_000);
       fake.emit({ type: 'transcript', item: { id: 'spin', kind: 'tool', name: 'Script', summary: '0 tool calls', state: 'running', source: 'while (true) await tools.read({ path: "x" })' } });
       vi.advanceTimersByTime(59_000);
+      await settle();
       expect(fake.cancels()).toBe(0);
       vi.advanceTimersByTime(2_000);
+      await settle();
+      expect(fake.cancels()).toBe(1);
+      // a Turn's end ends its scripts' deadlines, and a script's own calls have none
+      fake.emit({ type: 'turn', turn: { type: 'started' } });
+      fake.emit({ type: 'transcript', item: { id: 'late', kind: 'tool', name: 'Script', summary: '0 tool calls', state: 'running', source: 'return 2' } });
+      fake.emit({ type: 'transcript', item: { id: 'late/1', kind: 'tool', name: 'Script', summary: '0 tool calls', state: 'running', source: 'return 3', parentId: 'late' } });
+      fake.emit({ type: 'turn', turn: { type: 'settled', message: 'done' } });
+      vi.advanceTimersByTime(120_000);
+      await settle();
     } finally { vi.useRealTimers(); }
-    await vi.waitFor(() => expect(fake.cancels()).toBe(1));
+    expect(fake.cancels()).toBe(1);
     const items = (await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json().items;
-    expect(items).toContainEqual(expect.objectContaining({ kind: 'notice', tone: 'warning', text: 'A script ran past its 1-minute deadline, so its Turn was cancelled.' }));
+    expect(items.filter((item: { kind: string }) => item.kind === 'notice')).toEqual([expect.objectContaining({ tone: 'warning', text: 'A script ran past its 1-minute deadline, so its Turn was cancelled.' })]);
     await app.close();
   });
 

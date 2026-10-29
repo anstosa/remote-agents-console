@@ -509,6 +509,8 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     const agent = await launched(client, { role: 'conductor', replies: [{ tool: 'codemode', args: { code } }, 'done'], ...options });
     await agent.next('report');
     expect(await agent.connection.consoleAccess!({ url: mcp.url, token: 'rac-conductor.contract-token' })).toBe(true);
+    // it is taken once: a second hand-over is refused
+    expect(await agent.connection.consoleAccess!({ url: 'http://127.0.0.1:1/mcp', token: 'rac-conductor.other' })).toBe(false);
     return { ...agent, mcp };
   };
   // what a script printed, from the Script line's output
@@ -526,6 +528,12 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(agent.events).toContainEqual({ type: 'transcript', item: expect.objectContaining({ name: 'mcp__rac__list_agents', parentId: 'call_1', state: 'done' }) });
     // the token went to the console's server only, never to the model
     expect(agent.bodies.some(body => body.includes('contract-token'))).toBe(false);
+  }, 60_000);
+
+  it('takes the console\'s access only as the Conductor', async () => {
+    const agent = await launched(client);
+    await agent.next('report');
+    expect(await agent.connection.consoleAccess!({ url: 'http://127.0.0.1:1/mcp', token: 'rac-conductor.contract-token' })).toBe(false);
   }, 60_000);
 
   it('ends a Conductor script that spins when its Turn is cancelled', async () => {

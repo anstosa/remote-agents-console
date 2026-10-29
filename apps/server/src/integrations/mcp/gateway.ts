@@ -67,8 +67,8 @@ export class IntegrationGateway {
     else if (!definition.requiredScopes.every(scope => principal.scopes.includes(scope))) result = errorResult('insufficient_scope', 'The access token lacks a required scope.', correlationId);
     else if (instanceId !== undefined && (typeof instanceId !== 'string' || instanceId.length === 0 || instanceId.length > 240)) result = errorResult('invalid_request', 'The instance identifier is invalid.', correlationId);
     else if (parsed === undefined || !parsed.success) result = errorResult('invalid_request', 'The tool arguments are invalid.', correlationId);
-    // the Conductor acts on its own console only
-    else if (instanceId !== undefined && instanceId !== this.options.instanceId && principal.authentication === 'conductor') result = errorResult('instance_unavailable', 'The requested instance is unavailable.', correlationId);
+    // the Conductor, and any principal held to Places, acts on its own console only
+    else if (instanceId !== undefined && instanceId !== this.options.instanceId && (principal.authentication === 'conductor' || principal.places !== undefined)) result = errorResult('instance_unavailable', 'The requested instance is unavailable.', correlationId);
     else if (instanceId !== undefined && instanceId !== this.options.instanceId) {
       const control = definition.risk === 'read' ? { ok: true as const } : this.options.control.authorizeMutation();
       // require local purple Davo mode before forwarding mutations

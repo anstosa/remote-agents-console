@@ -190,7 +190,10 @@ function agentStatus(agent: DashboardPayload['agents'][number]): AgentStatusV1 {
 export class OrchestrationService {
   constructor(private readonly dependencies: OrchestrationDependencies) {}
 
-  /** The same operations over only the Worktrees `admits` (a principal's scope): the others are not found and not listed. */
+  /**
+   * The same operations over only the Worktrees `admits` (a principal's scope): the others are not
+   * found and not listed. Agent-keyed operations are not scoped: every Agent runs in a Workspace.
+   */
   scoped(admits: (worktree: Worktree) => boolean): OrchestrationService {
     const { discovery } = this.dependencies;
     return new OrchestrationService({ ...this.dependencies, discovery: { target: (id, force) => discovery.target(id, force), worktreesNow: () => discovery.worktreesNow().filter(admits) } });

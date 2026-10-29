@@ -311,4 +311,13 @@ describe('OrchestrationService', () => {
     await expect(service.deactivate(activeAgent.id)).resolves.toMatchObject({ ok: false, error: { code: 'conflict' } });
     expect(closed).toBe(1);
   });
+
+  it('scoped to some Worktrees, neither lists nor finds the others', async () => {
+    const service = new OrchestrationService(dependencies()).scoped(worktree => worktree.id === cora.id);
+    await expect(service.listWorktrees()).resolves.toMatchObject({ ok: true, value: [{ id: 'cora' }] });
+    await expect(service.worktreeStatus(dave.id)).resolves.toMatchObject({ ok: false, error: { code: 'not_found' } });
+    await expect(service.stackStatus(dave.id)).resolves.toMatchObject({ ok: false, error: { code: 'not_found' } });
+    await expect(service.previewFile({ worktreeId: dave.id, path: 'README.md' })).resolves.toMatchObject({ ok: false, error: { code: 'not_found' } });
+    await expect(service.worktreeStatus(cora.id)).resolves.toMatchObject({ ok: true });
+  });
 });

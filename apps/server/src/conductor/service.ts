@@ -24,13 +24,16 @@ export class Conductor {
   private seen?: AgentLifecycle;
   private running?: Promise<void>;
   private again = false;
+  // the Conductors' ids, Places and lifecycles as last reconciled: most changes (a transcript line) touch none
+  private fingerprint?: string;
 
   constructor(
     private readonly config: ConductorConfig | undefined,
     private readonly agents: StructuredAgents,
+    private readonly placeId: string | undefined,
     private readonly place: () => Promise<Place | undefined>,
     private readonly notify: (message: PushMessage) => void,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = () => Date.now()
   ) {}
 
   /** Bring the Conductor up as configured, and keep it up from now on. */
@@ -50,18 +53,20 @@ export class Conductor {
 
   private async reconcile(): Promise<void> {
     const config = this.config;
-    const place = config === undefined ? undefined : await this.place();
     const conductors = (await this.agents.agents()).filter(agent => agent.structured?.role === 'conductor');
+    const fingerprint = conductors.map(agent => `${agent.id} ${agent.placeId} ${agent.structured?.lifecycle}`).join('\n');
+    if (fingerprint === this.fingerprint) return;
+    this.fingerprint = fingerprint;
     // at most one, at the configured Project; any other is turned off
-    const kept = conductors.find(agent => place !== undefined && agent.placeId === place.id && agent.kind === config?.kind);
+    const kept = conductors.find(agent => agent.placeId === this.placeId && agent.kind === config?.kind);
     for (const agent of conductors) if (agent !== kept) await this.agents.close(agent.id, { retired: true });
-    if (config === undefined || place === undefined) return;
+    if (config === undefined) return;
     const lifecycle = kept?.structured?.lifecycle;
     const before = this.seen;
     this.seen = lifecycle;
     if (kept !== undefined && !down(lifecycle)) {
-      // live again, as the operator resumed it: it is kept up once more
-      if (lifecycle === 'live' && this.stopped) { this.stopped = false; this.exits = []; }
+      // started again, as the operator resumed it: it is kept up once more
+      if (this.stopped) { this.stopped = false; this.exits = []; }
       return;
     }
     if (this.stopped) return;
@@ -72,12 +77,17 @@ export class Conductor {
       this.exits = [...this.exits.filter(at => now - at < exitWindowMs), now];
       if (this.exits.length >= maxExits) {
         this.stopped = true;
-        this.notify({ kind: 'conductor', title: 'The Conductor stopped', body: `It exited ${maxExits} times in ${exitWindowMs / 60_000} minutes and stays down until you resume it. Prompts to it keep queueing.`, tag: 'conductor-stopped', url: kept === undefined ? '/' : `/#agent=${encodeURIComponent(kept.id)}` });
+        this.notify(kept === undefined
+          ? { kind: 'conductor', title: 'The Conductor could not start', body: `It failed to start ${maxExits} times in ${exitWindowMs / 60_000} minutes. Check adapters.pi and restart the console.`, tag: 'conductor-stopped', url: '/' }
+          : { kind: 'conductor', title: 'The Conductor stopped', body: `It exited ${maxExits} times in ${exitWindowMs / 60_000} minutes and stays down until you resume it. Prompts to it keep queueing.`, tag: 'conductor-stopped', url: `/#agent=${encodeURIComponent(kept.id)}` });
         return;
       }
     }
-    if (kept === undefined) await this.agents.launch(place, config.kind, { sandboxed: true, role: 'conductor' });
-    else await this.agents.restart(kept.id);
+    const place = kept === undefined ? await this.place() : undefined;
+    if (place !== undefined) await this.agents.launch(place, config.kind, { sandboxed: true, role: 'conductor' });
+    else if (kept !== undefined) await this.agents.restart(kept.id);
     this.seen = 'starting';
+    // what this did is reconciled afresh, even if it changed nothing
+    this.fingerprint = undefined;
   }
 }

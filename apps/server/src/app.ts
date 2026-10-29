@@ -962,7 +962,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // the Conductor (ADR 0018): kept running in its directory Project, with the console's MCP tools
   const conductorProject = config.projects.find(project => project.id === config.conductor?.projectId);
   if (config.conductor !== undefined) structuredAgents.useConductor({ endpoint: `${config.publicOrigin.origin}/mcp`, model: { model: config.conductor.model, ...(config.conductor.effort === undefined ? {} : { effort: config.conductor.effort }) }, scriptDeadlineMs: config.conductor.scriptDeadlineMinutes * 60_000 });
-  const conductor = new Conductor(config.conductor, structuredAgents, async () => conductorProject === undefined ? undefined : await resolvePlace(worktreeWireId(conductorProject.id, conductorProject.identity)), message => { void push.notify(message).catch(() => undefined); });
+  const conductorPlaceId = conductorProject === undefined ? undefined : worktreeWireId(conductorProject.id, conductorProject.identity);
+  const conductor = new Conductor(config.conductor, structuredAgents, conductorPlaceId, async () => conductorPlaceId === undefined ? undefined : await resolvePlace(conductorPlaceId), message => { void push.notify(message).catch(() => undefined); });
   // bind configured actions to existing host, prompt and normal-launch engines
   const buttonActions = deps.buttonActions ?? new ButtonActionService(buttonCatalog, {
     resolvePlace,

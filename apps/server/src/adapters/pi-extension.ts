@@ -56,6 +56,8 @@ export default function rac(pi: ExtensionAPI): void {
       if (typeof url !== 'string' || typeof token !== 'string') throw new Error('the console access is malformed');
       consoleGiven = true;
       pi.registerMcpServer('rac', { url, headers: { Authorization: `Bearer ${token}` }, exposure: 'direct', description: 'The Remote Agent Console: its Agents, Worktrees, Stack processes, reviews and files' });
+      // the console takes the access as given only once this says so (Pi answers `handled` either way)
+      ctx.ui.setStatus('rac-console', 'ready');
     }
   });
 

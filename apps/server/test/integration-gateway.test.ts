@@ -17,7 +17,10 @@ async function fixture(audit?: { record: (event: AuditEvent) => Promise<void> })
   const root = await mkdtemp(join(tmpdir(), 'rac-gateway-'));
   let queued = 0;
   const stackActions: unknown[] = [];
+  const scopes: unknown[] = [];
   const orchestration = {
+    scoped: (admits: unknown) => { scopes.push(admits); return orchestration; },
+    listWorktrees: async () => ({ ok: true as const, version: 'v1' as const, value: [] }),
     listInstances: async () => ({ ok: true as const, version: 'v1' as const, value: [{ id: 'https://agents.example.com', name: 'Local', url: 'https://agents.example.com', local: true }] }),
     queuePrompt: async () => { queued += 1; return { ok: true as const, version: 'v1' as const, value: { accepted: true as const } }; },
     runStackAction: async (input: unknown) => { stackActions.push(input); return { ok: true as const, version: 'v1' as const, value: { started: true as const } }; }
@@ -35,7 +38,7 @@ async function fixture(audit?: { record: (event: AuditEvent) => Promise<void> })
     control,
     forward: async (instanceId, _principal, name, _args, voiceAuthorized) => { forwarded.push({ instanceId, name, voiceAuthorized }); return { content: [{ type: 'text', text: '{"ok":true}' }], structuredContent: { ok: true, remote: true } }; }
   });
-  return { root, gateway, control, queued: () => queued, forwarded, stackActions };
+  return { root, gateway, control, queued: () => queued, forwarded, stackActions, scopes };
 }
 
 describe('IntegrationGateway', () => {
@@ -85,6 +88,18 @@ describe('IntegrationGateway', () => {
       const args = { agent_id: 'agent-1', prompt: 'Review the branch', request_id: 'request-456' };
       await expect(gateway.call(principal, 'queue_prompt', args)).resolves.toMatchObject({ structuredContent: { error: { code: 'audit_unavailable' } } });
       expect(queued()).toBe(0);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('keeps the Conductor on its own instance and its reads within its Places', async () => {
+    const { root, gateway, forwarded, scopes } = await fixture();
+    try {
+      const places = () => true;
+      const conductor: IntegrationPrincipal = { authentication: 'conductor', subjectId: 'conductor-1', clientId: 'conductor', audience: principal.audience, scopes: ['status:read'], places };
+      await expect(gateway.call(conductor, 'list_instances', { instance_id: 'https://peer.example.com' })).resolves.toMatchObject({ structuredContent: { error: { code: 'instance_unavailable' } } });
+      expect(forwarded).toEqual([]);
+      await expect(gateway.call(conductor, 'list_worktrees', {})).resolves.toMatchObject({ structuredContent: { ok: true } });
+      expect(scopes).toEqual([places]);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

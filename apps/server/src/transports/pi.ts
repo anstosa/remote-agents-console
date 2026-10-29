@@ -9,7 +9,7 @@ import type { LaunchReport, ModelInfo, ModelSetting, ProtocolClient, TranscriptI
 
 /** The status key the RAC Pi extension sends its launch report under. */
 export const piReportStatusKey = 'rac-launch';
-/** The RAC Pi extension's command that takes the console's MCP access (the Conductor's only). */
+/** The RAC Pi extension's command that takes the console's MCP access (the Conductor's only), and the status key it confirms under. */
 export const piConsoleCommand = 'rac-console';
 // what a tool call's line reads while its question waits in the Inline-question box
 const waitingForAnswer = 'waiting for your answer below';
@@ -242,6 +242,7 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
     if (messages !== undefined && (always || messages.length > 0)) emit({ type: 'history', items: piHistory(messages, { running: working === true }) });
   });
   let current: ModelSetting | undefined;
+  let consoleTaken = false;
   // report the Conversation and the model Pi is on now
   const refresh = async (): Promise<void> => {
     const state = (await request({ type: 'get_state' })).data;
@@ -306,6 +307,8 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
           return;
         }
         if (record.method !== 'setStatus' || typeof record.statusKey !== 'string') return;
+        // the extension confirming it took the console's access; never shown
+        if (record.statusKey === piConsoleCommand) { consoleTaken = record.statusText === 'ready'; return; }
         if (record.statusKey !== piReportStatusKey) {
           emit({ type: 'status', key: record.statusKey, ...(typeof record.statusText === 'string' && record.statusText !== '' ? { text: bounded(record.statusText) } : {}) });
           return;
@@ -484,9 +487,12 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
     },
     // the console's MCP access goes to the RAC extension as its command: Pi runs it at once and
     // keeps it out of the Conversation
+    // keeps it out of the Conversation; Pi answers `handled` even when the command refused or failed,
+    // so only the extension's confirmation, which Pi writes before its answer, says it was taken
     async consoleAccess(access) {
+      consoleTaken = false;
       const response = await request({ type: 'prompt', message: `/${piConsoleCommand} ${JSON.stringify(access)}` });
-      return response.success === true && isObject(response.data) && response.data.disposition === 'handled';
+      return response.success === true && consoleTaken;
     },
     close: () => channel.close()
   };
