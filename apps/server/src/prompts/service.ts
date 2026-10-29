@@ -147,14 +147,20 @@ export class PromptService {
     }
     const scope = promptScope(agentId);
     const origin: QueuedPromptOrigin = { home: first.agent.home, ...(first.agent.placeId === undefined ? {} : { placeId: first.agent.placeId }) };
+    // queue the prompt durably, admitting it to the Calendar and tracking it before anything can dispatch it
+    const enqueue = async (queued: QueuedPromptService): Promise<QueuedPromptSummary | undefined> => {
+      const added = await queued.enqueue(scope, prompt, attachments, origin);
+      if (added === undefined) return undefined;
+      await this.admitCalendar(transport, added.id, agentId, first.agent.kind, added.createdAt, prompt, attachments);
+      if (tracked) this.trackQueuedRequest(added.id, agentId, prompt);
+      return added;
+    };
+    const queuedAnswer = (queued: QueuedPromptSummary | undefined) => ({ accepted: queued !== undefined, ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) });
     // queue work arriving during a restart handoff
     if (releaseMutation === undefined || this.restartLocks.has(scope)) {
       releaseMutation?.();
-      const queued = await this.queued?.enqueue(scope, prompt, attachments, origin);
-      if (queued !== undefined) await this.admitCalendar(transport, queued.id, agentId, first.agent.kind, queued.createdAt, prompt, attachments);
       // retain exact queue identity through the restart handoff
-      if (tracked && queued !== undefined) this.trackQueuedRequest(queued.id, agentId, prompt);
-      return { accepted: queued !== undefined, ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) };
+      return queuedAnswer(this.queued === undefined ? undefined : await enqueue(this.queued));
     }
     try {
       const gate = await transport.gate(agentId, 'retry');
@@ -163,25 +169,19 @@ export class PromptService {
       if (this.queued !== undefined && (agentAttentionState(first.agent) !== 'finished' || this.phases.has(scope) || gate === 'pending' || gate === 'foreign' || (waiting?.length ?? 0) > 0)) {
         const adopting = agentAttentionState(first.agent) !== 'finished' && !this.phases.has(scope) && gate === 'none';
         const mark = adopting ? await transport.mark(first.agent) : {};
-        const queued = await this.queued.enqueue(scope, prompt, attachments, origin);
-        if (queued !== undefined) await this.admitCalendar(transport, queued.id, agentId, first.agent.kind, queued.createdAt, prompt, attachments);
-        // register before any later observer can dispatch this queue item
-        if (tracked && queued !== undefined) this.trackQueuedRequest(queued.id, agentId, prompt);
+        const queued = await enqueue(this.queued);
         // track work that started outside the managed prompt flow
         if (queued !== undefined && adopting) this.phases.set(scope, { state: 'working', changedAt: Date.now(), ...mark });
-        return { accepted: queued !== undefined, ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) };
+        return queuedAnswer(queued);
       }
       // persist direct work before attempting interactive delivery
       if (this.queued !== undefined) {
-        const queued = await this.queued.enqueue(scope, prompt, attachments, origin);
+        const queued = await enqueue(this.queued);
         // stop before paste when durable storage is unavailable
         if (queued === undefined) return { accepted: false };
-        await this.admitCalendar(transport, queued.id, agentId, first.agent.kind, queued.createdAt, prompt, attachments);
-        // publish identity before synchronous dispatch can advance it
-        if (tracked) this.trackQueuedRequest(queued.id, agentId, prompt);
         // delivery may remain queued without rejecting the accepted request
         await this.dispatch(transport, agentId, scope, resetAt, false);
-        return { accepted: true, ...(tracked ? { requestId: queued.id } : {}) };
+        return queuedAnswer(queued);
       }
       const requestId = tracked || this.calendar !== undefined ? randomBytes(18).toString('base64url') : undefined;
       if (requestId !== undefined) await this.admitCalendar(transport, requestId, agentId, first.agent.kind, new Date().toISOString(), prompt, attachments);
