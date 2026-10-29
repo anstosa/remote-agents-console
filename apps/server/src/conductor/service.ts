@@ -13,7 +13,8 @@ const down = (lifecycle: AgentLifecycle | undefined): boolean => lifecycle === '
  * Keeps the one configured Conductor running (ADR 0016 amendment, ADR 0018): launched at console
  * start and again whenever it exits, until it exits 3 times in 10 minutes; then it stays Exited,
  * with one push, and its queue keeps filling. A Conductor no longer configured, or at another
- * Project, is closed, so removing the configuration turns it off. Nothing here is Pi-shaped: the
+ * Project, is closed (its queue left to become Notes as a departed Agent's does), so removing the
+ * configuration turns it off. Nothing here is Pi-shaped: the
  * Conductor is a role on a structured Agent of the configured kind.
  */
 export class Conductor {
@@ -28,7 +29,6 @@ export class Conductor {
     private readonly config: ConductorConfig | undefined,
     private readonly agents: StructuredAgents,
     private readonly place: () => Promise<Place | undefined>,
-    private readonly close: (agentId: string) => Promise<boolean>,
     private readonly notify: (message: PushMessage) => void,
     private readonly now: () => number = Date.now
   ) {}
@@ -54,7 +54,7 @@ export class Conductor {
     const conductors = (await this.agents.agents()).filter(agent => agent.structured?.role === 'conductor');
     // at most one, at the configured Project; any other is turned off
     const kept = conductors.find(agent => place !== undefined && agent.placeId === place.id && agent.kind === config?.kind);
-    for (const agent of conductors) if (agent !== kept) await this.close(agent.id);
+    for (const agent of conductors) if (agent !== kept) await this.agents.close(agent.id, { retired: true });
     if (config === undefined || place === undefined) return;
     const lifecycle = kept?.structured?.lifecycle;
     const before = this.seen;

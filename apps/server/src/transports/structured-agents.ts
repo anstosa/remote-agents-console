@@ -511,7 +511,8 @@ export class StructuredAgents {
     },
     clearDraft: async () => true,
     answer: async (id, questionId, answer) => await this.answer(id, questionId, answer),
-    latestAnswer: async id => this.live.get(id)?.transcript.filter((item): item is Extract<TranscriptItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'assistant').at(-1)?.text,
+    // a working Agent's latest answer may be partial, so none is given until its Turn ends
+    latestAnswer: async id => this.live.get(id)?.working === true ? undefined : this.live.get(id)?.transcript.filter((item): item is Extract<TranscriptItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'assistant').at(-1)?.text,
     recentLines: async (id, rows) => {
       if (!await this.has(id)) return undefined;
       const lines = (this.live.get(id)?.transcript ?? []).flatMap(item => transcriptText(item)?.split('\n') ?? []);
@@ -577,11 +578,14 @@ export class StructuredAgents {
     });
   }
 
-  /** Close an Agent: stop its process, remove its holder and forget it. */
-  async close(id: string): Promise<boolean> {
+  /**
+   * Close an Agent: stop its process, remove its holder and forget it. The Conductor is closed only
+   * when it is `retired` (its configuration removed), never by an operation on Agents.
+   */
+  async close(id: string, { retired = false } = {}): Promise<boolean> {
     const records = await this.load();
     const record = records.find(candidate => candidate.id === id);
-    if (record === undefined) return false;
+    if (record === undefined || record.role === 'conductor' && !retired) return false;
     this.live.get(id)?.connection?.close();
     records.splice(records.indexOf(record), 1);
     this.live.delete(id);

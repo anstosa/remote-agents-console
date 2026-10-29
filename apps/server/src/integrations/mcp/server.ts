@@ -30,14 +30,15 @@ export function registerMcpServer(options: McpServerOptions): void {
   const expectedHost = new URL(options.publicOrigin).host;
   const challenge = `Bearer resource_metadata="${options.publicOrigin}/.well-known/oauth-protected-resource"`;
   options.app.get('/mcp', async (request, reply) => request.headers.host !== expectedHost ? reply.code(403).send({ error: 'forbidden' }) : reply.code(405).header('Allow', 'POST').send({ error: 'SSE is not supported by this stateless endpoint.' }));
-  // the Conductor's calls are limited in a bucket of their own, keyed by its token; every call is one request
+  // the Conductor's calls are limited in a bucket of their own, keyed by its token, and every call is
+  // one request; a token that only looks like the Conductor's counts against its sender's address
   const conductorToken = (request: FastifyRequest): string | undefined => {
     const token = bearer(request);
     return options.conductor !== undefined && token?.startsWith(options.conductor.prefix) === true ? token : undefined;
   };
-  const keyGenerator = (request: FastifyRequest): string => {
+  const keyGenerator = async (request: FastifyRequest): Promise<string> => {
     const token = conductorToken(request);
-    return token === undefined ? request.ip : `conductor:${digest(token)}`;
+    return token === undefined || await options.conductor!.authenticate(token) === undefined ? request.ip : `conductor:${digest(token)}`;
   };
   options.app.post('/mcp', { config: { rateLimit: { max: 120, timeWindow: '1 minute', keyGenerator } } }, async (request, reply) => {
     // bind the public resource to its configured authority

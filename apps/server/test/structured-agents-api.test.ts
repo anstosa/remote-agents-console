@@ -198,6 +198,10 @@ describe('a structured Agent over HTTP', () => {
     const call = async (name: string, args: object) => (await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } })).json().result.structuredContent;
     expect(await call('get_agent_latest_response', { agent_id: id })).toMatchObject({ ok: true, data: { text: 'Hello!', source: 'terminal' } });
     expect(await call('get_agent_log_tail', { agent_id: id, rows: 2 })).toMatchObject({ ok: true, data: { text: '- Read(README.md) -> 3 lines\nHello!', older: true } });
+    // while a Turn runs its answer may be partial, so none is shown until it ends
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    fake.emit({ type: 'transcript', item: { id: 'm3', kind: 'message', role: 'assistant', text: 'Half an ans' } });
+    expect(await call('get_agent_latest_response', { agent_id: id })).toMatchObject({ ok: false, error: { code: 'not_found' } });
     await app.close();
   });
 
@@ -1293,6 +1297,11 @@ describe('the Conductor', () => {
     // the voice assistant's calls are counted apart from the Conductor's
     const realtime = createHmac('sha256', secret).update('remote-agents:realtime-mcp:v1').digest('base64url');
     expect((await mcp(app, realtime, 'tools/list')).status).toBe(200);
+    // a token that only looks like the Conductor's counts against its sender, however many are made up
+    const forged: number[] = [];
+    for (let call = 0; call < 120; call += 1) forged.push((await mcp(app, `rac-conductor.forged-${call}`, 'tools/list')).status);
+    expect(forged.slice(0, 119).every(status => status === 401)).toBe(true);
+    expect(forged[119]).toBe(429);
     await app.close();
   });
 
