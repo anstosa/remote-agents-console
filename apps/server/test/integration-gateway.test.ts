@@ -14,16 +14,18 @@ const principal: IntegrationPrincipal = { authentication: 'oauth', subjectId: 'u
 const config = { enabled: true, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: false }, realtime: { enabled: true, name: 'Davo', context: '', writeToolsEnabled: true }, multiInstance: { enabled: true } };
 
 // create one private policy-backed gateway fixture
-async function fixture(audit?: { record: (event: AuditEvent) => Promise<void> }) {
+async function fixture(audit?: { record: (event: AuditEvent) => Promise<void> }, gates: Partial<typeof config> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'rac-gateway-'));
   let queued = 0;
   const stackActions: unknown[] = [];
   const scopes: unknown[] = [];
   const orchestration = {
     scoped: (admits: unknown) => { scopes.push(admits); return orchestration; },
+    hasAgent: async () => true,
     listWorktrees: async () => ({ ok: true as const, version: 'v1' as const, value: [] }),
     listInstances: async () => ({ ok: true as const, version: 'v1' as const, value: [{ id: 'https://agents.example.com', name: 'Local', url: 'https://agents.example.com', local: true }] }),
     queuePrompt: async () => { queued += 1; return { ok: true as const, version: 'v1' as const, value: { accepted: true as const } }; },
+    deactivate: async () => ({ ok: true as const, version: 'v1' as const, value: { deactivated: true as const } }),
     runStackAction: async (input: unknown) => { stackActions.push(input); return { ok: true as const, version: 'v1' as const, value: { started: true as const } }; }
   };
   const forwarded: Array<{ instanceId: string; name: string; voiceAuthorized: boolean }> = [];
@@ -31,7 +33,7 @@ async function fixture(audit?: { record: (event: AuditEvent) => Promise<void> })
   const control = new IntegrationControlService(() => 'browser-session');
   control.startVoice('browser-session', 'voice-session-123456789');
   const gateway = new IntegrationGateway({
-    config,
+    config: { ...config, ...gates },
     instanceId: 'https://agents.example.com',
     orchestration: orchestration as never,
     policy,
@@ -123,5 +125,26 @@ describe('IntegrationGateway', () => {
       expect(gateway.listTools(oauth).map(tool => tool.name)).toEqual(expect.not.arrayContaining(['list_notes', 'get_process_log', 'spawn_agent', 'close_agent']));
       expect(gateway.listTools(conductor).map(tool => tool.name)).toEqual(expect.arrayContaining(['list_notes', 'get_process_log']));
     } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('gates the Conductor\'s writes and dangerous tools by its scopes alone, while the deployment gates keep holding OAuth', async () => {
+    const { root, gateway, queued } = await fixture(undefined, { enabled: false, mcp: { readEnabled: true, writeEnabled: false, dangerousEnabled: false } });
+    try {
+      const conductor: IntegrationPrincipal = { authentication: 'conductor', subjectId: 'conductor-1', clientId: 'conductor', audience: principal.audience, scopes: ['status:read', 'prompts:write', 'agents:control', 'admin:dangerous'], places: () => true };
+      expect(gateway.listTools(conductor).map(tool => tool.name)).toEqual(expect.arrayContaining(['queue_prompt', 'deactivate_agent']));
+      await expect(gateway.call(conductor, 'queue_prompt', { agent_id: 'a', prompt: 'Lint', request_id: 'request-gate-1' })).resolves.toMatchObject({ structuredContent: { ok: true } });
+      await expect(gateway.call(conductor, 'deactivate_agent', { agent_id: 'a', request_id: 'request-gate-2' })).resolves.toMatchObject({ structuredContent: { ok: true } });
+      expect(queued()).toBe(1);
+      // without the scope, the dangerous tool is neither listed nor callable
+      const careful = { ...conductor, scopes: conductor.scopes.filter(scope => scope !== 'admin:dangerous') };
+      expect(gateway.listTools(careful).map(tool => tool.name)).not.toContain('deactivate_agent');
+      await expect(gateway.call(careful, 'deactivate_agent', { agent_id: 'a', request_id: 'request-gate-3' })).resolves.toMatchObject({ structuredContent: { error: { code: 'insufficient_scope' } } });
+    } finally { await rm(root, { recursive: true, force: true }); }
+    // an operator's OAuth client is still held to writeEnabled
+    const oauth = await fixture(undefined, { mcp: { readEnabled: true, writeEnabled: false, dangerousEnabled: false } });
+    try {
+      expect(oauth.gateway.listTools(principal).map(tool => tool.name)).not.toContain('queue_prompt');
+      await expect(oauth.gateway.call(principal, 'queue_prompt', { agent_id: 'a', prompt: 'Lint', request_id: 'request-gate-4' })).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
+    } finally { await rm(oauth.root, { recursive: true, force: true }); }
   });
 });

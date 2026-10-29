@@ -1157,7 +1157,7 @@ describe('the Conductor', () => {
   };
   const conductorOf = async (app: Awaited<ReturnType<typeof consoleWith>>['app'], headers: Record<string, string>) => (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { structured?: { role?: string } }) => agent.structured?.role === 'conductor');
 
-  it('launches at console start, Sandboxed in its Project on its model, and is given the console\'s read tools in-band', async () => {
+  it('launches at console start, Sandboxed in its Project on its model, and is given the console\'s tools in-band', async () => {
     await integrationFiles();
     const fake = fakeAgent();
     const { app, headers, root } = await consoleWith(fake, { conductor: { effort: 'high' } });
@@ -1177,9 +1177,10 @@ describe('the Conductor', () => {
     expect(names).toEqual(expect.arrayContaining(['list_agents', 'get_agent_latest_response', 'list_worktrees']));
     // a script reads each result's data from `structuredContent`, which every tool declares
     expect(tools.body.result.tools[0].outputSchema).toMatchObject({ type: 'object', required: ['ok'] });
-    // read access only so far, and never another Agent's question nor an unsandboxed launch
-    expect(names).not.toEqual(expect.arrayContaining(['queue_prompt']));
-    for (const never of ['answer_agent_question', 'launch_worktree_agent', 'launch_scratch_agent', 'queue_prompt']) expect(names).not.toContain(never);
+    // its writes within its scopes though no integrations block enables writes, its dangerous tools
+    // only with admin:dangerous, and never another Agent's question nor an unsandboxed launch
+    expect(names).toEqual(expect.arrayContaining(['queue_prompt', 'spawn_agent']));
+    for (const never of ['answer_agent_question', 'launch_worktree_agent', 'launch_scratch_agent', 'deactivate_agent']) expect(names).not.toContain(never);
 
     // a wrong Conductor token is refused without the OAuth challenge
     const refused = await mcp(app, 'rac-conductor.not-the-token', 'tools/list');

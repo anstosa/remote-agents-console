@@ -118,11 +118,13 @@ export class IntegrationGateway {
   }
 
   // apply deployment feature gates independently of OAuth scopes; the Conductor has its own parent
-  // gate (its configuration), independent of the integrations', and calls only what it may
+  // gate (its configuration), independent of the integrations', calls only what it may, and its
+  // writes and dangerous tools are held by its own scopes alone
   private enabled(definition: IntegrationTool, principal: IntegrationPrincipal): boolean {
     if (principal.authentication === 'conductor' ? !conductorCallable(definition) : !this.options.config.enabled || definition.conductorOnly === true) return false;
     // apply read-only deployment policy
     if (definition.feature === 'read') return this.options.config.mcp.readEnabled;
+    if (principal.authentication === 'conductor') return true;
     // apply ordinary write deployment policy
     if (definition.feature === 'write') return this.options.config.mcp.writeEnabled;
     return this.options.config.mcp.dangerousEnabled;

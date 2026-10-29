@@ -43,9 +43,6 @@
       "sandbox": { "allowedDomains": ["registry.npmjs.org", "github.com"] }
     }
   },
-  "integrations": {
-    "mcp": { "readEnabled": true, "writeEnabled": true, "dangerousEnabled": false }
-  },
   "conductor": {
     "kind": "pi",
     "project": "conductor",

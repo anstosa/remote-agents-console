@@ -498,7 +498,6 @@ The Conductor is one always-running Pi Agent that can act on the console itself,
 {
   "projects": [{ "id": "conductor", "label": "Conductor", "path": "/home/me/conductor" }],
   "adapters": { "pi": { "allowedModels": [{ "model": "openai/gpt-5.6", "effort": "medium" }] } },
-  "integrations": { "mcp": { "writeEnabled": true } },
   "conductor": { "kind": "pi", "project": "conductor", "model": "openai/gpt-5.6", "effort": "high", "maxWorkers": 4, "maxSelfStartedTurnsPerHour": 30, "scriptDeadlineMinutes": 10 }
 }
 ```
@@ -514,7 +513,7 @@ The Conductor is one always-running Pi Agent that can act on the console itself,
 
 **Its MCP access.** At each start of its process the console mints a token, keeps only its hash, and hands it to the RAC Pi extension over Pi's RPC channel; the extension registers the console's `/mcp` (at your `publicOrigin`) with it. The token never enters a command's environment, never reaches the model and is redacted from Raw events. Commands cannot reach the endpoint anyway: the console's `publicOrigin` host and listener address are denied domains for every Pi's commands. The token stops working when the process exits or is restarted.
 
-- The Conductor needs no `integrations` block: `/mcp` is served whenever a Conductor is configured, though the OAuth and voice parts are not. `integrations.mcp.readEnabled` (on by default), `writeEnabled` and `dangerousEnabled` still gate what it can call.
+- The Conductor needs no `integrations` block: `/mcp` is served whenever a Conductor is configured, though the OAuth and voice parts are not. Its `scopes` alone decide which writes and dangerous tools it may call: `integrations.mcp.writeEnabled` and `dangerousEnabled` gate only your OAuth and voice clients. `integrations.mcp.readEnabled` (on by default) still gates its reads.
 - It acts without Davo's voice mode, has its own rate limit (120 calls a minute, counted per MCP call, so one script cannot hammer the console), and never reaches another console through federation. Every call is in the integration audit log.
 - It acts only within its scope: every configured Project, and any other Place while its Workspace exists. Worktrees and Agents elsewhere are not listed, and a call on one answers not found.
 - Its commands share every Pi's network allowlist (`sandbox` and `adapters.pi.sandbox`). Since it can read across your Projects, keep that list to what you would let it send data to. The denied console hosts are names and the listener address; a wildcard you allow that resolves to the same proxy can still reach `/mcp`, where only the token admits a caller.
