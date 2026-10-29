@@ -38,6 +38,10 @@ export class Conductor {
 
   /** Bring the Conductor up as configured, and keep it up from now on. */
   async start(): Promise<void> {
+    if (this.config?.unavailable !== undefined) {
+      console.warn(`[conductor] off: ${this.config.unavailable}`);
+      this.notify({ kind: 'conductor', title: 'The Conductor is off', body: `Its Project ${this.config.projectId} is unavailable: ${this.config.unavailable}. Fix it and restart the console.`, tag: 'conductor-off', url: '/' });
+    }
     this.agents.onChange(() => { void this.keep(); });
     await this.keep();
   }
@@ -60,7 +64,8 @@ export class Conductor {
     // at most one, at the configured Project; any other is turned off
     const kept = conductors.find(agent => agent.placeId === this.placeId && agent.kind === config?.kind);
     for (const agent of conductors) if (agent !== kept) await this.agents.close(agent.id, { retired: true });
-    if (config === undefined) return;
+    // an unavailable Project leaves it off: nothing is launched, and a Conductor there is left alone
+    if (config === undefined || config.unavailable !== undefined) return;
     const lifecycle = kept?.structured?.lifecycle;
     const before = this.seen;
     this.seen = lifecycle;

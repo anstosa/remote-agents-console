@@ -1187,6 +1187,17 @@ describe('the Conductor', () => {
     expect(refused.headers['www-authenticate']).toBeUndefined();
     await app.close();
   });
+  it('stays off with one push when its Project is unavailable', async () => {
+    const notify = vi.spyOn(PushService.prototype, 'notify').mockResolvedValue(undefined);
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake, { conductor: { unavailable: 'path /srv/conductor was not found' } });
+    await app.conductor.start();
+    expect(fake.launches).toEqual([]);
+    expect(await conductorOf(app, headers)).toBeUndefined();
+    expect(notify.mock.calls.map(([message]) => message)).toEqual([expect.objectContaining({ kind: 'conductor', title: 'The Conductor is off', body: expect.stringContaining('path /srv/conductor was not found') })]);
+    await app.close();
+  });
+
   it('is launched again whenever it exits, until it exits 3 times in 10 minutes; then it stays Exited and pushes once', async () => {
     const notify = vi.spyOn(PushService.prototype, 'notify').mockResolvedValue(undefined);
     const fake = fakeAgent({ exits: true });

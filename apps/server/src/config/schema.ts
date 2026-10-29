@@ -89,8 +89,11 @@ function conductorConfig({ project, scopes, ...conductor }: z.output<typeof cond
   const adapter = adapters[conductor.kind];
   if (adapter?.launchable !== true) throw new Error(`conductor: adapters.${conductor.kind} must be configured and launchable${adapter?.unavailableReason === undefined ? '' : ` (${adapter.unavailableReason})`}`);
   if (!(adapter.allowedModels ?? []).some(entry => entry.model === conductor.model)) throw new Error(`conductor: ${conductor.model} is not an Allowed model (adapters.${conductor.kind}.allowedModels)`);
-  if (!projects.some(candidate => candidate.id === project && candidate.mode === 'directory' && candidate.available)) throw new Error(`conductor: ${project} must name a directory Project`);
-  return { ...conductor, projectId: project, scopes: scopes ?? conductorScopes.filter(scope => scope !== 'admin:dangerous') };
+  const named = projects.find(candidate => candidate.id === project);
+  // a Project whose folder is missing leaves the Conductor off, with a notice, rather than stopping the console
+  const unavailable = named?.available === false ? { unavailable: named.unavailableReason ?? `${project} is unavailable` } : {};
+  if (named === undefined || named.available && named.mode !== 'directory') throw new Error(`conductor: ${project} must name a directory Project`);
+  return { ...conductor, projectId: project, ...unavailable, scopes: scopes ?? conductorScopes.filter(scope => scope !== 'admin:dangerous') };
 }
 const adapterEnvName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u, 'invalid environment variable name');
 // reject whitespace-only update commands without normalizing meaningful bytes
@@ -184,8 +187,11 @@ export type ConfigInput = z.input<typeof sourceSchema>;
 export type RemoteServer = { url: URL; name?: string; icon?: InstanceIcon };
 export type IntegrationConfig = z.output<typeof integrationFeatures>;
 export type DavoSettings = z.output<typeof davoSettingsSchema>;
-/** The Conductor as configured: its kind, directory Project, Allowed model and Effort, MCP scopes and limits. */
-export type ConductorConfig = { kind: 'pi'; projectId: string; model: string; effort?: string; scopes: IntegrationScope[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
+/**
+ * The Conductor as configured: its kind, directory Project, Allowed model and Effort, MCP scopes and
+ * limits; `unavailable` says why its Project cannot be used now, which leaves it off.
+ */
+export type ConductorConfig = { kind: 'pi'; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
 export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; buttons?: ButtonSlots; projects: Project[] };
 // how validation surfaces non-fatal facts: `warn` collects boot warnings (non-executable
 // programs, a crossed OMX/Codex program); `checkExecutables` runs the boot X_OK probe

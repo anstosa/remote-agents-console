@@ -729,4 +729,10 @@ describe('Conductor configuration', () => {
     await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', scopes: ['everything'] }))).rejects.toThrow();
     await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6' }, {}))).rejects.toThrow(/adapters\.pi/u);
   });
+
+  it('leaves the Conductor off, saying why, when its Project\'s folder is missing, rather than refusing the configuration', async () => {
+    const config = await configured({ kind: 'pi', project: 'gone', model: 'openai/gpt-5.6' });
+    const validated = await validateConfig({ ...config, projects: [...config.projects, { id: 'gone', path: join(tmpdir(), 'rac-conductor-missing-folder') }] });
+    expect(validated.conductor).toMatchObject({ projectId: 'gone', unavailable: expect.stringMatching(/rac-conductor-missing-folder was not found/u) });
+  });
 });
