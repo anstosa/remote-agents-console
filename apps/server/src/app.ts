@@ -1964,7 +1964,20 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return reply.code(204).send();
   });
   // what a structured Agent's transcript Panel shows
-  app.get('/api/agents/:id/transcript', async (request, reply) => { controlled(request); const transcript = await structuredAgents.transcript((request.params as { id: string }).id); return transcript ?? reply.code(404).send({ error: 'target unavailable' }); });
+  // the latest `limit` lines of the transcript, or one item in full (`item`)
+  app.get('/api/agents/:id/transcript', async (request, reply) => {
+    controlled(request);
+    const id = (request.params as { id: string }).id;
+    const query = request.query as { limit?: unknown; item?: unknown };
+    if (typeof query.item === 'string') {
+      const item = await structuredAgents.transcriptItem(id, query.item);
+      return item === undefined ? reply.code(404).send({ error: 'transcript item unavailable' }) : { item };
+    }
+    const limit = query.limit === undefined ? 200 : typeof query.limit === 'string' && /^\d{1,4}$/u.test(query.limit) ? Number(query.limit) : 0;
+    if (limit < 1) return reply.code(400).send({ error: 'invalid transcript limit' });
+    const transcript = await structuredAgents.transcript(id, limit);
+    return transcript ?? reply.code(404).send({ error: 'target unavailable' });
+  });
   app.get('/api/agents/:id/prompt-history', async (request, reply) => { controlled(request); const id = (request.params as { id: string }).id; if (await structuredAgents.has(id)) return { prompts: [] }; if (await discovery.target(id) === undefined) return reply.code(404).send({ error: 'target unavailable' }); const prompts = await promptHistory.list(promptScope(id)); return prompts === undefined ? reply.code(400).send({ error: 'invalid prompt history scope' }) : { prompts }; });
   app.get('/api/agents/:id/queued-prompts', async (request, reply) => { controlled(request); if (await structuredAgents.has((request.params as { id: string }).id)) return { prompts: [] }; const queued = await prompts.listQueued((request.params as { id: string }).id); return queued === undefined ? reply.code(404).send({ error: 'target unavailable' }) : { prompts: queued }; });
   app.put('/api/agents/:id/queued-prompts/:promptId', async (request, reply) => { controlled(request, true); const { id, promptId } = request.params as { id: string; promptId: string }; const text = body(request).prompt; if (typeof text !== 'string') return reply.code(400).send({ error: 'invalid prompt' }); const prompt = await prompts.updateQueued(id, promptId, text); return prompt === undefined ? reply.code(404).send({ error: 'queued prompt unavailable' }) : prompt; });

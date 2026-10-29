@@ -8,7 +8,7 @@ import type { Place } from '../places/places.js';
 import { expandCommand } from '../launch/service.js';
 import { run } from '../tmux/command.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
-import { connectHolder, type Delivery, type StructuredConnection, type StructuredEvent, type TranscriptItem } from './structured.js';
+import { connectHolder, type Delivery, type StructuredConnection, type AgentUsage, type StructuredEvent, type TranscriptItem, type TranscriptTool } from './structured.js';
 import { agentPanel } from './transport.js';
 
 /** Where a structured Agent's process runs: its holder's socket and tmux pane (ADR 0016). */
@@ -64,8 +64,19 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
 }
 
 // what this console knows of one structured Agent's process while it drives it
-type Live = { connection?: StructuredConnection; working: boolean; delivering: boolean; transcript: TranscriptItem[]; revision: number; stderr?: string; reported?: (reported: boolean) => void };
+type Live = { connection?: StructuredConnection; working: boolean; delivering: boolean; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void };
 const maxTranscriptItems = 2_000;
+/** The status line above an Agent's composer: its extension's statuses, its cost so far and how full its context is. */
+export type AgentStatusLine = { extension: string[] } & Partial<AgentUsage>;
+/** A transcript item as the transcript lists it: a tool call carries its last lines and line count, not its whole output or source. */
+export type TranscriptLine = TranscriptItem | (Omit<TranscriptTool, 'output' | 'source'> & { tail?: string; outputLines?: number });
+const transcriptLine = (item: TranscriptItem): TranscriptLine => {
+  if (item.kind !== 'tool') return item;
+  const { output, source: _source, ...line } = item;
+  if (output === undefined) return line;
+  const lines = output.replace(/\n+$/u, '').split('\n');
+  return { ...line, tail: lines.slice(-5).join('\n'), outputLines: lines.length };
+};
 const isStoredRecord = (value: unknown): value is StructuredRecord => {
   const record = value as Partial<StructuredRecord> | null;
   const holder = record?.holder;
@@ -97,7 +108,7 @@ export class StructuredAgents {
   async launch(place: Place, kind: AgentKind): Promise<boolean> {
     const records = await this.load();
     const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed: false, lifecycle: 'starting', origin: 'operator', launchedAt: Date.now() };
-    const live: Live = { working: false, delivering: false, transcript: [], revision: 0 };
+    const live: Live = { working: false, delivering: false, transcript: [], revision: 0, status: new Map() };
     const reported = new Promise<boolean>(resolve => {
       live.reported = resolve;
       setTimeout(() => resolve(false), this.options.reportTimeoutMs ?? 30_000).unref();
@@ -124,14 +135,22 @@ export class StructuredAgents {
     return true;
   }
 
-  /** Deliver a prompt as a Turn: only to a live Agent that is not already working. */
-  async deliver(id: string, prompt: string): Promise<Delivery | undefined> {
+  /**
+   * Deliver a prompt as a Turn: only to a live Agent that is not already working. A prompt from
+   * the queue is marked so in the transcript.
+   */
+  async deliver(id: string, prompt: string, { queued = false } = {}): Promise<Delivery | undefined> {
     const record = (await this.load()).find(candidate => candidate.id === id);
     if (record === undefined) return undefined;
     const live = this.live.get(id);
     if (record.lifecycle !== 'live' || live?.connection === undefined || live.working || live.delivering) return 'refused';
     live.delivering = true;
-    try { return await live.connection.deliver(prompt); } finally { live.delivering = false; }
+    live.queuedNext = queued;
+    try {
+      const delivery = await live.connection.deliver(prompt);
+      if (delivery !== 'started') live.queuedNext = undefined;
+      return delivery;
+    } finally { live.delivering = false; }
   }
 
   /** Close an Agent: stop its process, remove its holder and forget it. */
@@ -162,11 +181,23 @@ export class StructuredAgents {
     });
   }
 
-  /** What an Agent's transcript Panel shows: its items, and its stderr once it failed. */
-  async transcript(id: string): Promise<{ items: TranscriptItem[]; stderr?: string } | undefined> {
+  /**
+   * What an Agent's transcript Panel shows: its latest `limit` items as lines, how many earlier
+   * items there are, and its stderr once it failed.
+   */
+  async transcript(id: string, limit: number): Promise<{ items: TranscriptLine[]; earlier: number; status: AgentStatusLine; stderr?: string } | undefined> {
     if (!await this.has(id)) return undefined;
     const live = this.live.get(id);
-    return { items: live?.transcript ?? [], ...(live?.stderr === undefined ? {} : { stderr: live.stderr }) };
+    const items = live?.transcript ?? [];
+    const shown = items.slice(-limit);
+    const status: AgentStatusLine = { extension: [...live?.status.values() ?? []], ...live?.usage };
+    return { items: shown.map(transcriptLine), earlier: items.length - shown.length, status, ...(live?.stderr === undefined ? {} : { stderr: live.stderr }) };
+  }
+
+  /** One transcript item in full, with a tool call's whole output and a script's source. */
+  async transcriptItem(id: string, itemId: string): Promise<TranscriptItem | undefined> {
+    if (!await this.has(id)) return undefined;
+    return this.live.get(id)?.transcript.find(item => item.id === itemId);
   }
 
   private observe(record: StructuredRecord, live: Live, event: StructuredEvent): void {
@@ -186,11 +217,26 @@ export class StructuredAgents {
         live.working = event.turn.type === 'started';
         break;
       case 'transcript': {
-        const index = live.transcript.findIndex(item => item.id === event.item.id);
-        if (index === -1) live.transcript.push(event.item); else live.transcript[index] = event.item;
+        let item = event.item;
+        // the first prompt of a Turn delivered from the queue
+        if (item.kind === 'message' && item.role === 'user' && item.steer !== true && live.queuedNext !== undefined) {
+          if (live.queuedNext) item = { ...item, queued: true };
+          live.queuedNext = undefined;
+        }
+        const index = live.transcript.findIndex(candidate => candidate.id === item.id);
+        if (index === -1) live.transcript.push(item); else live.transcript[index] = item;
         live.transcript.splice(0, live.transcript.length - maxTranscriptItems);
         break;
       }
+      case 'history':
+        live.transcript = event.items.slice(-maxTranscriptItems);
+        break;
+      case 'status':
+        if (event.text === undefined) live.status.delete(event.key); else live.status.set(event.key, event.text);
+        break;
+      case 'usage':
+        live.usage = event.usage;
+        break;
       case 'exited':
         live.working = false;
         live.connection = undefined;

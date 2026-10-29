@@ -12,16 +12,34 @@ import type { TurnEvent } from './transport.js';
 /** What the console-shipped extension reports once its Agent has started (ADR 0017). */
 export type LaunchReport = { loaded: true; sandbox: { engaged: boolean; reason?: string }; version: string };
 /**
- * One line of an Agent's transcript, replaced by a later item with the same id: a message, or a
- * tool call (nested under `parentId` when another call made it) as it runs and once it ends.
+ * A tool call as the transcript shows it: its verb (`name`) and target (`summary`), its state and
+ * duration, and what it gave back: its output, a short `result` line, or an edit's unified `diff`.
+ * A call another call made (a script's) sits under `parentId`; `kept: false` marks one whose
+ * result the Conversation did not keep. A script carries its `source`.
+ */
+export type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; output?: string; result?: string; diff?: string; source?: string; kept?: false };
+/**
+ * One line of an Agent's transcript, replaced by a later item with the same id: a prompt (a steer
+ * when sent mid-Turn, `queued` when it came from the queue), an answer, thinking (`live` while it
+ * streams), a notice from the Agent's extension, a tool call, and the end of a Turn with its cost.
  */
 export type TranscriptItem =
-  | { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string }
-  | { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string };
+  | { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string; steer?: true; queued?: true }
+  | { id: string; kind: 'thinking'; text: string; live?: true }
+  | { id: string; kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error' }
+  | { id: string; kind: 'settled'; outcome: 'done' | 'cancelled' | 'failed'; cost?: number }
+  | TranscriptTool;
+/** What an Agent has used of its Conversation: its cost so far and how full its context is. */
+export type AgentUsage = { cost: number; contextPercent?: number };
 export type StructuredEvent =
   | { type: 'report'; report: LaunchReport }
   | { type: 'turn'; turn: TurnEvent }
   | { type: 'transcript'; item: TranscriptItem }
+  // the Conversation's transcript as loaded from its history, replacing what was shown
+  | { type: 'history'; items: TranscriptItem[] }
+  // a status line the Agent's extension set, or cleared (no `text`)
+  | { type: 'status'; key: string; text?: string }
+  | { type: 'usage'; usage: AgentUsage }
   | { type: 'conversation'; id: string }
   | { type: 'exited' };
 /** What became of a delivered prompt: a Turn started, it was handled at once without one, or it was refused. */

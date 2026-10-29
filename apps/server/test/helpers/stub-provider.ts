@@ -2,10 +2,10 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 /**
- * A stub OpenAI-compatible provider: every streamed chat completion answers `reply`. `requests`
- * counts the completions asked for.
+ * A stub OpenAI-compatible provider: every streamed chat completion answers `reply`, except that
+ * the first calls `toolCall` when one is given. `requests` counts the completions asked for.
  */
-export async function stubProvider(reply = 'Hello from the stub provider'): Promise<{ baseUrl: string; requests: () => number; close: () => Promise<void> }> {
+export async function stubProvider(reply = 'Hello from the stub provider', toolCall?: { name: string; arguments: object }): Promise<{ baseUrl: string; requests: () => number; close: () => Promise<void> }> {
   let requests = 0;
   const server: Server = createServer((request, response) => {
     request.resume();
@@ -14,8 +14,13 @@ export async function stubProvider(reply = 'Hello from the stub provider'): Prom
       requests += 1;
       const chunk = (delta: object, finish: string | null, usage?: object) => `data: ${JSON.stringify({ id: 'stub', object: 'chat.completion.chunk', created: 0, model: 'stub', choices: [{ index: 0, delta, finish_reason: finish }], ...(usage === undefined ? {} : { usage }) })}\n\n`;
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.write(chunk({ role: 'assistant', content: reply }, null));
-      response.write(chunk({}, 'stop', { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 }));
+      if (toolCall !== undefined && requests === 1) {
+        response.write(chunk({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_stub', type: 'function', function: { name: toolCall.name, arguments: JSON.stringify(toolCall.arguments) } }] }, null));
+        response.write(chunk({}, 'tool_calls', { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 }));
+      } else {
+        response.write(chunk({ role: 'assistant', content: reply }, null));
+        response.write(chunk({}, 'stop', { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 }));
+      }
       response.end('data: [DONE]\n\n');
     });
   });

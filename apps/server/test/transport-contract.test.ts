@@ -60,12 +60,12 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => undefined); });
 
 // launch `client`'s CLI under the holder in a Workspace session, its events collected in order
-async function launched(client: ContractClient): Promise<{ connection: StructuredConnection; events: StructuredEvent[]; next(type: StructuredEvent['type'], match?: (event: StructuredEvent) => boolean): Promise<StructuredEvent> }> {
+async function launched(client: ContractClient, toolCall?: Parameters<typeof stubProvider>[1]): Promise<{ connection: StructuredConnection; events: StructuredEvent[]; next(type: StructuredEvent['type'], match?: (event: StructuredEvent) => boolean): Promise<StructuredEvent> }> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-contract-')));
   const socketPath = join(root, 'tmux');
   const state = join(root, 'state');
   await mkdir(state);
-  const provider = await stubProvider();
+  const provider = await stubProvider(undefined, toolCall);
   cleanups.push(async () => { await provider.close(); await run(tmux, ['-S', socketPath, 'kill-server']); await rm(root, { recursive: true, force: true }); });
   const place = adhocScratchPlace(root);
   expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-c', root, 'cat'])).code).toBe(0);
@@ -115,7 +115,20 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
       { type: 'turn', turn: { type: 'started' } },
       { type: 'transcript', item: { id: expect.any(String), kind: 'message', role: 'user', text: 'Say hello' } },
       { type: 'transcript', item: { id: expect.any(String), kind: 'message', role: 'assistant', text: 'Hello from the stub provider' } },
+      { type: 'transcript', item: { id: expect.any(String), kind: 'settled', outcome: 'done', cost: expect.any(Number) } },
       { type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } }
     ]);
+    expect(await next('usage')).toMatchObject({ usage: { cost: expect.any(Number) } });
+  }, 60_000);
+
+  it('shows a tool call as one line, running and then with its result', async () => {
+    const { connection, events, next } = await launched(client, { name: 'bash', arguments: { command: 'printf "one\\ntwo\\n"' } });
+    await next('report');
+    expect(await connection.deliver('Run it')).toBe('started');
+    await next('turn', event => event.type === 'turn' && event.turn.type !== 'started');
+
+    const lines = events.flatMap(event => event.type === 'transcript' && event.item.kind === 'tool' ? [event.item] : []);
+    expect(lines[0]).toEqual({ id: 'call_stub', kind: 'tool', name: 'Run', summary: 'printf "one\\ntwo\\n"', state: 'running' });
+    expect(lines.at(-1)).toEqual({ id: 'call_stub', kind: 'tool', name: 'Run', summary: 'printf "one\\ntwo\\n"', state: 'done', output: 'one\ntwo\n', durationMs: expect.any(Number) });
   }, 60_000);
 });

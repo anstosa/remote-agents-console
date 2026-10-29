@@ -48,7 +48,7 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
   const app = await buildApp(config, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents });
   const headers = await authenticatedHeaders(app);
   const dashboardAgent = async (id: string) => (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { id: string }) => agent.id === id);
-  return { app, headers, dashboardAgent, root };
+  return { app, headers, dashboardAgent, root, structuredAgents };
 }
 
 describe('a structured Agent over HTTP', () => {
@@ -137,6 +137,68 @@ describe('a structured Agent over HTTP', () => {
     const launched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers, payload: { kind: 'pi' } });
     expect(launched.statusCode).toBe(201);
     expect(await dashboardAgent(launched.json().agentId)).toMatchObject({ kind: 'pi', worktreeId: worktree.id, placeId: worktree.id });
+    await app.close();
+  });
+
+  it('serves the latest part of a transcript with a count of earlier items, and each item in full on request', async () => {
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    const output = Array.from({ length: 12 }, (_, line) => `line ${line + 1}`).join('\n');
+    fake.emit({ type: 'transcript', item: { id: 'm1', kind: 'message', role: 'user', text: 'Run the tests' } });
+    fake.emit({ type: 'transcript', item: { id: 's1', kind: 'tool', name: 'Script', summary: '1 tool calls', state: 'done', source: 'await tools.bash({ command: "pnpm test" })' } });
+    fake.emit({ type: 'transcript', item: { id: 't1', kind: 'tool', name: 'Run', summary: 'pnpm test', state: 'done', parentId: 's1', durationMs: 4612, output: `${output}\n` } });
+
+    const latest = (await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript?limit=2`, headers })).json();
+    expect(latest.earlier).toBe(1);
+    // the list carries a tool's last lines and its line count, not its whole output or source
+    expect(latest.items).toEqual([
+      { id: 's1', kind: 'tool', name: 'Script', summary: '1 tool calls', state: 'done' },
+      { id: 't1', kind: 'tool', name: 'Run', summary: 'pnpm test', state: 'done', parentId: 's1', durationMs: 4612, tail: 'line 8\nline 9\nline 10\nline 11\nline 12', outputLines: 12 }
+    ]);
+    expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json()).toMatchObject({ earlier: 0, items: [{ id: 'm1' }, { id: 's1' }, { id: 't1' }] });
+
+    const full = await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript?item=${encodeURIComponent('t1')}`, headers });
+    expect(full.json()).toEqual({ item: { id: 't1', kind: 'tool', name: 'Run', summary: 'pnpm test', state: 'done', parentId: 's1', durationMs: 4612, output: `${output}\n` } });
+    expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript?item=s1`, headers })).json().item.source).toBe('await tools.bash({ command: "pnpm test" })');
+    expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript?item=nowhere`, headers })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript?limit=0`, headers })).statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('carries the status line: the extension\'s statuses, the context used and the cost so far', async () => {
+    const fake = fakeAgent();
+    const { app, headers, dashboardAgent } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    const status = async () => (await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json().status;
+    expect(await status()).toEqual({ extension: [] });
+
+    const before = (await dashboardAgent(id)).structured.revision;
+    fake.emit({ type: 'status', key: 'rac-sandbox', text: 'sandbox: on' });
+    fake.emit({ type: 'status', key: 'lint', text: 'lint: 2 warnings' });
+    fake.emit({ type: 'usage', usage: { cost: 0.0812, contextPercent: 31 } });
+    expect((await dashboardAgent(id)).structured.revision).toBeGreaterThan(before);
+    expect(await status()).toEqual({ extension: ['sandbox: on', 'lint: 2 warnings'], cost: 0.0812, contextPercent: 31 });
+
+    fake.emit({ type: 'status', key: 'lint' });
+    expect(await status()).toEqual({ extension: ['sandbox: on'], cost: 0.0812, contextPercent: 31 });
+    await app.close();
+  });
+
+  it('replaces the transcript with a Conversation\'s history, and marks a prompt that came from the queue', async () => {
+    const fake = fakeAgent();
+    const { app, headers, structuredAgents } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    const items = async () => (await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json().items;
+    fake.emit({ type: 'transcript', item: { id: 'm1', kind: 'message', role: 'user', text: 'Before' } });
+    fake.emit({ type: 'history', items: [{ id: 'h1', kind: 'message', role: 'user', text: 'Earlier' }, { id: 'h2', kind: 'settled', outcome: 'done', cost: 0.01 }] });
+    expect(await items()).toEqual([{ id: 'h1', kind: 'message', role: 'user', text: 'Earlier' }, { id: 'h2', kind: 'settled', outcome: 'done', cost: 0.01 }]);
+
+    expect(await structuredAgents.deliver(id, 'From the queue', { queued: true })).toBe('started');
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    fake.emit({ type: 'transcript', item: { id: 'm2', kind: 'message', role: 'user', text: 'From the queue' } });
+    fake.emit({ type: 'transcript', item: { id: 'm3', kind: 'message', role: 'user', text: 'A steer', steer: true } });
+    expect((await items()).slice(2)).toEqual([{ id: 'm2', kind: 'message', role: 'user', text: 'From the queue', queued: true }, { id: 'm3', kind: 'message', role: 'user', text: 'A steer', steer: true }]);
     await app.close();
   });
 
