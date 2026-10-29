@@ -30,9 +30,7 @@ function fakeHost(script: { attention: Array<AttentionState | undefined>; replie
   let turn = -1;
   const host: InteractiveReviewHost = {
     capability: async () => ({ available: true }),
-    agentIds: async () => new Set(['agent-1']),
-    launch: async (worktreeId, kind, launch) => { calls.push(`launch:${worktreeId}:${kind}`); launches.push(launch); return script.launch ?? true; },
-    waitForAgent: async (_before, runId) => (runId === launches[0]?.runId ? agent : undefined),
+    launch: async (worktreeId, kind, launch) => { calls.push(`launch:${worktreeId}:${kind}`); launches.push(launch); return script.launch === false ? { failure: 'refused' } : { agent }; },
     waitForReadiness: async () => ({ state: 'ready' }),
     name: async (_id, name) => { calls.push(`name:${name}`); },
     beginTurn: async () => { const index = turn += 1; return async () => script.replies?.[index]; },
@@ -261,7 +259,6 @@ describe('interactive Review runner', () => {
     const gone = fakeHost({ attention: ['working', 'finished', undefined, 'working', 'finished'], replies: ['First.', 'Relaunched.'], conversation });
     const relaunching = new InteractiveReviewRunner(gone.host, { promptDirectory: '/tmp/runs' });
     await relaunching.run(request({ reply: { kind: 'text' }, followUps: true }), new AbortController().signal);
-    gone.host.waitForAgent = async () => agent;
     await expect(relaunching.run(request({ reply: { kind: 'text' }, followUps: true, resume: conversation }), new AbortController().signal)).resolves.toEqual({ value: 'Relaunched.', conversation });
     expect(gone.launches.map(launch => launch.conversationId)).toEqual([undefined, conversation]);
   });

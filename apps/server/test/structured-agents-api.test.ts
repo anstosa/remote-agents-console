@@ -684,6 +684,62 @@ describe('a structured Agent\'s queued prompts', () => {
   });
 });
 
+describe('a Schedule\'s unattended Run on a structured Agent', () => {
+  // a Worktree Note scheduled every minute on Pi, and the scheduler's tick a minute on
+  async function scheduled(fake: ReturnType<typeof fakeAgent>) {
+    const console = await consoleWith(fake);
+    const { app, headers } = console;
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects[0].worktrees[0];
+    const note = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/notes`, headers, payload: { title: 'Build', text: 'Check the build' } })).json();
+    expect((await app.inject({ method: 'PUT', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/notes/${note.id}/schedule`, headers, payload: { cron: '* * * * *', kind: 'pi', target: { worktreeId: worktree.id }, enabled: true } })).statusCode).toBe(200);
+    const tick = () => app.scheduler.tick(new Date(Date.now() + 61_000));
+    const lastRun = async () => (await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/notes`, headers })).json().notes.find((candidate: { id: string }) => candidate.id === note.id).schedule.lastRun;
+    await tick();
+    return { ...console, tick, lastRun };
+  }
+
+  it('launches a Pi Agent, names its Conversation, delivers the Note, and closes it once the Run completes', async () => {
+    const fake = fakeAgent();
+    const { app, tick, lastRun, dashboardAgent } = await scheduled(fake);
+    const running = await lastRun();
+    expect(running).toMatchObject({ status: 'running', agentId: expect.any(String) });
+    expect(fake.delivered).toEqual(['Check the build']);
+    expect(fake.operations).toEqual([expect.stringMatching(/^rename ⏰ Build — /u)]);
+
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    await tick();
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'Green' } });
+    await tick();
+    expect(await lastRun()).toMatchObject({ status: 'completed' });
+    expect(fake.closed()).toBe(true);
+    expect(await dashboardAgent(running.agentId)).toBeUndefined();
+    await app.close();
+  });
+
+  it('records failed when its Agent goes Exited, and closes it', async () => {
+    const fake = fakeAgent();
+    const { app, tick, lastRun, dashboardAgent } = await scheduled(fake);
+    const { agentId } = await lastRun();
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    fake.emit({ type: 'exited' });
+    await tick();
+    expect(await lastRun()).toMatchObject({ status: 'failed', detail: expect.stringContaining('exited') });
+    expect(await dashboardAgent(agentId)).toBeUndefined();
+    await app.close();
+  });
+
+  it('does not wait on a question it asks: the Run records needs-input and closes its Agent', async () => {
+    const fake = fakeAgent();
+    const { app, tick, lastRun } = await scheduled(fake);
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    fake.emit({ type: 'question', question: { id: 'q1', text: 'Which colour?', field: { kind: 'choice', choices: ['red', 'blue'] } } });
+    await tick();
+    expect(await lastRun()).toMatchObject({ status: 'needs-input' });
+    expect(fake.closed()).toBe(true);
+    await app.close();
+  });
+});
+
 describe('a structured Agent across a console restart', () => {
   it('reattaches from the lines read through its last idle point, so a Turn in flight completes into history and the queue moves on', async () => {
     const fake = fakeAgent();

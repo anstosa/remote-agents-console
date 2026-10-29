@@ -1,5 +1,6 @@
 import type { AttentionState } from '../adapters/types.js';
 import type { Agent } from '../domain/models.js';
+import type { LaunchOutcome } from '../transports/tmux.js';
 
 // ── Managed runs ──────────────────────────────────────────────────────────────────
 // A managed run launches a fresh Agent, delivers one prompt, watches its attention to an end
@@ -12,14 +13,13 @@ export type ReadinessOutcome = { state: 'ready' } | { state: 'blocked'; reason: 
 export type FreshLaunchFailure = 'launch-refused' | 'no-agent' | 'not-ready-blocked' | 'not-ready-timeout' | 'delivery-failed';
 // `detail` carries a blocked readiness's reason; `agentId` survives only when the pane is left open
 export type FreshLaunchOutcome = { status: 'launched'; agentId: string } | { status: 'failed'; reason: FreshLaunchFailure; detail?: string; agentId?: string };
-// The caller's steps for one fresh launch: snapshot the Agent ids, launch, wait for the new
-// Agent and its readiness, then `prepare` it (best-effort: name the conversation) and deliver
-// the prompt. `close` removes a pane that never became ready. A `prepare` that resolves `false`
-// left input in the pane it could not confirm, so the prompt is not pasted after it.
+// The caller's steps for one fresh launch: launch the Agent through its Transport, which answers
+// with the new Agent, wait for its readiness, then `prepare` it (best-effort: name the
+// conversation) and deliver the prompt. `close` removes a pane that never became ready. A
+// `prepare` that resolves `false` left input in the pane it could not confirm, so the prompt is
+// not pasted after it.
 export type FreshLaunchSteps = {
-  agentIds(): Promise<Set<string>>;
-  launch(): Promise<boolean>;
-  waitForNewAgent(before: Set<string>): Promise<Agent | undefined>;
+  launch(): Promise<LaunchOutcome>;
   waitForReadiness(agent: Agent): Promise<ReadinessOutcome>;
   close(agentId: string): Promise<unknown>;
   prepare?(agent: Agent): Promise<unknown>;
@@ -30,11 +30,10 @@ export type FreshLaunchSteps = {
 // pane this launch created rather than leaving it behind, so the outcome carries no agent id;
 // a failed delivery leaves the ready pane open and names it.
 export async function launchFresh(steps: FreshLaunchSteps): Promise<FreshLaunchOutcome> {
-  const before = await steps.agentIds();
+  const launched = await steps.launch();
   // a refused launch (an unconfigured or unlaunchable kind, or a busy worktree) pastes nothing
-  if (!await steps.launch()) return { status: 'failed', reason: 'launch-refused' };
-  const agent = await steps.waitForNewAgent(before);
-  if (agent === undefined) return { status: 'failed', reason: 'no-agent' };
+  if (!('agent' in launched)) return { status: 'failed', reason: launched.failure === 'refused' ? 'launch-refused' : 'no-agent' };
+  const { agent } = launched;
   const readiness = await steps.waitForReadiness(agent);
   if (readiness.state !== 'ready') {
     await steps.close(agent.id).catch(() => undefined);

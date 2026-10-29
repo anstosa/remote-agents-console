@@ -5,6 +5,7 @@ import type { AttentionState } from '../adapters/types.js';
 import type { Agent } from '../domain/models.js';
 import { launchFresh, managedRunProgress, managedRunStartWindowMs, type ReadinessOutcome } from '../launch/managed-run.js';
 import type { ReviewRunLaunch } from '../launch/service.js';
+import type { LaunchOutcome } from '../transports/tmux.js';
 import { MAX_REVIEW_GENERATED_BYTES } from '../review-tour/contracts.js';
 import { conversationKey, isReviewAgentKind, reviewRunsFor, validConversationId, type ReviewAgentKind } from './kinds.js';
 import { reviewReplacedFlags } from './launch-args.js';
@@ -16,9 +17,8 @@ import { ReviewRunError, unavailable, type ReviewRunCapability, type ReviewRunne
 // undefined once the Agent has gone. `release` hands a pane left open back to the operator.
 export type InteractiveReviewHost = {
   capability(kind: ReviewAgentKind): Promise<ReviewRunCapability>;
-  agentIds(): Promise<Set<string>>;
-  launch(worktreeId: string, kind: ReviewAgentKind, launch: ReviewRunLaunch): Promise<boolean>;
-  waitForAgent(before: Set<string>, runId: string): Promise<Agent | undefined>;
+  // launch the run's Agent through its Transport, which answers with the Agent once it runs
+  launch(worktreeId: string, kind: ReviewAgentKind, launch: ReviewRunLaunch): Promise<LaunchOutcome>;
   waitForReadiness(agent: Agent): Promise<ReadinessOutcome>;
   // resolves `false` when the rename may be left unsent in the composer, so no prompt is pasted after it
   name(agentId: string, name: string): Promise<unknown>;
@@ -245,9 +245,7 @@ export class InteractiveReviewRunner implements ReviewRunner {
     this.live.add(runId);
     try {
       const launched = await launchFresh({
-        agentIds: () => this.host.agentIds(),
         launch: () => this.host.launch(request.worktreeId, request.kind, { runId, label: request.label, extraArgs: interactive.args({ ...settings, readDirectory: this.options.promptDirectory }), replacedFlags: reviewReplacedFlags(interactive, settings), ...(request.resume === undefined ? {} : { conversationId: request.resume }) }),
-        waitForNewAgent: before => this.host.waitForAgent(before, runId),
         waitForReadiness: candidate => this.host.waitForReadiness(candidate),
         close: id => this.host.close(id),
         // report the Agent, then name a new conversation with the run (best-effort); a resumed one keeps its name

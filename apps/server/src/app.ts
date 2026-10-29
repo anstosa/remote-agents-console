@@ -22,7 +22,7 @@ import { agentKinds, codexFamily, sameConversation, type Adapter, type AgentKind
 import { TmuxCommandRegistry } from './tmux/command-registry.js';
 import { TmuxAdapter } from './tmux/adapter.js';
 import { maxPromptAttachmentBytes, PromptService, promptScope, type PromptAttachment } from './prompts/service.js';
-import { launchTmuxAgent, TmuxTransport } from './transports/tmux.js';
+import { launchTmuxAgent, TmuxTransport, type LaunchOutcome } from './transports/tmux.js';
 import { holderProcesses, StructuredAgents } from './transports/structured-agents.js';
 import { promptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, validPromptAttachments } from './prompts/validation.js';
 import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin } from './prompts/queue.js';
@@ -961,10 +961,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (place.adhoc === true) return undefined;
       let found: Agent | undefined;
       const outcome = await launchFresh({
-        agentIds: async () => new Set((await discovery.dashboard()).agents.map(agent => agent.id)),
         // preserve remembered Worktree, Project and Scratch launch profiles
-        launch: async () => await launch.launchAt(place),
-        waitForNewAgent: async before => await waitForAgent(before, atPlace(place.id)),
+        launch: async () => await launchAgent(atPlace(place.id), () => launch.launchAt(place)),
         waitForReadiness,
         close: async agentId => await prompts.close(agentId),
         // delivery belongs to the tracked prompt path after readiness succeeds
@@ -2363,6 +2361,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (clean.length === 0 || renamesInFlight.has(agentId)) return 'skipped';
     const persistence = await agentPersistence(agentId);
     if (persistence === undefined) return 'skipped';
+    // a structured Agent names its Conversation in place, as the rename route does
+    if (persistence.agent.transport === 'structured') {
+      if (await structuredAgents.rename(agentId, clean) !== 'ok') return 'skipped';
+      const conversationId = (await structuredAgents.agent(agentId))?.conversationId;
+      if (conversationId !== undefined) await consoleNamed.record(persistence.saveKey, { kind: persistence.agent.kind, id: conversationId }).catch(() => undefined);
+      return 'named';
+    }
     const conversations = adapterFor(persistence.agent.kind)?.conversations;
     if (conversations?.rename === undefined || conversations.readName === undefined) return 'skipped';
     renamesInFlight.add(agentId);
@@ -2395,6 +2400,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const promptStartPressEvery = 8;
   const submitConfirmed = async (agentId: string, text: string, attachments: PromptAttachment[] = []): Promise<boolean> => {
     if (!await prompts.submit(agentId, text, attachments)) return false;
+    // a structured Agent's Transport confirms what it delivered; nothing is pasted to press again
+    if (await structuredAgents.has(agentId)) return true;
     const first = await discovery.target(agentId);
     if (first === undefined) return false;
     const submission = adapterFor(first.agent.kind)?.submission;
@@ -2412,6 +2419,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   };
   // wait for slow agent startup, shared with the Run primitive (launch/wait.ts)
   const waitForAgent = createAgentWaiter(discovery, launchPollDelay);
+  // launch an Agent through its Transport: `start` opens it, and the new Agent is the first one
+  // that `matches` among those not running before
+  const launchAgent = async (matches: (agent: Agent) => boolean, start: () => Promise<boolean>): Promise<LaunchOutcome> =>
+    await launchTmuxAgent(waitForAgent, new Set((await discovery.dashboard()).agents.map(agent => agent.id)), matches, start);
   // the pane snapshot an Adapter's `newConversation` rules read, from one discovered agent
   // (Scheduled prompts) — the single builder the readiness poll and the reset settle loop share
   const runSnapshot = (agent: Agent): PaneSnapshot => ({ title: agent.title, attention: agentAttentionState(agent), ...(agent.conversationId === undefined ? {} : { conversationId: agent.conversationId }) });
@@ -2452,8 +2463,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         if (!configured.launchable) return { available: false, reason: 'generator_unavailable' };
         return process.env.RAC_HOST_TMUX_DIR === undefined ? { available: true } : { available: false, reason: 'interactive_unavailable' };
       },
-      agentIds: async () => new Set((await discovery.dashboard()).agents.map(agent => agent.id)),
-      launch: async (worktreeId, kind, review) => {
+      launch: async (worktreeId, kind, review) => await launchAgent(reviewRunAgent(review.runId), async () => {
         const { mcp } = reviewRunsFor(kind).interactive;
         const adapter = config.adapters[kind];
         const worktree = configuredWorktree(worktreeId);
@@ -2462,8 +2472,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         const disabled = await mcpDisableArgs(mcp, adapter.program, worktree.identity, adapter.env);
         if (disabled === undefined) { console.warn(`[review] ${worktree.identity}: could not disable ${kind} MCP servers; the run is not launched`); return false; }
         return await launch.launchReviewRun(worktreeId, kind, { ...review, extraArgs: [...review.extraArgs, ...disabled] });
-      },
-      waitForAgent: (before, runId) => waitForAgent(before, reviewRunAgent(runId)),
+      }),
       waitForReadiness: agent => waitForReadiness(agent),
       name: async (agentId, name) => await nameAgentConversation(agentId, name) !== 'stuck',
       beginTurn: (agent, maxBytes) => beginReplyTurn(discovery, agent, maxBytes),
@@ -2498,15 +2507,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // how to launch, match and reuse each Schedule target, mirroring the launcher rows; undefined
   // when the target no longer resolves (a removed Worktree, an unavailable directory Project).
   // A directory Project or Scratch matches its Agents by Place, wherever in the Place they run.
-  type RunPlan = { matches: (agent: Agent) => boolean; launch: () => Promise<boolean>; waitForNewAgent: (before: Set<string>) => Promise<Agent | undefined> };
+  type RunPlan = { matches: (agent: Agent) => boolean; launch: () => Promise<LaunchOutcome> };
   const resolveRunPlan = async (target: ScheduleTarget, kind: AgentKind | undefined, model?: ModelSetting): Promise<RunPlan | undefined> => {
     if ('worktreeId' in target) {
       const worktree = configuredWorktree(target.worktreeId);
       if (worktree === undefined) return undefined;
       return {
         matches: agent => !isReviewRun(agent) && worktreeMatchesWorkspace(worktree, agent.home),
-        launch: () => launch.launch(target.worktreeId, kind, model),
-        waitForNewAgent: before => waitForAgent(before, inWorktree(target.worktreeId)),
+        launch: () => launchAgent(inWorktree(target.worktreeId), () => launch.launch(target.worktreeId, kind, model))
       };
     }
     // only an available directory Project launches in place (a repository Project runs through its Worktrees)
@@ -2515,7 +2523,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       : { place: await launch.scratchPlace(), launch: () => launch.launchHome(kind, model) };
     const place = inPlace.place;
     if (place === undefined) return undefined;
-    return { matches: atPlace(place.id), launch: inPlace.launch, waitForNewAgent: before => waitForAgent(before, atPlace(place.id)) };
+    return { matches: atPlace(place.id), launch: () => launchAgent(atPlace(place.id), inPlace.launch) };
   };
   // reuse the Schedule's own idle pane: reset the conversation, wait for the Adapter's settle
   // rule, then submit the Note's text with the reset instant so Codex completion anchors on the
@@ -2560,9 +2568,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const freshFailureDetail: Record<FreshLaunchFailure, string> = { 'launch-refused': 'launch refused', 'no-agent': notReadyDetail, 'not-ready-blocked': notReadyDetail, 'not-ready-timeout': notReadyDetail, 'delivery-failed': 'the note could not be delivered' };
   const runFresh = async (plan: RunPlan, text: string, attachments: PromptAttachment[], name?: string): Promise<RunOutcome> => {
     const outcome = await launchFresh({
-      agentIds: async () => new Set((await discovery.dashboard()).agents.map(agent => agent.id)),
       launch: plan.launch,
-      waitForNewAgent: plan.waitForNewAgent,
       waitForReadiness,
       close: agentId => prompts.close(agentId),
       // an unattended (managed) Run names its fresh conversation before delivering, so the pane the
@@ -2721,7 +2727,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const lastRun = schedule?.lastRun;
       if (note === undefined || schedule === undefined || lastRun?.status !== 'running') return;
       const agentId = lastRun.agentId;
-      const target = agentId === undefined ? undefined : await discovery.target(agentId, true);
+      const target = agentId === undefined ? undefined : await discovery.target(agentId, true) ?? await structuredAgents.agent(agentId).then(agent => agent === undefined ? undefined : { agent });
       const started = Date.parse(lastRun.startedAt ?? lastRun.at);
       const elapsed = Number.isNaN(started) ? 0 : Date.now() - started;
       let terminal: ScheduleLastRun | undefined;
@@ -2733,6 +2739,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (agentId === undefined || target === undefined) {
         // the managed pane is gone — a manual stop, a crash, or a restart that outlived it
         terminal = { at: lastRun.at, status: 'failed', detail: 'the agent was closed before the run finished' };
+      } else if (withoutProcess(target.agent)) {
+        // a structured Agent whose process is gone is closed with its Run
+        terminal = { at: lastRun.at, status: 'failed', detail: 'the agent exited before the run finished' }; closeId = agentId;
       } else {
         const progress = managedRunProgress(agentAttentionState(target.agent), lastRun.sawWorking === true, elapsed);
         if (progress === 'working') {

@@ -8,9 +8,7 @@ const steps = (over: Partial<FreshLaunchSteps> = {}): FreshLaunchSteps & { calls
   const calls: string[] = [];
   return {
     calls,
-    agentIds: async () => { calls.push('snapshot'); return new Set(['agent-1']); },
-    launch: async () => { calls.push('launch'); return true; },
-    waitForNewAgent: async before => { calls.push(`wait:${[...before].join(',')}`); return agent; },
+    launch: async () => { calls.push('launch'); return { agent }; },
     waitForReadiness: async (): Promise<ReadinessOutcome> => { calls.push('ready'); return { state: 'ready' }; },
     close: async id => { calls.push(`close:${id}`); },
     prepare: async () => { calls.push('prepare'); },
@@ -20,10 +18,10 @@ const steps = (over: Partial<FreshLaunchSteps> = {}): FreshLaunchSteps & { calls
 };
 
 describe('managed run fresh launch', () => {
-  it('snapshots, launches, waits for the Agent and its readiness, prepares, then delivers', async () => {
+  it('launches the Agent, waits for its readiness, prepares, then delivers', async () => {
     const run = steps();
     await expect(launchFresh(run)).resolves.toEqual({ status: 'launched', agentId: 'agent-2' });
-    expect(run.calls).toEqual(['snapshot', 'launch', 'wait:agent-1', 'ready', 'prepare', 'deliver']);
+    expect(run.calls).toEqual(['launch', 'ready', 'prepare', 'deliver']);
   });
 
   it('closes a pane that never became ready and names no agent', async () => {
@@ -34,8 +32,8 @@ describe('managed run fresh launch', () => {
   });
 
   it('reports a refused launch, a missing Agent and a failed delivery', async () => {
-    await expect(launchFresh(steps({ launch: async () => false }))).resolves.toEqual({ status: 'failed', reason: 'launch-refused' });
-    await expect(launchFresh(steps({ waitForNewAgent: async () => undefined }))).resolves.toEqual({ status: 'failed', reason: 'no-agent' });
+    await expect(launchFresh(steps({ launch: async () => ({ failure: 'refused' }) }))).resolves.toEqual({ status: 'failed', reason: 'launch-refused' });
+    await expect(launchFresh(steps({ launch: async () => ({ failure: 'timed-out' }) }))).resolves.toEqual({ status: 'failed', reason: 'no-agent' });
     await expect(launchFresh(steps({ deliver: async () => false }))).resolves.toEqual({ status: 'failed', reason: 'delivery-failed', agentId: 'agent-2' });
   });
 
