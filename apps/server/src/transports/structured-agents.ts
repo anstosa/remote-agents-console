@@ -277,6 +277,26 @@ export class StructuredAgents {
     return await this.relaunch(record, live, record.conversationId) === true;
   }
 
+  /** Stop the Agent's process and leave it Exited, saying why; a resume or restart starts it again. */
+  async stop(id: string, reason: string): Promise<boolean> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    const live = this.live.get(id) ?? this.idle();
+    if (record === undefined || live.busy) return false;
+    this.live.set(id, live);
+    // its process's last events (its exit) change nothing now
+    live.generation += 1;
+    live.connection?.close();
+    this.endScripts(live);
+    if (record.holder !== undefined) await this.processes.stop(record.holder, record);
+    record.holder = undefined;
+    Object.assign(record, { lifecycle: 'exited', reason });
+    delete record.access;
+    Object.assign(live, { working: false, questions: [], steers: [], connection: undefined });
+    await this.save();
+    this.changed(live);
+    return true;
+  }
+
   /** The Agent whose current process holds this console MCP token, if any. */
   async tokenHolder(token: string): Promise<StructuredRecord | undefined> {
     const hash = tokenHash(token);

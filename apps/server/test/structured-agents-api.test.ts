@@ -146,7 +146,7 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
     await Promise.race([reattached, new Promise(resolve => setTimeout(resolve, 50))]);
     return { ...console, reattached };
   };
-  return { ...started, restart };
+  return { ...started, restart, conductor };
 }
 
 describe('a structured Agent over HTTP', () => {
@@ -1197,6 +1197,31 @@ describe('the Conductor', () => {
     expect(await conductorOf(app, headers)).toBeUndefined();
     expect(notify.mock.calls.map(([message]) => message)).toEqual([expect.objectContaining({ kind: 'conductor', title: 'The Conductor is off', body: expect.stringContaining('path /srv/conductor was not found') })]);
     await app.close();
+  });
+
+  it('is stopped, not left running, when a deploy finds its Project unavailable, and comes back in place once it is available again', async () => {
+    await integrationFiles();
+    vi.spyOn(PushService.prototype, 'notify').mockResolvedValue(undefined);
+    const fake = fakeAgent();
+    const { app, headers, restart, conductor } = await consoleWith(fake, { conductor: {} });
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+
+    const next = fakeAgent();
+    const deployed = await restart(next, { conductor: { ...conductor!, unavailable: 'path /srv/conductor was not found' } });
+    await deployed.reattached;
+    await deployed.app.conductor.start();
+    await vi.waitFor(async () => expect(await conductorOf(deployed.app, deployed.headers)).toMatchObject({ id, structured: { lifecycle: 'exited' } }));
+    expect(next.closed()).toBe(true);
+    expect(next.launches).toHaveLength(0);
+    expect((await mcp(deployed.app, fake.grants[0]!.token, 'tools/list')).status).toBe(401);
+
+    const back = fakeAgent();
+    const available = await restart(back, { conductor });
+    await available.reattached;
+    await available.app.conductor.start();
+    await vi.waitFor(() => expect(back.launches.map(launch => launch.id)).toEqual([id]));
+    await available.app.close();
   });
 
   it('is launched again whenever it exits, until it exits 3 times in 10 minutes; then it stays Exited and pushes once', async () => {

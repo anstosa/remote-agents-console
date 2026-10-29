@@ -64,9 +64,14 @@ export class Conductor {
     // at most one, at the configured Project; any other is turned off
     const kept = conductors.find(agent => agent.placeId === this.placeId && agent.kind === config?.kind);
     for (const agent of conductors) if (agent !== kept) await this.agents.close(agent.id, { retired: true });
-    // an unavailable Project leaves it off: nothing is launched, and a Conductor there is left alone
-    if (config === undefined || config.unavailable !== undefined) return;
+    if (config === undefined) return;
     const lifecycle = kept?.structured?.lifecycle;
+    // an unavailable Project leaves it off: nothing is launched, and one still running (its holder
+    // outlived a console restart) is stopped, its record and queue kept for when the Project is back
+    if (config.unavailable !== undefined) {
+      if (kept !== undefined && !down(lifecycle)) await this.agents.stop(kept.id, `Its Project is unavailable: ${config.unavailable}`);
+      return;
+    }
     const before = this.seen;
     this.seen = lifecycle;
     if (kept !== undefined && !down(lifecycle)) {
