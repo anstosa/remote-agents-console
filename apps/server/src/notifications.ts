@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isReviewRun, type Agent } from './domain/models.js';
 import type { AttentionState } from './adapters/types.js';
+import type { ConsoleEvents } from './events.js';
 
 export type AgentAttentionState = AttentionState;
 export type AgentNotificationContext = {
@@ -218,4 +219,18 @@ export class AgentNotificationCoordinator {
   private deliverSafely(notification: AgentNotification): void {
     void Promise.resolve(this.deliver(notification)).catch(() => {});
   }
+}
+
+/**
+ * Push notifications, the console events' first subscriber (ADR 0019): each snapshot's Agents
+ * through the coordinator, which diffs them, a ready review, and a Schedule Run that needs the operator.
+ */
+export function pushNotifications(events: ConsoleEvents, coordinator: AgentNotificationCoordinator, deliver: (message: PushMessage) => Promise<void>): void {
+  const send = (message: PushMessage) => { void deliver(message).catch(() => undefined); };
+  events.on('agents', ({ agents }) => {
+    for (const { agent, queued, context, quiet } of agents) coordinator.observe(agent, queued, context, quiet);
+    coordinator.retain(agents.map(({ agent }) => agent));
+  });
+  events.on('review-ready', ({ agentId, worktreeId, projectName, worktreeName }) => send(reviewNotification(agentId, worktreeId, projectName, worktreeName)));
+  events.on('schedule-run', ({ type: _type, ...run }) => send(scheduleNotification(run)));
 }

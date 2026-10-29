@@ -42,7 +42,8 @@ import { PullRequestLookupError } from './pull-requests/service.js';
 import { PullRequestSwitchService } from './pull-requests/switch-service.js';
 import { NewTaskService } from './new-task/service.js';
 import { WorktreeManagementService } from './worktrees/management.js';
-import { agentAttentionState, AgentNotificationCoordinator, reviewNotification, scheduleNotification, type AgentNotificationContext } from './notifications.js';
+import { agentAttentionState, AgentNotificationCoordinator, pushNotifications, type AgentNotificationContext } from './notifications.js';
+import { ConsoleEvents } from './events.js';
 import { isReviewRun, paneTmuxSession, stackActions, worktreeAgents, type Agent, type Pane, type SocketRef, type StackAction, type TmuxAgent, type Worktree } from './domain/models.js';
 import { CommandCatalogService } from './commands/service.js';
 import { LatestViewportScheduler, PaneViewportCoordinator } from './logs/viewport-scheduler.js';
@@ -210,6 +211,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   };
   const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch: LaunchService = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId), undefined, async (place, kind, options) => await structuredAgents.launch(place, kind, options) !== undefined); const structuredAgents: StructuredAgents = deps.structuredAgents ?? new StructuredAgents(holderProcesses(launch, config.adapters, kind => launch.adapterFiles(kind)), { allowedModels: kind => config.adapters[kind]?.allowedModels ?? [] }); discovery.useStructuredAgents?.(structuredAgents); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const transport = deps.prompts?.transport ?? new TmuxTransport(discovery, tmux, { begin: agentId => prompts.beginAgentMutation(agentId), version: agentId => prompts.mutationVersion(agentId), busy: agentId => prompts.mutating(agentId), restored: async (scope, deliveredPromptId) => await prompts.resetRestored(scope, deliveredPromptId) }, queuedPrompts.resets, undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, async (agentId, to) => await switchByRestart(agentId, to)); const prompts: PromptService = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, undefined, undefined, calendarLifecycle, transport, structuredAgents.turns); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, undefined, prSwitch); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
   const temporaryPreviews = deps.temporaryPreviews ?? new TemporaryPreviewService();
+  // what happens in the console, published once for every subscriber; push notifications are the first (ADR 0019)
+  const events = new ConsoleEvents();
+  pushNotifications(events, notifications, message => push.notify(message));
   // what one Agent queues to another is reported back to it, and the Turns the console starts on an
   // Agent's behalf are held to the Conductor's budget (ADR 0018, ADR 0019)
   const dispatches = new Dispatches({
@@ -241,11 +245,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const reviewJobs = new ReviewTourJobs(reviewTours, reviewStore, async review => {
     const worktree = review.prepared.resolved.worktree;
     const projectName = discovery.projectsNow().find(project => project.id === worktree.projectId)?.label ?? worktree.label;
-    // refresh dashboard state and push independently
-    await Promise.all([
-      dashboardUpdates.refresh().then(() => undefined).catch(() => undefined),
-      push.notify(reviewNotification(review.agentId, review.worktreeId, projectName, worktree.label)).then(() => undefined).catch(() => undefined)
-    ]);
+    events.emit({ type: 'review-ready', agentId: review.agentId, worktreeId: review.worktreeId, projectName, worktreeName: worktree.label });
+    await dashboardUpdates.refresh().then(() => undefined).catch(() => undefined);
   }, codeReviews, asks);
   const reviewTourCapability = await reviewTours.capability();
   const codeReviewCapability = await codeReviewer.capability();
@@ -491,6 +492,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       multipleWorktrees: (project?.worktrees.length ?? 0) > 1
     };
   };
+  // one snapshot's Agents as the console events publish them
+  const observedAgents = (discovered: { agents: Agent[] } & Parameters<typeof notificationContextForAgent>[1], queuedCounts: ReadonlyMap<string, number>) => ({ type: 'agents' as const, agents: discovered.agents.map(agent => ({ agent, queued: (queuedCounts.get(agent.id) ?? 0) > 0, context: notificationContextForAgent(agent, discovered), quiet: prompts.quiet?.(agent) ?? false })) });
   // count prompts before dispatch starts
   const queuedPromptCounts = async (agents: Agent[]) => new Map(await Promise.all(agents.map(async agent => {
     // suppress false completion alerts on storage errors
@@ -517,8 +520,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await prompts.retireDeparted(discovered.agents.map(agent => agent.id)).catch(() => undefined);
     await dispatches.sweep(discovered.agents).catch(() => undefined);
     // suppress completions while more work waits
-    for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered), prompts.quiet?.(agent));
-    notifications.retain(discovered.agents);
+    events.emit(observedAgents(discovered, queuedCounts));
     const worktrees = discovery.worktreesNow();
     const controls = new Map(await Promise.all(worktrees.map(async worktree => [worktree.id, { actions: stackCommands.actions(worktree), ...await stackCommands.state(worktree, paneSnapshots) }] as const)));
     const controlFor = (worktreeId: string | undefined) => worktreeId === undefined ? undefined : controls.get(worktreeId);
@@ -543,8 +545,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const discovered = await discovery.dashboard();
     const queuedCounts = await queuedPromptCounts(discovered.agents);
     // update completion and question state for every agent
-    for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered), prompts.quiet?.(agent));
-    notifications.retain(discovered.agents);
+    events.emit(observedAgents(discovered, queuedCounts));
     return instanceAttention({ agents: discovered.agents.map(agent => ({ ...agent, unread: notifications.isUnread(agent) })) });
   };
   dashboardUpdates.setLoader(dashboard);
@@ -2737,7 +2738,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const notifyScheduleRun = (schedule: Schedule, noteId: string, noteTitle: string | undefined, lastRun: ScheduleLastRun): void => {
     if (!scheduleAttentionStatuses.has(lastRun.status)) return;
     const target = resolveScheduleTarget(schedule.target);
-    void push.notify(scheduleNotification({
+    events.emit({
+      type: 'schedule-run',
       status: lastRun.status as 'skipped' | 'failed' | 'needs-input' | 'timed-out',
       targetLabel: target.label,
       noteId,
@@ -2745,7 +2747,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       ...(lastRun.detail === undefined ? {} : { detail: lastRun.detail }),
       ...(lastRun.agentId === undefined ? {} : { agentId: lastRun.agentId }),
       ...(target.worktreeId === undefined ? {} : { worktreeId: target.worktreeId })
-    })).catch(() => undefined);
+    });
   };
   // Run one Note's Schedule once at the due (or Run-now) instant `at`, and record the outcome on its
   // `lastRun`. One Run per Schedule at a time — the flight guard is shared by Run now, the scheduler
