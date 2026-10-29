@@ -396,6 +396,12 @@ button.model-chip:hover, button.model-chip.active { border-color: var(--lavender
 .model-picker-heading { margin: .3rem .4rem .1rem; color: var(--overlay-1); font: 800 .58rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
 .model-picker-warning { margin: 0 .4rem; color: var(--peach); font-size: .72rem; }
 .model-picker-note { margin: .2rem .4rem; color: var(--subtext-0); font-size: .68rem; }
+.watch-row { display: flex; align-items: center; gap: .5rem; padding: .3rem .4rem; border-radius: var(--control-radius); }
+.watch-row > span { display: grid; flex: 1; min-width: 0; gap: .1rem; }
+.watch-row strong { overflow: hidden; color: var(--text); font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
+.watch-row small { color: var(--subtext-0); font-size: .64rem; }
+.watch-row button { min-height: 2rem; padding: 0 .6rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: transparent; color: var(--red); font-size: .7rem; }
+.watch-row button:hover:not(:disabled) { border-color: var(--red); }
 .model-row { display: grid; grid-template-columns: 1fr auto; gap: .1rem .6rem; width: 100%; min-height: 2.75rem; padding: .4rem .5rem; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: var(--text); text-align: left; }
 .model-row:not(:disabled):hover { background: color-mix(in srgb, var(--surface-1) 45%, transparent); }
 .model-row.current { border-color: var(--lavender); }

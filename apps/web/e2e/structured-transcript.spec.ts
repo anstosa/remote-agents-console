@@ -7,7 +7,8 @@ type Transcript = { items: unknown[]; earlier?: number; status?: { extension: st
 // stub a console whose one Worktree runs a Pi Agent, serving `transcript` and each item in `full`
 // (`lifecycle` the Agent's process state; `resumed` hears each Resume)
 // (`queued` and `history` are its prompts, `spawnedBy` the Conductor that spawned it)
-async function mockPi(page: Page, transcript: Transcript, { attention = 'finished', full = {}, lifecycle = 'live', resumed = () => {}, queued = [], history = [], spawnedBy }: { attention?: 'working' | 'finished'; full?: Record<string, unknown>; lifecycle?: 'live' | 'exited'; resumed?: () => void; queued?: unknown[]; history?: unknown[]; spawnedBy?: string } = {}) {
+// (`watches` makes it the Conductor, keeping those Watches until each is removed)
+async function mockPi(page: Page, transcript: Transcript, { attention = 'finished', full = {}, lifecycle = 'live', resumed = () => {}, queued = [], history = [], spawnedBy, watches }: { attention?: 'working' | 'finished'; full?: Record<string, unknown>; lifecycle?: 'live' | 'exited'; resumed?: () => void; queued?: unknown[]; history?: unknown[]; spawnedBy?: string; watches?: Array<{ id: string }> } = {}) {
   const requested: string[] = [];
   await page.route('**/api/**', route => {
     const request = route.request();
@@ -15,7 +16,7 @@ async function mockPi(page: Page, transcript: Transcript, { attention = 'finishe
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') {
       const worktree = { id: 'cora', projectId: 'app', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'cora', available: true, pinned: true, order: 0 };
-      const agent = { id: 'agent-1', transport: 'structured', panel: 'transcript', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: '', branch: 'cora', kind: 'pi', attention, structured: { lifecycle, revision: 4, ...(spawnedBy === undefined ? {} : { spawnedBy }) }, queuedPromptCount: queued.length };
+      const agent = { id: 'agent-1', transport: 'structured', panel: 'transcript', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: '', branch: 'cora', kind: 'pi', attention, structured: { lifecycle, revision: 4, ...(spawnedBy === undefined ? {} : { spawnedBy }), ...(watches === undefined ? {} : { role: 'conductor' }) }, queuedPromptCount: queued.length, ...(watches === undefined || watches.length === 0 ? {} : { watches }) };
       return route.fulfill({ json: { generation: 1, agents: [agent], projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] } });
     }
     if (url.pathname === '/api/agents/agent-1/transcript') {
@@ -27,6 +28,8 @@ async function mockPi(page: Page, transcript: Transcript, { attention = 'finishe
     if (url.pathname === '/api/agents/agent-1/raw-events') return route.fulfill({ json: { lines: [{ from: 'console', line: '{"type":"prompt","message":"Hi"}' }, { from: 'agent', line: '{"type":"agent_start"}' }] } });
     if (url.pathname === '/api/agents/agent-1/holder-window') return route.fulfill({ json: { pane: '%12', text: 'pi: out of memory\n[holder] node exited with status 1' } });
     if (url.pathname === '/api/agents/agent-1/resume' && request.method() === 'POST') { resumed(); return route.fulfill({ status: 204 }); }
+    const watch = /^\/api\/agents\/agent-1\/watches\/([^/]+)$/u.exec(url.pathname);
+    if (watch !== null && request.method() === 'DELETE' && watches !== undefined) { const index = watches.findIndex(candidate => candidate.id === watch[1]); if (index !== -1) watches.splice(index, 1); return route.fulfill({ status: index === -1 ? 404 : 204 }); }
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: history } });
     if (url.pathname === '/api/agents/agent-1/queued-prompts') return route.fulfill({ json: { prompts: queued } });
@@ -264,4 +267,26 @@ test('a worker shows the Conductor that spawned it, and its queued prompts and h
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Prompt history (1)' }).click();
   await expect(page.getByRole('region', { name: 'Prompt history' }).getByRole('link', { name: 'from Conductor' })).toHaveAttribute('href', '#agent=conductor-1');
+});
+
+test('the Conductor\'s header counts its Watches and lists each with Remove', async ({ page }) => {
+  await mockPi(page, { items: [] }, { watches: [
+    { id: 'watch-1', kind: 'pull_request', description: 'Pull request octo/repo#7', createdAt: '2026-10-29T10:00:00.000Z' },
+    { id: 'watch-2', kind: 'command', description: 'the build log', createdAt: '2026-10-29T10:05:00.000Z' }
+  ] as Array<{ id: string }> });
+  await page.goto('/');
+  await page.locator('.log-split .panel-header').getByRole('button', { name: '2 Watches' }).click();
+  const list = page.getByRole('dialog', { name: 'Watches' });
+  await expect(list.getByText('Pull request octo/repo#7')).toBeVisible();
+  await expect(list.getByText(/^Command · since /u)).toBeVisible();
+  // the console removes it and its next dashboard no longer lists it
+  const removed = page.waitForRequest(request => request.method() === 'DELETE' && new URL(request.url()).pathname === '/api/agents/agent-1/watches/watch-2');
+  await list.getByRole('button', { name: 'Remove the build log' }).click();
+  await removed;
+});
+
+test('a worker has no Watches button', async ({ page }) => {
+  await mockPi(page, { items: [] });
+  await page.goto('/');
+  await expect(page.locator('.log-split .panel-header').getByRole('button', { name: /Watch/u })).toHaveCount(0);
 });
