@@ -64,7 +64,7 @@ const questionIdPattern = /^[A-Za-z0-9_-]{22}$/u;
 type DiscoveryFacade = Pick<DiscoveryService, 'target' | 'worktreesNow'>;
 type PromptFacade = Pick<PromptService, 'submitFrom' | 'inFlight' | 'listQueued' | 'updateQueued' | 'moveQueued' | 'removeQueued' | 'answerQuestion' | 'cancel' | 'close' | 'transportFor'>;
 type HistoryFacade = Pick<PromptHistoryService, 'list'>;
-type WorktreeCommandFacade = Pick<WorktreeCommandService, 'actions' | 'state' | 'start' | 'log'>;
+type WorktreeCommandFacade = Pick<WorktreeCommandService, 'actions' | 'state' | 'start' | 'log' | 'processLog'>;
 type WorkspaceFileFacade = Pick<WorkspaceFileService, 'preview'>;
 type PullRequestSwitchFacade = Pick<PullRequestSwitchService, 'available' | 'actionsUrl' | 'switch'>;
 type NewTaskFacade = Pick<NewTaskService, 'available' | 'start'>;
@@ -83,9 +83,14 @@ export type OrchestrationDependencies = {
   launchWorktree: (worktreeId: string) => Promise<boolean>;
   launchScratch: () => Promise<boolean>;
   loadReview?: (worktreeId: string, branch: string) => Promise<StoredReviewTour | undefined>;
-  startReview?: (agentId: string, input: ReviewTourInput) => Promise<unknown>;
+  startReview?: (agentId: string, input: ReviewTourInput, conductor?: string) => Promise<unknown>;
   /** The Conductor acting through these operations (ADR 0018), by its Agent id; none for the operator's integrations. */
   conductor?: string;
+  /**
+   * Spawn a Sandboxed Pi worker for the Conductor at a Place (ADR 0018): its id, or why not (the
+   * model is not allowed, the Conductor has its cap of live workers, or it could not start).
+   */
+  spawnWorker?: (placeId: string, conductor: string, model?: string) => Promise<string | 'not-allowed' | 'at-capacity' | undefined>;
 };
 /** Which Places a principal may act on, by the Worktree (or Place) id and its Project. */
 export type PlaceScope = (place: { id: string; projectId: string }) => boolean;
@@ -484,6 +489,16 @@ export class OrchestrationService {
     });
   }
 
+  // read one declared Stack process's log tail
+  async processLog(worktreeId: string, name: string): Promise<OrchestrationResult<{ name: string; path: string; output: string }>> {
+    if (!validIdentifier(worktreeId) || !validIdentifier(name)) return failure('invalid_request', 'Invalid process log request.');
+    return await this.operation(async () => {
+      const worktree = this.worktree(worktreeId);
+      const log = worktree === undefined ? undefined : await this.dependencies.worktreeCommands.processLog(worktree.id, name);
+      return log === undefined ? failure('not_found', 'Stack process not found.') : success({ ...log, output: redactIntegrationText(log.output) });
+    });
+  }
+
   // summarize configured and scratch workspaces deterministically
   async workspaceSummary(): Promise<OrchestrationResult<WorkspaceSummaryV1>> {
     return await this.operation(async () => {
@@ -658,6 +673,8 @@ export class OrchestrationService {
   async runStackAction(input: RunStackActionInputV1): Promise<OrchestrationResult<{ started: true }>> {
     // enforce the fixed action vocabulary
     if (!validIdentifier(input.worktreeId) || !stackActions.includes(input.action) || (input.process !== undefined && !validIdentifier(input.process))) return failure('invalid_request', 'Invalid stack action.');
+    // the Conductor starts, stops and restarts; it never builds or migrates
+    if (this.dependencies.conductor !== undefined && !processActions.includes(input.action)) return failure('invalid_request', 'You may only start, stop or restart a stack.');
     return await this.operation(async () => {
       const worktree = this.worktree(input.worktreeId);
       // require an action configured for this worktree
@@ -681,7 +698,34 @@ export class OrchestrationService {
     const startReview = this.dependencies.startReview;
     // require the injected review boundary
     if (startReview === undefined) return failure('unavailable', 'Review generation is unavailable.');
-    return await this.operation(async () => success(await startReview(input.agentId, { scope: input.scope, includeTests: input.includeTests, includeDocs: input.includeDocs })));
+    return await this.operation(async () => success(await startReview(input.agentId, { scope: input.scope, includeTests: input.includeTests, includeDocs: input.includeDocs }, this.dependencies.conductor)));
+  }
+
+  // spawn a worker for the Conductor in one Worktree within its scope
+  async spawnAgent(input: { worktreeId: string; model?: string }): Promise<OrchestrationResult<{ agent_id: string }>> {
+    const { conductor, spawnWorker } = this.dependencies;
+    if (!validIdentifier(input.worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
+    if (conductor === undefined || spawnWorker === undefined) return failure('unavailable', 'Only the Conductor spawns workers.');
+    if (this.worktree(input.worktreeId) === undefined) return failure('not_found', 'Worktree not found.');
+    return await this.operation(async () => {
+      const spawned = await spawnWorker(input.worktreeId, conductor, input.model);
+      if (spawned === 'not-allowed') return failure('invalid_request', 'That model is not one of the operator\'s Allowed models.');
+      if (spawned === 'at-capacity') return failure('conflict', 'You already have your most live workers: close one first.');
+      return spawned === undefined ? failure('operation_failed', 'The worker could not be started.', true) : success({ agent_id: spawned });
+    });
+  }
+
+  // close one worker the Conductor spawned, never another Agent; its queue becomes Notes
+  async closeWorker(agentId: string): Promise<OrchestrationResult<{ closed: true }>> {
+    const conductor = this.dependencies.conductor;
+    if (!validIdentifier(agentId)) return failure('invalid_request', 'Invalid agent identifier.');
+    if (conductor === undefined) return failure('unavailable', 'Only the Conductor closes its workers.');
+    return await this.operation(async () => {
+      const agent = (await this.dependencies.loadDashboard()).agents.find(candidate => candidate.id === agentId);
+      if (agent === undefined) return failure('not_found', 'Agent not found.');
+      if (agent.structured?.spawnedBy !== conductor) return failure('conflict', 'You can close only workers you spawned.');
+      return await this.dependencies.prompts.close(agentId) ? success({ closed: true as const }) : failure('not_found', 'Agent not found.');
+    });
   }
 
   // switch one clean worktree to an available pull request

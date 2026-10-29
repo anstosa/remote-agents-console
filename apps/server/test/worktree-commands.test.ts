@@ -1730,6 +1730,24 @@ describe('Stack process log file', () => {
     });
   };
 
+  it("reads a Stack process's log file's tail, only for a process the Worktree declares, never through a link", async () => {
+    const { main } = await repository();
+    const cora = testWorktree({ id: `proj:${main}`, projectId: 'proj', path: main, commands: { processes: { dev: 'pnpm dev', web: 'pnpm web' } } });
+    const commands = service(fakeTmux(), [cora]);
+    await mkdir(dirname(agentPath(main, 'dev')), { recursive: true });
+    await writeFile(agentPath(main, 'dev'), 'ready on :3000\n\u001b[31merror\u001b[0m: crashed\n');
+
+    await expect(commands.processLog(cora.id, 'dev')).resolves.toEqual({ name: 'dev', path: agentPath(main, 'dev'), output: 'ready on :3000\nerror: crashed\n' });
+    // a declared process that never ran has an empty log
+    await expect(commands.processLog(cora.id, 'web')).resolves.toEqual({ name: 'web', path: agentPath(main, 'web'), output: '' });
+    await expect(commands.processLog(cora.id, 'other')).resolves.toBeUndefined();
+    // a log an agent in the checkout swapped for a link is not followed
+    await writeFile(join(main, 'secret.txt'), 'secret');
+    const webLog = agentPath(main, 'web');
+    await symlink(join(main, 'secret.txt'), webLog);
+    await expect(commands.processLog(cora.id, 'web')).resolves.toEqual({ name: 'web', path: webLog, output: '' });
+  });
+
   it("pipes a new process window into a fresh log in the Main worktree's git directory before its command runs", async () => {
     const { main } = await repository();
     const cora = testWorktree({ id: `proj:${main}`, projectId: 'proj', path: main, commands: { processes: { dev: 'pnpm dev' } } });

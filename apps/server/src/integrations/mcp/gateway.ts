@@ -148,6 +148,7 @@ export class IntegrationGateway {
       case 'get_stack_status':
       case 'get_stack_log': return await orchestration.stackStatus(input.worktree_id as string);
       case 'preview_file': return await orchestration.previewFile({ path: input.path as string, ...(input.agent_id === undefined ? {} : { agentId: input.agent_id as string }), ...(input.worktree_id === undefined ? {} : { worktreeId: input.worktree_id as string }), ...(input.max_bytes === undefined ? {} : { maxBytes: input.max_bytes as number }) });
+      case 'get_process_log': return await orchestration.processLog(input.worktree_id as string, input.process as string);
       case 'get_pull_request_status': return await orchestration.pullRequestStatus(input.agent_id as string);
       case 'get_review_status': return await orchestration.reviewStatus(input.worktree_id as string);
       case 'summarize_workspace': return await orchestration.workspaceSummary();
@@ -164,6 +165,8 @@ export class IntegrationGateway {
       case 'start_new_task': return await orchestration.startNewTask(input.agent_id as string);
       case 'run_stack_action': return await orchestration.runStackAction({ worktreeId: input.worktree_id as string, action: input.action as 'start' | 'stop' | 'build' | 'restart' | 'migrate', ...(input.process === undefined ? {} : { process: input.process as string }) });
       case 'start_review': return await orchestration.startReview({ agentId: input.agent_id as string, scope: input.scope as 'working' | 'pr', includeTests: input.include_tests as boolean, includeDocs: input.include_docs as boolean });
+      case 'spawn_agent': return await orchestration.spawnAgent({ worktreeId: input.worktree_id as string, ...(input.model === undefined ? {} : { model: input.model as string }) });
+      case 'close_agent': return await orchestration.closeWorker(input.agent_id as string);
       case 'switch_pull_request': return await orchestration.switchPullRequest({ agentId: input.agent_id as string, number: input.number as number });
       default: return { ok: false, version: 'v1', error: { code: 'invalid_request', message: 'Unknown tool.', retryable: false } };
     }

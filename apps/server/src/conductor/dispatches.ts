@@ -59,6 +59,13 @@ export function reportText(record: Pick<DispatchRecord, 'promptId' | 'to'>, outc
   return lines.join('\n');
 }
 
+/** The report a Conductor is queued once a review it started has ended (ADR 0018). */
+export function reviewReportText(agentId: string, worktreeId: string, outcome: { title: string } | { failed: string }): string {
+  return 'title' in outcome
+    ? `[RAC report] The review you started for Agent ${agentId} is ready: ${outcome.title}.\n\nRead it with get_review_status {"worktree_id": ${JSON.stringify(worktreeId)}}.`
+    : `[RAC report] The review you started for Agent ${agentId} failed (${outcome.failed}).`;
+}
+
 export type DispatchOptions = {
   file?: string;
   /** Queue a prompt from the console to an Agent, answering its id once queued. */

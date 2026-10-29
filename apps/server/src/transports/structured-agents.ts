@@ -28,7 +28,7 @@ export type HolderLaunch = { program: string; args: string[]; env: Record<string
  * role (the Conductor's). `access` is the hash of the console MCP token its current process holds,
  * while it runs.
  */
-export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; home: string; sandboxed: boolean; conversationId?: string; holder?: HolderRef; lifecycle: AgentLifecycle; reason?: string; origin: 'operator'; role?: 'conductor'; access?: string; launchedAt: number; version?: string };
+export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; home: string; sandboxed: boolean; conversationId?: string; holder?: HolderRef; lifecycle: AgentLifecycle; reason?: string; origin: 'operator' | { conductor: string }; role?: 'conductor'; access?: string; launchedAt: number; version?: string };
 /**
  * What a launch starts: one process of `kind` at `place`, for the Agent `id`, on a new
  * Conversation (on `model` when Allowed models are configured) or resuming the Conversation `resume`,
@@ -212,13 +212,13 @@ export class StructuredAgents {
    * the entry's default. Answers the new Agent's id once its process started (it may then have
    * failed to report in); undefined when it could not start, or `model` is not an Allowed model.
    */
-  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, role }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; role?: 'conductor' } = {}): Promise<string | undefined> {
+  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false, role, spawnedBy }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean; role?: 'conductor'; spawnedBy?: string } = {}): Promise<string | undefined> {
     // the Conductor starts on its configured model
     if (role === 'conductor') model ??= this.conductor?.model;
     const entry = model === undefined ? (resume === undefined && latest !== true ? this.allowed(kind)[0] : undefined) : this.allowed(kind).find(candidate => candidate.model === model.model);
     if (model !== undefined && entry === undefined) return undefined;
     const records = await this.load();
-    const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, lifecycle: 'starting', origin: 'operator', ...(role === undefined ? {} : { role }), launchedAt: Date.now() };
+    const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, lifecycle: 'starting', origin: spawnedBy === undefined ? 'operator' : { conductor: spawnedBy }, ...(role === undefined ? {} : { role }), launchedAt: Date.now() };
     const live = this.idle();
     records.push(record);
     this.live.set(record.id, live);
@@ -231,6 +231,21 @@ export class StructuredAgents {
     }
     return started === true ? record.id : undefined;
   }
+
+  /**
+   * Spawn a Sandboxed worker for the Conductor `by` (ADR 0018), on `model` if given: one at a time,
+   * and none while it has `max` workers starting or live.
+   */
+  spawn(place: Place, kind: AgentKind, by: string, max: number, model?: ModelSetting): Promise<string | 'at-capacity' | undefined> {
+    const spawning = this.spawning.then(async () => {
+      const live = (await this.load()).filter(record => typeof record.origin === 'object' && record.origin.conductor === by && (record.lifecycle === 'starting' || record.lifecycle === 'live'));
+      if (live.length >= max) return 'at-capacity' as const;
+      return await this.launch(place, kind, { sandboxed: true, spawnedBy: by, ...(model === undefined ? {} : { model }) });
+    });
+    this.spawning = spawning.then(() => undefined, () => undefined);
+    return spawning;
+  }
+  private spawning: Promise<unknown> = Promise.resolve();
 
   /** How the console gives the Conductor its access, model and script deadline. */
   useConductor(options: ConductorOptions): void { this.conductor = options; }
@@ -619,7 +634,7 @@ export class StructuredAgents {
       // one resyncing after a reattach may be working: nothing takes it to have finished
       const attention = questions.length > 0 ? 'question' : live?.working === true || live?.resyncing === true ? 'working' : 'finished';
       const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
-      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), structured: { lifecycle, ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: record.role === undefined && this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }) } };
+      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), structured: { lifecycle, ...(record.role === undefined ? {} : { role: record.role }), ...(typeof record.origin === 'object' ? { spawnedBy: record.origin.conductor } : {}), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: record.role === undefined && this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }) } };
     });
   }
 

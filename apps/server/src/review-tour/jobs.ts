@@ -40,6 +40,7 @@ export class ReviewTourJobs {
   private readonly latestByWorktree = new Map<string, string>();
   private readonly persistenceVersions = new Map<string, number>();
   private readonly idempotentStarts = new Map<string, IdempotentStart>();
+  private readonly watchers = new Map<string, (state: ReviewJobState) => void>();
 
   // `codeReviews` runs a Code review beside a tour that asks for one; every new tour supersedes it,
   // and the questions asked about the tour it replaces
@@ -130,6 +131,7 @@ export class ReviewTourJobs {
       // ignore jobs superseded during persistence
       if (retained !== job || retained.state.kind !== 'pending') return;
       retained.state = { kind: 'ready', tour };
+      this.settled(retained);
       // publish the new footer state
       await this.onStored?.({ agentId: job.agentId, worktreeId: job.worktreeId, prepared, tour });
     } catch (error) {
@@ -138,7 +140,22 @@ export class ReviewTourJobs {
       if (current !== job || current.state.kind !== 'pending') return;
       const typed = error instanceof ReviewTourError ? error : new ReviewTourError('generation_failed', true);
       current.state = { kind: 'error', code: typed.code, retryable: typed.retryable };
+      this.settled(current);
     }
+  }
+
+  /** Hear once when a job ends (ready, failed or gone), at once if it already has. */
+  watch(id: string, listener: (state: ReviewJobState) => void): void {
+    const state = this.jobs.get(id)?.state;
+    if (state?.kind === 'pending') this.watchers.set(id, listener);
+    else if (state !== undefined) listener(state);
+  }
+
+  // tell the job's watcher how it ended
+  private settled(job: StoredReviewJob): void {
+    const listener = this.watchers.get(job.id);
+    this.watchers.delete(job.id);
+    listener?.(job.state);
   }
 
   // cancel earlier worktree generation
@@ -185,6 +202,7 @@ export class ReviewTourJobs {
       void conditionalStore?.invalidateIfCurrent?.(job.worktreeId, job.persistenceVersion).catch(() => undefined);
     }
     job.state = { kind: 'gone', code };
+    this.settled(job);
     // clear latest ownership
     const latestKey = this.latestKey(job.owner, job.worktreeId);
     if (this.latestByWorktree.get(latestKey) === job.id) this.latestByWorktree.delete(latestKey);

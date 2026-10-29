@@ -1,4 +1,5 @@
 import { lstat, mkdir, open, readFile,unlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { ValidatedConfig } from '../config/schema.js';
@@ -98,9 +99,9 @@ const outputTail = (value: string): string => {
   return bytes.length <= maxStackLogBytes ? value : bytes.subarray(bytes.length - maxStackLogBytes).toString('utf8');
 };
 
-// read only the newest bounded log output
+// read only the newest bounded log output, never through a link
 const readLogTail = async (path: string): Promise<string> => {
-  const file = await open(path, 'r').catch(() => undefined);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
   // tolerate commands that have not written output yet
   if (file === undefined) return '';
   try {
@@ -300,6 +301,18 @@ export class WorktreeCommandService {
     const active = await this.operationActive(operation);
     const output = operation.logFile === undefined ? '' : await readLogTail(operation.logFile);
     return { action: operation.action, active, startedAt: operation.startedAt, ...(operation.completedAt === undefined ? {} : { completedAt: operation.completedAt }), output };
+  }
+
+  // A declared Stack process's log file, where its window's output goes, as plain text cut to a
+  // stack log's tail: empty when it never ran. Undefined for an unknown Worktree or process, or
+  // when its git directory cannot be found.
+  async processLog(worktreeId: string, name: string): Promise<{ name: string; path: string; output: string } | undefined> {
+    const worktree = worktreeById(this.discovery.worktreesNow(), worktreeId);
+    if (worktree === undefined || !stackProcesses(worktree).some(declared => declared.name === name)) return undefined;
+    const files = await this.processFiles(worktree);
+    if ('failure' in files) return undefined;
+    const path = join(files.directory, `${name}.log`);
+    return { name, path, output: await readLogTail(path) };
   }
 
   // "Show <name> output": a Capture of the process pane (its full history, wrapped lines joined)

@@ -13,7 +13,7 @@ import { agentKinds, type AdapterConfigs, type AdapterLaunchConfig, type AgentKi
 import { instanceIconNames, type InstanceIcon } from '../instance-icon.js';
 import { isIP } from 'node:net';
 import { defaultDavoContext, defaultDavoName } from '../integrations/realtime/settings.js';
-import { supportedIntegrationScopes, type IntegrationScope } from '../integrations/auth/types.js';
+import { conductorScopes, type IntegrationScope } from '../integrations/auth/types.js';
 import { resolveReviewConfig, reviewConfigSchema, type ResolvedReviewConfig } from '../review-runs/config.js';
 import { agentModel } from '../launch/agent-choice.js';
 import { piEfforts } from '../transports/pi.js';
@@ -90,7 +90,7 @@ function conductorConfig({ project, scopes, ...conductor }: z.output<typeof cond
   if (adapter?.launchable !== true) throw new Error(`conductor: adapters.${conductor.kind} must be configured and launchable${adapter?.unavailableReason === undefined ? '' : ` (${adapter.unavailableReason})`}`);
   if (!(adapter.allowedModels ?? []).some(entry => entry.model === conductor.model)) throw new Error(`conductor: ${conductor.model} is not an Allowed model (adapters.${conductor.kind}.allowedModels)`);
   if (!projects.some(candidate => candidate.id === project && candidate.mode === 'directory' && candidate.available)) throw new Error(`conductor: ${project} must name a directory Project`);
-  return { ...conductor, projectId: project, scopes: scopes ?? supportedIntegrationScopes.filter(scope => scope !== 'admin:dangerous') };
+  return { ...conductor, projectId: project, scopes: scopes ?? conductorScopes.filter(scope => scope !== 'admin:dangerous') };
 }
 const adapterEnvName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u, 'invalid environment variable name');
 // reject whitespace-only update commands without normalizing meaningful bytes
@@ -137,7 +137,7 @@ const conductorSchema = z.object({
   project: z.string().min(1).max(80),
   model: agentModel,
   effort: z.enum(piEfforts).optional(),
-  scopes: z.array(z.enum(supportedIntegrationScopes)).max(supportedIntegrationScopes.length).optional(),
+  scopes: z.array(z.enum(conductorScopes)).max(conductorScopes.length).optional(),
   maxWorkers: z.number().int().min(1).max(16).default(4),
   maxSelfStartedTurnsPerHour: z.number().int().min(1).max(1_000).default(30),
   scriptDeadlineMinutes: z.number().int().min(1).max(120).default(10)

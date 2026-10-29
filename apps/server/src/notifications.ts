@@ -130,8 +130,9 @@ export class AgentNotificationCoordinator {
 
   constructor(private readonly deliver: NotificationDelivery, private readonly completionDelayMs = 2_000) {}
 
-  // track each agent independently even when several share one workspace
-  observe(agent: Agent, hasQueuedPrompt = false, context?: AgentNotificationContext): void {
+  // track each agent independently even when several share one workspace; a `quiet` Turn (one
+  // another Agent or the console started) still marks its end unread but pushes nothing
+  observe(agent: Agent, hasQueuedPrompt = false, context?: AgentNotificationContext, quiet = false): void {
     const key = agent.id;
     const current = agentPresentationAttentionState(agent);
     const previous = this.states.get(key);
@@ -162,7 +163,7 @@ export class AgentNotificationCoordinator {
       this.pendingCompletions.delete(key);
       if (this.states.get(key) !== 'finished') return;
       this.unread.set(key, id);
-      this.deliverSafely(notification);
+      if (!quiet) this.deliverSafely(notification);
     }, this.completionDelayMs);
     this.pendingCompletions.set(key, { id, timer });
   }

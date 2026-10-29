@@ -70,7 +70,7 @@ export type AgentLifecycle = 'starting' | 'live' | 'exited' | 'failed';
 // `questions` are every open question, the first of which is the Agent's `question`; `steers` are
 // the steers its process holds, not yet taken; `draft` is text it offers for the composer; `role`
 // marks the Conductor
-export type StructuredAgentState = { lifecycle: AgentLifecycle; role?: 'conductor'; reason?: string; revision: number; model?: { id: string; name?: string; effort?: string }; switchable: boolean; questions?: ShapedQuestion[]; steers?: string[]; draft?: { id: number; text: string } };
+export type StructuredAgentState = { lifecycle: AgentLifecycle; role?: 'conductor'; spawnedBy?: string; reason?: string; revision: number; model?: { id: string; name?: string; effort?: string }; switchable: boolean; questions?: ShapedQuestion[]; steers?: string[]; draft?: { id: number; text: string } };
 // `transport` says how the console drives the Agent and `panel` what its Panel shows (ADR 0015).
 // A tmux Agent carries its pane details in `pane`, a structured one its process state in `structured`.
 export type Agent = { id: string; transport: Transport; panel: AgentPanel; pane?: AgentPane; structured?: StructuredAgentState; home: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind: AgentKind; attention: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; newTaskConfigured?: boolean; push?: PromptAction; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: ShapedQuestion; reviewRun?: string };

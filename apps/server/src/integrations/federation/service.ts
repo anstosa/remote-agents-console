@@ -65,7 +65,7 @@ function isFederationPayload(value: unknown): value is FederationPayload {
   if (typeof candidate.name !== 'string' || !/^[a-z][a-z0-9_]{1,63}$/u.test(candidate.name) || candidate.arguments === null || typeof candidate.arguments !== 'object' || Array.isArray(candidate.arguments) || candidate.principal === null || typeof candidate.principal !== 'object' || Array.isArray(candidate.principal) || typeof candidate.voiceAuthorized !== 'boolean') return false;
   const principal = candidate.principal as { subjectId?: unknown; clientId?: unknown; scopes?: unknown };
   // accept only bounded subjects and known scopes
-  if (typeof principal.subjectId !== 'string' || principal.subjectId.length === 0 || principal.subjectId.length > 256 || principal.clientId !== undefined && (typeof principal.clientId !== 'string' || principal.clientId.length > 256) || !Array.isArray(principal.scopes) || principal.scopes.length > supportedIntegrationScopes.length || !principal.scopes.every(scope => supportedIntegrationScopes.includes(scope as IntegrationScope))) return false;
+  if (typeof principal.subjectId !== 'string' || principal.subjectId.length === 0 || principal.subjectId.length > 256 || principal.clientId !== undefined && (typeof principal.clientId !== 'string' || principal.clientId.length > 256) || !Array.isArray(principal.scopes) || principal.scopes.length > supportedIntegrationScopes.length || !principal.scopes.every(scope => (supportedIntegrationScopes as readonly string[]).includes(scope))) return false;
   return true;
 }
 

@@ -25,7 +25,7 @@ import { maxPromptAttachmentBytes, PromptService, promptScope, type PromptAttach
 import { launchTmuxAgent, TmuxTransport } from './transports/tmux.js';
 import { consoleTokenPrefix, holderProcesses, StructuredAgents } from './transports/structured-agents.js';
 import { Conductor } from './conductor/service.js';
-import { Dispatches } from './conductor/dispatches.js';
+import { Dispatches, reviewReportText } from './conductor/dispatches.js';
 import { promptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, validPromptAttachments } from './prompts/validation.js';
 import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin } from './prompts/queue.js';
 import { LaunchService, type TmuxSession } from './launch/service.js';
@@ -517,7 +517,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await prompts.retireDeparted(discovered.agents.map(agent => agent.id)).catch(() => undefined);
     await dispatches.sweep(discovered.agents).catch(() => undefined);
     // suppress completions while more work waits
-    for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered));
+    for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered), prompts.quiet?.(agent.id));
     notifications.retain(discovered.agents);
     const worktrees = discovery.worktreesNow();
     const controls = new Map(await Promise.all(worktrees.map(async worktree => [worktree.id, { actions: stackCommands.actions(worktree), ...await stackCommands.state(worktree, paneSnapshots) }] as const)));
@@ -543,7 +543,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const discovered = await discovery.dashboard();
     const queuedCounts = await queuedPromptCounts(discovered.agents);
     // update completion and question state for every agent
-    for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered));
+    for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered), prompts.quiet?.(agent.id));
     notifications.retain(discovered.agents);
     return instanceAttention({ agents: discovered.agents.map(agent => ({ ...agent, unread: notifications.isUnread(agent) })) });
   };
@@ -584,7 +584,23 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       launchWorktree: worktreeId => launch.launch(worktreeId),
       launchScratch: () => launch.launchHome(),
       loadReview: (worktreeId, branch) => reviewStore.current(worktreeId, branch),
-      startReview: (agentId, input) => reviewJobs.start('integration-gateway', agentId, input)
+      // a review the Conductor started is reported back to it, ready or failed
+      startReview: async (agentId, input, conductor) => {
+        const started = await reviewJobs.start('integration-gateway', agentId, input);
+        if (conductor !== undefined && started.kind === 'pending') reviewJobs.watch(started.job.id, state => {
+          const worktreeId = reviewJobs.get('integration-gateway', started.job.id)?.worktreeId ?? '';
+          const text = reviewReportText(agentId, worktreeId, state.kind === 'ready' ? { title: state.tour.title } : { failed: 'code' in state ? state.code : state.kind });
+          void prompts.submitFrom(conductor, text, { label: 'report' }).catch(() => undefined);
+        });
+        return started;
+      },
+      // a worker is the Conductor's kind, Sandboxed, on an Allowed model (ADR 0018)
+      ...(config.conductor === undefined ? {} : { spawnWorker: async (placeId: string, by: string, model?: string) => {
+        const conductorConfig = config.conductor!;
+        if (model !== undefined && !(config.adapters[conductorConfig.kind]?.allowedModels ?? []).some(entry => entry.model === model)) return 'not-allowed' as const;
+        const place = await resolvePlace(placeId);
+        return place === undefined ? undefined : await structuredAgents.spawn(place, conductorConfig.kind, by, conductorConfig.maxWorkers, model === undefined ? undefined : { model });
+      } })
     });
     const federationSecret = process.env.RAC_INTEGRATION_FEDERATION_SECRET?.trim() || instanceStatusSecret;
     const integrationGateway = new IntegrationGateway({ config: integrationConfig, instanceId: config.publicOrigin.origin, orchestration, policy: integrationPolicy, audit: integrationAudit, control: integrationControl, ...(integrationConfig.multiInstance.enabled ? { forward: federationForwarder(config.remoteServers, federationSecret) } : {}) });

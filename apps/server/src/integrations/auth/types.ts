@@ -11,7 +11,10 @@ export const supportedIntegrationScopes = [
 
 export const SUPPORTED_INTEGRATION_SCOPES = supportedIntegrationScopes;
 
-export type IntegrationScope = typeof supportedIntegrationScopes[number];
+/** The Conductor's scopes (ADR 0018): the integrations' own, and two only it can hold. */
+export const conductorScopes = [...supportedIntegrationScopes, 'agents:spawn', 'notes:write'] as const;
+
+export type IntegrationScope = typeof conductorScopes[number];
 
 export type OAuthErrorCode =
   | 'invalid_request'
