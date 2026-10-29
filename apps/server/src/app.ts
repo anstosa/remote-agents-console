@@ -23,7 +23,8 @@ import { TmuxCommandRegistry } from './tmux/command-registry.js';
 import { TmuxAdapter } from './tmux/adapter.js';
 import { maxPromptAttachmentBytes, PromptService, promptScope, type PromptAttachment } from './prompts/service.js';
 import { launchTmuxAgent, TmuxTransport } from './transports/tmux.js';
-import { holderProcesses, StructuredAgents } from './transports/structured-agents.js';
+import { consoleTokenPrefix, holderProcesses, StructuredAgents } from './transports/structured-agents.js';
+import { Conductor } from './conductor/service.js';
 import { promptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, validPromptAttachments } from './prompts/validation.js';
 import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin } from './prompts/queue.js';
 import { LaunchService, type TmuxSession } from './launch/service.js';
@@ -127,7 +128,7 @@ export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLif
 // structured Agents, which index.ts reattaches to their holders (never a test: a holder serves one
 // console at a time).
 declare module 'fastify' {
-  interface FastifyInstance { scheduler: Scheduler; structuredAgents: StructuredAgents }
+  interface FastifyInstance { scheduler: Scheduler; structuredAgents: StructuredAgents; conductor: Conductor }
 }
 // how long a pane must be quiet after output before its live frame is captured
 const logQuietWindowMs = 250;
@@ -544,12 +545,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (secureOrigin) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     return payload;
   });
-  // expose the same shared services through remote transports
-  if (integrationConfig.enabled) {
+  // expose the same shared services through remote transports: the integrations' (OAuth, Realtime,
+  // federation) when enabled, and `/mcp` for the Conductor whenever one is configured (ADR 0018)
+  if (integrationConfig.enabled || config.conductor !== undefined) {
     const resource = `${config.publicOrigin.origin}/mcp`;
-    const derivedRealtimeToken = createHmac('sha256', process.env.RAC_SESSION_SECRET ?? '').update('remote-agents:realtime-mcp:v1').digest('base64url');
-    const realtimeToken = process.env.RAC_REALTIME_MCP_TOKEN?.trim() || derivedRealtimeToken;
-    const integrationAuth = new IntegrationAuthService({ issuer: config.publicOrigin.origin, resource, stateFile: process.env.RAC_INTEGRATION_AUTH_FILE ?? '.data/integration-auth.json', realtimeToken, realtimeSubjectId: 'local-voice' });
     const integrationPolicy = new IntegrationPolicyService();
     const integrationAudit = new IntegrationAuditService();
     const integrationControl = new IntegrationControlService(() => control.ownerSessionId());
@@ -576,67 +575,85 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const federationSecret = process.env.RAC_INTEGRATION_FEDERATION_SECRET?.trim() || instanceStatusSecret;
     const integrationGateway = new IntegrationGateway({ config: integrationConfig, instanceId: config.publicOrigin.origin, orchestration, policy: integrationPolicy, audit: integrationAudit, control: integrationControl, ...(integrationConfig.multiInstance.enabled ? { forward: federationForwarder(config.remoteServers, federationSecret) } : {}) });
     const realtimeScopes: IntegrationScope[] = ['status:read', 'logs:read', 'files:read', ...(integrationConfig.realtime.writeToolsEnabled ? ['prompts:write', 'agents:control', 'stack:operate', 'review:write'] as IntegrationScope[] : [])];
-    registerIntegrationAuthServer({
-      app,
-      auth: integrationAuth,
-      resource,
-      // bind OAuth consent to the existing signed browser session
-      localSubject: (request, csrf): LocalIntegrationSubject | undefined => {
-        try {
-          const local = session(request);
-          // verify form approval with the session's CSRF secret
-          if (csrf !== undefined && (request.headers.origin !== config.publicOrigin.origin || !auth.csrf(local, csrf))) return undefined;
-          return { id: local.id, csrf: local.csrf } as LocalIntegrationSubject;
-        } catch { return undefined; }
+    const conductorConfig = config.conductor;
+    const conductorAccess = conductorConfig === undefined ? undefined : {
+      prefix: consoleTokenPrefix,
+      // the Conductor whose current process holds the token, scoped to the configured Projects and any Place whose Workspace exists
+      authenticate: async (token: string) => {
+        const holder = await structuredAgents.tokenHolder(token);
+        if (holder?.role !== 'conductor') return undefined;
+        const configured = new Set(config.projects.map(project => project.id));
+        const workspaces = discovery.workspacePlaces();
+        return { authentication: 'conductor' as const, subjectId: holder.id, clientId: 'conductor', audience: resource, scopes: [...conductorConfig.scopes], places: (worktree: { id: string; projectId: string }) => configured.has(worktree.projectId) || workspaces.has(worktree.id) };
       }
-    });
-    registerMcpServer({ app, publicOrigin: config.publicOrigin.origin, auth: integrationAuth, gateway: integrationGateway, realtimeScopes });
-    app.post('/api/integration-federation', { config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (request, reply) => {
-      browser(request);
-      // keep cross-instance execution independently disabled
-      if (!integrationConfig.multiInstance.enabled) return reply.code(404).send({ error: 'federation unavailable' });
-      const delegated = verifyFederationRequest(federationSecret, request.headers['x-rac-federation-timestamp'], request.headers['x-rac-federation-signature'], request.body);
-      // reject unsigned or malformed delegation
-      if (delegated === undefined) return reply.code(401).send({ error: 'unauthorized' });
-      return await integrationGateway.call({ authentication: 'oauth', subjectId: delegated.principal.subjectId, audience: resource, scopes: delegated.principal.scopes, ...(delegated.principal.clientId === undefined ? {} : { clientId: delegated.principal.clientId }) }, delegated.name, delegated.arguments, { voiceAuthorized: delegated.voiceAuthorized });
-    });
-    const realtime = new RealtimeService({ apiKey: process.env.RAC_OPENAI_API_KEY, settings: () => ({ name: integrationConfig.realtime.name, context: integrationConfig.realtime.context }) });
-    app.get('/api/integrations/status', async request => {
-      session(request);
-      return { enabled: true, mcp: integrationConfig.mcp, control: integrationControl.snapshot(), realtime: { enabled: integrationConfig.realtime.enabled, available: integrationConfig.realtime.enabled && realtime.available(), writeToolsEnabled: integrationConfig.realtime.writeToolsEnabled } };
-    });
-    app.post('/api/realtime/session', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
-      const local = controlled(request, true);
-      // keep voice disabled unless both the feature and provider are configured
-      if (!integrationConfig.realtime.enabled || !realtime.available()) return reply.code(503).send({ error: 'Realtime voice is unavailable.' });
-      const principal = integrationAuth.authenticateRealtimeToken(realtimeToken);
-      // fail closed if the isolated MCP credential is unavailable
-      if (!principal.ok) return reply.code(503).send({ error: 'Realtime orchestration is unavailable.' });
-      const allowedTools = integrationGateway.listTools({ ...principal.value, audience: resource, scopes: realtimeScopes }).map(tool => tool.name);
-      const requestedContext = body(request);
-      // accept only canonical selected-target identifiers
-      if ((requestedContext.worktreeId !== undefined && (typeof requestedContext.worktreeId !== 'string' || requestedContext.worktreeId.length > 240)) || (requestedContext.agentId !== undefined && (typeof requestedContext.agentId !== 'string' || requestedContext.agentId.length > 240)) || typeof requestedContext.voiceSessionId !== 'string' || !/^[A-Za-z0-9_-]{20,64}$/u.test(requestedContext.voiceSessionId)) return reply.code(400).send({ error: 'invalid voice context' });
-      // activate mutation access only for this voice session
-      if (!integrationControl.startVoice(local.id, requestedContext.voiceSessionId)) return reply.code(409).send({ error: 'voice session stopped' });
-      const result = await realtime.create({ subject: local.id, mcpUrl: resource, mcpAuthorization: realtimeToken, allowedTools, context: { instanceId: config.publicOrigin.origin, ...(requestedContext.worktreeId === undefined ? {} : { worktreeId: requestedContext.worktreeId as string }), ...(requestedContext.agentId === undefined ? {} : { agentId: requestedContext.agentId as string }) } });
-      // revoke access when provider setup fails
-      if (!result.ok) integrationControl.stopVoice(local.id, requestedContext.voiceSessionId);
-      return result.ok ? reply.send(result) : reply.code(result.code === 'invalid_request' ? 400 : 502).send({ error: result.code });
-    });
-    app.post('/api/realtime/session/heartbeat', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
-      const local = controlled(request, true);
-      const voiceSessionId = body(request).voiceSessionId;
-      // renew only the active voice browser
-      if (typeof voiceSessionId !== 'string' || !/^[A-Za-z0-9_-]{20,64}$/u.test(voiceSessionId) || !integrationControl.heartbeatVoice(local.id, voiceSessionId)) return reply.code(409).send({ error: 'voice mode inactive' });
-      return { ok: true };
-    });
-    app.post('/api/realtime/session/stop', async request => {
-      const local = session(request, true);
-      const voiceSessionId = body(request).voiceSessionId;
-      // stop only one canonical browser voice session
-      if (typeof voiceSessionId === 'string' && /^[A-Za-z0-9_-]{20,64}$/u.test(voiceSessionId)) integrationControl.stopVoice(local.id, voiceSessionId);
-      return { ok: true };
-    });
+    };
+    if (!integrationConfig.enabled) registerMcpServer({ app, publicOrigin: config.publicOrigin.origin, gateway: integrationGateway, realtimeScopes, ...(conductorAccess === undefined ? {} : { conductor: conductorAccess }) });
+    else {
+      const derivedRealtimeToken = createHmac('sha256', process.env.RAC_SESSION_SECRET ?? '').update('remote-agents:realtime-mcp:v1').digest('base64url');
+      const realtimeToken = process.env.RAC_REALTIME_MCP_TOKEN?.trim() || derivedRealtimeToken;
+      const integrationAuth = new IntegrationAuthService({ issuer: config.publicOrigin.origin, resource, stateFile: process.env.RAC_INTEGRATION_AUTH_FILE ?? '.data/integration-auth.json', realtimeToken, realtimeSubjectId: 'local-voice' });
+      registerIntegrationAuthServer({
+        app,
+        auth: integrationAuth,
+        resource,
+        // bind OAuth consent to the existing signed browser session
+        localSubject: (request, csrf): LocalIntegrationSubject | undefined => {
+          try {
+            const local = session(request);
+            // verify form approval with the session's CSRF secret
+            if (csrf !== undefined && (request.headers.origin !== config.publicOrigin.origin || !auth.csrf(local, csrf))) return undefined;
+            return { id: local.id, csrf: local.csrf } as LocalIntegrationSubject;
+          } catch { return undefined; }
+        }
+      });
+      registerMcpServer({ app, publicOrigin: config.publicOrigin.origin, auth: integrationAuth, gateway: integrationGateway, realtimeScopes, ...(conductorAccess === undefined ? {} : { conductor: conductorAccess }) });
+      app.post('/api/integration-federation', { config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (request, reply) => {
+        browser(request);
+        // keep cross-instance execution independently disabled
+        if (!integrationConfig.multiInstance.enabled) return reply.code(404).send({ error: 'federation unavailable' });
+        const delegated = verifyFederationRequest(federationSecret, request.headers['x-rac-federation-timestamp'], request.headers['x-rac-federation-signature'], request.body);
+        // reject unsigned or malformed delegation
+        if (delegated === undefined) return reply.code(401).send({ error: 'unauthorized' });
+        return await integrationGateway.call({ authentication: 'oauth', subjectId: delegated.principal.subjectId, audience: resource, scopes: delegated.principal.scopes, ...(delegated.principal.clientId === undefined ? {} : { clientId: delegated.principal.clientId }) }, delegated.name, delegated.arguments, { voiceAuthorized: delegated.voiceAuthorized });
+      });
+      const realtime = new RealtimeService({ apiKey: process.env.RAC_OPENAI_API_KEY, settings: () => ({ name: integrationConfig.realtime.name, context: integrationConfig.realtime.context }) });
+      app.get('/api/integrations/status', async request => {
+        session(request);
+        return { enabled: true, mcp: integrationConfig.mcp, control: integrationControl.snapshot(), realtime: { enabled: integrationConfig.realtime.enabled, available: integrationConfig.realtime.enabled && realtime.available(), writeToolsEnabled: integrationConfig.realtime.writeToolsEnabled } };
+      });
+      app.post('/api/realtime/session', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+        const local = controlled(request, true);
+        // keep voice disabled unless both the feature and provider are configured
+        if (!integrationConfig.realtime.enabled || !realtime.available()) return reply.code(503).send({ error: 'Realtime voice is unavailable.' });
+        const principal = integrationAuth.authenticateRealtimeToken(realtimeToken);
+        // fail closed if the isolated MCP credential is unavailable
+        if (!principal.ok) return reply.code(503).send({ error: 'Realtime orchestration is unavailable.' });
+        const allowedTools = integrationGateway.listTools({ ...principal.value, audience: resource, scopes: realtimeScopes }).map(tool => tool.name);
+        const requestedContext = body(request);
+        // accept only canonical selected-target identifiers
+        if ((requestedContext.worktreeId !== undefined && (typeof requestedContext.worktreeId !== 'string' || requestedContext.worktreeId.length > 240)) || (requestedContext.agentId !== undefined && (typeof requestedContext.agentId !== 'string' || requestedContext.agentId.length > 240)) || typeof requestedContext.voiceSessionId !== 'string' || !/^[A-Za-z0-9_-]{20,64}$/u.test(requestedContext.voiceSessionId)) return reply.code(400).send({ error: 'invalid voice context' });
+        // activate mutation access only for this voice session
+        if (!integrationControl.startVoice(local.id, requestedContext.voiceSessionId)) return reply.code(409).send({ error: 'voice session stopped' });
+        const result = await realtime.create({ subject: local.id, mcpUrl: resource, mcpAuthorization: realtimeToken, allowedTools, context: { instanceId: config.publicOrigin.origin, ...(requestedContext.worktreeId === undefined ? {} : { worktreeId: requestedContext.worktreeId as string }), ...(requestedContext.agentId === undefined ? {} : { agentId: requestedContext.agentId as string }) } });
+        // revoke access when provider setup fails
+        if (!result.ok) integrationControl.stopVoice(local.id, requestedContext.voiceSessionId);
+        return result.ok ? reply.send(result) : reply.code(result.code === 'invalid_request' ? 400 : 502).send({ error: result.code });
+      });
+      app.post('/api/realtime/session/heartbeat', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
+        const local = controlled(request, true);
+        const voiceSessionId = body(request).voiceSessionId;
+        // renew only the active voice browser
+        if (typeof voiceSessionId !== 'string' || !/^[A-Za-z0-9_-]{20,64}$/u.test(voiceSessionId) || !integrationControl.heartbeatVoice(local.id, voiceSessionId)) return reply.code(409).send({ error: 'voice mode inactive' });
+        return { ok: true };
+      });
+      app.post('/api/realtime/session/stop', async request => {
+        const local = session(request, true);
+        const voiceSessionId = body(request).voiceSessionId;
+        // stop only one canonical browser voice session
+        if (typeof voiceSessionId === 'string' && /^[A-Za-z0-9_-]{20,64}$/u.test(voiceSessionId)) integrationControl.stopVoice(local.id, voiceSessionId);
+        return { ok: true };
+      });
+    }
   }
   // share a boot-local route proof with the tunnel setup health check
   registerHealthRoute(app);
@@ -942,6 +959,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return worktree === undefined ? await discovery.place(id) : worktreePlace(worktree);
   };
   structuredAgents.usePlaces(resolvePlace);
+  // the Conductor (ADR 0018): kept running in its directory Project, with the console's MCP tools
+  const conductorProject = config.projects.find(project => project.id === config.conductor?.projectId);
+  if (config.conductor !== undefined) structuredAgents.useConductor({ endpoint: `${config.publicOrigin.origin}/mcp`, model: { model: config.conductor.model, ...(config.conductor.effort === undefined ? {} : { effort: config.conductor.effort }) }, scriptDeadlineMs: config.conductor.scriptDeadlineMinutes * 60_000 });
+  const conductor = new Conductor(config.conductor, structuredAgents, async () => conductorProject === undefined ? undefined : await resolvePlace(worktreeWireId(conductorProject.id, conductorProject.identity)), id => prompts.close(id), message => { void push.notify(message).catch(() => undefined); });
   // bind configured actions to existing host, prompt and normal-launch engines
   const buttonActions = deps.buttonActions ?? new ButtonActionService(buttonCatalog, {
     resolvePlace,
@@ -2329,12 +2350,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await dashboardUpdates.refresh().catch(() => undefined);
     return reply.code(204).send();
   });
-  app.delete('/api/agents/:id', async (request, reply) => { controlled(request, true); const id = (request.params as { id: string }).id; if (await structuredAgents.has(id)) return await prompts.close(id) ? reply.code(204).send() : reply.code(404).send({ error: 'target unavailable' }); const target = await discovery.target(id); if (!target || discovery.worktreesNow().some(worktree => worktreeMatchesWorkspace(worktree, target.agent.home)) || !await prompts.close(id)) return reply.code(404).send({ error: 'target unavailable' }); return reply.code(204).send(); });
+  // close a structured Agent; the Conductor has no Close, and turns off when its configuration is removed
+  const closeStructured = async (id: string, reply: FastifyReply) => (await structuredAgents.agent(id))?.structured?.role === 'conductor'
+    ? reply.code(409).send({ error: 'The Conductor turns off when its configuration is removed.' })
+    : await prompts.close(id) ? reply.code(204).send() : reply.code(404).send({ error: 'target unavailable' });
+  app.delete('/api/agents/:id', async (request, reply) => { controlled(request, true); const id = (request.params as { id: string }).id; if (await structuredAgents.has(id)) return await closeStructured(id, reply); const target = await discovery.target(id); if (!target || discovery.worktreesNow().some(worktree => worktreeMatchesWorkspace(worktree, target.agent.home)) || !await prompts.close(id)) return reply.code(404).send({ error: 'target unavailable' }); return reply.code(204).send(); });
   // permanently close one idle configured agent
   app.post('/api/agents/:id/deactivate', async (request, reply) => {
     controlled(request, true);
     const id = (request.params as { id: string }).id;
-    if (await structuredAgents.has(id)) return await prompts.close(id) ? reply.code(204).send() : reply.code(404).send({ error: 'target unavailable' });
+    if (await structuredAgents.has(id)) return await closeStructured(id, reply);
     const target = await discovery.target(id);
     const worktree = target === undefined ? undefined : configuredWorktreeForWorkspace(discovery.worktreesNow(), target.agent.home);
     // preserve active configured agents
@@ -3180,6 +3205,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.post('/api/agents/:id/restart', async (request, reply) => {
     controlled(request, true);
     const id = (request.params as { id: string }).id;
+    // the Conductor's process starts again in place, keeping its id, queue and Conversation
+    if ((await structuredAgents.agent(id))?.structured?.role === 'conductor') return await structuredAgents.restart(id) ? reply.code(204).send() : reply.code(409).send({ error: 'The Conductor could not be restarted.' });
     const kind = requestedKind(request);
     // reject an unknown kind before any handoff
     if (kind.invalid) return reply.code(400).send({ error: 'invalid agent kind' });
@@ -4077,5 +4104,6 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // expose the scheduler on the instance (index.ts starts it; the HTTP-seam tests tick it)
   app.decorate('scheduler', scheduler);
   app.decorate('structuredAgents', structuredAgents);
+  app.decorate('conductor', conductor);
   return app;
 }

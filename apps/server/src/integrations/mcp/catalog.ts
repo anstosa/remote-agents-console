@@ -13,6 +13,7 @@ export type IntegrationTool = {
   feature: ToolFeature;
   schema: z.ZodType<Record<string, unknown>>;
   inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
   annotations: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
 };
 
@@ -23,10 +24,24 @@ const empty = z.object({}).strict();
 const identifier = z.string().min(1).max(240).refine(value => !value.includes('\0'));
 const mutationEnvelope = { request_id: z.string().min(8).max(200) };
 
+// every result's `structuredContent`: the envelope around the tool's data, or its error
+const outputSchema = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean' },
+    contract_version: { type: 'string' },
+    correlation_id: { type: 'string' },
+    data: { description: 'What the tool returns, when `ok`' },
+    error: { type: 'object', properties: { code: { type: 'string' }, message: { type: 'string' }, retryable: { type: 'boolean' } } }
+  },
+  required: ['ok']
+};
+
 // construct one stable MCP tool descriptor
-function tool(input: Omit<IntegrationTool, 'annotations'>): IntegrationTool {
+function tool(input: Omit<IntegrationTool, 'annotations' | 'outputSchema'>): IntegrationTool {
   return {
     ...input,
+    outputSchema,
     annotations: {
       readOnlyHint: input.risk === 'read',
       destructiveHint: input.risk !== 'read',
@@ -80,6 +95,11 @@ export const integrationTools: IntegrationTool[] = [
   mutation('start_review', 'Start review', 'Start one bounded guided review for working changes or the pull request.', ['review:write'], 'operational', z.object({ agent_id: identifier, scope: z.enum(['working', 'pr']), include_tests: z.boolean(), include_docs: z.boolean(), ...mutationEnvelope }).strict(), { agent_id: id, scope: { type: 'string', enum: ['working', 'pr'] }, include_tests: { type: 'boolean' }, include_docs: { type: 'boolean' } }, ['agent_id', 'scope', 'include_tests', 'include_docs']),
   mutation('switch_pull_request', 'Switch pull request', 'Switch one clean pushed worktree to an available pull request.', ['agents:control', 'admin:dangerous'], 'dangerous', z.object({ agent_id: identifier, number: z.number().int().positive(), ...mutationEnvelope }).strict(), { agent_id: id, number: { type: 'integer', minimum: 1 } }, ['agent_id', 'number'])
 ];
+
+// What the Conductor may call when its scopes allow (ADR 0018): read tools so far, and never another
+// Agent's question (an Agent never consents for the operator) nor a launch (they launch unsandboxed)
+const neverForConductor = new Set(['answer_agent_question', 'launch_worktree_agent', 'launch_scratch_agent']);
+export const conductorCallable = (tool: IntegrationTool): boolean => tool.risk === 'read' && !neverForConductor.has(tool.name);
 
 // index the immutable public catalog
 export const integrationToolByName = new Map(integrationTools.map(candidate => [candidate.name, candidate]));

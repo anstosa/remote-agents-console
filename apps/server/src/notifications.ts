@@ -39,7 +39,8 @@ export type ScheduleNotification = {
   url: string;
   worktreeId?: string;
 };
-export type PushMessage = AgentNotification | CleanupNotification | ReviewNotification | ScheduleNotification;
+export type ConductorNotification = { kind: 'conductor'; title: string; body: string; tag: string; url: string };
+export type PushMessage = AgentNotification | CleanupNotification | ReviewNotification | ScheduleNotification | ConductorNotification;
 
 type NotificationDelivery = (notification: AgentNotification) => void | Promise<void>;
 

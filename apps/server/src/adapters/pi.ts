@@ -34,8 +34,10 @@ const extension = (): string => {
 };
 
 // the tools declared to the model: Pi's defaults, the search tools the path policy covers, and the
-// RAC extension's `ask_user`
+// RAC extension's `ask_user`; the Conductor adds code mode and the console's MCP tools, which only it
+// gets, so no other MCP server can turn code mode on
 const tools = 'read,bash,edit,write,grep,find,ls,ask_user';
+const conductorTools = `${tools},codemode,mcp__rac__*`;
 // a Worktree's own skills and prompt templates, passed explicitly because `--no-approve` keeps
 // every other trust-gated `.pi/` resource (settings, extensions, MCP servers) out
 const projectResources = (cwd: string): string[] => [['--skill', '.pi/skills'], ['--skill', '.agents/skills'], ['--prompt-template', '.pi/prompts']]
@@ -56,13 +58,14 @@ const projectResources = (cwd: string): string[] => [['--skill', '.pi/skills'], 
  */
 export const piAdapter = {
   kind: 'pi',
-  launch: ({ cwd, sandboxed, files, nonce = '', resume, continue: latest, models }) => ({
+  launch: ({ cwd, sandboxed, files, nonce = '', resume, continue: latest, models, role }) => ({
     args: [
-      piProgram(), '--mode', 'rpc', '-ne', '-e', extension(), '--offline', '--no-approve', '--tools', tools, ...projectResources(cwd),
+      // the Conductor loads no project skills or prompt templates
+      piProgram(), '--mode', 'rpc', '-ne', '-e', extension(), '--offline', '--no-approve', '--tools', role === 'conductor' ? conductorTools : tools, ...(role === 'conductor' ? [] : projectResources(cwd)),
       ...(models === undefined || models.allowed.length === 0 ? [] : ['--models', models.allowed.join(',')]),
       ...(resume !== undefined ? ['--session', resume] : latest === true ? ['--continue'] : models?.start === undefined ? [] : ['--model', models.start.model, ...(models.start.effort === undefined ? [] : ['--thinking', models.start.effort])])
     ],
-    env: { RAC_LAUNCH_NONCE: nonce, ...(sandboxed ? { RAC_SANDBOX_POLICY: files?.['sandbox.json'] ?? '' } : {}) }
+    env: { RAC_LAUNCH_NONCE: nonce, ...(sandboxed ? { RAC_SANDBOX_POLICY: files?.['sandbox.json'] ?? '' } : {}), ...(role === 'conductor' ? { RAC_ROLE: 'conductor' } : {}) }
   }),
   client: piClient,
   steers: true,

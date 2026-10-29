@@ -5,7 +5,7 @@ import type { IntegrationAuditService } from '../audit/service.js';
 import type { IntegrationPrincipal } from '../auth/index.js';
 import type { IntegrationControlService } from '../control/index.js';
 import { digest, type IntegrationPolicyService } from '../policy/service.js';
-import { integrationToolByName, integrationTools, type IntegrationTool } from './catalog.js';
+import { conductorCallable, integrationToolByName, integrationTools, type IntegrationTool } from './catalog.js';
 
 export type ToolCallResult = { content: Array<{ type: 'text'; text: string }>; structuredContent: Record<string, unknown>; isError?: boolean };
 export type IntegrationGatewayOptions = { config: IntegrationConfig; instanceId: string; orchestration: OrchestrationService; policy: IntegrationPolicyService; audit: Pick<IntegrationAuditService, 'record'>; control: IntegrationControlService; forward?: (instanceId: string, principal: IntegrationPrincipal, name: string, args: Record<string, unknown>, voiceAuthorized: boolean) => Promise<ToolCallResult | undefined> };
@@ -20,7 +20,7 @@ export class IntegrationGateway {
 
   // list only tools enabled for this deployment and principal
   listTools(principal: IntegrationPrincipal): IntegrationTool[] {
-    return integrationTools.filter(candidate => this.enabled(candidate) && candidate.requiredScopes.every(scope => principal.scopes.includes(scope)));
+    return integrationTools.filter(candidate => this.enabled(candidate, principal) && candidate.requiredScopes.every(scope => principal.scopes.includes(scope)));
   }
 
   // validate, authorize, execute, and audit one tool call
@@ -63,10 +63,12 @@ export class IntegrationGateway {
 
     // reject unknown, disabled, or malformed calls before dispatch
     if (definition === undefined) result = errorResult('unknown_tool', 'The requested tool does not exist.', correlationId);
-    else if (!this.enabled(definition)) result = errorResult('tool_disabled', 'The requested tool is disabled.', correlationId);
+    else if (!this.enabled(definition, principal)) result = errorResult('tool_disabled', 'The requested tool is disabled.', correlationId);
     else if (!definition.requiredScopes.every(scope => principal.scopes.includes(scope))) result = errorResult('insufficient_scope', 'The access token lacks a required scope.', correlationId);
     else if (instanceId !== undefined && (typeof instanceId !== 'string' || instanceId.length === 0 || instanceId.length > 240)) result = errorResult('invalid_request', 'The instance identifier is invalid.', correlationId);
     else if (parsed === undefined || !parsed.success) result = errorResult('invalid_request', 'The tool arguments are invalid.', correlationId);
+    // the Conductor acts on its own console only
+    else if (instanceId !== undefined && instanceId !== this.options.instanceId && principal.authentication === 'conductor') result = errorResult('instance_unavailable', 'The requested instance is unavailable.', correlationId);
     else if (instanceId !== undefined && instanceId !== this.options.instanceId) {
       const control = definition.risk === 'read' ? { ok: true as const } : this.options.control.authorizeMutation();
       // require local purple Davo mode before forwarding mutations
@@ -75,13 +77,13 @@ export class IntegrationGateway {
         const forwarded = this.options.config.multiInstance.enabled && this.options.forward !== undefined ? await this.options.forward(instanceId, principal, name, parsed.data, definition.risk !== 'read') : undefined;
         result = forwarded ?? errorResult('instance_unavailable', 'The requested instance is unavailable.', correlationId, true);
       }
-    } else if (definition.risk === 'read') result = operationResult(await this.execute(definition.name, parsed.data), correlationId);
+    } else if (definition.risk === 'read') result = operationResult(await this.execute(definition.name, parsed.data, principal), correlationId);
     else {
       const mutation = parsed.data as MutationArguments;
       requestId = mutation.request_id;
       const canonicalDigest = digest(stableJson(mutation));
-      const control = context.voiceAuthorized ? { ok: true as const } : this.options.control.authorizeMutation();
-      // require active purple Davo mode
+      // require active purple Davo mode, which the Conductor works without (ADR 0018)
+      const control = context.voiceAuthorized || principal.authentication === 'conductor' ? { ok: true as const } : this.options.control.authorizeMutation();
       if (!control.ok) result = errorResult(control.code, controlMessage(control.code), correlationId, true);
       else {
         const claim = await this.options.policy.claim(principalKey, definition.name, mutation.request_id, canonicalDigest);
@@ -95,7 +97,7 @@ export class IntegrationGateway {
             // persist intent before the side effect
             await audit('intent', 'pending');
             strictOutcomeAudit = true;
-            result = operationResult(await this.execute(definition.name, mutation), correlationId);
+            result = operationResult(await this.execute(definition.name, mutation, principal), correlationId);
             await this.options.policy.finish(claim.recordId, result.isError ? 'failed' : 'completed', result.structuredContent);
           } catch {
             await this.options.policy.finish(claim.recordId, 'failed', { ok: false, error: { code: 'audit_unavailable' } });
@@ -115,10 +117,10 @@ export class IntegrationGateway {
     return result;
   }
 
-  // apply deployment feature gates independently of OAuth scopes
-  private enabled(definition: IntegrationTool): boolean {
-    // require the parent integration gate
-    if (!this.options.config.enabled) return false;
+  // apply deployment feature gates independently of OAuth scopes; the Conductor has its own parent
+  // gate (its configuration), independent of the integrations', and calls only what it may
+  private enabled(definition: IntegrationTool, principal: IntegrationPrincipal): boolean {
+    if (principal.authentication === 'conductor' ? !conductorCallable(definition) : !this.options.config.enabled) return false;
     // apply read-only deployment policy
     if (definition.feature === 'read') return this.options.config.mcp.readEnabled;
     // apply ordinary write deployment policy
@@ -127,8 +129,8 @@ export class IntegrationGateway {
   }
 
   // dispatch one already-authorized typed operation
-  private async execute(name: string, input: Record<string, unknown>): Promise<OrchestrationResult<unknown>> {
-    const orchestration = this.options.orchestration;
+  private async execute(name: string, input: Record<string, unknown>, principal: IntegrationPrincipal): Promise<OrchestrationResult<unknown>> {
+    const orchestration = principal.places === undefined ? this.options.orchestration : this.options.orchestration.scoped(principal.places);
     // map transport names to stable orchestration operations
     switch (name) {
       case 'list_instances': return await orchestration.listInstances();

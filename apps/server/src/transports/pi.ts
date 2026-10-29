@@ -9,6 +9,8 @@ import type { LaunchReport, ModelInfo, ModelSetting, ProtocolClient, TranscriptI
 
 /** The status key the RAC Pi extension sends its launch report under. */
 export const piReportStatusKey = 'rac-launch';
+/** The RAC Pi extension's command that takes the console's MCP access (the Conductor's only). */
+export const piConsoleCommand = 'rac-console';
 // what a tool call's line reads while its question waits in the Inline-question box
 const waitingForAnswer = 'waiting for your answer below';
 
@@ -479,6 +481,12 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
       closeDialog(questionId);
       channel.send(JSON.stringify({ type: 'extension_ui_response', id: questionId, ...response }));
       return true;
+    },
+    // the console's MCP access goes to the RAC extension as its command: Pi runs it at once and
+    // keeps it out of the Conversation
+    async consoleAccess(access) {
+      const response = await request({ type: 'prompt', message: `/${piConsoleCommand} ${JSON.stringify(access)}` });
+      return response.success === true && isObject(response.data) && response.data.disposition === 'handled';
     },
     close: () => channel.close()
   };

@@ -95,6 +95,12 @@ export interface StructuredConnection {
   cancel(): Promise<string[] | undefined>;
   /** Answer an open question by id, or dismiss it; false when it is no longer open. */
   answer(questionId: string, answer: QuestionAnswer): Promise<boolean>;
+  /**
+   * Give the Agent the console's MCP endpoint and its token over the protocol itself, to be held
+   * by the Agent's process and kept out of its commands (ADR 0018); false when it was not taken. A
+   * client that cannot do this cannot host the Conductor.
+   */
+  consoleAccess?(access: { url: string; token: string }): Promise<boolean>;
   close(): void;
 }
 /** A line-oriented connection to an Agent process; lines carry no terminator. */

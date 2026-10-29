@@ -169,13 +169,15 @@ export class LaunchService implements HolderWindows {
   // transient failure is logged, degrades this launch to no files (it omits
   // `--settings`) rather than failing, and clears the memo so the next launch retries. A kind's
   // sandbox settings also keep its commands out of the console's own state: its private directory
-  // (holder sockets), `.data`, `.env` and config file.
+  // (holder sockets), `.data`, `.env` and config file, and its network listener and public origin,
+  // so no command reaches `/mcp` (ADR 0018).
   async adapterFiles(kind: AgentKind): Promise<Record<string, string> | undefined> {
     if ((adapterFor(kind) ?? structuredAdapterFor(kind))?.files === undefined) return undefined;
     const consoleState = [this.root, join(serverCheckout(), '.data'), join(serverCheckout(), '.env'), ...(process.env.RAC_CONFIG === undefined ? [] : [resolve(process.env.RAC_CONFIG)])];
+    const consoleHosts = [this.config.publicOrigin?.hostname, this.config.listen?.host].filter((host): host is string => host !== undefined);
     this.adapterFilesPromise ??= renderAdapterFiles(process.env, candidate => {
       const settings = this.config.adapters[candidate]?.sandbox ?? { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
-      return { ...settings, denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState], repositories: [serverCheckout(), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory])] };
+      return { ...settings, deniedDomains: [...settings.deniedDomains, ...consoleHosts], denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState], repositories: [serverCheckout(), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory])] };
     }).catch(error => {
       this.adapterFilesPromise = undefined;
       console.error('[launch] adapter files not rendered:', error instanceof Error ? error.message : 'unknown error');

@@ -190,6 +190,12 @@ function agentStatus(agent: DashboardPayload['agents'][number]): AgentStatusV1 {
 export class OrchestrationService {
   constructor(private readonly dependencies: OrchestrationDependencies) {}
 
+  /** The same operations over only the Worktrees `admits` (a principal's scope): the others are not found and not listed. */
+  scoped(admits: (worktree: Worktree) => boolean): OrchestrationService {
+    const { discovery } = this.dependencies;
+    return new OrchestrationService({ ...this.dependencies, discovery: { target: (id, force) => discovery.target(id, force), worktreesNow: () => discovery.worktreesNow().filter(admits) } });
+  }
+
   // normalize unexpected dependency failures
   private async operation<T>(work: () => Promise<OrchestrationResult<T>>): Promise<OrchestrationResult<T>> {
     try {

@@ -503,9 +503,10 @@ export interface StructuredAdapter {
  * What a structured launch starts: a new Conversation, the one at `resume` (located by the
  * kind's store), or (`continue`) the latest one started in `cwd`; with Allowed models configured,
  * `models` scopes the Agent to them and names the model a new Conversation starts on. `files` are
- * the kind's console-rendered files, and `nonce` is what its launch report must echo.
+ * the kind's console-rendered files, and `nonce` is what its launch report must echo. `role` launches
+ * the Conductor: its client then takes the console's MCP access, and it gets the console's role prompt.
  */
-export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting }; files?: Record<string, string>; nonce?: string };
+export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting }; files?: Record<string, string>; nonce?: string; role?: 'conductor' };
 /** One Allowed model (`adapters.pi.allowedModels`): an exact `provider/id` and an optional default Effort. */
 export type AllowedModel = { model: string; effort?: string };
 

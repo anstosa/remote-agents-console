@@ -69,3 +69,5 @@ await Promise.race([reattached, new Promise(resolve => setTimeout(resolve, 10_00
 // fire enabled Schedules unattended, beside the other periodic jobs; buildApp's onClose stops it
 app.scheduler.start();
 await app.listen(config.listen);
+// once the reattach settles, bring up the Conductor (or turn one off that is no longer configured)
+void reattached.then(() => app.conductor.start()).catch(error => { console.error('[conductor] could not start:', error); });

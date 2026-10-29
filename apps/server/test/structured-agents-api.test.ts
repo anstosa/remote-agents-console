@@ -8,12 +8,13 @@ import { DiscoveryService } from '../src/discovery/service.js';
 import { WorktreeLaunchStore } from '../src/worktrees/store.js';
 import { PromptHistoryService } from '../src/prompt-history/service.js';
 import { QueuedPromptService } from '../src/prompts/queue.js';
-import { StructuredAgents, type HolderRef, type StructuredLaunch, type StructuredProcesses } from '../src/transports/structured-agents.js';
+import { StructuredAgents, type HolderRef, type RawLine, type StructuredLaunch, type StructuredProcesses } from '../src/transports/structured-agents.js';
+import { PushService } from '../src/push-service.js';
 import type { Delivery, LaunchReport, ModelInfo, ModelSetting, StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
 import type { QuestionAnswer } from '../src/transports/transport.js';
 import { WorktreeNoteService } from '../src/notes/service.js';
 import type { AllowedModel } from '../src/adapters/types.js';
-import type { ValidatedConfig } from '../src/config/schema.js';
+import type { ConductorConfig, ValidatedConfig } from '../src/config/schema.js';
 import { piAdapter } from '../src/adapters/pi.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject } from './helpers/config.js';
@@ -36,7 +37,7 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
 // reports `attached` (as a client reading its state afresh does), or finds the holder `gone`.
-function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], gone = false, sandboxFails = false, nonce = undefined as string | undefined } = {}) {
+function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], gone = false, sandboxFails = false, nonce = undefined as string | undefined } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -49,6 +50,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
   let cancels = 0;
   let lines = 0;
   const attaches: HolderRef[] = [];
+  const grants: Array<{ url: string; token: string }> = [];
   let reporting = reports;
   const connection = (): StructuredConnection => ({
     deliver: async prompt => { delivered.push(prompt); return dispositions.shift() ?? 'started'; },
@@ -67,6 +69,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
       return returned;
     },
     answer: async (id, answer) => { answers.push([id, answer]); emit({ type: 'question-closed', id }); return true; },
+    consoleAccess: async access => { grants.push(access); return true; },
     // a closed connection hears its process go, as a holder's socket closing says
     close: () => { const closing = emit; queueMicrotask(() => closing({ type: 'exited' })); }
   });
@@ -80,7 +83,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
       const sent = lastReport;
       if (reporting) queueMicrotask(() => emit({ type: 'report', report: sent }));
       if (exits) setTimeout(() => emit({ type: 'exited' }), 10);
-      return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9' }, connection: connection(), cursor: () => lines, raw: () => [{ from: 'agent' as const, line: '{"type":"agent_start"}' }] };
+      return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9' }, connection: connection(), cursor: () => lines, raw: () => raw?.(grants.at(-1)?.token ?? '') ?? [{ from: 'agent' as const, line: '{"type":"agent_start"}' }] };
     },
     attach: async (holder, _kind, events) => {
       attaches.push(holder);
@@ -93,7 +96,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
     stderr: async () => 'pi: could not load its extension',
     stop: async () => { closed = true; }
   };
-  return { processes, delivered, launches, attaches, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
+  return { processes, delivered, launches, attaches, grants, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
 }
 
 // the integration gateway's state and audit files, in a temporary folder
@@ -105,28 +108,33 @@ async function integrationFiles(): Promise<void> {
 
 // a console with one Project whose only Worktree is a temporary folder, and the Scratch folder beside it
 // (`linked` adds a linked Worktree beside it; `deps` replace the app's own services)
-async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { reportTimeoutMs?: number; allowedModels?: AllowedModel[]; linked?: boolean; deps?: Record<string, unknown>; config?: Partial<ValidatedConfig> } = {}) {
+// (`conductor` configures the Conductor in a directory Project `home` beside it, on `openai/gpt-5.6`)
+async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { reportTimeoutMs?: number; allowedModels?: AllowedModel[]; linked?: boolean; deps?: Record<string, unknown>; config?: Partial<ValidatedConfig>; conductor?: Partial<ConductorConfig> } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-structured-')));
   dirs.push(root);
   const project = testProject({ path: join(root, 'repo') });
-  const allowed = options.allowedModels ?? [];
-  const config = testConfig({ scratchDirectory: root, projects: [project], adapters: { pi: { program: '/pinned/pi', args: [], env: {}, launchable: true, ...(allowed.length === 0 ? {} : { allowedModels: allowed }) } }, ...options.config });
+  const home = join(root, 'home');
+  const allowed = options.allowedModels ?? (options.conductor === undefined ? [] : [{ model: 'openai/gpt-5.6' }]);
+  const conductor: ConductorConfig | undefined = options.conductor === undefined ? undefined : { kind: 'pi', projectId: 'home', model: 'openai/gpt-5.6', scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write'], maxWorkers: 4, maxSelfStartedTurnsPerHour: 30, scriptDeadlineMinutes: 10, ...options.conductor };
+  if (conductor !== undefined) await mkdir(home);
+  const config = testConfig({ scratchDirectory: root, projects: [project, ...(conductor === undefined ? [] : [testProject({ id: 'home', label: 'Conductor', path: home, identity: home, mode: 'directory' })])], adapters: { pi: { program: '/pinned/pi', args: [], env: {}, launchable: true, ...(allowed.length === 0 ? {} : { allowedModels: allowed }) } }, ...(conductor === undefined ? {} : { conductor }), ...options.config });
   const worktreeStore = new WorktreeLaunchStore({ file: join(root, 'worktrees.json') });
   const worktrees = async (path: string) => path === project.path ? [{ path: project.path, branch: 'refs/heads/main', detached: false, bare: false, locked: false, prunable: false }, ...(options.linked === true ? [{ path: join(root, 'feat'), branch: 'refs/heads/feat', detached: false, bare: false, locked: false, prunable: false }] : [])] : undefined;
   const discovery = new DiscoveryService(socketFinder([]), paneLister([]) as never, processInspector(), { cachedPullRequest: async () => undefined, invalidateRepositories: () => {} } as never, config.adapters, config.projects, worktreeStore, worktrees, root);
   // the console as it starts, over the stores in `root`, driving its structured Agents through `processes`
-  const start = async (processes: StructuredProcesses) => {
+  const start = async (processes: StructuredProcesses, changed: Partial<ValidatedConfig> = {}) => {
     const structuredAgents = new StructuredAgents(processes, { file: join(root, 'structured-agents.json'), allowedModels: () => allowed, ...(options.reportTimeoutMs === undefined ? {} : { reportTimeoutMs: options.reportTimeoutMs }) });
-    const app = await buildApp(config, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents, promptHistory: new PromptHistoryService(join(root, 'history.json')), queuedPrompts: new QueuedPromptService(join(root, 'queue.json')), notes: new WorktreeNoteService(join(root, 'notes.json')), ...options.deps });
+    const app = await buildApp({ ...config, ...changed }, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents, promptHistory: new PromptHistoryService(join(root, 'history.json')), queuedPrompts: new QueuedPromptService(join(root, 'queue.json')), notes: new WorktreeNoteService(join(root, 'notes.json')), ...options.deps });
     const headers = await authenticatedHeaders(app);
     const dashboardAgent = async (id: string) => (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { id: string }) => agent.id === id);
     return { app, headers, dashboardAgent, root, structuredAgents };
   };
   const started = await start(fake.processes);
-  // stop this console and start another over the same stores, as a deploy does; it reattaches to its Agents' holders through `next`
-  const restart = async (next: ReturnType<typeof fakeAgent>) => {
+  // stop this console and start another over the same stores, as a deploy does, its configuration
+  // `changed`; it reattaches to its Agents' holders through `next`
+  const restart = async (next: ReturnType<typeof fakeAgent>, changed: Partial<ValidatedConfig> = {}) => {
     await started.app.close();
-    const console = await start(next.processes);
+    const console = await start(next.processes, changed);
     const reattached = console.structuredAgents.reattach();
     // a reattach held up by its holder (`attaching`) goes on behind the console that started
     await Promise.race([reattached, new Promise(resolve => setTimeout(resolve, 50))]);
@@ -1130,3 +1138,194 @@ describe('an Exited structured Agent', () => {
     await app.close();
   });
 });
+
+describe('the Conductor', () => {
+  // a JSON-RPC call to the console's `/mcp` with `token`, answered with its status, body and headers
+  const mcp = async (app: Awaited<ReturnType<typeof consoleWith>>['app'], token: string, method: string, params?: object) => {
+    const response = await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${token}` }, payload: { jsonrpc: '2.0', id: 1, method, ...(params === undefined ? {} : { params }) } });
+    return { status: response.statusCode, body: response.json(), headers: response.headers };
+  };
+  const conductorOf = async (app: Awaited<ReturnType<typeof consoleWith>>['app'], headers: Record<string, string>) => (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { structured?: { role?: string } }) => agent.structured?.role === 'conductor');
+
+  it('launches at console start, Sandboxed in its Project on its model, and is given the console\'s read tools in-band', async () => {
+    await integrationFiles();
+    const fake = fakeAgent();
+    const { app, headers, root } = await consoleWith(fake, { conductor: { effort: 'high' } });
+    await app.conductor.start();
+
+    expect(fake.launches).toHaveLength(1);
+    expect(fake.launches[0]).toMatchObject({ kind: 'pi', sandboxed: true, role: 'conductor', model: { model: 'openai/gpt-5.6', effort: 'high' }, place: { kind: 'directory', home: join(root, 'home') } });
+    const conductor = await conductorOf(app, headers);
+    expect(conductor).toMatchObject({ kind: 'pi', sandboxed: true, structured: { lifecycle: 'live', role: 'conductor', switchable: false } });
+    // the token travels over the protocol, never on the launch line or in the environment
+    expect(fake.grants).toEqual([{ url: 'https://agents.example.com/mcp', token: expect.stringMatching(/^rac-conductor\.[A-Za-z0-9_-]{43}$/u) }]);
+    expect(JSON.stringify(fake.launches)).not.toContain(fake.grants[0]!.token);
+
+    const tools = await mcp(app, fake.grants[0]!.token, 'tools/list');
+    expect(tools.status).toBe(200);
+    const names: string[] = tools.body.result.tools.map((tool: { name: string }) => tool.name);
+    expect(names).toEqual(expect.arrayContaining(['list_agents', 'get_agent_latest_response', 'list_worktrees']));
+    // a script reads each result's data from `structuredContent`, which every tool declares
+    expect(tools.body.result.tools[0].outputSchema).toMatchObject({ type: 'object', required: ['ok'] });
+    // read access only so far, and never another Agent's question nor an unsandboxed launch
+    expect(names).not.toEqual(expect.arrayContaining(['queue_prompt']));
+    for (const never of ['answer_agent_question', 'launch_worktree_agent', 'launch_scratch_agent', 'queue_prompt']) expect(names).not.toContain(never);
+
+    // a wrong Conductor token is refused without the OAuth challenge
+    const refused = await mcp(app, 'rac-conductor.not-the-token', 'tools/list');
+    expect(refused.status).toBe(401);
+    expect(refused.headers['www-authenticate']).toBeUndefined();
+    await app.close();
+  });
+  it('is launched again whenever it exits, until it exits 3 times in 10 minutes; then it stays Exited and pushes once', async () => {
+    const notify = vi.spyOn(PushService.prototype, 'notify').mockResolvedValue(undefined);
+    const fake = fakeAgent({ exits: true });
+    const { app, headers } = await consoleWith(fake, { conductor: {} });
+    await app.conductor.start();
+    await vi.waitFor(async () => expect((await conductorOf(app, headers))?.structured.lifecycle).toBe('exited'), { timeout: 2_000 });
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // the same Agent each time, its process started three times, then left down
+    expect(fake.launches.map(launch => launch.id)).toEqual(Array(3).fill(fake.launches[0]!.id));
+    expect((await conductorOf(app, headers)).structured.lifecycle).toBe('exited');
+    expect(notify.mock.calls.map(([message]) => message)).toEqual([expect.objectContaining({ kind: 'conductor', title: 'The Conductor stopped' })]);
+    // each process's token stopped working when it exited
+    for (const { token } of fake.grants) expect((await mcp(app, token, 'tools/list')).status).toBe(401);
+    await app.close();
+  });
+
+  it('is relaunched on its Conversation when it exits, survives a deploy, and is turned off once its configuration is removed', async () => {
+    await integrationFiles();
+    const fake = fakeAgent();
+    const { app, headers, root, restart } = await consoleWith(fake, { conductor: {} });
+    const conversation = '01a188d1-e7d9-711a-aba8-381b96066aa5';
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'pi'));
+    await piSession(join(root, 'pi'), join(root, 'home'), conversation);
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+    fake.emit({ type: 'conversation', id: conversation });
+    fake.emit({ type: 'exited' });
+    await vi.waitFor(() => expect(fake.launches).toHaveLength(2));
+    expect(fake.launches[1]).toMatchObject({ id, resume: expect.stringContaining(conversation), role: 'conductor', sandboxed: true });
+
+    // a deploy: the next console reattaches to it and launches nothing more
+    const next = fakeAgent();
+    const deployed = await restart(next);
+    await deployed.reattached;
+    await deployed.app.conductor.start();
+    expect(next.launches).toHaveLength(0);
+    // the token its process holds still works after the deploy
+    expect((await mcp(deployed.app, fake.grants[1]!.token, 'tools/list')).status).toBe(200);
+    await deployed.app.close();
+
+    const off = fakeAgent();
+    const unconfigured = await restart(off, { conductor: undefined });
+    await unconfigured.reattached;
+    await unconfigured.app.conductor.start();
+    expect(await conductorOf(unconfigured.app, unconfigured.headers)).toBeUndefined();
+    expect(off.launches).toHaveLength(0);
+    await unconfigured.app.close();
+  });
+
+  it('offers Restart but no Close, and keeps its configured model', async () => {
+    const fake = fakeAgent({ models: [{ id: 'openai/gpt-5.6', name: 'GPT', provider: 'openai', efforts: ['low'] }, { id: 'openai/gpt-4', name: 'Old', provider: 'openai', efforts: [] }] });
+    const { app, headers } = await consoleWith(fake, { conductor: {}, allowedModels: [{ model: 'openai/gpt-5.6' }, { model: 'openai/gpt-4' }] });
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+
+    expect((await app.inject({ method: 'DELETE', url: `/api/agents/${id}`, headers })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/deactivate`, headers })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: 'openai/gpt-4' } })).statusCode).toBe(409);
+    expect(await conductorOf(app, headers)).toMatchObject({ id, structured: { lifecycle: 'live', switchable: false } });
+
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/restart`, headers, payload: {} })).statusCode).toBe(204);
+    expect(fake.launches.map(launch => launch.id)).toEqual([id, id]);
+    expect(fake.grants).toHaveLength(2);
+    expect((await mcp(app, fake.grants[0]!.token, 'tools/list')).status).toBe(401);
+    expect((await mcp(app, fake.grants[1]!.token, 'tools/list')).status).toBe(200);
+    await app.close();
+  });
+
+  it('reads within its scopes: tools it lacks a scope for are hidden and refused, and it reaches no other instance', async () => {
+    await integrationFiles();
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake, { conductor: { scopes: ['status:read'] }, config: { remoteServers: [{ url: new URL('https://peer.example.com') }], integrations: { enabled: true, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: true }, realtime: { enabled: false, name: 'Davo', context: '', writeToolsEnabled: false }, multiInstance: { enabled: true } } } });
+    await app.conductor.start();
+    const token = fake.grants[0]!.token;
+    const id = (await conductorOf(app, headers)).id;
+
+    const names: string[] = (await mcp(app, token, 'tools/list')).body.result.tools.map((tool: { name: string }) => tool.name);
+    expect(names).toContain('list_agents');
+    expect(names).not.toContain('get_agent_latest_response');
+    const call = async (name: string, args: object) => (await mcp(app, token, 'tools/call', { name, arguments: args })).body.result.structuredContent;
+    expect(await call('list_agents', {})).toMatchObject({ ok: true, data: [expect.objectContaining({ id })] });
+    expect(await call('list_worktrees', {})).toMatchObject({ ok: true, data: [expect.objectContaining({ id: expect.stringMatching(/^proj:/u) })] });
+    expect(await call('get_agent_latest_response', { agent_id: id })).toMatchObject({ ok: false, error: { code: 'insufficient_scope' } });
+    expect(await call('list_instances', { instance_id: 'https://peer.example.com' })).toMatchObject({ ok: false, error: { code: 'instance_unavailable' } });
+    await app.close();
+  });
+
+  it('never calls another Agent\'s question or a launch, whatever its scopes', async () => {
+    await integrationFiles();
+    const fake = fakeAgent();
+    const { app } = await consoleWith(fake, { conductor: { scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write', 'admin:dangerous'] }, config: { integrations: { enabled: true, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: true }, realtime: { enabled: false, name: 'Davo', context: '', writeToolsEnabled: false }, multiInstance: { enabled: false } } } });
+    await app.conductor.start();
+    const token = fake.grants[0]!.token;
+    for (const [name, args] of [['answer_agent_question', { agent_id: 'a', question_id: 'q'.repeat(22), index: 0 }], ['launch_worktree_agent', { worktree_id: 'w' }], ['launch_scratch_agent', {}]] as const) {
+      const result = (await mcp(app, token, 'tools/call', { name, arguments: { ...args, request_id: 'request-never-1' } })).body.result.structuredContent;
+      expect(result).toMatchObject({ ok: false, error: { code: 'tool_disabled' } });
+    }
+    await app.close();
+  });
+
+  it('has its own rate-limit bucket, applied to every MCP call', async () => {
+    await integrationFiles();
+    const fake = fakeAgent();
+    const secret = Buffer.alloc(32, 9).toString('base64url');
+    vi.stubEnv('RAC_SESSION_SECRET', secret);
+    vi.stubEnv('RAC_REALTIME_MCP_TOKEN', '');
+    const { app } = await consoleWith(fake, { conductor: {}, config: { integrations: { enabled: true, mcp: { readEnabled: true, writeEnabled: false, dangerousEnabled: false }, realtime: { enabled: false, name: 'Davo', context: '', writeToolsEnabled: false }, multiInstance: { enabled: false } } } });
+    await app.conductor.start();
+    const statuses: number[] = [];
+    for (let call = 0; call < 121; call += 1) statuses.push((await mcp(app, fake.grants[0]!.token, 'tools/call', { name: 'list_agents', arguments: {} })).status);
+    expect(statuses.slice(0, 120).every(status => status === 200)).toBe(true);
+    expect(statuses[120]).toBe(429);
+    // the voice assistant's calls are counted apart from the Conductor's
+    const realtime = createHmac('sha256', secret).update('remote-agents:realtime-mcp:v1').digest('base64url');
+    expect((await mcp(app, realtime, 'tools/list')).status).toBe(200);
+    await app.close();
+  });
+
+  it('cancels a Turn whose script runs past its deadline, and says so in the transcript', async () => {
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake, { conductor: { scriptDeadlineMinutes: 1 } });
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      fake.emit({ type: 'turn', turn: { type: 'started' } });
+      fake.emit({ type: 'transcript', item: { id: 'quick', kind: 'tool', name: 'Script', summary: '1 tool call', state: 'running', source: 'return 1' } });
+      fake.emit({ type: 'transcript', item: { id: 'quick', kind: 'tool', name: 'Script', summary: '1 tool call', state: 'done', source: 'return 1' } });
+      fake.emit({ type: 'transcript', item: { id: 'spin', kind: 'tool', name: 'Script', summary: '0 tool calls', state: 'running', source: 'while (true) await tools.read({ path: "x" })' } });
+      vi.advanceTimersByTime(59_000);
+      expect(fake.cancels()).toBe(0);
+      vi.advanceTimersByTime(2_000);
+    } finally { vi.useRealTimers(); }
+    await vi.waitFor(() => expect(fake.cancels()).toBe(1));
+    const items = (await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json().items;
+    expect(items).toContainEqual(expect.objectContaining({ kind: 'notice', tone: 'warning', text: 'A script ran past its 1-minute deadline, so its Turn was cancelled.' }));
+    await app.close();
+  });
+
+  it('keeps its console token out of the Raw events', async () => {
+    const fake = fakeAgent({ raw: line => [{ from: 'console', line: `{"type":"prompt","message":"/rac-console ${line}"}` }] });
+    const { app, headers } = await consoleWith(fake, { conductor: {} });
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+    const lines = (await app.inject({ method: 'GET', url: `/api/agents/${id}/raw-events`, headers })).json().lines;
+    expect(JSON.stringify(lines)).not.toContain(fake.grants[0]!.token);
+    expect(lines).toEqual([{ from: 'console', line: '{"type":"prompt","message":"/rac-console rac-conductor.[redacted]"}' }]);
+    await app.close();
+  });
+});
+

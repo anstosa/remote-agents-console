@@ -1,7 +1,10 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { readFile } from 'node:fs/promises';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { LaunchService } from '../../src/launch/service.js';
+import { testConfig } from '../helpers/config.js';
 import { piAdapter } from '../../src/adapters/pi.js';
 import { adhocScratchPlace } from '../../src/places/places.js';
 import { holderProcesses, type HolderLaunch } from '../../src/transports/structured-agents.js';
@@ -10,7 +13,7 @@ import { holderProcesses, type HolderLaunch } from '../../src/transports/structu
 // launch points the extension at the rendered policy, which the operator's env cannot replace.
 
 const dirs: string[] = [];
-afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { vi.unstubAllEnvs(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 const worktree = async () => { const dir = await mkdtemp(join(tmpdir(), 'rac-pi-launch-')); dirs.push(dir); return dir; };
 
 describe('the Pi Adapter\'s launch', () => {
@@ -31,6 +34,15 @@ describe('the Pi Adapter\'s launch', () => {
     expect(args.join(' ')).toContain(`--skill ${join(cwd, '.pi/skills')} --skill ${join(cwd, '.agents/skills')} --prompt-template ${join(cwd, '.pi/prompts')}`);
   });
 
+  it('launches the Conductor with code mode and the console\'s MCP tools, without the place\'s skills', async () => {
+    const cwd = await worktree();
+    await mkdir(join(cwd, '.pi', 'skills'), { recursive: true });
+    const { args, env } = piAdapter.launch({ cwd, sandboxed: true, nonce: 'n1', role: 'conductor' });
+    expect(args).toEqual(expect.arrayContaining(['--tools', 'read,bash,edit,write,grep,find,ls,ask_user,codemode,mcp__rac__*']));
+    expect(args).not.toContain('--skill');
+    expect(env).toMatchObject({ RAC_ROLE: 'conductor' });
+  });
+
   it('names the policy only when Sandboxed, failing closed without a rendered one, and always the nonce', async () => {
     const cwd = await worktree();
     expect(piAdapter.launch({ cwd, sandboxed: false, nonce: 'n1' }).env).toEqual({ RAC_LAUNCH_NONCE: 'n1' });
@@ -46,5 +58,15 @@ describe('a Pi holder launch', () => {
     const processes = holderProcesses(windows, { pi: { program: process.execPath, args: [], env: { RAC_SANDBOX_POLICY: '', RAC_LAUNCH_NONCE: 'operator', KEEP: '1' }, launchable: true } }, async () => ({ 'sandbox.json': '/files/pi/sandbox.json' }));
     await processes.start({ id: 'a1', kind: 'pi', place: adhocScratchPlace(await worktree()), sandboxed: true, nonce: 'console' }, () => {});
     expect(launches[0]?.env).toEqual({ KEEP: '1', RAC_LAUNCH_NONCE: 'console', RAC_SANDBOX_POLICY: '/files/pi/sandbox.json' });
+  });
+});
+
+describe('the rendered Pi sandbox policy', () => {
+  it('denies commands the console\'s own listener and public origin, so none reaches its /mcp', async () => {
+    vi.stubEnv('RAC_ADAPTER_FILES_DIR', await worktree());
+    const sandbox = { allowedDomains: ['agents.example.com'], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
+    const launch = new LaunchService(testConfig({ listen: { host: '172.19.0.1', port: 8787 }, adapters: { pi: { program: process.execPath, args: [], env: {}, launchable: true, sandbox } } }));
+    const policy = JSON.parse(await readFile((await launch.adapterFiles('pi'))!['sandbox.json']!, 'utf8')) as { network: { deniedDomains: string[] } };
+    expect(policy.network.deniedDomains).toEqual(expect.arrayContaining(['agents.example.com', '172.19.0.1']));
   });
 });

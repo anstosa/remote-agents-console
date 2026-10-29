@@ -13,6 +13,7 @@ import { agentKinds, type AdapterConfigs, type AdapterLaunchConfig, type AgentKi
 import { instanceIconNames, type InstanceIcon } from '../instance-icon.js';
 import { isIP } from 'node:net';
 import { defaultDavoContext, defaultDavoName } from '../integrations/realtime/settings.js';
+import { supportedIntegrationScopes, type IntegrationScope } from '../integrations/auth/types.js';
 import { resolveReviewConfig, reviewConfigSchema, type ResolvedReviewConfig } from '../review-runs/config.js';
 import { agentModel } from '../launch/agent-choice.js';
 import { piEfforts } from '../transports/pi.js';
@@ -82,6 +83,15 @@ const serverName = z.string().trim().min(1).max(80).refine(value => !value.inclu
 // console shell-quotes them), so placeholders are literal; env is not for secrets.
 const adapterProgram = z.string().min(1).max(4096).startsWith('/', 'adapter program must be an absolute path').refine(value => !value.includes('\0'), 'NUL is forbidden');
 const adapterArgument = z.string().max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden');
+// the Conductor runs Pi, which must be enabled, on an Allowed model, in a directory Project; by
+// default it gets every scope but `admin:dangerous`
+function conductorConfig({ project, scopes, ...conductor }: z.output<typeof conductorSchema>, projects: readonly Project[], adapters: AdapterConfigs): ConductorConfig {
+  const pi = adapters.pi;
+  if (pi?.launchable !== true) throw new Error(`conductor: adapters.pi must be configured and launchable${pi?.unavailableReason === undefined ? '' : ` (${pi.unavailableReason})`}`);
+  if (!(pi.allowedModels ?? []).some(entry => entry.model === conductor.model)) throw new Error(`conductor: ${conductor.model} is not an Allowed model (adapters.pi.allowedModels)`);
+  if (!projects.some(candidate => candidate.id === project && candidate.mode === 'directory' && candidate.available)) throw new Error(`conductor: ${project} must name a directory Project`);
+  return { ...conductor, projectId: project, scopes: scopes ?? supportedIntegrationScopes.filter(scope => scope !== 'admin:dangerous') };
+}
 const adapterEnvName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u, 'invalid environment variable name');
 // reject whitespace-only update commands without normalizing meaningful bytes
 const adapterUpdateCommand = command.refine(value => value.trim().length > 0, 'update command cannot be blank');
@@ -120,6 +130,18 @@ const integrationFeatures = z.object({
   // accept legacy input while runtime derives federation from configured remotes
   multiInstance: z.object({ enabled: z.boolean().default(false) }).strict().default({})
 }).strict().default({});
+// The Conductor (ADR 0018): one always-running Sandboxed Agent in a directory Project, with the
+// console's MCP tools its scopes allow. Only Pi can host it so far.
+const conductorSchema = z.object({
+  kind: z.literal('pi'),
+  project: z.string().min(1).max(80),
+  model: agentModel,
+  effort: z.enum(piEfforts).optional(),
+  scopes: z.array(z.enum(supportedIntegrationScopes)).max(supportedIntegrationScopes.length).optional(),
+  maxWorkers: z.number().int().min(1).max(16).default(4),
+  maxSelfStartedTurnsPerHour: z.number().int().min(1).max(1_000).default(30),
+  scriptDeadlineMinutes: z.number().int().min(1).max(120).default(10)
+}).strict();
 export const sourceSchema = z.object({
   listen: z.object({ host: z.string(), port: z.number().int().min(1).max(65535) }).strict().default({ host: '127.0.0.1', port: 8787 }),
   name: serverName.default('Remote Agents'),
@@ -142,6 +164,7 @@ export const sourceSchema = z.object({
   adapters: adaptersSchema.default({}),
   sandbox: sandboxLists.optional(),
   integrations: integrationFeatures,
+  conductor: conductorSchema.optional(),
   googleCalendar: googleCalendarConfigSchema.default({}),
   // how the Review tour and the opt-in Code review run (ADR 0010); every field is optional
   review: reviewConfigSchema.optional(),
@@ -161,7 +184,9 @@ export type ConfigInput = z.input<typeof sourceSchema>;
 export type RemoteServer = { url: URL; name?: string; icon?: InstanceIcon };
 export type IntegrationConfig = z.output<typeof integrationFeatures>;
 export type DavoSettings = z.output<typeof davoSettingsSchema>;
-export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; buttons?: ButtonSlots; projects: Project[] };
+/** The Conductor as configured: its kind, directory Project, Allowed model and Effort, MCP scopes and limits. */
+export type ConductorConfig = { kind: 'pi'; projectId: string; model: string; effort?: string; scopes: IntegrationScope[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
+export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; buttons?: ButtonSlots; projects: Project[] };
 // how validation surfaces non-fatal facts: `warn` collects boot warnings (non-executable
 // programs, a crossed OMX/Codex program); `checkExecutables` runs the boot X_OK probe
 // and is skipped under the host bridge, where `program` is a host path the container
@@ -471,5 +496,6 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
     else { if (identities.has(project.identity)) throw new Error('duplicate project identity'); identities.add(project.identity); }
     projects.push(project);
   }
-  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), googleCalendar: parsed.googleCalendar, review, buttons: parsed.buttons, projects };
+  const conductor = parsed.conductor === undefined ? undefined : conductorConfig(parsed.conductor, projects, adapters);
+  return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), ...(conductor === undefined ? {} : { conductor }), googleCalendar: parsed.googleCalendar, review, buttons: parsed.buttons, projects };
 }

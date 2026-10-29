@@ -703,3 +703,30 @@ describe('review configuration', () => {
     await expect(validateConfig({ ...scratch, adapters: both, review: { extra: true } })).rejects.toThrow(/[Uu]nrecognized/);
   });
 });
+
+describe('Conductor configuration', () => {
+  const pi = { pi: { allowedModels: [{ model: 'openai/gpt-5.6', effort: 'medium' }, { model: 'openrouter/z/glm' }] } };
+  // a console whose `conductor` lives in a directory Project `home`, beside a repository Project `code`
+  const configured = async (conductor: Record<string, unknown>, adapters: Record<string, unknown> = pi) => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), 'rac-conductor-')));
+    dirs.push(home);
+    return { publicOrigin: 'https://agents.example.com', adapters, projects: [{ id: 'home', path: home }, { id: 'code', path: await gitRepo() }], conductor };
+  };
+
+  it('runs Pi in a directory Project on an Allowed model, with every scope but admin:dangerous by default', async () => {
+    const config = await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openrouter/z/glm' }));
+    expect(config.conductor).toEqual({ kind: 'pi', projectId: 'home', model: 'openrouter/z/glm', scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write'], maxWorkers: 4, maxSelfStartedTurnsPerHour: 30, scriptDeadlineMinutes: 10 });
+    const chosen = await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', effort: 'high', scopes: ['status:read'], maxWorkers: 2, maxSelfStartedTurnsPerHour: 5, scriptDeadlineMinutes: 3 }));
+    expect(chosen.conductor).toEqual({ kind: 'pi', projectId: 'home', model: 'openai/gpt-5.6', effort: 'high', scopes: ['status:read'], maxWorkers: 2, maxSelfStartedTurnsPerHour: 5, scriptDeadlineMinutes: 3 });
+    expect((await validateConfig({ publicOrigin: 'https://agents.example.com' })).conductor).toBeUndefined();
+  });
+
+  it('refuses another kind, a model that is not Allowed, a repository or unknown Project, an unknown scope, and Pi left unconfigured', async () => {
+    await expect(validateConfig(await configured({ kind: 'claude', project: 'home', model: 'openai/gpt-5.6' }))).rejects.toThrow();
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-4' }))).rejects.toThrow(/Allowed model/u);
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'code', model: 'openai/gpt-5.6' }))).rejects.toThrow(/directory Project/u);
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'nowhere', model: 'openai/gpt-5.6' }))).rejects.toThrow(/directory Project/u);
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', scopes: ['everything'] }))).rejects.toThrow();
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6' }, {}))).rejects.toThrow(/adapters\.pi/u);
+  });
+});

@@ -562,6 +562,8 @@ export class DiscoveryService {
   // the current snapshot, replaced wholesale on refresh and never mutated — consumers
   // (the ProjectProxy target map) memoize by array identity, so keep it that way
   worktreesNow(): Worktree[] { return this.worktreeSnapshot; }
+  /** The Places whose Workspace session the last scan found. */
+  workspacePlaces(): ReadonlySet<string> { return new Set(this.sessionMarks.values()); }
 
   // drop the Worktree and dashboard caches so the next read re-runs `git worktree list` and
   // rebuilds — called after a console add/remove and after a pin toggle. The epoch bump makes

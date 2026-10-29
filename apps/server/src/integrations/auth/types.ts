@@ -123,13 +123,18 @@ export type AccessAuthenticationRequest = {
   scopes?: readonly IntegrationScope[];
 };
 
+/**
+ * Who calls the gateway: an OAuth client, the Realtime voice assistant, or the Conductor (an Agent
+ * holding a console token, ADR 0018). `places` limits the Worktrees it may read to those it admits.
+ */
 export type IntegrationPrincipal = {
-  authentication: 'oauth' | 'realtime';
+  authentication: 'oauth' | 'realtime' | 'conductor';
   subjectId: string;
   audience: string;
   scopes: IntegrationScope[];
   clientId?: string;
   expiresAt?: number;
+  places?: (worktree: { id: string; projectId: string }) => boolean;
 };
 
 export type IntegrationAuditData = {
