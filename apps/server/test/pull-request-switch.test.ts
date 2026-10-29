@@ -113,7 +113,7 @@ function moveService(repository: Awaited<ReturnType<typeof createMoveRepository>
   const targetWorktree = { ...worktree, id: `cora:${repository.targetPath}`, path: repository.targetPath, identity: repository.targetPath };
   const sourceWorktree = { ...worktree, id: 'delta', projectId: 'cora', label: 'Delta', path: repository.sourcePath, identity: repository.sourcePath };
   const targetAgent = { ...agent, home: repository.targetPath, branch: 'main', attention: targetAttention };
-  const sourceAgent = { ...agent, id: 'agent-2', paneId: '%2', home: repository.sourcePath, branch: 'feature/draft', worktreeId: 'delta', attention: sourceAttention };
+  const sourceAgent = { ...agent, id: 'agent-2', pane: { ...agent.pane, paneId: '%2' }, home: repository.sourcePath, branch: 'feature/draft', worktreeId: 'delta', attention: sourceAttention };
   const discovery = {
     worktreesNow: () => [targetWorktree, sourceWorktree],
     refresh: async () => [targetAgent, sourceAgent],

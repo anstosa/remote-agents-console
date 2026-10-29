@@ -15,7 +15,7 @@ import { TicketStore } from './auth/tickets.js';
 import { DiscoveryService } from './discovery/service.js';
 import { adapterFor } from './adapters/registry.js';
 import { withQuestionShape } from './adapters/inline-questions.js';
-import { agentKinds, codexFamily, sameConversation, type Adapter, type AgentKind, type ConversationSummary, type InlineQuestion, type PaneSnapshot, type ResetSettling } from './adapters/types.js';
+import { agentKinds, codexFamily, sameConversation, type Adapter, type AgentKind, type ConversationSummary, type PaneSnapshot, type ShapedQuestion, type ResetSettling } from './adapters/types.js';
 import { TmuxCommandRegistry } from './tmux/command-registry.js';
 import { TmuxAdapter } from './tmux/adapter.js';
 import { maxPromptAttachmentBytes, PromptService, promptScope, type PromptAttachment } from './prompts/service.js';
@@ -36,7 +36,7 @@ import { PullRequestSwitchService } from './pull-requests/switch-service.js';
 import { NewTaskService } from './new-task/service.js';
 import { WorktreeManagementService } from './worktrees/management.js';
 import { agentAttentionState, AgentNotificationCoordinator, reviewNotification, scheduleNotification, type AgentNotificationContext } from './notifications.js';
-import { agentTmuxSession, isReviewRun, stackActions, worktreeAgents, type Agent, type Pane, type SocketRef, type StackAction, type TmuxAgent, type Worktree } from './domain/models.js';
+import { isReviewRun, paneTmuxSession, stackActions, worktreeAgents, type Agent, type Pane, type SocketRef, type StackAction, type TmuxAgent, type Worktree } from './domain/models.js';
 import { CommandCatalogService } from './commands/service.js';
 import { LatestViewportScheduler, PaneViewportCoordinator } from './logs/viewport-scheduler.js';
 import { boundedViewport } from './logs/viewport.js';
@@ -2678,8 +2678,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const protectedIds = new Set<string>();
     // retain only the newest pane for each protected target
     for (const label of protectedLabels) {
-      const candidates = dashboard.agents.filter(candidate => candidate.displayLabel === label);
-      const newest = candidates.sort((left, right) => Number(right.pane?.paneId.slice(1)) - Number(left.pane?.paneId.slice(1)))[0];
+      const candidates = dashboard.agents.filter((candidate): candidate is TmuxAgent => candidate.displayLabel === label && candidate.pane !== undefined);
+      const newest = candidates.sort((left, right) => Number(right.pane.paneId.slice(1)) - Number(left.pane.paneId.slice(1)))[0];
       // preserve one current advisor
       if (newest !== undefined) protectedIds.add(newest.id);
     }
@@ -3171,7 +3171,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const agent = (await discovery.dashboard(true)).agents.find(candidate => candidate.placeId === placeId);
     if (agent === undefined) return undefined;
     const target = await discovery.target(agent.id);
-    return target === undefined ? undefined : { socket: target.socket, session: agentTmuxSession(target.agent.pane) };
+    return target === undefined ? undefined : { socket: target.socket, session: paneTmuxSession(target.agent.pane) };
   };
   // shape one Worktree pane for the wire: its id, session, role/name markers (a Stack
   // process's pane is named for its process) and the busy flag for a Console shell, and
@@ -3630,7 +3630,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (agentTarget !== undefined) {
         agent = agentTarget.agent;
         socketRef = agentTarget.socket;
-        session = agentTmuxSession(agentTarget.agent.pane);
+        session = paneTmuxSession(agentTarget.agent.pane);
         pane = agentTarget.agent.pane.paneId;
         // the Agent's own pane by default; a requested pane must belong to its session
         if (typeof requestedPane === 'string' && requestedPane !== '') {
@@ -3738,7 +3738,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // question and Turn parsers; question/metadata go out only on change, at subscribe, and on
       // the on-demand request (Captures and the derive, ADR 0008)
       let lastParseInput: string | undefined;
-      let lastQuestion: InlineQuestion | undefined;
+      let lastQuestion: ShapedQuestion | undefined;
       let lastQuestionKey = '';
       let lastMetadataKey = '';
       let deriving = false;

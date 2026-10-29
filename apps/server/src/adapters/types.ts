@@ -48,10 +48,11 @@ export type Turn = { prompt?: string; text: string; rows?: number };
 // file, Claude's reported payload) is server-published and waits for the server to
 // stop reporting it. Not the same as the CONTEXT.md "Inline question" provenance.
 // descriptions parallel choices ('' where an option has none) and are not part of the id.
-// `field` and `pane` are the Transport-neutral shape (ADR 0015): the one answer the question takes,
-// and where a question drawn on a tmux pane is answered. Adapters fill `choices` and `pane`; the
-// tmux Transport derives `field` from the choices (`withQuestionShape`).
+// `field` is the Transport-neutral answer the question takes (ADR 0015) and `pane` where a question
+// drawn on a tmux pane is answered. Adapters fill `choices` and `pane`; every question sent to the
+// web is a ShapedQuestion, with `field` derived from the choices (`withQuestionShape`).
 export type InlineQuestion = { id: string; text: string; choices: string[]; descriptions?: string[]; source: 'structured' | 'parsed'; field?: QuestionField; pane?: QuestionPane };
+export type ShapedQuestion = InlineQuestion & { field: QuestionField };
 // one of the question's choices, or text: one line or several, prefilled or with a placeholder
 export type QuestionField = { kind: 'choice'; choices: string[]; descriptions?: string[] } | { kind: 'text'; multiline: boolean; prefill?: string; placeholder?: string };
 // selectedIndex is the live zero-based keyboard cursor, not part of the question id; rows maps

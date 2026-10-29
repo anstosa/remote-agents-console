@@ -599,8 +599,8 @@ describe('/ws/pane derive (Codex)', () => {
     // Transport-neutral shape: the choices as its answer field
     stream.setCapture('CHOOSE an option');
     stream.activity();
-    const shaped = { ...question, field: { kind: 'choice', choices: ['1. keep', '2. drop'] } };
-    await waitFor(() => conn.frames.some(frame => frame.type === 'question' && JSON.stringify(frame.question) === JSON.stringify(shaped)));
+    await waitFor(() => conn.frames.some(frame => frame.type === 'question' && frame.question !== null));
+    expect(conn.frames.find(frame => frame.type === 'question' && frame.question !== null)!.question).toEqual({ ...question, field: { kind: 'choice', choices: ['1. keep', '2. drop'] } });
 
     // an idle re-capture of the same pane must not run the parser again nor frame again
     const parsesAfter = parse.mock.calls.length;

@@ -1048,7 +1048,7 @@ describe('DiscoveryService dashboard', () => {
       const dashboard = await service.dashboard();
 
       // the title infers 'finished', but the pending question outranks it
-      expect(dashboard.agents[0]).toMatchObject({ kind: 'omx', attention: 'question', question: { id: inlineQuestionId('Deploy?', ['Yes', 'No']), text: 'Deploy?', choices: ['Yes', 'No'], source: 'structured', pane: { targetPaneId: '%9' } } });
+      expect(dashboard.agents[0]).toMatchObject({ kind: 'omx', attention: 'question', question: { id: inlineQuestionId('Deploy?', ['Yes', 'No']), text: 'Deploy?', choices: ['Yes', 'No'], field: { kind: 'choice', choices: ['Yes', 'No'] }, source: 'structured', pane: { targetPaneId: '%9' } } });
     } finally { await rm(workspace, { recursive: true, force: true }); }
   });
 

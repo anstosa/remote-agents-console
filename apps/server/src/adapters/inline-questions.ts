@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { InlineQuestion } from './types.js';
+import type { InlineQuestion, ShapedQuestion } from './types.js';
 
 /**
  * The identity every Inline question transport agrees on, shared by the three
@@ -17,7 +17,7 @@ export function inlineQuestionId(text: string, choices: readonly string[]): stri
 }
 
 /** A pane question with its Transport-neutral answer field: one of its choices. */
-export function withQuestionShape(question: InlineQuestion): InlineQuestion {
+export function withQuestionShape(question: InlineQuestion): ShapedQuestion {
   const { choices, descriptions } = question;
   return { ...question, field: { kind: 'choice', choices, ...(descriptions === undefined ? {} : { descriptions }) } };
 }

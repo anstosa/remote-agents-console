@@ -104,7 +104,7 @@ describe('interactive submit settle', () => {
       await expect(service.listQueued(agent.id)).resolves.toMatchObject([{ attachments: [{ name: 'image.png' }] }]);
       await expect(access(join(directory, 'node_modules'))).rejects.toThrow();
       // text-only prompts must still work when no attachment mapping is available
-      const textAgent = { ...agent, id: 'socket:%2', paneId: '%2' };
+      const textAgent = { ...agent, id: 'socket:%2', pane: { ...agent.pane, paneId: '%2' } };
       const textDiscovery = { worktreesNow: () => [], target: async () => ({ agent: textAgent, socket }) };
       const textService = new PromptService(textDiscovery as never, tmux as never, undefined, queue, undefined, undefined, undefined, { workspace: directory, hostWorkspace });
       await expect(textService.submit(textAgent.id, 'text-only prompt')).resolves.toBe(true);

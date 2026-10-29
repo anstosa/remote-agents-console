@@ -69,6 +69,8 @@ describe('native queued question activation', () => {
     await expect(service.answerQuestion(agent.id, 'structured-question', 0)).resolves.toBe(true);
     await expect(service.openQueuedQuestion(agent.id, banner, () => true)).resolves.toBe(false);
     expect(sendKeys).toHaveBeenCalledTimes(2);
+    // the answer goes to the renderer pane that draws the question, not the Agent's own
+    expect((sendKeys.mock.calls[1] as unknown[])[1]).toBe('%2');
   });
 
   // suppress repeats across viewers until the collapsed footer disappears
