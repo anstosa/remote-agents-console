@@ -110,6 +110,20 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('the holder in a W
     expect(await nextLine(third.lines, third.channel)).toBe('while away');
   });
 
+  it('tells a connection whose cursor fell out of the replay buffer how many lines it missed, and replays what it kept', async () => {
+    const { place, launch } = await workspace();
+    // a buffer of 16 bytes keeps the last two lines of four
+    const holder = await launch.openHolderWindow(place, 'agent-4', { ...echo(0), env: { RAC_HOLDER_REPLAY_BYTES: '16' } });
+    const writer = await connect(holder!.socket);
+    for (const line of ['line-1', 'line-2', 'line-3', 'line-4']) { writer.channel.send(line); expect(await nextLine(writer.lines, writer.channel)).toBe(line); }
+    writer.channel.close();
+
+    const late = await connect(holder!.socket, 1);
+    expect(late.dropped).toBe(1);
+    expect(await nextLine(late.lines, late.channel)).toBe('line-3');
+    expect(await nextLine(late.lines, late.channel)).toBe('line-4');
+  });
+
   it('keeps the window after its child exits, with the child\'s stderr, and ends the connection', async () => {
     const { place, launch, socketPath } = await workspace();
     const holder = await launch.openHolderWindow(place, 'agent-2', echo(0));

@@ -108,9 +108,9 @@ const finished = (toolName: string, args: unknown, result: unknown, failed: bool
  * A Conversation's transcript from its messages (`get_messages`): prompts (a prompt that follows
  * a tool's result was a steer), answers, thinking, tool calls with their results, and the end of
  * each prompt's Turn with its cost. A script's calls keep only their arguments and status, so
- * each shows that its result was not kept.
+ * each shows that its result was not kept. While a Turn is `running`, the last prompt's has no end yet.
  */
-export function piHistory(messages: readonly unknown[]): TranscriptItem[] {
+export function piHistory(messages: readonly unknown[], { running = false } = {}): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   const calls = new Map<string, { toolName: string; args: unknown; index: number }>();
   let open = false;
@@ -160,7 +160,7 @@ export function piHistory(messages: readonly unknown[]): TranscriptItem[] {
     }
     previous = message.role;
   }
-  settle();
+  if (!running) settle();
   return items;
 }
 
@@ -237,7 +237,7 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
   // a Conversation change always, so a new one starts empty
   const history = (always: boolean) => request({ type: 'get_messages' }).then(response => {
     const messages = isObject(response.data) && Array.isArray(response.data.messages) ? response.data.messages : undefined;
-    if (messages !== undefined && (always || messages.length > 0)) emit({ type: 'history', items: piHistory(messages) });
+    if (messages !== undefined && (always || messages.length > 0)) emit({ type: 'history', items: piHistory(messages, { running: working === true }) });
   });
   let current: ModelSetting | undefined;
   // report the Conversation and the model Pi is on now

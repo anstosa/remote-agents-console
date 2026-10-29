@@ -4,7 +4,8 @@
  *
  *   node holder.js <socket> -- <program> [args...]
  *
- * The child's output lines are numbered from 0, and the latest `replayBytes` of them are kept.
+ * The child's output lines are numbered from 0, and the latest `replayBytes` of them are kept
+ * (8 MiB, or `RAC_HOLDER_REPLAY_BYTES`).
  * A client's first line says how many it has read, `{"from":<n>}`; the holder answers
  * `{"holder":1,"pid":<child pid>,"from":<m>,"dropped":<m - n>}`, where `m` is the first line it
  * still has, replays every kept line from there, then passes the child's lines on as they come.
@@ -19,7 +20,7 @@ import { spawn } from 'node:child_process';
 import { chmodSync, rmSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 
-const replayBytes = 8 * 1024 * 1024;
+const replayBytes = Number(process.env.RAC_HOLDER_REPLAY_BYTES) > 0 ? Number(process.env.RAC_HOLDER_REPLAY_BYTES) : 8 * 1024 * 1024;
 const [socketPath, separator, program, ...args] = process.argv.slice(2);
 if (socketPath === undefined || separator !== '--' || program === undefined) {
   process.stderr.write('usage: holder <socket> -- <program> [args...]\n');

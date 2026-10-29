@@ -6,6 +6,17 @@ const usage = (total: number) => ({ input: 1000, output: 50, totalTokens: 1050, 
 const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] });
 
 describe('a Pi Conversation reloaded from its messages', () => {
+  it('leaves the last prompt\'s group open while its Turn still runs, as after a reattach mid-Turn', () => {
+    const messages = [user('Tidy the notes'), { role: 'assistant', content: [{ type: 'text', text: 'Done.' }], usage: usage(0.001), stopReason: 'stop' }, user('Reply slowly')];
+    expect(piHistory(messages, { running: true })).toEqual([
+      { id: 'h0', kind: 'message', role: 'user', text: 'Tidy the notes' },
+      { id: 'h1', kind: 'message', role: 'assistant', text: 'Done.' },
+      { id: 'h2', kind: 'settled', outcome: 'done', cost: 0.001, toolCalls: 0 },
+      { id: 'h3', kind: 'message', role: 'user', text: 'Reply slowly' }
+    ]);
+    expect(piHistory(messages).at(-1)).toMatchObject({ kind: 'settled' });
+  });
+
   it('groups each prompt with its steers, answers, thinking and tool calls, and ends it with its cost and calls', () => {
     const messages = [
       { role: 'system', content: '', sections: { preamble: 'You are an expert coding assistant' } },

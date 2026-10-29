@@ -11,7 +11,7 @@ import { adhocScratchPlace } from '../src/places/places.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { run } from '../src/tmux/command.js';
 import { interactiveShellName } from '../src/tmux/interactive-shell.js';
-import { holderProcesses } from '../src/transports/structured-agents.js';
+import { holderProcesses, type StructuredProcess, type StructuredProcesses } from '../src/transports/structured-agents.js';
 import type { StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
 import type { SocketRef } from '../src/domain/models.js';
 import { testConfig } from './helpers/config.js';
@@ -62,8 +62,28 @@ const tmuxSocketsWork = (() => {
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => undefined); });
 
+type Next = (type: StructuredEvent['type'], match?: (event: StructuredEvent) => boolean) => Promise<StructuredEvent>;
+// events collected in order, and a wait for the next of a type after the last one awaited, so
+// each wait moves forward in the stream (`describe` says what was running when it times out)
+function collector(describe: () => Promise<string | undefined>): { events: StructuredEvent[]; emit: (event: StructuredEvent) => void; next: Next } {
+  const events: StructuredEvent[] = [];
+  const waiters: Array<() => void> = [];
+  let seen = 0;
+  const next: Next = async (type, match = () => true) => {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const index = events.findIndex((event, at) => at >= seen && event.type === type && match(event));
+      if (index !== -1) { seen = index + 1; return events[index]!; }
+      await new Promise<void>(resolve => { waiters.push(resolve); setTimeout(resolve, 250); });
+    }
+    throw new Error(`no ${type} event within 30 s; saw ${JSON.stringify(events)}; holder pane: ${await describe()}`);
+  };
+  return { events, emit: event => { events.push(event); for (const waiter of waiters.splice(0)) waiter(); }, next };
+}
+
 // launch `client`'s CLI under the holder in a Workspace session, its events collected in order
-async function launched(client: ContractClient, toolCall?: NonNullable<Parameters<typeof stubProvider>[1]>['toolCall']): Promise<{ connection: StructuredConnection; events: StructuredEvent[]; home: string; next(type: StructuredEvent['type'], match?: (event: StructuredEvent) => boolean): Promise<StructuredEvent> }> {
+// (`env` reaches the holder and the CLI)
+async function launched(client: ContractClient, toolCall?: NonNullable<Parameters<typeof stubProvider>[1]>['toolCall'], env: Record<string, string> = {}): Promise<{ connection: StructuredConnection; events: StructuredEvent[]; home: string; next: Next; started: StructuredProcess; processes: StructuredProcesses; socketPath: string }> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-contract-')));
   const socketPath = join(root, 'tmux');
   const state = join(root, 'state');
@@ -76,25 +96,23 @@ async function launched(client: ContractClient, toolCall?: NonNullable<Parameter
   const socket: SocketRef = { fingerprint: 'work', path: socketPath, device: 0, inode: 0 };
   const launch = new LaunchService(testConfig(), socketFinder([socket]), new TmuxAdapter(), undefined, undefined, () => [], () => new Set(), async () => ({ socket, session: 'work' }), join(root, 'private'));
   const stub = await client.stub(provider.baseUrl, state);
-  const processes = holderProcesses(launch, { [client.adapter.kind]: { program: process.execPath, args: stub.args, env: stub.env, launchable: true } });
-  const events: StructuredEvent[] = [];
-  const waiters: Array<() => void> = [];
-  const started = await processes.start({ id: 'contract', kind: client.adapter.kind, place }, event => { events.push(event); for (const waiter of waiters.splice(0)) waiter(); });
+  const processes = holderProcesses(launch, { [client.adapter.kind]: { program: process.execPath, args: stub.args, env: { ...stub.env, ...env }, launchable: true } });
+  let started: StructuredProcess | undefined;
+  const { events, emit, next } = collector(async () => started === undefined ? undefined : await processes.stderr(started.holder));
+  started = await processes.start({ id: 'contract', kind: client.adapter.kind, place }, emit);
   expect(started).toBeDefined();
   cleanups.push(async () => { started!.connection.close(); await processes.stop(started!.holder, { kind: client.adapter.kind, home: root }); });
-  let seen = 0;
-  // the next event of `type` after the last one awaited, so each wait moves forward in the stream
-  const next = async (type: StructuredEvent['type'], match: (event: StructuredEvent) => boolean = () => true): Promise<StructuredEvent> => {
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      const index = events.findIndex((event, at) => at >= seen && event.type === type && match(event));
-      if (index !== -1) { seen = index + 1; return events[index]!; }
-      await new Promise<void>(resolve => { waiters.push(resolve); setTimeout(resolve, 250); });
-    }
-    throw new Error(`no ${type} event within 30 s; saw ${JSON.stringify(events)}; holder pane: ${await processes.stderr(started!.holder)}`);
-  };
-  return { connection: started!.connection, events, home: root, next };
+  return { connection: started!.connection, events, home: root, next, started: started!, processes, socketPath };
 }
+
+// reconnect to a launched process as a console that restarted would, from the lines read through its last idle point
+async function reattached(launch: Awaited<ReturnType<typeof launched>>, client: ContractClient, read: number) {
+  const { events, emit, next } = collector(async () => await launch.processes.stderr(launch.started.holder));
+  const attached = await launch.processes.attach({ ...launch.started.holder, read }, client.adapter.kind, emit);
+  expect(attached).toBeDefined();
+  return { connection: attached!.connection, events, next };
+}
+const running = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the $name protocol client', client => {
   beforeEach(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); vi.stubEnv('RAC_INTERACTIVE_SHELL', loginShell!); });
@@ -231,4 +249,58 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(events).toContainEqual({ type: 'transcript', item: expect.objectContaining({ id: toolCallId, kind: 'tool', name: 'Ask', summary: '', state: 'done', result: 'blue' }) });
     expect(await connection.answer(asked.question.id, 0)).toBe(false);
   }, 60_000);
+
+  it('reconnects after the console\'s connection drops: the holder replays the Turn in flight, which completes', async () => {
+    const launch = await launched(client);
+    await launch.next('report');
+    const idle = launch.started.cursor!();
+    expect(await launch.connection.deliver('Reply slowly')).toBe('started');
+    await launch.next('turn', event => event.type === 'turn' && event.turn.type === 'started');
+    launch.connection.close();
+
+    const again = await reattached(launch, client, idle);
+    expect(again.events.some(event => event.type === 'report')).toBe(false);
+    expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'started' } });
+    expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } });
+    // it read the Conversation afresh, as it never heard the launch
+    expect(again.events).toContainEqual({ type: 'conversation', id: expect.any(String) });
+    // the reconnected client drives the Agent on
+    expect(await again.connection.deliver('Say hello')).toBe('started');
+    expect(await again.next('turn', event => event.type === 'turn' && event.turn.type === 'settled')).toBeDefined();
+  }, 60_000);
+
+  it('after a replay that overflowed, resyncs: Pi\'s state says it works, the Turn settles, and a question may be unseen', async () => {
+    // a replay buffer of one line: a reconnect from the launch report has lost lines
+    const launch = await launched(client, undefined, { RAC_HOLDER_REPLAY_BYTES: '1' });
+    await launch.next('report');
+    expect(await launch.connection.deliver('Reply slowly')).toBe('started');
+    await launch.next('turn', event => event.type === 'turn' && event.turn.type === 'started');
+    launch.connection.close();
+
+    const again = await reattached(launch, client, 0);
+    expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'started' } });
+    expect(await again.next('transcript', event => event.type === 'transcript' && event.item.kind === 'notice')).toMatchObject({ item: { tone: 'warning', text: expect.stringContaining('question') } });
+    expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } });
+  }, 60_000);
+
+  it('reports its process exiting, killed or its window closed by hand, and Close stops the process and removes the window', async () => {
+    const killed = await launched(client);
+    await killed.next('report');
+    process.kill(killed.started.holder.pid!, 'SIGKILL');
+    expect(await killed.next('exited')).toEqual({ type: 'exited' });
+    expect(await killed.processes.stderr(killed.started.holder)).toContain('exited on SIGKILL');
+
+    const byHand = await launched(client);
+    await byHand.next('report');
+    expect((await run(tmux, ['-S', byHand.socketPath, 'kill-window', '-t', byHand.started.holder.pane])).code).toBe(0);
+    expect(await byHand.next('exited')).toEqual({ type: 'exited' });
+
+    const closed = await launched(client);
+    await closed.next('report');
+    const pid = closed.started.holder.pid!;
+    await closed.processes.stop(closed.started.holder, { kind: client.adapter.kind, home: closed.home });
+    expect(running(pid)).toBe(false);
+    expect(await closed.processes.stderr(closed.started.holder)).toBeUndefined();
+    expect(await closed.next('exited')).toEqual({ type: 'exited' });
+  }, 90_000);
 });
