@@ -5,6 +5,7 @@ import type { ReviewTourCapability, StoredReviewTourSummary } from '../review-to
 import type { CodeReviewCapability } from '../code-review/contracts.js';
 import type { KeysConfig } from '../config/keys.js';
 import type { ButtonCatalog } from '../button-actions/catalog.js';
+import type { WatchSummary } from '../watches/service.js';
 
 // one Worktree on the wire, augmented with the per-Worktree state the loader adds:
 // its stack controls and its resolved Launch profile
@@ -14,7 +15,8 @@ export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'>
   // menu without re-deriving it (a running agent's is its worktree's; a scratch agent's
   // is `scratchLaunch`); `scratchLaunch` is the Scratch group's resolution.
   // completionId stays stable from pending detection through unread publication
-  agents: Array<Agent & { unread: boolean; completionId?: string; queuedPromptCount: number; stack?: StackState; launch?: LaunchResolution }>;
+  // `watches`: the Watches the Agent set (ADR 0019)
+  agents: Array<Agent & { unread: boolean; completionId?: string; queuedPromptCount: number; stack?: StackState; launch?: LaunchResolution; watches?: WatchSummary[] }>;
   // a non-git `directory` Project carries its own resolved Launch profile so the web renders
   // a Project-level Launch button (it has no Worktrees to launch through); omitted otherwise
   projects: Array<Omit<DashboardProject, 'worktrees'> & { worktrees: PayloadWorktree[]; launch?: LaunchResolution }>;

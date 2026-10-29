@@ -529,6 +529,16 @@ The Conductor is one always-running Pi Agent that can act on the console itself,
 - A Schedule may target the Conductor (the target picker offers it while one runs). A Run queues the Note's text to it as a labelled "scheduled run" and is recorded `delivered`; it launches no Agent.
 - In its transcript, reports and Runs are labelled rows, and another Agent's answer inside a report is shown as plain text in a box marked untrusted.
 
+**Watches.** Nothing wakes the Conductor but you, reports, its Schedules and the Watches it sets itself. Each change a Watch sees reaches it once, as a queued prompt starting `[RAC event] Watch <id> #<n>`, and counts against `maxSelfStartedTurnsPerHour` like a report.
+
+- `watch_pull_request` (a Worktree, which names the repository, and a number): its checks settling (all passed, or failed) on each new head, a new unresolved review thread, a merge conflict appearing, and it being merged or closed, which ends the Watch.
+- `watch_process` (a Worktree and one of its Stack processes): each time the process exits, with its status and log path.
+- `watch_review_requests` (a Worktree, naming its repository): a pull request requesting a review from your own `gh` user, first or again; a request to one of your teams does not count. The role prompt tells it to set this only when you ask.
+- `watch_command` (a command and a description): the console runs the command in the Conductor's folder under its sandbox (its write scope, the network allowlist, the allowlisted environment), in a window of its Workspace under the holder. The lines it prints to stdout within 200 ms are one event, shown to it as untrusted output, and its exit is the last. More than 20 events in a minute stops it, with an event saying so. It keeps running across console restarts, and starts again after a reboot. It needs `stack:operate`; the other Watches need `status:read`.
+- The pull request and review-request Watches read GitHub once a minute with the console's GitHub token (`RAC_GITHUB_TOKEN`, else `gh`'s login). A Watch takes what it sees when it is set as its starting point; the tool answers that state, and only later changes are events.
+- Watches belong to the Conductor, not its Conversation: they survive New Conversation, restarts, deploys and reboots. The console stores each with the last state it saw (`.data/watches.json`, or `RAC_WATCHES_FILE`), so a change during a deploy is told once the console is back, and nothing is told twice. Output a command printed after the console stopped and before it exited during the same deploy is lost; its exit is still told.
+- `list_watches` and `unwatch` manage them; it may keep 50. The Conductor's header shows a Watches button with the count, listing each Watch with Remove, which also stops a command Watch's command. When the Conductor is turned off, its Watches go too.
+
 **Why only Pi.** The console can arm and confirm Pi's sandbox itself, and hold the token inside Pi's process where commands cannot read it. It cannot see whether Claude's or Codex's own sandbox is on, and an Agent whose commands are unconfined could read another process's token from `/proc` or drive any pane. So only Pi can be the Conductor, and it can spawn only Sandboxed Pi workers.
 
 ## Reviews

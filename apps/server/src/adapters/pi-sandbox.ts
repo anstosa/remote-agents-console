@@ -1,7 +1,9 @@
-import { existsSync, lstatSync, readlinkSync, realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gitOverrideEnv } from '../git/overrides.js';
 import type { SandboxSettings } from './types.js';
 
 /**
@@ -85,6 +87,31 @@ export function sessionPolicy(policy: SandboxPolicy, session: SessionPaths): San
     env: policy.env,
     repositories: policy.repositories
   };
+}
+
+/**
+ * The checkout's git directory and git's common directory (the same one outside a linked Worktree).
+ * What the policy protects in a repository's own git directory must exist to be protected in place
+ * (a deny on a missing path leaves a placeholder that git stumbles on), so it is made: `.` is the
+ * `commondir` git takes when there is none, and the folders are empty.
+ */
+export function sessionGit(cwd: string): Pick<SessionPaths, 'git'> {
+  let dirs: string[];
+  try {
+    dirs = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], { cwd, env: { ...process.env, ...gitOverrideEnv() }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim().split('\n');
+  } catch { return {}; }
+  const [dir, commonDir] = dirs;
+  if (dir === undefined || dir === '' || commonDir === undefined || commonDir === '') return {};
+  if (dir === commonDir) {
+    if (!existsSync(join(dir, 'commondir'))) writeFileSync(join(dir, 'commondir'), '.\n', { flag: 'wx' });
+    for (const folder of ['hooks', 'info', 'modules', 'worktrees', 'remotes', 'branches']) mkdirSync(join(dir, folder), { recursive: true });
+  }
+  return { git: { dir, commonDir } };
+}
+/** The socket of the tmux server a process runs in (`TMUX` is `<socket>,<pid>,<session>`). */
+export function sessionTmuxSocket(env: NodeJS.ProcessEnv): Pick<SessionPaths, 'tmuxSocket'> {
+  const socket = env.TMUX?.split(',')[0];
+  return socket === undefined || socket === '' ? {} : { tmuxSocket: socket };
 }
 
 const expandHome = (path: string): string => path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path;

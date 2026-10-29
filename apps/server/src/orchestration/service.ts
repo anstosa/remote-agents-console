@@ -16,6 +16,10 @@ import type { WorkspaceFileService, WorkspaceFilePreview } from '../workspace-fi
 import { configuredWorktreeForWorkspace, projectIdOf, worktreeById } from '../workspaces/resolver.js';
 import { limitText, redactIntegrationText } from '../integrations/text.js';
 import { processActions, type StackState, type WorktreeCommandService } from '../worktree-commands/service.js';
+import { declaredProcesses } from '../domain/stack-processes.js';
+import { GithubRequestError, type GithubRepository } from '../pull-requests/github.js';
+import { originRepository } from '../watches/github.js';
+import type { WatchRefusal, Watches } from '../watches/service.js';
 import type {
   AgentStatusV1,
   AnswerQuestionInputV1,
@@ -96,6 +100,8 @@ export type OrchestrationDependencies = {
   spawnWorker?: (placeId: string, conductor: string, model?: string) => Promise<string | 'not-allowed' | 'at-capacity' | undefined>;
   /** The Notes of a Place (its notes key, the store, deletion and a Schedule aimed at the Conductor), and telling the web they changed. */
   notes?: NoteFacade;
+  /** The Watches the Conductor sets (ADR 0019). */
+  watches?: Pick<Watches, 'watchPullRequest' | 'watchProcess' | 'watchReviewRequests' | 'watchCommand' | 'list' | 'remove'>;
 };
 type NoteFacade = {
   key: (placeId: string) => Promise<string | undefined>;
@@ -701,6 +707,78 @@ export class OrchestrationService {
       if (spawned === 'at-capacity') return failure('conflict', 'You already have your most live workers: close one first.');
       return spawned === undefined ? failure('operation_failed', 'The worker could not be started.', true) : success({ agent_id: spawned });
     });
+  }
+
+  // the Conductor and its Watches, or why these operations are not offered
+  private watching(): { owner: string; watches: NonNullable<OrchestrationDependencies['watches']> } | undefined {
+    const { conductor, watches } = this.dependencies;
+    return conductor === undefined || watches === undefined ? undefined : { owner: conductor, watches };
+  }
+
+  // a Watch set, or the reason it was not; GitHub's own failure is said as GitHub said it
+  private async watched<T extends object>(work: () => Promise<T | WatchRefusal>): Promise<OrchestrationResult<T>> {
+    return await this.operation(async () => {
+      try {
+        const result = await work();
+        return 'refused' in result ? failure('conflict', result.refused) : success(result);
+      } catch (error) {
+        if (error instanceof GithubRequestError) return failure('unavailable', error.message, error.kind === 'transient');
+        throw error;
+      }
+    });
+  }
+
+  // the GitHub repository a Worktree in scope pushes to, or why there is none
+  private async repositoryAt(worktreeId: string): Promise<GithubRepository | OrchestrationResult<never>> {
+    if (!validIdentifier(worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
+    const worktree = this.worktree(worktreeId);
+    if (worktree === undefined) return failure('not_found', 'Worktree not found.');
+    return await originRepository(worktree.path) ?? failure('invalid_request', 'The worktree has no GitHub origin.');
+  }
+
+  async watchPullRequest(input: { worktreeId: string; number: number }): Promise<OrchestrationResult<unknown>> {
+    const watching = this.watching();
+    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    const repository = await this.repositoryAt(input.worktreeId);
+    if ('ok' in repository) return repository;
+    return await this.watched(() => watching.watches.watchPullRequest(watching.owner, repository, input.number));
+  }
+
+  async watchReviewRequests(worktreeId: string): Promise<OrchestrationResult<unknown>> {
+    const watching = this.watching();
+    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    const repository = await this.repositoryAt(worktreeId);
+    if ('ok' in repository) return repository;
+    return await this.watched(() => watching.watches.watchReviewRequests(watching.owner, repository));
+  }
+
+  async watchProcess(input: { worktreeId: string; process: string }): Promise<OrchestrationResult<unknown>> {
+    const watching = this.watching();
+    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    if (!validIdentifier(input.worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
+    const worktree = this.worktree(input.worktreeId);
+    if (worktree === undefined) return failure('not_found', 'Worktree not found.');
+    if (!declaredProcesses(worktree.commands).some(process => process.name === input.process)) return failure('not_found', 'The worktree declares no such Stack process.');
+    return await this.watched(() => watching.watches.watchProcess(watching.owner, worktree.id, input.process, worktree.label));
+  }
+
+  async watchCommand(input: { command: string; description: string }): Promise<OrchestrationResult<unknown>> {
+    const watching = this.watching();
+    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    return await this.watched(() => watching.watches.watchCommand(watching.owner, input.command, input.description));
+  }
+
+  async listWatches(): Promise<OrchestrationResult<unknown>> {
+    const watching = this.watching();
+    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    return await this.operation(async () => success({ watches: (await watching.watches.list(watching.owner)).map(({ id, kind, description, createdAt }) => ({ watch_id: id, kind, description, created_at: createdAt })) }));
+  }
+
+  async unwatch(watchId: string): Promise<OrchestrationResult<{ removed: true }>> {
+    const watching = this.watching();
+    if (watching === undefined) return failure('unavailable', 'Only the Conductor sets Watches.');
+    if (!validIdentifier(watchId)) return failure('invalid_request', 'Invalid watch identifier.');
+    return await this.operation(async () => await watching.watches.remove(watching.owner, watchId) ? success({ removed: true as const }) : failure('not_found', 'Watch not found.'));
   }
 
   // close one worker the Conductor spawned, never another Agent; its queue becomes Notes

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -17,6 +18,8 @@ import { WorktreeNoteService } from '../src/notes/service.js';
 import type { AllowedModel } from '../src/adapters/types.js';
 import type { ConductorConfig, ValidatedConfig } from '../src/config/schema.js';
 import { piAdapter } from '../src/adapters/pi.js';
+import type { CommandWindows } from '../src/watches/service.js';
+import type { Project } from '../src/domain/models.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject } from './helpers/config.js';
 import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
@@ -114,10 +117,10 @@ async function integrationFiles(): Promise<void> {
 // a console with one Project whose only Worktree is a temporary folder, and the Scratch folder beside it
 // (`linked` adds a linked Worktree beside it; `deps` replace the app's own services)
 // (`conductor` configures the Conductor in a directory Project `home` beside it, on `openai/gpt-5.6`)
-async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { reportTimeoutMs?: number; allowedModels?: AllowedModel[]; linked?: boolean; deps?: Record<string, unknown>; config?: Partial<ValidatedConfig>; conductor?: Partial<ConductorConfig> } = {}) {
+async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { reportTimeoutMs?: number; allowedModels?: AllowedModel[]; linked?: boolean; deps?: Record<string, unknown>; config?: Partial<ValidatedConfig>; conductor?: Partial<ConductorConfig>; project?: Partial<Project> } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-structured-')));
   dirs.push(root);
-  const project = testProject({ path: join(root, 'repo') });
+  const project = testProject({ path: join(root, 'repo'), ...options.project });
   const home = join(root, 'home');
   const allowed = options.allowedModels ?? (options.conductor === undefined ? [] : [{ model: 'openai/gpt-5.6' }]);
   const conductor: ConductorConfig | undefined = options.conductor === undefined ? undefined : { kind: 'pi', projectId: 'home', model: 'openai/gpt-5.6', scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write', 'agents:spawn', 'notes:write'], maxWorkers: 4, maxSelfStartedTurnsPerHour: 30, scriptDeadlineMinutes: 10, ...options.conductor };
@@ -129,6 +132,7 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
   // the console as it starts, over the stores in `root`, driving its structured Agents through `processes`
   const start = async (processes: StructuredProcesses, changed: Partial<ValidatedConfig> = {}) => {
     vi.stubEnv('RAC_DISPATCHES_FILE', join(root, 'dispatches.json'));
+    vi.stubEnv('RAC_WATCHES_FILE', join(root, 'watches.json'));
     const structuredAgents = new StructuredAgents(processes, { file: join(root, 'structured-agents.json'), allowedModels: () => allowed, ...(options.reportTimeoutMs === undefined ? {} : { reportTimeoutMs: options.reportTimeoutMs }) });
     const app = await buildApp({ ...config, ...changed }, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents, promptHistory: new PromptHistoryService(join(root, 'history.json')), queuedPrompts: new QueuedPromptService(join(root, 'queue.json')), notes: new WorktreeNoteService(join(root, 'notes.json')), ...options.deps });
     const headers = await authenticatedHeaders(app);
@@ -1852,6 +1856,264 @@ describe('the Conductor\'s dispatches', () => {
     expect(spawned.map(result => result.ok).sort()).toEqual([false, true]);
     expect(spawned.find(result => !result.ok)).toMatchObject({ error: { code: 'conflict' } });
     expect(fake.launches.filter(launch => launch.role === undefined)).toHaveLength(1);
+    await app.close();
+  });
+});
+
+describe('the Conductor\'s Watches', () => {
+  // GitHub as a test scripts it: one pull request (#7 in octo/repo) and the review requests naming
+  // the token's user `me`, answered to the GraphQL queries Watches send
+  function fakeGithub() {
+    const pull = { state: 'OPEN', mergeable: 'MERGEABLE', head: 'a'.repeat(40), rollup: 'PENDING' as string | undefined, threads: [] as Array<{ id: string; resolved: boolean; author: string }> };
+    const requests: Array<{ number: number; events: Array<{ id: string; login: string }> }> = [];
+    const request = async (_url: string, init?: RequestInit) => {
+      const { query } = JSON.parse(String(init?.body)) as { query: string };
+      const data = query.includes('search(')
+        ? { viewer: { login: 'me' }, search: { nodes: requests.map(({ number, events }) => ({ number, url: `https://github.com/octo/repo/pull/${number}`, timelineItems: { nodes: events.map(({ id, login }) => ({ id, requestedReviewer: { login } })) } })) } }
+        : { repository: { pullRequest: { state: pull.state, mergeable: pull.mergeable, url: 'https://github.com/octo/repo/pull/7', headRefOid: pull.head, commits: { nodes: [{ commit: { statusCheckRollup: pull.rollup === undefined ? null : { state: pull.rollup } } }] }, reviewThreads: { nodes: pull.threads.map(({ id, resolved, author }) => ({ id, isResolved: resolved, isOutdated: false, comments: { nodes: [{ author: { login: author } }] } })) } } } };
+      return { ok: true, status: 200, json: async () => ({ data }) };
+    };
+    return { pull, requests, request };
+  }
+
+  // command windows as a test scripts them, on a tmux server that outlives each console: each
+  // opened window is a pane whose command prints lines and exits when the test says, and every
+  // connection is recorded with the line it reads from
+  function fakeWindows() {
+    const opened: Array<{ watchId: string; command: string; kind: string; home: string; pane: string }> = [];
+    const connects: Array<{ pane: string; from: number }> = [];
+    const closed: string[] = [];
+    const status = new Map<string, { dead: boolean; status?: number }>();
+    let line: (text: string) => void = () => {};
+    let close: () => void = () => {};
+    const windows: CommandWindows = {
+      open: async (place, watchId, command, kind) => { const pane = `%${opened.length + 1}`; opened.push({ watchId, command, kind, home: place.home, pane }); status.set(pane, { dead: false }); return { agentId: watchId, socket: `/tmp/${watchId}.sock`, pane }; },
+      connect: async (holder, from) => { connects.push({ pane: holder.pane, from }); return { from, channel: { send: () => {}, onLine: listener => { line = listener; }, onClose: listener => { close = listener; }, close: () => {} } }; },
+      status: async holder => status.get(holder.pane),
+      close: async holder => { closed.push(holder.pane); status.delete(holder.pane); }
+    };
+    return { windows, opened, connects, closed, print: (...lines: string[]) => { for (const text of lines) line(text); }, exit: (pane: string, code: number) => { status.set(pane, { dead: true, status: code }); close(); }, vanish: (pane: string) => { status.delete(pane); } };
+  }
+
+  // every event a console told the Conductor: the Turns its process was given and the prompts still queued for it
+  const eventsTo = async (console: { app: Awaited<ReturnType<typeof consoleWith>>['app']; headers: Record<string, string> }, conductor: string, fake: ReturnType<typeof fakeAgent>): Promise<string[]> => [...fake.delivered, ...(await console.app.inject({ method: 'GET', url: `/api/agents/${conductor}/queued-prompts`, headers: console.headers })).json().prompts.map((prompt: { text: string }) => prompt.text)].filter((text: string) => text.startsWith('[RAC event]'));
+
+  // a console whose Conductor is live, its Project's Worktree a git checkout of octo/repo with a
+  // `dev` Stack process; `call` runs one of the Conductor's tools
+  async function watching(fake: ReturnType<typeof fakeAgent>, { github = fakeGithub(), windows = fakeWindows(), deps = {} as Record<string, unknown>, conductor: configured = {} as Partial<ConductorConfig> } = {}) {
+    await integrationFiles();
+    vi.stubEnv('RAC_GITHUB_TOKEN', 'github-token');
+    const console = await consoleWith(fake, { conductor: configured, project: { commands: { processes: { dev: 'pnpm dev' } } }, deps: { githubRequest: github.request, watchCommands: windows.windows, ...deps } });
+    const repo = join(console.root, 'repo');
+    execFileSync('git', ['init', '-q', repo]);
+    execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/octo/repo.git']);
+    await console.app.conductor.start();
+    const dashboard = async () => (await console.app.inject({ method: 'GET', url: '/api/dashboard', headers: console.headers })).json();
+    const conductor = (await dashboard()).agents.find((agent: { structured?: { role?: string } }) => agent.structured?.role === 'conductor').id as string;
+    let requests = 0;
+    const call = async (name: string, args: Record<string, unknown>, mutation = true) => (await console.app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${fake.grants.at(-1)!.token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { ...args, ...(mutation ? { request_id: `request-${requests += 1}-of-test` } : {}) } } } })).json().result.structuredContent;
+    const worktree = (await dashboard()).projects.find((project: { id: string }) => project.id !== 'home').worktrees[0].id as string;
+    // the next console over the same stores, the Conductor reattached and its Watches started
+    const deploy = async (next: ReturnType<typeof fakeAgent>) => {
+      const deployed = await console.restart(next);
+      await deployed.reattached;
+      await deployed.app.conductor.start();
+      await deployed.app.watches.start();
+      return { ...deployed, told: () => eventsTo(deployed, conductor, next) };
+    };
+    return { ...console, conductor, dashboard, call, worktree, github, windows, repo, deploy, told: () => eventsTo(console, conductor, fake) };
+  }
+
+  it('watches a pull request: settled checks and a new thread are one event, nothing repeats, and merging ends it', async () => {
+    const fake = fakeAgent();
+    const { app, call, worktree, told, github, dashboard, conductor } = await watching(fake);
+    const set = await call('watch_pull_request', { worktree_id: worktree, number: 7 });
+    expect(set).toMatchObject({ ok: true, data: { watch_id: expect.stringMatching(/^watch-/u), state: { checks: 'pending', merge_conflict: false, unresolved_threads: 0 } } });
+    const id = set.data.watch_id as string;
+    expect((await call('list_watches', {}, false)).data.watches).toEqual([expect.objectContaining({ watch_id: id, kind: 'pull_request', description: 'Pull request octo/repo#7' })]);
+    expect((await dashboard()).agents.find((agent: { id: string }) => agent.id === conductor).watches).toEqual([expect.objectContaining({ id, kind: 'pull_request' })]);
+
+    await app.watches.check();
+    expect(await told()).toEqual([]);
+    github.pull.rollup = 'FAILURE';
+    github.pull.threads.push({ id: 'T1', resolved: false, author: 'alice' }, { id: 'T0', resolved: true, author: 'bob' });
+    await app.watches.check();
+    await app.watches.check();
+    expect(await told()).toEqual([`[RAC event] Watch ${id} #1 (Pull request octo/repo#7): its checks failed on aaaaaaaaaaaa; a new unresolved review thread from alice. https://github.com/octo/repo/pull/7`]);
+    // a conflict, and checks passing on a new head
+    github.pull.mergeable = 'CONFLICTING';
+    github.pull.head = 'b'.repeat(40);
+    github.pull.rollup = 'SUCCESS';
+    await app.watches.check();
+    expect((await told())[1]).toContain('its checks all passed on bbbbbbbbbbbb; a merge conflict appeared');
+    github.pull.state = 'MERGED';
+    await app.watches.check();
+    expect((await told())[2]).toContain('it was merged, so this Watch ends');
+    expect(await told()).toHaveLength(3);
+    expect((await call('list_watches', {}, false)).data.watches).toEqual([]);
+    // a pull request already merged is not watched
+    expect(await call('watch_pull_request', { worktree_id: worktree, number: 7 })).toMatchObject({ ok: false, error: { code: 'conflict' } });
+    await app.close();
+  });
+
+  it('keeps a Watch and the last state it saw across deploys: a change made while the console was down is told once, and nothing is told twice', async () => {
+    const fake = fakeAgent();
+    const { call, worktree, github, deploy } = await watching(fake);
+    const id = (await call('watch_pull_request', { worktree_id: worktree, number: 7 })).data.watch_id as string;
+    // the checks fail while no console looks
+    github.pull.rollup = 'FAILURE';
+    const deployed = await deploy(fakeAgent());
+    expect(await deployed.told()).toEqual([expect.stringContaining(`Watch ${id} #1 (Pull request octo/repo#7): its checks failed`)]);
+    await deployed.app.watches.check();
+    expect(await deployed.told()).toHaveLength(1);
+
+    const redeployed = await deploy(fakeAgent());
+    github.pull.threads.push({ id: 'T9', resolved: false, author: 'carol' });
+    await redeployed.app.watches.check();
+    // the first still waits in its queue (the Conductor has not settled since the deploy), told once
+    expect(await redeployed.told()).toEqual([expect.stringContaining(`Watch ${id} #1 `), expect.stringContaining(`Watch ${id} #2 (Pull request octo/repo#7): a new unresolved review thread from carol`)]);
+    await redeployed.app.close();
+  });
+
+  it('watches review requests to the operator: a first request and a re-request are told, another user\'s are not', async () => {
+    const fake = fakeAgent();
+    const { app, call, worktree, told, github } = await watching(fake);
+    github.requests.push({ number: 3, events: [{ id: 'RR1', login: 'me' }] });
+    const set = await call('watch_review_requests', { worktree_id: worktree });
+    expect(set).toMatchObject({ ok: true, data: { requested: [{ number: 3, url: 'https://github.com/octo/repo/pull/3' }] } });
+    const id = set.data.watch_id as string;
+    await app.watches.check();
+    expect(await told()).toEqual([]);
+
+    github.requests.push({ number: 5, events: [{ id: 'RR2', login: 'someone-else' }, { id: 'RR3', login: 'me' }] });
+    await app.watches.check();
+    expect(await told()).toEqual([`[RAC event] Watch ${id} #1 (Review requests in octo/repo): #5 requests your review: https://github.com/octo/repo/pull/5`]);
+    // reviewed (no longer requested), then requested again
+    github.requests.splice(0, 1);
+    await app.watches.check();
+    github.requests.push({ number: 3, events: [{ id: 'RR1', login: 'me' }, { id: 'RR4', login: 'me' }] });
+    await app.watches.check();
+    await app.watches.check();
+    expect(await told()).toEqual([expect.any(String), `[RAC event] Watch ${id} #2 (Review requests in octo/repo): #3 re-requests your review: https://github.com/octo/repo/pull/3`]);
+    await app.close();
+  });
+
+  it('watches a Stack process and tells each exit with its status and log, one during a deploy too', async () => {
+    // tmux as the Stack processes read it: one `dev` window, live or dead with a status
+    const tmuxState = await mkdtemp(join(tmpdir(), 'rac-watch-tmux-'));
+    dirs.push(tmuxState);
+    const panes = join(tmuxState, 'panes.txt');
+    const tmux = join(tmuxState, 'tmux');
+    await writeFile(panes, '');
+    await writeFile(tmux, `#!/bin/sh\ncase "$*" in *list-panes*) cat '${panes}';; *) exit 1;; esac\n`, { mode: 0o755 });
+    vi.stubEnv('RAC_TMUX_BIN', tmux);
+    const fake = fakeAgent();
+    const { call, worktree, told, repo, dashboard, deploy } = await watching(fake);
+    const pane = (dead: boolean, status = '') => writeFile(panes, `$1\t@1\t%5\t${dead ? 1 : 0}\t${status}\t\tprocess\tdev\t${repo}\n`);
+    // where a Start writes its log
+    await mkdir(join(repo, '.git', 'rac', 'processes'), { recursive: true });
+    await pane(false);
+    await dashboard();
+    const set = await call('watch_process', { worktree_id: worktree, process: 'dev' });
+    expect(set).toMatchObject({ ok: true, data: { state: 'running' } });
+    expect(await call('watch_process', { worktree_id: worktree, process: 'nope' })).toMatchObject({ ok: false, error: { code: 'not_found' } });
+    const id = set.data.watch_id as string;
+
+    await pane(true, '3');
+    await dashboard();
+    await vi.waitFor(async () => expect(await told()).toEqual([expect.stringContaining(`[RAC event] Watch ${id} #1 (Stack process dev in `)]));
+    expect((await told())[0]).toContain('the process exited with status 3.');
+    expect((await told())[0]).toContain(join(repo, '.git', 'rac', 'processes', 'dev.log'));
+    await dashboard();
+    expect(await told()).toHaveLength(1);
+
+    // started again, then it exits while the console is down
+    await pane(false);
+    await dashboard();
+    await pane(true, '1');
+    const deployed = await deploy(fakeAgent());
+    await deployed.app.inject({ method: 'GET', url: '/api/dashboard', headers: deployed.headers });
+    await vi.waitFor(async () => expect(await deployed.told()).toEqual([expect.stringContaining(`Watch ${id} #2 (Stack process dev in `)]));
+    expect((await deployed.told())[0]).toContain('with status 1.');
+    await deployed.app.close();
+  });
+
+  it('runs a command in its Project under its sandbox: lines within 200 ms are one event, a deploy reads on where it stopped, and its exit is the last', async () => {
+    const fake = fakeAgent();
+    const { call, told, windows, root, deploy } = await watching(fake);
+    const set = await call('watch_command', { command: 'tail -F build.log', description: 'the build log' });
+    expect(set).toMatchObject({ ok: true, data: { watch_id: expect.stringMatching(/^watch-/u) } });
+    const id = set.data.watch_id as string;
+    expect(windows.opened).toEqual([{ watchId: id, command: 'tail -F build.log', kind: 'pi', home: join(root, 'home'), pane: '%1' }]);
+    expect(windows.connects).toEqual([{ pane: '%1', from: 0 }]);
+
+    windows.print('compiling', 'linked');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    windows.print('done');
+    await vi.waitFor(async () => expect(await told()).toHaveLength(1), { timeout: 2_000 });
+    const event = (await told())[0]!;
+    expect(event).toMatch(new RegExp(`^\\[RAC event\\] Watch ${id} #1 \\(the build log\\): it printed:`, 'u'));
+    expect(event).toMatch(/<<<untrusted-[0-9a-f]+\ncompiling\nlinked\ndone\nuntrusted-[0-9a-f]+>>>/u);
+    windows.print('warning: slow');
+    await vi.waitFor(async () => expect(await told()).toHaveLength(2), { timeout: 2_000 });
+
+    // a deploy: the command kept running in its window, and the next console reads on from line 4
+    const deployed = await deploy(fakeAgent());
+    expect(windows.opened).toHaveLength(1);
+    expect(windows.connects).toEqual([{ pane: '%1', from: 0 }, { pane: '%1', from: 4 }]);
+    windows.print('deployed');
+    await vi.waitFor(async () => expect((await deployed.told()).at(-1)).toContain(`Watch ${id} #3 (the build log): it printed:`), { timeout: 2_000 });
+    expect((await deployed.told()).filter(text => text.includes('\ndeployed\n'))).toHaveLength(1);
+    expect((await deployed.told()).filter(text => text.includes('compiling'))).toHaveLength(0);
+    windows.exit('%1', 2);
+    await vi.waitFor(async () => expect((await deployed.told()).at(-1)).toBe(`[RAC event] Watch ${id} #4 (the build log): the command exited with status 2, so this Watch ends.`), { timeout: 2_000 });
+    expect(windows.closed).toEqual(['%1']);
+    await deployed.app.close();
+  });
+
+  it('stops a command sending more than 20 events a minute, runs one again whose window a reboot ended, and stops one the operator removes', async () => {
+    const fake = fakeAgent();
+    const { app, call, told, windows, deploy, conductor } = await watching(fake, { deps: { watchBatchMs: 1 } });
+    const noisy = (await call('watch_command', { command: 'while :; do date; done', description: 'noise' })).data.watch_id as string;
+    for (let index = 0; index < 21; index += 1) { windows.print(`line ${index}`); await new Promise(resolve => setTimeout(resolve, 15)); }
+    await vi.waitFor(async () => expect((await told()).at(-1)).toBe(`[RAC event] Watch ${noisy} #21 (noise): it was stopped: it sent more than 20 events in a minute. Set it again with a quieter command if you still need it.`), { timeout: 2_000 });
+    expect(await told()).toHaveLength(21);
+    expect(windows.closed).toEqual(['%1']);
+    expect((await call('list_watches', {}, false)).data.watches).toEqual([]);
+
+    // a reboot ends its window: the next console runs it again from its start
+    const folder = (await call('watch_command', { command: 'inotifywait -m .', description: 'the folder' })).data.watch_id as string;
+    await app.close();
+    windows.vanish('%2');
+    const deployed = await deploy(fakeAgent());
+    expect(windows.opened.map(window => window.watchId)).toEqual([noisy, folder, folder]);
+    expect(windows.connects.at(-1)).toEqual({ pane: '%3', from: 0 });
+
+    // the operator removes it from the Conductor's Watches: its command stops
+    expect((await deployed.app.inject({ method: 'DELETE', url: `/api/agents/${conductor}/watches/${folder}`, headers: deployed.headers })).statusCode).toBe(204);
+    expect(windows.closed).toEqual(['%1', '%3']);
+    expect((await deployed.app.inject({ method: 'GET', url: '/api/dashboard', headers: deployed.headers })).json().agents.find((agent: { id: string }) => agent.id === conductor).watches).toBeUndefined();
+    expect((await deployed.app.inject({ method: 'DELETE', url: `/api/agents/${conductor}/watches/${folder}`, headers: deployed.headers })).statusCode).toBe(404);
+    await deployed.app.close();
+  });
+
+  it('holds a Watch\'s events to the Conductor\'s budget, as its other self-started Turns', async () => {
+    const notify = vi.spyOn(PushService.prototype, 'notify').mockResolvedValue(undefined);
+    const fake = fakeAgent();
+    const { app, call, windows, conductor, dashboard, told } = await watching(fake, { conductor: { maxSelfStartedTurnsPerHour: 1 } });
+    const events = () => fake.delivered.filter(text => text.startsWith('[RAC event]'));
+    await call('watch_command', { command: 'tail -F log', description: 'the log' });
+    windows.print('one');
+    await vi.waitFor(() => expect(events()).toHaveLength(1), { timeout: 2_000 });
+    fake.emitTo(conductor, { type: 'turn', turn: { type: 'started' } });
+    windows.print('two');
+    await vi.waitFor(async () => expect(await told()).toHaveLength(2), { timeout: 2_000 });
+    fake.emitTo(conductor, { type: 'turn', turn: { type: 'settled', message: 'Noted.' } });
+    await dashboard();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await dashboard();
+    expect(events()).toHaveLength(1);
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: 'conductor', tag: 'conductor-throttled' }));
     await app.close();
   });
 });

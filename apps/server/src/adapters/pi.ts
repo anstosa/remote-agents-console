@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { piClient, piEfforts } from '../transports/pi.js';
@@ -73,6 +74,11 @@ export const piAdapter = {
   efforts: piEfforts,
   conversations: { validId: validPiSessionId, list: piConversationSummaries, readName: piConversationName, locate: locatePiSession },
   sandbox: true,
+  // as Pi's own `getAgentDir` reads it
+  stateDir: env => {
+    const configured = env.PI_CODING_AGENT_DIR ?? process.env.PI_CODING_AGENT_DIR;
+    return configured === undefined || configured === '' ? join(homedir(), '.pi', 'agent') : configured === '~' || configured.startsWith('~/') ? join(homedir(), configured.slice(1)) : configured;
+  },
   // the static policy: the kind's sandbox lists as the sandbox runtime takes them (none: no
   // network, no writes beyond what the extension adds), and the extra environment names commands get
   files: ({ sandbox: settings = { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] } }) => ({ 'sandbox.json': JSON.stringify(staticPolicy(settings), null, 2) })

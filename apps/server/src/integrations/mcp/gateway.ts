@@ -174,6 +174,12 @@ export class IntegrationGateway {
       case 'start_review': return await orchestration.startReview({ agentId: input.agent_id as string, scope: input.scope as 'working' | 'pr', includeTests: input.include_tests as boolean, includeDocs: input.include_docs as boolean });
       case 'spawn_agent': return await orchestration.spawnAgent({ worktreeId: input.worktree_id as string, ...(input.model === undefined ? {} : { model: input.model as string }) });
       case 'close_agent': return await orchestration.closeAgent(input.agent_id as string);
+      case 'watch_pull_request': return await orchestration.watchPullRequest({ worktreeId: input.worktree_id as string, number: input.number as number });
+      case 'watch_process': return await orchestration.watchProcess({ worktreeId: input.worktree_id as string, process: input.process as string });
+      case 'watch_review_requests': return await orchestration.watchReviewRequests(input.worktree_id as string);
+      case 'watch_command': return await orchestration.watchCommand({ command: input.command as string, description: input.description as string });
+      case 'list_watches': return await orchestration.listWatches();
+      case 'unwatch': return await orchestration.unwatch(input.watch_id as string);
       case 'switch_pull_request': return await orchestration.switchPullRequest({ agentId: input.agent_id as string, number: input.number as number });
       default: return { ok: false, version: 'v1', error: { code: 'invalid_request', message: 'Unknown tool.', retryable: false } };
     }

@@ -44,6 +44,10 @@ import { NewTaskService } from './new-task/service.js';
 import { WorktreeManagementService } from './worktrees/management.js';
 import { agentAttentionState, AgentNotificationCoordinator, pushNotifications, type AgentNotificationContext } from './notifications.js';
 import { ConsoleEvents } from './events.js';
+import { Watches, type CommandWindows } from './watches/service.js';
+import type { Request as GithubRequest } from './pull-requests/github.js';
+import { GithubWatchReader } from './watches/github.js';
+import { commandWindows } from './watches/commands.js';
 import { isReviewRun, paneTmuxSession, stackActions, worktreeAgents, type Agent, type Pane, type SocketRef, type StackAction, type TmuxAgent, type Worktree } from './domain/models.js';
 import { CommandCatalogService } from './commands/service.js';
 import { LatestViewportScheduler, PaneViewportCoordinator } from './logs/viewport-scheduler.js';
@@ -125,13 +129,13 @@ import { registerGoogleCalendarRoutes } from './google-calendar/routes.js';
 import { calendarLabelsForAgent } from './google-calendar/labels.js';
 import { renderNotFoundPage, renderPublicPolicyPage } from './public-pages.js';
 
-export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents };
+export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents; githubRequest?: GithubRequest; watchCommands?: CommandWindows; watchBatchMs?: number };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
 // the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use, and with the
 // structured Agents, which index.ts reattaches to their holders (never a test: a holder serves one
 // console at a time).
 declare module 'fastify' {
-  interface FastifyInstance { scheduler: Scheduler; structuredAgents: StructuredAgents; conductor: Conductor }
+  interface FastifyInstance { scheduler: Scheduler; structuredAgents: StructuredAgents; conductor: Conductor; watches: Watches }
 }
 // how long a pane must be quiet after output before its live frame is captured
 const logQuietWindowMs = 250;
@@ -225,6 +229,22 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     notify: message => { void push.notify(message).catch(() => undefined); }
   });
   prompts.useDispatches?.(dispatches);
+  // what Agents watch (ADR 0019): each event is a labelled prompt to its owner, held to the same budget
+  const watches = new Watches({
+    events,
+    github: new GithubWatchReader(deps.githubRequest),
+    commands: deps.watchCommands ?? commandWindows(launch, config.adapters, kind => launch.adapterFiles(kind)),
+    submit: (agentId, text) => prompts.submitFrom(agentId, text, { label: 'event' }),
+    sent: async agentId => [...(await queuedPrompts.list(promptScope(agentId)) ?? []).map(prompt => prompt.text), ...(await promptHistory.list(promptScope(agentId)) ?? []).map(entry => entry.text)],
+    // a command runs under its owner's sandbox, in its Workspace
+    sandboxOf: async agentId => {
+      const agent = await structuredAgents.agent(agentId);
+      const place = agent?.sandboxed !== true || agent.placeId === undefined || agent.kind === undefined ? undefined : await resolvePlace(agent.placeId);
+      return place === undefined ? undefined : { place, kind: agent!.kind! };
+    },
+    logPath: async (worktreeId, process) => (await stackCommands.processLog(worktreeId, process))?.path,
+    ...(deps.watchBatchMs === undefined ? {} : { batchMs: deps.watchBatchMs })
+  });
   // publish only boot-opaque presentations of trusted configured actions
   const buttonCatalog = deps.buttonActions?.catalog ?? new ConfiguredButtonCatalog(config);
   // create Files lazily so missing host prerequisites affect only Files requests
@@ -524,6 +544,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const worktrees = discovery.worktreesNow();
     const controls = new Map(await Promise.all(worktrees.map(async worktree => [worktree.id, { actions: stackCommands.actions(worktree), ...await stackCommands.state(worktree, paneSnapshots) }] as const)));
     const controlFor = (worktreeId: string | undefined) => worktreeId === undefined ? undefined : controls.get(worktreeId);
+    events.emit({ type: 'stack', worktrees: [...controls].flatMap(([worktreeId, state]) => state.processes === undefined ? [] : [{ worktreeId, processes: state.processes }]) });
+    const watched = await watches.summaries();
     const worktreeViews = discovered.projects.flatMap(project => project.worktrees);
     const reviewBranches = worktreeViews.map(view => ({ worktreeId: view.id, branch: discovered.agents.find(agent => agent.worktreeId === view.id)?.branch ?? view.branch }));
     const reviews = (await reviewStore.summaries(reviewBranches)).map(codeReviewSummary);
@@ -538,7 +560,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const place = agent.placeId === undefined ? undefined : placeById.get(agent.placeId);
       return agent.worktreeId === undefined && place !== undefined ? launchResolutions.get(placeLaunchScope(place)) : launchFor(agent.worktreeId);
     };
-    return { ...discovered, agents: discovered.agents.map(agent => ({ ...agent, unread: notifications.isUnread(agent), completionId: notifications.completionId(agent), queuedPromptCount: queuedCounts.get(agent.id) ?? 0, ...(controlFor(agent.worktreeId) === undefined ? {} : { stack: controlFor(agent.worktreeId) }), ...(agentLaunch(agent) === undefined ? {} : { launch: agentLaunch(agent) }) })), places: discovered.places.map(place => ({ ...place, ...(launchResolutions.get(placeLaunchScope(place)) === undefined ? {} : { launch: launchResolutions.get(placeLaunchScope(place)) }) })), projects: discovered.projects.map(project => ({ ...project, ...(project.mode === 'directory' && launchResolutions.get(project.id) !== undefined ? { launch: launchResolutions.get(project.id) } : {}), worktrees: project.worktrees.map(worktree => ({ ...worktree, ...(controlFor(worktree.id) === undefined ? {} : { stack: controlFor(worktree.id) }), ...(launchFor(worktree.id) === undefined ? {} : { launch: launchFor(worktree.id) }) })) })), cleanupPending: cleanup.pending().length, buttons: buttonCatalog.value, notesRevision, scratchLaunch: launchResolutions.get(scratchLaunchKey), reviewTour: reviewTourCapability, codeReview: codeReviewCapability, reviews, ...(config.editor === undefined ? {} : { editor: true as const }), ...(config.keys === undefined ? {} : { keys: browserKeysConfig(config.keys) }) };
+    return { ...discovered, agents: discovered.agents.map(agent => ({ ...agent, unread: notifications.isUnread(agent), completionId: notifications.completionId(agent), queuedPromptCount: queuedCounts.get(agent.id) ?? 0, ...(watched.get(agent.id) === undefined ? {} : { watches: watched.get(agent.id) }), ...(controlFor(agent.worktreeId) === undefined ? {} : { stack: controlFor(agent.worktreeId) }), ...(agentLaunch(agent) === undefined ? {} : { launch: agentLaunch(agent) }) })), places: discovered.places.map(place => ({ ...place, ...(launchResolutions.get(placeLaunchScope(place)) === undefined ? {} : { launch: launchResolutions.get(placeLaunchScope(place)) }) })), projects: discovered.projects.map(project => ({ ...project, ...(project.mode === 'directory' && launchResolutions.get(project.id) !== undefined ? { launch: launchResolutions.get(project.id) } : {}), worktrees: project.worktrees.map(worktree => ({ ...worktree, ...(controlFor(worktree.id) === undefined ? {} : { stack: controlFor(worktree.id) }), ...(launchFor(worktree.id) === undefined ? {} : { launch: launchFor(worktree.id) }) })) })), cleanupPending: cleanup.pending().length, buttons: buttonCatalog.value, notesRevision, scratchLaunch: launchResolutions.get(scratchLaunchKey), reviewTour: reviewTourCapability, codeReview: codeReviewCapability, reviews, ...(config.editor === undefined ? {} : { editor: true as const }), ...(config.keys === undefined ? {} : { keys: browserKeysConfig(config.keys) }) };
   };
   // observe only agent state needed by cross-instance attention
   const localInstanceAttention = async () => {
@@ -603,6 +625,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         conductorSchedule: (cron, enabled) => buildSchedule({ cron, kind: config.conductor?.kind ?? 'pi', target: { conductor: true }, enabled }),
         changed: () => publishNotesRevision()
       },
+      watches,
       // a worker is the Conductor's kind, Sandboxed, on an Allowed model (ADR 0018)
       ...(config.conductor === undefined ? {} : { spawnWorker: async (placeId: string, by: string, model?: string) => {
         const conductorConfig = config.conductor!;
@@ -3262,6 +3285,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return reply.code(201).send({ agentId: launched.agent.id });
   });
   // restart one idle configured agent by resuming its last conversation
+  // the operator removes a Watch an Agent set
+  app.delete('/api/agents/:id/watches/:watchId', async (request, reply) => {
+    controlled(request, true);
+    const { id, watchId } = request.params as { id: string; watchId: string };
+    if (!await watches.remove(id, watchId)) return reply.code(404).send({ error: 'watch not found' });
+    await dashboardUpdates.refresh().catch(() => undefined);
+    return reply.code(204).send();
+  });
   app.post('/api/agents/:id/restart', async (request, reply) => {
     controlled(request, true);
     const id = (request.params as { id: string }).id;
@@ -4160,10 +4191,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   // close owned Files transport and existing background services on shutdown
   // close both viewer-owned streams and server-owned dashboard connections
-  app.addHook('onClose', async () => { buttonActions.close(); scheduler.stop(); reviewJobs.close(); codeReviews.close(); asks.close(); await hostFiles.close(); await accounts.close(); await paneViewports.restoreAll(); paneStream.closeAll(); tmux.closeCommands?.(); dashboardUpdates.close(); });
+  app.addHook('onClose', async () => { watches.close(); buttonActions.close(); scheduler.stop(); reviewJobs.close(); codeReviews.close(); asks.close(); await hostFiles.close(); await accounts.close(); await paneViewports.restoreAll(); paneStream.closeAll(); tmux.closeCommands?.(); dashboardUpdates.close(); });
   // expose the scheduler on the instance (index.ts starts it; the HTTP-seam tests tick it)
   app.decorate('scheduler', scheduler);
   app.decorate('structuredAgents', structuredAgents);
   app.decorate('conductor', conductor);
+  app.decorate('watches', watches);
   return app;
 }

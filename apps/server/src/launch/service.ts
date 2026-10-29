@@ -809,6 +809,16 @@ export class LaunchService implements HolderWindows {
     return (await this.holderPane(holder))?.dead === false;
   }
 
+  // whether a holder's process has exited, with its exit status; undefined once its pane is gone
+  async holderStatus(holder: HolderRef): Promise<{ dead: boolean; status?: number } | undefined> {
+    const socketArgs = (await this.holderPane(holder))?.socketArgs;
+    if (socketArgs === undefined) return undefined;
+    const shown = await run(this.tmux, [...socketArgs, 'display-message', '-p', '-t', holder.pane, '#{pane_dead} #{pane_dead_status}']).catch(() => undefined);
+    if (shown?.code !== 0) return undefined;
+    const [dead, status] = shown.stdout.trim().split(' ');
+    return { dead: dead === '1', ...(status === undefined || status === '' || Number.isNaN(Number(status)) ? {} : { status: Number(status) }) };
+  }
+
   // the last `lines` a holder's pane shows: its child's stderr, and the holder's exit line
   async captureHolder(holder: HolderRef, lines = 40): Promise<string | undefined> {
     const socketArgs = (await this.holderPane(holder))?.socketArgs;

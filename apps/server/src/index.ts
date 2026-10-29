@@ -71,3 +71,5 @@ app.scheduler.start();
 await app.listen(config.listen);
 // once the reattach settles, bring up the Conductor (or turn one off that is no longer configured)
 void reattached.then(() => app.conductor.start()).catch(error => { console.error('[conductor] could not start:', error); });
+// and re-arm the Watches' commands (a reboot ended their windows), polling GitHub from now on
+void reattached.then(() => app.watches.start()).catch(error => { console.error('[watches] could not start:', error); });
