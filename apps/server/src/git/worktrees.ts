@@ -1,4 +1,6 @@
+import { existsSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { run } from '../tmux/command.js';
 
 /**
@@ -23,6 +25,14 @@ export type WorktreeEntry = {
 /** The injectable git runner, so discovery and config validation can stub it in tests. */
 export type GitRun = (command: string, args: string[]) => Promise<{ code: number; stdout: string }>;
 const defaultRun: GitRun = (command, args) => run(command, args);
+/**
+ * How to name a repository to git: a bare one by its git directory, since the console's git does
+ * not discover bare repositories (`safe.bareRepository=explicit`); anything else by `-C`, so git
+ * fails on a checkout whose `.git` is broken rather than adopting what was planted there. Whether
+ * it is bare comes from the path the operator configured (named `*.git`, with no `.git` inside),
+ * never from the folder's contents, which a Sandboxed Agent may have written.
+ */
+export const repositoryArgs = (path: string): string[] => basename(path).endsWith('.git') && !existsSync(join(path, '.git')) ? ['--git-dir', path] : ['-C', path];
 
 // strip a `refs/heads/` prefix to the short branch name git prints elsewhere
 function shortBranch(ref: string): string {
@@ -65,7 +75,7 @@ export function parseWorktreeList(porcelain: string): WorktreeEntry[] {
  * into an unavailable Project rather than a boot failure.
  */
 export async function gitCommonDir(path: string, command: GitRun = defaultRun): Promise<string | undefined> {
-  const result = await command('/usr/bin/git', ['-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const result = await command('/usr/bin/git', [...repositoryArgs(path), 'rev-parse', '--path-format=absolute', '--git-common-dir']);
   if (result.code !== 0) return undefined;
   const dir = result.stdout.trim();
   if (dir === '') return undefined;
@@ -74,7 +84,7 @@ export async function gitCommonDir(path: string, command: GitRun = defaultRun): 
 
 /** Every checkout git lists for the repository at `path`, or `undefined` when git fails. */
 export async function listWorktrees(path: string, command: GitRun = defaultRun): Promise<WorktreeEntry[] | undefined> {
-  const result = await command('/usr/bin/git', ['-C', path, 'worktree', 'list', '--porcelain']);
+  const result = await command('/usr/bin/git', [...repositoryArgs(path), 'worktree', 'list', '--porcelain']);
   if (result.code !== 0) return undefined;
   return parseWorktreeList(result.stdout);
 }

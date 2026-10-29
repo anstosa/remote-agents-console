@@ -4,6 +4,7 @@ import type { Project, Worktree } from '../domain/models.js';
 import { PullRequestService, forkCheckoutNumber } from '../pull-requests/service.js';
 import type { PullRequestSwitchService } from '../pull-requests/switch-service.js';
 import { run } from '../tmux/command.js';
+import { repositoryArgs } from '../git/worktrees.js';
 
 /**
  * The git subprocess seam for Worktree management, always spawning `/usr/bin/git`.
@@ -122,7 +123,7 @@ export class WorktreeManagementService {
     if (project === undefined) return { ok: false, status: 404, error: 'project unavailable' };
     const availability = worktreeManagementAvailability(project);
     if (!availability.available) return { ok: false, status: 409, error: availability.reason! };
-    const listed = await this.git(['-C', project.path, 'for-each-ref', '--format', '%(refname)\t%(worktreepath)', 'refs/heads', 'refs/remotes']);
+    const listed = await this.git([...repositoryArgs(project.path), 'for-each-ref', '--format', '%(refname)\t%(worktreepath)', 'refs/heads', 'refs/remotes']);
     if (listed.code !== 0) return { ok: false, status: 409, error: (listed.stderr.trim() || 'could not list branches') };
     const local: BranchOption[] = [];
     const localNames = new Set<string>();
@@ -205,7 +206,7 @@ export class WorktreeManagementService {
   // run `git worktree add` with the given arguments, returning the realpath'd root
   private async addCheckout(project: Project, path: string, args: string[]): Promise<AddResult> {
     await mkdir(project.worktreesDirectory, { recursive: true });
-    const created = await this.git(['-C', project.path, 'worktree', 'add', ...args], addTimeoutMs);
+    const created = await this.git([...repositoryArgs(project.path), 'worktree', 'add', ...args], addTimeoutMs);
     if (created.code !== 0) return { ok: false, status: 409, error: (created.stderr.trim() || 'git worktree add failed') };
     return { ok: true, path: await realpath(path).catch(() => path) };
   }
@@ -266,7 +267,7 @@ export class WorktreeManagementService {
     if (worktree.main) return { ok: false, status: 409, error: 'the main worktree cannot be removed' };
     if (worktree.locked) return { ok: false, status: 409, error: 'Locked worktrees cannot be removed' };
     return await this.serialize(project.id, async () => {
-      const args = ['-C', project.path, 'worktree', 'remove', ...(options.force ? ['--force'] : []), worktree.path];
+      const args = [...repositoryArgs(project.path), 'worktree', 'remove', ...(options.force ? ['--force'] : []), worktree.path];
       const removed = await this.git(args);
       return removed.code !== 0 ? { ok: false as const, status: 409, error: (removed.stderr.trim() || 'git worktree remove failed') } : { ok: true as const };
     });
@@ -282,7 +283,7 @@ export class WorktreeManagementService {
     // a name beginning with `-` would be read as a flag; a real branch name never does
     if (branch.startsWith('-')) return { ok: false, error: `\`${branch}\` is not a valid branch name` };
     return await this.serialize(project.id, async () => {
-      const deleted = await this.git(['-C', project.path, 'branch', '-D', branch]);
+      const deleted = await this.git([...repositoryArgs(project.path), 'branch', '-D', branch]);
       return deleted.code !== 0 ? { ok: false as const, error: (deleted.stderr.trim() || 'git branch delete failed') } : { ok: true as const };
     });
   }
@@ -301,7 +302,7 @@ export class WorktreeManagementService {
       const eligible = new Map<string, CleanupBranch>();
       // accept merges visible on either remote or local default
       for (const ref of [`origin/${defaultBranch}`, defaultBranch]) {
-        const listed = await this.git(['-C', project.path, 'for-each-ref', `--merged=${ref}`, '--format=%(refname:strip=2)\t%(worktreepath)', 'refs/heads']);
+        const listed = await this.git([...repositoryArgs(project.path), 'for-each-ref', `--merged=${ref}`, '--format=%(refname:strip=2)\t%(worktreepath)', 'refs/heads']);
         // tolerate a missing remote default
         if (listed.code !== 0) continue;
         // collect only deletable branch refs
@@ -443,7 +444,7 @@ export class WorktreeManagementService {
     const availability = worktreeManagementAvailability(project);
     if (!availability.available) return { ok: false, status: 409, error: availability.reason! };
     return await this.serialize(project.id, async () => {
-      const pruned = await this.git(['-C', project.path, 'worktree', 'prune']);
+      const pruned = await this.git([...repositoryArgs(project.path), 'worktree', 'prune']);
       return pruned.code !== 0 ? { ok: false as const, status: 409, error: (pruned.stderr.trim() || 'git worktree prune failed') } : { ok: true as const };
     });
   }
@@ -506,7 +507,7 @@ export class WorktreeManagementService {
     const defaultBranch = await this.defaultBranch(project.path);
     // require one protected merge target
     if (defaultBranch === undefined) return { ok: false, status: 409, error: 'the default branch could not be resolved' };
-    const checkout = await this.git(['-C', project.path, 'for-each-ref', '--format=%(worktreepath)', `refs/heads/${branch}`]);
+    const checkout = await this.git([...repositoryArgs(project.path), 'for-each-ref', '--format=%(worktreepath)', `refs/heads/${branch}`]);
     // refuse uncertain checkout ownership
     if (checkout.code !== 0) return { ok: false, status: 409, error: (checkout.stderr.trim() || 'branch checkout state could not be read') };
     const worktreePath = checkout.stdout.trim();
@@ -540,14 +541,14 @@ export class WorktreeManagementService {
     const defaultBranch = await this.defaultBranch(project.path);
     // an unresolved or newly protected default cannot be removed
     if (defaultBranch === undefined || branch === defaultBranch) return false;
-    const result = await this.git(['-C', project.path, 'for-each-ref', '--format=%(objectname)\t%(worktreepath)', `refs/heads/${branch}`]);
+    const result = await this.git([...repositoryArgs(project.path), 'for-each-ref', '--format=%(objectname)\t%(worktreepath)', `refs/heads/${branch}`]);
     const [currentHead, checkout = ''] = result.stdout.split('\n')[0]!.split('\t');
     return result.code === 0 && currentHead === head && checkout === '';
   }
 
   // force-delete only after a caller has completed its safety checks
   private async forceDeleteBranch(project: Project, branch: string): Promise<GuardedBranchDeleteResult> {
-    const deleted = await this.git(['-C', project.path, 'branch', '-D', branch]);
+    const deleted = await this.git([...repositoryArgs(project.path), 'branch', '-D', branch]);
     return deleted.code !== 0 ? { ok: false, status: 409, error: (deleted.stderr.trim() || 'git branch delete failed') } : { ok: true };
   }
 

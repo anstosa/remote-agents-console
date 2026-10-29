@@ -461,7 +461,10 @@ describe('pull request switching', () => {
     }
   }, 15_000);
 
-  it('never applies an existing stash when the dirty state cannot be stashed', async () => {
+  // The console's git does not look inside submodules (ADR 0004: a submodule's own configuration
+  // could run code), so a submodule's changes neither stop a move nor move with it: they stay where
+  // they are, and an existing stash is never taken for the move's own.
+  it('never applies an existing stash, and leaves a dirty submodule where it is', async () => {
     const repository = await createMoveRepository(true);
     try {
       await writeFile(join(repository.targetPath, 'tracked.txt'), 'existing stash\n');
@@ -469,10 +472,10 @@ describe('pull request switching', () => {
       await writeFile(join(repository.sourcePath, 'module', 'module.txt'), 'dirty module\n');
       const { service, targetWorktree } = moveService(repository);
 
-      await expect(service.move(targetWorktree.id, 7)).resolves.toBe('unavailable');
+      await expect(service.move(targetWorktree.id, 7)).resolves.toBe('moved');
 
-      await expect(run('/usr/bin/git', ['-C', repository.targetPath, 'branch', '--show-current'])).resolves.toMatchObject({ stdout: 'main\n' });
-      await expect(run('/usr/bin/git', ['-C', repository.sourcePath, 'branch', '--show-current'])).resolves.toMatchObject({ stdout: 'feature/draft\n' });
+      await expect(run('/usr/bin/git', ['-C', repository.targetPath, 'branch', '--show-current'])).resolves.toMatchObject({ stdout: 'feature/draft\n' });
+      await expect(readFile(join(repository.targetPath, 'tracked.txt'), 'utf8')).resolves.toBe('original\n');
       await expect(readFile(join(repository.sourcePath, 'module', 'module.txt'), 'utf8')).resolves.toBe('dirty module\n');
       const stashes = await run('/usr/bin/git', ['-C', repository.sourcePath, 'stash', 'list']);
       expect(stashes.stdout.match(/^stash@/gmu)).toHaveLength(1);

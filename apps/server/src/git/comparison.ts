@@ -4,7 +4,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { constants } from 'node:fs';
 import { lstat, open, readlink, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
-import { run, safeEnv } from '../tmux/command.js';
+import { gitEnv, run } from '../tmux/command.js';
 import { classifyReviewPath } from './change-classification.js';
 import { maxInlineImageBytes, previewFileBytes, previewImageMediaType, WorkspaceFileService, type PreviewImage } from '../workspace-files/service.js';
 import type { GitComparisonSummary, GitStatusChange, GitStatusSummary } from '../domain/models.js';
@@ -673,7 +673,7 @@ async function captureTrackedPatch(workspace: string, base: string, change: GitS
   // Load anyway) and the Review tour. explicit --src-prefix/--dst-prefix override every prefix config.
   const args = ['--no-optional-locks', '-C', workspace, 'diff', '--binary', '--no-ext-diff', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', '--find-renames', base, ...(head === undefined ? [] : [head]), '--', ...paths];
   return new Promise(resolve => {
-    const child = spawn(git, args, { shell: false, env: safeEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn(git, args, { shell: false, env: gitEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
     const fingerprint = createHash('sha256');
     const decoder = new StringDecoder('utf8');
     let patch = '';
@@ -761,7 +761,7 @@ export type FileRevision = { commit: string } | { workingTree: true };
 // undefined when the object is absent (git exits non-zero having produced nothing)
 function gitShowBounded(workspace: string, object: string, maxBytes: number): Promise<Buffer | undefined> {
   return new Promise(resolve => {
-    const child = spawn(git, ['--no-optional-locks', '-C', workspace, 'show', object], { shell: false, env: safeEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn(git, ['--no-optional-locks', '-C', workspace, 'show', object], { shell: false, env: gitEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
     const chunks: Buffer[] = [];
     let total = 0;
     let failed = false;

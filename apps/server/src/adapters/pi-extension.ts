@@ -4,11 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import { createBashToolDefinition, createLocalBashOperations, getAgentDir, VERSION, type BashOperations, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { gitOverrideEnv } from '../git/overrides.js';
 import { commandEnv, pathRefusal, sessionPolicy, type SandboxPolicy } from './pi-sandbox.js';
 
 /**
  * The RAC Pi extension, loaded into every Pi the console launches (ADR 0017). Pi loads it
- * itself (`-e`), so it imports nothing from the console but the Pi-free sandbox policy: the status
+ * itself (`-e`), so it imports nothing from the console but the Pi-free sandbox policy and git's
+ * overrides: the status
  * key is the Pi client's `piReportStatusKey`, and a dialog's title has the shape the Pi client's
  * `dialogTitle` reads.
  *
@@ -124,7 +126,7 @@ export default function rac(pi: ExtensionAPI): void {
 // the checkout's git directory and git's common directory (the same one outside a linked Worktree)
 function gitDirs(cwd: string): { git?: { dir: string; commonDir: string } } {
   try {
-    const [dir, commonDir] = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim().split('\n');
+    const [dir, commonDir] = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], { cwd, env: { ...process.env, ...gitOverrideEnv() }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim().split('\n');
     return dir === undefined || dir === '' || commonDir === undefined || commonDir === '' ? {} : { git: { dir, commonDir } };
   } catch { return {}; }
 }

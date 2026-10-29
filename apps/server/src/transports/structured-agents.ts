@@ -590,6 +590,8 @@ export class StructuredAgents {
         // a Sandboxed Agent whose sandbox did not arm never runs (ADR 0004)
         if (record.sandboxed && !event.report.sandbox.engaged) {
           live.refusal = `Its sandbox did not start: ${event.report.sandbox.reason ?? 'no reason given'}`;
+          // nothing else may report this process in
+          delete live.nonce;
           live.reported?.(false);
           return;
         }

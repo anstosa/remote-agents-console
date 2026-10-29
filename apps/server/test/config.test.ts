@@ -187,7 +187,7 @@ describe('project configuration', () => {
     dirs.push(root);
     const bare = join(root, 'store.git'); await mkdir(bare); await git(bare, 'init', '--bare', '-q');
     const config = await validateConfig(await withProject(bare));
-    expect(config.projects[0]?.available).toBe(true);
+    expect(config.projects[0]).toMatchObject({ available: true, mode: 'repository' });
     // with no Main worktree the default resolves against the bare repository itself
     expect(config.projects[0]?.worktreesDirectory).toBe(join(root, 'store.git-worktrees'));
   });

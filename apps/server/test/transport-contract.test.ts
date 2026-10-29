@@ -10,6 +10,7 @@ import { LaunchService } from '../src/launch/service.js';
 import { adhocScratchPlace } from '../src/places/places.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { run } from '../src/tmux/command.js';
+import { cleanWorkingTree } from '../src/git/worktree-state.js';
 import { interactiveShellName } from '../src/tmux/interactive-shell.js';
 import { holderProcesses, type StructuredProcess, type StructuredProcesses } from '../src/transports/structured-agents.js';
 import type { StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
@@ -304,6 +305,40 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect((await run('git', ['-C', agent.home, 'status', '--porcelain=v1'])).code).toBe(0);
     expect(existsSync(join(agent.root, 'pwned'))).toBe(false);
     expect(agent.toolResult(2)).toContain('protected in the sandbox');
+  }, 60_000);
+
+  // each script, in the Worktree where the command may write, marks `<root>/pwned-<name>` if it ever runs
+  const evil = (name: string) => `printf '#!/bin/sh\\ntouch %s/pwned-${name}\\n' "$(dirname "$PWD")" > evil-${name}.sh; chmod +x evil-${name}.sh`;
+  // plant what a command could leave in a main checkout (every step must land), then run the
+  // console's own git over it
+  const plantedThenConsoleGit = async (commands: string[], consoleGit: (home: string) => Promise<unknown>) => {
+    const agent = await launched(client, { sandboxed: true, git: 'main', replies: [{ tool: 'bash', args: { command: [...commands, 'echo planted'].join(' && ') } }, 'done'] });
+    expect(await agent.next('report')).toMatchObject({ report: { sandbox: { engaged: true } } });
+    await turn(agent);
+    expect(agent.toolResult(1)).toContain('planted');
+    await consoleGit(agent.home);
+    return agent;
+  };
+
+  it('runs no fsmonitor of a nested repository a command adds as a submodule', async () => {
+    const agent = await plantedThenConsoleGit([
+      evil('fsmonitor'),
+      'mkdir sub && git -C sub init -q && git -C sub -c user.name=A -c user.email=a@b commit -q --allow-empty -m s',
+      'git add sub && git -c user.name=A -c user.email=a@b commit -q -m gitlink',
+      'printf "[core]\\n\\trepositoryformatversion = 0\\n\\tfsmonitor = $PWD/evil-fsmonitor.sh\\n" > sub/.git/config'
+    ], async home => { await cleanWorkingTree(home); await run('/usr/bin/git', ['-C', home, 'status', '--porcelain=v1', '--untracked-files=all']); });
+    expect(existsSync(join(agent.root, 'pwned-fsmonitor'))).toBe(false);
+  }, 60_000);
+
+  it('does not read a bare repository a command makes at the Worktree root after breaking .git', async () => {
+    const agent = await plantedThenConsoleGit([
+      evil('gpg'),
+      'mv .git/HEAD .git/HEAD.bak', 'git init -q --bare fake', 'cp -r fake/HEAD fake/objects fake/refs .',
+      // a signed commit, so a log asks gpg about it
+      'tree=$(git --git-dir=. mktree </dev/null) && commit=$(printf "tree %s\\nauthor a <a@b> 1 +0000\\ncommitter a <a@b> 1 +0000\\ngpgsig -----BEGIN PGP SIGNATURE-----\\n x\\n -----END PGP SIGNATURE-----\\n\\nsigned\\n" "$tree" | git --git-dir=. hash-object -t commit -w --stdin) && git --git-dir=. update-ref HEAD "$commit"',
+      'printf "[log]\\n\\tshowSignature = true\\n[gpg]\\n\\tprogram = $PWD/evil-gpg.sh\\n" > config'
+    ], async home => { await cleanWorkingTree(home); await run('/usr/bin/git', ['--no-optional-locks', '-C', home, 'log', '-z', '--max-count=2', 'HEAD', '--']); });
+    expect(existsSync(join(agent.root, 'pwned-gpg'))).toBe(false);
   }, 60_000);
 
   it('lets a Sandboxed Agent ask the operator with ask_user', async () => {

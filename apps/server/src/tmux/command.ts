@@ -1,7 +1,9 @@
-import { lstat } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 import type { SocketRef } from '../domain/models.js';
 import { spawn } from 'node:child_process';
 import { userInfo } from 'node:os';
+import { basename } from 'node:path';
+import { gitOverrideEnv } from '../git/overrides.js';
 import { interactiveShellPath } from './interactive-shell.js';
 // the tmux binary the console runs; read at call time so tests can stub the env
 export const tmuxBinary = (): string => process.env.RAC_TMUX_BIN ?? '/usr/bin/tmux';
@@ -31,6 +33,8 @@ export const tmuxTimeFormatLiteral = (value: string): string => tmuxFormatLitera
 // build one restricted subprocess environment; SHELL names the console's interactive shell,
 // resolved by the one reader of RAC_INTERACTIVE_SHELL
 export const safeEnv = (): NodeJS.ProcessEnv => { const user = userInfo(); return { HOME: user.homedir, USER: user.username, LOGNAME: user.username, SHELL: interactiveShellPath(), TERM: 'xterm-256color', COLORTERM: 'truecolor', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', PATH: '/usr/local/bin:/usr/bin:/bin' }; };
+/** The environment of the console's own git: `safeEnv` with what a Worktree's repository cannot override. */
+export const gitEnv = (): NodeJS.ProcessEnv => ({ ...safeEnv(), ...gitOverrideEnv() });
 // the variables tmux sets on the process it starts in a pane, naming that pane
 const paneVariables = ['TMUX', 'TMUX_PANE'] as const;
 /**
@@ -48,10 +52,39 @@ export const paneEnv = (source: NodeJS.ProcessEnv = process.env): NodeJS.Process
   for (const name of paneVariables) { const value = source[name]; if (value !== undefined && value !== '') env[name] = value; }
   return env;
 };
+type RunResult = { code: number; stdout: string; stderr: string; timedOut?: true };
+// git subcommands that change a checkout, its branches or its stashes
+const gitWrites = new Set(['add', 'apply', 'branch', 'checkout', 'cherry-pick', 'clean', 'commit', 'fetch', 'merge', 'mv', 'pull', 'rebase', 'reset', 'restore', 'rm', 'stash', 'submodule', 'switch', 'update-ref', 'worktree']);
+// the `-C` checkout and subcommand of a git argv; a `--git-dir` call names its repository outright
+function gitTarget(args: string[]): { path: string; subcommand: string } | undefined {
+  let path: string | undefined;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === '-C') path = args[++index];
+    else if (arg === '-c') index++;
+    else if (arg.startsWith('--git-dir')) return undefined;
+    else if (!arg.startsWith('-')) return path === undefined ? undefined : { path, subcommand: arg };
+  }
+  return undefined;
+}
+// A command can break a checkout's .git (ADR 0004), and git then walks up to the repository
+// around it, so a reset or clean meant for the checkout would land on that one. A git call that
+// writes runs only when the checkout it names is the top of its own work tree.
+async function misdirectedGit(command: string, args: string[], timeoutMs: number): Promise<RunResult | undefined> {
+  const target = gitTarget(args);
+  if (target === undefined || !gitWrites.has(target.subcommand)) return undefined;
+  const top = await run(command, ['-C', target.path, 'rev-parse', '--show-toplevel'], undefined, timeoutMs);
+  const found = top.code === 0 ? top.stdout.trim() : '';
+  const [actual, expected] = await Promise.all([found, target.path].map(path => realpath(path).catch(() => undefined)));
+  if (actual !== undefined && actual === expected) return undefined;
+  return { code: 128, stdout: '', stderr: `refusing to run git ${target.subcommand} in ${target.path}: its repository is ${found === '' ? 'not a work tree' : `at ${found}`}\n` };
+}
 // stdout and stderr decode as UTF-8 streams, so a character split between two pipe reads survives
-export async function run(command: string, args: string[], input?: string, timeoutMs = 5000): Promise<{ code: number; stdout: string; stderr: string; timedOut?: true }> {
+export async function run(command: string, args: string[], input?: string, timeoutMs = 5000): Promise<RunResult> {
+  const refusal = basename(command) === 'git' ? await misdirectedGit(command, args, timeoutMs) : undefined;
+  if (refusal !== undefined) return refusal;
   return await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { shell: false, env: safeEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { shell: false, env: basename(command) === 'git' ? gitEnv() : safeEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     let timedOut = false;
     child.stdout.setEncoding('utf8');
