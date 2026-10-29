@@ -51,7 +51,14 @@ export type Turn = { prompt?: string; text: string; rows?: number };
 // descriptions parallel choices ('' where an option has none) and are not part of it either;
 // rows maps each choice to its zero-based on-screen row when the menu skips a row
 // the picker does not offer (Claude's `Type something.` input), identity otherwise
-export type InlineQuestion = { id: string; text: string; choices: string[]; descriptions?: string[]; rows?: number[]; source: 'structured' | 'parsed'; targetPaneId?: string; selectedIndex?: number };
+// `field` and `pane` are the Transport-neutral shape (ADR 0015): the one answer the question takes,
+// and where a question drawn on a tmux pane is answered. Adapters fill the flat fields; the tmux
+// Transport derives the shape from them (`withQuestionShape`), and the flat fields stay until the
+// web reads the shape.
+export type InlineQuestion = { id: string; text: string; choices: string[]; descriptions?: string[]; rows?: number[]; source: 'structured' | 'parsed'; targetPaneId?: string; selectedIndex?: number; field?: QuestionField; pane?: QuestionPane };
+// one of the question's choices, or text: one line or several, prefilled or with a placeholder
+export type QuestionField = { kind: 'choice'; choices: string[]; descriptions?: string[] } | { kind: 'text'; multiline: boolean; prefill?: string; placeholder?: string };
+export type QuestionPane = { rows?: number[]; selectedIndex?: number; targetPaneId?: string };
 export type PromptCommand = { name: string; description?: string };
 
 export type LaunchMode = 'fresh' | 'continue' | 'resume';

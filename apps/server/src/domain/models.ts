@@ -1,5 +1,6 @@
 import type { AdapterCapability, AgentKind, AttentionState, InlineQuestion } from '../adapters/types.js';
 import type { ProjectButtons } from '../config/buttons.js';
+import type { AgentPanel, Transport } from '../transports/transport.js';
 
 export type SocketRef = { fingerprint: string; path: string; device: number; inode: number };
 // `role` is the console's pane-role marker (`@rac_role`): `shell` on a Console shell the
@@ -58,7 +59,13 @@ export type GitStatusChange = { code: string; path: string; originalPath?: strin
 export type GitStatusSummary = { files: number; staged: number; unstaged: number; untracked: number; conflicted: number; changes?: GitStatusChange[] };
 export type GitComparisonSummary = { base: string; files: number; changes?: GitStatusChange[] };
 export type GitUpstreamSummary = { upstream: string; ahead: number; behind: number };
-export type Agent = { id: string; paneId: string; sessionId: string; socketFingerprint: string; home: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind: AgentKind; attention: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; newTaskConfigured?: boolean; push?: PromptAction; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; paneMode?: string; reviewRun?: string };
+// An Agent's tmux pane: the pane and session it runs in, on the socket of that fingerprint,
+// and the pane mode (a picker or copy mode) it is in, if any
+export type AgentPane = { paneId: string; sessionId: string; socketFingerprint: string; paneMode?: string };
+// `transport` says how the console drives the Agent and `panel` what its Panel shows (ADR 0015).
+// A tmux Agent carries its pane details in `pane`; the flat pane fields beside it remain until the
+// web reads the pane part.
+export type Agent = { id: string; transport: Transport; panel: AgentPanel; pane?: AgentPane; paneId: string; sessionId: string; socketFingerprint: string; home: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; title: string; kind: AgentKind; attention: AttentionState; hasMessageQuestion?: true; sandboxed?: boolean; conversationId?: string; displayLabel?: string; placeId?: string; projectId?: string; worktreeId?: string; newTaskConfigured?: boolean; push?: PromptAction; projectUrl?: string; projectProxied?: boolean; pullRequest?: PullRequestSummary; question?: InlineQuestion; paneMode?: string; reviewRun?: string };
 // An Agent's `sessionId` is the console's composite id `${socketFingerprint}:${tmuxSession}`
 // (discovery keys agents that way). Recover the raw tmux session name a command targets.
 // whether an Agent is an interactive Review run's own (ADR 0010): it belongs to its run, so the

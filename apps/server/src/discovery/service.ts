@@ -13,7 +13,9 @@ import { gitCommonDir, listWorktrees, type WorktreeEntry } from '../git/worktree
 import { worktreeManagementAvailability } from '../worktrees/management.js';
 import type { WorktreeLaunchStore } from '../worktrees/store.js';
 import type { Adapter, AdapterConfigs, AgentKind, AttentionState, Conversation, ConversationSummary, InlineQuestion } from '../adapters/types.js';
-import type { Agent, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree, GitComparisonSummary, GitStatusSummary, GitUpstreamSummary, Pane, Project, SocketRef, Worktree } from '../domain/models.js';
+import type { Agent, AgentPane, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree, GitComparisonSummary, GitStatusSummary, GitUpstreamSummary, Pane, Project, SocketRef, Worktree } from '../domain/models.js';
+import { agentPanel } from '../transports/transport.js';
+import { withQuestionShape } from '../adapters/inline-questions.js';
 import { addUntrackedLineStats, comparisonAgainst, prComparisonCandidates, workingStatus } from '../git/comparison.js';
 import { isUpdateAdvisorLabel } from '../update-advisor.js';
 import { adhocScratchPlace, configuredPlaces, markedPlace, placeForRoot, scratchHome, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
@@ -372,7 +374,8 @@ export class DiscoveryService {
       if (pane.reportedQuestion !== undefined && pane.reportedQuestion.length > 0) paneQuestionPayloads.set(id, pane.reportedQuestion);
       const attention = resolveAttention({ kind: recognized.kind, title: pane.title, reported, hasQuestion: false });
       const conversationId = pane.reportedSession !== undefined && pane.reportedSession.length > 0 ? pane.reportedSession : undefined;
-      const agent: Agent = { id, paneId: pane.paneId, sessionId: `${pane.socket.fingerprint}:${pane.sessionId}`, socketFingerprint: pane.socket.fingerprint, home, title: pane.title, kind: recognized.kind, attention, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.paneMode === undefined ? {} : { paneMode: pane.paneMode }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }) };
+      const agentPane: AgentPane = { paneId: pane.paneId, sessionId: `${pane.socket.fingerprint}:${pane.sessionId}`, socketFingerprint: pane.socket.fingerprint, ...(pane.paneMode === undefined ? {} : { paneMode: pane.paneMode }) };
+      const agent: Agent = { id, ...agentPane, home, title: pane.title, kind: recognized.kind, attention, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }), transport: 'tmux', panel: agentPanel('tmux'), pane: agentPane };
       return agent;
     }))).filter((agent): agent is Agent => agent !== undefined);
     const sessionKey = (pane: Pane) => `${pane.socket.fingerprint}:${pane.sessionId}`;
@@ -802,7 +805,7 @@ export class DiscoveryService {
         : { ...agent, branch, ...(meta.gitStatus === undefined ? {} : { gitStatus: meta.gitStatus }), ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }), home: worktree.identity, projectId: worktree.projectId, worktreeId: worktree.id, ...(worktree.newTask === undefined ? {} : { newTaskConfigured: true }), ...(worktree.projectUrl === undefined ? {} : { projectUrl: worktree.projectUrl, projectProxied: worktree.projectPort !== undefined }) };
       // re-resolve now that a pending Inline question is known (precedence: reported → question → inferred → finished)
       const attention = resolveAttention({ kind: agent.kind, title: agent.title, reported: this.paneReported.get(agent.id), hasQuestion: question !== undefined });
-      return { ...details, attention, ...(pullRequest === undefined ? {} : { pullRequest }), ...(question === undefined ? {} : { question }) };
+      return { ...details, attention, ...(pullRequest === undefined ? {} : { pullRequest }), ...(question === undefined ? {} : { question: withQuestionShape(question) }) };
     }));
     // a Worktree with a live agent carries its git metadata on the Agent; an idle one carries
     // it on the Worktree record, as the flat list used to. A modal advisor never claims one.

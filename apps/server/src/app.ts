@@ -18,6 +18,7 @@ import { agentKinds, codexFamily, sameConversation, type Adapter, type AgentKind
 import { TmuxCommandRegistry } from './tmux/command-registry.js';
 import { TmuxAdapter } from './tmux/adapter.js';
 import { maxPromptAttachmentBytes, PromptService, promptScope, type PromptAttachment } from './prompts/service.js';
+import { launchTmuxAgent, TmuxTransport } from './transports/tmux.js';
 import { promptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, validPromptAttachments } from './prompts/validation.js';
 import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin } from './prompts/queue.js';
 import { LaunchService, type TmuxSession } from './launch/service.js';
@@ -191,7 +192,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     workspace: serverCheckout(),
     hostWorkspace: serverCheckoutOnHost(config.projects, process.env.RAC_HOST_REPOSITORY?.trim() || process.env.RAC_HOST_WORKSPACE)
   };
-  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId)); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const prompts = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, calendarLifecycle); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, undefined, prSwitch); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
+  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId)); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const transport = new TmuxTransport(discovery, tmux, { begin: agentId => prompts.beginAgentMutation(agentId), version: agentId => prompts.mutationVersion(agentId), busy: agentId => prompts.mutating(agentId) }, promptHistory, queuedPrompts, undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, calendarLifecycle); const prompts: PromptService = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, undefined, undefined, calendarLifecycle, transport); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, undefined, prSwitch); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
   const temporaryPreviews = deps.temporaryPreviews ?? new TemporaryPreviewService();
   // publish only boot-opaque presentations of trusted configured actions
   const buttonCatalog = deps.buttonActions?.catalog ?? new ConfiguredButtonCatalog(config);
@@ -1751,20 +1752,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // require a known current Conversation to rename and to read back
       const conversationId = await discovery.conversationId(id);
       if (conversationId === undefined) return reply.code(409).send({ error: 'The current conversation is unknown.' });
-      const target = await discovery.target(id);
-      if (target === undefined) return reply.code(404).send({ error: 'agent unavailable' });
-      // hold the agent's lifecycle mutation lock across the paste so a concurrent restart/switch
-      // cannot close the pane mid-delivery (and so it, in turn, defers to this rename), exactly as
-      // prompt submission does; a live restart reservation refuses the rename
-      const releaseMutation = prompts.beginAgentMutation(id);
-      if (releaseMutation === undefined) return reply.code(409).send({ error: 'The agent is busy with another operation.' });
-      const rename = conversations.rename(name);
-      const buffer = `rac-${randomBytes(18).toString('base64url')}`;
-      try {
-        // paste the Adapter's rename text and send its keys directly on the pane (Enter in every state)
-        if (!await tmux.pastePrompt(target.socket, target.agent.paneId, buffer, rename.text)
-          || !await tmux.sendKeys(target.socket, target.agent.paneId, rename.keys)) return reply.code(502).send({ error: 'Could not deliver the rename to the agent.' });
-      } finally { releaseMutation(); }
+      // the Transport delivers the CLI's own rename under the agent's input reservation, which a
+      // live restart reservation refuses
+      const renamed = await transport.rename(id, name);
+      if (renamed === 'unavailable') return reply.code(404).send({ error: 'agent unavailable' });
+      if (renamed === 'busy') return reply.code(409).send({ error: 'The agent is busy with another operation.' });
+      if (renamed !== 'sent') return reply.code(502).send({ error: 'Could not deliver the rename to the agent.' });
       // read the name back from the agent's own store until it reports the submitted name
       const cwd = discovery.paneDirectory(id);
       let confirmed = false;
@@ -2022,7 +2015,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.post('/api/agents/:id/cancel', async (request, reply) => { controlled(request, true); const outcome = await prompts.cancel((request.params as { id: string }).id); if (outcome === 'unavailable') return reply.code(404).send({ error: 'target unavailable' }); if (outcome === 'not-working') return reply.code(409).send({ error: 'The agent is not working; there is nothing to interrupt.' }); return reply.code(204).send(); });
   // leave a tmux mode holding the Agent's pane (a picker opened by a hook): input is refused
   // there, so prompts sit queued until it closes; the queue drains on the next observe
-  app.post('/api/agents/:id/pane-mode/exit', async (request, reply) => { controlled(request, true); const target = await discovery.target((request.params as { id: string }).id); if (target === undefined) return reply.code(404).send({ error: 'target unavailable' }); if (!await tmux.exitPaneMode(target.socket, target.agent.paneId)) return reply.code(503).send({ error: 'Unable to leave the pane mode.' }); await dashboardUpdates.refresh().catch(() => undefined); return reply.code(204).send(); });
+  app.post('/api/agents/:id/pane-mode/exit', async (request, reply) => { controlled(request, true); const exited = await transport.exitPaneMode((request.params as { id: string }).id); if (exited === undefined) return reply.code(404).send({ error: 'target unavailable' }); if (!exited) return reply.code(503).send({ error: 'Unable to leave the pane mode.' }); await dashboardUpdates.refresh().catch(() => undefined); return reply.code(204).send(); });
   app.post('/api/agents/:id/review-tour/jobs', { bodyLimit: REVIEW_REQUEST_BODY_BYTES }, async (request, reply) => {
     const owner = controlled(request, true).id;
     const start = parseReviewTourStart(request.body);
@@ -2263,18 +2256,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     renamesInFlight.add(agentId);
     try {
       const conversationId = await discovery.conversationId(agentId);
-      const target = await discovery.target(agentId);
-      if (conversationId === undefined || target === undefined) return 'skipped';
-      const rename = conversations.rename(clean);
-      const buffer = `rac-${randomBytes(18).toString('base64url')}`;
+      if (conversationId === undefined) return 'skipped';
       const cwd = discovery.paneDirectory(agentId);
       for (let press = 0; press < conversationNamePresses; press += 1) {
-        const releaseMutation = prompts.beginAgentMutation(agentId);
-        if (releaseMutation === undefined) return press === 0 ? 'skipped' : 'stuck';
-        try {
-          if (press === 0 && !await tmux.pastePrompt(target.socket, target.agent.paneId, buffer, rename.text)) return 'skipped';
-          if (!await tmux.sendKeys(target.socket, target.agent.paneId, rename.keys)) return 'stuck';
-        } finally { releaseMutation(); }
+        const renamed = await transport.rename(agentId, clean, press > 0);
+        if (renamed === 'unavailable' || renamed === 'busy' || renamed === 'unsent') return press === 0 ? 'skipped' : 'stuck';
+        if (renamed === 'stuck') return 'stuck';
         for (let attempt = 0; attempt < conversationNamePollAttempts; attempt += 1) {
           await conversationNamePollDelay();
           if (await conversations.readName(conversationId, cwd).catch(() => undefined) === clean) {
@@ -2301,17 +2288,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const submission = adapterFor(first.agent.kind)?.submission;
     const shellMode = attachments.length === 0 && text.startsWith('!');
     if (submission === undefined || shellMode || (attachments.length === 0 && submission.completesWithoutWork?.(text) === true)) return true;
-    const composed = submission.prepare(text, 'prompt');
     for (let attempt = 1; attempt <= promptStartAttempts; attempt += 1) {
       await launchPollDelay();
       const target = await discovery.target(agentId, true);
       if (target === undefined) return false;
       if (agentAttentionState(target.agent) !== 'finished') return true;
       if (attempt % promptStartPressEvery !== 0 || attempt === promptStartAttempts) continue;
-      const releaseMutation = prompts.beginAgentMutation(agentId);
-      if (releaseMutation === undefined) continue;
-      try { await tmux.sendKeys(target.socket, target.agent.paneId, composed.idleKeys ?? composed.keys).catch(() => false); }
-      finally { releaseMutation(); }
+      await transport.resubmit(target, text);
     }
     return false;
   };
@@ -2333,7 +2316,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const target = await discovery.target(agent.id, true);
       // a pane that vanished before it settled is a launch that did not survive
       if (target === undefined) return { state: 'blocked', reason: 'the agent closed before it was ready' };
-      const capture = await tmux.capture(target.socket, target.agent.paneId).catch(() => undefined) ?? '';
+      const capture = await transport.capture(target) ?? '';
       const readiness = ready(runSnapshot(target.agent), capture);
       // ready to paste, or blocked on something only the operator can clear
       if (readiness.state === 'ready') return { state: 'ready' };
@@ -2382,7 +2365,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // under); an Agent missing from it is confirmed gone by a forced scan inside `target`
       attention: async agentId => { await discovery.refresh(); const target = await discovery.target(agentId); return target === undefined ? undefined : agentAttentionState(target.agent); },
       close: agentId => prompts.close(agentId),
-      release: async agentId => { const target = await discovery.target(agentId); return target !== undefined && await tmux.unmarkReviewRun(target.socket, target.agent.paneId); },
+      release: agentId => transport.unmarkReviewRun(agentId),
       delay: async () => await new Promise(resolve => setTimeout(resolve, 1_000))
     }, { promptDirectory: join(`/tmp/remote-agent-console-${process.getuid?.() ?? 0}`, 'review-runs') });
   }
@@ -2432,7 +2415,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (attention === 'question') return { status: 'skipped', detail: 'previous run is asking a question', agentId };
     // a draft or an open dialog in the composer would merge the reset into a prompt: skip instead.
     // A pane we cannot read is skipped too rather than pasted into blind.
-    const capture = await tmux.capture(prior.socket, prior.agent.paneId).catch(() => undefined);
+    const capture = await transport.capture(prior);
     if (capture === undefined) return { status: 'skipped', detail: 'could not read the pane', agentId };
     if (!capability.composerEmpty(capture)) return { status: 'skipped', detail: 'composer has unsent text', agentId };
     const before = runSnapshot(prior.agent);
@@ -2731,22 +2714,22 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     }
     const before = new Set(dashboard.agents.map(agent => agent.id));
     // launch inside the fixed host checkout
-    if (!await launch.launchUpdateAdvisor(advisor.repository, targetSha)) return undefined;
-    const agent = await waitForAgent(before, candidate => candidate.displayLabel === updateAdvisorPendingLabel(targetSha));
-    // stop after a failed discovery handoff
-    if (agent === undefined) return undefined;
+    const launched = await launchTmuxAgent(waitForAgent, before, candidate => candidate.displayLabel === updateAdvisorPendingLabel(targetSha), () => launch.launchUpdateAdvisor(advisor.repository, targetSha));
+    // stop after a failed launch or discovery handoff
+    if (!('agent' in launched)) return undefined;
+    const agentId = launched.agent.id;
     // close an unprompted scratch pane
-    if (!await prompts.submitUpdateAdvisor(agent.id, targetSha, advisor.prompt)) {
-      await prompts.close(agent.id).catch(() => false);
+    if (!await prompts.submitUpdateAdvisor(agentId, targetSha, advisor.prompt)) {
+      await prompts.close(agentId).catch(() => false);
       return undefined;
     }
     // trust recovered panes only after the initial prompt is scheduled
-    if (!await prompts.markUpdateAdvisorReady(agent.id, targetSha)) {
-      await prompts.close(agent.id).catch(() => false);
+    if (!await prompts.markUpdateAdvisorReady(agentId, targetSha)) {
+      await prompts.close(agentId).catch(() => false);
       return undefined;
     }
-    updateAdvisors.set(targetSha, agent.id);
-    return agent.id;
+    updateAdvisors.set(targetSha, agentId);
+    return agentId;
   };
   // start or reuse a fixed update advisor
   app.post('/api/server/update-advisor', async (request, reply) => {
@@ -2803,22 +2786,18 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const before = new Set(current.agents.map(agent => agent.id));
       // require the original agent to close
       if (!await prompts.close(id)) return { status: 'skipped', worktreeId, reason: 'unavailable', error: 'The worktree agent could not be closed.' };
-      const resumed = resumeThread !== undefined ? await launch.resumeConversation(worktree.id, resumeThread, resumeKind)
-        : hasSiblings ? await launch.launch(worktree.id, kind) : await launch.resume(worktree.id, kind);
-      // require the resumed agent to start
-      if (!resumed) {
+      const launched = await launchTmuxAgent(waitForAgent, before, inWorktree(worktree.id), () => resumeThread !== undefined ? launch.resumeConversation(worktree.id, resumeThread, resumeKind)
+        : hasSiblings ? launch.launch(worktree.id, kind) : launch.resume(worktree.id, kind));
+      // require the resumed agent to start, and retain recovery controls after a timeout
+      if (!('agent' in launched)) {
         await dashboardUpdates.refresh().catch(() => undefined);
-        return { status: 'failed', worktreeId, reason: 'launch-failed', error: 'The agent closed, but it could not be resumed.' };
+        return launched.failure === 'refused'
+          ? { status: 'failed', worktreeId, reason: 'launch-failed', error: 'The agent closed, but it could not be resumed.' }
+          : { status: 'failed', worktreeId, reason: 'timed-out', error: `The agent closed and resumed, but Codex did not become ready within ${launchReadyTimeoutSeconds} seconds.` };
       }
-      const agent = await waitForAgent(before, inWorktree(worktree.id));
-      // retain recovery controls after a timeout
-      if (agent === undefined) {
-        await dashboardUpdates.refresh().catch(() => undefined);
-        return { status: 'failed', worktreeId, reason: 'timed-out', error: `The agent closed and resumed, but Codex did not become ready within ${launchReadyTimeoutSeconds} seconds.` };
-      }
-      await prompts.handOver(id, agent.id).catch(() => undefined);
+      await prompts.handOver(id, launched.agent.id).catch(() => undefined);
       await dashboardUpdates.refresh().catch(() => undefined);
-      return { status: 'restarted', worktreeId, agentId: agent.id };
+      return { status: 'restarted', worktreeId, agentId: launched.agent.id };
     } finally {
       releaseRestart();
     }
@@ -3023,12 +3002,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     }
     const before = new Set(current.agents.map(agent => agent.id));
     // launch an inactive worktree directly into the Conversation, through its own Adapter
-    if (!await launch.resumeConversation(worktree.id, conversationId, resumeKind)) return reply.code(409).send({ error: 'Could not resume the conversation.' });
-    const agent = await waitForAgent(before, inWorktree(worktree.id));
-    // surface slow or failed resume handoffs
-    if (agent === undefined) return reply.code(504).send({ error: `The conversation started, but the agent did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
+    const launched = await launchTmuxAgent(waitForAgent, before, inWorktree(worktree.id), () => launch.resumeConversation(worktree.id, conversationId, resumeKind));
+    if (!('agent' in launched)) {
+      if (launched.failure === 'refused') return reply.code(409).send({ error: 'Could not resume the conversation.' });
+      // surface slow or failed resume handoffs
+      return reply.code(504).send({ error: `The conversation started, but the agent did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
+    }
     await dashboardUpdates.refresh().catch(() => undefined);
-    return reply.code(201).send({ agentId: agent.id });
+    return reply.code(201).send({ agentId: launched.agent.id });
   });
   // restart one idle configured agent by resuming its last conversation
   app.post('/api/agents/:id/restart', async (request, reply) => {
@@ -3053,11 +3034,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (kind.invalid) return reply.code(400).send({ error: 'invalid agent kind' });
     const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
     // require a successful launch handoff (refuses an unconfigured or unlaunchable kind)
-    if (!await launch.launch(worktreeId, kind.kind)) return reply.code(409).send({ error: 'Could not start the worktree agent.' });
-    const agent = await waitForAgent(before, inWorktree(worktreeId));
+    const launched = await launchTmuxAgent(waitForAgent, before, inWorktree(worktreeId), () => launch.launch(worktreeId, kind.kind));
+    if ('agent' in launched) return reply.code(201).send({ agentId: launched.agent.id });
+    if (launched.failure === 'refused') return reply.code(409).send({ error: 'Could not start the worktree agent.' });
     // report a true timeout
-    if (!agent) return reply.code(504).send({ error: `The worktree session started, but Codex did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
-    return reply.code(201).send({ agentId: agent.id });
+    return reply.code(504).send({ error: `The worktree session started, but Codex did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
   });
   // the Run target that launches at a Place, as its launcher row does; an ad-hoc Scratch folder
   // has no launch of its own, only the configured Scratch folder does
@@ -3102,11 +3083,11 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (place === undefined) return reply.code(404).send({ error: 'project unavailable' });
     const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
     // require a successful launch handoff (refuses an unconfigured or unlaunchable kind)
-    if (!await launch.launchProjectDirectory(projectId, kind.kind)) return reply.code(409).send({ error: 'Could not start the project agent.' });
-    const agent = await waitForAgent(before, atPlace(place.id));
+    const launched = await launchTmuxAgent(waitForAgent, before, atPlace(place.id), () => launch.launchProjectDirectory(projectId, kind.kind));
+    if ('agent' in launched) return reply.code(201).send({ agentId: launched.agent.id });
+    if (launched.failure === 'refused') return reply.code(409).send({ error: 'Could not start the project agent.' });
     // report a true timeout
-    if (!agent) return reply.code(504).send({ error: `The project session started, but the agent did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
-    return reply.code(201).send({ agentId: agent.id });
+    return reply.code(504).send({ error: `The project session started, but the agent did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
   });
   // the branches the Add dialog offers — local branches (flagged when a Worktree already
   // holds one, which the checkout picker hides but the base picker keeps) plus remote-only
@@ -3172,8 +3153,9 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         await launch.startWorktreeShell(worktree);
         const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
         // report the agent when it appears, but never fail the creation on a slow launch
-        if (await launch.launch(worktreeId)) agentId = (await waitForAgent(before, inWorktree(worktreeId)))?.id;
-        else launchError = 'The worktree was created, but the agent could not be started.';
+        const launched = await launchTmuxAgent(waitForAgent, before, inWorktree(worktreeId), () => launch.launch(worktreeId));
+        if ('agent' in launched) agentId = launched.agent.id;
+        else if (launched.failure === 'refused') launchError = 'The worktree was created, but the agent could not be started.';
       }
     }
     discovery.invalidateWorktrees();
@@ -3524,12 +3506,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // reject an unknown kind before any handoff
     if (kind.invalid) return reply.code(400).send({ error: 'invalid agent kind' });
     const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
-    if (!await launch.launchHome(kind.kind)) return reply.code(409).send({ error: 'Could not start a new agent session.' });
     const scratch = await launch.scratchPlace();
-    const agent = await waitForAgent(before, atPlace(scratch.id));
+    const launched = await launchTmuxAgent(waitForAgent, before, atPlace(scratch.id), () => launch.launchHome(kind.kind));
+    if ('agent' in launched) return reply.code(201).send({ agentId: launched.agent.id });
+    if (launched.failure === 'refused') return reply.code(409).send({ error: 'Could not start a new agent session.' });
     // report a true timeout
-    if (!agent) return reply.code(504).send({ error: `The new session started, but Codex did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
-    return reply.code(201).send({ agentId: agent.id });
+    return reply.code(504).send({ error: `The new session started, but Codex did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
   });
   // Open folder (ADR 0014): open any folder as a Workspace by launching an Agent at its Place,
   // opening a Console shell there, or pinning it; then record it as recent. A first launch in a
@@ -3547,10 +3529,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     let opened: { agentId?: string; paneId?: string; needsOperator?: string };
     if (action === 'agent') {
       const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
-      if (!await launch.launchAt(place, kind.kind)) return reply.code(409).send({ error: 'Could not start an agent in that folder.' });
-      await openedFolders.record(folder.path).catch(() => undefined);
-      const agent = await waitForAgent(before, atPlace(place.id));
-      if (agent === undefined) return reply.code(504).send({ error: `The session started, but the agent did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
+      const launched = await launchTmuxAgent(waitForAgent, before, atPlace(place.id), async () => {
+        if (!await launch.launchAt(place, kind.kind)) return false;
+        await openedFolders.record(folder.path).catch(() => undefined);
+        return true;
+      });
+      if (!('agent' in launched)) return launched.failure === 'refused' ? reply.code(409).send({ error: 'Could not start an agent in that folder.' }) : reply.code(504).send({ error: `The session started, but the agent did not become ready within ${launchReadyTimeoutSeconds} seconds.` });
+      const agent = launched.agent;
       // a short look for a blocking first screen; an agent still starting is left to start
       const readiness = await waitForReadiness(agent, openFolderReadinessAttempts);
       if (readiness.state === 'blocked' && await discovery.target(agent.id, true) === undefined) return reply.code(409).send({ error: 'The agent closed as it started.' });

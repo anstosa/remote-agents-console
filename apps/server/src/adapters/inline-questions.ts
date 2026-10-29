@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { InlineQuestion } from './types.js';
 
 /**
  * The identity every Inline question transport agrees on, shared by the three
@@ -13,4 +14,14 @@ import { createHash } from 'node:crypto';
  */
 export function inlineQuestionId(text: string, choices: readonly string[]): string {
   return createHash('sha256').update([text, ...choices].join('\0')).digest('base64url').slice(0, 22);
+}
+
+/** A pane question with its Transport-neutral shape: a choice field, and its pane fields as the pane part. */
+export function withQuestionShape(question: InlineQuestion): InlineQuestion {
+  const { choices, descriptions, rows, selectedIndex, targetPaneId } = question;
+  return {
+    ...question,
+    field: { kind: 'choice', choices, ...(descriptions === undefined ? {} : { descriptions }) },
+    pane: { ...(rows === undefined ? {} : { rows }), ...(selectedIndex === undefined ? {} : { selectedIndex }), ...(targetPaneId === undefined ? {} : { targetPaneId }) }
+  };
 }

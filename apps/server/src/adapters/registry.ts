@@ -3,6 +3,7 @@ import { omxAdapter } from './omx.js';
 import { claudeAdapter } from './claude.js';
 import type { Pane } from '../domain/models.js';
 import type { Adapter, AdapterCapability, AdapterConfigs, AgentKind, ReviewRuns } from './types.js';
+import type { Transport } from '../transports/transport.js';
 
 /**
  * The closed registry. It is code, not plugins: adding a kind means adding an
@@ -49,26 +50,30 @@ export function paneExcluded(pane: Pane): boolean {
 }
 
 /**
- * The capability record the Dashboard publishes per registered kind (ADR 0002).
- * Every capability but launchability is intrinsic to the Adapter. Launchability is
- * config-gated: a kind is launchable only when its program is configured and
- * executable (`unavailableReason`/`program` carry the details); an observe-only
+ * The capability record the Dashboard publishes per registered kind (ADR 0002), derived from the
+ * kind's Adapter and the Transport it is driven over (ADR 0015); every registered kind is driven
+ * over tmux. Launchability is config-gated: a kind is launchable only when its program is
+ * configured and executable (`unavailableReason`/`program` carry the details); an observe-only
  * console (empty `adapters`) recognises every kind and launches none.
  */
 export function adapterCapabilities(configs: AdapterConfigs): Partial<Record<AgentKind, AdapterCapability>> {
-  return Object.fromEntries(adapters.map((adapter) => {
-    const configured = configs[adapter.kind];
-    return [adapter.kind, {
-      launchable: configured?.launchable ?? false,
-      ...(configured?.unavailableReason === undefined ? {} : { unavailableReason: configured.unavailableReason }),
-      ...(configured?.program === undefined ? {} : { program: configured.program }),
-      stateSource: adapter.stateSource,
-      turnCapture: adapter.turns !== undefined,
-      conversations: adapter.conversations?.list !== undefined,
-      naming: adapter.conversations?.rename !== undefined,
-      inlineQuestions: adapter.questions !== undefined,
-      commands: adapter.commands !== undefined,
-      sandbox: adapter.sandbox !== undefined,
-    }];
-  }));
+  return Object.fromEntries(adapters.map((adapter) => [adapter.kind, capability(adapter, 'tmux', configs[adapter.kind])]));
+}
+
+// The pane-based members (Turn capture from the screen, questions read off the pane, a rename
+// pasted into the composer) count only over tmux; a structured Transport reports its own.
+function capability(adapter: Adapter, transport: Transport, configured: AdapterConfigs[AgentKind]): AdapterCapability {
+  const tmux = transport === 'tmux';
+  return {
+    launchable: configured?.launchable ?? false,
+    ...(configured?.unavailableReason === undefined ? {} : { unavailableReason: configured.unavailableReason }),
+    ...(configured?.program === undefined ? {} : { program: configured.program }),
+    stateSource: adapter.stateSource,
+    turnCapture: tmux && adapter.turns !== undefined,
+    conversations: adapter.conversations?.list !== undefined,
+    naming: tmux && adapter.conversations?.rename !== undefined,
+    inlineQuestions: tmux && adapter.questions !== undefined,
+    commands: adapter.commands !== undefined,
+    sandbox: adapter.sandbox !== undefined,
+  };
 }

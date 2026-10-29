@@ -7,6 +7,8 @@ import { maxStoredAttachmentFootprintBytes, promptAttachmentBytes, promptAttachm
 // where the queuing Agent ran, so its prompts can still become Notes after it is gone
 export type QueuedPromptOrigin = { home: string; placeId?: string };
 export type QueuedPrompt = { id: string; text: string; createdAt: string; attachments?: PromptAttachment[]; origin?: QueuedPromptOrigin };
+// queued prompts and history belong to the Agent they were sent to, never to a sibling at its Worktree
+export const promptScope = (agentId: string) => `agent:${agentId}`;
 export type QueuedPromptSummary = { id: string; text: string; createdAt: string; attachments?: Array<{ name: string; size: number }> };
 type StoredQueues = Record<string, QueuedPrompt[]>;
 
