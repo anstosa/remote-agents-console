@@ -778,7 +778,7 @@ export class PromptService {
     for (const [requestId, request] of this.trackedRequests) {
       if (request.agentId === agentId && request.terminalAt === undefined) this.settleTrackedRequest(requestId, 'interrupted', 'agent_closed');
     }
-    if (transport !== this.transport) await this.saveQueued(promptScope(agentId));
+    if (transport === this.structured) await this.saveQueued(promptScope(agentId));
     return true;
   }
 }

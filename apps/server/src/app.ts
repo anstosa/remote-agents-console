@@ -2024,7 +2024,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (attachments.length > 0 && await structuredAgents.has(id)) return reply.code(400).send({ error: 'This agent does not take attachments yet.' });
     if (!await prompts.submit(id, data.prompt, attachments)) return reply.code(404).send({ error: 'target unavailable' });
     // a prompt to an Exited Agent waits in its queue while the Agent resumes
-    if ((await structuredAgents.agent(id))?.structured?.lifecycle === 'exited') void structuredAgents.resume(id);
+    if ((await structuredAgents.agent(id))?.structured?.lifecycle === 'exited') void structuredAgents.resume(id).catch(error => { console.error(`[structured] ${id} could not resume:`, error); });
     return reply.code(204).send();
   });
   // a structured Agent's Raw events: the latest lines between the console and its process

@@ -29,7 +29,7 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // until the Agent takes it or a cancel returns it, and a cancel aborts the Turn before it answers.
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to.
-function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve() } = {}) {
+function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0 } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -74,7 +74,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
       attaches.push(holder);
       await attaching;
       emit = events;
-      return { holder, connection: connection(), cursor: () => lines };
+      return { holder, connection: connection(), cursor: () => lines, dropped };
     },
     stderr: async () => 'pi: could not load its extension',
     stop: async () => { closed = true; }
@@ -799,6 +799,18 @@ describe('a structured Agent across a console restart', () => {
     expect(next.delivered).toEqual(['Third']);
     const history = (await restarted.app.inject({ method: 'GET', url: `/api/agents/${id}/prompt-history`, headers: restarted.headers })).json().prompts;
     expect(history).toMatchObject([{ text: 'Third' }, { text: 'Second', answer: 'Second answered' }, { text: 'First', answer: 'First answered' }]);
+    await restarted.app.close();
+  });
+
+  it('says a question may be waiting unseen when the holder could not replay every line, and keeps saying so over a reloaded history', async () => {
+    const fake = fakeAgent();
+    const { app, headers, restart } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    const next = fakeAgent({ dropped: 40 });
+    const restarted = await restart(next);
+    next.emit({ type: 'history', items: [{ id: 'h0', kind: 'message', role: 'user', text: 'Reply slowly' }] });
+    const items = (await restarted.app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers: restarted.headers })).json().items;
+    expect(items).toEqual([{ id: 'h0', kind: 'message', role: 'user', text: 'Reply slowly' }, expect.objectContaining({ kind: 'notice', tone: 'warning', text: expect.stringContaining('missed 40 lines') })]);
     await restarted.app.close();
   });
 

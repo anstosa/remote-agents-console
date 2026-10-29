@@ -407,13 +407,10 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
     emit({ type: 'exited' });
   });
 
-  // reattached to a process that reported in to an earlier console: read its state afresh. Lines
-  // the holder could no longer replay may have held a dialog, which then waits unseen.
+  // reattached to a process that reported in to an earlier console: read its state afresh
   if (attached !== undefined) {
     void refresh();
-    void history(false).then(() => {
-      if (attached.dropped > 0) transcript({ id: next('n'), kind: 'notice', tone: 'warning', text: `The console missed ${count(attached.dropped, 'line', 'lines')} of this Agent's output while it restarted. If a question was asked then, it is waiting unseen: cancel the Turn if it does not finish.` });
-    });
+    void history(false);
     usage();
   }
 

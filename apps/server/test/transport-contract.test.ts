@@ -110,7 +110,7 @@ async function reattached(launch: Awaited<ReturnType<typeof launched>>, client: 
   const { events, emit, next } = collector(async () => await launch.processes.stderr(launch.started.holder));
   const attached = await launch.processes.attach({ ...launch.started.holder, read }, client.adapter.kind, emit);
   expect(attached).toBeDefined();
-  return { connection: attached!.connection, events, next };
+  return { connection: attached!.connection, events, next, dropped: attached!.dropped };
 }
 const running = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
@@ -269,7 +269,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(await again.next('turn', event => event.type === 'turn' && event.turn.type === 'settled')).toBeDefined();
   }, 60_000);
 
-  it('after a replay that overflowed, resyncs: Pi\'s state says it works, the Turn settles, and a question may be unseen', async () => {
+  it('after a replay that overflowed, resyncs: Pi\'s state says it works, and the Turn settles', async () => {
     // a replay buffer of one line: a reconnect from the launch report has lost lines
     const launch = await launched(client, undefined, { RAC_HOLDER_REPLAY_BYTES: '1' });
     await launch.next('report');
@@ -278,8 +278,8 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     launch.connection.close();
 
     const again = await reattached(launch, client, 0);
+    expect(again.dropped).toBeGreaterThan(0);
     expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'started' } });
-    expect(await again.next('transcript', event => event.type === 'transcript' && event.item.kind === 'notice')).toMatchObject({ item: { tone: 'warning', text: expect.stringContaining('question') } });
     expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } });
   }, 60_000);
 

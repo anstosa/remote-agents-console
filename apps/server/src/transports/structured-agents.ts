@@ -36,10 +36,10 @@ export type StructuredLaunch = { id: string; kind: AgentKind; place: Place; resu
 /** One line between the console and an Agent's process, as it went over the wire. */
 export type RawLine = { from: 'agent' | 'console'; line: string };
 /**
- * A running process the console is connected to, how many of its lines the console has read, and
- * the latest lines either way (Raw events).
+ * A running process the console is connected to, how many of its lines the console has read, the
+ * latest lines either way (Raw events), and, reattached, how many lines it could not replay.
  */
-export type StructuredProcess = { connection: StructuredConnection; holder: HolderRef; cursor?: () => number; raw?: () => readonly RawLine[] };
+export type StructuredProcess = { connection: StructuredConnection; holder: HolderRef; cursor?: () => number; raw?: () => readonly RawLine[]; dropped?: number };
 /** Starts, reads and stops structured Agent processes; the holder in tmux outside tests. */
 export interface StructuredProcesses {
   /** Start the process and connect its protocol client, which reports through `emit`. */
@@ -80,7 +80,9 @@ function clientOver(adapter: StructuredAdapter, holder: HolderRef, { channel, he
   const raw: RawLine[] = [];
   const keep = (from: RawLine['from'], line: string) => { raw.push({ from, line: line.slice(0, maxRawLine) }); raw.splice(0, raw.length - maxRawLines); };
   const counted: LineChannel = { ...channel, send: line => { keep('console', line); channel.send(line); }, onLine: listener => channel.onLine(line => { read += 1; keep('agent', line); listener(line); }) };
-  return { holder: { ...holder, pid: hello.pid }, connection: adapter.client(counted, emit, attached), cursor: () => read, raw: () => raw };
+  // the pid is signalled on Close, so only a real one is kept
+  const pid = Number.isSafeInteger(hello.pid) && hello.pid > 1 ? { pid: hello.pid } : {};
+  return { holder: { ...holder, ...pid }, connection: adapter.client(counted, emit, attached), cursor: () => read, raw: () => raw, ...(attached === undefined ? {} : { dropped: attached.dropped }) };
 }
 
 /** The structured Agents' processes, each run under a holder in its Place's Workspace session. */
@@ -213,7 +215,7 @@ export class StructuredAgents {
   async resume(id: string, conversationId?: string): Promise<boolean> {
     const record = (await this.load()).find(candidate => candidate.id === id);
     const live = this.live.get(id) ?? this.idle();
-    if (record === undefined || this.lifecycle(record) !== 'exited' || live.busy) return false;
+    if (record === undefined || record.lifecycle !== 'exited' || live.busy) return false;
     this.live.set(id, live);
     return await this.relaunch(record, live, conversationId ?? record.conversationId) === true;
   }
@@ -257,12 +259,7 @@ export class StructuredAgents {
       return false;
     }
     if (started === undefined) return undefined;
-    live.connection = started.connection;
-    live.cursor = started.cursor;
-    live.raw = started.raw;
-    record.holder = started.holder;
-    await this.save();
-    this.changed(live);
+    await this.adopt(record, live, started);
     if (await reported) await this.noteUnreachableModels(record, live);
     else if (record.lifecycle === 'starting') await this.fail(record, live, 'Its process did not report in after starting.', true);
     return true;
@@ -284,8 +281,7 @@ export class StructuredAgents {
         return;
       }
       const generation = live.generation += 1;
-      live.busy = true;
-      const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event)).catch(() => undefined).finally(() => { live.busy = false; });
+      const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event)).catch(() => undefined);
       if (this.live.get(record.id) !== live || live.generation !== generation) { attached?.connection.close(); return; }
       if (attached === undefined) {
         record.lifecycle = 'exited';
@@ -293,23 +289,30 @@ export class StructuredAgents {
         await this.readStderr(record, live);
         return;
       }
-      live.connection = attached.connection;
-      live.cursor = attached.cursor;
-      live.raw = attached.raw;
-      record.holder = attached.holder;
       // a deploy may have moved the pin on under it: it restarts on the pinned version once idle
       const pinned = structuredAdapterFor(record.kind)?.pinned()?.version;
       live.offPin = record.version !== undefined && pinned !== undefined && record.version !== pinned;
-      await this.save();
-      this.changed(live);
+      await this.adopt(record, live, attached);
+      // lines the holder could no longer replay may have held a question, which then waits unseen
+      if ((attached.dropped ?? 0) > 0) this.notice(live, `The console missed ${attached.dropped} lines of this Agent's output while it restarted. If a question was asked then, it is waiting unseen: cancel the Turn if it does not finish.`, 'warning');
     }));
+  }
+
+  // drive the Agent through a process it started or reattached to
+  private async adopt(record: StructuredRecord, live: Live, process: StructuredProcess): Promise<void> {
+    live.connection = process.connection;
+    live.cursor = process.cursor;
+    live.raw = process.raw;
+    record.holder = process.holder;
+    await this.save();
+    this.changed(live);
   }
 
   // restart an Agent whose process runs another version than the pin, once it is idle, on its Conversation
   private restartOffPin(record: StructuredRecord, live: Live): void {
     if (live.offPin !== true || live.working || live.busy || live.questions.length > 0) return;
     live.offPin = false;
-    void this.relaunch(record, live, record.conversationId);
+    void this.relaunch(record, live, record.conversationId).catch(error => { console.error(`[structured] ${record.id} could not restart on the pinned version:`, error); });
   }
 
   // where a restarted console would reconnect from: the lines read through this idle point
@@ -323,13 +326,6 @@ export class StructuredAgents {
     return { generation: 0, working: false, busy: false, questions: [], steers: [], offers: 0, transcript: [], revision: 0, status: new Map(), noticeCount: 0, notices: [] };
   }
 
-  // the Agent's lifecycle: one this console holds no connection to has no process it can drive
-  // (one not yet reattached, or being reattached, is still live, so nothing resumes it under its
-  // running process)
-  private lifecycle(record: StructuredRecord): AgentLifecycle {
-    const live = this.live.get(record.id);
-    return live !== undefined && live.connection === undefined && !live.busy && record.lifecycle === 'live' || live === undefined && record.lifecycle === 'starting' ? 'exited' : record.lifecycle;
-  }
 
   /**
    * Deliver a prompt as a Turn: only to a live Agent that is not already working (`busy` until
@@ -518,7 +514,7 @@ export class StructuredAgents {
   async agents(): Promise<Agent[]> {
     return (await this.load()).map(record => {
       const live = this.live.get(record.id);
-      const lifecycle = this.lifecycle(record);
+      const lifecycle = record.lifecycle;
       const current = live?.model;
       const name = current === undefined ? undefined : live?.models?.find(model => model.id === current.model)?.name;
       const questions = (live?.questions ?? []).map(shaped);

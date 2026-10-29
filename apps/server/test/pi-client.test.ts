@@ -131,7 +131,7 @@ describe('the Pi client', () => {
     expect(events.some(event => event.type === 'report')).toBe(false);
   });
 
-  it('after an overflowed replay, settles a Turn whose start it missed, and says a question may be waiting unseen', async () => {
+  it('after an overflowed replay, settles a Turn whose start it missed', async () => {
     const { sent, events, pi } = piOverChannel({ dropped: 40 });
     pi({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' } });
     pi({ type: 'agent_settled', aborted: false });
@@ -141,9 +141,6 @@ describe('the Pi client', () => {
     const { id } = sent.find(record => record.type === 'get_state')!;
     pi({ type: 'response', id, command: 'get_state', success: true, data: { sessionId: 's1', isStreaming: true } });
     expect(events.filter(event => event.type === 'turn').at(-1)).toEqual({ type: 'turn', turn: { type: 'started' } });
-    // the notice follows the history, which replaces the transcript
-    pi({ type: 'response', id: sent.find(record => record.type === 'get_messages')!.id, command: 'get_messages', success: true, data: { messages: [] } });
-    await vi.waitFor(() => expect(events.at(-1)).toEqual({ type: 'transcript', item: expect.objectContaining({ kind: 'notice', tone: 'warning', text: expect.stringContaining('question') }) }));
   });
 
   it('after an overflowed replay in the middle of a Turn, takes the Agent to be working when Pi says it is', async () => {
