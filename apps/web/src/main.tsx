@@ -2329,7 +2329,8 @@ type RestartAs = { label: string; resolution?: LaunchResolution; onLaunch: (choi
 // `disabledReason` holds the menu shut (an Agent at work) and explains why in the button's title.
 // An Agent outside a Worktree (Scratch, a directory Project) has no Restart: Turn off closes it.
 type NewTaskPower = { agentId: string; worktreeId?: string; configured: boolean; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void };
-type AgentPowerMenuProps = { pending: boolean; progressColor?: ProgressColor; hidden?: boolean; disabledReason?: string; className?: string; onTurnOff: () => void; onRestart?: () => void; onClear: () => void; restartAs?: RestartAs; newTask?: NewTaskPower };
+// the Conductor's menu offers only Restart: it has no Clear and no Turn off
+type AgentPowerMenuProps = { pending: boolean; progressColor?: ProgressColor; hidden?: boolean; disabledReason?: string; className?: string; onTurnOff?: () => void; onRestart?: () => void; onClear?: () => void; restartAs?: RestartAs; newTask?: NewTaskPower };
 // keep task availability and the handoff alive while the power flyout closes
 function useNewTaskPowerOption(task: NewTaskPower | undefined, open: boolean, closeMenu: () => void): ReactNode {
   const [availability, setAvailability] = useState<NewTaskAvailability>();
@@ -2430,10 +2431,10 @@ function AgentPowerMenu(props: AgentPowerMenuProps) {
   // a held menu closes rather than stranding an open flyout
   useEffect(() => { if (disabledReason !== undefined) setOpen(false); }, [disabledReason]);
   // Restart as… sits between Restart and Clear
-  const stateActions = <>{onRestart !== undefined && <button type="button" role="menuitem" onClick={() => choose(onRestart)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7L20 7.6M20 3v4.6h-4.6" /></svg>Restart</button>}{restartAs !== undefined && <button type="button" role="menuitem" data-context-flyout aria-haspopup="menu" onClick={() => setView('restart-as')}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7L20 7.6M20 3v4.6h-4.6" /></svg>Restart as…</button>}<button type="button" role="menuitem" onClick={() => choose(props.onClear)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 15 8-8 5 5-8 8H4v-5Zm7-7 5 5M10 20h10" /></svg>Clear</button></>;
+  const stateActions = <>{onRestart !== undefined && <button type="button" role="menuitem" onClick={() => choose(onRestart)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7L20 7.6M20 3v4.6h-4.6" /></svg>Restart</button>}{restartAs !== undefined && <button type="button" role="menuitem" data-context-flyout aria-haspopup="menu" onClick={() => setView('restart-as')}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7L20 7.6M20 3v4.6h-4.6" /></svg>Restart as…</button>}{props.onClear !== undefined && <button type="button" role="menuitem" onClick={() => choose(props.onClear!)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 15 8-8 5 5-8 8H4v-5Zm7-7 5 5M10 20h10" /></svg>Clear</button>}</>;
   const restartAsPage = restartAs === undefined ? null : <LaunchMenu verb="Restart" label={restartAs.label} resolution={restartAs.resolution} onLaunch={choice => choose(() => restartAs.onLaunch(choice))} />;
   // Turn off at the foot of the menu
-  const footAction = <button className="agent-power-off" type="button" role="menuitem" onClick={() => choose(props.onTurnOff)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9m5.7-5.7a8 8 0 1 1-11.4 0" /></svg>Turn off</button>;
+  const footAction = props.onTurnOff !== undefined && <button className="agent-power-off" type="button" role="menuitem" onClick={() => choose(props.onTurnOff!)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9m5.7-5.7a8 8 0 1 1-11.4 0" /></svg>Turn off</button>;
   const menuLabel = 'Agent power options';
   // keep restart choices in the same compact power flyout
   return <><span className="power-menu-wrap" ref={anchorRef} hidden={hidden}><button className={`${className}${progressBorder(pending, props.progressColor ?? 'red')}`} type="button" disabled={pending || disabledReason !== undefined || hidden} aria-busy={pending || undefined} aria-label={menuLabel} data-context-flyout aria-expanded={open && !hidden} aria-haspopup="menu" title={disabledReason ?? menuLabel} onClick={() => setOpen(current => !current)}><ProgressRing busy={pending} /><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9m5.7-5.7a8 8 0 1 1-11.4 0" /></svg></button></span>{open && !hidden && <FlyoutPortal onDismiss={() => setOpen(false)}><div className="more-menu flyout-menu agent-power-menu" ref={flyoutRef} style={style} role="menu" aria-label={menuLabel}>{view === 'restart-as' && restartAs !== undefined ? restartAsPage : <>{stateActions}{newTaskOption}{footAction}</>}</div></FlyoutPortal>}</>;
@@ -7899,7 +7900,17 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const panelState = agentPanelState(agent, startingNewTask);
   // Stop interrupts work in progress beside the hidden, disabled power control
   const cancelButton = active && <button type="button" className={`panel-header-action agent-cancel${progressBorder(cancelling, 'red')}`} disabled={cancelling} aria-busy={cancelling || undefined} aria-label="Cancel agent" title="Cancel agent" onClick={() => void cancel()}><ProgressRing busy={cancelling} /><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1" /></svg></button>;
-  const power = <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || clearing || deactivating || deleting} progressColor={restarting ? 'yellow' : 'red'} hidden={active} {...(active ? { disabledReason: 'Cancel the agent’s work before restarting, clearing or turning it off' } : {})} onClear={() => void clear()} onTurnOff={() => void (agent.worktreeId === undefined ? remove() : deactivate())} newTask={agent.worktreeId !== undefined || agent.placeId === undefined ? { agentId: agent.id, worktreeId: agent.worktreeId, configured: agent.newTaskConfigured === true, onOperationFeedback } : undefined} {...(agent.worktreeId === undefined ? {} : { onRestart: () => void restart(), restartAs: { label: displayLabel, resolution: agent.launch, onLaunch: choice => void restart(choice) } })} />;
+  // the Conductor restarts in place and is never turned off here: removing its configuration does that
+  const conductor = agent.structured?.role === 'conductor';
+  const restartConductor = async () => {
+    setRestarting(true);
+    try {
+      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}/restart`, emptyJsonMutation('POST'));
+      if (!response.ok) onOperationFeedback({ tone: 'error', message: 'The Conductor could not restart', detail: await launchError(response) });
+    } catch { onOperationFeedback({ tone: 'error', message: 'The Conductor could not restart', detail: 'The console could not be reached.' }); }
+    finally { if (mounted.current) setRestarting(false); }
+  };
+  const power = conductor ? <AgentPowerMenu className="panel-header-action agent-power" pending={restarting} progressColor="yellow" hidden={active} {...(active ? { disabledReason: 'Cancel the Conductor’s work before restarting it' } : {})} onRestart={() => void restartConductor()} /> : <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || clearing || deactivating || deleting} progressColor={restarting ? 'yellow' : 'red'} hidden={active} {...(active ? { disabledReason: 'Cancel the agent’s work before restarting, clearing or turning it off' } : {})} onClear={() => void clear()} onTurnOff={() => void (agent.worktreeId === undefined ? remove() : deactivate())} newTask={agent.worktreeId !== undefined || agent.placeId === undefined ? { agentId: agent.id, worktreeId: agent.worktreeId, configured: agent.newTaskConfigured === true, onOperationFeedback } : undefined} {...(agent.worktreeId === undefined ? {} : { onRestart: () => void restart(), restartAs: { label: displayLabel, resolution: agent.launch, onLaunch: choice => void restart(choice) } })} />;
   const title = conversationName ?? displayLabel;
   const switcher = <AgentSwitcher agent={agent} agents={agents} title={title} placeLabel={displayLabel} onSelect={onSelectAgent} />;
   const model = agent.structured?.model;
@@ -7910,6 +7921,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const composer = paneMode === undefined ? prompt : <><PaneModeNotice agentId={agent.id} mode={paneMode} worktreeId={agent.worktreeId} onOperationFeedback={onOperationFeedback} />{prompt}</>;
   // reuse power actions without bypassing lifecycle safeguards
   const turnOff = () => {
+    if (conductor) return;
     // keep active work protected like the power menu
     if (active) {
       onOperationFeedback({ tone: 'error', message: `${displayLabel} could not be turned off`, detail: 'Cancel the agent’s work before turning it off.', worktreeId: agent.worktreeId });
@@ -7928,7 +7940,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     </>;
     const openDiff = agent.worktreeId === undefined ? undefined : (path: string) => workspace.code.openChanges('working', path.startsWith(`${agent.home}/`) ? path.slice(agent.home.length + 1) : path);
     // an Exited Agent's stderr and its recovery replace the composer
-    const exited = agent.structured?.lifecycle === 'exited' ? <ExitedAgent agent={agent} onOpenHolder={() => setDebugView('holder')} onClose={turnOff} onOperationFeedback={onOperationFeedback} /> : undefined;
+    const exited = agent.structured?.lifecycle === 'exited' ? <ExitedAgent agent={agent} onOpenHolder={() => setDebugView('holder')} {...(conductor ? {} : { onClose: turnOff })} onOperationFeedback={onOperationFeedback} /> : undefined;
     return <AgentPanelFrame header={header('Live', menu)} composer={exited ?? composer} onTurnOff={turnOff}><Transcript agent={agent} showThinking={showThinking} onOpenDiff={openDiff} />{debugView !== undefined && <AgentDebugDialog agentId={agent.id} view={debugView} onClose={() => setDebugView(undefined)} />}</AgentPanelFrame>;
   }
   // keep codex transcript shortcuts limited to codex and omx agent panels
@@ -8029,7 +8041,7 @@ function AgentPanelTitle({ kind, sandboxed, title, switcher, state, connection =
 // A structured Agent's process state (`revision` changes with its transcript). `questions` are
 // every open question (the first is the Agent's `question`), `steers` the steers its process holds
 // not yet taken, and `draft` text it offers for an empty composer
-type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number; model?: AgentModel; switchable?: boolean; questions?: InlineQuestion[]; steers?: string[]; draft?: { id: number; text: string } };
+type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; role?: 'conductor'; reason?: string; revision: number; model?: AgentModel; switchable?: boolean; questions?: InlineQuestion[]; steers?: string[]; draft?: { id: number; text: string } };
 // A tool call as the transcript lists it: one result (a short line, an edit's diff, or a command's
 // last lines with their count). Its full output and a script's source are read when it is opened.
 type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; result?: string; diff?: { path: string; patch: string }; tail?: string; outputLines?: number; output?: string; source?: string; kept?: false };
@@ -8142,7 +8154,7 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
 
 // What an Exited Agent shows in place of its composer: its process's stderr tail, read from its
 // holder window, and Resume (on its Conversation, keeping its queue), Open holder window and Close
-function ExitedAgent({ agent, onOpenHolder, onClose, onOperationFeedback }: { agent: Agent; onOpenHolder: () => void; onClose: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+function ExitedAgent({ agent, onOpenHolder, onClose, onOperationFeedback }: { agent: Agent; onOpenHolder: () => void; onClose?: () => void; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
   const [stderr, setStderr] = useState<string>();
   const [resuming, setResuming] = useState(false);
   const revision = agent.structured?.revision;
@@ -8168,7 +8180,7 @@ function ExitedAgent({ agent, onOpenHolder, onClose, onOperationFeedback }: { ag
     <div className="transcript-exited-actions">
       <button type="button" className={progressBorder(resuming, 'blue')} aria-busy={resuming || undefined} disabled={resuming} onClick={() => void resume()}><ProgressRing busy={resuming} />{resuming ? 'Resuming…' : 'Resume'}</button>
       <button type="button" onClick={onOpenHolder}>Open holder window</button>
-      <button type="button" onClick={onClose}>Close</button>
+      {onClose !== undefined && <button type="button" onClick={onClose}>Close</button>}
     </div>
   </div>;
 }
@@ -9733,7 +9745,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       const placeId = agentPlaceId(first);
       const worktree = placeId === undefined ? undefined : worktrees.find(candidate => candidate.id === placeId);
       const place = worktree !== undefined || placeId === undefined ? undefined : data.places?.find(candidate => candidate.id === placeId);
-      const order = worktree?.order ?? first.worktreeOrder ?? Number.MAX_SAFE_INTEGER;
+      // the Conductor's Place sorts first
+      const order = agents.some(agent => agent.structured?.role === 'conductor') ? -1 : worktree?.order ?? first.worktreeOrder ?? Number.MAX_SAFE_INTEGER;
       const label = worktree?.label ?? place?.label ?? first.worktreeLabel ?? agentLabel(first);
       const operation = agents.map(agentPendingOperation).find(candidate => candidate !== undefined);
       items.push({ key, label, ...placeTabState(agents), order, operation, agents, placeId, worktree, place });
