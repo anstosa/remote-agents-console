@@ -325,13 +325,57 @@ html.software-keyboard-open .tabs { display: none; }
 .log > .log-output.agent-panel { height: 100%; }
 .log-output.agent-panel { --panel-accent: var(--lavender); display: grid; grid-template-rows: minmax(0, 1fr) auto; padding-top: var(--panel-header-clearance); }
 .agent-output { position: relative; min-width: 0; min-height: 0; }
-/* a structured Agent's bare transcript: prompts, assistant text and one plain line per tool call */
 .structured-transcript { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; }
-.transcript-log { flex: 1; box-sizing: border-box; width: 100%; max-width: 52rem; min-height: 0; margin: 0 auto; padding: .75rem 1rem; overflow-y: auto; list-style: none; }
-.transcript-message { margin: 0 0 .7rem; overflow-wrap: anywhere; white-space: pre-wrap; }
-.transcript-user { padding-left: .6rem; border-left: 2px solid var(--lavender); color: var(--subtext-1); }
-.transcript-tool { margin: 0 0 .35rem; overflow: hidden; color: var(--subtext-0); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.transcript-tool-failed { color: var(--red); }
+/* a structured Agent's grouped log (variant D): one group per prompt, one line per tool call, kept to a reading width */
+.transcript-log { flex: 1; box-sizing: border-box; width: 100%; max-width: 52rem; min-height: 0; margin: 0 auto; padding: .5rem 1rem 1rem; overflow-y: auto; overscroll-behavior: contain; font-size: .8rem; line-height: 1.45; }
+.transcript-earlier { display: block; margin: 0 auto .5rem; padding: .35rem .8rem; border: 1px solid var(--surface-1); border-radius: 999px; background: var(--surface-0); color: var(--text); font: inherit; font-size: .72rem; cursor: pointer; }
+.transcript-group { margin: .6rem 0 .9rem; padding-left: .55rem; border-left: 2px solid var(--surface-1); }
+.transcript-group.live { border-left-color: var(--peach); }
+.transcript-line, .transcript-result { display: grid; grid-template-columns: 1.2rem minmax(0, 1fr); margin: .15rem 0; }
+.transcript-line > span:last-child { overflow-wrap: anywhere; white-space: pre-wrap; }
+.transcript-glyph { color: var(--overlay-1); text-align: center; }
+.transcript-dim, .transcript-group-end { color: var(--overlay-1); }
+.transcript-prompt { margin-top: 0; padding: .3rem .2rem; border-radius: .3rem; background: color-mix(in srgb, var(--blue) 8%, transparent); color: var(--blue); }
+.transcript-prompt .transcript-glyph { color: var(--blue); }
+.transcript-steer, .transcript-steer .transcript-glyph { color: var(--mauve); }
+.transcript-answer .transcript-glyph { color: var(--text); }
+.transcript-thinking { color: var(--overlay-1); font-style: italic; }
+.transcript-notice { color: var(--subtext-0); }
+.transcript-notice.warning .transcript-glyph { color: var(--yellow); }
+.transcript-notice.error .transcript-glyph { color: var(--red); }
+.transcript-group-end { margin: .35rem 0 0 1.2rem; font-size: .72rem; }
+/* each tool call is a button; its chevron is a real touch target */
+.transcript-tool-line { display: grid; grid-template-columns: 1.2rem minmax(0, 1fr) auto; align-items: center; width: 100%; min-height: 2.25rem; margin: 0; padding: 0; border: 0; border-radius: .3rem; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.transcript-tool-line::before { content: "●" / ""; color: var(--green); text-align: center; }
+.transcript-tool-running > .transcript-tool-line::before { content: "○" / ""; color: var(--peach); }
+.transcript-tool-failed > .transcript-tool-line::before { content: "✕" / ""; color: var(--red); }
+.transcript-tool-line:is(:hover, .open) { background: var(--surface-0); }
+.transcript-tool-line b { color: var(--lavender); }
+.transcript-tool-text { overflow-wrap: anywhere; }
+.transcript-chevron { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; color: var(--overlay-1); font-size: 1.15rem; }
+.transcript-chevron::before { content: "▸" / ""; }
+.transcript-tool-line:is(:hover, .open) .transcript-chevron { color: var(--lavender); }
+.transcript-tool-line.open .transcript-chevron::before { content: "▾" / ""; }
+.transcript-result { margin: 0 0 .25rem 1.2rem; color: var(--subtext-0); font-size: .75rem; }
+.transcript-result > :last-child { min-width: 0; }
+.transcript-result pre, .transcript-open pre { margin: 0; overflow-x: auto; font: inherit; white-space: pre; }
+.transcript-link { padding: 0; border: 0; background: none; color: var(--blue); font: inherit; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; cursor: pointer; }
+.transcript-diff { overflow: hidden; border: 1px solid var(--surface-0); border-radius: .3rem; }
+.transcript-diff-file { display: flex; align-items: center; gap: .4rem; padding: .2rem .45rem; border-bottom: 1px solid var(--surface-0); background: var(--mantle); }
+.transcript-diff-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transcript-added { color: var(--green); }
+.transcript-removed { color: var(--red); }
+.transcript-diff pre { background: var(--crust); }
+.transcript-diff-line { display: block; min-width: max-content; padding: 0 .5rem; }
+.transcript-diff-line.added { background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green); }
+.transcript-diff-line.removed { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
+.transcript-diff-line.hunk { background: color-mix(in srgb, var(--blue) 8%, transparent); color: var(--blue); }
+/* an opened tool call: its full output as plain text, and a script's source */
+.transcript-open { display: grid; gap: .35rem; max-height: 60vh; margin: .2rem 0 .4rem 1.2rem; padding: .35rem; overflow: auto; border: 1px solid var(--surface-1); border-radius: .3rem; background: var(--crust); color: var(--subtext-0); font-size: .75rem; }
+.transcript-source { padding: .3rem .4rem; border-radius: .25rem; background: var(--mantle); color: var(--text); }
+.transcript-children { margin-left: 1.2rem; }
+.transcript-statusline { display: flex; gap: .6rem; overflow: hidden; padding: .2rem .75rem; border-top: 1px solid var(--surface-0); background: var(--mantle); color: var(--overlay-1); font-size: .68rem; white-space: nowrap; }
+.transcript-extension-status { color: var(--green); }
 .transcript-status, .transcript-failure { margin: 0 auto; padding: .5rem 1rem; width: 100%; max-width: 52rem; box-sizing: border-box; color: var(--subtext-0); }
 .transcript-failure { color: var(--red); }
 .transcript-failure pre { max-height: 40vh; overflow: auto; color: var(--text); font-family: var(--font-mono); white-space: pre-wrap; }

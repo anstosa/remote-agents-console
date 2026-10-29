@@ -129,19 +129,6 @@ test('an Agent whose Panel is a transcript opens no terminal', async ({ page }) 
   expect(await paneConnectCount(page, 'agent-1')).toBe(0);
 });
 
-test('a transcript Agent shows its prompts, its answers and a plain line per tool call', async ({ page }) => {
-  await mockConsole(page, { kind: 'pi', attention: 'finished', panel: 'transcript', structured: { lifecycle: 'live', revision: 3 } }, { transcript: { items: [
-    { id: 'm1', kind: 'message', role: 'user', text: 'Read the readme' },
-    { id: 't1', kind: 'tool', name: 'read', summary: 'README.md', state: 'done' },
-    { id: 't2', kind: 'tool', name: 'bash', summary: 'ls nowhere', state: 'failed' },
-    { id: 'm2', kind: 'message', role: 'assistant', text: 'It describes the console.' }
-  ] } });
-  await page.goto('/');
-  const transcript = agentPanel(page).getByRole('list', { name: 'Transcript' });
-  await expect(transcript.getByRole('listitem')).toHaveText(['Read the readme', '● read(README.md)', '✕ bash(ls nowhere)', 'It describes the console.']);
-  await expect(agentPanel(page).locator('.agent-state-pill')).toHaveText('Idle');
-});
-
 test('a transcript Agent that failed to start shows why, with its stderr', async ({ page }) => {
   await mockConsole(page, { kind: 'pi', attention: 'finished', panel: 'transcript', structured: { lifecycle: 'failed', reason: 'Its process exited before reporting in.', revision: 2 } }, { transcript: { items: [], stderr: 'Error: Cannot find module rac-extension' } });
   await page.goto('/');
