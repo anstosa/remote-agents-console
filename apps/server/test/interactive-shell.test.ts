@@ -74,6 +74,12 @@ describe('interactive agent shell', () => {
     expect(await runBootstrap(fish!, '.config/fish/config.fish', probe, false, 'echo resumed\n')).toBe("rc|unset|it's\n");
   });
 
+  // a quoted word inside an already-quoted command puts a backslash next to a quote, which fish
+  // reads differently from POSIX inside single quotes
+  it.skipIf(fish === undefined)('carries an already-quoted command through fish unchanged', async () => {
+    expect(await runBootstrap(fish!, '.config/fish/config.fish', `sh -c 'printf "%s\\n" "it'\\''s"'`)).toBe("it's\n");
+  });
+
   it.skipIf(fish === undefined)('returns to an interactive fish after the command when asked to stay', async () => {
     const output = await runBootstrap(fish!, '.config/fish/config.fish', probe, true, 'echo after:$MARKER:(set -q RAC_AGENT_COMMAND; and echo set; or echo unset)\n');
     expect(output).toContain("rc|unset|it's\n");

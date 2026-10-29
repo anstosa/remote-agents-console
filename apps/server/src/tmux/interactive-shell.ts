@@ -35,10 +35,12 @@ const runCommand = `sh -c 'cmd=$RAC_AGENT_COMMAND; unset RAC_AGENT_COMMAND; eval
 export function interactiveShellBootstrap(command: string, home = '$HOME', shell = interactiveShellPath(), stay = false): string {
   const name = interactiveShellName(shell);
   if (name !== 'zsh' && name !== 'bash' && name !== 'fish') throw new Error(`unsupported interactive shell: ${shell}`);
-  const exported = (variable: string, value: string) => name === 'fish' ? `set -gx ${variable} ${quote(value)}` : `export ${variable}=${quote(value)}`;
-  const interactive = `${quote(shell)} -i`;
+  // fish reads `\\` and `\'` as escapes inside single quotes, where POSIX shells read them literally
+  const q = name === 'fish' ? (value: string) => `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'` : quote;
+  const exported = (variable: string, value: string) => name === 'fish' ? `set -gx ${variable} ${q(value)}` : `export ${variable}=${q(value)}`;
+  const interactive = `${q(shell)} -i`;
   const start = command === '' ? `exec ${interactive}`
-    : stay ? `exec ${interactive} -c ${quote(`${runCommand}; exec env -u RAC_AGENT_COMMAND ${interactive}`)}`
-    : `exec ${interactive} -c ${quote(`exec ${runCommand}`)}`;
+    : stay ? `exec ${interactive} -c ${q(`${runCommand}; exec env -u RAC_AGENT_COMMAND ${interactive}`)}`
+    : `exec ${interactive} -c ${q(`exec ${runCommand}`)}`;
   return [...(home === '$HOME' ? [] : [exported('HOME', home)]), ...(command === '' ? [] : [exported('RAC_AGENT_COMMAND', command)]), start].join('\n');
 }
