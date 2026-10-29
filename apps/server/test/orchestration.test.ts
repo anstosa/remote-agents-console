@@ -47,7 +47,8 @@ function dependencies(overrides: Partial<OrchestrationDependencies> = {}): Orche
     discovery: { target: async agentId => agentId === activeAgent.id ? { agent: activeAgent, socket } : undefined, worktreesNow: () => [cora, dave] },
     prompts: {
       transportFor: async () => reads(),
-      submit: async () => true,
+      submitFrom: async () => 'prompt-queued-1234',
+      inFlight: () => undefined,
       listQueued: async () => [],
       updateQueued: async (_agentId, promptId, text) => ({ id: promptId, text, createdAt: '2026-08-13T00:00:00.000Z' }),
       moveQueued: async () => [],
@@ -206,7 +207,8 @@ describe('OrchestrationService', () => {
     const promptId = 'prompt-123456789';
     const service = new OrchestrationService(dependencies({
       prompts: {
-        submit: async (_agentId, prompt) => { calls.push(`queue:${prompt}`); return true; },
+        submitFrom: async (_agentId, prompt) => { calls.push(`queue:${prompt}`); return 'prompt-queued-1234'; },
+        inFlight: () => undefined,
         listQueued: async () => [],
         updateQueued: async (_agentId, id, text) => { calls.push(`update:${id}:${text}`); return { id, text, createdAt: '2026-08-13T00:00:00.000Z' }; },
         moveQueued: async (_agentId, id, direction) => { calls.push(`move:${id}:${direction}`); return [{ id, text: 'Edited', createdAt: '2026-08-13T00:00:00.000Z' }]; },
@@ -291,7 +293,8 @@ describe('OrchestrationService', () => {
     const service = new OrchestrationService(dependencies({
       discovery: { target: async () => ({ agent, socket }), worktreesNow: () => [cora, dave] },
       prompts: {
-        submit: async () => true,
+        submitFrom: async () => 'prompt-queued-1234',
+      inFlight: () => undefined,
         listQueued: async () => [],
         updateQueued: async () => undefined,
         moveQueued: async () => undefined,

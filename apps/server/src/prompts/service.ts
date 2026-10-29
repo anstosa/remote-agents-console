@@ -7,7 +7,7 @@ import type { PromptCalendarLifecycle } from '../google-calendar/lifecycle.js';
 import type { Agent } from '../domain/models.js';
 import type { PromptHistoryService } from '../prompt-history/service.js';
 import { agentAttentionState } from '../notifications.js';
-import { promptScope, QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin, type QueuedPromptSummary } from './queue.js';
+import { promptScope, QueuedPromptService, senderOf, type PromptSender, type QueuedPrompt, type QueuedPromptOrigin, type QueuedPromptSummary } from './queue.js';
 import { validPrompt, type PromptAttachment } from './validation.js';
 import { updateAdvisorPendingLabel } from '../update-advisor.js';
 import { isFullGitSha } from '../git/revision.js';
@@ -55,10 +55,39 @@ export interface TurnTransport extends Pick<AgentTransport, 'answer' | 'interrup
 }
 type TurnDelivery = Delivery | { status: 'busy' };
 // how a prompt is delivered (`waited`: it waited in the queue behind earlier work)
-type TurnDeliveryOptions = Omit<DeliveryOptions, 'discovered'> & { discovered?: { agent: Agent }; waited?: true };
+type TurnDeliveryOptions = Omit<DeliveryOptions, 'discovered'> & { discovered?: { agent: Agent }; waited?: true; sender?: PromptSender };
 /** The structured Agents' Transport, which says which Agents are its own. */
 export type StructuredTurnTransport = TurnTransport & { owns(agentId: string): Promise<boolean> };
-type PromptPhase = TurnMark & { state: 'awaiting-start' | 'working' | 'awaiting-answer' | 'halted'; changedAt: number; requestId?: string; historyEntryId?: string; historyPrompt?: string; failedDraft?: FailedDraft };
+type PromptPhase = TurnMark & { state: 'awaiting-start' | 'working' | 'awaiting-answer' | 'halted'; changedAt: number; requestId?: string; historyEntryId?: string; historyPrompt?: string; failedDraft?: FailedDraft; sender?: PromptSender };
+/**
+ * How a queued prompt's Turn, or the prompt itself, ended: its Turn completed, failed, was
+ * interrupted, or its Agent's process exited under it; it never went out (it became a Note, or was
+ * removed), was `withdrawn` by its own sender, or its Agent is `gone`.
+ */
+export type PromptOutcome = 'completed' | 'failed' | 'interrupted' | 'exited' | 'not-delivered' | 'withdrawn' | 'gone';
+/**
+ * What the console's dispatch bookkeeping hears from the queue policy (the Conductor's, ADR 0018),
+ * keyed by queued prompt id: a prompt another Agent sent was queued (before it can go out), went out
+ * as a Turn (with its history entry), and how it ended. `admits` may hold a queued prompt back for
+ * now; the next one that it admits goes out instead.
+ */
+export interface PromptDispatchHooks {
+  admits(agentId: string, prompt: QueuedPrompt): boolean;
+  queued(agentId: string, promptId: string, sender: PromptSender): Promise<void>;
+  delivered(agentId: string, promptId: string, sender: PromptSender, entryId: string | undefined): void;
+  ended(promptId: string, outcome: PromptOutcome, answer?: string): void;
+}
+// the outcome a tracked request's settling means for its prompt
+const outcomeOf = (state: 'complete' | 'failed' | 'interrupted', error: string | undefined): PromptOutcome => {
+  if (state === 'complete') return 'completed';
+  switch (error) {
+    case 'agent_exited': return 'exited';
+    case 'queue_removed': case 'queue_saved': case 'prompt_not_delivered': return 'not-delivered';
+    case 'queue_withdrawn': return 'withdrawn';
+    case 'agent_departed': case 'agent_closed': return 'gone';
+    default: return state === 'interrupted' ? 'interrupted' : 'failed';
+  }
+};
 
 /**
  * The queue policy: what to dispatch and when, the cancel policy, and a halted or departed
@@ -85,6 +114,9 @@ export class PromptService {
   private readonly reconciliationPendingSince = new Map<string, number>();
   private sweptAt = -Infinity;
   private lifecycleMutationVersion = 0;
+  private dispatchHooks?: PromptDispatchHooks;
+  // who sent the latest prompt each Agent's Turn started from, when not the operator
+  private readonly senders = new Map<string, PromptSender>();
 
   // bind queue delivery and optional shared host staging
   // the Transport is built from the delivery arguments unless one is given, whose input
@@ -92,6 +124,29 @@ export class PromptService {
   constructor(discovery: DiscoveryService, tmux: TmuxAdapter, private readonly history?: PromptHistoryService, private readonly queued?: QueuedPromptService, private readonly drainUndelivered?: UndeliveredDrain, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, teardownFor: (kind: AgentKind) => string | undefined = () => undefined, attachmentStaging?: AttachmentStagingWorkspace, private readonly calendar?: PromptCalendarLifecycle, transport?: TmuxTransport, private readonly structured?: StructuredTurnTransport) {
     const hooks = { begin: (agentId: string) => this.beginAgentMutation(agentId), version: (agentId: string) => this.mutationVersion(agentId), busy: (agentId: string) => this.mutating(agentId), restored: (scope: string, deliveredPromptId?: string) => this.resetRestored(scope, deliveredPromptId) };
     this.transport = transport ?? new TmuxTransport(discovery, tmux, hooks, queued?.resets, resolveAdapter, teardownFor, attachmentStaging);
+  }
+
+  /** Report queued prompts' dispatches and ends to `hooks`, which may also hold some back. */
+  useDispatches(hooks: PromptDispatchHooks): void { this.dispatchHooks = hooks; }
+
+  /**
+   * Whether the Turn an Agent last started came from another Agent or from the console, not the
+   * operator: a quiet Turn's end pushes nothing (ADR 0019).
+   */
+  quiet(agentId: string): boolean {
+    const sender = this.senders.get(agentId);
+    return sender?.from !== undefined || sender?.label !== undefined;
+  }
+
+  /** The queued prompt whose Turn the Agent is on now, and who sent it. */
+  inFlight(agentId: string): { promptId: string; sender: PromptSender } | undefined {
+    const phase = this.phases.get(promptScope(agentId));
+    return phase?.requestId === undefined || phase.state === 'halted' ? undefined : { promptId: phase.requestId, sender: phase.sender ?? {} };
+  }
+
+  /** Queue a prompt from `sender` (another Agent, or the console), answering its queued prompt's id. */
+  async submitFrom(agentId: string, prompt: string, sender: PromptSender): Promise<string | undefined> {
+    return (await this.submitRequest(agentId, prompt, [], undefined, false, sender)).promptId;
   }
 
   /** The Transport an Agent is driven over: structured for the structured Agents, tmux otherwise. */
@@ -135,7 +190,7 @@ export class PromptService {
   }
 
   // share ordinary and tracked prompt admission without changing legacy results
-  private async submitRequest(agentId: string, prompt: string, attachments: PromptAttachment[], resetAt: number | undefined, tracked: boolean): Promise<{ accepted: boolean; requestId?: string }> {
+  private async submitRequest(agentId: string, prompt: string, attachments: PromptAttachment[], resetAt: number | undefined, tracked: boolean, sender: PromptSender = {}): Promise<{ accepted: boolean; requestId?: string; promptId?: string }> {
     if (!validPrompt(prompt, attachments)) return { accepted: false };
     const releaseMutation = this.beginAgentMutation(agentId);
     const transport = await this.transportFor(agentId);
@@ -149,13 +204,14 @@ export class PromptService {
     const origin: QueuedPromptOrigin = { home: first.agent.home, ...(first.agent.placeId === undefined ? {} : { placeId: first.agent.placeId }) };
     // queue the prompt durably, admitting it to the Calendar and tracking it before anything can dispatch it
     const enqueue = async (queued: QueuedPromptService): Promise<QueuedPromptSummary | undefined> => {
-      const added = await queued.enqueue(scope, prompt, attachments, origin);
+      const added = await queued.enqueue(scope, prompt, attachments, origin, sender);
       if (added === undefined) return undefined;
+      if (sender.from !== undefined) await this.dispatchHooks?.queued(agentId, added.id, senderOf(sender));
       await this.admitCalendar(transport, added.id, agentId, first.agent.kind, added.createdAt, prompt, attachments);
       if (tracked) this.trackQueuedRequest(added.id, agentId, prompt);
       return added;
     };
-    const queuedAnswer = (queued: QueuedPromptSummary | undefined) => ({ accepted: queued !== undefined, ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) });
+    const queuedAnswer = (queued: QueuedPromptSummary | undefined) => ({ accepted: queued !== undefined, ...(queued === undefined ? {} : { promptId: queued.id }), ...(tracked && queued !== undefined ? { requestId: queued.id } : {}) });
     // queue work arriving during a restart handoff
     if (releaseMutation === undefined || this.restartLocks.has(scope)) {
       releaseMutation?.();
@@ -211,8 +267,10 @@ export class PromptService {
   }
 
   // settle one exact request once and retain a bounded terminal snapshot
-  private settleTrackedRequest(requestId: string | undefined, state: 'complete' | 'failed' | 'interrupted', error?: string): void {
+  // (a queued prompt's dispatch hears every end, tracked or not, but an edit, which ends nothing)
+  private settleTrackedRequest(requestId: string | undefined, state: 'complete' | 'failed' | 'interrupted', error?: string, answer?: string): void {
     if (requestId === undefined) return;
+    if (error !== 'queue_updated') this.dispatchHooks?.ended(requestId, outcomeOf(state, error), answer);
     const current = this.trackedRequests.get(requestId);
     if (current === undefined || current.terminalAt !== undefined) return;
     const next: StoredPromptRequest = { ...current, state, ...(error === undefined ? {} : { error }), terminalAt: Date.now() };
@@ -357,12 +415,13 @@ export class PromptService {
     return target === undefined || this.queued === undefined ? undefined : await this.queued.move(promptScope(agentId), promptId, direction);
   }
 
-  async removeQueued(agentId: string, promptId: string): Promise<boolean> {
+  // remove a queued prompt; `withdrawn` when its own sender took it back, which it need not hear of
+  async removeQueued(agentId: string, promptId: string, withdrawn = false): Promise<boolean> {
     const target = await this.target(agentId);
     const removed = target !== undefined && this.queued !== undefined && await this.queued.remove(promptScope(agentId), promptId) !== undefined;
     // removed tracked work can never be dispatched
     if (removed) {
-      this.settleTrackedRequest(promptId, 'failed', 'queue_removed');
+      this.settleTrackedRequest(promptId, 'failed', withdrawn ? 'queue_withdrawn' : 'queue_removed');
       await this.calendar?.invalid(promptId, 'missing_lifecycle_evidence').catch(() => undefined);
     }
     return removed;
@@ -434,6 +493,7 @@ export class PromptService {
         return;
       }
       const completion: PromptCompletion = event === undefined || event.type === 'started' ? 'pending' : event.type === 'settled' ? await this.persistAnswer(scope, phase.historyEntryId, event.message) : 'failed';
+      const answer = event?.type === 'settled' ? event.message : undefined;
       // allow terminal output to finish rendering
       if (completion === 'pending' && phase.state === 'working') {
         this.phases.set(scope, { ...phase, state: 'awaiting-answer', changedAt: Date.now() });
@@ -472,7 +532,7 @@ export class PromptService {
         if (!await this.reconcile(transport, agent.id, scope)) return;
       }
       // release completed prompts
-      this.settleTrackedRequest(phase.requestId, 'complete');
+      this.settleTrackedRequest(phase.requestId, 'complete', undefined, answer);
       this.phases.delete(scope);
     }
     // recover answer tracking lost across restarts
@@ -658,10 +718,11 @@ export class PromptService {
     if (this.dispatching.has(scope) || this.phases.has(scope) || this.restartLocks.has(scope) || transport.held(agentId)) return;
     this.dispatching.add(scope);
     try {
-      const prompt = await this.queued?.next(scope);
+      const hooks = this.dispatchHooks;
+      const prompt = await this.queued?.next(scope, hooks === undefined ? undefined : candidate => hooks.admits(agentId, candidate));
       // consume only after the adapter confirms submission
       if (prompt !== undefined) {
-        const status = await this.send(transport, agentId, prompt.text, prompt.attachments ?? [], { durable: true, resetAt, queuedPromptId: prompt.id, ...(waited ? { waited: true as const } : {}) });
+        const status = await this.send(transport, agentId, prompt.text, prompt.attachments ?? [], { durable: true, resetAt, queuedPromptId: prompt.id, sender: senderOf(prompt), ...(waited ? { waited: true as const } : {}) });
         // exact tracked failures halt instead of replaying on a later observation; a busy Agent
         // keeps the prompt queued for its next settle
         if (status !== 'submitted' && status !== 'busy' && this.trackedRequests.has(prompt.id)) {
@@ -691,6 +752,8 @@ export class PromptService {
     if (delivery.status === 'held') await this.holdFailedSubmission(scope, delivery.failedDraft);
     if (delivery.status !== 'submitted') return delivery.status;
     this.markTrackedRequestSubmitted(requestId);
+    const sender = options.sender ?? {};
+    this.senders.set(agentId, sender);
     if (delivery.instant) {
       this.settleTrackedRequest(requestId, 'complete');
       // release the provisional render phase instead of waiting for a nonexistent answer
@@ -699,9 +762,10 @@ export class PromptService {
       return 'submitted';
     }
     // track real prompts and their answers rather than reset commands
-    const entry = await this.history?.record(scope, delivery.prompt).catch(() => undefined);
+    const entry = await this.history?.record(scope, delivery.prompt, sender).catch(() => undefined);
     // monitor managed prompt completion
-    if (this.queued !== undefined || requestId !== undefined) this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), historyPrompt: delivery.prompt, ...(entry === undefined ? {} : { historyEntryId: entry.id }), ...(delivery.rolloutBaseline === undefined ? {} : { rolloutBaseline: delivery.rolloutBaseline }) });
+    if (this.queued !== undefined || requestId !== undefined) this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), historyPrompt: delivery.prompt, ...(entry === undefined ? {} : { historyEntryId: entry.id }), ...(delivery.rolloutBaseline === undefined ? {} : { rolloutBaseline: delivery.rolloutBaseline }), sender });
+    if (requestId !== undefined) this.dispatchHooks?.delivered(agentId, requestId, sender, entry?.id);
     return 'submitted';
   }
 
@@ -778,6 +842,8 @@ export class PromptService {
     for (const [requestId, request] of this.trackedRequests) {
       if (request.agentId === agentId && request.terminalAt === undefined) this.settleTrackedRequest(requestId, 'interrupted', 'agent_closed');
     }
+    // the Turn it was on ends with it, tracked or not
+    this.settleTrackedRequest(this.phases.get(promptScope(agentId))?.requestId, 'interrupted', 'agent_closed');
     if (transport === this.structured) await this.saveQueued(promptScope(agentId));
     return true;
   }

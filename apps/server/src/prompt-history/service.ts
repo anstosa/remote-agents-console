@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { promptLabels, senderOf, type PromptSender } from '../prompts/queue.js';
 
-export type PromptHistoryEntry = { id: string; text: string; createdAt: string; answer?: string; answeredAt?: string };
+export type PromptHistoryEntry = { id: string; text: string; createdAt: string; answer?: string; answeredAt?: string } & PromptSender;
 type StoredHistory = Record<string, PromptHistoryEntry[]>;
 
 const maxScopes = 500;
@@ -15,7 +16,7 @@ const validText = (value: string) => value.trim().length > 0 && value.length <= 
 const validEntry = (value: unknown): value is PromptHistoryEntry => {
   // require the base prompt fields
   if (value === null || typeof value !== 'object') return false;
-  const entry = value as { id?: unknown; text?: unknown; createdAt?: unknown; answer?: unknown; answeredAt?: unknown };
+  const entry = value as { id?: unknown; text?: unknown; createdAt?: unknown; answer?: unknown; answeredAt?: unknown; from?: unknown; label?: unknown };
   const validAnswer = entry.answer === undefined && entry.answeredAt === undefined
     || typeof entry.answer === 'string'
       && validText(entry.answer)
@@ -27,6 +28,8 @@ const validEntry = (value: unknown): value is PromptHistoryEntry => {
     && validText(entry.text)
     && typeof entry.createdAt === 'string'
     && Number.isFinite(Date.parse(entry.createdAt))
+    && (entry.from === undefined || typeof entry.from === 'string' && validScope(entry.from))
+    && (entry.label === undefined || (promptLabels as readonly unknown[]).includes(entry.label))
     && validAnswer;
 };
 // count all persisted history text
@@ -43,14 +46,14 @@ export class PromptHistoryService {
     return ((await this.read())[scope] ?? []).slice(0, listedEntriesPerScope);
   }
 
-  async record(scope: string, text: string): Promise<PromptHistoryEntry | undefined> {
+  async record(scope: string, text: string, sender: PromptSender = {}): Promise<PromptHistoryEntry | undefined> {
     if (!validScope(scope) || !validText(text)) return undefined;
     return await this.mutate(stored => {
       if (stored[scope] === undefined && Object.keys(stored).length >= maxScopes) {
         const oldestScope = Object.entries(stored).sort(([, left], [, right]) => Date.parse(left.at(-1)?.createdAt ?? '') - Date.parse(right.at(-1)?.createdAt ?? ''))[0]?.[0];
         if (oldestScope !== undefined) delete stored[oldestScope];
       }
-      const entry = { id: randomBytes(18).toString('base64url'), text, createdAt: new Date().toISOString() };
+      const entry = { id: randomBytes(18).toString('base64url'), text, createdAt: new Date().toISOString(), ...senderOf(sender) };
       stored[scope] = [entry, ...(stored[scope] ?? [])].slice(0, maxEntriesPerScope);
       while (totalTextLength(stored) > maxTotalTextLength) {
         const oldest = Object.entries(stored).sort(([, left], [, right]) => Date.parse(left.at(-1)?.createdAt ?? '') - Date.parse(right.at(-1)?.createdAt ?? ''))[0];

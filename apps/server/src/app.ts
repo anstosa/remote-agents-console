@@ -25,6 +25,7 @@ import { maxPromptAttachmentBytes, PromptService, promptScope, type PromptAttach
 import { launchTmuxAgent, TmuxTransport } from './transports/tmux.js';
 import { consoleTokenPrefix, holderProcesses, StructuredAgents } from './transports/structured-agents.js';
 import { Conductor } from './conductor/service.js';
+import { Dispatches } from './conductor/dispatches.js';
 import { promptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, validPromptAttachments } from './prompts/validation.js';
 import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin } from './prompts/queue.js';
 import { LaunchService, type TmuxSession } from './launch/service.js';
@@ -208,6 +209,18 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   };
   const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch: LaunchService = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId), undefined, async (place, kind, options) => await structuredAgents.launch(place, kind, options) !== undefined); const structuredAgents: StructuredAgents = deps.structuredAgents ?? new StructuredAgents(holderProcesses(launch, config.adapters, kind => launch.adapterFiles(kind)), { allowedModels: kind => config.adapters[kind]?.allowedModels ?? [] }); discovery.useStructuredAgents?.(structuredAgents); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const transport = deps.prompts?.transport ?? new TmuxTransport(discovery, tmux, { begin: agentId => prompts.beginAgentMutation(agentId), version: agentId => prompts.mutationVersion(agentId), busy: agentId => prompts.mutating(agentId), restored: async (scope, deliveredPromptId) => await prompts.resetRestored(scope, deliveredPromptId) }, queuedPrompts.resets, undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, async (agentId, to) => await switchByRestart(agentId, to)); const prompts: PromptService = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, undefined, undefined, calendarLifecycle, transport, structuredAgents.turns); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, undefined, prSwitch); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
   const temporaryPreviews = deps.temporaryPreviews ?? new TemporaryPreviewService();
+  // what one Agent queues to another is reported back to it, and the Turns the console starts on an
+  // Agent's behalf are held to the Conductor's budget (ADR 0018, ADR 0019)
+  const dispatches = new Dispatches({
+    file: process.env.RAC_DISPATCHES_FILE ?? '.data/dispatches.json',
+    submit: (agentId, text, sender) => prompts.submitFrom(agentId, text, sender),
+    queued: agentId => queuedPrompts.list(promptScope(agentId)),
+    history: agentId => promptHistory.list(promptScope(agentId)),
+    inFlight: agentId => prompts.inFlight(agentId)?.promptId,
+    ...(config.conductor === undefined ? {} : { selfStartedPerHour: config.conductor.maxSelfStartedTurnsPerHour }),
+    notify: message => { void push.notify(message).catch(() => undefined); }
+  });
+  prompts.useDispatches?.(dispatches);
   // publish only boot-opaque presentations of trusted configured actions
   const buttonCatalog = deps.buttonActions?.catalog ?? new ConfiguredButtonCatalog(config);
   // create Files lazily so missing host prerequisites affect only Files requests
@@ -502,6 +515,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (calendarLifecycle !== undefined) await prompts.reconcileCalendar?.(discovered.agents.map(agent => agent.id)).catch(() => undefined);
     await Promise.all(discovered.agents.map(agent => prompts.observe(agent).catch(() => undefined)));
     await prompts.retireDeparted(discovered.agents.map(agent => agent.id)).catch(() => undefined);
+    await dispatches.sweep(discovered.agents).catch(() => undefined);
     // suppress completions while more work waits
     for (const agent of discovered.agents) notifications.observe(agent, (queuedCounts.get(agent.id) ?? 0) > 0, notificationContextForAgent(agent, discovered));
     notifications.retain(discovered.agents);

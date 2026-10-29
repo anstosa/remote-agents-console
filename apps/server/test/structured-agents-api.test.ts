@@ -45,6 +45,8 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
   const answers: Array<[string, QuestionAnswer]> = [];
   let pending: string[] = [];
   let emit: (event: StructuredEvent) => void = () => {};
+  // each process's own events, by its Agent's id
+  const emitters = new Map<string, (event: StructuredEvent) => void>();
   let closed = false;
   let conversations = 0;
   let cancels = 0;
@@ -77,6 +79,7 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
   const processes: StructuredProcesses = {
     start: async (launch, events) => {
       emit = events;
+      emitters.set(launch.id, events);
       launches.push(launch);
       const engaged = launch.sandboxed && !sandboxFails;
       lastReport = { ...report, sandbox: { engaged, ...(engaged ? {} : { reason: launch.sandboxed ? 'bwrap: not found' : 'not sandboxed' }) }, version, nonce: nonce ?? launch.nonce };
@@ -90,13 +93,14 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
       await attaching;
       if (gone) return undefined;
       emit = events;
+      emitters.set(holder.agentId, events);
       queueMicrotask(() => { for (const event of attached) events(event); });
       return { holder, connection: connection(), cursor: () => lines, dropped };
     },
     stderr: async () => 'pi: could not load its extension',
     stop: async () => { closed = true; }
   };
-  return { processes, delivered, launches, attaches, grants, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
+  return { processes, delivered, launches, attaches, grants, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), emitTo: (id: string, event: StructuredEvent) => emitters.get(id)?.(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
 }
 
 // the integration gateway's state and audit files, in a temporary folder
@@ -123,6 +127,7 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
   const discovery = new DiscoveryService(socketFinder([]), paneLister([]) as never, processInspector(), { cachedPullRequest: async () => undefined, invalidateRepositories: () => {} } as never, config.adapters, config.projects, worktreeStore, worktrees, root);
   // the console as it starts, over the stores in `root`, driving its structured Agents through `processes`
   const start = async (processes: StructuredProcesses, changed: Partial<ValidatedConfig> = {}) => {
+    vi.stubEnv('RAC_DISPATCHES_FILE', join(root, 'dispatches.json'));
     const structuredAgents = new StructuredAgents(processes, { file: join(root, 'structured-agents.json'), allowedModels: () => allowed, ...(options.reportTimeoutMs === undefined ? {} : { reportTimeoutMs: options.reportTimeoutMs }) });
     const app = await buildApp({ ...config, ...changed }, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents, promptHistory: new PromptHistoryService(join(root, 'history.json')), queuedPrompts: new QueuedPromptService(join(root, 'queue.json')), notes: new WorktreeNoteService(join(root, 'notes.json')), ...options.deps });
     const headers = await authenticatedHeaders(app);
@@ -1389,3 +1394,176 @@ describe('the Conductor', () => {
   });
 });
 
+
+describe('the Conductor\'s dispatches', () => {
+  const writable = { integrations: { enabled: false, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: false }, realtime: { enabled: false, name: 'Davo', context: '', writeToolsEnabled: false }, multiInstance: { enabled: false } } };
+  // a console whose Conductor is live, with MCP write tools enabled; `call` runs one of its tools
+  // and answers the result's structured content
+  async function conducting(fake: ReturnType<typeof fakeAgent>, options: { conductor?: Partial<ConductorConfig> } = {}) {
+    await integrationFiles();
+    const console = await consoleWith(fake, { conductor: options.conductor ?? {}, config: writable });
+    await console.app.conductor.start();
+    const conductor: string = (await console.app.inject({ method: 'GET', url: '/api/dashboard', headers: console.headers })).json().agents.find((agent: { structured?: { role?: string } }) => agent.structured?.role === 'conductor').id;
+    let requests = 0;
+    const call = async (name: string, args: Record<string, unknown>, mutation = true) => (await console.app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${fake.grants.at(-1)!.token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { ...args, ...(mutation ? { request_id: `request-${requests += 1}-of-test` } : {}) } } } })).json().result.structuredContent;
+    // a Pi Agent the operator launches in the Project's Worktree
+    const worker = async () => {
+      const worktree = (await console.app.inject({ method: 'GET', url: '/api/dashboard', headers: console.headers })).json().projects.find((project: { id: string }) => project.id !== 'home').worktrees[0];
+      return (await console.app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers: console.headers, payload: { kind: 'pi' } })).json().agentId as string;
+    };
+    const queued = async (id: string) => (await console.app.inject({ method: 'GET', url: `/api/agents/${id}/queued-prompts`, headers: console.headers })).json().prompts;
+    const history = async (id: string) => (await console.app.inject({ method: 'GET', url: `/api/agents/${id}/prompt-history`, headers: console.headers })).json().prompts;
+    // one dashboard poll, which observes every Agent's Turn
+    const tick = async () => { await console.app.inject({ method: 'GET', url: '/api/dashboard', headers: console.headers }); await new Promise(resolve => setTimeout(resolve, 20)); };
+    return { ...console, conductor, call, worker, queued, history, tick };
+  }
+
+  it('queues a prompt from the Conductor, marked as its, and reports the Turn it started back to it with the answer', async () => {
+    const fake = fakeAgent();
+    const { app, conductor, call, worker, queued, history, tick } = await conducting(fake);
+    const target = await worker();
+    fake.emitTo(target, { type: 'turn', turn: { type: 'started' } });
+
+    const sent = await call('queue_prompt', { agent_id: target, prompt: 'Fix the parser' });
+    expect(sent).toMatchObject({ ok: true, data: { prompt_id: expect.stringMatching(/^[A-Za-z0-9_-]{12,64}$/u) } });
+    expect(await queued(target)).toEqual([expect.objectContaining({ id: sent.data.prompt_id, text: 'Fix the parser', from: conductor })]);
+
+    fake.emitTo(target, { type: 'turn', turn: { type: 'settled', message: 'earlier work' } });
+    await tick();
+    expect(fake.delivered).toEqual(['Fix the parser']);
+    expect((await history(target))[0]).toMatchObject({ text: 'Fix the parser', from: conductor });
+    fake.emitTo(target, { type: 'turn', turn: { type: 'started' } });
+    fake.emitTo(target, { type: 'turn', turn: { type: 'settled', message: 'Parser fixed.' } });
+    await tick();
+    await tick();
+
+    // one report, to the Conductor, labelled, with the answer as untrusted data
+    expect(fake.delivered).toHaveLength(2);
+    const report = fake.delivered[1]!;
+    expect(report).toMatch(/^\[RAC report\]/u);
+    expect(report).toContain(target);
+    expect(report).toContain('completed');
+    expect(report).toContain('Parser fixed.');
+    expect(report).toContain('get_agent_latest_response');
+    expect((await history(conductor))[0]).toMatchObject({ label: 'report' });
+    // the report's own Turn ending reports nothing
+    fake.emitTo(conductor, { type: 'turn', turn: { type: 'started' } });
+    fake.emitTo(conductor, { type: 'turn', turn: { type: 'settled', message: 'Noted.' } });
+    await tick();
+    await tick();
+    expect(fake.delivered).toHaveLength(2);
+    await app.close();
+  });
+  it('reports a Turn its target\'s process exited under, and a prompt that never went out because its target closed', async () => {
+    const fake = fakeAgent();
+    const { app, headers, conductor, call, worker, tick } = await conducting(fake);
+    const target = await worker();
+    const sent = await call('queue_prompt', { agent_id: target, prompt: 'Run the suite' });
+    expect(fake.delivered).toEqual(['Run the suite']);
+    fake.emitTo(target, { type: 'turn', turn: { type: 'started' } });
+    await tick();
+    fake.emitTo(target, { type: 'exited' });
+    await tick();
+    await tick();
+    expect(fake.delivered).toHaveLength(2);
+    expect(fake.delivered[1]).toContain(`The prompt ${sent.data.prompt_id} you queued to Agent ${target} failed: the Agent's process exited.`);
+    fake.emitTo(conductor, { type: 'turn', turn: { type: 'started' } });
+    fake.emitTo(conductor, { type: 'turn', turn: { type: 'settled', message: 'Noted.' } });
+    await tick();
+
+    const other = await worker();
+    fake.emitTo(other, { type: 'turn', turn: { type: 'started' } });
+    const waiting = await call('queue_prompt', { agent_id: other, prompt: 'Then lint' });
+    expect((await app.inject({ method: 'DELETE', url: `/api/agents/${other}`, headers })).statusCode).toBe(204);
+    await tick();
+    await tick();
+    expect(fake.delivered.at(-1)).toContain(`The prompt ${waiting.data.prompt_id} you queued to Agent ${other} was not delivered`);
+    await app.close();
+  });
+  it('keeps a dispatch across a deploy: the Turn in flight settles after the restart and is still reported', async () => {
+    const fake = fakeAgent();
+    const { conductor, call, worker, restart } = await conducting(fake);
+    const target = await worker();
+    const sent = await call('queue_prompt', { agent_id: target, prompt: 'Port the parser' });
+    fake.emitTo(target, { type: 'turn', turn: { type: 'started' } });
+
+    const next = fakeAgent();
+    const deployed = await restart(next);
+    await deployed.reattached;
+    await deployed.app.conductor.start();
+    // the Conductor, reattached too, is idle once it reports its Conversation
+    next.emitTo(conductor, { type: 'conversation', id: 'conducting' });
+    next.emitTo(target, { type: 'turn', turn: { type: 'started' } });
+    next.emitTo(target, { type: 'transcript', item: { id: 'm1', kind: 'message', role: 'user', text: 'Port the parser' } });
+    next.emitTo(target, { type: 'turn', turn: { type: 'settled', message: 'Ported.' } });
+    const dashboard = () => deployed.app.inject({ method: 'GET', url: '/api/dashboard', headers: deployed.headers });
+    await dashboard();
+    await vi.waitFor(async () => {
+      await dashboard();
+      expect(next.delivered).toEqual([expect.stringContaining(`The prompt ${sent.data.prompt_id} you queued to Agent ${target} completed.`)]);
+    }, { timeout: 2_000 });
+    expect(next.delivered[0]).toContain('Ported.');
+    const history = (await deployed.app.inject({ method: 'GET', url: `/api/agents/${conductor}/prompt-history`, headers: deployed.headers })).json().prompts;
+    expect(history[0]).toMatchObject({ label: 'report' });
+    await deployed.app.close();
+  });
+  it('lists, edits and removes only its own queued prompts, and cancels only a Turn it dispatched', async () => {
+    const fake = fakeAgent();
+    const { app, headers, call, worker, queued, tick } = await conducting(fake);
+    const target = await worker();
+    fake.emitTo(target, { type: 'turn', turn: { type: 'started' } });
+    // the operator's prompt is queued first
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${target}/prompt`, headers, payload: { prompt: 'Operator work', attachments: [] } })).statusCode).toBe(204);
+    const operators = (await queued(target))[0].id as string;
+    const mine = (await call('queue_prompt', { agent_id: target, prompt: 'Conductor work' })).data.prompt_id as string;
+
+    expect(await call('list_queued_prompts', { agent_id: target }, false)).toMatchObject({ ok: true, data: { prompts: [{ id: mine, text: 'Conductor work' }] } });
+    expect(await call('update_queued_prompt', { agent_id: target, prompt_id: operators, prompt: 'Hijacked' })).toMatchObject({ ok: false, error: { code: 'not_found' } });
+    expect(await call('remove_queued_prompt', { agent_id: target, prompt_id: operators })).toMatchObject({ ok: false, error: { code: 'not_found' } });
+    expect(await call('move_queued_prompt', { agent_id: target, prompt_id: mine, direction: 'earlier' })).toMatchObject({ ok: false, error: { code: 'tool_disabled' } });
+    expect(await call('update_queued_prompt', { agent_id: target, prompt_id: mine, prompt: 'Conductor work, revised' })).toMatchObject({ ok: true });
+    expect((await queued(target)).map((prompt: { text: string }) => prompt.text)).toEqual(['Operator work', 'Conductor work, revised']);
+    // the operator's Turn is not the Conductor's to cancel
+    expect(await call('cancel_agent', { agent_id: target })).toMatchObject({ ok: false, error: { code: 'conflict' } });
+    expect(fake.cancels()).toBe(0);
+    // a prompt it takes back is not reported to it
+    expect(await call('remove_queued_prompt', { agent_id: target, prompt_id: mine })).toMatchObject({ ok: true });
+    await tick();
+
+    const again = (await call('queue_prompt', { agent_id: target, prompt: 'Conductor work again' })).data.prompt_id as string;
+    fake.emitTo(target, { type: 'turn', turn: { type: 'settled', message: 'done' } });
+    await tick();
+    await tick();
+    expect(fake.delivered).toEqual(['Operator work']);
+    fake.emitTo(target, { type: 'turn', turn: { type: 'started' } });
+    fake.emitTo(target, { type: 'turn', turn: { type: 'settled', message: 'done' } });
+    await tick();
+    await tick();
+    expect(fake.delivered).toEqual(['Operator work', 'Conductor work again']);
+    fake.emitTo(target, { type: 'turn', turn: { type: 'started' } });
+    await tick();
+    expect(await call('cancel_agent', { agent_id: target })).toMatchObject({ ok: true });
+    expect(fake.cancels()).toBe(1);
+    await tick();
+    await tick();
+    expect(fake.delivered.at(-1)).toContain(`The prompt ${again} you queued to Agent ${target} was interrupted.`);
+    await app.close();
+  });
+  it('acts only on Agents within its scope: one at a Place with no Workspace, outside any configured Project, is not found', async () => {
+    const fake = fakeAgent();
+    const { app, headers, call, worker } = await conducting(fake);
+    const inside = await worker();
+    // the Scratch folder is no configured Project, and here no Workspace session holds it
+    const outside: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+
+    const listed = (await call('list_agents', {}, false)).data.map((agent: { id: string }) => agent.id);
+    expect(listed).toContain(inside);
+    expect(listed).not.toContain(outside);
+    expect(await call('get_agent_status', { agent_id: inside }, false)).toMatchObject({ ok: true });
+    for (const [name, args, mutation] of [['get_agent_status', {}, false], ['get_agent_latest_response', {}, false], ['queue_prompt', { prompt: 'Hello' }, true], ['cancel_agent', {}, true]] as const) {
+      expect(await call(name, { agent_id: outside, ...args }, mutation)).toMatchObject({ ok: false, error: { code: 'not_found' } });
+    }
+    expect(fake.delivered).toEqual([]);
+    await app.close();
+  });
+});

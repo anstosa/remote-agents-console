@@ -6,10 +6,15 @@ import { maxStoredAttachmentFootprintBytes, promptAttachmentBytes, promptAttachm
 
 // where the queuing Agent ran, so its prompts can still become Notes after it is gone
 export type QueuedPromptOrigin = { home: string; placeId?: string };
-export type QueuedPrompt = { id: string; text: string; createdAt: string; attachments?: PromptAttachment[]; origin?: QueuedPromptOrigin };
+/** The console's own prompts to an Agent, each of which starts a Turn it did not ask for (ADR 0019). */
+export const promptLabels = ['report', 'event', 'run'] as const;
+export type PromptLabel = typeof promptLabels[number];
+/** Who sent a prompt, when not the operator: another Agent (`from`, its id), or the console (`label`). */
+export type PromptSender = { from?: string; label?: PromptLabel };
+export type QueuedPrompt = { id: string; text: string; createdAt: string; attachments?: PromptAttachment[]; origin?: QueuedPromptOrigin } & PromptSender;
 // queued prompts and history belong to the Agent they were sent to, never to a sibling at its Worktree
 export const promptScope = (agentId: string) => `agent:${agentId}`;
-export type QueuedPromptSummary = { id: string; text: string; createdAt: string; attachments?: Array<{ name: string; size: number }> };
+export type QueuedPromptSummary = { id: string; text: string; createdAt: string; attachments?: Array<{ name: string; size: number }> } & PromptSender;
 type StoredQueues = Record<string, QueuedPrompt[]>;
 
 const maxScopes = 500;
@@ -18,6 +23,9 @@ const maxStoredTextLength = 10_000_000;
 const maxStoredAttachmentBytes = 100 * 1024 * 1024;
 const validScope = (value: string) => value.length > 0 && value.length <= 4096 && !value.includes('\0');
 const validId = (value: string) => /^[A-Za-z0-9_-]{12,64}$/u.test(value);
+const validSender = ({ from, label }: { from?: unknown; label?: unknown }): boolean => (from === undefined || typeof from === 'string' && validScope(from)) && (label === undefined || (promptLabels as readonly unknown[]).includes(label));
+// the sender fields a prompt carries, and none it does not
+export const senderOf = ({ from, label }: PromptSender): PromptSender => ({ ...(from === undefined ? {} : { from }), ...(label === undefined ? {} : { label }) });
 const validOrigin = (value: unknown): value is QueuedPromptOrigin => {
   if (value === null || typeof value !== 'object') return false;
   const origin = value as { home?: unknown; placeId?: unknown };
@@ -25,15 +33,15 @@ const validOrigin = (value: unknown): value is QueuedPromptOrigin => {
 };
 const parsePrompt = (value: unknown): QueuedPrompt | undefined => {
   if (value === null || typeof value !== 'object') return undefined;
-  const prompt = value as { id?: unknown; text?: unknown; createdAt?: unknown; attachments?: unknown; origin?: unknown };
+  const prompt = value as { id?: unknown; text?: unknown; createdAt?: unknown; attachments?: unknown; origin?: unknown; from?: unknown; label?: unknown };
   if (typeof prompt.id !== 'string' || !validId(prompt.id) || typeof prompt.text !== 'string' || typeof prompt.createdAt !== 'string' || !Number.isFinite(Date.parse(prompt.createdAt))) return undefined;
   const rawAttachments = prompt.attachments ?? [];
   if (!Array.isArray(rawAttachments)) return undefined;
   const attachments = rawAttachments.filter((attachment): attachment is PromptAttachment => attachment !== null && typeof attachment === 'object' && typeof (attachment as { name?: unknown }).name === 'string' && typeof (attachment as { data?: unknown }).data === 'string');
-  if (attachments.length !== rawAttachments.length || !validPrompt(prompt.text, attachments) || prompt.origin !== undefined && !validOrigin(prompt.origin)) return undefined;
-  return { id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...(attachments.length === 0 ? {} : { attachments }), ...(prompt.origin === undefined ? {} : { origin: { home: prompt.origin.home, ...(prompt.origin.placeId === undefined ? {} : { placeId: prompt.origin.placeId }) } }) };
+  if (attachments.length !== rawAttachments.length || !validPrompt(prompt.text, attachments) || prompt.origin !== undefined && !validOrigin(prompt.origin) || !validSender(prompt)) return undefined;
+  return { id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...senderOf(prompt as PromptSender), ...(attachments.length === 0 ? {} : { attachments }), ...(prompt.origin === undefined ? {} : { origin: { home: prompt.origin.home, ...(prompt.origin.placeId === undefined ? {} : { placeId: prompt.origin.placeId }) } }) };
 };
-const summarize = (prompt: QueuedPrompt): QueuedPromptSummary => ({ id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...(prompt.attachments === undefined ? {} : { attachments: prompt.attachments.map(attachment => ({ name: attachment.name, size: promptAttachmentBytes(attachment)! })) }) });
+const summarize = (prompt: QueuedPrompt): QueuedPromptSummary => ({ id: prompt.id, text: prompt.text, createdAt: prompt.createdAt, ...senderOf(prompt), ...(prompt.attachments === undefined ? {} : { attachments: prompt.attachments.map(attachment => ({ name: attachment.name, size: promptAttachmentBytes(attachment)! })) }) });
 // sum every durable queue budget across all scopes
 const totals = (stored: StoredQueues) => Object.values(stored).flat().reduce((value, prompt) => ({ text: value.text + prompt.text.length, attachments: value.attachments + (prompt.attachments ?? []).reduce((sum, attachment) => sum + (promptAttachmentBytes(attachment) ?? 0), 0), attachmentFootprint: value.attachmentFootprint + promptAttachmentsStorageFootprint(prompt.attachments ?? []) }), { text: 0, attachments: 0, attachmentFootprint: 0 });
 
@@ -54,14 +62,14 @@ export class QueuedPromptService {
   }
 
   // validate complete prompt content once before queue persistence
-  async enqueue(scope: string, text: string, attachments: PromptAttachment[] = [], origin?: QueuedPromptOrigin): Promise<QueuedPromptSummary | undefined> {
+  async enqueue(scope: string, text: string, attachments: PromptAttachment[] = [], origin?: QueuedPromptOrigin, sender: PromptSender = {}): Promise<QueuedPromptSummary | undefined> {
     // prompt validation includes every attachment safeguard
-    if (!validScope(scope) || !validPrompt(text, attachments) || origin !== undefined && !validOrigin(origin)) return undefined;
+    if (!validScope(scope) || !validPrompt(text, attachments) || origin !== undefined && !validOrigin(origin) || !validSender(sender)) return undefined;
     return await this.mutate(stored => {
       if (stored[scope] === undefined && Object.keys(stored).length >= maxScopes) return undefined;
       const queue = stored[scope] ?? [];
       if (queue.length >= maxPromptsPerScope) return undefined;
-      const prompt: QueuedPrompt = { id: randomBytes(18).toString('base64url'), text, createdAt: new Date().toISOString(), ...(attachments.length === 0 ? {} : { attachments }), ...(origin === undefined ? {} : { origin }) };
+      const prompt: QueuedPrompt = { id: randomBytes(18).toString('base64url'), text, createdAt: new Date().toISOString(), ...senderOf(sender), ...(attachments.length === 0 ? {} : { attachments }), ...(origin === undefined ? {} : { origin }) };
       queue.push(prompt);
       stored[scope] = queue;
       const size = totals(stored);
@@ -150,10 +158,11 @@ export class QueuedPromptService {
     return Object.keys(await this.read());
   }
 
-  async next(scope: string): Promise<QueuedPrompt | undefined> {
+  // the first queued prompt that may go out now: the head, unless `admits` holds some back
+  async next(scope: string, admits: (prompt: QueuedPrompt) => boolean = () => true): Promise<QueuedPrompt | undefined> {
     if (!validScope(scope)) return undefined;
     await this.mutation;
-    return (await this.read())[scope]?.[0];
+    return (await this.read())[scope]?.find(admits);
   }
 
   // drop every queued prompt for one scope — Remove deletes the Worktree's queue outright

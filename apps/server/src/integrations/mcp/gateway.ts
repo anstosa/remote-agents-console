@@ -130,7 +130,9 @@ export class IntegrationGateway {
 
   // dispatch one already-authorized typed operation
   private async execute(name: string, input: Record<string, unknown>, principal: IntegrationPrincipal): Promise<OrchestrationResult<unknown>> {
-    const orchestration = principal.places === undefined ? this.options.orchestration : this.options.orchestration.scoped(principal.places);
+    const orchestration = principal.places === undefined ? this.options.orchestration : this.options.orchestration.scoped(principal.places, principal.authentication === 'conductor' ? principal.subjectId : undefined);
+    // an Agent outside a principal's Places is not found, whatever the tool
+    if (principal.places !== undefined && typeof input.agent_id === 'string' && !await orchestration.hasAgent(input.agent_id)) return { ok: false, version: 'v1', error: { code: 'not_found', message: 'Agent not found.', retryable: false } };
     // map transport names to stable orchestration operations
     switch (name) {
       case 'list_instances': return await orchestration.listInstances();

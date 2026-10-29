@@ -11,7 +11,7 @@ import type { StoredReviewTour } from '../review-tour/contracts.js';
 import type { ReviewTourInput } from '../review-tour/contracts.js';
 import type { NewTaskService } from '../new-task/service.js';
 import type { WorkspaceFileService, WorkspaceFilePreview } from '../workspace-files/service.js';
-import { configuredWorktreeForWorkspace, worktreeById } from '../workspaces/resolver.js';
+import { configuredWorktreeForWorkspace, projectIdOf, worktreeById } from '../workspaces/resolver.js';
 import { processActions, type StackState, type WorktreeCommandService } from '../worktree-commands/service.js';
 import type {
   AgentStatusV1,
@@ -62,7 +62,7 @@ const promptIdPattern = /^[A-Za-z0-9_-]{12,64}$/u;
 const questionIdPattern = /^[A-Za-z0-9_-]{22}$/u;
 
 type DiscoveryFacade = Pick<DiscoveryService, 'target' | 'worktreesNow'>;
-type PromptFacade = Pick<PromptService, 'submit' | 'listQueued' | 'updateQueued' | 'moveQueued' | 'removeQueued' | 'answerQuestion' | 'cancel' | 'close' | 'transportFor'>;
+type PromptFacade = Pick<PromptService, 'submitFrom' | 'inFlight' | 'listQueued' | 'updateQueued' | 'moveQueued' | 'removeQueued' | 'answerQuestion' | 'cancel' | 'close' | 'transportFor'>;
 type HistoryFacade = Pick<PromptHistoryService, 'list'>;
 type WorktreeCommandFacade = Pick<WorktreeCommandService, 'actions' | 'state' | 'start' | 'log'>;
 type WorkspaceFileFacade = Pick<WorkspaceFileService, 'preview'>;
@@ -84,7 +84,11 @@ export type OrchestrationDependencies = {
   launchScratch: () => Promise<boolean>;
   loadReview?: (worktreeId: string, branch: string) => Promise<StoredReviewTour | undefined>;
   startReview?: (agentId: string, input: ReviewTourInput) => Promise<unknown>;
+  /** The Conductor acting through these operations (ADR 0018), by its Agent id; none for the operator's integrations. */
+  conductor?: string;
 };
+/** Which Places a principal may act on, by the Worktree (or Place) id and its Project. */
+export type PlaceScope = (place: { id: string; projectId: string }) => boolean;
 
 type TextLimit = { text: string; truncated: boolean };
 
@@ -191,12 +195,24 @@ export class OrchestrationService {
   constructor(private readonly dependencies: OrchestrationDependencies) {}
 
   /**
-   * The same operations over only the Worktrees `admits` (a principal's scope): the others are not
-   * found and not listed. Agent-keyed operations are not scoped: every Agent runs in a Workspace.
+   * The same operations over only the Places `admits` (a principal's scope), acting as `conductor`
+   * when given: Worktrees and Agents elsewhere are not listed, and `hasAgent` does not find such an
+   * Agent, which the gateway checks before any Agent-keyed call.
    */
-  scoped(admits: (worktree: Worktree) => boolean): OrchestrationService {
-    const { discovery } = this.dependencies;
-    return new OrchestrationService({ ...this.dependencies, discovery: { target: (id, force) => discovery.target(id, force), worktreesNow: () => discovery.worktreesNow().filter(admits) } });
+  scoped(admits: PlaceScope, conductor?: string): OrchestrationService {
+    const { discovery, loadDashboard } = this.dependencies;
+    const inScope = (agent: Pick<Agent, 'worktreeId' | 'placeId' | 'projectId'>) => admits({ id: agent.worktreeId ?? agent.placeId ?? '', projectId: agent.projectId ?? projectIdOf(agent.placeId ?? '') });
+    return new OrchestrationService({
+      ...this.dependencies,
+      discovery: { target: (id, force) => discovery.target(id, force), worktreesNow: () => discovery.worktreesNow().filter(admits) },
+      loadDashboard: async () => { const dashboard = await loadDashboard(); return { ...dashboard, agents: dashboard.agents.filter(inScope) }; },
+      ...(conductor === undefined ? {} : { conductor })
+    });
+  }
+
+  /** Whether an Agent is current and within these operations' scope. */
+  async hasAgent(agentId: string): Promise<boolean> {
+    return (await this.dependencies.loadDashboard()).agents.some(agent => agent.id === agentId);
   }
 
   // normalize unexpected dependency failures
@@ -382,8 +398,16 @@ export class OrchestrationService {
     if (!validIdentifier(agentId)) return failure('invalid_request', 'Invalid agent identifier.');
     return await this.operation(async () => {
       const prompts = await this.dependencies.prompts.listQueued(agentId);
-      return prompts === undefined ? failure('not_found', 'Agent or prompt queue not found.') : success({ prompts: prompts.map(prompt => ({ ...prompt, text: redactIntegrationText(prompt.text) })) });
+      // the Conductor sees only the prompts it queued
+      const shown = prompts?.filter(prompt => this.dependencies.conductor === undefined || prompt.from === this.dependencies.conductor);
+      return shown === undefined ? failure('not_found', 'Agent or prompt queue not found.') : success({ prompts: shown.map(prompt => ({ ...prompt, text: redactIntegrationText(prompt.text) })) });
     });
+  }
+
+  // whether the acting principal may change a queued prompt: the Conductor only its own
+  private async mayChange(agentId: string, promptId: string): Promise<boolean> {
+    const conductor = this.dependencies.conductor;
+    return conductor === undefined || (await this.dependencies.prompts.listQueued(agentId))?.some(prompt => prompt.id === promptId && prompt.from === conductor) === true;
   }
 
   // preview one configured or active workspace file
@@ -511,12 +535,16 @@ export class OrchestrationService {
   }
 
   // submit or durably queue one prompt through PromptService
-  async queuePrompt(input: QueuePromptInputV1): Promise<OrchestrationResult<{ accepted: true }>> {
+  // (the Conductor's prompt is its own, and its Turn is reported back to it)
+  async queuePrompt(input: QueuePromptInputV1): Promise<OrchestrationResult<{ accepted: true; prompt_id: string }>> {
     // reject malformed prompt requests
     if (!validIdentifier(input.agentId) || !validIntegrationPrompt(input.prompt)) return failure('invalid_request', 'Invalid prompt.');
-    return await this.operation(async () => await this.dependencies.prompts.submit(input.agentId, input.prompt)
-      ? success({ accepted: true as const })
-      : failure('not_found', 'Agent is unavailable.'));
+    const conductor = this.dependencies.conductor;
+    if (input.agentId === conductor) return failure('invalid_request', 'The Conductor cannot queue prompts to itself.');
+    return await this.operation(async () => {
+      const promptId = await this.dependencies.prompts.submitFrom(input.agentId, input.prompt, conductor === undefined ? {} : { from: conductor });
+      return promptId === undefined ? failure('not_found', 'Agent is unavailable.') : success({ accepted: true as const, prompt_id: promptId });
+    });
   }
 
   // update one queued prompt
@@ -524,6 +552,7 @@ export class OrchestrationService {
     // reject malformed queue updates
     if (!validIdentifier(input.agentId) || !promptIdPattern.test(input.promptId) || !validIntegrationPrompt(input.prompt)) return failure('invalid_request', 'Invalid queued prompt update.');
     return await this.operation(async () => {
+      if (!await this.mayChange(input.agentId, input.promptId)) return failure('not_found', 'Queued prompt not found.');
       const prompt = await this.dependencies.prompts.updateQueued(input.agentId, input.promptId, input.prompt);
       return prompt === undefined ? failure('not_found', 'Queued prompt not found.') : success(prompt);
     });
@@ -543,7 +572,7 @@ export class OrchestrationService {
   async removeQueuedPrompt(input: RemoveQueuedPromptInputV1): Promise<OrchestrationResult<{ removed: true }>> {
     // reject malformed queue removals
     if (!validIdentifier(input.agentId) || !promptIdPattern.test(input.promptId)) return failure('invalid_request', 'Invalid queued prompt removal.');
-    return await this.operation(async () => await this.dependencies.prompts.removeQueued(input.agentId, input.promptId)
+    return await this.operation(async () => await this.mayChange(input.agentId, input.promptId) && await this.dependencies.prompts.removeQueued(input.agentId, input.promptId, this.dependencies.conductor !== undefined)
       ? success({ removed: true as const })
       : failure('not_found', 'Queued prompt not found.'));
   }
@@ -562,6 +591,9 @@ export class OrchestrationService {
     // reject malformed identifiers
     if (!validIdentifier(agentId)) return failure('invalid_request', 'Invalid agent identifier.');
     return await this.operation(async () => {
+      // the Conductor cancels only a Turn it dispatched
+      const conductor = this.dependencies.conductor;
+      if (conductor !== undefined && this.dependencies.prompts.inFlight(agentId)?.sender.from !== conductor) return failure('conflict', 'The agent is not on a Turn you dispatched.');
       const outcome = await this.dependencies.prompts.cancel(agentId);
       // 'ok' interrupted; 'not-working' refused a finished agent; 'unavailable' had no target
       if (outcome === 'ok') return success({ cancelled: true as const });
