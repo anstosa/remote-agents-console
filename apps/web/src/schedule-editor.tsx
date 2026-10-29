@@ -3,8 +3,8 @@ import { agentKindGlyph, agentKindLabel, type AgentKind, type AllowedModel } fro
 
 // The wire shape of a Schedule (mirrors the server's `Schedule`). `updatedAt` and
 // `lastRun` are server-owned; the editor emits only the four fields the set route reads.
-export type ScheduleTarget = { worktreeId: string } | { projectId: string } | { scratch: true };
-export type ScheduleRunStatus = 'launched' | 'running' | 'completed' | 'needs-input' | 'timed-out' | 'skipped' | 'failed';
+export type ScheduleTarget = { worktreeId: string } | { projectId: string } | { scratch: true } | { conductor: true };
+export type ScheduleRunStatus = 'launched' | 'running' | 'completed' | 'needs-input' | 'timed-out' | 'skipped' | 'failed' | 'delivered';
 export type ScheduleLastRun = { at: string; status: ScheduleRunStatus; detail?: string; agentId?: string };
 export type Schedule = { cron: string; kind: AgentKind; model?: string; effort?: string; target: ScheduleTarget; enabled: boolean; updatedAt?: string; lastRun?: ScheduleLastRun };
 export type ScheduleSetBody = { cron: string; kind: AgentKind; model?: string; effort?: string; target: ScheduleTarget; enabled: boolean };
@@ -23,16 +23,17 @@ export type ScheduleTargetOption = { target: ScheduleTarget; label: string; subl
 const sameScheduleTarget = (a: ScheduleTarget | undefined, b: ScheduleTarget | undefined): boolean => {
   if (a === undefined || b === undefined) return false;
   if ('scratch' in a) return 'scratch' in b;
+  if ('conductor' in a) return 'conductor' in b;
   if ('worktreeId' in a) return 'worktreeId' in b && a.worktreeId === b.worktreeId;
-  return 'projectId' in b && a.projectId === b.projectId;
+  return 'projectId' in a && 'projectId' in b && a.projectId === b.projectId;
 };
-const targetRowKey = (target: ScheduleTarget): string => 'scratch' in target ? 'scratch' : 'worktreeId' in target ? `wt:${target.worktreeId}` : `proj:${target.projectId}`;
+const targetRowKey = (target: ScheduleTarget): string => 'scratch' in target ? 'scratch' : 'conductor' in target ? 'conductor' : 'worktreeId' in target ? `wt:${target.worktreeId}` : `proj:${target.projectId}`;
 // the picker's leading glyph: Scratch, a directory Project, the main worktree, or another worktree
-const targetGlyph = (option: ScheduleTargetOption): string => 'scratch' in option.target ? '~' : 'projectId' in option.target ? '▤' : option.main === true ? '⌂' : '⎇';
+const targetGlyph = (option: ScheduleTargetOption): string => 'scratch' in option.target ? '~' : 'conductor' in option.target ? '◆' : 'projectId' in option.target ? '▤' : option.main === true ? '⌂' : '⎇';
 // the "Runs on" statement a target reads as, e.g. "atlas · main worktree" / "Scratch"
 const targetRunsOn = (option: ScheduleTargetOption): string => option.group === undefined ? option.label : `${option.group} · ${option.sublabel ?? option.label}`;
 // what the target slot reads when a stored target has vanished, honest about its shape
-const goneTargetLabel = (target: ScheduleTarget): string => 'projectId' in target ? 'an unavailable project' : 'a removed worktree';
+const goneTargetLabel = (target: ScheduleTarget): string => 'conductor' in target ? 'the Conductor (not running)' : 'projectId' in target ? 'an unavailable project' : 'a removed worktree';
 
 export const defaultScheduleCron = '0 9 * * *';
 

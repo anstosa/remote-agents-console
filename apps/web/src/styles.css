@@ -341,6 +341,14 @@ html.software-keyboard-open .tabs { display: none; }
 .transcript-answer .transcript-glyph { color: var(--text); }
 .transcript-thinking { color: var(--overlay-1); font-style: italic; }
 .transcript-notice { color: var(--subtext-0); }
+/* who sent a prompt: the Agent it came from (a link), or what the console sent it as */
+.prompt-sender-chip { display: inline-block; margin-right: .35rem; padding: 0 .35rem; border: 1px solid color-mix(in srgb, var(--mauve) 45%, transparent); border-radius: .6rem; color: var(--mauve); font-size: .7rem; line-height: 1.3rem; white-space: nowrap; text-decoration: none; vertical-align: middle; }
+.prompt-sender-chip.label { border-color: color-mix(in srgb, var(--subtext-0) 45%, transparent); color: var(--subtext-0); }
+.transcript-console-prompt .transcript-console-text { margin: .2rem 0 .2rem 1.2rem; color: var(--subtext-0); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* an Agent's own text inside a report: data, never instructions */
+.transcript-untrusted { margin: .25rem 0 .25rem 1.2rem; padding: .3rem .45rem; border: 1px dashed color-mix(in srgb, var(--yellow) 60%, transparent); border-radius: .3rem; }
+.transcript-untrusted small { color: var(--yellow); font-size: .7rem; }
+.transcript-untrusted pre { margin: .2rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 .transcript-notice.warning .transcript-glyph { color: var(--yellow); }
 .transcript-notice.error .transcript-glyph { color: var(--red); }
 .transcript-group-end { margin: .35rem 0 0 1.2rem; font-size: .72rem; }
