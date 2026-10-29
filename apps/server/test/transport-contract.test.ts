@@ -63,12 +63,12 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => undefined); });
 
 // launch `client`'s CLI under the holder in a Workspace session, its events collected in order
-async function launched(client: ContractClient, toolCall?: Parameters<typeof stubProvider>[1]): Promise<{ connection: StructuredConnection; events: StructuredEvent[]; home: string; next(type: StructuredEvent['type'], match?: (event: StructuredEvent) => boolean): Promise<StructuredEvent> }> {
+async function launched(client: ContractClient, toolCall?: NonNullable<Parameters<typeof stubProvider>[1]>['toolCall']): Promise<{ connection: StructuredConnection; events: StructuredEvent[]; home: string; next(type: StructuredEvent['type'], match?: (event: StructuredEvent) => boolean): Promise<StructuredEvent> }> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-contract-')));
   const socketPath = join(root, 'tmux');
   const state = join(root, 'state');
   await mkdir(state);
-  const provider = await stubProvider(undefined, toolCall);
+  const provider = await stubProvider(undefined, { toolCall });
   cleanups.push(async () => { await provider.close(); await run(tmux, ['-S', socketPath, 'kill-server']); await rm(root, { recursive: true, force: true }); });
   const place = adhocScratchPlace(root);
   expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-c', root, 'cat'])).code).toBe(0);
@@ -175,5 +175,60 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(await next('model')).toEqual({ type: 'model', current: { model: client.models.reasoning, effort: 'high' } });
     expect((await client.adapter.conversations.list([home])).map(row => row.id)).toEqual([first]);
     expect(second).not.toBe(first);
+  }, 60_000);
+
+  it('answers busy to a second prompt while a Turn runs', async () => {
+    const { connection, next } = await launched(client);
+    await next('report');
+    expect(await connection.deliver('Reply slowly')).toBe('started');
+    await next('turn', event => event.type === 'turn' && event.turn.type === 'started');
+    expect(await connection.deliver('Second')).toBe('busy');
+    expect(await next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } });
+  }, 60_000);
+
+  it('steers a working Agent: the steer is pending, then taken within the same Turn', async () => {
+    const { connection, events, next } = await launched(client);
+    await next('report');
+    expect(await connection.deliver('Reply slowly')).toBe('started');
+    await next('turn', event => event.type === 'turn' && event.turn.type === 'started');
+    expect(await connection.steer('Also say goodbye')).toBe(true);
+    expect(await next('steers')).toEqual({ type: 'steers', pending: ['Also say goodbye'] });
+    expect(await next('steers')).toEqual({ type: 'steers', pending: [] });
+    await next('turn');
+
+    expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }, { type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } }]);
+    expect(events.filter(event => event.type === 'transcript' && event.item.kind === 'message' && event.item.role === 'user').map(event => (event as { item: { text: string } }).item.text)).toEqual(['Reply slowly', 'Also say goodbye']);
+  }, 60_000);
+
+  it('cancels a working Agent: its pending steers come back and the Turn ends aborted', async () => {
+    const { connection, events, next } = await launched(client);
+    await next('report');
+    expect(await connection.deliver('Reply slowly')).toBe('started');
+    await next('turn', event => event.type === 'turn' && event.turn.type === 'started');
+    expect(await connection.steer('Never mind')).toBe(true);
+    await next('steers');
+
+    expect(await connection.cancel()).toEqual(['Never mind']);
+    expect(await next('turn')).toEqual({ type: 'turn', turn: { type: 'aborted' } });
+    expect(events.filter(event => event.type === 'transcript' && event.item.kind === 'message').map(event => (event as { item: { text: string } }).item.text)).toEqual(['Reply slowly']);
+  }, 60_000);
+
+  it('round-trips a dialog: the Agent asks the operator, naming its tool call, and the answer reaches it', async () => {
+    const { connection, events, next } = await launched(client);
+    await next('report');
+    expect(await connection.deliver('Please ask me a question')).toBe('started');
+    const asked = await next('question') as Extract<StructuredEvent, { type: 'question' }>;
+    expect(asked.question).toMatchObject({ text: 'Which colour?', field: { kind: 'choice', choices: ['red', 'blue'] } });
+    // the dialog named its tool call: that call's line waits on the answer
+    const toolCallId = (events.find(event => event.type === 'transcript' && event.item.kind === 'tool' && event.item.name === 'Ask') as { item: { id: string } }).item.id;
+    // the question shows once, in the question box: the tool line never carries it as arguments
+    expect(events).toContainEqual({ type: 'transcript', item: expect.objectContaining({ id: toolCallId, kind: 'tool', name: 'Ask', summary: 'waiting for your answer below', state: 'running' }) });
+    expect(JSON.stringify(events.filter(event => event.type === 'transcript'))).not.toContain('Which colour?');
+
+    expect(await connection.answer(asked.question.id, 1)).toBe(true);
+    expect(await next('question-closed')).toEqual({ type: 'question-closed', id: asked.question.id });
+    expect(await next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'You answered: blue' } });
+    expect(events).toContainEqual({ type: 'transcript', item: expect.objectContaining({ id: toolCallId, kind: 'tool', name: 'Ask', summary: '', state: 'done', result: 'blue' }) });
+    expect(await connection.answer(asked.question.id, 0)).toBe(false);
   }, 60_000);
 });

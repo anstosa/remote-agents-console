@@ -22,7 +22,7 @@ export type QuestionAnswer = number | string | { dismiss: true };
  * Conversation's start), and `foreign` is another Agent's hold on the same queue.
  */
 export type Gate = 'none' | 'anchored' | 'pending' | 'expired' | 'foreign';
-export type InterruptOutcome ='ok' | 'unavailable' | 'not-working';
+export type InterruptOutcome = 'ok' | 'unavailable' | 'not-working';
 /** `unsent` reached nothing; `stuck` may have left the name unsubmitted in the composer. */
 export type RenameOutcome = 'sent' | 'unavailable' | 'busy' | 'unsent' | 'stuck';
 /**
@@ -40,7 +40,8 @@ export type SwitchOutcome = { status: 'switched'; agentId: string } | { status: 
  */
 export interface AgentTransport {
   answer(agentId: string, questionId: string, answer: QuestionAnswer): Promise<boolean>;
-  interrupt(agentId: string): Promise<InterruptOutcome>;
+  /** `returned` hears the steers a cancel dropped, which go back to the operator. */
+  interrupt(agentId: string, returned?: (steers: string[]) => void): Promise<InterruptOutcome>;
   close(agentId: string): Promise<boolean>;
   rename(agentId: string, name: string): Promise<RenameOutcome>;
   newConversation(agentId: string): Promise<boolean>;

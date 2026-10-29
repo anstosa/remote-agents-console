@@ -1,3 +1,4 @@
+import type { QuestionField } from '../adapters/types.js';
 import type { LaunchReport, ModelInfo, ModelSetting, ProtocolClient, TranscriptItem, TranscriptTool } from './structured.js';
 
 /**
@@ -7,6 +8,8 @@ import type { LaunchReport, ModelInfo, ModelSetting, ProtocolClient, TranscriptI
 
 /** The status key the RAC Pi extension sends its launch report under. */
 export const piReportStatusKey = 'rac-launch';
+// what a tool call's line reads while its question waits in the Inline-question box
+const waitingForAnswer = 'waiting for your answer below';
 
 type Json = { [key: string]: unknown };
 const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -28,6 +31,34 @@ const parseReport = (statusText: unknown): LaunchReport | undefined => {
   const reason = typeof parsed.sandbox.reason === 'string' ? parsed.sandbox.reason : undefined;
   return { loaded: true, sandbox: { engaged: parsed.sandbox.engaged, ...(reason === undefined ? {} : { reason }) }, version: parsed.version };
 };
+// A dialog's question and the tool call it names. The RAC Pi extension titles its dialogs with
+// JSON `{ rac: 'dialog', toolCallId, text }`, since Pi's dialog requests carry no tool call of their
+// own; another extension's title is the question itself.
+const dialogTitle = (title: unknown): { text: string; toolCallId?: string } => {
+  if (typeof title !== 'string') return { text: '' };
+  try {
+    const parsed: unknown = JSON.parse(title);
+    if (isObject(parsed) && parsed.rac === 'dialog' && typeof parsed.text === 'string') return { text: parsed.text, ...(typeof parsed.toolCallId === 'string' ? { toolCallId: parsed.toolCallId } : {}) };
+  } catch { /* a plain title */ }
+  return { text: title };
+};
+const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+// at most this many dialogs stay open (more are dismissed at once) and this many choices show
+const maxDialogs = 20;
+const maxChoices = 50;
+// Pi's dialogs as Inline-question fields: `select` a choice, `confirm` a Yes/No choice, `input` one
+// line of text, `editor` several lines with a prefill. A choice shows bounded; its answer is the
+// option itself.
+const dialogField = (record: Json): QuestionField | undefined => {
+  switch (record.method) {
+    case 'select': return { kind: 'choice', choices: strings(record.options).slice(0, maxChoices).map(oneLine) };
+    case 'confirm': return { kind: 'choice', choices: ['Yes', 'No'] };
+    case 'input': return { kind: 'text', multiline: false, ...(typeof record.placeholder === 'string' ? { placeholder: oneLine(record.placeholder) } : {}) };
+    case 'editor': return { kind: 'text', multiline: true, ...(typeof record.prefill === 'string' ? { prefill: bounded(record.prefill) } : {}) };
+    default: return undefined;
+  }
+};
+type Dialog = { method: 'select' | 'confirm' | 'input' | 'editor'; options: string[]; timer?: NodeJS.Timeout };
 const messageCost = (message: Json): number => isObject(message.usage) && isObject(message.usage.cost) && typeof message.usage.cost.total === 'number' ? message.usage.cost.total : 0;
 
 // an assistant message's text, or its error when it failed having said nothing
@@ -46,7 +77,8 @@ const verbs: Record<string, string> = { read: 'Read', write: 'Write', edit: 'Edi
 // a tool call as it starts: its verb and target, and a script's source
 function toolCall(id: string, toolName: string, args: unknown, parentId?: string): TranscriptTool {
   const script = toolName === 'codemode';
-  return { id, kind: 'tool', name: verbs[toolName] ?? toolName, summary: script ? scriptSummary(0) : summary(args), state: 'running', ...(parentId === undefined ? {} : { parentId }), ...(script && isObject(args) && typeof args.code === 'string' ? { source: bounded(args.code) } : {}) };
+  // an `ask_user` question shows once, in the Inline-question box, never as the call's target
+  return { id, kind: 'tool', name: verbs[toolName] ?? toolName, summary: script ? scriptSummary(0) : toolName === 'ask_user' ? '' : summary(args), state: 'running', ...(parentId === undefined ? {} : { parentId }), ...(script && isObject(args) && typeof args.code === 'string' ? { source: bounded(args.code) } : {}) };
 }
 
 // What a finished call gave back: its output (a command's last lines are its result line), plus an
@@ -177,6 +209,8 @@ export const piClient: ProtocolClient = (channel, emit) => {
   let assistantMessages = 0;
   // the calls in flight, as last shown; a script's count of the calls it made
   const tools = new Map<string, { toolName: string; args: unknown; item: TranscriptTool; calls: number }>();
+  // the open dialogs, by Pi's request id
+  const dialogs = new Map<string, Dialog>();
   const request = (command: Json): Promise<Json> => new Promise(resolve => {
     const id = `rac-${requests += 1}`;
     pending.set(id, resolve);
@@ -220,6 +254,29 @@ export const piClient: ProtocolClient = (channel, emit) => {
     return true;
   };
 
+  const closeDialog = (id: string) => {
+    const dialog = dialogs.get(id);
+    if (dialog === undefined) return;
+    clearTimeout(dialog.timer);
+    dialogs.delete(id);
+    emit({ type: 'question-closed', id });
+  };
+  const openDialog = (record: Json) => {
+    const field = dialogField(record);
+    if (typeof record.id !== 'string' || field === undefined) return;
+    const id = record.id;
+    if (dialogs.size >= maxDialogs) { channel.send(JSON.stringify({ type: 'extension_ui_response', id, cancelled: true })); return; }
+    const { text: title, toolCallId } = dialogTitle(record.title);
+    const question = bounded(record.method === 'confirm' && typeof record.message === 'string' && record.message !== '' ? `${title}\n\n${record.message}` : title);
+    // Pi takes its default answer when a timeout lapses, without saying so; one too long for a
+    // timer counts as none
+    const timeout = typeof record.timeout === 'number' && record.timeout > 0 && record.timeout <= 2 ** 31 - 1 ? record.timeout : undefined;
+    dialogs.set(id, { method: record.method as Dialog['method'], options: record.method === 'select' ? strings(record.options).slice(0, maxChoices) : [], ...(timeout === undefined ? {} : { timer: setTimeout(() => closeDialog(id), timeout) }) });
+    emit({ type: 'question', question: { id, text: question, field, ...(timeout === undefined ? {} : { expiresAt: Date.now() + timeout }) } });
+    const tool = toolCallId === undefined ? undefined : tools.get(toolCallId);
+    if (tool !== undefined) showTool(toolCallId!, { ...tool.item, summary: waitingForAnswer });
+  };
+
   channel.onLine(line => {
     let record: unknown;
     try { record = JSON.parse(line); } catch { return; }
@@ -232,6 +289,8 @@ export const piClient: ProtocolClient = (channel, emit) => {
         return;
       }
       case 'extension_ui_request':
+        if (record.method === 'set_editor_text' && typeof record.text === 'string') { emit({ type: 'draft', text: record.text }); return; }
+        if (record.method === 'select' || record.method === 'confirm' || record.method === 'input' || record.method === 'editor') { openDialog(record); return; }
         if (record.method === 'notify' && typeof record.message === 'string') {
           transcript({ id: next('n'), kind: 'notice', text: bounded(record.message), tone: record.notifyType === 'warning' || record.notifyType === 'error' ? record.notifyType : 'info' });
           return;
@@ -251,6 +310,9 @@ export const piClient: ProtocolClient = (channel, emit) => {
         void refresh();
         history(false);
         usage();
+        return;
+      case 'queue_update':
+        emit({ type: 'steers', pending: strings(record.steering) });
         return;
       case 'agent_start':
         if (working) return;
@@ -313,12 +375,15 @@ export const piClient: ProtocolClient = (channel, emit) => {
         const failed = record.isError === true;
         const calls = isObject(record.result) && isObject(record.result.details) && Array.isArray(record.result.details.calls) ? record.result.details.calls.length : undefined;
         const { output: _streamed, ...started } = tool.item;
-        transcript({ ...started, ...finished(tool.toolName, tool.args, record.result, failed, record.durationMs), ...(calls === undefined ? {} : { summary: scriptSummary(calls) }) });
+        // a call that waited on the operator shows the answer it got as its result
+        transcript({ ...started, ...(started.summary === waitingForAnswer ? { summary: '' } : {}), ...finished(tool.toolName, tool.args, record.result, failed, record.durationMs), ...(calls === undefined ? {} : { summary: scriptSummary(calls) }) });
         return;
       }
       case 'agent_settled':
         if (!working) return;
         working = false;
+        // a settled Turn waits on no dialog; an aborted one's dialogs were dismissed with it
+        for (const id of [...dialogs.keys()]) closeDialog(id);
         transcript({ id: next('e'), kind: 'settled', outcome: outcome(record.aborted === true, errored), cost, toolCalls });
         emit({ type: 'turn', turn: record.aborted === true ? { type: 'aborted' } : errored ? { type: 'failed' } : { type: 'settled', message: answer } });
         return;
@@ -327,13 +392,16 @@ export const piClient: ProtocolClient = (channel, emit) => {
   channel.onClose(() => {
     for (const resolve of pending.values()) resolve({ success: false });
     pending.clear();
+    for (const dialog of dialogs.values()) clearTimeout(dialog.timer);
+    dialogs.clear();
     emit({ type: 'exited' });
   });
 
   return {
     async deliver(prompt) {
       const response = await request({ type: 'prompt', message: prompt });
-      if (response.success !== true) return 'refused';
+      // Pi refuses a prompt while it works, and outright when it has no model or no login
+      if (response.success !== true) return typeof response.error === 'string' && response.error.startsWith('Agent is already processing') ? 'busy' : 'refused';
       // a prompt sent without `streamingBehavior` is refused while Pi works, never `queued`
       return isObject(response.data) && response.data.disposition === 'handled' ? 'handled' : 'started';
     },
@@ -371,6 +439,28 @@ export const piClient: ProtocolClient = (channel, emit) => {
       const applied = await apply(setting);
       await refresh();
       return applied;
+    },
+    async steer(prompt) {
+      return (await request({ type: 'prompt', message: prompt, streamingBehavior: 'steer' })).success === true;
+    },
+    // `clear_queue` first, so `abort` cannot run the steers it holds; the steers come back
+    async cancel() {
+      const cleared = await request({ type: 'clear_queue' });
+      if (cleared.success !== true || (await request({ type: 'abort' })).success !== true) return undefined;
+      return strings(isObject(cleared.data) ? cleared.data.steering : undefined);
+    },
+    async answer(questionId, given) {
+      const dialog = dialogs.get(questionId);
+      if (dialog === undefined) return false;
+      let response: Json;
+      if (typeof given === 'object') response = { cancelled: true };
+      else if (dialog.method === 'confirm' && (given === 0 || given === 1)) response = { confirmed: given === 0 };
+      else if (dialog.method === 'select' && typeof given === 'number' && dialog.options[given] !== undefined) response = { value: dialog.options[given] };
+      else if ((dialog.method === 'input' || dialog.method === 'editor') && typeof given === 'string') response = { value: given };
+      else return false;
+      closeDialog(questionId);
+      channel.send(JSON.stringify({ type: 'extension_ui_response', id: questionId, ...response }));
+      return true;
     },
     close: () => channel.close()
   };

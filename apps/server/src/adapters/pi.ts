@@ -40,6 +40,7 @@ export const piAdapter = {
     ...(resume !== undefined ? ['--session', resume] : models?.start === undefined ? [] : ['--model', models.start.model, ...(models.start.effort === undefined ? [] : ['--thinking', models.start.effort])])
   ] }),
   client: piClient,
+  steers: true,
   efforts: piEfforts,
   conversations: { validId: validPiSessionId, list: piConversationSummaries, readName: piConversationName, locate: locatePiSession }
 } satisfies StructuredAdapter;

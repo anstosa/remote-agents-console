@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import type { TurnEvent } from './transport.js';
+import type { QuestionField } from '../adapters/types.js';
+import type { QuestionAnswer, TurnEvent } from './transport.js';
 
 /**
  * The structured Transport (ADR 0015): the protocol-neutral interface a protocol client offers
@@ -38,6 +39,16 @@ export type AgentUsage = { cost: number; contextPercent?: number };
 export type ModelInfo = { id: string; name: string; provider: string; inputPrice?: number; outputPrice?: number; contextWindow?: number; efforts: string[] };
 /** A model, by the kind's own id for it, and the Effort to run it at. */
 export type ModelSetting = { model: string; effort?: string };
+/**
+ * A question the Agent asks the operator, open until it is answered or dismissed: its text, one
+ * answer field, and when it lapses on its own (epoch ms).
+ */
+export type StructuredQuestion = { id: string; text: string; field: QuestionField; expiresAt?: number };
+/**
+ * What a protocol client reports: its launch report, a Turn's steps, its transcript and usage, the current
+ * Conversation and model, the steers still pending (the whole list each time), questions opening and
+ * closing, text the Agent offers for the operator's draft, and the process exiting.
+ */
 export type StructuredEvent =
   | { type: 'report'; report: LaunchReport }
   | { type: 'turn'; turn: TurnEvent }
@@ -49,9 +60,16 @@ export type StructuredEvent =
   | { type: 'usage'; usage: AgentUsage }
   | { type: 'conversation'; id: string; name?: string }
   | { type: 'model'; current: ModelSetting }
+  | { type: 'steers'; pending: string[] }
+  | { type: 'question'; question: StructuredQuestion }
+  | { type: 'question-closed'; id: string }
+  | { type: 'draft'; text: string }
   | { type: 'exited' };
-/** What became of a delivered prompt: a Turn started, it was handled at once without one, or it was refused. */
-export type Delivery = 'started' | 'handled' | 'refused';
+/**
+ * What became of a delivered prompt: a Turn started, it was handled at once without one, the Agent
+ * is `busy` (already working, for now), or it was refused outright.
+ */
+export type Delivery = 'started' | 'handled' | 'busy' | 'refused';
 /**
  * A protocol client's connection to one Agent process; closing it leaves the process running.
  * The Conversation and model operations run between Turns; each answers false when the Agent
@@ -59,6 +77,7 @@ export type Delivery = 'started' | 'handled' | 'refused';
  * `model` event: a switch restores that Conversation's own model, and a new one keeps the current.
  */
 export interface StructuredConnection {
+  /** Deliver a prompt as a Turn; an Agent already working answers `busy`. */
   deliver(prompt: string): Promise<Delivery>;
   newConversation(): Promise<boolean>;
   /** Switch to a Conversation by the reference its kind's store located. */
@@ -67,6 +86,12 @@ export interface StructuredConnection {
   /** The models the Agent can reach now. */
   models(): Promise<ModelInfo[]>;
   setModel(setting: ModelSetting): Promise<boolean>;
+  /** Redirect the working Agent with `prompt` (an idle one starts a Turn with it); false when refused. */
+  steer(prompt: string): Promise<boolean>;
+  /** Drop the pending steers and abort the Turn; the steers it dropped, or undefined when it could not. */
+  cancel(): Promise<string[] | undefined>;
+  /** Answer an open question by id, or dismiss it; false when it is no longer open. */
+  answer(questionId: string, answer: QuestionAnswer): Promise<boolean>;
   close(): void;
 }
 /** A line-oriented connection to an Agent process; lines carry no terminator. */

@@ -105,7 +105,7 @@ export class TmuxTransport implements AgentTransport {
 
   // reset boundaries survive a console restart in `resets`; without it there is no durable
   // queue, so nothing is held behind a reset and delivery is best-effort
-  constructor(private readonly discovery: DiscoveryService, private readonly tmux: TmuxAdapter, private readonly locks: PolicyHooks, private readonly resets?: ResetBoundaryStore, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, private readonly teardownFor: (kind: AgentKind) => string | undefined = () => undefined, private readonly attachmentStaging?: AttachmentStagingWorkspace, private readonly restart?: (agentId: string, to: ConversationTarget) => Promise<SwitchOutcome>) {}
+  constructor(private readonly discovery: DiscoveryService, private readonly tmux: TmuxAdapter, private readonly policy: PolicyHooks, private readonly resets?: ResetBoundaryStore, private readonly resolveAdapter: (kind: AgentKind) => AdapterView | undefined = adapterFor, private readonly teardownFor: (kind: AgentKind) => string | undefined = () => undefined, private readonly attachmentStaging?: AttachmentStagingWorkspace, private readonly restart?: (agentId: string, to: ConversationTarget) => Promise<SwitchOutcome>) {}
 
   // A pane's CLI cannot switch Conversation in place: the switch closes it and launches the kind
   // resuming the Conversation, under the queue's restart reservation and hand-over (in `app.ts`)
@@ -151,7 +151,7 @@ export class TmuxTransport implements AgentTransport {
     // hold the agent's lifecycle mutation lock across the paste so a concurrent restart/switch
     // cannot close the pane mid-delivery (and so it, in turn, defers to this rename), exactly as
     // prompt submission does; a live restart reservation refuses the rename
-    const release = this.locks.begin(agentId);
+    const release = this.policy.begin(agentId);
     if (release === undefined) return 'busy';
     try {
       if (!again && !await this.tmux.pastePrompt(target.socket, target.agent.pane.paneId, `rac-${randomBytes(18).toString('base64url')}`, rename.text)) return 'unsent';
@@ -162,7 +162,7 @@ export class TmuxTransport implements AgentTransport {
   // press the Adapter's submit keys again for a prompt pasted into an idle composer
   async resubmit(target: TmuxTarget, prompt: string): Promise<void> {
     const submission = this.resolveAdapter(target.agent.kind)?.submission;
-    const release = submission === undefined ? undefined : this.locks.begin(target.agent.id);
+    const release = submission === undefined ? undefined : this.policy.begin(target.agent.id);
     if (submission === undefined || release === undefined) return;
     const composed = submission.prepare(prompt, 'prompt');
     try { await this.tmux.sendKeys(target.socket, target.agent.pane.paneId, composed.idleKeys ?? composed.keys).catch(() => false); }
@@ -415,7 +415,7 @@ export class TmuxTransport implements AgentTransport {
         // missing boundaries leave normal completion recovery unchanged
         if (boundary === undefined) return;
         // close the crash window between durable reset acknowledgement and queue removal
-        await this.locks.restored(scope, boundary.resetPromptId);
+        await this.policy.restored(scope, boundary.resetPromptId);
         this.conversationResets.set(scope, { ...boundary, observed: [], state: 'pending' });
       }).catch(error => {
         this.restoredResets.delete(scope);
@@ -911,11 +911,11 @@ export class TmuxTransport implements AgentTransport {
     // leave an expanded editor untouched
     if (key === undefined) return false;
     // coalesce viewers and avoid racing a newly started manual operation
-    if (this.openedQueuedQuestions.has(agentId) || !mayOpen() || this.locks.busy(agentId)) return false;
-    const release = this.locks.begin(agentId);
+    if (this.openedQueuedQuestions.has(agentId) || !mayOpen() || this.policy.busy(agentId)) return false;
+    const release = this.policy.begin(agentId);
     // respect a restart reservation acquired during discovery
     if (release === undefined) return false;
-    const version = this.locks.version(agentId);
+    const version = this.policy.version(agentId);
     try {
       const capture = await this.tmux.capture(first.socket, first.agent.pane.paneId).catch(() => undefined);
       // never act on a footer that changed since the pane derive
@@ -923,7 +923,7 @@ export class TmuxTransport implements AgentTransport {
       const second = await this.discovery.target(agentId);
       // require the same live target, viewer lease, and untouched input generation
       if (second === undefined || second.socket.fingerprint !== first.socket.fingerprint || second.agent.pane.paneId !== first.agent.pane.paneId
-        || second.agent.kind !== first.agent.kind || !mayOpen() || this.locks.version(agentId) !== version) return false;
+        || second.agent.kind !== first.agent.kind || !mayOpen() || this.policy.version(agentId) !== version) return false;
       const opened = await this.tmux.sendKeys(second.socket, second.agent.pane.paneId, [key]);
       // suppress duplicate opening shortcuts until the native dialog changes the footer
       if (opened) this.openedQueuedQuestions.add(agentId);
@@ -943,11 +943,11 @@ export class TmuxTransport implements AgentTransport {
       ? !validPrompt(answer) || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(answer)
       : !Number.isInteger(answer) || answer < 0 || answer > 15)) return false;
     // serialize question delivery with active input and restart handoffs
-    if (this.locks.busy(agentId)) return false;
-    const release = this.locks.begin(agentId);
+    if (this.policy.busy(agentId)) return false;
+    const release = this.policy.begin(agentId);
     // respect an existing lifecycle reservation
     if (release === undefined) return false;
-    const version = this.locks.version(agentId);
+    const version = this.policy.version(agentId);
     try {
       const first = await this.discovery.target(agentId);
       // require a live question-capable agent
@@ -978,7 +978,7 @@ export class TmuxTransport implements AgentTransport {
         const current = await this.discovery.target(agentId);
         return current !== undefined && current.socket.fingerprint === first.socket.fingerprint
           && current.agent.pane.paneId === first.agent.pane.paneId && current.agent.kind === first.agent.kind
-          && this.locks.version(agentId) === version;
+          && this.policy.version(agentId) === version;
       };
       // refuse replacement panes or intervening operator input
       if (!await stillCurrent()) return false;

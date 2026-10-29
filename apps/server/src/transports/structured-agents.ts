@@ -4,12 +4,15 @@ import { dirname, join } from 'node:path';
 import { structuredAdapterFor } from '../adapters/registry.js';
 import type { AdapterConfigs, AgentKind, AllowedModel } from '../adapters/types.js';
 import type { Agent, AgentLifecycle } from '../domain/models.js';
+import type { ShapedQuestion } from '../adapters/types.js';
 import type { Place } from '../places/places.js';
 import { expandCommand } from '../launch/service.js';
 import { run } from '../tmux/command.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
-import { connectHolder, type AgentUsage, type Delivery, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type TranscriptItem, type TranscriptTool } from './structured.js';
-import { agentPanel } from './transport.js';
+import { connectHolder, type AgentUsage, type Delivery, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
+import { agentPanel, type InterruptOutcome, type QuestionAnswer, type TurnEvent } from './transport.js';
+import { validPrompt } from '../prompts/validation.js';
+import type { StructuredTurnTransport } from '../prompts/service.js';
 
 /** Where a structured Agent's process runs: its holder's socket and tmux pane (ADR 0016). */
 export type HolderRef = { agentId: string; socket: string; pane: string; tmuxSocket?: string };
@@ -70,11 +73,16 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
 }
 
 // what this console knows of one structured Agent's process while it drives it; `busy` while an
-// operation (a delivery, a Conversation or model change) is in flight
-type Live = { connection?: StructuredConnection; working: boolean; busy: boolean; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
+// operation (a delivery, a Conversation or model change) is in flight. `turn` is how the latest
+// Turn ended; `draft` the text offered for the composer until the next prompt or steer, numbered
+// by `offers` so the web takes each one once
+type Live = { connection?: StructuredConnection; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
+// a question as every Inline question reaches the web: its choices, if any, are also its own
+const shaped = ({ id, text, field, expiresAt }: StructuredQuestion): ShapedQuestion => ({ id, text, choices: field.kind === 'choice' ? field.choices : [], source: 'structured', field, ...(expiresAt === undefined ? {} : { expiresAt }) });
+
 /** The status line above an Agent's composer: its extension's statuses, its cost so far and how full its context is. */
 export type AgentStatusLine = { extension: string[] } & Partial<AgentUsage>;
 /** A transcript item as the transcript lists it: a tool call carries its last lines and line count, not its whole output or source. */
@@ -129,7 +137,7 @@ export class StructuredAgents {
     if (model !== undefined && entry === undefined) return false;
     const records = await this.load();
     const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed: false, lifecycle: 'starting', origin: 'operator', launchedAt: Date.now() };
-    const live: Live = { working: false, busy: false, transcript: [], revision: 0, status: new Map(), noticeCount: 0, notices: [] };
+    const live: Live = { working: false, busy: false, questions: [], steers: [], offers: 0, transcript: [], revision: 0, status: new Map(), noticeCount: 0, notices: [] };
     const reported = new Promise<boolean>(resolve => {
       live.reported = resolve;
       setTimeout(() => resolve(false), this.options.reportTimeoutMs ?? 30_000).unref();
@@ -160,22 +168,111 @@ export class StructuredAgents {
   }
 
   /**
-   * Deliver a prompt as a Turn: only to a live Agent that is not already working. A prompt from
-   * the queue is marked so in the transcript.
+   * Deliver a prompt as a Turn: only to a live Agent that is not already working (`busy` until
+   * then, as is one not live). A prompt from the queue is marked so in the transcript.
    */
   async deliver(id: string, prompt: string, { queued = false } = {}): Promise<Delivery | undefined> {
     const record = (await this.load()).find(candidate => candidate.id === id);
     if (record === undefined) return undefined;
     const live = this.live.get(id);
-    if (record.lifecycle !== 'live' || live?.connection === undefined || live.working || live.busy) return 'refused';
+    if (record.lifecycle !== 'live' || live?.connection === undefined || live.working || live.busy) return 'busy';
     live.busy = true;
     live.queuedNext = queued;
+    // the Turn this prompt starts settles afresh, and an offered draft is spent
+    live.turn = undefined;
+    live.draft = undefined;
     try {
       const delivery = await live.connection.deliver(prompt);
       if (delivery !== 'started') live.queuedNext = undefined;
       return delivery;
     } finally { live.busy = false; }
   }
+
+  /** Steer a working Agent with `prompt`, where its kind can steer; `refused` when it is not working or its process refused. */
+  async steer(id: string, prompt: string): Promise<'sent' | 'unsupported' | 'refused'> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    if (record === undefined || structuredAdapterFor(record.kind)?.steers !== true) return 'unsupported';
+    const live = await this.connected(id);
+    if (live === undefined || !live.working || !await live.connection.steer(prompt)) return 'refused';
+    live.draft = undefined;
+    return 'sent';
+  }
+
+  /**
+   * Cancel a working Agent's Turn: its pending steers are dropped, then the Turn is aborted. The
+   * dropped steers go to `returned`, or are offered for the composer when nobody asked for them.
+   */
+  async interrupt(id: string, returned?: (steers: string[]) => void): Promise<InterruptOutcome> {
+    const live = await this.connected(id);
+    if (live === undefined) return 'unavailable';
+    if (!live.working) return 'not-working';
+    const steers = await live.connection.cancel();
+    if (steers === undefined) return 'unavailable';
+    if (returned !== undefined) returned(steers);
+    else if (steers.length > 0) this.offer(live, steers.join('\n\n'));
+    return 'ok';
+  }
+
+  private offer(live: Live, text: string): void {
+    live.draft = { id: live.offers += 1, text };
+    this.changed(live);
+  }
+
+  /** Answer one of a live Agent's open questions, or dismiss it. */
+  async answer(id: string, questionId: string, answer: QuestionAnswer): Promise<boolean> {
+    const live = await this.connected(id);
+    const question = live?.questions.find(candidate => candidate.id === questionId);
+    if (live === undefined || question === undefined || !answerFits(question, answer) || !await live.connection.answer(questionId, answer)) return false;
+    this.closeQuestion(live, questionId);
+    return true;
+  }
+
+  // a live Agent this console holds a connection to
+  private async connected(id: string): Promise<(Live & { connection: StructuredConnection }) | undefined> {
+    const record = (await this.load()).find(candidate => candidate.id === id);
+    const live = this.live.get(id);
+    return record?.lifecycle === 'live' && live?.connection !== undefined ? live as Live & { connection: StructuredConnection } : undefined;
+  }
+
+  private closeQuestion(live: Live, questionId: string): void {
+    const before = live.questions.length;
+    live.questions = live.questions.filter(candidate => candidate.id !== questionId);
+    if (live.questions.length !== before) this.changed(live);
+  }
+
+  /**
+   * The structured Agents' Transport for the queue policy: a prompt is delivered as a Turn, and
+   * the Turn is read from the events its protocol client reported. A busy Agent leaves the prompt
+   * queued; an outright refusal holds the queue, which becomes Notes. Nothing here is held by a
+   * reset or recovered after a restart.
+   */
+  readonly turns: StructuredTurnTransport = {
+    owns: async id => await this.has(id),
+    target: async id => {
+      const agent = (await this.agents()).find(candidate => candidate.id === id);
+      return agent === undefined ? undefined : { agent };
+    },
+    gate: async () => 'none',
+    held: () => false,
+    mark: async () => ({}),
+    deliver: async (id, prompt, _attachments, options) => {
+      const delivery = await this.deliver(id, prompt, { queued: options.waited === true });
+      if (delivery === undefined) return { status: 'refused' };
+      if (delivery === 'busy') return { status: 'busy' };
+      return delivery === 'refused' ? { status: 'held' } : { status: 'submitted', instant: delivery === 'handled', prompt };
+    },
+    observe: async agent => {
+      const live = this.live.get(agent.id);
+      return live?.working === true ? { type: 'started', mark: {} } : live?.turn;
+    },
+    externalReset: async () => false,
+    recoverAnswer: async () => 'settled',
+    clearDraft: async () => true,
+    answer: async (id, questionId, answer) => await this.answer(id, questionId, answer),
+    steer: async (id, prompt) => await this.steer(id, prompt),
+    interrupt: async (id, returned) => await this.interrupt(id, returned),
+    close: async id => await this.close(id)
+  };
 
   /** Start a new Conversation in place while the Agent is idle; it keeps the model and Effort. */
   async newConversation(id: string): Promise<'ok' | StructuredRefusal> {
@@ -256,8 +353,10 @@ export class StructuredAgents {
       const lifecycle: AgentLifecycle = live === undefined && (record.lifecycle === 'starting' || record.lifecycle === 'live') ? 'exited' : record.lifecycle;
       const current = live?.model;
       const name = current === undefined ? undefined : live?.models?.find(model => model.id === current.model)?.name;
+      const questions = (live?.questions ?? []).map(shaped);
+      const attention = questions.length > 0 ? 'question' : live?.working === true ? 'working' : 'finished';
       const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
-      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention: live?.working === true ? 'working' : 'finished', placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), structured: { lifecycle, ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: this.allowed(record.kind).length > 0 } };
+      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), structured: { lifecycle, ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }) } };
     });
   }
 
@@ -317,7 +416,21 @@ export class StructuredAgents {
         break;
       case 'turn':
         live.working = event.turn.type === 'started';
+        if (event.turn.type !== 'started') live.turn = event.turn;
         break;
+      case 'steers':
+        live.steers = event.pending;
+        break;
+      case 'question':
+        live.questions = [...live.questions.filter(candidate => candidate.id !== event.question.id), event.question];
+        break;
+      case 'question-closed':
+        this.closeQuestion(live, event.id);
+        return;
+      case 'draft':
+        this.offer(live, event.text);
+        return;
+
       case 'transcript': {
         let item = event.item;
         // one prompt is delivered at a time, so the next prompt shown (not a steer) is the delivered one
@@ -343,6 +456,8 @@ export class StructuredAgents {
         break;
       case 'exited':
         live.working = false;
+        live.questions = [];
+        live.steers = [];
         live.connection = undefined;
         live.status.clear();
         live.reported?.(false);
@@ -451,3 +566,7 @@ export class StructuredAgents {
     return this.mutation;
   }
 }
+
+// an answer the question's field takes: one of its choices, text as a prompt would be for a text field, or dismissing it
+const answerFits = (question: StructuredQuestion, answer: QuestionAnswer): boolean => typeof answer === 'object'
+  || (question.field.kind === 'choice' ? Number.isInteger(answer) && (answer as number) >= 0 && (answer as number) < question.field.choices.length : typeof answer === 'string' && validPrompt(answer));

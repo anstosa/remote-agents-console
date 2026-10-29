@@ -52,7 +52,7 @@ export type Turn = { prompt?: string; text: string; rows?: number };
 // `field` is the Transport-neutral answer the question takes (ADR 0015) and `pane` where a question
 // drawn on a tmux pane is answered. Adapters fill `choices` and `pane`; every question sent to the
 // web is a ShapedQuestion, with `field` derived from the choices (`withQuestionShape`).
-export type InlineQuestion = { id: string; text: string; choices: string[]; descriptions?: string[]; source: 'structured' | 'parsed'; field?: QuestionField; pane?: QuestionPane };
+export type InlineQuestion = { id: string; text: string; choices: string[]; descriptions?: string[]; source: 'structured' | 'parsed'; field?: QuestionField; pane?: QuestionPane; expiresAt?: number };
 export type ShapedQuestion = InlineQuestion & { field: QuestionField };
 // one of the question's choices, or text: one line or several, prefilled or with a placeholder
 export type QuestionField = { kind: 'choice'; choices: string[]; descriptions?: string[] } | { kind: 'text'; multiline: boolean; prefill?: string; placeholder?: string };
@@ -481,6 +481,8 @@ export interface StructuredAdapter {
     readName(id: string, cwd?: string): Promise<string | undefined>;
     locate(id: string, cwd: string): Promise<string | undefined>;
   };
+  /** whether its protocol client can steer a working Agent */
+  readonly steers: boolean;
 }
 /**
  * What a structured launch starts: a new Conversation, or the one at `resume` (located by the
@@ -524,6 +526,8 @@ export type AdapterCapability = {
   /** the Adapter renames a Conversation from the console (`conversations.rename` present) */
   naming: boolean;
   inlineQuestions: boolean;
+  /** a working Agent can be redirected mid-Turn (a structured Transport whose protocol steers) */
+  steer: boolean;
   commands: boolean;
   sandbox: boolean;
   /** a structured kind's Allowed models, in the operator's order, which a launch may choose from, and every Effort its models may take */

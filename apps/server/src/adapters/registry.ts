@@ -70,8 +70,8 @@ export function adapterCapabilities(configs: AdapterConfigs): Partial<Record<Age
   ]);
 }
 
-// a structured kind reports its own state and Turns, and names its Conversations in place; the
-// rest arrive with later protocol features
+// a structured kind reports its own state, Turns and questions, names its Conversations in place,
+// and steers where its protocol client can; the rest arrive with later protocol features
 function structuredCapability(adapter: StructuredAdapter, configured: AdapterConfigs[AgentKind]): AdapterCapability {
   return {
     ...launchability(configured),
@@ -81,7 +81,8 @@ function structuredCapability(adapter: StructuredAdapter, configured: AdapterCon
     naming: true,
     allowedModels: configured?.allowedModels ?? [],
     efforts: [...adapter.efforts],
-    inlineQuestions: false,
+    inlineQuestions: true,
+    steer: adapter.steers,
     commands: false,
     sandbox: false,
   };
@@ -104,6 +105,7 @@ function capability(adapter: Adapter, transport: Transport, configured: AdapterC
     conversations: adapter.conversations?.list !== undefined,
     naming: tmux && adapter.conversations?.rename !== undefined,
     inlineQuestions: tmux && adapter.questions !== undefined,
+    steer: false,
     commands: adapter.commands !== undefined,
     sandbox: adapter.sandbox !== undefined,
   };

@@ -5,8 +5,11 @@ import { join } from 'node:path';
 import { buildApp } from '../src/app.js';
 import { DiscoveryService } from '../src/discovery/service.js';
 import { WorktreeLaunchStore } from '../src/worktrees/store.js';
+import { PromptHistoryService } from '../src/prompt-history/service.js';
+import { QueuedPromptService } from '../src/prompts/queue.js';
 import { StructuredAgents, type StructuredLaunch, type StructuredProcesses } from '../src/transports/structured-agents.js';
-import type { ModelInfo, ModelSetting, StructuredEvent } from '../src/transports/structured.js';
+import type { Delivery, ModelInfo, ModelSetting, StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
+import type { QuestionAnswer } from '../src/transports/transport.js';
 import { WorktreeNoteService } from '../src/notes/service.js';
 import type { AllowedModel } from '../src/adapters/types.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
@@ -22,33 +25,50 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // scripts. It reports in as soon as it starts unless told to stay silent. Its Conversation and
 // model operations succeed (unless it `refuses` them) and report what changed, as a client does.
 // A switch lands on `switchedTo` (the Conversation's own model), and `unavailable` models are refused.
+// Each delivery answers with the next of `dispositions`, then `started`; a steer waits as pending
+// until the Agent takes it or a cancel returns it, and a cancel aborts the Turn before it answers.
 function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[] } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
+  const dispositions: Delivery[] = [];
+  const answers: Array<[string, QuestionAnswer]> = [];
+  let pending: string[] = [];
   let emit: (event: StructuredEvent) => void = () => {};
   let closed = false;
   let conversations = 0;
+  let cancels = 0;
   const processes: StructuredProcesses = {
     start: async (launch, events) => {
       emit = events;
       launches.push(launch);
       if (reports) queueMicrotask(() => emit({ type: 'report', report }));
       if (exits) setTimeout(() => emit({ type: 'exited' }), 10);
-      return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9' }, connection: {
-        deliver: async prompt => { delivered.push(prompt); return 'started'; },
+      const connection: StructuredConnection = {
+        deliver: async prompt => { delivered.push(prompt); return dispositions.shift() ?? 'started'; },
         newConversation: async () => { operations.push('new'); if (refuses) return false; emit({ type: 'conversation', id: `new-${conversations += 1}` }); return true; },
         switchConversation: async reference => { operations.push(`switch ${reference}`); if (refuses) return false; emit({ type: 'conversation', id: 'switched' }); if (switchedTo !== undefined) emit({ type: 'model', current: switchedTo }); return true; },
         renameConversation: async name => { operations.push(`rename ${name}`); if (refuses) return false; emit({ type: 'conversation', id: 'named', name }); return true; },
         models: async () => models,
         setModel: async setting => { operations.push(`model ${setting.model} ${setting.effort}`); if (refuses || unavailable.includes(setting.model)) return false; emit({ type: 'model', current: setting }); return true; },
+        steer: async prompt => { pending = [...pending, prompt]; emit({ type: 'steers', pending }); return true; },
+        cancel: async () => {
+          cancels += 1;
+          const returned = pending;
+          pending = [];
+          emit({ type: 'steers', pending });
+          emit({ type: 'turn', turn: { type: 'aborted' } });
+          return returned;
+        },
+        answer: async (id, answer) => { answers.push([id, answer]); emit({ type: 'question-closed', id }); return true; },
         close: () => {}
-      } };
+      };
+      return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9' }, connection };
     },
     stderr: async () => 'pi: could not load its extension',
     stop: async () => { closed = true; }
   };
-  return { processes, delivered, launches, operations, emit: (event: StructuredEvent) => emit(event), closed: () => closed };
+  return { processes, delivered, launches, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, emit: (event: StructuredEvent) => emit(event), closed: () => closed };
 }
 
 // a console with one Project whose only Worktree is a temporary folder, and the Scratch folder beside it
@@ -62,7 +82,7 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
   const worktrees = async (path: string) => path === project.path ? [{ path: project.path, branch: 'refs/heads/main', detached: false, bare: false, locked: false, prunable: false }] : undefined;
   const discovery = new DiscoveryService(socketFinder([]), paneLister([]) as never, processInspector(), { cachedPullRequest: async () => undefined, invalidateRepositories: () => {} } as never, config.adapters, config.projects, worktreeStore, worktrees, root);
   const structuredAgents = new StructuredAgents(fake.processes, { file: join(root, 'structured-agents.json'), allowedModels: () => allowed, ...(options.reportTimeoutMs === undefined ? {} : { reportTimeoutMs: options.reportTimeoutMs }) });
-  const app = await buildApp(config, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents, notes: new WorktreeNoteService(join(root, 'notes.json')) });
+  const app = await buildApp(config, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents, promptHistory: new PromptHistoryService(join(root, 'history.json')), queuedPrompts: new QueuedPromptService(join(root, 'queue.json')), notes: new WorktreeNoteService(join(root, 'notes.json')) });
   const headers = await authenticatedHeaders(app);
   const dashboardAgent = async (id: string) => (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { id: string }) => agent.id === id);
   return { app, headers, dashboardAgent, root, structuredAgents };
@@ -90,8 +110,6 @@ describe('a structured Agent over HTTP', () => {
     expect((await dashboardAgent(id)).structured.revision).toBeGreaterThan(before);
     fake.emit({ type: 'transcript', item: { id: 't1', kind: 'tool', name: 'read', summary: 'README.md', state: 'running' } });
     expect(await dashboardAgent(id)).toMatchObject({ attention: 'working' });
-    // a second prompt mid-Turn is refused, not delivered
-    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'And again', attachments: [] } })).statusCode).toBe(409);
 
     fake.emit({ type: 'transcript', item: { id: 't1', kind: 'tool', name: 'read', summary: 'README.md', state: 'done' } });
     fake.emit({ type: 'transcript', item: { id: 'm2', kind: 'message', role: 'assistant', text: 'Hello!' } });
@@ -116,12 +134,14 @@ describe('a structured Agent over HTTP', () => {
     const launching = app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } });
     let starting: { id: string } | undefined;
     while (starting === undefined) starting = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { structured?: { lifecycle: string } }) => agent.structured?.lifecycle === 'starting');
-    expect((await app.inject({ method: 'POST', url: `/api/agents/${starting.id}/prompt`, headers, payload: { prompt: 'Say hello', attachments: [] } })).statusCode).toBe(409);
+    // the prompt waits in the queue until the Agent reports in
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${starting.id}/prompt`, headers, payload: { prompt: 'Say hello', attachments: [] } })).statusCode).toBe(204);
     expect(fake.delivered).toEqual([]);
 
     fake.emit({ type: 'report', report });
     expect((await launching).statusCode).toBe(201);
     expect(await dashboardAgent(starting.id)).toMatchObject({ structured: { lifecycle: 'live' } });
+    expect(fake.delivered).toEqual(['Say hello']);
     await app.close();
   });
 
@@ -132,8 +152,10 @@ describe('a structured Agent over HTTP', () => {
     const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
     expect(await dashboardAgent(id)).toMatchObject({ attention: 'finished', structured: { lifecycle: 'failed' } });
     expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json()).toMatchObject({ stderr: 'pi: could not load its extension' });
-    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'Say hello', attachments: [] } })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'Say hello', attachments: [] } })).statusCode).toBe(204);
+    await dashboardAgent(id);
     expect(fake.delivered).toEqual([]);
+    expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/queued-prompts`, headers })).json().prompts).toMatchObject([{ text: 'Say hello' }]);
     await app.close();
   });
 
@@ -423,6 +445,201 @@ describe('a structured Agent\'s Allowed models', () => {
     expect(set.json().schedule).toMatchObject({ kind: 'pi', model: opus.id, effort: 'high' });
     expect((await schedule({ model: 'openai/gpt-4' })).statusCode).toBe(400);
     expect((await schedule({ effort: 'lots' })).statusCode).toBe(400);
+    await app.close();
+  });
+});
+
+describe('a structured Agent\'s queued prompts', () => {
+  // launch a live Agent and send it one prompt, which starts a Turn
+  async function working(fake: ReturnType<typeof fakeAgent>) {
+    const console = await consoleWith(fake);
+    const id: string = (await console.app.inject({ method: 'POST', url: '/api/agents/launch', headers: console.headers, payload: { kind: 'pi' } })).json().agentId;
+    const prompt = (text: string) => console.app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers: console.headers, payload: { prompt: text, attachments: [] } });
+    const queued = async () => (await console.app.inject({ method: 'GET', url: `/api/agents/${id}/queued-prompts`, headers: console.headers })).json();
+    const history = async () => (await console.app.inject({ method: 'GET', url: `/api/agents/${id}/prompt-history`, headers: console.headers })).json().prompts;
+    expect((await prompt('First')).statusCode).toBe(204);
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    return { ...console, id, prompt, queued, history };
+  }
+
+  it('queues a prompt sent while the Agent works and dispatches it once the Turn settles, filling history from the answer', async () => {
+    const fake = fakeAgent();
+    const { app, headers, prompt, queued, history, dashboardAgent, id } = await working(fake);
+
+    expect((await prompt('Second')).statusCode).toBe(204);
+    expect(fake.delivered).toEqual(['First']);
+    expect((await queued()).prompts).toMatchObject([{ text: 'Second' }]);
+    expect(await dashboardAgent(id)).toMatchObject({ queuedPromptCount: 1 });
+
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'First answered' } });
+    await dashboardAgent(id);
+    expect(fake.delivered).toEqual(['First', 'Second']);
+    expect((await queued()).prompts).toEqual([]);
+    expect(await history()).toMatchObject([{ text: 'Second' }, { text: 'First', answer: 'First answered' }]);
+    // observed before its Turn starts, Second's Turn has not settled: First's answer is not Second's
+    await dashboardAgent(id);
+    expect((await history())[0]).toEqual(expect.not.objectContaining({ answer: expect.anything() }));
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'Second answered' } });
+    await dashboardAgent(id);
+    expect(await history()).toMatchObject([{ text: 'Second', answer: 'Second answered' }, { text: 'First', answer: 'First answered' }]);
+    // the prompt that waited is marked as coming from the queue
+    fake.emit({ type: 'transcript', item: { id: 'm9', kind: 'message', role: 'user', text: 'Second' } });
+    const items = (await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json().items;
+    expect(items).toContainEqual({ id: 'm9', kind: 'message', role: 'user', text: 'Second', queued: true });
+    await app.close();
+  });
+
+  it('leaves the head queued when the Agent refuses it as already working, and sends it on a later observation', async () => {
+    const fake = fakeAgent();
+    const { app, prompt, queued, dashboardAgent, id } = await working(fake);
+    expect((await prompt('Second')).statusCode).toBe(204);
+
+    // the Agent settles and at once starts work of its own, so the dispatched head is refused
+    fake.dispositions.push('busy');
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'done' } });
+    await dashboardAgent(id);
+    expect(fake.delivered).toEqual(['First', 'Second']);
+    expect((await queued()).prompts).toMatchObject([{ text: 'Second' }]);
+
+    await dashboardAgent(id);
+    expect(fake.delivered).toEqual(['First', 'Second', 'Second']);
+    expect((await queued()).prompts).toEqual([]);
+    await app.close();
+  });
+
+  it('turns the queue into Notes when the Agent refuses a prompt outright', async () => {
+    const fake = fakeAgent();
+    const { app, headers, prompt, queued, dashboardAgent, id } = await working(fake);
+    expect((await prompt('Second')).statusCode).toBe(204);
+
+    // say the Agent lost its login: it refuses the head, not for now but at all
+    fake.dispositions.push('refused');
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'done' } });
+    await dashboardAgent(id);
+    const { placeId } = await dashboardAgent(id);
+    expect(fake.delivered).toEqual(['First', 'Second']);
+    expect((await queued()).prompts).toEqual([]);
+    expect(JSON.stringify((await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(placeId)}/notes`, headers })).json())).toContain('Second');
+    await app.close();
+  });
+
+  it('completes a handled prompt at once and sends the next one', async () => {
+    const fake = fakeAgent();
+    const { app, prompt, queued, history, dashboardAgent, id } = await working(fake);
+    expect((await prompt('/rac-status')).statusCode).toBe(204);
+    expect((await prompt('Third')).statusCode).toBe(204);
+
+    fake.dispositions.push('handled');
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'done' } });
+    await dashboardAgent(id);
+    expect(fake.delivered).toEqual(['First', '/rac-status']);
+    await dashboardAgent(id);
+    expect(fake.delivered).toEqual(['First', '/rac-status', 'Third']);
+    expect((await queued()).prompts).toEqual([]);
+    expect((await history()).map((entry: { text: string }) => entry.text)).toEqual(['Third', 'First']);
+    await app.close();
+  });
+
+  it('cancels a Turn: the Agent halts, its queue becomes Notes, and its unsent steers come back', async () => {
+    const fake = fakeAgent();
+    const { app, headers, prompt, queued, dashboardAgent, id } = await working(fake);
+    expect((await prompt('Second')).statusCode).toBe(204);
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/steer`, headers, payload: { prompt: 'Use tabs' } })).statusCode).toBe(204);
+
+    const cancelled = await app.inject({ method: 'POST', url: `/api/agents/${id}/cancel`, headers });
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json()).toEqual({ steers: ['Use tabs'] });
+    expect(fake.cancels()).toBe(1);
+
+    const { placeId } = await dashboardAgent(id);
+    expect(fake.delivered).toEqual(['First']);
+    expect((await queued()).prompts).toEqual([]);
+    const notes = (await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(placeId)}/notes`, headers })).json();
+    expect(JSON.stringify(notes)).toContain('Second');
+    await app.close();
+  });
+
+  it('pages several open questions in order, answers each by id, and is in question Attention while one is open', async () => {
+    const fake = fakeAgent();
+    const { app, headers, prompt, dashboardAgent, id } = await working(fake);
+    const expiresAt = Date.now() + 60_000;
+    fake.emit({ type: 'question', question: { id: 'q1', text: 'Which branch?', field: { kind: 'choice', choices: ['main', 'dev'] } } });
+    fake.emit({ type: 'question', question: { id: 'q2', text: 'Commit message?', field: { kind: 'text', multiline: true, prefill: 'Fix' }, expiresAt } });
+
+    const asking = await dashboardAgent(id);
+    expect(asking).toMatchObject({ attention: 'question', question: { id: 'q1', text: 'Which branch?', choices: ['main', 'dev'], field: { kind: 'choice', choices: ['main', 'dev'] } } });
+    expect(asking.structured.questions.map((question: { id: string }) => question.id)).toEqual(['q1', 'q2']);
+    expect(asking.structured.questions[1]).toMatchObject({ field: { kind: 'text', multiline: true, prefill: 'Fix' }, expiresAt });
+    // a prompt sent meanwhile waits in the queue
+    expect((await prompt('Later')).statusCode).toBe(204);
+    expect(fake.delivered).toEqual(['First']);
+
+    const answer = (payload: object) => app.inject({ method: 'POST', url: `/api/agents/${id}/question`, headers, payload });
+    expect((await answer({ questionId: 'q1', index: 2 })).statusCode).toBe(404);
+    expect((await answer({ questionId: 'q1', index: 1 })).statusCode).toBe(204);
+    expect(await dashboardAgent(id)).toMatchObject({ attention: 'question', question: { id: 'q2' } });
+    expect((await answer({ questionId: 'q2', dismiss: true })).statusCode).toBe(204);
+    expect(fake.answers).toEqual([['q1', 1], ['q2', { dismiss: true }]]);
+    const answered = await dashboardAgent(id);
+    expect(answered.attention).toBe('working');
+    expect(answered.question).toBeUndefined();
+    expect((await answer({ questionId: 'q2', text: 'late' })).statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('shows steers pending apart from the queue, and records each in history with no answer', async () => {
+    const fake = fakeAgent();
+    const { app, headers, history, queued, dashboardAgent, id } = await working(fake);
+    const steer = (text: string) => app.inject({ method: 'POST', url: `/api/agents/${id}/steer`, headers, payload: { prompt: text } });
+    expect((await steer('Use tabs')).statusCode).toBe(204);
+    expect((await steer('And tests')).statusCode).toBe(204);
+
+    expect(await dashboardAgent(id)).toMatchObject({ queuedPromptCount: 0, structured: { steers: ['Use tabs', 'And tests'] } });
+    expect((await queued()).prompts).toEqual([]);
+    expect(fake.delivered).toEqual(['First']);
+    const entries = await history();
+    expect(entries.map((entry: { text: string }) => entry.text)).toEqual(['And tests', 'Use tabs', 'First']);
+    expect(entries[0].answer).toBeUndefined();
+
+    // the Turn settles: First's answer lands on First, not on a steer
+    fake.emit({ type: 'steers', pending: [] });
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'Done, with tabs and tests' } });
+    await dashboardAgent(id);
+    expect((await history()).map((entry: { text: string; answer?: string }) => [entry.text, entry.answer])).toEqual([['And tests', undefined], ['Use tabs', undefined], ['First', 'Done, with tabs and tests']]);
+    await app.close();
+  });
+
+  it('offers text from the Agent for the composer until the next prompt', async () => {
+    const fake = fakeAgent();
+    const { app, prompt, dashboardAgent, id } = await working(fake);
+    fake.emit({ type: 'draft', text: 'Suggested next step' });
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { draft: { id: 1, text: 'Suggested next step' } } });
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'done' } });
+    await dashboardAgent(id);
+    expect((await prompt('Something else')).statusCode).toBe(204);
+    expect((await dashboardAgent(id)).structured.draft).toBeUndefined();
+    await app.close();
+  });
+
+  it('offers the Steer capability for Pi only', async () => {
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake);
+    const adapters = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().adapters;
+    expect(adapters.pi).toMatchObject({ steer: true, inlineQuestions: true });
+    expect(adapters.claude).toMatchObject({ steer: false });
+    await app.close();
+  });
+
+  it('refuses to cancel or steer an Agent that is not working', async () => {
+    const fake = fakeAgent();
+    const { app, headers, dashboardAgent, id } = await working(fake);
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'done' } });
+    await dashboardAgent(id);
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/cancel`, headers })).statusCode).toBe(409);
+    expect(fake.cancels()).toBe(0);
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/steer`, headers, payload: { prompt: 'Too late' } })).statusCode).toBe(409);
+    expect(fake.steers()).toEqual([]);
     await app.close();
   });
 });
