@@ -123,13 +123,14 @@ describe('agent updates', () => {
   });
 
   it('lists a pinned kind with the pin as current and the published version as latest, and never runs an update for it', async () => {
-    const runner = vi.fn<AgentUpdateRunner>(async command => ({ code: 0, output: command === 'current' ? '0.152.1\n' : '0.152.1\n' }));
+    const runner = vi.fn<AgentUpdateRunner>(async () => ({ code: 0, output: '0.152.1\n' }));
+    const pinned = (JSON.parse(await readFile(new URL('../node_modules/@earendil-works/pi-coding-agent/package.json', import.meta.url), 'utf8')) as { version: string }).version;
     const published = vi.fn(async (name: string) => name === '@earendil-works/pi-coding-agent' ? '9.0.0' : undefined);
     const config = { ...configured(), adapters: { ...configured().adapters, pi: { program: process.execPath, args: [], env: {}, launchable: true } } };
     const service = new AgentUpdateService(config, '/home/test', runner, undefined, published);
     expect(await service.statuses()).toEqual([
       { kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.152.1', updateAvailable: false },
-      { kind: 'pi', currentVersion: '1.4.0', latestVersion: '9.0.0', updateAvailable: true, pinned: true }
+      { kind: 'pi', currentVersion: pinned, latestVersion: '9.0.0', updateAvailable: true, pinned: true }
     ]);
     expect(service.startUpdate('pi')).toEqual({ outcome: 'unavailable' });
     // the pin is read from the server's own dependencies, never by running a command

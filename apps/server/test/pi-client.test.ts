@@ -116,8 +116,12 @@ describe('the Pi client', () => {
     const first = piOverChannel();
     const second = piOverChannel();
     void first.connection.models();
-    void second.connection.models();
-    expect(first.sent[0]!.id).not.toEqual(second.sent[0]!.id);
+    let answered = false;
+    void second.connection.models().then(() => { answered = true; });
+    // the earlier client's response, replayed to the later one
+    second.pi({ type: 'response', id: first.sent[0]!.id, command: 'get_available_models', success: true, data: { models: [] } });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(answered).toBe(false);
   });
 
   it('reattached, reads the Conversation, its history and usage afresh, without waiting for a launch report', () => {

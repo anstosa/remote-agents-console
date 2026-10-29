@@ -253,17 +253,20 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
   it('reconnects after the console\'s connection drops: the holder replays the Turn in flight, which completes', async () => {
     const launch = await launched(client);
     await launch.next('report');
+    expect(await launch.connection.deliver('Say hello')).toBe('started');
+    await launch.next('turn', event => event.type === 'turn' && event.turn.type === 'settled');
+    // the console's last idle point: the end of the first Turn
     const idle = launch.started.cursor!();
     expect(await launch.connection.deliver('Reply slowly')).toBe('started');
     await launch.next('turn', event => event.type === 'turn' && event.turn.type === 'started');
     launch.connection.close();
 
     const again = await reattached(launch, client, idle);
-    expect(again.events.some(event => event.type === 'report')).toBe(false);
     expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'started' } });
     expect(await again.next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'Hello from the stub provider' } });
-    // it read the Conversation afresh, as it never heard the launch
+    // it read the Conversation afresh, as it never heard the launch, and replayed only the Turn in flight
     expect(again.events).toContainEqual({ type: 'conversation', id: expect.any(String) });
+    expect(again.events.flatMap(event => event.type === 'transcript' && event.item.kind === 'message' && event.item.role === 'user' ? [event.item.text] : [])).toEqual(['Reply slowly']);
     // the reconnected client drives the Agent on
     expect(await again.connection.deliver('Say hello')).toBe('started');
     expect(await again.next('turn', event => event.type === 'turn' && event.turn.type === 'settled')).toBeDefined();

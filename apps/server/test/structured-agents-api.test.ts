@@ -12,6 +12,7 @@ import type { Delivery, ModelInfo, ModelSetting, StructuredConnection, Structure
 import type { QuestionAnswer } from '../src/transports/transport.js';
 import { WorktreeNoteService } from '../src/notes/service.js';
 import type { AllowedModel } from '../src/adapters/types.js';
+import { piAdapter } from '../src/adapters/pi.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject } from './helpers/config.js';
 import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
@@ -19,7 +20,8 @@ import { paneLister, processInspector, socketFinder } from './helpers/discovery-
 const dirs: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
-const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not sandboxed' }, version: '1.4.0' };
+// the pinned Pi's report, so a fake is on the pin unless a test says otherwise
+const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not sandboxed' }, version: piAdapter.pinned()!.version };
 
 // A scripted structured Agent: it records what it is asked to do and emits the events a test
 // scripts. It reports in as soon as it starts unless told to stay silent. Its Conversation and
@@ -28,8 +30,9 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // Each delivery answers with the next of `dispositions`, then `started`; a steer waits as pending
 // until the Agent takes it or a cancel returns it, and a cancel aborts the Turn before it answers.
 // `lines` is how many lines the console has read from its process, which a reattach (after a
-// console restart) resumes from; `attaches` lists the holders it was reattached to.
-function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0 } = {}) {
+// console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
+// reports `attached` (as a client reading its state afresh does), or finds the holder `gone`.
+function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], gone = false } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -73,7 +76,9 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
     attach: async (holder, _kind, events) => {
       attaches.push(holder);
       await attaching;
+      if (gone) return undefined;
       emit = events;
+      queueMicrotask(() => { for (const event of attached) events(event); });
       return { holder, connection: connection(), cursor: () => lines, dropped };
     },
     stderr: async () => 'pi: could not load its extension',
@@ -782,8 +787,9 @@ describe('a structured Agent across a console restart', () => {
     await app.inject({ method: 'GET', url: '/api/dashboard', headers });
     expect(fake.delivered).toEqual(['First']);
     await prompt({ app, headers }, 'Second');
-    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    // the console reads on into the next Turn, but would reconnect from the last idle point
     fake.read(12);
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
     await prompt({ app, headers }, 'Third');
 
     const next = fakeAgent();
@@ -811,6 +817,35 @@ describe('a structured Agent across a console restart', () => {
     next.emit({ type: 'history', items: [{ id: 'h0', kind: 'message', role: 'user', text: 'Reply slowly' }] });
     const items = (await restarted.app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers: restarted.headers })).json().items;
     expect(items).toEqual([{ id: 'h0', kind: 'message', role: 'user', text: 'Reply slowly' }, expect.objectContaining({ kind: 'notice', tone: 'warning', text: expect.stringContaining('missed 40 lines') })]);
+    await restarted.app.close();
+  });
+
+  it('restarts an Agent found idle on another Pi than the pin once it reattaches', async () => {
+    const fake = fakeAgent({ version: '0.0.1' });
+    const { app, headers, root, restart } = await consoleWith(fake);
+    const conversation = '01a188d1-e7d9-711a-aba8-381b96066aa5';
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'pi'));
+    await piSession(join(root, 'pi'), root, conversation);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'conversation', id: conversation });
+
+    // idle on an old Pi: the state it reads afresh on reattach finds it idle, so it restarts on the pin
+    const idle = fakeAgent({ attached: [{ type: 'conversation', id: conversation }] });
+    const restarted = await restart(idle);
+    await vi.waitFor(() => expect(idle.launches).toEqual([expect.objectContaining({ id, resume: conversation })]));
+    await vi.waitFor(async () => expect(await restarted.dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'live' } }));
+    await restarted.app.close();
+  });
+
+  it('marks an Agent whose holder is gone after a restart Exited, with its stderr, and starts nothing', async () => {
+    const fake = fakeAgent();
+    const { app, headers, restart } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    const gone = fakeAgent({ gone: true });
+    const restarted = await restart(gone);
+    expect(await restarted.dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'exited' } });
+    expect((await restarted.app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers: restarted.headers })).json()).toMatchObject({ stderr: 'pi: could not load its extension' });
+    expect(gone.launches).toEqual([]);
     await restarted.app.close();
   });
 

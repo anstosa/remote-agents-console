@@ -124,11 +124,11 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
 // What this console knows of one structured Agent's process while it drives it. `generation`
 // counts the processes it started for the Agent, `cursor` the lines read from the current one,
 // `prompt` is the latest Turn's prompt, and `offPin` is set while the process runs another
-// version than the pinned one. `busy` while an operation (a delivery, a Conversation or model
+// version than the pinned one, `synced` once it has reported its Conversation. `busy` while an operation (a delivery, a Conversation or model
 // change, a relaunch or reattach) is in flight. `turn` is how the latest
 // Turn ended; `draft` the text offered for the composer until the next prompt or steer, numbered
 // by `offers` so the web takes each one once
-type Live = { generation: number; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
+type Live = { generation: number; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; synced?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -281,6 +281,9 @@ export class StructuredAgents {
         return;
       }
       const generation = live.generation += 1;
+      // a deploy may have moved the pin on under it: it restarts on the pinned version once idle
+      const pinned = structuredAdapterFor(record.kind)?.pinned()?.version;
+      live.offPin = record.version !== undefined && pinned !== undefined && record.version !== pinned;
       const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event)).catch(() => undefined);
       if (this.live.get(record.id) !== live || live.generation !== generation) { attached?.connection.close(); return; }
       if (attached === undefined) {
@@ -289,10 +292,9 @@ export class StructuredAgents {
         await this.readStderr(record, live);
         return;
       }
-      // a deploy may have moved the pin on under it: it restarts on the pinned version once idle
-      const pinned = structuredAdapterFor(record.kind)?.pinned()?.version;
-      live.offPin = record.version !== undefined && pinned !== undefined && record.version !== pinned;
       await this.adopt(record, live, attached);
+      // its state may have arrived before it was adopted
+      if (live.synced === true) this.restartOffPin(record, live);
       // lines the holder could no longer replay may have held a question, which then waits unseen
       if ((attached.dropped ?? 0) > 0) this.notice(live, `The console missed ${attached.dropped} lines of this Agent's output while it restarted. If a question was asked then, it is waiting unseen: cancel the Turn if it does not finish.`, 'warning');
     }));
@@ -310,7 +312,7 @@ export class StructuredAgents {
 
   // restart an Agent whose process runs another version than the pin, once it is idle, on its Conversation
   private restartOffPin(record: StructuredRecord, live: Live): void {
-    if (live.offPin !== true || live.working || live.busy || live.questions.length > 0) return;
+    if (live.offPin !== true || live.connection === undefined || live.working || live.busy || live.questions.length > 0) return;
     live.offPin = false;
     void this.relaunch(record, live, record.conversationId).catch(error => { console.error(`[structured] ${record.id} could not restart on the pinned version:`, error); });
   }
@@ -579,6 +581,7 @@ export class StructuredAgents {
         if (record.conversationId !== undefined && record.conversationId !== event.id) live.notices = [];
         record.conversationId = event.id;
         live.conversationName = event.name;
+        live.synced = true;
         void this.save();
         this.restartOffPin(record, live);
         break;
