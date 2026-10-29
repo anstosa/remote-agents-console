@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,12 +12,19 @@ const piPackage = '@earendil-works/pi-coding-agent';
  * The pinned Pi's CLI from the server's own dependencies (ADR 0017). The package exports no
  * `package.json` and no CommonJS entry to resolve, so its directory is found on the module paths.
  */
-function piProgram(): string {
+function piRoot(): string {
   const roots = createRequire(import.meta.url).resolve.paths(piPackage) ?? [];
   const root = roots.map(directory => join(directory, piPackage)).find(directory => existsSync(join(directory, 'package.json')));
   if (root === undefined) throw new Error(`${piPackage} is not installed`);
-  return join(root, 'dist', 'bundle', 'cli.js');
+  return root;
 }
+const piProgram = (): string => join(piRoot(), 'dist', 'bundle', 'cli.js');
+// the pinned Pi's version, read once
+let pinnedVersion: string | undefined;
+const piVersion = (): string | undefined => {
+  try { pinnedVersion ??= (JSON.parse(readFileSync(join(piRoot(), 'package.json'), 'utf8')) as { version?: unknown }).version as string; } catch { return undefined; }
+  return typeof pinnedVersion === 'string' ? pinnedVersion : undefined;
+};
 
 // the RAC Pi extension beside this module, compiled in a build, its source otherwise (Pi loads both)
 const extension = (): string => {
@@ -41,6 +48,7 @@ export const piAdapter = {
   ] }),
   client: piClient,
   steers: true,
+  pinned: piVersion,
   efforts: piEfforts,
   conversations: { validId: validPiSessionId, list: piConversationSummaries, readName: piConversationName, locate: locatePiSession }
 } satisfies StructuredAdapter;

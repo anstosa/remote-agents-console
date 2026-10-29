@@ -11,8 +11,12 @@ export type Transport = 'tmux' | 'structured';
 export type AgentPanel = 'terminal' | 'transcript';
 export const agentPanel = (transport: Transport): AgentPanel => transport === 'tmux' ? 'terminal' : 'transcript';
 
-/** One step of a Turn as its Transport observes it; `settled` carries the last assistant message. */
-export type TurnEvent = { type: 'started' } | { type: 'settled'; message: string } | { type: 'failed' } | { type: 'aborted' };
+/**
+ * One step of a Turn as its Transport observes it; `settled` carries the last assistant message.
+ * `exited` ends a Turn whose Agent's process exited under it: the Turn failed, but the Agent's
+ * queue is held for its resume rather than turned into Notes.
+ */
+export type TurnEvent = { type: 'started' } | { type: 'settled'; message: string } | { type: 'failed' } | { type: 'aborted' } | { type: 'exited' };
 /** An answer to an Inline question: a choice's index, text, or dismissing the question. */
 export type QuestionAnswer = number | string | { dismiss: true };
 /**

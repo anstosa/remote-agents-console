@@ -64,4 +64,6 @@ void dashboardUpdates.refresh().catch(() => {});
 cleanupMonitor.start();
 // fire enabled Schedules unattended, beside the other periodic jobs; buildApp's onClose stops it
 app.scheduler.start();
+// reconnect to the structured Agents' holders, which replay what this console has not read
+void app.structuredAgents.reattach().catch(error => { console.error('[structured] reattach failed:', error); });
 await app.listen(config.listen);

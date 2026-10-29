@@ -427,6 +427,12 @@ export class PromptService {
     // finish tracked work before releasing its queue
     if (phase !== undefined) {
       const event = await transport.observe(agent, phase);
+      // the Agent's process exited under the Turn: it failed, and the queue waits for a resume
+      if (event?.type === 'exited') {
+        this.settleTrackedRequest(phase.requestId, 'failed', 'agent_exited');
+        this.phases.delete(scope);
+        return;
+      }
       const completion: PromptCompletion = event === undefined || event.type === 'started' ? 'pending' : event.type === 'settled' ? await this.persistAnswer(scope, phase.historyEntryId, event.message) : 'failed';
       // allow terminal output to finish rendering
       if (completion === 'pending' && phase.state === 'working') {
@@ -764,12 +770,15 @@ export class PromptService {
     return 'ok';
   }
 
-  // stop one Agent; closing it makes every accepted tracked request terminal
+  // stop one Agent; closing it makes every accepted tracked request terminal. A structured
+  // Agent's queue becomes Notes at once; a pane's departs with it after the departure grace.
   async close(agentId: string): Promise<boolean> {
-    if (!await (await this.transportFor(agentId)).close(agentId)) return false;
+    const transport = await this.transportFor(agentId);
+    if (!await transport.close(agentId)) return false;
     for (const [requestId, request] of this.trackedRequests) {
       if (request.agentId === agentId && request.terminalAt === undefined) this.settleTrackedRequest(requestId, 'interrupted', 'agent_closed');
     }
+    if (transport !== this.transport) await this.saveQueued(promptScope(agentId));
     return true;
   }
 }

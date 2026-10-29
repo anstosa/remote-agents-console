@@ -123,9 +123,11 @@ import { renderNotFoundPage, renderPublicPolicyPage } from './public-pages.js';
 
 export type Dependencies = { googleCalendar?: GoogleCalendarService; calendarLifecycle?: PromptCalendarLifecycle; buttonActions?: ButtonActionService; settings?: SettingsService; auth?: AuthService; control?: ControlService; devices?: DeviceService; discovery?: DiscoveryService; tmux?: TmuxAdapter; tickets?: TicketStore; launch?: LaunchService; launchPollDelay?: () => Promise<void>; conversationNamePollDelay?: () => Promise<void>; push?: PushService; notifications?: AgentNotificationCoordinator; prSwitch?: PullRequestSwitchService; newTask?: NewTaskService; promptHistory?: PromptHistoryService; queuedPrompts?: QueuedPromptService; prompts?: PromptService; notes?: WorktreeNoteService; consoleNamed?: ConsoleNamedConversationService; commandCatalog?: CommandCatalogService; cleanup?: CleanupService; dashboardUpdates?: DashboardUpdates<DashboardPayload>; reviewTours?: ReviewTourService; pullRequestReviews?: PullRequestReviewService; reviewStore?: ReviewTourStore; changeAskStore?: ChangeAskStore; reviewRunner?: ReviewRunner; workspaceFiles?: WorkspaceFileService; hostFiles?: HostFilesService; comparison?: ComparisonService; serverAdmin?: ServerAdminService; accounts?: CodexAccountService; claudeAccount?: () => Promise<AccountSummary>; accountSpend?: ApiKeySpendService; instanceStatusPoller?: Pick<RemoteInstanceStatusPoller, 'statuses'>; worktreeStore?: WorktreeLaunchStore; openedFolders?: OpenedFolderStore; worktreeManagement?: WorktreeManagementService; worktreeCommands?: WorktreeCommandService; agentUpdates?: AgentUpdateServiceLike; temporaryPreviews?: Pick<TemporaryPreviewService, 'resolve'>; scheduleBootAt?: Date; paneStream?: PaneStreamProvider; structuredAgents?: StructuredAgents };
 // buildApp decorates the returned instance with the Schedule scheduler, so index.ts can start it and
-// the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use.
+// the HTTP-seam tests can drive its `tick(now)` over the same fakes the Run routes use, and with the
+// structured Agents, which index.ts reattaches to their holders (never a test: a holder serves one
+// console at a time).
 declare module 'fastify' {
-  interface FastifyInstance { scheduler: Scheduler }
+  interface FastifyInstance { scheduler: Scheduler; structuredAgents: StructuredAgents }
 }
 // how long a pane must be quiet after output before its live frame is captured
 const logQuietWindowMs = 250;
@@ -934,6 +936,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const worktree = configuredWorktree(id);
     return worktree === undefined ? await discovery.place(id) : worktreePlace(worktree);
   };
+  structuredAgents.usePlaces(resolvePlace);
   // bind configured actions to existing host, prompt and normal-launch engines
   const buttonActions = deps.buttonActions ?? new ButtonActionService(buttonCatalog, {
     resolvePlace,
@@ -2022,7 +2025,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const id = (request.params as { id: string }).id;
     if (attachments.length > 0 && await structuredAgents.has(id)) return reply.code(400).send({ error: 'This agent does not take attachments yet.' });
     if (!await prompts.submit(id, data.prompt, attachments)) return reply.code(404).send({ error: 'target unavailable' });
+    // a prompt to an Exited Agent waits in its queue while the Agent resumes
+    if ((await structuredAgents.agent(id))?.structured?.lifecycle === 'exited') void structuredAgents.resume(id);
     return reply.code(204).send();
+  });
+  // relaunch an Exited structured Agent on its Conversation, keeping its id and queue
+  app.post('/api/agents/:id/resume', async (request, reply) => {
+    controlled(request, true);
+    const id = (request.params as { id: string }).id;
+    if (!await structuredAgents.has(id)) return reply.code(404).send({ error: 'target unavailable' });
+    return await structuredAgents.resume(id) ? reply.code(204).send() : reply.code(409).send({ error: 'The agent could not be resumed.' });
   });
   // what a structured Agent's transcript Panel shows
   // the latest `limit` lines of the transcript, or one item in full (`item`)
@@ -2302,12 +2314,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await dashboardUpdates.refresh().catch(() => undefined);
     return reply.code(204).send();
   });
-  app.delete('/api/agents/:id', async (request, reply) => { controlled(request, true); const id = (request.params as { id: string }).id; if (await structuredAgents.has(id)) return await structuredAgents.close(id) ? reply.code(204).send() : reply.code(404).send({ error: 'target unavailable' }); const target = await discovery.target(id); if (!target || discovery.worktreesNow().some(worktree => worktreeMatchesWorkspace(worktree, target.agent.home)) || !await prompts.close(id)) return reply.code(404).send({ error: 'target unavailable' }); return reply.code(204).send(); });
+  app.delete('/api/agents/:id', async (request, reply) => { controlled(request, true); const id = (request.params as { id: string }).id; if (await structuredAgents.has(id)) return await prompts.close(id) ? reply.code(204).send() : reply.code(404).send({ error: 'target unavailable' }); const target = await discovery.target(id); if (!target || discovery.worktreesNow().some(worktree => worktreeMatchesWorkspace(worktree, target.agent.home)) || !await prompts.close(id)) return reply.code(404).send({ error: 'target unavailable' }); return reply.code(204).send(); });
   // permanently close one idle configured agent
   app.post('/api/agents/:id/deactivate', async (request, reply) => {
     controlled(request, true);
     const id = (request.params as { id: string }).id;
-    if (await structuredAgents.has(id)) return await structuredAgents.close(id) ? reply.code(204).send() : reply.code(404).send({ error: 'target unavailable' });
+    if (await structuredAgents.has(id)) return await prompts.close(id) ? reply.code(204).send() : reply.code(404).send({ error: 'target unavailable' });
     const target = await discovery.target(id);
     const worktree = target === undefined ? undefined : configuredWorktreeForWorkspace(discovery.worktreesNow(), target.agent.home);
     // preserve active configured agents
@@ -3425,12 +3437,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // Worktree, or a running stack operation there. `fresh` forces a live pane scan before a
   // destructive removal so an Agent that started within the discovery cache window is never
   // missed (CONTRIBUTING: validate immediately before a destructive operation).
+  const withoutProcess = (agent: Agent): boolean => agent.structured?.lifecycle === 'exited' || agent.structured?.lifecycle === 'failed';
   const worktreeRemovalBlockers = async (worktree: Worktree, fresh = false): Promise<string[]> => {
     const blockers: string[] = [];
     // a Review run's Agent also reads the checkout, so it blocks too, named for what it is
     // an Ask's Agent waiting for a follow-up is closed by the Remove itself
     const idleKept = interactiveRunner.idleKeptAgents();
-    const running = (await discovery.dashboard(fresh)).agents.filter(agent => agent.worktreeId === worktree.id && !idleKept.has(agent.id));
+    // a structured Agent with no process (Exited, or failed) is closed by the Remove itself
+    const running = (await discovery.dashboard(fresh)).agents.filter(agent => agent.worktreeId === worktree.id && !idleKept.has(agent.id) && !withoutProcess(agent));
     if (worktreeAgents(running, worktree.id).length > 0) blockers.push('a running agent');
     else if (running.length > 0) blockers.push('a Review run');
     if (await stackCommands.sessionRunning(worktree)) blockers.push('a running stack command');
@@ -3549,6 +3563,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const removed = await stackCommands.stopForRemoval(worktree, async () => {
       const late = await worktreeRemovalRefusal(worktree);
       if (late !== undefined) return { ok: false, status: 409, error: late } as const;
+      for (const agent of (await discovery.dashboard(true)).agents) if (agent.worktreeId === worktree.id && withoutProcess(agent)) await prompts.close(agent.id);
       await launch.killWorktreeShells(worktree);
       return await worktreeManagement.removeCheckout(worktree, { force: discardChanges === true });
     });
@@ -4024,5 +4039,6 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.addHook('onClose', async () => { buttonActions.close(); scheduler.stop(); reviewJobs.close(); codeReviews.close(); asks.close(); await hostFiles.close(); await accounts.close(); await paneViewports.restoreAll(); paneStream.closeAll(); tmux.closeCommands?.(); dashboardUpdates.close(); });
   // expose the scheduler on the instance (index.ts starts it; the HTTP-seam tests tick it)
   app.decorate('scheduler', scheduler);
+  app.decorate('structuredAgents', structuredAgents);
   return app;
 }

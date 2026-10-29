@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { QuestionField } from '../adapters/types.js';
 import type { LaunchReport, ModelInfo, ModelSetting, ProtocolClient, TranscriptItem, TranscriptTool } from './structured.js';
 
@@ -58,7 +59,7 @@ const dialogField = (record: Json): QuestionField | undefined => {
     default: return undefined;
   }
 };
-type Dialog = { method: 'select' | 'confirm' | 'input' | 'editor'; options: string[]; timer?: NodeJS.Timeout };
+type Dialog = { method: 'select' | 'confirm' | 'input' | 'editor'; options: string[]; toolCallId?: string; timer?: NodeJS.Timeout };
 const messageCost = (message: Json): number => isObject(message.usage) && isObject(message.usage.cost) && typeof message.usage.cost.total === 'number' ? message.usage.cost.total : 0;
 
 // an assistant message's text, or its error when it failed having said nothing
@@ -194,13 +195,16 @@ const sessionModel = (entries: unknown): ModelSetting | undefined => {
 // a session command Pi accepted and no extension cancelled
 const accepted = (response: Json): boolean => response.success === true && !(isObject(response.data) && response.data.cancelled === true);
 
-export const piClient: ProtocolClient = (channel, emit) => {
+export const piClient: ProtocolClient = (channel, emit, attached) => {
   const pending = new Map<string, (response: Json) => void>();
+  // request ids no earlier client used, so a response replayed from before a reattach answers nothing
+  const prefix = `rac-${randomUUID().slice(0, 8)}`;
   let requests = 0;
   let sequence = 0;
-  let reported = false;
-  // a Turn runs from the first `agent_start` to `agent_settled`: retries and compaction count as working
-  let working = false;
+  let reported = attached !== undefined;
+  // a Turn runs from the first `agent_start` to `agent_settled`: retries and compaction count as
+  // working. Unknown after a replay that lost lines, until Pi's state or the Turn's end says.
+  let working: boolean | undefined = attached !== undefined && attached.dropped > 0 ? undefined : false;
   let prompted = false;
   let answer = '';
   let errored = false;
@@ -212,7 +216,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
   // the open dialogs, by Pi's request id
   const dialogs = new Map<string, Dialog>();
   const request = (command: Json): Promise<Json> => new Promise(resolve => {
-    const id = `rac-${requests += 1}`;
+    const id = `${prefix}-${requests += 1}`;
     pending.set(id, resolve);
     channel.send(JSON.stringify({ ...command, id }));
   });
@@ -231,7 +235,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
   });
   // the Conversation's transcript from its history: on a launch only when it has one, and after
   // a Conversation change always, so a new one starts empty
-  const history = (always: boolean) => void request({ type: 'get_messages' }).then(response => {
+  const history = (always: boolean) => request({ type: 'get_messages' }).then(response => {
     const messages = isObject(response.data) && Array.isArray(response.data.messages) ? response.data.messages : undefined;
     if (messages !== undefined && (always || messages.length > 0)) emit({ type: 'history', items: piHistory(messages) });
   });
@@ -240,6 +244,10 @@ export const piClient: ProtocolClient = (channel, emit) => {
   const refresh = async (): Promise<void> => {
     const state = (await request({ type: 'get_state' })).data;
     if (!isObject(state)) return;
+    if (working === undefined) {
+      working = state.isStreaming === true || state.isCompacting === true;
+      if (working) { prompted = true; emit({ type: 'turn', turn: { type: 'started' } }); }
+    }
     if (typeof state.sessionId === 'string' && state.sessionId !== '') emit({ type: 'conversation', id: state.sessionId, ...(typeof state.sessionName === 'string' ? { name: state.sessionName } : {}) });
     const model = modelInfo(state.model);
     if (model === undefined) return;
@@ -271,7 +279,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
     // Pi takes its default answer when a timeout lapses, without saying so; one too long for a
     // timer counts as none
     const timeout = typeof record.timeout === 'number' && record.timeout > 0 && record.timeout <= 2 ** 31 - 1 ? record.timeout : undefined;
-    dialogs.set(id, { method: record.method as Dialog['method'], options: record.method === 'select' ? strings(record.options).slice(0, maxChoices) : [], ...(timeout === undefined ? {} : { timer: setTimeout(() => closeDialog(id), timeout) }) });
+    dialogs.set(id, { method: record.method as Dialog['method'], options: record.method === 'select' ? strings(record.options).slice(0, maxChoices) : [], ...(toolCallId === undefined ? {} : { toolCallId }), ...(timeout === undefined ? {} : { timer: setTimeout(() => closeDialog(id), timeout) }) });
     emit({ type: 'question', question: { id, text: question, field, ...(timeout === undefined ? {} : { expiresAt: Date.now() + timeout }) } });
     const tool = toolCallId === undefined ? undefined : tools.get(toolCallId);
     if (tool !== undefined) showTool(toolCallId!, { ...tool.item, summary: waitingForAnswer });
@@ -308,14 +316,14 @@ export const piClient: ProtocolClient = (channel, emit) => {
           emit({ type: 'report', report });
         }
         void refresh();
-        history(false);
+        void history(false);
         usage();
         return;
       case 'queue_update':
         emit({ type: 'steers', pending: strings(record.steering) });
         return;
       case 'agent_start':
-        if (working) return;
+        if (working === true) return;
         working = true; prompted = false; answer = ''; errored = false; cost = 0; toolCalls = 0;
         emit({ type: 'turn', turn: { type: 'started' } });
         return;
@@ -334,7 +342,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
         const message = isObject(record.message) ? record.message : undefined;
         if (message?.role === 'user') {
           // a prompt after the Turn's first arrived as a steer
-          transcript({ id: next('m'), kind: 'message', role: 'user', text: text(message.content), ...(working && prompted ? { steer: true as const } : {}) });
+          transcript({ id: next('m'), kind: 'message', role: 'user', text: text(message.content), ...(working === true && prompted ? { steer: true as const } : {}) });
           prompted = true;
         }
         if (message?.role !== 'assistant') return;
@@ -370,6 +378,8 @@ export const piClient: ProtocolClient = (channel, emit) => {
       }
       case 'tool_execution_end': {
         const tool = typeof record.toolCallId === 'string' ? tools.get(record.toolCallId) : undefined;
+        // a dialog the call raised waits no longer (one replayed after it was answered, say)
+        for (const [id, dialog] of dialogs) if (dialog.toolCallId === record.toolCallId) closeDialog(id);
         if (tool === undefined) return;
         tools.delete(record.toolCallId as string);
         const failed = record.isError === true;
@@ -380,7 +390,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
         return;
       }
       case 'agent_settled':
-        if (!working) return;
+        if (working === false) return;
         working = false;
         // a settled Turn waits on no dialog; an aborted one's dialogs were dismissed with it
         for (const id of [...dialogs.keys()]) closeDialog(id);
@@ -397,6 +407,16 @@ export const piClient: ProtocolClient = (channel, emit) => {
     emit({ type: 'exited' });
   });
 
+  // reattached to a process that reported in to an earlier console: read its state afresh. Lines
+  // the holder could no longer replay may have held a dialog, which then waits unseen.
+  if (attached !== undefined) {
+    void refresh();
+    void history(false).then(() => {
+      if (attached.dropped > 0) transcript({ id: next('n'), kind: 'notice', tone: 'warning', text: `The console missed ${count(attached.dropped, 'line', 'lines')} of this Agent's output while it restarted. If a question was asked then, it is waiting unseen: cancel the Turn if it does not finish.` });
+    });
+    usage();
+  }
+
   return {
     async deliver(prompt) {
       const response = await request({ type: 'prompt', message: prompt });
@@ -411,7 +431,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
       // a new session starts on the launch's model at no thinking; keep the current ones
       if (keep !== undefined) await apply(keep);
       await refresh();
-      history(true);
+      void history(true);
       usage();
       return true;
     },
@@ -422,7 +442,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
       const own = sessionModel(isObject(entries) ? entries.entries : undefined);
       if (own !== undefined) await apply(own);
       await refresh();
-      history(true);
+      void history(true);
       usage();
       return true;
     },

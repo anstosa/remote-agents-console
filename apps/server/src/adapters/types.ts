@@ -483,6 +483,8 @@ export interface StructuredAdapter {
   };
   /** whether its protocol client can steer a working Agent */
   readonly steers: boolean;
+  /** The version the console pins the kind's CLI at, which its launch report should show (ADR 0017). */
+  pinned(): string | undefined;
 }
 /**
  * What a structured launch starts: a new Conversation, or the one at `resume` (located by the

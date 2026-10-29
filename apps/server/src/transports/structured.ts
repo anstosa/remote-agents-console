@@ -101,8 +101,13 @@ export interface LineChannel {
   onClose(listener: () => void): void;
   close(): void;
 }
-/** A protocol client: it speaks one protocol over a channel and reports what it sees as events. */
-export type ProtocolClient = (channel: LineChannel, emit: (event: StructuredEvent) => void) => StructuredConnection;
+/**
+ * A protocol client: it speaks one protocol over a channel and reports what it sees as events.
+ * `attached` says the channel reconnects to a process that reported in to an earlier console:
+ * the client reads its state afresh, and `dropped` lines it never sees (the holder's replay
+ * overflowed) are resynced from the process.
+ */
+export type ProtocolClient = (channel: LineChannel, emit: (event: StructuredEvent) => void, attached?: { dropped: number }) => StructuredConnection;
 
 /**
  * Split a byte stream into lines on LF only, dropping a CR before it. JSON may carry U+2028 and

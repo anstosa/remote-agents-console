@@ -4,12 +4,12 @@ import type { LineChannel, StructuredEvent } from '../src/transports/structured.
 
 // The Pi client over an in-memory channel: the test plays Pi, feeding it RPC records shaped as
 // Pi 1.4.0 sends them (docs/rpc-extension-ui.md, rpc-commands.md) and reading what it sends back.
-function piOverChannel() {
+function piOverChannel(attached?: { dropped: number }) {
   const sent: Array<Record<string, unknown>> = [];
   const events: StructuredEvent[] = [];
   let listener: (line: string) => void = () => {};
   const channel: LineChannel = { send: line => sent.push(JSON.parse(line) as Record<string, unknown>), onLine: next => { listener = next; }, onClose: () => {}, close: () => {} };
-  const connection = piClient(channel, event => events.push(event));
+  const connection = piClient(channel, event => events.push(event), attached);
   const pi = (record: object) => listener(JSON.stringify(record));
   const questions = () => events.flatMap(event => event.type === 'question' ? [event.question] : []);
   const closed = () => events.flatMap(event => event.type === 'question-closed' ? [event.id] : []);
@@ -100,5 +100,58 @@ describe('the Pi client', () => {
     await vi.waitFor(() => expect(sent.at(-1)).toMatchObject({ type: 'abort' }));
     pi({ type: 'response', id: sent.at(-1)!.id, command: 'abort', success: true });
     expect(await cancelled).toEqual(['Never mind']);
+  });
+
+  it('closes a dialog once the tool call it names has ended, as a replayed dialog answered before a restart has', () => {
+    const { pi, questions, closed } = piOverChannel();
+    pi({ type: 'agent_start' });
+    pi({ type: 'tool_execution_start', toolCallId: 'call_1', toolName: 'ask_user', args: { question: 'Which colour?' } });
+    pi({ type: 'extension_ui_request', id: 'q1', method: 'select', title: JSON.stringify({ rac: 'dialog', toolCallId: 'call_1', text: 'Which colour?' }), options: ['red', 'blue'] });
+    expect(questions()).toHaveLength(1);
+    pi({ type: 'tool_execution_end', toolCallId: 'call_1', toolName: 'ask_user', result: { content: [{ type: 'text', text: 'blue' }] }, isError: false });
+    expect(closed()).toEqual(['q1']);
+  });
+
+  it('gives each request an id no other client used, so a response replayed from before a restart answers nothing', async () => {
+    const first = piOverChannel();
+    const second = piOverChannel();
+    void first.connection.models();
+    void second.connection.models();
+    expect(first.sent[0]!.id).not.toEqual(second.sent[0]!.id);
+  });
+
+  it('reattached, reads the Conversation, its history and usage afresh, without waiting for a launch report', () => {
+    const { sent, events, pi } = piOverChannel({ dropped: 0 });
+    expect(sent.map(record => record.type)).toEqual(expect.arrayContaining(['get_state', 'get_messages', 'get_session_stats']));
+    // the replay holds the rest of the Turn in flight, which settles as it would have
+    pi({ type: 'agent_start' });
+    pi({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' } });
+    pi({ type: 'agent_settled', aborted: false });
+    expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }, { type: 'turn', turn: { type: 'settled', message: 'Done' } }]);
+    expect(events.some(event => event.type === 'report')).toBe(false);
+  });
+
+  it('after an overflowed replay, settles a Turn whose start it missed, and says a question may be waiting unseen', async () => {
+    const { sent, events, pi } = piOverChannel({ dropped: 40 });
+    pi({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' } });
+    pi({ type: 'agent_settled', aborted: false });
+    expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'settled', message: 'Done' } }]);
+    // Pi works on: the state it reports decides that the Agent is working, and a dialog it opened in the lines missed is unknown
+    pi({ type: 'agent_start' });
+    const { id } = sent.find(record => record.type === 'get_state')!;
+    pi({ type: 'response', id, command: 'get_state', success: true, data: { sessionId: 's1', isStreaming: true } });
+    expect(events.filter(event => event.type === 'turn').at(-1)).toEqual({ type: 'turn', turn: { type: 'started' } });
+    // the notice follows the history, which replaces the transcript
+    pi({ type: 'response', id: sent.find(record => record.type === 'get_messages')!.id, command: 'get_messages', success: true, data: { messages: [] } });
+    await vi.waitFor(() => expect(events.at(-1)).toEqual({ type: 'transcript', item: expect.objectContaining({ kind: 'notice', tone: 'warning', text: expect.stringContaining('question') }) }));
+  });
+
+  it('after an overflowed replay in the middle of a Turn, takes the Agent to be working when Pi says it is', async () => {
+    const { sent, events, pi } = piOverChannel({ dropped: 40 });
+    const { id } = sent.find(record => record.type === 'get_state')!;
+    pi({ type: 'response', id, command: 'get_state', success: true, data: { sessionId: 's1', isStreaming: true } });
+    await vi.waitFor(() => expect(events.filter(event => event.type === 'turn')).toEqual([{ type: 'turn', turn: { type: 'started' } }]));
+    pi({ type: 'agent_settled', aborted: false });
+    expect(events.filter(event => event.type === 'turn').at(-1)).toEqual({ type: 'turn', turn: { type: 'settled', message: '' } });
   });
 });
