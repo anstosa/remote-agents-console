@@ -558,7 +558,6 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       config,
       loadDashboard: () => dashboardUpdates.refresh(),
       discovery,
-      tmux,
       prompts,
       promptHistory,
       worktreeCommands: stackCommands,

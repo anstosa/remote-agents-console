@@ -19,6 +19,13 @@ const config: ValidatedConfig = {
 const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
 const activeAgent: Agent = stated({ id: 'agent-cora', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: cora.identity, branch: 'feature/cora', title: 'Ready', projectId: cora.projectId, worktreeId: cora.id, projectUrl: cora.projectUrl, projectProxied: false, gitStatus: { files: 2, staged: 0, unstaged: 2, untracked: 0, conflicted: 0 } });
 
+// the active Agent's Transport as orchestration reads it: what it shows of its answer and its latest lines
+const reads = (recent = 'terminal', older = false) => ({
+  target: async (agentId: string) => agentId === activeAgent.id ? { agent: activeAgent } : undefined,
+  latestAnswer: async () => undefined,
+  recentLines: async () => ({ text: recent, older })
+}) as never;
+
 // build one fully structural dependency set
 function dependencies(overrides: Partial<OrchestrationDependencies> = {}): OrchestrationDependencies {
   const dashboard: DashboardPayload = {
@@ -38,11 +45,8 @@ function dependencies(overrides: Partial<OrchestrationDependencies> = {}): Orche
     config,
     loadDashboard: async () => dashboard,
     discovery: { target: async agentId => agentId === activeAgent.id ? { agent: activeAgent, socket } : undefined, worktreesNow: () => [cora, dave] },
-    tmux: {
-      captureWindow: async () => ({ text: 'terminal', older: false }),
-      captureRecentWindow: async () => ({ text: 'terminal', older: false })
-    },
     prompts: {
+      transportFor: async () => reads(),
       submit: async () => true,
       listQueued: async () => [],
       updateQueued: async (_agentId, promptId, text) => ({ id: promptId, text, createdAt: '2026-08-13T00:00:00.000Z' }),
@@ -161,10 +165,7 @@ describe('OrchestrationService', () => {
   it('falls back to durable responses and bounds terminal and file output', async () => {
     const oversized = 'x'.repeat(120 * 1024);
     const service = new OrchestrationService(dependencies({
-      tmux: {
-        captureWindow: async () => ({ text: '', older: false }),
-        captureRecentWindow: async () => ({ text: oversized, older: true })
-      },
+      prompts: { ...dependencies().prompts, transportFor: async () => reads(oversized, true) },
       promptHistory: { list: async () => [{ id: 'history-12345', text: 'Question', createdAt: '2026-08-13T00:00:00.000Z', answer: 'Durable answer', answeredAt: '2026-08-13T00:01:00.000Z' }] }
     }));
 
@@ -180,10 +181,7 @@ describe('OrchestrationService', () => {
   it('blocks secret paths and redacts credential-shaped output', async () => {
     let previews = 0;
     const service = new OrchestrationService(dependencies({
-      tmux: {
-        captureWindow: async () => ({ text: '', older: false }),
-        captureRecentWindow: async () => ({ text: 'RAC_SESSION_SECRET=private\nAuthorization: Bearer abcdefghijklmnop\nkey: sk-proj-examplecredential\npassword: hunter2', older: false })
-      },
+      prompts: { ...dependencies().prompts, transportFor: async () => reads('RAC_SESSION_SECRET=private\nAuthorization: Bearer abcdefghijklmnop\nkey: sk-proj-examplecredential\npassword: hunter2') },
       workspaceFiles: { preview: async (_workspace, path) => { previews += 1; return { path, size: 64, binary: false, truncated: false, content: '"api_key":"sk_examplecredential"' }; } },
       worktreeCommands: {
         actions: () => ['build'],

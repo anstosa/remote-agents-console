@@ -9,7 +9,6 @@ import { validPrompt } from '../prompts/validation.js';
 import type { PullRequestSwitchService } from '../pull-requests/switch-service.js';
 import type { StoredReviewTour } from '../review-tour/contracts.js';
 import type { ReviewTourInput } from '../review-tour/contracts.js';
-import type { TmuxAdapter } from '../tmux/adapter.js';
 import type { NewTaskService } from '../new-task/service.js';
 import type { WorkspaceFileService, WorkspaceFilePreview } from '../workspace-files/service.js';
 import { configuredWorktreeForWorkspace, worktreeById } from '../workspaces/resolver.js';
@@ -63,8 +62,7 @@ const promptIdPattern = /^[A-Za-z0-9_-]{12,64}$/u;
 const questionIdPattern = /^[A-Za-z0-9_-]{22}$/u;
 
 type DiscoveryFacade = Pick<DiscoveryService, 'target' | 'worktreesNow'>;
-type TmuxFacade = Pick<TmuxAdapter, 'captureWindow' | 'captureRecentWindow'>;
-type PromptFacade = Pick<PromptService, 'submit' | 'listQueued' | 'updateQueued' | 'moveQueued' | 'removeQueued' | 'answerQuestion' | 'cancel' | 'close'>;
+type PromptFacade = Pick<PromptService, 'submit' | 'listQueued' | 'updateQueued' | 'moveQueued' | 'removeQueued' | 'answerQuestion' | 'cancel' | 'close' | 'transportFor'>;
 type HistoryFacade = Pick<PromptHistoryService, 'list'>;
 type WorktreeCommandFacade = Pick<WorktreeCommandService, 'actions' | 'state' | 'start' | 'log'>;
 type WorkspaceFileFacade = Pick<WorkspaceFileService, 'preview'>;
@@ -75,7 +73,6 @@ export type OrchestrationDependencies = {
   config: ValidatedConfig;
   loadDashboard: () => Promise<DashboardPayload>;
   discovery: DiscoveryFacade;
-  tmux: TmuxFacade;
   prompts: PromptFacade;
   promptHistory: HistoryFacade;
   worktreeCommands: WorktreeCommandFacade;
@@ -209,7 +206,7 @@ export class OrchestrationService {
 
   // resolve one live Agent's prompt-history scope and the workspace it runs in
   private async promptScope(agentId: string): Promise<{ scope: string; agent: Agent; workspace: string } | undefined> {
-    const target = await this.dependencies.discovery.target(agentId);
+    const target = await (await this.dependencies.prompts.transportFor(agentId)).target(agentId);
     // require a current target
     if (target === undefined) return undefined;
     const worktree = configuredWorktreeForWorkspace(this.dependencies.discovery.worktreesNow(), target.agent.home);
@@ -320,13 +317,13 @@ export class OrchestrationService {
     // reject malformed identifiers
     if (!validIdentifier(agentId)) return failure('invalid_request', 'Invalid agent identifier.');
     return await this.operation(async () => {
-      const target = await this.dependencies.discovery.target(agentId);
-      // require a live target for terminal identity
-      if (target === undefined) return failure('not_found', 'Agent not found.');
-      const captured = await this.dependencies.tmux.captureWindow(target.socket, target.agent.pane.paneId, defaultLogRows).catch(() => undefined);
-      // prefer the terminal's prompt-coherent response
-      if (captured?.latestAssistantMessage !== undefined) {
-        const limited = limitText(redactIntegrationText(captured.latestAssistantMessage), maxTerminalBytes);
+      const transport = await this.dependencies.prompts.transportFor(agentId);
+      // require a live target
+      if (await transport.target(agentId) === undefined) return failure('not_found', 'Agent not found.');
+      const shown = await transport.latestAnswer(agentId).catch(() => undefined);
+      // prefer the answer the Agent shows, coherent with its latest prompt
+      if (shown !== undefined) {
+        const limited = limitText(redactIntegrationText(shown), maxTerminalBytes);
         return success({ text: limited.text, source: 'terminal', truncated: limited.truncated });
       }
       const scope = await this.promptScope(agentId);
@@ -346,10 +343,10 @@ export class OrchestrationService {
     // enforce the tmux viewport contract
     if (!validIdentifier(agentId) || !Number.isInteger(rows) || rows < 2 || rows > maxLogRows) return failure('invalid_request', 'Invalid log request.');
     return await this.operation(async () => {
-      const target = await this.dependencies.discovery.target(agentId);
-      // require a current pane
-      if (target === undefined) return failure('not_found', 'Agent not found.');
-      const captured = await this.dependencies.tmux.captureRecentWindow(target.socket, target.agent.pane.paneId, rows);
+      const transport = await this.dependencies.prompts.transportFor(agentId);
+      // require a current Agent
+      if (await transport.target(agentId) === undefined) return failure('not_found', 'Agent not found.');
+      const captured = await transport.recentLines(agentId, rows);
       // distinguish capture failure from missing agents
       if (captured === undefined) return failure('unavailable', 'Agent log is unavailable.', true);
       const limited = limitText(redactIntegrationText(captured.text), maxTerminalBytes);

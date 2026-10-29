@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHmac } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +13,7 @@ import type { Delivery, LaunchReport, ModelInfo, ModelSetting, StructuredConnect
 import type { QuestionAnswer } from '../src/transports/transport.js';
 import { WorktreeNoteService } from '../src/notes/service.js';
 import type { AllowedModel } from '../src/adapters/types.js';
+import type { ValidatedConfig } from '../src/config/schema.js';
 import { piAdapter } from '../src/adapters/pi.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject } from './helpers/config.js';
@@ -94,14 +96,21 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
   return { processes, delivered, launches, attaches, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
 }
 
+// the integration gateway's state and audit files, in a temporary folder
+async function integrationFiles(): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), 'rac-integration-'));
+  dirs.push(root);
+  for (const [name, file] of [['RAC_INTEGRATION_AUTH_FILE', 'auth.json'], ['RAC_INTEGRATION_STATE_FILE', 'state.json'], ['RAC_INTEGRATION_AUDIT_FILE', 'audit.jsonl']]) vi.stubEnv(name!, join(root, file!));
+}
+
 // a console with one Project whose only Worktree is a temporary folder, and the Scratch folder beside it
 // (`linked` adds a linked Worktree beside it; `deps` replace the app's own services)
-async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { reportTimeoutMs?: number; allowedModels?: AllowedModel[]; linked?: boolean; deps?: Record<string, unknown> } = {}) {
+async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { reportTimeoutMs?: number; allowedModels?: AllowedModel[]; linked?: boolean; deps?: Record<string, unknown>; config?: Partial<ValidatedConfig> } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-structured-')));
   dirs.push(root);
   const project = testProject({ path: join(root, 'repo') });
   const allowed = options.allowedModels ?? [];
-  const config = testConfig({ scratchDirectory: root, projects: [project], adapters: { pi: { program: '/pinned/pi', args: [], env: {}, launchable: true, ...(allowed.length === 0 ? {} : { allowedModels: allowed }) } } });
+  const config = testConfig({ scratchDirectory: root, projects: [project], adapters: { pi: { program: '/pinned/pi', args: [], env: {}, launchable: true, ...(allowed.length === 0 ? {} : { allowedModels: allowed }) } }, ...options.config });
   const worktreeStore = new WorktreeLaunchStore({ file: join(root, 'worktrees.json') });
   const worktrees = async (path: string) => path === project.path ? [{ path: project.path, branch: 'refs/heads/main', detached: false, bare: false, locked: false, prunable: false }, ...(options.linked === true ? [{ path: join(root, 'feat'), branch: 'refs/heads/feat', detached: false, bare: false, locked: false, prunable: false }] : [])] : undefined;
   const discovery = new DiscoveryService(socketFinder([]), paneLister([]) as never, processInspector(), { cachedPullRequest: async () => undefined, invalidateRepositories: () => {} } as never, config.adapters, config.projects, worktreeStore, worktrees, root);
@@ -162,6 +171,25 @@ describe('a structured Agent over HTTP', () => {
       { id: 't1', kind: 'tool', name: 'read', summary: 'README.md', state: 'done' },
       { id: 'm2', kind: 'message', role: 'assistant', text: 'Hello!' }
     ]);
+    await app.close();
+  });
+
+  it('shows its latest answer and recent lines to the console\'s MCP readers', async () => {
+    const secret = Buffer.alloc(32, 7).toString('base64url');
+    vi.stubEnv('RAC_SESSION_SECRET', secret);
+    vi.stubEnv('RAC_REALTIME_MCP_TOKEN', '');
+    await integrationFiles();
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake, { config: { integrations: { enabled: true, mcp: { readEnabled: true, writeEnabled: false, dangerousEnabled: false }, realtime: { enabled: false, name: 'Davo', context: '', writeToolsEnabled: false }, multiInstance: { enabled: false } } } });
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'transcript', item: { id: 'm1', kind: 'message', role: 'user', text: 'Say hello' } });
+    fake.emit({ type: 'transcript', item: { id: 't1', kind: 'tool', name: 'Read', summary: 'README.md', state: 'done', result: '3 lines' } });
+    fake.emit({ type: 'transcript', item: { id: 'm2', kind: 'message', role: 'assistant', text: 'Hello!' } });
+
+    const token = createHmac('sha256', secret).update('remote-agents:realtime-mcp:v1').digest('base64url');
+    const call = async (name: string, args: object) => (await app.inject({ method: 'POST', url: '/mcp', headers: { host: 'agents.example.com', authorization: `Bearer ${token}` }, payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } })).json().result.structuredContent;
+    expect(await call('get_agent_latest_response', { agent_id: id })).toMatchObject({ ok: true, data: { text: 'Hello!', source: 'terminal' } });
+    expect(await call('get_agent_log_tail', { agent_id: id, rows: 2 })).toMatchObject({ ok: true, data: { text: '- Read(README.md) -> 3 lines\nHello!', older: true } });
     await app.close();
   });
 

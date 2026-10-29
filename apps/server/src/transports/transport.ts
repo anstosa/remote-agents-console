@@ -53,4 +53,8 @@ export interface AgentTransport {
   rename(agentId: string, name: string): Promise<RenameOutcome>;
   newConversation(agentId: string): Promise<boolean>;
   switchConversation(agentId: string, to: ConversationTarget): Promise<SwitchOutcome>;
+  /** The Agent's latest completed answer as it shows it, if it shows one. */
+  latestAnswer(agentId: string): Promise<string | undefined>;
+  /** The latest `rows` lines the Agent shows, and whether it shows earlier ones; undefined when unreadable. */
+  recentLines(agentId: string, rows: number): Promise<{ text: string; older: boolean } | undefined>;
 }

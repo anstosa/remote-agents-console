@@ -40,7 +40,7 @@ type StoredPromptRequest = PromptRequestStatus & { terminalAt?: number; promptFi
  * failed draft to clear), which a structured Transport answers trivially. A delivery is `busy`
  * when the Agent was already working: the prompt stays queued for the next settle.
  */
-export interface TurnTransport extends Pick<AgentTransport, 'answer' | 'interrupt' | 'close'> {
+export interface TurnTransport extends Pick<AgentTransport, 'answer' | 'interrupt' | 'close' | 'latestAnswer' | 'recentLines'> {
   target(agentId: string): Promise<{ agent: Agent } | undefined>;
   gate(agentId: string, step?: 'retry' | 'settle'): Promise<Gate>;
   held(agentId: string): boolean;
@@ -94,8 +94,8 @@ export class PromptService {
     this.transport = transport ?? new TmuxTransport(discovery, tmux, hooks, queued?.resets, resolveAdapter, teardownFor, attachmentStaging);
   }
 
-  // the Transport an Agent is driven over: structured for the structured Agents, tmux otherwise
-  private async transportFor(agentId: string): Promise<TurnTransport> {
+  /** The Transport an Agent is driven over: structured for the structured Agents, tmux otherwise. */
+  async transportFor(agentId: string): Promise<TurnTransport> {
     const structured = this.structured;
     return structured !== undefined && await structured.owns(agentId) ? structured : this.transport;
   }

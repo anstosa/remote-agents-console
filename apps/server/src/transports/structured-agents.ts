@@ -156,6 +156,16 @@ const transcriptLine = (item: TranscriptItem): TranscriptLine => {
   while (lines.length > 1 && lines.at(-1) === '') lines.pop();
   return { ...line, tail: lines.slice(-5).join('\n'), outputLines: lines.length };
 };
+// a transcript item as plain text lines, as a log tail reads it; thinking is left out
+const transcriptText = (item: TranscriptItem): string | undefined => {
+  switch (item.kind) {
+    case 'message': return item.role === 'user' ? `> ${item.text}` : item.text;
+    case 'notice': return `* ${item.text}`;
+    case 'settled': return `(${item.outcome})`;
+    case 'tool': return `${item.parentId === undefined ? '' : '  '}- ${item.name}(${item.summary})${item.result === undefined ? '' : ` -> ${item.result}`}`;
+    default: return undefined;
+  }
+};
 const nonNegativeInt = (value: unknown): boolean => value === undefined || Number.isSafeInteger(value) && (value as number) >= 0;
 const isStoredRecord = (value: unknown): value is StructuredRecord => {
   const record = value as Partial<StructuredRecord> | null;
@@ -451,6 +461,12 @@ export class StructuredAgents {
     },
     clearDraft: async () => true,
     answer: async (id, questionId, answer) => await this.answer(id, questionId, answer),
+    latestAnswer: async id => this.live.get(id)?.transcript.filter((item): item is Extract<TranscriptItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'assistant').at(-1)?.text,
+    recentLines: async (id, rows) => {
+      if (!await this.has(id)) return undefined;
+      const lines = (this.live.get(id)?.transcript ?? []).flatMap(item => transcriptText(item)?.split('\n') ?? []);
+      return { text: lines.slice(-rows).join('\n'), older: lines.length > rows };
+    },
     steer: async (id, prompt) => await this.steer(id, prompt),
     interrupt: async (id, returned) => await this.interrupt(id, returned),
     close: async id => await this.close(id)

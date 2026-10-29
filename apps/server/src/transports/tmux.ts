@@ -1040,4 +1040,16 @@ export class TmuxTransport implements AgentTransport {
     }
     return true;
   }
+
+  // the latest completed answer the pane's deep capture shows
+  async latestAnswer(agentId: string): Promise<string | undefined> {
+    const target = await this.discovery.target(agentId);
+    return target === undefined ? undefined : (await this.tmux.captureWindow(target.socket, target.agent.pane.paneId, 120).catch(() => undefined))?.latestAssistantMessage;
+  }
+
+  async recentLines(agentId: string, rows: number): Promise<{ text: string; older: boolean } | undefined> {
+    const target = await this.discovery.target(agentId);
+    const captured = target === undefined ? undefined : await this.tmux.captureRecentWindow(target.socket, target.agent.pane.paneId, rows);
+    return captured === undefined ? undefined : { text: captured.text, older: captured.older };
+  }
 }
