@@ -6,6 +6,7 @@ import { IntegrationAuditService } from '../src/integrations/audit/service.js';
 import type { AuditEvent } from '../src/integrations/audit/service.js';
 import type { IntegrationPrincipal } from '../src/integrations/auth/index.js';
 import { IntegrationGateway } from '../src/integrations/mcp/gateway.js';
+import { conductorCallable } from '../src/integrations/mcp/catalog.js';
 import { IntegrationPolicyService } from '../src/integrations/policy/service.js';
 import { IntegrationControlService } from '../src/integrations/control/index.js';
 
@@ -100,6 +101,23 @@ describe('IntegrationGateway', () => {
       expect(forwarded).toEqual([]);
       await expect(gateway.call(conductor, 'list_worktrees', {})).resolves.toMatchObject({ structuredContent: { ok: true } });
       expect(scopes).toEqual([places]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('closes every mutation to the Conductor that is not on its list, so a tool added later stays closed', async () => {
+    const { root, gateway } = await fixture();
+    try {
+      const conductor: IntegrationPrincipal = { authentication: 'conductor', subjectId: 'conductor-1', clientId: 'conductor', audience: principal.audience, scopes: ['status:read', 'logs:read', 'prompts:write', 'agents:control', 'admin:dangerous'], places: () => true };
+      // a mutation the catalog has but the list does not name: neither listed nor callable
+      const listed = gateway.listTools(conductor).map(tool => tool.name);
+      expect(listed).toContain('queue_prompt');
+      expect(listed).not.toContain('move_queued_prompt');
+      await expect(gateway.call(conductor, 'move_queued_prompt', { agent_id: 'a', prompt_id: 'prompt-123456789', direction: 'earlier', request_id: 'request-move-1' })).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
+      for (const risk of ['write', 'operational', 'dangerous'] as const) expect(conductorCallable({ name: 'some_future_tool', risk })).toBe(false);
+      expect(conductorCallable({ name: 'some_future_read', risk: 'read' })).toBe(true);
+      // the dangerous ones it may call are still held to admin:dangerous by their scopes
+      expect(conductorCallable({ name: 'deactivate_agent', risk: 'dangerous' })).toBe(true);
+      for (const never of ['answer_agent_question', 'launch_worktree_agent', 'launch_scratch_agent']) expect(conductorCallable({ name: never, risk: 'write' })).toBe(false);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

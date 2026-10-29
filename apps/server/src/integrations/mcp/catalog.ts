@@ -96,10 +96,13 @@ export const integrationTools: IntegrationTool[] = [
   mutation('switch_pull_request', 'Switch pull request', 'Switch one clean pushed worktree to an available pull request.', ['agents:control', 'admin:dangerous'], 'dangerous', z.object({ agent_id: identifier, number: z.number().int().positive(), ...mutationEnvelope }).strict(), { agent_id: id, number: { type: 'integer', minimum: 1 } }, ['agent_id', 'number'])
 ];
 
-// What the Conductor may call when its scopes allow (ADR 0018): never another Agent's question (an
-// Agent never consents for the operator), a launch (they launch unsandboxed), or reordering a queue
-const neverForConductor = new Set(['answer_agent_question', 'launch_worktree_agent', 'launch_scratch_agent', 'move_queued_prompt']);
-export const conductorCallable = (tool: IntegrationTool): boolean => !neverForConductor.has(tool.name);
+// What the Conductor may call when its scopes allow (ADR 0018): every read tool, and only the
+// mutations named here (the dangerous ones need `admin:dangerous` besides), so a tool added later is
+// closed to it until listed. Never another Agent's question (an Agent never consents for the
+// operator) nor a launch (they launch unsandboxed), whatever is listed.
+const conductorMutations = new Set(['queue_prompt', 'update_queued_prompt', 'remove_queued_prompt', 'cancel_agent', 'run_stack_action', 'start_review', 'spawn_agent', 'close_agent', 'create_note', 'update_note', 'delete_note', 'schedule_note', 'deactivate_agent', 'start_new_task', 'switch_pull_request']);
+const neverForConductor = new Set(['answer_agent_question', 'launch_worktree_agent', 'launch_scratch_agent']);
+export const conductorCallable = (tool: Pick<IntegrationTool, 'name' | 'risk'>): boolean => (tool.risk === 'read' || conductorMutations.has(tool.name)) && !neverForConductor.has(tool.name);
 
 // index the immutable public catalog
 export const integrationToolByName = new Map(integrationTools.map(candidate => [candidate.name, candidate]));
