@@ -16,7 +16,7 @@ import type { StructuredConnection, StructuredEvent } from '../src/transports/st
 import type { SocketRef } from '../src/domain/models.js';
 import { testConfig } from './helpers/config.js';
 import { socketFinder } from './helpers/discovery-stubs.js';
-import { stubModels, stubProvider } from './helpers/stub-provider.js';
+import { stubModels, stubProvider, type StubReply } from './helpers/stub-provider.js';
 
 // The Transport contract suite (ADR 0017's gate on pin bumps): each protocol client drives its
 // pinned CLI under the real holder in a tmux window, against a stub OpenAI-compatible provider,
@@ -81,28 +81,49 @@ function collector(describe: () => Promise<string | undefined>): { events: Struc
   return { events, emit: event => { events.push(event); for (const waiter of waiters.splice(0)) waiter(); }, next };
 }
 
-// launch `client`'s CLI under the holder in a Workspace session, its events collected in order
-// (`env` reaches the holder and the CLI)
-async function launched(client: ContractClient, toolCall?: NonNullable<Parameters<typeof stubProvider>[1]>['toolCall'], env: Record<string, string> = {}): Promise<{ connection: StructuredConnection; events: StructuredEvent[]; home: string; next: Next; started: StructuredProcess; processes: StructuredProcesses; socketPath: string }> {
+// How a case launches: Sandboxed or not, the provider's scripted replies (or the one tool call it
+// makes first), environment the CLI and its holder get beyond the stub's (the operator's
+// `adapters.<kind>.env`), the policy's extra names, and whether the place is a repository's main
+// checkout or a linked Worktree of one.
+type LaunchOptions = { sandboxed?: boolean; replies?: StubReply[]; toolCall?: { name: string; arguments: object }; env?: Record<string, string>; sandboxEnv?: string[]; git?: 'main' | 'linked' };
+const nonce = 'contract-nonce-0123456789abcdef';
+
+// launch `client`'s CLI under the holder in a Workspace session, its events collected in order;
+// the place is `<root>/place` (a repository, or a linked Worktree of `<root>/repo`, when asked),
+// the console's private directory `<root>/private`
+async function launched(client: ContractClient, { sandboxed = false, replies, toolCall, env = {}, sandboxEnv = [], git: checkout }: LaunchOptions = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-contract-')));
   const socketPath = join(root, 'tmux');
   const state = join(root, 'state');
+  const home = join(root, 'place');
   await mkdir(state);
-  const provider = await stubProvider(undefined, { toolCall });
+  const git = (...args: string[]) => run('git', ['-c', 'user.name=Contract', '-c', 'user.email=contract@example.com', ...args]);
+  const repository = checkout === 'linked' ? join(root, 'repo') : home;
+  if (checkout === undefined) await mkdir(home);
+  else {
+    expect((await git('init', '-q', repository)).code).toBe(0);
+    expect((await git('-C', repository, 'commit', '-q', '--allow-empty', '-m', 'init')).code).toBe(0);
+    if (checkout === 'linked') expect((await git('-C', repository, 'worktree', 'add', '-q', home)).code).toBe(0);
+  }
+  const provider = await stubProvider(undefined, { ...(toolCall === undefined ? {} : { toolCall }), ...(replies === undefined ? {} : { replies }) });
+  vi.stubEnv('RAC_ADAPTER_FILES_DIR', join(root, 'files'));
   cleanups.push(async () => { await provider.close(); await run(tmux, ['-S', socketPath, 'kill-server']); await rm(root, { recursive: true, force: true }); });
-  const place = adhocScratchPlace(root);
-  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-c', root, 'cat'])).code).toBe(0);
+  const place = adhocScratchPlace(home);
+  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-c', home, 'cat'])).code).toBe(0);
   expect((await run(tmux, ['-S', socketPath, 'set-option', '-t', 'work', '@rac_place', place.id])).code).toBe(0);
   const socket: SocketRef = { fingerprint: 'work', path: socketPath, device: 0, inode: 0 };
-  const launch = new LaunchService(testConfig(), socketFinder([socket]), new TmuxAdapter(), undefined, undefined, () => [], () => new Set(), async () => ({ socket, session: 'work' }), join(root, 'private'));
   const stub = await client.stub(provider.baseUrl, state);
-  const processes = holderProcesses(launch, { [client.adapter.kind]: { program: process.execPath, args: stub.args, env: { ...stub.env, ...env }, launchable: true } });
+  const configured = { program: process.execPath, args: stub.args, env: { ...stub.env, ...env }, launchable: true, sandbox: { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: sandboxEnv } };
+  const launch = new LaunchService(testConfig({ adapters: { [client.adapter.kind]: configured } }), socketFinder([socket]), new TmuxAdapter(), undefined, undefined, () => [], () => new Set(), async () => ({ socket, session: 'work' }), join(root, 'private'));
+  const processes = holderProcesses(launch, { [client.adapter.kind]: configured }, kind => launch.adapterFiles(kind));
   let started: StructuredProcess | undefined;
   const { events, emit, next } = collector(async () => started === undefined ? undefined : await processes.stderr(started.holder));
-  started = await processes.start({ id: 'contract', kind: client.adapter.kind, place }, emit);
+  started = await processes.start({ id: 'contract', kind: client.adapter.kind, place, sandboxed, nonce }, emit);
   expect(started).toBeDefined();
-  cleanups.push(async () => { started!.connection.close(); await processes.stop(started!.holder, { kind: client.adapter.kind, home: root }); });
-  return { connection: started!.connection, events, home: root, next, started: started!, processes, socketPath };
+  cleanups.push(async () => { started!.connection.close(); await processes.stop(started!.holder, { kind: client.adapter.kind, home }); });
+  // what the CLI told the provider a tool call returned, for the `n`th completion's request (from 0)
+  const toolResult = (n: number): string => JSON.stringify((JSON.parse(provider.bodies[n] ?? '{}') as { messages?: Array<{ role: string; content: unknown }> }).messages?.filter(message => message.role === 'tool').at(-1)?.content ?? '');
+  return { connection: started!.connection, events, next, toolResult, root, home, started: started!, processes, socketPath };
 }
 
 // reconnect to a launched process as a console that restarted would, from the lines read through its last idle point
@@ -117,10 +138,11 @@ const running = (pid: number) => { try { process.kill(pid, 0); return true; } ca
 describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the $name protocol client', client => {
   beforeEach(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); vi.stubEnv('RAC_INTERACTIVE_SHELL', loginShell!); });
   afterEach(() => { vi.unstubAllEnvs(); });
-  it('reports in once launched, unsandboxed, on its pinned version', async () => {
-    const { next } = await launched(client);
+  it('reports in once launched, unsandboxed, on its pinned version, with its launch\'s nonce', async () => {
+    const { next, events } = await launched(client);
     const report = await next('report');
-    expect(report).toMatchObject({ type: 'report', report: { loaded: true, sandbox: { engaged: false } } });
+    expect(report).toMatchObject({ type: 'report', report: { loaded: true, sandbox: { engaged: false }, nonce } });
+    expect(events).toContainEqual({ type: 'status', key: 'rac-sandbox', text: 'not sandboxed' });
     expect((report as Extract<StructuredEvent, { type: 'report' }>).report.version).toBe(client.pinned);
     expect(await next('conversation')).toMatchObject({ id: expect.any(String) });
   }, 60_000);
@@ -147,14 +169,151 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
   }, 60_000);
 
   it('shows a tool call as one line, running and then with its result', async () => {
-    const { connection, events, next } = await launched(client, { name: 'bash', arguments: { command: 'printf "one\\ntwo\\n"' } });
+    const { connection, events, next } = await launched(client, { replies: [{ tool: 'bash', args: { command: 'printf "one\\ntwo\\n"' } }, 'Hello from the stub provider'] });
     await next('report');
     expect(await connection.deliver('Run it')).toBe('started');
     await next('turn', event => event.type === 'turn' && event.turn.type !== 'started');
 
     const lines = events.flatMap(event => event.type === 'transcript' && event.item.kind === 'tool' ? [event.item] : []);
-    expect(lines[0]).toEqual({ id: 'call_stub', kind: 'tool', name: 'Run', summary: 'printf "one\\ntwo\\n"', state: 'running' });
-    expect(lines.at(-1)).toEqual({ id: 'call_stub', kind: 'tool', name: 'Run', summary: 'printf "one\\ntwo\\n"', state: 'done', output: 'one\ntwo\n', durationMs: expect.any(Number) });
+    expect(lines[0]).toEqual({ id: 'call_1', kind: 'tool', name: 'Run', summary: 'printf "one\\ntwo\\n"', state: 'running' });
+    expect(lines.at(-1)).toEqual({ id: 'call_1', kind: 'tool', name: 'Run', summary: 'printf "one\\ntwo\\n"', state: 'done', output: 'one\ntwo\n', durationMs: expect.any(Number) });
+  }, 60_000);
+
+  // a Turn that makes the scripted tool calls, then answers; resolves once it settles
+  const turn = async (agent: Awaited<ReturnType<typeof launched>>) => {
+    expect(await agent.connection.deliver('Use the tools')).toBe('started');
+    await agent.next('turn', event => event.type === 'turn' && event.turn.type !== 'started');
+  };
+
+  it('reports its sandbox engaged when launched Sandboxed', async () => {
+    const { next, events } = await launched(client, { sandboxed: true });
+    expect(await next('report')).toMatchObject({ report: { sandbox: { engaged: true }, nonce } });
+    expect(events).toContainEqual({ type: 'status', key: 'rac-sandbox', text: 'sandboxed' });
+  }, 60_000);
+
+  it('confines a Sandboxed Agent\'s commands and file tools to its Place', async () => {
+    const agent = await launched(client, { sandboxed: true, replies: [
+      { tool: 'bash', args: { command: 'touch ../outside-bash.txt; touch inside-bash.txt; ls -A ../private' } },
+      { tool: 'write', args: { path: '../outside-write.txt', content: 'x' } },
+      { tool: 'write', args: { path: 'inside-write.txt', content: 'x' } },
+      'done'
+    ] });
+    expect(await agent.next('report')).toMatchObject({ report: { sandbox: { engaged: true } } });
+    await turn(agent);
+    expect(existsSync(join(agent.root, 'outside-bash.txt'))).toBe(false);
+    expect(existsSync(join(agent.home, 'inside-bash.txt'))).toBe(true);
+    // the console's private directory, where holder sockets live, is hidden from commands
+    expect(agent.toolResult(1)).not.toContain('holders');
+    expect(agent.toolResult(2)).toContain('outside the paths the sandbox may write');
+    expect(existsSync(join(agent.root, 'outside-write.txt'))).toBe(false);
+    expect(existsSync(join(agent.home, 'inside-write.txt'))).toBe(true);
+  }, 60_000);
+
+  it('gives a Sandboxed Agent\'s commands only the allowlisted environment, and no tmux', async () => {
+    const agent = await launched(client, { sandboxed: true, env: { OPENROUTER_API_KEY: 'sk-contract', CONTRACT_KEPT: 'kept', LC_CONTRACT: 'locale' }, sandboxEnv: ['CONTRACT_KEPT'], replies: [
+      // the Workspace's tmux socket is `<root>/tmux`, beside the place
+      { tool: 'bash', args: { command: `env; ${tmux} -S ../tmux list-sessions; echo tmux=$?` } },
+      'done'
+    ] });
+    await agent.next('report');
+    await turn(agent);
+    const output = agent.toolResult(1);
+    expect(output).toContain('CONTRACT_KEPT=kept');
+    expect(output).toContain('LC_CONTRACT=locale');
+    expect(output).toContain('PATH=');
+    expect(output).not.toContain('sk-contract');
+    expect(output).not.toContain('RAC_LAUNCH_NONCE');
+    expect(output).not.toContain('RAC_SANDBOX_POLICY');
+    expect(output).not.toContain('tmux=0');
+  }, 60_000);
+
+  it('fails closed when the sandbox runtime cannot start: the report says why, commands are refused, the path policy holds', async () => {
+    // no bubblewrap on this PATH, so the runtime refuses to start
+    const agent = await launched(client, { sandboxed: true, env: { PATH: '/nonexistent' }, replies: [
+      { tool: 'bash', args: { command: ': > inside-bash.txt' } },
+      { tool: 'write', args: { path: '../outside-write.txt', content: 'x' } },
+      'done'
+    ] });
+    const report = await agent.next('report');
+    expect(report).toMatchObject({ report: { sandbox: { engaged: false, reason: expect.any(String) } } });
+    await turn(agent);
+    expect(agent.toolResult(1)).toContain('Sandboxed commands are refused');
+    expect(existsSync(join(agent.home, 'inside-bash.txt'))).toBe(false);
+    expect(agent.toolResult(2)).toContain('outside the paths the sandbox may write');
+  }, 60_000);
+
+  it('lets a Sandboxed Agent commit in a linked Worktree but not configure or repoint git', async () => {
+    const agent = await launched(client, { sandboxed: true, git: 'linked', replies: [
+      { tool: 'bash', args: { command: [
+        'git -c user.name=Agent -c user.email=agent@example.com commit -q --allow-empty -m sandboxed; echo commit=$?',
+        'echo "[core] fsmonitor = touch ../pwned" > ../repo/.git/config.worktree',
+        'echo "[core] fsmonitor = touch ../pwned" > ../repo/.git/worktrees/place/config.worktree',
+        'echo "gitdir: ../evil" > .git',
+        'mv .git .git.bak 2>/dev/null && echo "gitdir: ../evil" > .git && echo replaced:gitfile',
+        'echo ../evil > ../repo/.git/worktrees/place/commondir',
+        'mkdir -p ../repo/.git/worktrees/place/modules/x && echo "[core] fsmonitor = touch ../pwned" > ../repo/.git/worktrees/place/modules/x/config',
+        'true'
+      ].join('; ') } },
+      { tool: 'write', args: { path: '../repo/.git/config.worktree', content: '[core]\n\tfsmonitor = touch ../pwned\n' } },
+      { tool: 'write', args: { path: '.git', content: 'gitdir: ../evil\n' } },
+      'done'
+    ] });
+    const before = { gitfile: readFileSync(join(agent.home, '.git'), 'utf8'), commondir: readFileSync(join(agent.root, 'repo/.git/worktrees/place/commondir'), 'utf8') };
+    expect(await agent.next('report')).toMatchObject({ report: { sandbox: { engaged: true } } });
+    await turn(agent);
+    expect(agent.toolResult(1)).toContain('commit=0');
+    expect(agent.toolResult(1)).not.toContain('replaced:');
+    expect(existsSync(join(agent.home, '.git.bak'))).toBe(false);
+    expect((await run('git', ['-C', agent.home, 'log', '-1', '--format=%s'])).stdout.trim()).toBe('sandboxed');
+    expect(existsSync(join(agent.root, 'repo/.git/config.worktree')) ? readFileSync(join(agent.root, 'repo/.git/config.worktree'), 'utf8') : '').toBe('');
+    expect(existsSync(join(agent.root, 'repo/.git/worktrees/place/config.worktree')) ? readFileSync(join(agent.root, 'repo/.git/worktrees/place/config.worktree'), 'utf8') : '').toBe('');
+    expect(readFileSync(join(agent.home, '.git'), 'utf8')).toBe(before.gitfile);
+    expect(readFileSync(join(agent.root, 'repo/.git/worktrees/place/commondir'), 'utf8')).toBe(before.commondir);
+    expect(existsSync(join(agent.root, 'repo/.git/worktrees/place/modules/x'))).toBe(false);
+    expect(agent.toolResult(2)).toContain('outside the paths the sandbox may write');
+    expect(agent.toolResult(3)).toContain('protected in the sandbox');
+  }, 60_000);
+
+  it('lets a Sandboxed Agent commit in a repository\'s main checkout but write nothing that configures or redirects git', async () => {
+    // each a file, or a folder a file goes in, that git reads its configuration, code or whereabouts from
+    const protectedPaths = ['config', 'config.worktree', 'commondir', 'hooks/pre-commit', 'info/attributes', 'modules/x/config', 'worktrees/x/gitdir', 'remotes/origin', 'branches/origin'];
+    const attempts = protectedPaths.map(path => `mkdir -p "$(dirname .git/${path})" 2>/dev/null; printf '[core]\\n\\tfsmonitor = touch ../pwned\\n' > .git/${path} 2>/dev/null && echo wrote:${path}`);
+    const agent = await launched(client, { sandboxed: true, git: 'main', replies: [
+      { tool: 'bash', args: { command: ['git -c user.name=Agent -c user.email=agent@example.com commit -q --allow-empty -m sandboxed; echo commit=$?', ...attempts, 'git config core.fsmonitor "touch ../pwned"; echo config=$?',
+        // the entry itself is immovable: no moving `.git` aside to make a fresh one
+        'mv .git .git.bak 2>/dev/null && git init -q && printf \'[core]\\n\\tfsmonitor = touch ../pwned\\n\' > .git/config && echo replaced:git'].join('; ') } },
+      { tool: 'write', args: { path: '.git/config', content: '[core]\n\tfsmonitor = touch ../pwned\n' } },
+      'done'
+    ] });
+    expect(await agent.next('report')).toMatchObject({ report: { sandbox: { engaged: true } } });
+    // the console's extension made the repository's own `commondir`, as git reads none
+    const before = { config: readFileSync(join(agent.home, '.git/config'), 'utf8'), commondir: readFileSync(join(agent.home, '.git/commondir'), 'utf8') };
+    expect(before.commondir).toBe('.\n');
+    await turn(agent);
+    const output = agent.toolResult(1);
+    expect(output).toContain('commit=0');
+    expect(output).not.toContain('wrote:');
+    expect(output).not.toContain('config=0');
+    expect(output).not.toContain('replaced:');
+    expect(existsSync(join(agent.home, '.git.bak'))).toBe(false);
+    expect((await run('git', ['-C', agent.home, 'log', '-1', '--format=%s'])).stdout.trim()).toBe('sandboxed');
+    expect(readFileSync(join(agent.home, '.git/config'), 'utf8')).toBe(before.config);
+    expect(readFileSync(join(agent.home, '.git/commondir'), 'utf8')).toBe(before.commondir);
+    for (const path of protectedPaths.filter(path => !['config', 'commondir'].includes(path))) expect(existsSync(join(agent.home, '.git', path)) ? readFileSync(join(agent.home, '.git', path), 'utf8') : '', path).toBe('');
+    // the console's own git, as its dashboard runs it, finds nothing to run
+    expect((await run('git', ['-C', agent.home, 'status', '--porcelain=v1'])).code).toBe(0);
+    expect(existsSync(join(agent.root, 'pwned'))).toBe(false);
+    expect(agent.toolResult(2)).toContain('protected in the sandbox');
+  }, 60_000);
+
+  it('lets a Sandboxed Agent ask the operator with ask_user', async () => {
+    const { connection, next } = await launched(client, { sandboxed: true });
+    expect(await next('report')).toMatchObject({ report: { sandbox: { engaged: true } } });
+    expect(await connection.deliver('Please ask me a question')).toBe('started');
+    const asked = await next('question') as Extract<StructuredEvent, { type: 'question' }>;
+    expect(asked.question).toMatchObject({ text: 'Which colour?', field: { kind: 'choice', choices: ['red', 'blue'] } });
+    expect(await connection.answer(asked.question.id, 1)).toBe(true);
+    expect(await next('turn')).toEqual({ type: 'turn', turn: { type: 'settled', message: 'You answered: blue' } });
   }, 60_000);
 
   it('switches model and Effort between Turns, among the models it can reach', async () => {
@@ -274,7 +433,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
 
   it('after a replay that overflowed, resyncs: Pi\'s state says it works, and the Turn settles', async () => {
     // a replay buffer of one line: a reconnect from the launch report has lost lines
-    const launch = await launched(client, undefined, { RAC_HOLDER_REPLAY_BYTES: '1' });
+    const launch = await launched(client, { env: { RAC_HOLDER_REPLAY_BYTES: '1' } });
     await launch.next('report');
     expect(await launch.connection.deliver('Reply slowly')).toBe('started');
     await launch.next('turn', event => event.type === 'turn' && event.turn.type === 'started');

@@ -2,6 +2,8 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 type ChatMessage = { role: string; content?: unknown };
+/** One scripted completion: text, or a call to `tool` with `args`. */
+export type StubReply = string | { tool: string; args: object };
 const said = (message: ChatMessage | undefined): string => typeof message?.content === 'string' ? message.content
   : Array.isArray(message?.content) ? message.content.map(part => typeof part === 'object' && part !== null && 'text' in part ? String(part.text) : '').join('') : '';
 
@@ -10,20 +12,25 @@ const said = (message: ChatMessage | undefined): string => typeof message?.conte
  * scripted exceptions read from the conversation so far. The first completion calls `toolCall` when
  * one is given. A user message containing `slowly` is answered after `slowMs` (so a Turn can be
  * steered or cancelled while it runs); one containing `ask me` is answered with an `ask_user` call
- * offering `red` and `blue`; and a tool result is answered `You answered: <result>`. `requests`
- * counts the completions asked for and `prompts` lists the last user message of each.
+ * offering `red` and `blue`; and a tool result is answered `You answered: <result>`. Given
+ * `replies`, the nth completion answers the nth of them instead (the last one from then on).
+ * `requests` counts the completions asked for, `prompts` lists the last user message of each and
+ * `bodies` keeps each request.
  */
-export async function stubProvider(reply = 'Hello from the stub provider', { slowMs = 3_000, toolCall }: { slowMs?: number; toolCall?: { name: string; arguments: object } } = {}): Promise<{ baseUrl: string; requests: () => number; prompts: () => string[]; close: () => Promise<void> }> {
+export async function stubProvider(reply = 'Hello from the stub provider', { slowMs = 3_000, toolCall, replies }: { slowMs?: number; toolCall?: { name: string; arguments: object }; replies?: StubReply[] } = {}): Promise<{ baseUrl: string; requests: () => number; prompts: () => string[]; bodies: string[]; close: () => Promise<void> }> {
   let requests = 0;
   const prompts: string[] = [];
+  const bodies: string[] = [];
   const server: Server = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on('data', chunk => chunks.push(chunk as Buffer));
     request.on('end', () => {
       if (request.method !== 'POST' || !request.url?.endsWith('/chat/completions')) { response.writeHead(404).end(); return; }
       requests += 1;
+      const body = Buffer.concat(chunks).toString('utf8');
+      bodies.push(body);
       let messages: ChatMessage[] = [];
-      try { messages = (JSON.parse(Buffer.concat(chunks).toString('utf8')) as { messages?: ChatMessage[] }).messages ?? []; } catch { /* answer the default */ }
+      try { messages = (JSON.parse(body) as { messages?: ChatMessage[] }).messages ?? []; } catch { /* answer the default */ }
       const last = messages.at(-1);
       const lastUser = said(messages.filter(message => message.role === 'user').at(-1));
       prompts.push(lastUser);
@@ -32,7 +39,14 @@ export async function stubProvider(reply = 'Hello from the stub provider', { slo
       const answer = () => {
         if (response.destroyed) return;
         response.writeHead(200, { 'content-type': 'text/event-stream' });
-        if (toolCall !== undefined && requests === 1) {
+        const scripted = replies?.[Math.min(requests, replies.length) - 1];
+        if (typeof scripted === 'string') {
+          response.write(chunk({ role: 'assistant', content: scripted }, null));
+          response.write(chunk({}, 'stop', usage));
+        } else if (scripted !== undefined) {
+          response.write(chunk({ role: 'assistant', tool_calls: [{ index: 0, id: `call_${requests}`, type: 'function', function: { name: scripted.tool, arguments: JSON.stringify(scripted.args) } }] }, null));
+          response.write(chunk({}, 'tool_calls', usage));
+        } else if (toolCall !== undefined && requests === 1) {
           response.write(chunk({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_stub', type: 'function', function: { name: toolCall.name, arguments: JSON.stringify(toolCall.arguments) } }] }, null));
           response.write(chunk({}, 'tool_calls', usage));
         } else if (last?.role === 'tool') {
@@ -56,7 +70,7 @@ export async function stubProvider(reply = 'Hello from the stub provider', { slo
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
-  return { baseUrl: `http://127.0.0.1:${port}/v1`, requests: () => requests, prompts: () => prompts, close: () => new Promise(resolve => { server.closeAllConnections(); server.close(() => resolve()); }) };
+  return { baseUrl: `http://127.0.0.1:${port}/v1`, requests: () => requests, prompts: () => prompts, bodies, close: () => new Promise(resolve => { server.closeAllConnections(); server.close(() => resolve()); }) };
 }
 
 /** A Pi agent directory whose models are the stub provider's `stub/echo`, priced so a Turn has a cost, and the reasoning `stub/think`. */

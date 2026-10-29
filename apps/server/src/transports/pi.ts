@@ -28,9 +28,9 @@ const parseReport = (statusText: unknown): LaunchReport | undefined => {
   if (typeof statusText !== 'string') return undefined;
   let parsed: unknown;
   try { parsed = JSON.parse(statusText); } catch { return undefined; }
-  if (!isObject(parsed) || parsed.loaded !== true || typeof parsed.version !== 'string' || !isObject(parsed.sandbox) || typeof parsed.sandbox.engaged !== 'boolean') return undefined;
+  if (!isObject(parsed) || parsed.loaded !== true || typeof parsed.version !== 'string' || typeof parsed.nonce !== 'string' || !isObject(parsed.sandbox) || typeof parsed.sandbox.engaged !== 'boolean') return undefined;
   const reason = typeof parsed.sandbox.reason === 'string' ? parsed.sandbox.reason : undefined;
-  return { loaded: true, sandbox: { engaged: parsed.sandbox.engaged, ...(reason === undefined ? {} : { reason }) }, version: parsed.version };
+  return { loaded: true, sandbox: { engaged: parsed.sandbox.engaged, ...(reason === undefined ? {} : { reason }) }, version: parsed.version, nonce: parsed.nonce };
 };
 // A dialog's question and the tool call it names. The RAC Pi extension titles its dialogs with
 // JSON `{ rac: 'dialog', toolCallId, text }`, since Pi's dialog requests carry no tool call of their
@@ -308,12 +308,13 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
           emit({ type: 'status', key: record.statusKey, ...(typeof record.statusText === 'string' && record.statusText !== '' ? { text: bounded(record.statusText) } : {}) });
           return;
         }
-        if (reported) return;
         {
+          // every report goes up: the console keeps only the one bearing its launch's nonce
           const report = parseReport(record.statusText);
           if (report === undefined) return;
-          reported = true;
           emit({ type: 'report', report });
+          if (reported) return;
+          reported = true;
         }
         void refresh();
         void history(false);

@@ -84,7 +84,7 @@ function structuredCapability(adapter: StructuredAdapter, configured: AdapterCon
     inlineQuestions: true,
     steer: adapter.steers,
     commands: false,
-    sandbox: false,
+    sandbox: adapter.sandbox === true,
   };
 }
 

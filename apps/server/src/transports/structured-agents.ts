@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { structuredAdapterFor } from '../adapters/registry.js';
@@ -30,9 +30,10 @@ export type HolderLaunch = { program: string; args: string[]; env: Record<string
 export type StructuredRecord = { id: string; kind: AgentKind; placeId: string; home: string; sandboxed: boolean; conversationId?: string; holder?: HolderRef; lifecycle: AgentLifecycle; reason?: string; origin: 'operator'; role?: 'conductor'; launchedAt: number; version?: string };
 /**
  * What a launch starts: one process of `kind` at `place`, for the Agent `id`, on a new
- * Conversation (on `model` when Allowed models are configured) or resuming the Conversation `resume`.
+ * Conversation (on `model` when Allowed models are configured) or resuming the Conversation `resume`,
+ * Sandboxed or not, and the nonce its launch report must echo.
  */
-export type StructuredLaunch = { id: string; kind: AgentKind; place: Place; resume?: string; continue?: true; model?: ModelSetting };
+export type StructuredLaunch = { id: string; kind: AgentKind; place: Place; resume?: string; continue?: true; model?: ModelSetting; sandboxed: boolean; nonce: string };
 /** One line between the console and an Agent's process, as it went over the wire. */
 export type RawLine = { from: 'agent' | 'console'; line: string };
 /**
@@ -85,18 +86,23 @@ function clientOver(adapter: StructuredAdapter, holder: HolderRef, { channel, he
   return { holder: { ...holder, ...pid }, connection: adapter.client(counted, emit, attached), cursor: () => read, raw: () => raw, ...(attached === undefined ? {} : { dropped: attached.dropped }) };
 }
 
-/** The structured Agents' processes, each run under a holder in its Place's Workspace session. */
-export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs): StructuredProcesses {
+/**
+ * The structured Agents' processes, each run under a holder in its Place's Workspace session.
+ * `files` are the kind's console-rendered files. The operator's `env` cannot replace what the
+ * Adapter composes from them and the launch (its sandbox policy, the nonce its report must echo).
+ */
+export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs, files: (kind: AgentKind) => Promise<Record<string, string> | undefined> = async () => undefined): StructuredProcesses {
   return {
-    async start({ id, kind, place, resume, continue: latest, model }, emit) {
+    async start({ id, kind, place, resume, continue: latest, model, sandboxed, nonce }, emit) {
       const adapter = structuredAdapterFor(kind);
       const configured = configs[kind];
       if (adapter === undefined || configured?.launchable !== true) return undefined;
       const located = resume === undefined ? undefined : await adapter.conversations.locate(resume, place.home);
       if (resume !== undefined && located === undefined) return undefined;
       const allowed = configured.allowedModels ?? [];
-      const spec = adapter.launch({ cwd: place.home, sandboxed: false, ...(located === undefined ? {} : { resume: located }), ...(latest === true ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
-      const holder = await windows.openHolderWindow(place, id, { program: configured.program, args: [...spec.args, ...configured.args], env: { ...spec.env, ...configured.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
+      const rendered = await files(kind);
+      const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(rendered === undefined ? {} : { files: rendered }), ...(located === undefined ? {} : { resume: located }), ...(latest === true ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
+      const holder = await windows.openHolderWindow(place, id, { program: configured.program, args: [...spec.args, ...configured.args], env: { ...configured.env, ...spec.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
       if (holder === undefined) return undefined;
       const connected = await connectHolder(holder.socket);
       if (connected === undefined) { await windows.closeHolder(holder); return undefined; }
@@ -128,8 +134,9 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
 // Conversation (after the replay) or ended a Turn: until then it may be working. `busy` while an operation (a delivery, a Conversation or model
 // change, a relaunch or reattach) is in flight. `turn` is how the latest
 // Turn ended; `draft` the text offered for the composer until the next prompt or steer, numbered
-// by `offers` so the web takes each one once
-type Live = { generation: number; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
+// by `offers` so the web takes each one once. `nonce` is what the latest process's launch report
+// must echo, and `refusal` why its report refused it
+type Live = { generation: number; nonce?: string; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -182,15 +189,15 @@ export class StructuredAgents {
   onChange(listener: () => void): void { this.listeners.add(listener); }
 
   /**
-   * Launch a `kind` Agent at the Place, resuming `resume` on the model it was on, or on a new
-   * Conversation on `model`, else the first Allowed model, at the Effort asked for, else the
-   * entry's default. False when its process could not start, or `model` is not an Allowed model.
+   * Launch a `kind` Agent at the Place, Sandboxed or not, resuming `resume` on the model it was on,
+   * or on a new Conversation on `model`, else the first Allowed model, at the Effort asked for, else
+   * the entry's default. False when its process could not start, or `model` is not an Allowed model.
    */
-  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model }: { resume?: string; continue?: true; model?: ModelSetting } = {}): Promise<boolean> {
+  async launch(place: Place, kind: AgentKind, { resume, continue: latest, model, sandboxed = false }: { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean } = {}): Promise<boolean> {
     const entry = model === undefined ? (resume === undefined && latest !== true ? this.allowed(kind)[0] : undefined) : this.allowed(kind).find(candidate => candidate.model === model.model);
     if (model !== undefined && entry === undefined) return false;
     const records = await this.load();
-    const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed: false, lifecycle: 'starting', origin: 'operator', launchedAt: Date.now() };
+    const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed, lifecycle: 'starting', origin: 'operator', launchedAt: Date.now() };
     const live = this.idle();
     records.push(record);
     this.live.set(record.id, live);
@@ -248,13 +255,16 @@ export class StructuredAgents {
   // Start a process for the record and wait for its launch report: true once started (it may
   // then have failed to report in), false when it was closed meanwhile, undefined when no process
   // started. Events from an earlier process of the same Agent are ignored.
-  private async start(record: StructuredRecord, live: Live, launch: StructuredLaunch): Promise<boolean | undefined> {
+  private async start(record: StructuredRecord, live: Live, launch: Omit<StructuredLaunch, 'sandboxed' | 'nonce'>): Promise<boolean | undefined> {
     const generation = live.generation += 1;
+    // each process reports in under its own nonce, Sandboxed as the Agent was launched
+    live.nonce = randomBytes(16).toString('base64url');
+    delete live.refusal;
     const reported = new Promise<boolean>(resolve => {
       live.reported = resolve;
       setTimeout(() => resolve(false), this.options.reportTimeoutMs ?? 30_000).unref();
     });
-    const started = await this.processes.start(launch, event => this.observe(record, live, generation, event)).catch(() => undefined);
+    const started = await this.processes.start({ ...launch, sandboxed: record.sandboxed, nonce: live.nonce }, event => this.observe(record, live, generation, event)).catch(() => undefined);
     // closed while it started: nothing may keep running for it
     if (this.live.get(record.id) !== live || live.generation !== generation) {
       if (started !== undefined) { started.connection.close(); await this.processes.stop(started.holder, record); }
@@ -263,7 +273,7 @@ export class StructuredAgents {
     if (started === undefined) return undefined;
     await this.adopt(record, live, started);
     if (await reported) await this.noteUnreachableModels(record, live);
-    else if (record.lifecycle === 'starting') await this.fail(record, live, 'Its process did not report in after starting.', true);
+    else if (record.lifecycle === 'starting') await this.fail(record, live, live.refusal ?? 'Its process did not report in after starting.', true);
     return true;
   }
 
@@ -576,7 +586,13 @@ export class StructuredAgents {
     if (this.live.get(record.id) !== live || live.generation !== generation) return;
     switch (event.type) {
       case 'report':
-        if (record.lifecycle !== 'starting') return;
+        if (record.lifecycle !== 'starting' || event.report.nonce !== live.nonce) return;
+        // a Sandboxed Agent whose sandbox did not arm never runs (ADR 0004)
+        if (record.sandboxed && !event.report.sandbox.engaged) {
+          live.refusal = `Its sandbox did not start: ${event.report.sandbox.reason ?? 'no reason given'}`;
+          live.reported?.(false);
+          return;
+        }
         record.lifecycle = 'live';
         record.version = event.report.version;
         live.reported?.(true);

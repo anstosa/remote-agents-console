@@ -159,6 +159,12 @@ const requestedKind = (request: FastifyRequest): { kind?: AgentKind; invalid?: t
   if (value === undefined) return {};
   return (agentKinds as readonly string[]).includes(value as string) ? { kind: value as AgentKind } : { invalid: true };
 };
+// a launch's kind and its optional Sandboxed choice, which must be a boolean
+const requestedLaunch = (request: FastifyRequest): { kind?: AgentKind; sandboxed?: boolean; invalid?: true } => {
+  const { sandboxed } = body(request);
+  if (sandboxed !== undefined && typeof sandboxed !== 'boolean') return { invalid: true };
+  return { ...requestedKind(request), ...(sandboxed === undefined ? {} : { sandboxed }) };
+};
 // parse attachment records without imposing a file-count limit
 const promptAttachments = (value: unknown): PromptAttachment[] | undefined => {
   // treat an omitted collection as empty
@@ -199,7 +205,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     workspace: serverCheckout(),
     hostWorkspace: serverCheckoutOnHost(config.projects, process.env.RAC_HOST_REPOSITORY?.trim() || process.env.RAC_HOST_WORKSPACE)
   };
-  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch: LaunchService = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId), undefined, async (place, kind, options) => await structuredAgents.launch(place, kind, options)); const structuredAgents: StructuredAgents = deps.structuredAgents ?? new StructuredAgents(holderProcesses(launch, config.adapters), { allowedModels: kind => config.adapters[kind]?.allowedModels ?? [] }); discovery.useStructuredAgents?.(structuredAgents); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const transport = deps.prompts?.transport ?? new TmuxTransport(discovery, tmux, { begin: agentId => prompts.beginAgentMutation(agentId), version: agentId => prompts.mutationVersion(agentId), busy: agentId => prompts.mutating(agentId), restored: async (scope, deliveredPromptId) => await prompts.resetRestored(scope, deliveredPromptId) }, queuedPrompts.resets, undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, async (agentId, to) => await switchByRestart(agentId, to)); const prompts: PromptService = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, undefined, undefined, calendarLifecycle, transport, structuredAgents.turns); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, undefined, prSwitch); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
+  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, undefined, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch: LaunchService = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId), undefined, async (place, kind, options) => await structuredAgents.launch(place, kind, options)); const structuredAgents: StructuredAgents = deps.structuredAgents ?? new StructuredAgents(holderProcesses(launch, config.adapters, kind => launch.adapterFiles(kind)), { allowedModels: kind => config.adapters[kind]?.allowedModels ?? [] }); discovery.useStructuredAgents?.(structuredAgents); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const transport = deps.prompts?.transport ?? new TmuxTransport(discovery, tmux, { begin: agentId => prompts.beginAgentMutation(agentId), version: agentId => prompts.mutationVersion(agentId), busy: agentId => prompts.mutating(agentId), restored: async (scope, deliveredPromptId) => await prompts.resetRestored(scope, deliveredPromptId) }, queuedPrompts.resets, undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, async (agentId, to) => await switchByRestart(agentId, to)); const prompts: PromptService = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, undefined, undefined, calendarLifecycle, transport, structuredAgents.turns); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, undefined, prSwitch); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
   const temporaryPreviews = deps.temporaryPreviews ?? new TemporaryPreviewService();
   // publish only boot-opaque presentations of trusted configured actions
   const buttonCatalog = deps.buttonActions?.catalog ?? new ConfiguredButtonCatalog(config);
@@ -3189,14 +3195,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.post('/api/worktrees/:id/launch', async (request, reply) => {
     controlled(request, true);
     const worktreeId = (request.params as { id: string }).id;
-    const kind = requestedKind(request);
+    const kind = requestedLaunch(request);
     // reject an unknown kind before any handoff
     if (kind.invalid) return reply.code(400).send({ error: 'invalid agent kind' });
     const model = requestedModel(body(request), kind.kind);
     if (model.error !== undefined) return reply.code(400).send({ error: model.error });
     const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
     // require a successful launch handoff (refuses an unconfigured or unlaunchable kind)
-    const launched = await launchTmuxAgent(waitForAgent, before, inWorktree(worktreeId), () => launch.launch(worktreeId, kind.kind, model.model));
+    const launched = await launchTmuxAgent(waitForAgent, before, inWorktree(worktreeId), () => launch.launch(worktreeId, kind.kind, model.model, kind.sandboxed));
     if ('agent' in launched) return reply.code(201).send({ agentId: launched.agent.id });
     if (launched.failure === 'refused') return reply.code(409).send({ error: 'Could not start the worktree agent.' });
     // report a true timeout
@@ -3239,7 +3245,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.post('/api/projects/:id/launch', async (request, reply) => {
     controlled(request, true);
     const projectId = (request.params as { id: string }).id;
-    const kind = requestedKind(request);
+    const kind = requestedLaunch(request);
     // reject an unknown kind before any handoff
     if (kind.invalid) return reply.code(400).send({ error: 'invalid agent kind' });
     const model = requestedModel(body(request), kind.kind);
@@ -3249,7 +3255,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (place === undefined) return reply.code(404).send({ error: 'project unavailable' });
     const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
     // require a successful launch handoff (refuses an unconfigured or unlaunchable kind)
-    const launched = await launchTmuxAgent(waitForAgent, before, atPlace(place.id), () => launch.launchProjectDirectory(projectId, kind.kind, model.model));
+    const launched = await launchTmuxAgent(waitForAgent, before, atPlace(place.id), () => launch.launchProjectDirectory(projectId, kind.kind, model.model, kind.sandboxed));
     if ('agent' in launched) return reply.code(201).send({ agentId: launched.agent.id });
     if (launched.failure === 'refused') return reply.code(409).send({ error: 'Could not start the project agent.' });
     // report a true timeout
@@ -3671,14 +3677,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   app.post('/api/agents/launch', async (request, reply) => {
     controlled(request, true);
-    const kind = requestedKind(request);
+    const kind = requestedLaunch(request);
     // reject an unknown kind before any handoff
     if (kind.invalid) return reply.code(400).send({ error: 'invalid agent kind' });
     const model = requestedModel(body(request), kind.kind);
     if (model.error !== undefined) return reply.code(400).send({ error: model.error });
     const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
     const scratch = await launch.scratchPlace();
-    const launched = await launchTmuxAgent(waitForAgent, before, atPlace(scratch.id), () => launch.launchHome(kind.kind, model.model));
+    const launched = await launchTmuxAgent(waitForAgent, before, atPlace(scratch.id), () => launch.launchHome(kind.kind, model.model, kind.sandboxed));
     if ('agent' in launched) return reply.code(201).send({ agentId: launched.agent.id });
     if (launched.failure === 'refused') return reply.code(409).send({ error: 'Could not start a new agent session.' });
     // report a true timeout
@@ -3690,7 +3696,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.post('/api/folders/open', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
     controlled(request, true);
     const { path, action } = body(request);
-    const kind = requestedKind(request);
+    const kind = requestedLaunch(request);
     if (action !== 'agent' && action !== 'terminal' && action !== 'empty') return reply.code(400).send({ error: 'invalid action' });
     if (kind.invalid) return reply.code(400).send({ error: 'invalid agent kind' });
     const model = requestedModel(body(request), kind.kind);
@@ -3703,7 +3709,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (action === 'agent') {
       const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
       const launched = await launchTmuxAgent(waitForAgent, before, atPlace(place.id), async () => {
-        if (!await launch.launchAt(place, kind.kind, model.model)) return false;
+        if (!await launch.launchAt(place, kind.kind, model.model, kind.sandboxed)) return false;
         await openedFolders.record(folder.path).catch(() => undefined);
         return true;
       });

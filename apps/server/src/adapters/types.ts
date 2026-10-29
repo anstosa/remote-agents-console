@@ -164,9 +164,18 @@ export type ReviewRuns = {
  * checkout root the rendered content and file paths are named against (under the
  * host bridge this is `RAC_HOST_REPOSITORY`), and the tmux binary to bake into a
  * hook command — omitted under the bridge, where the agent runs on the host and
- * the reporter resolves tmux from PATH instead.
+ * the reporter resolves tmux from PATH instead. `sandbox` is the kind's sandbox settings, for a
+ * kind that sandboxes its own tool calls.
  */
-export type AdapterFileContext = { repoRoot: string; tmuxBin?: string };
+export type AdapterFileContext = { repoRoot: string; tmuxBin?: string; sandbox?: SandboxSettings };
+/**
+ * The sandbox settings for one kind (ADR 0004): the operator's shared and per-kind `sandbox` lists
+ * concatenated, plus the console's own private paths in `denyRead` and `denyWrite`. Domains use
+ * the sandbox runtime's grammar; paths are absolute or `~`-prefixed; `env` names the environment
+ * variables a sandboxed command gets beyond the base set. `repositories` are the console's own
+ * (its Projects and checkout), which no writable folder may hold.
+ */
+export type SandboxSettings = { allowedDomains: string[]; deniedDomains: string[]; allowWrite: string[]; denyWrite: string[]; denyRead: string[]; env: string[]; repositories?: string[] };
 
 /**
  * The agent-agnostic facts the console feeds `panes.classify`/`classifyProcess`
@@ -485,13 +494,18 @@ export interface StructuredAdapter {
   readonly steers: boolean;
   /** The npm package and version the console pins the kind's CLI at; its launch report should show the version (ADR 0017). */
   pinned(): { package: string; version: string } | undefined;
+  /** Console-owned files rendered at boot, as for `Adapter.files`. */
+  readonly files?: (context: AdapterFileContext) => Record<string, string>;
+  /** The kind confines its own tool calls when launched Sandboxed, failing its launch if it cannot. */
+  readonly sandbox?: true;
 }
 /**
  * What a structured launch starts: a new Conversation, the one at `resume` (located by the
  * kind's store), or (`continue`) the latest one started in `cwd`; with Allowed models configured,
- * `models` scopes the Agent to them and names the model a new Conversation starts on.
+ * `models` scopes the Agent to them and names the model a new Conversation starts on. `files` are
+ * the kind's console-rendered files, and `nonce` is what its launch report must echo.
  */
-export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting } };
+export type StructuredLaunchInput = { cwd: string; sandboxed: boolean; resume?: string; continue?: true; models?: { allowed: readonly string[]; start?: ModelSetting }; files?: Record<string, string>; nonce?: string };
 /** One Allowed model (`adapters.pi.allowedModels`): an exact `provider/id` and an optional default Effort. */
 export type AllowedModel = { model: string; effort?: string };
 
@@ -506,7 +520,7 @@ export type AllowedModel = { model: string; effort?: string };
  */
 /** Trusted shell commands used to inspect and update one configured agent CLI. */
 export type AdapterUpdateCommands = { current: string; latest: string; run: string };
-export type AdapterLaunchConfig = { program: string; args: string[]; env: Record<string, string>; launchable: boolean; unavailableReason?: string; setup?: string; teardown?: string; updates?: AdapterUpdateCommands; allowedModels?: AllowedModel[] };
+export type AdapterLaunchConfig = { program: string; args: string[]; env: Record<string, string>; launchable: boolean; unavailableReason?: string; setup?: string; teardown?: string; updates?: AdapterUpdateCommands; allowedModels?: AllowedModel[]; sandbox?: SandboxSettings };
 /** The configured adapters, keyed by kind; empty for an observe-only console. */
 export type AdapterConfigs = Partial<Record<AgentKind, AdapterLaunchConfig>>;
 

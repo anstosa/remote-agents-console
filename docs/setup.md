@@ -402,8 +402,8 @@ host-side agent reads the file the container wrote.
 ### Pi
 
 `adapters.pi` enables Pi Agents. The console runs its own pinned Pi, so the entry
-takes no `program` or `updates`, only `args`, `env`, `setup`, `teardown` and
-`allowedModels`.
+takes no `program` or `updates`, only `args`, `env`, `setup`, `teardown`,
+`allowedModels` and `sandbox`. Pi is driven over its RPC mode rather than in a terminal (ADR 0017): a Pi Agent's Panel is a transcript, and its process runs under a small holder in a tagged window of the Workspace's tmux session, so a console deploy does not stop it. Pi cannot launch under the host bridge.
 
 **Allowed models** are the only models a Pi Agent may run on: one ordered list,
 edited under **Global settings → Agents → Pi**, each entry an exact Pi
@@ -429,8 +429,9 @@ edited under **Global settings → Agents → Pi**, each entry an exact Pi
   first entry and the transcript says so.
 - When an entry matches no model Pi can reach (a typo, or a lapsed login), the
   Agent's transcript says so once it starts.
-- With no entries, Pi uses its own default model (and a Worktree's
-  `.pi/settings.json` can choose it), and the model picker is hidden.
+- With no entries, Pi uses its own default model (from your
+  `~/.pi/agent/settings.json`; a Worktree's `.pi/settings.json` never loads), and
+  the model picker is hidden.
 
 **Named conversations.** A Pi Agent names, starts and switches Conversations in
 place while it is idle, keeping its queued prompts. The Named list includes Pi
@@ -455,6 +456,36 @@ console reconnects and a Turn in flight completes.
   npm, with no Update button: Pi updates when the console's pin is bumped. A Pi
   still running another version after a deploy restarts on the pinned one when it
   is next idle, on the same Conversation, keeping its queue.
+
+**Logins.** RAC's Pi shares your `~/.pi/agent`, so log in once in a Pi you start yourself and the console's Pi uses it: `/login openai` (Sign in with ChatGPT; not the older `openai-codex` login) and `/login openrouter`. Keys then live in `~/.pi/agent/auth.json` rather than your environment, which is where they belong: a Sandboxed Agent's commands never see that file.
+
+**What loads.** RAC's Pi loads only what the console vets. It starts with `-ne` (none of your own extensions or packages, and none of Pi's built-ins, so no server in your `mcp.json` starts), `--offline` (no package installs or tool downloads at startup; `grep` and `find` need `rg` and `fd` on your PATH or already in `~/.pi/agent/bin`), `--no-approve` (a Worktree's `.pi/settings.json`, `.pi/extensions` and `.pi/mcp.json` never load), and an explicit `--tools read,bash,edit,write,grep,find,ls,ask_user`. The console's own extension is always loaded. A Worktree's skills and prompt templates do load: the console passes `.pi/skills`, `.agents/skills` and `.pi/prompts` explicitly when they exist, and your global skills load as usual. To opt one of your own extensions back in, add it to `args`, for example `"args": ["-e", "/home/me/.pi/agent/extensions/approval-gate.ts"]`; it then runs unconfined inside Pi's process, so opt in only what you trust. Its tools stay hidden from the model until you name them too, with your own full list after it (the last `--tools` wins): `"--tools", "read,bash,edit,write,grep,find,ls,ask_user,my_tool"`.
+
+**`!` commands.** The console offers none for Pi, and its extension refuses them. Use a Terminal.
+
+**Sandbox.** Pi launches Sandboxed unless you choose **Without sandbox** for that one launch (ADR 0004). Pi itself runs on the host; only the model's tool calls are confined:
+
+- `bash` runs each command through the sandbox runtime (`bubblewrap` and `socat` must be installed): it may write only the Agent's folder (its Worktree), what a commit writes in its git directory (see below) and a per-session temp directory; it reaches only the domains you allow; it cannot open Unix sockets, read Pi's credentials, or reach the console's own state (its private directory with the holder sockets, `.data`, `.env` and config file) or the tmux server.
+- Commands may commit, in a main checkout or a linked Worktree, but write nothing that configures git, runs code through it or points it elsewhere: `config`, `config.worktree`, `hooks/`, `info/`, `modules/`, `commondir`, `worktrees/`, `remotes/`, `branches/`, and a linked Worktree's `.git` file and its own `commondir` and `gitdir`. A `.git` cannot be moved aside and replaced, and outside a repository a command cannot make one. In a linked Worktree the shared git directory's other files, `packed-refs` included, stay read-only.
+- **A Sandboxed launch writes into a main checkout's `.git`:** when they are missing, it adds a `commondir` reading `.` (which git treats exactly as no `commondir`) and empty `hooks/`, `info/`, `modules/`, `worktrees/`, `remotes/` and `branches/` folders, so that each can be protected in place. Otherwise the sandbox would hold an empty placeholder there while each command runs, which stops git.
+- Nothing is writable in a folder that is your home directory or above it, or that holds a configured Project or the console's own checkout: a Scratch or directory Agent there can read but not write. Searching (`grep`, `find`, `ls`) from a folder that holds a denied path is refused, so search a subfolder.
+- Files other tools run code from stay protected anywhere in the folder, for commands and file tools alike: shell rc files, `.gitconfig`, `.gitmodules`, `.mcp.json`, nested `.git`, `.vscode`, `.idea`, `.claude/settings*.json`, `.claude/commands` and `.claude/agents`, and the folder's `.pi`.
+- The file tools (`read`, `write`, `edit`, `grep`, `find`, `ls`) follow the same rules, checked inside Pi: no reads of Pi's credentials and other Conversations (`auth.json`, `oauth.json`, `mcp-auth.json`, `models.json`, `mcp.json`, `sessions/`), of `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gh`, Claude's and Codex's credentials, of `/proc`, or of your `denyRead` paths, and writes only where commands may write, never into Pi's state directory. `bash` runs one call at a time with them, so a command cannot swap a file under a check.
+- Each command gets an allowlisted environment, not Pi's: `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, the sandbox's proxy variables, and the names you list in `sandbox.env`. Provider keys and tokens in your environment never reach a command.
+- If the sandbox cannot start, the launch fails with the reason (shown in the Agent's Panel) and nothing is dispatched to it. A Sandboxed Agent's status line says it is Sandboxed.
+
+The lists come from a top-level `sandbox` block, shared, followed by `adapters.pi.sandbox`; both take `allowedDomains`, `deniedDomains` (host names or `*.host` patterns, no URLs; none allowed means no network), `allowWrite`, `denyWrite`, `denyRead` (absolute or `~/` paths) and `env` (variable names):
+
+```json
+{
+  "sandbox": { "allowedDomains": ["registry.npmjs.org", "github.com", "*.github.com"], "denyRead": ["~/.ssh", "~/.aws"] },
+  "adapters": { "pi": { "sandbox": { "allowWrite": ["~/.cache/pnpm"], "env": ["GH_TOKEN"] } } }
+}
+```
+
+What is not confined: the Pi process itself (its provider traffic and its own state writes), and extensions you opt in with `-e`.
+
+**A Pi you start by hand** in a Terminal stays a Terminal: the console never recognises or drives it.
 
 ## Reviews
 

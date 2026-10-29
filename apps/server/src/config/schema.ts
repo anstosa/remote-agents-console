@@ -9,7 +9,7 @@ import { gitCommonDir, listWorktrees } from '../git/worktrees.js';
 import { adapterFor } from '../adapters/registry.js';
 import { codexProgramName, omxProgramName } from '../adapters/program-names.js';
 import { hostVisibleRepoRoot } from '../adapters/files.js';
-import { agentKinds, type AdapterConfigs, type AdapterLaunchConfig, type AgentKind } from '../adapters/types.js';
+import { agentKinds, type AdapterConfigs, type AdapterLaunchConfig, type AgentKind, type SandboxSettings } from '../adapters/types.js';
 import { instanceIconNames, type InstanceIcon } from '../instance-icon.js';
 import { isIP } from 'node:net';
 import { defaultDavoContext, defaultDavoName } from '../integrations/realtime/settings.js';
@@ -96,8 +96,14 @@ const adapterEntry = z.object({ program: adapterProgram, args: z.array(adapterAr
 // default), each with an optional default Effort; the only models a Pi Agent may run on
 const allowedModels = z.array(z.object({ model: agentModel.refine(value => /^[^/[\]]+\/[^[\]]+$/u.test(value), 'an Allowed model is an exact `provider/id`, never a pattern'), effort: z.enum(piEfforts).optional() }).strict()).max(50)
   .refine(entries => new Set(entries.map(entry => entry.model)).size === entries.length, 'each Allowed model is listed once');
+// What a Sandboxed Agent's commands may reach (ADR 0004), shared at the top level and per kind:
+// domains in the sandbox runtime's grammar (`host`, `*.host`), absolute or `~/` paths, and the
+// names of the extra environment variables commands get. Never a way to open Unix sockets.
+const sandboxPath = z.string().min(1).max(4096).refine(value => (value.startsWith('/') || value === '~' || value.startsWith('~/')) && !value.includes('\0'), 'sandbox paths must be absolute or start with ~/');
+const sandboxDomain = z.string().min(1).max(253).regex(/^[^\s/:@]+(?::\d{1,5})?$/u, 'a sandbox domain is a host name or pattern, not a URL');
+const sandboxLists = z.object({ allowedDomains: z.array(sandboxDomain).max(256).optional(), deniedDomains: z.array(sandboxDomain).max(256).optional(), allowWrite: z.array(sandboxPath).max(256).optional(), denyWrite: z.array(sandboxPath).max(256).optional(), denyRead: z.array(sandboxPath).max(256).optional(), env: z.array(adapterEnvName).max(256).optional() }).strict();
 // the console pins Pi and supplies its program (ADR 0017), so `adapters.pi` only enables the kind
-const piEntry = adapterEntry.omit({ program: true, updates: true }).extend({ allowedModels: allowedModels.optional() }).strict('adapters.pi takes only args, env, setup, teardown and allowedModels: Pi is pinned by the console as its own dependency, so it has no program or update commands');
+const piEntry = adapterEntry.omit({ program: true, updates: true }).extend({ allowedModels: allowedModels.optional(), sandbox: sandboxLists.optional() }).strict('adapters.pi takes only args, env, setup, teardown, allowedModels and sandbox: Pi is pinned by the console as its own dependency, so it has no program or update commands');
 // keyed by kind, one strict entry each; an omitted block is observe-only (nothing launches)
 const adaptersSchema = z.object({ codex: adapterEntry.optional(), omx: adapterEntry.optional(), claude: adapterEntry.optional(), pi: piEntry.optional(), opencode: adapterEntry.optional() }).strict();
 // constrain icons to supported aliases
@@ -134,6 +140,7 @@ export const sourceSchema = z.object({
   // key tables over the built-in `root` and `prefix` (config/keys.ts validates them)
   keys: z.unknown().optional(),
   adapters: adaptersSchema.default({}),
+  sandbox: sandboxLists.optional(),
   integrations: integrationFeatures,
   googleCalendar: googleCalendarConfigSchema.default({}),
   // how the Review tour and the opt-in Code review run (ADR 0010); every field is optional
@@ -351,9 +358,9 @@ export function applyListenOverrides(input: unknown, env: Record<string, string 
 type ParsedAdapters = z.output<typeof adaptersSchema>;
 // resolve each configured adapter program: normalise args/env, probe executability
 // (unless bridged), and warn about operator arguments the Adapter reserves.
-async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean, warn: (message: string) => void): Promise<AdapterConfigs> {
+async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean, warn: (message: string) => void, sandbox?: z.output<typeof sandboxLists>): Promise<AdapterConfigs> {
   const configs: AdapterConfigs = {};
-  if (parsed.pi !== undefined) configs.pi = piConfig(parsed.pi, warn);
+  if (parsed.pi !== undefined) configs.pi = piConfig(parsed.pi, warn, sandbox);
   for (const kind of agentKinds) {
     const entry = kind === 'pi' ? undefined : parsed[kind] as z.output<typeof adapterEntry> | undefined;
     if (entry === undefined) continue;
@@ -408,13 +415,18 @@ async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean
 // Pi runs the console's own pinned copy under the console's own Node (the Pi Adapter names the
 // CLI), which only a console driving the host's tmux directly can start: the host bridge's tmux
 // runs on the host, where the container's copy is not
-function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message: string) => void): AdapterLaunchConfig {
-  const config: AdapterLaunchConfig = { program: process.execPath, args: entry.args ?? [], env: entry.env ?? {}, launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.allowedModels === undefined || entry.allowedModels.length === 0 ? {} : { allowedModels: entry.allowedModels }) };
+function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message: string) => void, shared?: z.output<typeof sandboxLists>): AdapterLaunchConfig {
+  const config: AdapterLaunchConfig = { program: process.execPath, args: entry.args ?? [], env: entry.env ?? {}, launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.allowedModels === undefined || entry.allowedModels.length === 0 ? {} : { allowedModels: entry.allowedModels }), sandbox: sandboxSettings(shared, entry.sandbox) };
   if (process.env.RAC_HOST_TMUX_DIR === undefined) return config;
   config.launchable = false;
   config.unavailableReason = 'Pi cannot launch under the host bridge: the console runs its pinned Pi itself';
   warn(`adapters.pi: ${config.unavailableReason}`);
   return config;
+}
+// a kind's sandbox settings: the shared lists, then the kind's own, each without repeats
+function sandboxSettings(shared: z.output<typeof sandboxLists> = {}, own: z.output<typeof sandboxLists> = {}): SandboxSettings {
+  const list = (key: Exclude<keyof SandboxSettings, 'repositories'>) => [...new Set([...shared[key] ?? [], ...own[key] ?? []])];
+  return { allowedDomains: list('allowedDomains'), deniedDomains: list('deniedDomains'), allowWrite: list('allowWrite'), denyWrite: list('denyWrite'), denyRead: list('denyRead'), env: list('env') };
 }
 // OMX was once launched through `adapters.codex` (one kind recognised both). Now that
 // OMX is its own kind (ADR 0005), a Codex entry whose program is OMX — or an OMX entry
@@ -431,7 +443,7 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
   const warn = options.warn ?? (() => {});
   // the host bridge cannot stat host program paths from inside the container
   const checkExecutables = options.checkExecutables ?? process.env.RAC_HOST_TMUX_DIR === undefined;
-  const adapters = await resolveAdapters(parsed.adapters, checkExecutables, warn);
+  const adapters = await resolveAdapters(parsed.adapters, checkExecutables, warn, parsed.sandbox);
   const review = resolveReviewConfig(parsed.review, parsed.adapters);
   const keys = parsed.keys === undefined ? undefined : parseKeysConfig(parsed.keys);
   if (isIP(parsed.listen.host) === 0) throw new Error('listener host must be an IP address literal');

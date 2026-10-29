@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { piClient, piEfforts } from '../transports/pi.js';
 import { locatePiSession, piConversationName, piConversationSummaries, validPiSessionId } from './pi-conversations.js';
+import { staticPolicy } from './pi-sandbox.js';
 import type { StructuredAdapter } from './types.js';
 
 const piPackage = '@earendil-works/pi-coding-agent';
@@ -32,23 +33,44 @@ const extension = (): string => {
   return existsSync(compiled) ? compiled : compiled.replace(/\.js$/u, '.ts');
 };
 
+// the tools declared to the model: Pi's defaults, the search tools the path policy covers, and the
+// RAC extension's `ask_user`
+const tools = 'read,bash,edit,write,grep,find,ls,ask_user';
+// a Worktree's own skills and prompt templates, passed explicitly because `--no-approve` keeps
+// every other trust-gated `.pi/` resource (settings, extensions, MCP servers) out
+const projectResources = (cwd: string): string[] => [['--skill', '.pi/skills'], ['--skill', '.agents/skills'], ['--prompt-template', '.pi/prompts']]
+  .flatMap(([flag, path]) => existsSync(join(cwd, path!)) ? [flag!, join(cwd, path!)] : []);
+
 /**
  * The Pi Adapter: structured-only (ADR 0002 amendment). Pi is never recognised in a pane, so it
  * has no `recognizes` match and no pane members; the console drives `pi --mode rpc` through the
  * Pi client, with the RAC extension always loaded. Its program is the console's own Node, which
  * runs the pinned CLI. A resume names the session file (or continues the latest) and no model,
  * since `--model` would override the model the Conversation was on.
+ *
+ * RAC's Pi loads only what the console vets (ADR 0004 amendment): `-ne` drops the operator's
+ * extensions, packages and Pi's built-ins (so no `mcp.json` server starts), `--offline` stops
+ * startup package installs and downloads, and `--no-approve` skips the Worktree's `.pi/` settings.
+ * A Sandboxed launch points the extension at the rendered `sandbox.json` (an empty path fails
+ * it closed); the extension adds the Pi state directory, the Worktree and its git directory.
  */
 export const piAdapter = {
   kind: 'pi',
-  launch: ({ resume, continue: latest, models }) => ({ args: [
-    piProgram(), '--mode', 'rpc', '-e', extension(),
-    ...(models === undefined || models.allowed.length === 0 ? [] : ['--models', models.allowed.join(',')]),
-    ...(resume !== undefined ? ['--session', resume] : latest === true ? ['--continue'] : models?.start === undefined ? [] : ['--model', models.start.model, ...(models.start.effort === undefined ? [] : ['--thinking', models.start.effort])])
-  ] }),
+  launch: ({ cwd, sandboxed, files, nonce = '', resume, continue: latest, models }) => ({
+    args: [
+      piProgram(), '--mode', 'rpc', '-ne', '-e', extension(), '--offline', '--no-approve', '--tools', tools, ...projectResources(cwd),
+      ...(models === undefined || models.allowed.length === 0 ? [] : ['--models', models.allowed.join(',')]),
+      ...(resume !== undefined ? ['--session', resume] : latest === true ? ['--continue'] : models?.start === undefined ? [] : ['--model', models.start.model, ...(models.start.effort === undefined ? [] : ['--thinking', models.start.effort])])
+    ],
+    env: { RAC_LAUNCH_NONCE: nonce, ...(sandboxed ? { RAC_SANDBOX_POLICY: files?.['sandbox.json'] ?? '' } : {}) }
+  }),
   client: piClient,
   steers: true,
   pinned: piPinned,
   efforts: piEfforts,
-  conversations: { validId: validPiSessionId, list: piConversationSummaries, readName: piConversationName, locate: locatePiSession }
+  conversations: { validId: validPiSessionId, list: piConversationSummaries, readName: piConversationName, locate: locatePiSession },
+  sandbox: true,
+  // the static policy: the kind's sandbox lists as the sandbox runtime takes them (none: no
+  // network, no writes beyond what the extension adds), and the extra environment names commands get
+  files: ({ sandbox: settings = { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] } }) => ({ 'sandbox.json': JSON.stringify(staticPolicy(settings), null, 2) })
 } satisfies StructuredAdapter;

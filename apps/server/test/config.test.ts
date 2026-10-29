@@ -562,7 +562,7 @@ describe('claude adapter configuration', () => {
 
   it('enables Pi with the pinned program and refuses a program or update commands of its own', async () => {
     const config = await validateConfig({ ...scratch, adapters: { pi: { args: ['--verbose'], env: { RAC_TEST: '1' } } } });
-    expect(config.adapters?.pi).toEqual({ program: process.execPath, args: ['--verbose'], env: { RAC_TEST: '1' }, launchable: true });
+    expect(config.adapters?.pi).toEqual({ program: process.execPath, args: ['--verbose'], env: { RAC_TEST: '1' }, launchable: true, sandbox: { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] } });
     await expect(validateConfig({ ...scratch, adapters: { pi: { program: process.execPath } } })).rejects.toThrow(/pinned/u);
     await expect(validateConfig({ ...scratch, adapters: { pi: { updates: { current: 'a', latest: 'b', run: 'c' } } } })).rejects.toThrow(/pinned/u);
   });
@@ -575,6 +575,20 @@ describe('claude adapter configuration', () => {
     await expect(validateConfig({ ...scratch, adapters: { pi: { allowedModels: [{ model: 'gpt-5.6' }] } } })).rejects.toThrow(/provider\/id/u);
     await expect(validateConfig({ ...scratch, adapters: { pi: { allowedModels: [{ model: 'openai/gpt-5.6' }, { model: 'openai/gpt-5.6' }] } } })).rejects.toThrow(/once/u);
     await expect(validateConfig({ ...scratch, adapters: { pi: { allowedModels: [{ model: 'openai/gpt-5.6', effort: 'extreme' }] } } })).rejects.toThrow();
+  });
+
+  it('gives Pi the shared sandbox lists followed by its own, without repeats', async () => {
+    const config = await validateConfig({ ...scratch,
+      sandbox: { allowedDomains: ['registry.npmjs.org', '*.github.com'], denyRead: ['~/.ssh'], env: ['GH_TOKEN'] },
+      adapters: { pi: { sandbox: { allowedDomains: ['*.github.com', 'pypi.org'], deniedDomains: ['evil.example'], allowWrite: ['~/.cache/pnpm'], denyWrite: ['/etc'], env: ['NPM_TOKEN'] } } } });
+    expect(config.adapters?.pi?.sandbox).toEqual({ allowedDomains: ['registry.npmjs.org', '*.github.com', 'pypi.org'], deniedDomains: ['evil.example'], allowWrite: ['~/.cache/pnpm'], denyWrite: ['/etc'], denyRead: ['~/.ssh'], env: ['GH_TOKEN', 'NPM_TOKEN'] });
+  });
+
+  it('refuses sandbox paths that are not absolute or home-relative, URLs as domains, and bad variable names', async () => {
+    await expect(validateConfig({ ...scratch, sandbox: { allowWrite: ['relative/dir'] } })).rejects.toThrow(/absolute or start with ~/u);
+    await expect(validateConfig({ ...scratch, adapters: { pi: { sandbox: { allowedDomains: ['https://github.com'] } } } })).rejects.toThrow(/not a URL/u);
+    await expect(validateConfig({ ...scratch, sandbox: { env: ['NOT-A-NAME'] } })).rejects.toThrow(/invalid environment variable name/u);
+    await expect(validateConfig({ ...scratch, sandbox: { allowAllUnixSockets: true } })).rejects.toThrow(/allowAllUnixSockets/u);
   });
 
   it('leaves Pi unlaunchable under the host bridge', async () => {

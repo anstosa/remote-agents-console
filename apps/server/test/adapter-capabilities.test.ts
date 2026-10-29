@@ -35,4 +35,8 @@ describe('adapterCapabilities', () => {
     const claude = adapterCapabilities({ claude: { program: '/usr/local/bin/claude', args: [], env: {}, launchable: true } }).claude;
     expect(claude).toMatchObject({ launchable: true, program: '/usr/local/bin/claude', stateSource: 'reported', naming: true, conversations: true, commands: true, turnCapture: false, inlineQuestions: true, sandbox: false });
   });
+
+  it('offers a Sandboxed launch for Pi, whose extension confines its tool calls', () => {
+    expect(adapterCapabilities({ pi: { program: process.execPath, args: [], env: {}, launchable: true } }).pi).toMatchObject({ launchable: true, sandbox: true });
+  });
 });

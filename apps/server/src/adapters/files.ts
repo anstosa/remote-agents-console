@@ -1,8 +1,8 @@
 import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { adapters } from './registry.js';
-import type { AdapterFileContext, AgentKind } from './types.js';
+import { adapters, structuredAdapters } from './registry.js';
+import type { AdapterFileContext, AgentKind, SandboxSettings } from './types.js';
 
 /**
  * Boot-time rendering of the console-owned files each Adapter declares through its
@@ -58,21 +58,23 @@ export function adapterFileContext(env: NodeJS.ProcessEnv = process.env): { cont
 }
 
 /**
- * Render every Adapter's `files` and return the absolute paths, keyed by kind and
+ * Render every Adapter's `files`, each given its kind's sandbox settings when `sandbox` has
+ * them, and return the absolute paths, keyed by kind and
  * name, for `LaunchInput.files`. Returns `{}` when no host-visible repo root exists
  * (a bridge without `RAC_HOST_REPOSITORY`), matching the launchability gate.
  */
-export async function renderAdapterFiles(env: NodeJS.ProcessEnv = process.env): Promise<RenderedAdapterFiles> {
+export async function renderAdapterFiles(env: NodeJS.ProcessEnv = process.env, sandbox: (kind: AgentKind) => SandboxSettings | undefined = () => undefined): Promise<RenderedAdapterFiles> {
   const resolved = adapterFileContext(env);
   if (resolved === undefined) return {};
   const { context, filesDir } = resolved;
   const rendered: RenderedAdapterFiles = {};
-  for (const adapter of adapters) {
+  for (const adapter of [...adapters, ...structuredAdapters]) {
     if (adapter.files === undefined) continue;
     const dir = join(filesDir, adapter.kind);
     await mkdir(dir, { recursive: true });
     const paths: Record<string, string> = {};
-    for (const [name, content] of Object.entries(adapter.files(context))) {
+    const settings = sandbox(adapter.kind);
+    for (const [name, content] of Object.entries(adapter.files({ ...context, ...(settings === undefined ? {} : { sandbox: settings }) }))) {
       const path = join(dir, name);
       await writeFile(path, content, { mode: 0o644 });
       // restore the promised mode independently of umask and existing permissions

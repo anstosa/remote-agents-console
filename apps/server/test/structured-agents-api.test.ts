@@ -8,7 +8,7 @@ import { WorktreeLaunchStore } from '../src/worktrees/store.js';
 import { PromptHistoryService } from '../src/prompt-history/service.js';
 import { QueuedPromptService } from '../src/prompts/queue.js';
 import { StructuredAgents, type HolderRef, type StructuredLaunch, type StructuredProcesses } from '../src/transports/structured-agents.js';
-import type { Delivery, ModelInfo, ModelSetting, StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
+import type { Delivery, LaunchReport, ModelInfo, ModelSetting, StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
 import type { QuestionAnswer } from '../src/transports/transport.js';
 import { WorktreeNoteService } from '../src/notes/service.js';
 import type { AllowedModel } from '../src/adapters/types.js';
@@ -24,15 +24,17 @@ afterEach(async () => { vi.unstubAllEnvs(); for (const dir of dirs.splice(0)) aw
 const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not sandboxed' }, version: piAdapter.pinned()!.version };
 
 // A scripted structured Agent: it records what it is asked to do and emits the events a test
-// scripts. It reports in as soon as it starts unless told to stay silent. Its Conversation and
-// model operations succeed (unless it `refuses` them) and report what changed, as a client does.
-// A switch lands on `switchedTo` (the Conversation's own model), and `unavailable` models are refused.
+// scripts. It reports in as soon as it starts unless told to stay silent, with the launch's nonce
+// (or `nonce`) and its sandbox engaged exactly when the launch is Sandboxed, unless the sandbox
+// `fails`. Its Conversation and model operations succeed (unless it `refuses` them) and report
+// what changed, as a client does. A switch lands on `switchedTo` (the Conversation's own model),
+// and `unavailable` models are refused.
 // Each delivery answers with the next of `dispositions`, then `started`; a steer waits as pending
 // until the Agent takes it or a cancel returns it, and a cancel aborts the Turn before it answers.
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
 // reports `attached` (as a client reading its state afresh does), or finds the holder `gone`.
-function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], gone = false } = {}) {
+function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], gone = false, sandboxFails = false, nonce = undefined as string | undefined } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -66,11 +68,15 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
     // a closed connection hears its process go, as a holder's socket closing says
     close: () => { const closing = emit; queueMicrotask(() => closing({ type: 'exited' })); }
   });
+  let lastReport: LaunchReport | undefined;
   const processes: StructuredProcesses = {
     start: async (launch, events) => {
       emit = events;
       launches.push(launch);
-      if (reporting) queueMicrotask(() => emit({ type: 'report', report: { ...report, version } }));
+      const engaged = launch.sandboxed && !sandboxFails;
+      lastReport = { ...report, sandbox: { engaged, ...(engaged ? {} : { reason: launch.sandboxed ? 'bwrap: not found' : 'not sandboxed' }) }, version, nonce: nonce ?? launch.nonce };
+      const sent = lastReport;
+      if (reporting) queueMicrotask(() => emit({ type: 'report', report: sent }));
       if (exits) setTimeout(() => emit({ type: 'exited' }), 10);
       return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9' }, connection: connection(), cursor: () => lines, raw: () => [{ from: 'agent' as const, line: '{"type":"agent_start"}' }] };
     },
@@ -85,7 +91,7 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
     stderr: async () => 'pi: could not load its extension',
     stop: async () => { closed = true; }
   };
-  return { processes, delivered, launches, attaches, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, emit: (event: StructuredEvent) => emit(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
+  return { processes, delivered, launches, attaches, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
 }
 
 // a console with one Project whose only Worktree is a temporary folder, and the Scratch folder beside it
@@ -170,7 +176,7 @@ describe('a structured Agent over HTTP', () => {
     expect((await app.inject({ method: 'POST', url: `/api/agents/${starting.id}/prompt`, headers, payload: { prompt: 'Say hello', attachments: [] } })).statusCode).toBe(204);
     expect(fake.delivered).toEqual([]);
 
-    fake.emit({ type: 'report', report });
+    fake.emit({ type: 'report', report: fake.report() });
     expect((await launching).statusCode).toBe(201);
     expect(await dashboardAgent(starting.id)).toMatchObject({ structured: { lifecycle: 'live' } });
     expect(fake.delivered).toEqual(['Say hello']);
@@ -233,7 +239,8 @@ describe('a structured Agent over HTTP', () => {
 
     const launched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers, payload: { kind: 'pi' } });
     expect(launched.statusCode).toBe(201);
-    expect(await dashboardAgent(launched.json().agentId)).toMatchObject({ kind: 'pi', worktreeId: worktree.id, placeId: worktree.id });
+    expect(await dashboardAgent(launched.json().agentId)).toMatchObject({ kind: 'pi', worktreeId: worktree.id, placeId: worktree.id, sandboxed: true });
+    expect(fake.launches.map(launch => launch.sandboxed)).toEqual([true]);
     await app.close();
   });
 
@@ -316,6 +323,64 @@ describe('a structured Agent over HTTP', () => {
     expect((await app.inject({ method: 'DELETE', url: `/api/agents/${id}`, headers })).statusCode).toBe(204);
     expect(fake.closed()).toBe(true);
     expect(await dashboardAgent(id)).toBeUndefined();
+    await app.close();
+  });
+
+  it('launches Sandboxed by default, live once its sandbox reports engaged, under a fresh nonce each time', async () => {
+    const fake = fakeAgent();
+    const { app, headers, dashboardAgent } = await consoleWith(fake);
+
+    const first: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    expect(await dashboardAgent(first)).toMatchObject({ sandboxed: true, structured: { lifecycle: 'live' } });
+    const second: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', sandboxed: true } })).json().agentId;
+    expect(await dashboardAgent(second)).toMatchObject({ sandboxed: true, structured: { lifecycle: 'live' } });
+    expect(fake.launches.map(launch => launch.sandboxed)).toEqual([true, true]);
+    expect(fake.launches[0]!.nonce).not.toBe(fake.launches[1]!.nonce);
+    expect(fake.launches[0]!.nonce.length).toBeGreaterThanOrEqual(22);
+    await app.close();
+  });
+
+  it('launches unsandboxed only when the launch says so', async () => {
+    const fake = fakeAgent();
+    const { app, headers, dashboardAgent } = await consoleWith(fake);
+
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', sandboxed: false } })).json().agentId;
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'live' } });
+    expect((await dashboardAgent(id)).sandboxed).toBeUndefined();
+    expect(fake.launches.map(launch => launch.sandboxed)).toEqual([false]);
+    await app.close();
+  });
+
+  it('fails a Sandboxed launch whose sandbox reports not engaged, with the reason, stops it and dispatches nothing', async () => {
+    const fake = fakeAgent({ sandboxFails: true });
+    const { app, headers, dashboardAgent } = await consoleWith(fake);
+
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'failed', reason: expect.stringContaining('bwrap: not found') } });
+    expect(fake.closed()).toBe(true);
+    // a prompt waits in the queue: nothing reaches the Agent
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'Say hello', attachments: [] } })).statusCode).toBe(204);
+    await dashboardAgent(id);
+    expect(fake.delivered).toEqual([]);
+    await app.close();
+  });
+
+  it('ignores a launch report that does not carry its launch\'s nonce', async () => {
+    const fake = fakeAgent({ nonce: 'someone-else' });
+    const { app, headers, dashboardAgent } = await consoleWith(fake, { reportTimeoutMs: 50 });
+
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', sandboxed: false } })).json().agentId;
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'failed' } });
+    expect(fake.delivered).toEqual([]);
+    await app.close();
+  });
+
+  it('refuses a launch whose Sandboxed choice is not a boolean', async () => {
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake);
+
+    expect((await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', sandboxed: 'no' } })).statusCode).toBe(400);
+    expect(fake.launches).toEqual([]);
     await app.close();
   });
 });

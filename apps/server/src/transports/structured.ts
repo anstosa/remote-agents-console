@@ -10,8 +10,11 @@ import type { QuestionAnswer, TurnEvent } from './transport.js';
  * protocol; Pi is the first client behind it.
  */
 
-/** What the console-shipped extension reports once its Agent has started (ADR 0017). */
-export type LaunchReport = { loaded: true; sandbox: { engaged: boolean; reason?: string }; version: string };
+/**
+ * What the console-shipped extension reports once its Agent has started (ADR 0017), echoing the
+ * nonce its launch was given so that only that launch's own process can report it in.
+ */
+export type LaunchReport = { loaded: true; sandbox: { engaged: boolean; reason?: string }; version: string; nonce: string };
 /**
  * A tool call as the transcript shows it: its verb (`name`) and target (`summary`), its state and
  * duration, and what it gave back: its output, a short `result` line, or an edit's unified `diff` with its file's path.

@@ -1,5 +1,5 @@
 import { mkdir, open, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { resolveAgentProgram, type ValidatedConfig } from '../config/schema.js';
 import { run, tmuxFormatLiteral, tmuxLiteralArg } from '../tmux/command.js';
@@ -21,9 +21,10 @@ import { holderArgv, type ModelSetting } from '../transports/structured.js';
 import type { HolderLaunch, HolderRef, HolderWindows } from '../transports/structured-agents.js';
 import { isFullGitSha } from '../git/revision.js';
 import { accountHome, configuredPlaces, placeHostRoot, scratchHome, scratchPlaceLabel, scratchProjectId, worktreePlace, type Place } from '../places/places.js';
+import { serverCheckout } from '../workspaces/server-checkout.js';
 
-/** How a structured Agent launches: resuming one Conversation, continuing the latest, or a new one on a chosen model. */
-export type StructuredLaunchOptions = { resume?: string; continue?: true; model?: ModelSetting };
+/** How a structured Agent launches: resuming one Conversation, continuing the latest, or a new one on a chosen model; Sandboxed or not. */
+export type StructuredLaunchOptions = { resume?: string; continue?: true; model?: ModelSetting; sandboxed?: boolean };
 
 export function expandCommand(command: string, worktree: Pick<Worktree, 'identity'>): string {
   const directory = `'${worktree.identity.replaceAll("'", "'\\''")}'`;
@@ -111,6 +112,8 @@ export const scratchLabel = scratchPlaceLabel;
 // The session a directory-Project or Scratch Place's launches and Console shells start in, named
 // for its folder. tmux turns `.` into `_` in a session name, so the name is written that way up
 // front and the free-name check compares what tmux will actually list.
+// a structured kind that offers a sandbox launches Sandboxed unless the launch turns it off (ADR 0004)
+const structuredSandboxed = (kind: AgentKind, requested: boolean | undefined): boolean => structuredAdapterFor(kind)?.sandbox === true && requested !== false;
 // what a holder window runs while it is tagged, before the holder itself
 const holderPlaceholder = ['/bin/sh', '-c', 'sleep 30'];
 const placeSessionName = (place: Pick<Place, 'home' | 'hostPath'>): string => worktreeSessionName(placeHostRoot(place)).replaceAll('.', '_');
@@ -164,10 +167,16 @@ export class LaunchService implements HolderWindows {
   // when the kind declares none (Codex) — which keeps the
   // launch hot path off the filesystem. Only a *successful* render is memoized; a
   // transient failure is logged, degrades this launch to no files (it omits
-  // `--settings`) rather than failing, and clears the memo so the next launch retries.
-  private async adapterFiles(kind: AgentKind): Promise<Record<string, string> | undefined> {
-    if (adapterFor(kind)?.files === undefined) return undefined;
-    this.adapterFilesPromise ??= renderAdapterFiles().catch(error => {
+  // `--settings`) rather than failing, and clears the memo so the next launch retries. A kind's
+  // sandbox settings also keep its commands out of the console's own state: its private directory
+  // (holder sockets), `.data`, `.env` and config file.
+  async adapterFiles(kind: AgentKind): Promise<Record<string, string> | undefined> {
+    if ((adapterFor(kind) ?? structuredAdapterFor(kind))?.files === undefined) return undefined;
+    const consoleState = [this.root, join(serverCheckout(), '.data'), join(serverCheckout(), '.env'), ...(process.env.RAC_CONFIG === undefined ? [] : [resolve(process.env.RAC_CONFIG)])];
+    this.adapterFilesPromise ??= renderAdapterFiles(process.env, candidate => {
+      const settings = this.config.adapters[candidate]?.sandbox ?? { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
+      return { ...settings, denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState], repositories: [serverCheckout(), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory])] };
+    }).catch(error => {
       this.adapterFilesPromise = undefined;
       console.error('[launch] adapter files not rendered:', error instanceof Error ? error.message : 'unknown error');
       return {} as RenderedAdapterFiles;
@@ -361,8 +370,8 @@ export class LaunchService implements HolderWindows {
   }
   // launch one ordinary scratch agent of the resolved (or requested) kind at the Scratch Place:
   // the configured Scratch directory when set, else the account home
-  async launchHome(kind?: AgentKind, model?: ModelSetting): Promise<boolean> {
-    return await this.launchRemembering(await this.scratchPlace(), scratchLaunchKey, kind, model);
+  async launchHome(kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
+    return await this.launchRemembering(await this.scratchPlace(), scratchLaunchKey, kind, model, sandboxed);
   }
 
   // launch one agent directly in a non-git `directory` Project — the same in-place spawn
@@ -371,27 +380,27 @@ export class LaunchService implements HolderWindows {
   // under the Scratch persistence key for the directory. Only an available `directory` Project
   // launches this way: a `repository` Project launches through its Worktrees, and an
   // unavailable one has nothing to launch into. Remembers the kind under the Project scope.
-  async launchProjectDirectory(projectId: string, kind?: AgentKind, model?: ModelSetting): Promise<boolean> {
+  async launchProjectDirectory(projectId: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
     const place = await this.directoryPlace(projectId);
-    return place !== undefined && await this.launchRemembering(place, projectId, kind, model);
+    return place !== undefined && await this.launchRemembering(place, projectId, kind, model, sandboxed);
   }
 
   // launch a fresh agent at any Place through its own launch: a Worktree's, a directory
   // Project's, the Scratch folder's, or in place in an ad-hoc Scratch folder, remembering the kind
   // under that folder's own scope. Only Open folder launches in an ad-hoc folder.
-  async launchAt(place: Place, kind?: AgentKind, model?: ModelSetting): Promise<boolean> {
-    if (place.kind === 'worktree') return await this.launch(place.id, kind, model);
-    if (place.kind === 'directory') return await this.launchProjectDirectory(place.projectId, kind, model);
-    return place.adhoc === true ? await this.launchRemembering(place, place.id, kind, model) : await this.launchHome(kind, model);
+  async launchAt(place: Place, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
+    if (place.kind === 'worktree') return await this.launch(place.id, kind, model, sandboxed);
+    if (place.kind === 'directory') return await this.launchProjectDirectory(place.projectId, kind, model, sandboxed);
+    return place.adhoc === true ? await this.launchRemembering(place, place.id, kind, model, sandboxed) : await this.launchHome(kind, model, sandboxed);
   }
 
   // launch in place at a directory-Project or Scratch Place with the resolved (or requested) kind,
   // remembering it under `scope`; a storage failure never fails a live launch
-  private async launchRemembering(place: Place, scope: string, kind?: AgentKind, model?: ModelSetting): Promise<boolean> {
+  private async launchRemembering(place: Place, scope: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
     const resolved = await this.resolveLaunchKind(scope, kind);
     // refuse an unconfigured or unlaunchable kind
     if (resolved === undefined) return false;
-    const launched = await this.launchInPlace(place, resolved, model);
+    const launched = await this.launchInPlace(place, resolved, model, sandboxed);
     if (launched) await this.worktreeStore.rememberLaunchProfile(scope, resolved).catch(() => {});
     return launched;
   }
@@ -425,12 +434,12 @@ export class LaunchService implements HolderWindows {
   }
 
   // launch into a directory-Project or Scratch Place without modifying an idle shell's input
-  private async launchInPlace(place: Place, kind: AgentKind, model?: ModelSetting): Promise<boolean> {
+  private async launchInPlace(place: Place, kind: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
     if (this.pending.has(place.id)) { console.warn(`[launch] ${place.home}: a launch is already in progress`); return false; }
     this.pending.add(place.id);
     try {
       // a structured Agent runs under a holder rather than in a pane (ADR 0015)
-      if (structuredAdapterFor(kind) !== undefined) return await this.launchStructured(place, kind, model === undefined ? {} : { model });
+      if (structuredAdapterFor(kind) !== undefined) return await this.launchStructured(place, kind, { ...(model === undefined ? {} : { model }), sandboxed: structuredSandboxed(kind, sandboxed) });
       // under the Docker bridge the host-visible path is what the host tmux can cd into; HOME is
       // the default account home for every directory-Project and Scratch launch
       const site: LaunchSite = { cwd: placeHostRoot(place), home: this.agentHome() };
@@ -496,8 +505,8 @@ export class LaunchService implements HolderWindows {
   }
 
   // launch a fresh agent in a worktree, resolving the kind (or using the requested one)
-  async launch(worktreeId: string, kind?: AgentKind, model?: ModelSetting): Promise<boolean> {
-    return await this.launchWorktree(worktreeId, { mode: 'fresh', ...(kind === undefined ? {} : { kind }), ...(model === undefined ? {} : { model }) });
+  async launch(worktreeId: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
+    return await this.launchWorktree(worktreeId, { mode: 'fresh', ...(kind === undefined ? {} : { kind }), ...(model === undefined ? {} : { model }), ...(sandboxed === undefined ? {} : { sandboxed }) });
   }
 
   // launch a Review run's Agent (ADR 0010): a `kind` pane in the Worktree's Workspace, fresh or
@@ -584,9 +593,7 @@ export class LaunchService implements HolderWindows {
       const sandboxed = input.sandboxed === true;
       let launched: boolean;
       if (structuredAdapterFor(kind) !== undefined) {
-        // a structured Agent launches unsandboxed so far
-        if (sandboxed) { console.warn(`[launch] ${worktree.identity}: ${kind} launches only unsandboxed`); return false; }
-        launched = await this.launchStructured(worktreePlace(worktree), kind, { ...(input.conversationId === undefined ? {} : { resume: input.conversationId }), ...(input.mode === 'continue' ? { continue: true as const } : {}), ...(input.model === undefined ? {} : { model: input.model }) });
+        launched = await this.launchStructured(worktreePlace(worktree), kind, { ...(input.conversationId === undefined ? {} : { resume: input.conversationId }), ...(input.mode === 'continue' ? { continue: true as const } : {}), ...(input.model === undefined ? {} : { model: input.model }), sandboxed: structuredSandboxed(kind, input.sandboxed) });
       } else {
         const id = randomBytes(18).toString('base64url');
         const command = await this.worktreeCommand(worktree, kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), sandboxed });

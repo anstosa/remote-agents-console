@@ -229,8 +229,8 @@ describe('Adapter contract suite', () => {
 
   it('pi launches on its Allowed models, and resumes or continues a Conversation on the model it was on', () => {
     const pi = structuredAdapters.find(adapter => adapter.kind === 'pi')!;
-    // after the pinned CLI, `--mode rpc` and the RAC extension
-    const own = (input: Parameters<typeof pi.launch>[0]) => pi.launch(input).args.slice(5);
+    // after the pinned CLI, `--mode rpc`, `-ne` and the RAC extension, `--offline`, `--no-approve` and the tool list
+    const own = (input: Parameters<typeof pi.launch>[0]) => pi.launch(input).args.slice(10);
     expect(own({ cwd: '/work/repo', sandboxed: false })).toEqual([]);
     expect(own({ cwd: '/work/repo', sandboxed: false, models: { allowed: ['openai/gpt-5.6', 'openrouter/~anthropic/claude-opus-latest'], start: { model: 'openai/gpt-5.6', effort: 'high' } } }))
       .toEqual(['--models', 'openai/gpt-5.6,openrouter/~anthropic/claude-opus-latest', '--model', 'openai/gpt-5.6', '--thinking', 'high']);
