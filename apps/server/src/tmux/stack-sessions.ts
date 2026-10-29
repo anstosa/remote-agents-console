@@ -13,3 +13,5 @@ export const processPaneRole = 'process';
 // A structured Agent's process runs under a holder in its own window of its Place's Workspace
 // session (ADR 0016); the pane role keeps it from ever being a Terminal or a recognised Agent.
 export const holderPaneRole = 'holder';
+// the structured Agent a holder's pane holds, so the console never acts on a reused pane id
+export const holderAgentOption = '@rac_agent';

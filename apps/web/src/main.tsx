@@ -7915,7 +7915,6 @@ function AgentPanelTitle({ kind, sandboxed, title, switcher, state, connection =
   </>;
 }
 
-// fill one agent split with a header, output, footer and full-frame overlay
 // A structured Agent's process state (`revision` changes with its transcript) and its transcript:
 // messages, and one plain line per tool call
 type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number };
@@ -7950,6 +7949,7 @@ function Transcript({ agentId, state }: { agentId: string; state?: StructuredAge
   </div>;
 }
 
+// fill one agent split with a header, output, footer and full-frame overlay
 function AgentPanelFrame({ header, composer, mobileKeys, overlay, className = '', children, onTurnOff }: { header: ReactNode; composer?: ReactNode; mobileKeys?: ReactNode; overlay?: ReactNode; className?: string; children?: ReactNode; onTurnOff?: () => void }) {
   const expanded = usePanelExpand('agent')?.expanded === true;
   // keep whole-split transitions outside the output cell and preserve footer controls

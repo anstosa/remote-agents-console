@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +11,7 @@ import { adhocScratchPlace } from '../src/places/places.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { run } from '../src/tmux/command.js';
 import { holderProcesses } from '../src/transports/structured-agents.js';
-import type { StructuredEvent, StructuredSession } from '../src/transports/structured.js';
+import type { StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
 import type { SocketRef } from '../src/domain/models.js';
 import { testConfig } from './helpers/config.js';
 import { socketFinder } from './helpers/discovery-stubs.js';
@@ -25,10 +25,11 @@ import { stubModels, stubProvider } from './helpers/stub-provider.js';
 
 // One protocol client under test: its Adapter, and the launch arguments and environment that point
 // its CLI at the stub provider and away from the operator's own state.
-type ContractClient = { name: string; adapter: StructuredAdapter; stub(baseUrl: string, state: string): Promise<{ args: string[]; env: Record<string, string> }> };
+type ContractClient = { name: string; adapter: StructuredAdapter; pinned: string; stub(baseUrl: string, state: string): Promise<{ args: string[]; env: Record<string, string> }> };
 const clients: ContractClient[] = [{
   name: 'pi',
   adapter: piAdapter,
+  pinned: (JSON.parse(readFileSync(new URL('../node_modules/@earendil-works/pi-coding-agent/package.json', import.meta.url), 'utf8')) as { version: string }).version,
   async stub(baseUrl, state) {
     await writeFile(join(state, 'models.json'), stubModels(baseUrl));
     return { args: ['--model', 'stub/echo'], env: { PI_CODING_AGENT_DIR: state, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' } };
@@ -56,7 +57,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => undefined); });
 
 // launch `client`'s CLI under the holder in a Workspace session, its events collected in order
-async function launched(client: ContractClient): Promise<{ session: StructuredSession; events: StructuredEvent[]; next(type: StructuredEvent['type'], match?: (event: StructuredEvent) => boolean): Promise<StructuredEvent> }> {
+async function launched(client: ContractClient): Promise<{ connection: StructuredConnection; events: StructuredEvent[]; next(type: StructuredEvent['type'], match?: (event: StructuredEvent) => boolean): Promise<StructuredEvent> }> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-contract-')));
   const socketPath = join(root, 'tmux');
   const state = join(root, 'state');
@@ -74,7 +75,7 @@ async function launched(client: ContractClient): Promise<{ session: StructuredSe
   const waiters: Array<() => void> = [];
   const started = await processes.start({ id: 'contract', kind: client.adapter.kind, place }, event => { events.push(event); for (const waiter of waiters.splice(0)) waiter(); });
   expect(started).toBeDefined();
-  cleanups.push(async () => { started!.session.close(); await processes.stop(started!.holder); });
+  cleanups.push(async () => { started!.connection.close(); await processes.stop(started!.holder, { kind: client.adapter.kind, home: root }); });
   let seen = 0;
   // the next event of `type` after the last one awaited, so each wait moves forward in the stream
   const next = async (type: StructuredEvent['type'], match: (event: StructuredEvent) => boolean = () => true): Promise<StructuredEvent> => {
@@ -86,7 +87,7 @@ async function launched(client: ContractClient): Promise<{ session: StructuredSe
     }
     throw new Error(`no ${type} event within 30 s; saw ${JSON.stringify(events)}; holder pane: ${await processes.stderr(started!.holder)}`);
   };
-  return { session: started!.session, events, next };
+  return { connection: started!.connection, events, next };
 }
 
 describe.skipIf(!tmuxSocketsWork).each(clients)('the $name protocol client', client => {
@@ -94,14 +95,14 @@ describe.skipIf(!tmuxSocketsWork).each(clients)('the $name protocol client', cli
     const { next } = await launched(client);
     const report = await next('report');
     expect(report).toMatchObject({ type: 'report', report: { loaded: true, sandbox: { engaged: false } } });
-    expect((report as Extract<StructuredEvent, { type: 'report' }>).report.version).toMatch(/^\d+\.\d+\.\d+/u);
+    expect((report as Extract<StructuredEvent, { type: 'report' }>).report.version).toBe(client.pinned);
     expect(await next('conversation')).toMatchObject({ id: expect.any(String) });
   }, 60_000);
 
   it('runs one Turn: started, the prompt, the answer, then settled with the answer', async () => {
-    const { session, events, next } = await launched(client);
+    const { connection, events, next } = await launched(client);
     await next('report');
-    expect(await session.deliver('Say hello')).toBe('started');
+    expect(await connection.deliver('Say hello')).toBe('started');
     await next('turn', event => event.type === 'turn' && event.turn.type !== 'started');
 
     const turn = events.filter(event => event.type === 'turn' || event.type === 'transcript');

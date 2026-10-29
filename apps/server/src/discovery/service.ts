@@ -202,7 +202,7 @@ export class DiscoveryService {
   // the Place a discovered agent belongs to: its session's; a modal update advisor is never placed
   private placeOf(agent: Agent, places: readonly Place[]): Place | undefined {
     if (agent.pane === undefined) return agent.placeId === undefined ? undefined : markedPlace(places, agent.placeId);
-    const mark = agent.pane === undefined ? undefined : this.sessionMarks.get(agent.pane.sessionId);
+    const mark = this.sessionMarks.get(agent.pane.sessionId);
     return isUpdateAdvisorLabel(agent.displayLabel) || mark === undefined ? undefined : markedPlace(places, mark);
   }
   // Claim each unmarked session the last scan saw, once: a session the console did not create

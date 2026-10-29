@@ -8,13 +8,13 @@ import type { LaunchReport, ProtocolClient, TranscriptItem } from './structured.
 /** The status key the RAC Pi extension sends its launch report under. */
 export const piReportStatusKey = 'rac-launch';
 
-type Record = { [key: string]: unknown };
-const isRecord = (value: unknown): value is Record => typeof value === 'object' && value !== null && !Array.isArray(value);
+type Json = { [key: string]: unknown };
+const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
 const text = (content: unknown): string => typeof content === 'string' ? content
-  : Array.isArray(content) ? content.flatMap(block => isRecord(block) && block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('') : '';
+  : Array.isArray(content) ? content.flatMap(block => isObject(block) && block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('') : '';
 // a tool call's one-line target: its first string argument, on one line and bounded
 const summary = (args: unknown): string => {
-  const first = isRecord(args) ? Object.values(args).find((value): value is string => typeof value === 'string') : undefined;
+  const first = isObject(args) ? Object.values(args).find((value): value is string => typeof value === 'string') : undefined;
   const line = (first ?? '').replace(/\s+/gu, ' ').trim();
   return line.length > 120 ? `${line.slice(0, 119)}…` : line;
 };
@@ -22,13 +22,13 @@ const parseReport = (statusText: unknown): LaunchReport | undefined => {
   if (typeof statusText !== 'string') return undefined;
   let parsed: unknown;
   try { parsed = JSON.parse(statusText); } catch { return undefined; }
-  if (!isRecord(parsed) || parsed.loaded !== true || typeof parsed.version !== 'string' || !isRecord(parsed.sandbox) || typeof parsed.sandbox.engaged !== 'boolean') return undefined;
+  if (!isObject(parsed) || parsed.loaded !== true || typeof parsed.version !== 'string' || !isObject(parsed.sandbox) || typeof parsed.sandbox.engaged !== 'boolean') return undefined;
   const reason = typeof parsed.sandbox.reason === 'string' ? parsed.sandbox.reason : undefined;
   return { loaded: true, sandbox: { engaged: parsed.sandbox.engaged, ...(reason === undefined ? {} : { reason }) }, version: parsed.version };
 };
 
 export const piClient: ProtocolClient = (channel, emit) => {
-  const pending = new Map<string, (response: Record) => void>();
+  const pending = new Map<string, (response: Json) => void>();
   let requests = 0;
   let messages = 0;
   let reported = false;
@@ -38,7 +38,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
   let errored = false;
   // a call's summary, read from its arguments at its start (its end carries none)
   const toolSummaries = new Map<string, string>();
-  const request = (command: Record): Promise<Record> => new Promise(resolve => {
+  const request = (command: Json): Promise<Json> => new Promise(resolve => {
     const id = `rac-${requests += 1}`;
     pending.set(id, resolve);
     channel.send(JSON.stringify({ ...command, id }));
@@ -48,7 +48,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
   channel.onLine(line => {
     let record: unknown;
     try { record = JSON.parse(line); } catch { return; }
-    if (!isRecord(record)) return;
+    if (!isObject(record)) return;
     switch (record.type) {
       case 'response': {
         const id = typeof record.id === 'string' ? record.id : undefined;
@@ -63,7 +63,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
         reported = true;
         emit({ type: 'report', report });
         void request({ type: 'get_state' }).then(response => {
-          const id = isRecord(response.data) ? response.data.sessionId : undefined;
+          const id = isObject(response.data) ? response.data.sessionId : undefined;
           if (typeof id === 'string' && id !== '') emit({ type: 'conversation', id });
         });
         return;
@@ -74,7 +74,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
         emit({ type: 'turn', turn: { type: 'started' } });
         return;
       case 'message_end': {
-        const message = isRecord(record.message) ? record.message : undefined;
+        const message = isObject(record.message) ? record.message : undefined;
         if (message?.role === 'user') transcript({ id: `m${messages += 1}`, kind: 'message', role: 'user', text: text(message.content) });
         if (message?.role !== 'assistant') return;
         errored = message.stopReason === 'error';
@@ -111,7 +111,8 @@ export const piClient: ProtocolClient = (channel, emit) => {
     async deliver(prompt) {
       const response = await request({ type: 'prompt', message: prompt });
       if (response.success !== true) return 'refused';
-      return isRecord(response.data) && response.data.disposition === 'handled' ? 'handled' : 'started';
+      // a prompt sent without `streamingBehavior` is refused while Pi works, never `queued`
+      return isObject(response.data) && response.data.disposition === 'handled' ? 'handled' : 'started';
     },
     close: () => channel.close()
   };

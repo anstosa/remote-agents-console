@@ -26,8 +26,8 @@ export type StructuredEvent =
   | { type: 'exited' };
 /** What became of a delivered prompt: a Turn started, it was handled at once without one, or it was refused. */
 export type Delivery = 'started' | 'handled' | 'refused';
-/** One Agent process as its protocol client drives it. */
-export interface StructuredSession {
+/** A protocol client's connection to one Agent process; closing it leaves the process running. */
+export interface StructuredConnection {
   deliver(prompt: string): Promise<Delivery>;
   close(): void;
 }
@@ -39,25 +39,26 @@ export interface LineChannel {
   close(): void;
 }
 /** A protocol client: it speaks one protocol over a channel and reports what it sees as events. */
-export type ProtocolClient = (channel: LineChannel, emit: (event: StructuredEvent) => void) => StructuredSession;
+export type ProtocolClient = (channel: LineChannel, emit: (event: StructuredEvent) => void) => StructuredConnection;
 
 /**
  * Split a byte stream into lines on LF only, dropping a CR before it. JSON may carry U+2028 and
  * U+2029 unescaped, so a generic line reader that also splits on those would corrupt records.
  */
-export function lineSplitter(onLine: (line: string) => void): { push(chunk: string): void; rest(): string } {
+export function lineSplitter(onLine: (line: string) => void): { push(chunk: string): void } {
   let partial = '';
   return {
     push(chunk) {
+      // only the new chunk can hold the next LF, so a long line is scanned once
+      let end = chunk.indexOf('\n');
+      if (end !== -1) end += partial.length;
       partial += chunk;
-      let end = partial.indexOf('\n');
       while (end !== -1) {
         onLine(partial.slice(0, end).replace(/\r$/u, ''));
         partial = partial.slice(end + 1);
         end = partial.indexOf('\n');
       }
-    },
-    rest: () => partial
+    }
   };
 }
 
@@ -70,14 +71,17 @@ const holderEntry = (): string => {
 /** The command running `argv` under the holder (ADR 0016), serving its stdio on `socket`. */
 export const holderArgv = (socket: string, argv: readonly string[]): string[] => [process.execPath, holderEntry(), socket, '--', ...argv];
 
-/** The first line a holder sends on every connection, before any of its child's lines. */
-export type HolderHello = { holder: 1; pid: number; dropped: number };
+/**
+ * The holder's answer to a connection, before any of its child's lines: the line it replays from,
+ * and how many lines past the client's cursor it no longer had (the protocol client resyncs then).
+ */
+export type HolderHello = { holder: 1; pid: number; from: number; dropped: number };
 
 /**
- * Connect to a holder's socket, retrying while the holder starts, and read its hello. Every later
- * line is the child's, passed through as the child wrote it.
+ * Connect to a holder's socket, retrying while the holder starts, having read `from` of its
+ * child's lines already, and read its hello. Every later line is the child's, as the child wrote it.
  */
-export async function connectHolder(path: string, { attempts = 100, intervalMs = 100 } = {}): Promise<{ channel: LineChannel; hello: HolderHello } | undefined> {
+export async function connectHolder(path: string, { from = 0, attempts = 100, intervalMs = 100 } = {}): Promise<{ channel: LineChannel; hello: HolderHello } | undefined> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const socket = await new Promise<Socket | undefined>(resolve => {
       const candidate = connect(path);
@@ -85,7 +89,7 @@ export async function connectHolder(path: string, { attempts = 100, intervalMs =
       candidate.once('error', () => resolve(undefined));
     });
     if (socket !== undefined) {
-      const connected = await holderChannel(socket);
+      const connected = await holderChannel(socket, from);
       if (connected !== undefined) return connected;
     }
     await new Promise(resolve => setTimeout(resolve, intervalMs));
@@ -94,7 +98,7 @@ export async function connectHolder(path: string, { attempts = 100, intervalMs =
 }
 
 // wrap a connected socket, resolving once its hello arrives
-function holderChannel(socket: Socket): Promise<{ channel: LineChannel; hello: HolderHello } | undefined> {
+function holderChannel(socket: Socket, from: number): Promise<{ channel: LineChannel; hello: HolderHello } | undefined> {
   return new Promise(resolve => {
     const lineListeners: Array<(line: string) => void> = [];
     const closeListeners: Array<() => void> = [];
@@ -109,7 +113,7 @@ function holderChannel(socket: Socket): Promise<{ channel: LineChannel; hello: H
     const lines = lineSplitter(line => {
       if (hello === undefined) {
         try { hello = JSON.parse(line) as HolderHello; } catch { socket.destroy(); return; }
-        if (hello.holder !== 1) { socket.destroy(); return; }
+        if (hello?.holder !== 1) { hello = undefined; socket.destroy(); return; }
         resolve({ channel, hello });
         return;
       }
@@ -117,6 +121,7 @@ function holderChannel(socket: Socket): Promise<{ channel: LineChannel; hello: H
       for (const listener of lineListeners) listener(line);
     });
     socket.setEncoding('utf8');
+    socket.write(`${JSON.stringify({ from })}\n`);
     socket.on('data', chunk => lines.push(chunk as unknown as string));
     socket.on('error', () => {});
     socket.on('close', () => {

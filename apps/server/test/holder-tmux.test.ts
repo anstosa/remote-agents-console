@@ -48,7 +48,7 @@ afterEach(async () => {
 });
 
 // a child that echoes each line back after `delayMs`, and exits on `exit`
-const echo = (delayMs: number) => [process.execPath, '-e', `let rest = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => { rest += chunk; let end; while ((end = rest.indexOf('\\n')) !== -1) { const line = rest.slice(0, end); rest = rest.slice(end + 1); if (line === 'exit') { console.error('echo: bye'); process.exit(3); } setTimeout(() => process.stdout.write(line + '\\n'), ${delayMs}); } });`];
+const echo = (delayMs: number) => ({ program: process.execPath, env: {}, args: ['-e', `let rest = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => { rest += chunk; let end; while ((end = rest.indexOf('\\n')) !== -1) { const line = rest.slice(0, end); rest = rest.slice(end + 1); if (line === 'exit') { console.error('echo: bye'); process.exit(3); } setTimeout(() => process.stdout.write(line + '\\n'), ${delayMs}); } });`] });
 
 // a tmux server with one session marked as an ad-hoc Scratch Place's Workspace, and a launch
 // service that joins it
@@ -71,8 +71,8 @@ const nextLine = (lines: string[], channel: LineChannel) => new Promise<string>(
   const poll = setInterval(() => { if (lines.length > 0) { clearTimeout(timer); clearInterval(poll); resolve(lines.shift()!); } }, 20);
   channel.onClose(() => { clearTimeout(timer); clearInterval(poll); reject(new Error('closed')); });
 });
-async function connect(socket: string): Promise<{ channel: LineChannel; lines: string[]; dropped: number; closed: Promise<void> }> {
-  const connected = await connectHolder(socket);
+async function connect(socket: string, from = 0): Promise<{ channel: LineChannel; lines: string[]; dropped: number; closed: Promise<void> }> {
+  const connected = await connectHolder(socket, { from });
   expect(connected).toBeDefined();
   const lines: string[] = [];
   connected!.channel.onLine(line => lines.push(line));
@@ -82,27 +82,32 @@ async function connect(socket: string): Promise<{ channel: LineChannel; lines: s
 }
 
 describe.skipIf(!tmuxSocketsWork)('the holder in a Workspace session', () => {
-  it('passes lines through both ways and replays what was written while nobody was connected', async () => {
+  it('passes lines through both ways and replays every line past the cursor a connection brings', async () => {
     const { place, launch } = await workspace();
-    const holder = await launch.openHolderWindow(place, 'agent-1', echo(300), {});
+    const holder = await launch.openHolderWindow(place, 'agent-1', echo(300));
     expect(holder).toBeDefined();
 
     const first = await connect(holder!.socket);
-    first.channel.send('{"type":"ping","text":"a b"}');
-    expect(await nextLine(first.lines, first.channel)).toBe('{"type":"ping","text":"a b"}');
+    first.channel.send('{"type":"ping","text":"a\u2028b"}');
+    expect(await nextLine(first.lines, first.channel)).toBe('{"type":"ping","text":"a\u2028b"}');
 
-    // the echo arrives after this connection is gone: the holder keeps it for the next one
+    // the echo arrives after this connection is gone: a connection that read one line gets the rest
     first.channel.send('while away');
     first.channel.close();
     await new Promise(resolve => setTimeout(resolve, 600));
-    const second = await connect(holder!.socket);
+    const second = await connect(holder!.socket, 1);
     expect(second.dropped).toBe(0);
     expect(await nextLine(second.lines, second.channel)).toBe('while away');
+    second.channel.close();
+    // a connection that read nothing gets every line the holder kept, in order
+    const third = await connect(holder!.socket, 0);
+    expect(await nextLine(third.lines, third.channel)).toBe('{"type":"ping","text":"a\u2028b"}');
+    expect(await nextLine(third.lines, third.channel)).toBe('while away');
   });
 
   it('keeps the window after its child exits, with the child\'s stderr, and ends the connection', async () => {
     const { place, launch, socketPath } = await workspace();
-    const holder = await launch.openHolderWindow(place, 'agent-2', echo(0), {});
+    const holder = await launch.openHolderWindow(place, 'agent-2', echo(0));
     const connected = await connect(holder!.socket);
     connected.channel.send('exit');
     await connected.closed;
@@ -118,7 +123,7 @@ describe.skipIf(!tmuxSocketsWork)('the holder in a Workspace session', () => {
 
   it('never lists the held process as a Terminal or as an Agent', async () => {
     const { place, launch, socket, panes } = await workspace();
-    const holder = await launch.openHolderWindow(place, 'agent-3', echo(0), {});
+    const holder = await launch.openHolderWindow(place, 'agent-3', echo(0));
     await connect(holder!.socket);
 
     expect((await launch.placePanes(place)).map(pane => pane.paneId)).not.toContain(holder!.pane);

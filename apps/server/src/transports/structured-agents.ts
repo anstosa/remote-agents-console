@@ -5,12 +5,16 @@ import { structuredAdapterFor } from '../adapters/registry.js';
 import type { AdapterConfigs, AgentKind } from '../adapters/types.js';
 import type { Agent, AgentLifecycle } from '../domain/models.js';
 import type { Place } from '../places/places.js';
+import { expandCommand } from '../launch/service.js';
+import { run } from '../tmux/command.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
-import { connectHolder, type Delivery, type StructuredEvent, type StructuredSession, type TranscriptItem } from './structured.js';
+import { connectHolder, type Delivery, type StructuredConnection, type StructuredEvent, type TranscriptItem } from './structured.js';
 import { agentPanel } from './transport.js';
 
-/** Where a structured Agent's process runs: its holder's socket and tmux window (ADR 0016). */
-export type HolderRef = { socket: string; window: string; pane: string; tmuxSocket?: string };
+/** Where a structured Agent's process runs: its holder's socket and tmux pane (ADR 0016). */
+export type HolderRef = { agentId: string; socket: string; pane: string; tmuxSocket?: string };
+/** The command a holder runs: the program and its arguments, its environment, and the setup run first. */
+export type HolderLaunch = { program: string; args: string[]; env: Record<string, string>; setup?: string };
 /**
  * A structured Agent as the console stores it, from launch until Close: its kind, Place, whether
  * it is Sandboxed, its current Conversation, its holder, its lifecycle, who launched it and its
@@ -22,15 +26,15 @@ export type StructuredLaunch = { id: string; kind: AgentKind; place: Place };
 /** Starts, reads and stops structured Agent processes; the holder in tmux outside tests. */
 export interface StructuredProcesses {
   /** Start the process and connect its protocol client, which reports through `emit`. */
-  start(launch: StructuredLaunch, emit: (event: StructuredEvent) => void): Promise<{ session: StructuredSession; holder: HolderRef } | undefined>;
+  start(launch: StructuredLaunch, emit: (event: StructuredEvent) => void): Promise<{ connection: StructuredConnection; holder: HolderRef } | undefined>;
   /** The process's recent stderr, shown when it fails. */
   stderr(holder: HolderRef): Promise<string | undefined>;
-  /** Stop the process and remove its holder. */
-  stop(holder: HolderRef): Promise<void>;
+  /** Stop the process and remove its holder, then run its kind's teardown in its home. */
+  stop(holder: HolderRef, agent: { kind: AgentKind; home: string }): Promise<void>;
 }
 /** Opens, reads and removes holder windows in a Place's Workspace session. */
 export interface HolderWindows {
-  openHolderWindow(place: Place, agentId: string, argv: string[], env: Record<string, string>, setup?: string): Promise<HolderRef | undefined>;
+  openHolderWindow(place: Place, agentId: string, launch: HolderLaunch): Promise<HolderRef | undefined>;
   captureHolder(holder: HolderRef): Promise<string | undefined>;
   closeHolder(holder: HolderRef): Promise<void>;
 }
@@ -43,21 +47,31 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
       const configured = configs[kind];
       if (adapter === undefined || configured?.launchable !== true) return undefined;
       const spec = adapter.launch({ mode: 'fresh', cwd: place.home, sandboxed: false });
-      const holder = await windows.openHolderWindow(place, id, [configured.program, ...spec.args, ...configured.args], { ...spec.env, ...configured.env }, configured.setup);
+      const holder = await windows.openHolderWindow(place, id, { program: configured.program, args: [...spec.args, ...configured.args], env: { ...spec.env, ...configured.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
       if (holder === undefined) return undefined;
       const connected = await connectHolder(holder.socket);
       if (connected === undefined) { await windows.closeHolder(holder); return undefined; }
-      return { holder, session: adapter.client(connected.channel, emit) };
+      return { holder, connection: adapter.client(connected.channel, emit) };
     },
     stderr: holder => windows.captureHolder(holder),
-    stop: holder => windows.closeHolder(holder)
+    async stop(holder, { kind, home }) {
+      await windows.closeHolder(holder);
+      const teardown = configs[kind]?.teardown;
+      // best-effort, as for a pane: a failed teardown never blocks the stop
+      if (teardown !== undefined && (await run('/bin/sh', ['-c', expandCommand(teardown, { identity: home })], undefined, 60_000).catch(() => undefined))?.code !== 0) console.error(`[structured] adapters.${kind} teardown failed in ${JSON.stringify(home)}`);
+    }
   };
 }
 
-// the console's view of one structured Agent's process while this console drives it
-type Driven = { session?: StructuredSession; working: boolean; delivering: boolean; transcript: TranscriptItem[]; revision: number; stderr?: string; reported?: (reported: boolean) => void };
+// what this console knows of one structured Agent's process while it drives it
+type Live = { connection?: StructuredConnection; working: boolean; delivering: boolean; transcript: TranscriptItem[]; revision: number; stderr?: string; reported?: (reported: boolean) => void };
 const maxTranscriptItems = 2_000;
-const isRecord = (value: unknown): value is StructuredRecord => typeof value === 'object' && value !== null && typeof (value as StructuredRecord).id === 'string' && typeof (value as StructuredRecord).kind === 'string' && typeof (value as StructuredRecord).placeId === 'string' && typeof (value as StructuredRecord).home === 'string';
+const isStoredRecord = (value: unknown): value is StructuredRecord => {
+  const record = value as Partial<StructuredRecord> | null;
+  const holder = record?.holder;
+  return typeof record === 'object' && record !== null && typeof record.id === 'string' && typeof record.kind === 'string' && typeof record.placeId === 'string' && typeof record.home === 'string'
+    && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string');
+};
 
 /**
  * The structured Agents (ADR 0015): each gets a console-minted id and a stored record, is
@@ -68,7 +82,7 @@ const isRecord = (value: unknown): value is StructuredRecord => typeof value ===
 export class StructuredAgents {
   private readonly file: string;
   private records?: Promise<StructuredRecord[]>;
-  private readonly driven = new Map<string, Driven>();
+  private readonly live = new Map<string, Live>();
   private readonly listeners = new Set<() => void>();
   private mutation = Promise.resolve();
 
@@ -83,24 +97,30 @@ export class StructuredAgents {
   async launch(place: Place, kind: AgentKind): Promise<boolean> {
     const records = await this.load();
     const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed: false, lifecycle: 'starting', origin: 'operator', launchedAt: Date.now() };
-    const driven: Driven = { working: false, delivering: false, transcript: [], revision: 0 };
+    const live: Live = { working: false, delivering: false, transcript: [], revision: 0 };
     const reported = new Promise<boolean>(resolve => {
-      driven.reported = resolve;
+      live.reported = resolve;
       setTimeout(() => resolve(false), this.options.reportTimeoutMs ?? 30_000).unref();
     });
     records.push(record);
-    this.driven.set(record.id, driven);
-    const started = await this.processes.start({ id: record.id, kind, place }, event => this.observe(record, driven, event)).catch(() => undefined);
-    if (started === undefined) {
-      records.splice(records.indexOf(record), 1);
-      this.driven.delete(record.id);
+    this.live.set(record.id, live);
+    const started = await this.processes.start({ id: record.id, kind, place }, event => this.observe(record, live, event)).catch(() => undefined);
+    // closed while it started: nothing may keep running for it
+    if (this.live.get(record.id) !== live) {
+      if (started !== undefined) { started.connection.close(); await this.processes.stop(started.holder, record); }
       return false;
     }
-    driven.session = started.session;
+    if (started === undefined) {
+      records.splice(records.indexOf(record), 1);
+      this.live.delete(record.id);
+      this.changed();
+      return false;
+    }
+    live.connection = started.connection;
     record.holder = started.holder;
     await this.save();
-    this.changed(driven);
-    if (!await reported && record.lifecycle === 'starting') await this.fail(record, driven, 'Its process did not report in after starting.');
+    this.changed(live);
+    if (!await reported && record.lifecycle === 'starting') await this.fail(record, live, 'Its process did not report in after starting.', true);
     return true;
   }
 
@@ -108,10 +128,10 @@ export class StructuredAgents {
   async deliver(id: string, prompt: string): Promise<Delivery | undefined> {
     const record = (await this.load()).find(candidate => candidate.id === id);
     if (record === undefined) return undefined;
-    const driven = this.driven.get(id);
-    if (record.lifecycle !== 'live' || driven?.session === undefined || driven.working || driven.delivering) return 'refused';
-    driven.delivering = true;
-    try { return await driven.session.deliver(prompt); } finally { driven.delivering = false; }
+    const live = this.live.get(id);
+    if (record.lifecycle !== 'live' || live?.connection === undefined || live.working || live.delivering) return 'refused';
+    live.delivering = true;
+    try { return await live.connection.deliver(prompt); } finally { live.delivering = false; }
   }
 
   /** Close an Agent: stop its process, remove its holder and forget it. */
@@ -119,11 +139,10 @@ export class StructuredAgents {
     const records = await this.load();
     const record = records.find(candidate => candidate.id === id);
     if (record === undefined) return false;
-    const driven = this.driven.get(id);
-    driven?.session?.close();
-    if (record.holder !== undefined) await this.processes.stop(record.holder);
+    this.live.get(id)?.connection?.close();
     records.splice(records.indexOf(record), 1);
-    this.driven.delete(id);
+    this.live.delete(id);
+    if (record.holder !== undefined) await this.processes.stop(record.holder, record);
     await this.save();
     this.changed();
     return true;
@@ -136,27 +155,27 @@ export class StructuredAgents {
   /** The dashboard's view of every structured Agent, at its Place. */
   async agents(): Promise<Agent[]> {
     return (await this.load()).map(record => {
-      const driven = this.driven.get(record.id);
+      const live = this.live.get(record.id);
       // an Agent this console never connected to has no process it can drive
-      const lifecycle: AgentLifecycle = driven === undefined && (record.lifecycle === 'starting' || record.lifecycle === 'live') ? 'exited' : record.lifecycle;
-      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention: driven?.working === true ? 'working' : 'finished', placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), structured: { lifecycle, ...(record.reason === undefined ? {} : { reason: record.reason }), revision: driven?.revision ?? 0 } };
+      const lifecycle: AgentLifecycle = live === undefined && (record.lifecycle === 'starting' || record.lifecycle === 'live') ? 'exited' : record.lifecycle;
+      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention: live?.working === true ? 'working' : 'finished', placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), structured: { lifecycle, ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0 } };
     });
   }
 
   /** What an Agent's transcript Panel shows: its items, and its stderr once it failed. */
   async transcript(id: string): Promise<{ items: TranscriptItem[]; stderr?: string } | undefined> {
     if (!await this.has(id)) return undefined;
-    const driven = this.driven.get(id);
-    return { items: driven?.transcript ?? [], ...(driven?.stderr === undefined ? {} : { stderr: driven.stderr }) };
+    const live = this.live.get(id);
+    return { items: live?.transcript ?? [], ...(live?.stderr === undefined ? {} : { stderr: live.stderr }) };
   }
 
-  private observe(record: StructuredRecord, driven: Driven, event: StructuredEvent): void {
-    if (this.driven.get(record.id) !== driven) return;
+  private observe(record: StructuredRecord, live: Live, event: StructuredEvent): void {
+    if (this.live.get(record.id) !== live) return;
     switch (event.type) {
       case 'report':
         if (record.lifecycle !== 'starting') return;
         record.lifecycle = 'live';
-        driven.reported?.(true);
+        live.reported?.(true);
         void this.save();
         break;
       case 'conversation':
@@ -164,36 +183,38 @@ export class StructuredAgents {
         void this.save();
         break;
       case 'turn':
-        driven.working = event.turn.type === 'started';
+        live.working = event.turn.type === 'started';
         break;
       case 'transcript': {
-        const index = driven.transcript.findIndex(item => item.id === event.item.id);
-        if (index === -1) driven.transcript.push(event.item); else driven.transcript[index] = event.item;
-        driven.transcript.splice(0, driven.transcript.length - maxTranscriptItems);
+        const index = live.transcript.findIndex(item => item.id === event.item.id);
+        if (index === -1) live.transcript.push(event.item); else live.transcript[index] = event.item;
+        live.transcript.splice(0, live.transcript.length - maxTranscriptItems);
         break;
       }
       case 'exited':
-        driven.working = false;
-        driven.session = undefined;
-        driven.reported?.(false);
-        if (record.lifecycle === 'starting') { void this.fail(record, driven, 'Its process exited before reporting in.'); return; }
+        live.working = false;
+        live.connection = undefined;
+        live.reported?.(false);
+        if (record.lifecycle === 'starting') { void this.fail(record, live, 'Its process exited before reporting in.'); return; }
         if (record.lifecycle === 'live') { record.lifecycle = 'exited'; void this.save(); }
         break;
     }
-    this.changed(driven);
+    this.changed(live);
   }
 
-  private async fail(record: StructuredRecord, driven: Driven, reason: string): Promise<void> {
+  // mark the Agent failed with its stderr; a process still running unheard is stopped, its stderr kept
+  private async fail(record: StructuredRecord, live: Live, reason: string, stop = false): Promise<void> {
     record.lifecycle = 'failed';
     record.reason = reason;
     const stderr = record.holder === undefined ? undefined : await this.processes.stderr(record.holder).catch(() => undefined);
-    if (stderr !== undefined) driven.stderr = stderr;
+    if (stderr !== undefined) live.stderr = stderr;
+    if (stop && record.holder !== undefined) { live.connection?.close(); live.connection = undefined; await this.processes.stop(record.holder, record); }
     await this.save();
-    this.changed(driven);
+    this.changed(live);
   }
 
-  private changed(driven?: Driven): void {
-    if (driven !== undefined) driven.revision += 1;
+  private changed(live?: Live): void {
+    if (live !== undefined) live.revision += 1;
     for (const listener of this.listeners) listener();
   }
 
@@ -208,7 +229,7 @@ export class StructuredAgents {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       parsed = undefined;
     }
-    if (Array.isArray(parsed) && parsed.every(isRecord)) return parsed;
+    if (Array.isArray(parsed) && parsed.every(isStoredRecord)) return parsed;
     console.warn(`[structured] ${this.file} is not a valid list of structured Agents; starting with none`);
     return [];
   }
