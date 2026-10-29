@@ -1834,6 +1834,16 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .question-notes textarea { width: 100%; min-height: 4.5rem; border-color: var(--surface-2); background: color-mix(in srgb, var(--crust) 72%, transparent); }
 .question-notes-actions { display: flex; justify-content: flex-end; }
 .question-notes-actions button { min-height: 2.2rem; padding: .35rem .65rem; font: 700 .7rem var(--font-mono); }
+.question-page, .question-countdown { color: var(--subtext-0); font-weight: 600; letter-spacing: 0; text-transform: none; }
+.question-page-next { min-height: 2.75rem; padding: 0 .5rem; border: 0; background: none; color: var(--blue); font: inherit; text-decoration: underline; }
+.question-text-answer { display: flex; flex-direction: column; gap: .4rem; }
+.question-text-answer textarea { width: 100%; min-height: 4.5rem; }
+.question-text-answer button, .question-dismiss { align-self: flex-end; min-height: 2.75rem; padding: .35rem .75rem; font: 700 .7rem var(--font-mono); }
+.steer-bar { display: flex; align-items: center; justify-content: flex-end; gap: .5rem; color: var(--subtext-0); font: 600 .7rem var(--font-mono); }
+.steer-pending { color: var(--peach); }
+.steer-hint { min-height: 2.75rem; padding: 0 .6rem; border: 1px dashed var(--surface-2); background: none; color: var(--subtext-0); font: inherit; }
+.pending-steers { padding: .4rem .6rem; border-bottom: 1px solid var(--surface-1); color: var(--subtext-0); font-size: .75rem; }
+.pending-steers ul { margin: .25rem 0 0; padding-left: 1.1rem; color: var(--text); }
 @media (max-width: 600px) { .question-heading { flex-direction: column; }.question-tools { width: 100%; justify-content: stretch; }.question-tools button { flex: 1 1 auto; justify-content: center; } }
 .launch-error { margin: 0; color: var(--red); font-size: .78rem; line-height: 1.35; }
 .operation-feedback { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .65rem; min-width: 0; padding: .55rem .7rem; border: 1px solid color-mix(in srgb, var(--blue) 40%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 94%, var(--blue)); box-shadow: 0 .7rem 1.9rem color-mix(in srgb, var(--crust) 70%, transparent), inset 0 1px color-mix(in srgb, var(--text) 5%, transparent); color: var(--text); }

@@ -24,7 +24,7 @@ export const AgentAccountsMenuContext = createContext<AgentAccountsMenu | undefi
 // The capability record the Dashboard publishes per registered kind (ADR 0002). The web
 // reads presence and reasons; it never re-derives capabilities. `sandbox*` stay undefined
 // until chunk 4 arms the sandbox, so every launch is unsandboxed here.
-export type AdapterCapability = { launchable: boolean; unavailableReason?: string; program?: string; stateSource: 'reported' | 'title' | 'both'; turnCapture: boolean; inlineQuestions: boolean; commands: boolean; sandbox: boolean; sandboxUnavailableReason?: string; allowedModels?: AllowedModel[]; efforts?: string[] };
+export type AdapterCapability = { launchable: boolean; unavailableReason?: string; program?: string; stateSource: 'reported' | 'title' | 'both'; turnCapture: boolean; inlineQuestions: boolean; steer?: boolean; commands: boolean; sandbox: boolean; sandboxUnavailableReason?: string; allowedModels?: AllowedModel[]; efforts?: string[] };
 // one of a kind's Allowed models: an exact `provider/id`, with the Effort it defaults to
 export type AllowedModel = { model: string; effort?: string };
 export type AdapterCapabilities = Partial<Record<AgentKind, AdapterCapability>>;
