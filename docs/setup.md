@@ -490,6 +490,35 @@ What is not confined: the Pi process itself (its provider traffic and its own st
 
 **A Pi you start by hand** in a Terminal stays a Terminal: the console never recognises or drives it.
 
+### The Conductor
+
+The Conductor is one always-running Pi Agent that can act on the console itself, through the console's MCP server (ADR 0018). It is the only Agent with that access. Configure it with a top-level `conductor` block:
+
+```json
+{
+  "projects": [{ "id": "conductor", "label": "Conductor", "path": "/home/me/conductor" }],
+  "adapters": { "pi": { "allowedModels": [{ "model": "openai/gpt-5.6", "effort": "medium" }] } },
+  "conductor": { "kind": "pi", "project": "conductor", "model": "openai/gpt-5.6", "effort": "high", "scriptDeadlineMinutes": 10 }
+}
+```
+
+- `kind` is `pi`, the only kind that can host it. `adapters.pi` must be configured, and `model` must be one of its Allowed models; `effort` is optional.
+- `project` names a directory Project (a folder that is not a git checkout). It is the Conductor's working folder and the only place its commands may write, and its `AGENTS.md` is your standing guidance to it. Its tab sorts first.
+- `scopes` chooses what it may call, from `status:read`, `logs:read`, `files:read`, `prompts:write`, `agents:control`, `stack:operate`, `review:write` and `admin:dangerous`. The default is every scope but `admin:dangerous`. Its tool list shows only what its scopes allow. So far it gets the read tools only (Agents and their latest answers, logs and history, Worktrees, Stack state, reviews, file previews), and never `answer_agent_question` or the `launch_*` tools, whatever its scopes: one Agent never consents for you, and those launches are unsandboxed.
+- `maxWorkers` (4) and `maxSelfStartedTurnsPerHour` (30) are read but not used yet.
+- `scriptDeadlineMinutes` (default 10): a code mode script that runs longer cancels its Turn, and its transcript says so.
+
+**Lifecycle.** The console launches the Conductor when it starts and again whenever it exits, on the same Conversation, keeping its queue. After 3 exits in 10 minutes it stays Exited and you get a push; prompts to it keep queueing until you resume it. It is always Sandboxed (see Pi's sandbox above). Its menu offers Restart, which starts its process again in place, and its Conversations menu offers New Conversation; there is no Close or Turn off. Remove the `conductor` block to turn it off. Its model chip shows its configured model without a picker, and it loads no skills or prompt templates from its folder.
+
+**Its MCP access.** At each start of its process the console mints a token, keeps only its hash, and hands it to the RAC Pi extension over Pi's RPC channel; the extension registers the console's `/mcp` (at your `publicOrigin`) with it. The token never enters a command's environment, never reaches the model and is redacted from Raw events. Commands cannot reach the endpoint anyway: the console's `publicOrigin` host and listener address are denied domains for every Pi's commands. The token stops working when the process exits or is restarted.
+
+- The Conductor needs no `integrations` block: `/mcp` is served whenever a Conductor is configured, though the OAuth and voice parts are not. `integrations.mcp.readEnabled` (on by default), `writeEnabled` and `dangerousEnabled` still gate what it can call.
+- It acts without Davo's voice mode, has its own rate limit (120 calls a minute, counted per MCP call, so one script cannot hammer the console), and never reaches another console through federation. Every call is in the integration audit log.
+- It reads only within its scope: every configured Project, and any other Place while its Workspace exists.
+- It uses code mode to batch and filter console calls: a script calls them as `tools.mcp__rac__<tool>(args)`, and each result carries its data in `structuredContent`. Scripts get no `models` (no direct provider calls outside the Allowed models).
+
+**Why only Pi.** The console can arm and confirm Pi's sandbox itself, and hold the token inside Pi's process where commands cannot read it. It cannot see whether Claude's or Codex's own sandbox is on, and an Agent whose commands are unconfined could read another process's token from `/proc` or drive any pane. So only Pi can be the Conductor, and later only Sandboxed Pi workers can be spawned by it.
+
 ## Reviews
 
 The guided **Review tour** and the opt-in AI **Code review** are both a *Review

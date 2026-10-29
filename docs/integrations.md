@@ -6,7 +6,9 @@ Remote Agents exposes one typed orchestration gateway through two clients:
 - a browser Realtime voice dialog opened from the purple **Davo** button in the server row
 
 Both paths use the same tool catalog, feature flags, exact scopes, voice-mode
-mutation gate, idempotency store, and redacted audit log. They do not expose the raw
+mutation gate, idempotency store, and redacted audit log. A configured Conductor
+is a third caller of the same endpoint, with its own token, scopes and rate limit
+and no voice-mode gate; see "The Conductor" in `setup.md`. They do not expose the raw
 terminal or an arbitrary shell. Integration prompts beginning with `!` are
 rejected rather than entering the console's local shell mode.
 
