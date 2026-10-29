@@ -186,12 +186,15 @@ export class WorktreeNoteService {
     });
   }
 
-  // Whether `by` may change the note: the Conductor only its own. Any change of the operator's
-  // (text, title, attachments, lock, visibility, Schedule) makes it the operator's.
-  private claim(note: WorktreeNote, by: NoteAuthor): boolean {
-    if (by === 'conductor') return note.source === 'conductor';
-    if (note.source === 'conductor') delete note.source;
-    return true;
+  // Whether `by` may change the note: the Conductor only its own.
+  private mayChange(note: WorktreeNote, by: NoteAuthor): boolean {
+    return by === 'operator' || note.source === 'conductor';
+  }
+
+  // A change that landed: any of the operator's (text, title, attachments, lock, visibility,
+  // Schedule) makes a Conductor's Note the operator's.
+  private claim(note: WorktreeNote, by: NoteAuthor): void {
+    if (by === 'operator' && note.source === 'conductor') delete note.source;
   }
 
   // update one owned or shared note at its canonical storage location
@@ -201,9 +204,10 @@ export class WorktreeNoteService {
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
       // hide notes outside the requesting scope
-      if (note === undefined || !this.claim(note, by)) return undefined;
+      if (note === undefined || !this.mayChange(note, by)) return undefined;
       // preserve the aggregate text budget
       if (totalNoteLength(stored) - note.text.length + text.length > maxTotalNoteLength) return undefined;
+      this.claim(note, by);
       note.text = text;
       return { ...note };
     });
@@ -214,8 +218,9 @@ export class WorktreeNoteService {
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || !validTitle(title)) return undefined;
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
-      if (note === undefined || !this.claim(note, by)) return undefined;
+      if (note === undefined || !this.mayChange(note, by)) return undefined;
       if (totalNoteLength(stored) - (note.title?.length ?? 0) + title.length > maxTotalNoteLength) return undefined;
+      this.claim(note, by);
       note.title = title;
       return { ...note };
     });
@@ -252,7 +257,7 @@ export class WorktreeNoteService {
       if (index < 0) return undefined;
       // refuse locks before changing the stored collection
       if (notes[index]!.locked === true) return 'locked';
-      if (!this.claim(notes[index]!, by)) return undefined;
+      if (!this.mayChange(notes[index]!, by)) return undefined;
       const existingOrder = this.deletionOrders.get(resolved.key);
       const newIds = existingOrder === undefined ? [] : notes.map(note => note.id).filter(id => !existingOrder.includes(id));
       const deletionOrder = existingOrder === undefined ? notes.map(note => note.id) : [...newIds, ...existingOrder];
@@ -318,7 +323,8 @@ export class WorktreeNoteService {
     if (!validWorktreeId(worktreeId) || !validNoteId(noteId) || !validSchedule(schedule)) return undefined;
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
-      if (note === undefined || !this.claim(note, by)) return undefined;
+      if (note === undefined || !this.mayChange(note, by)) return undefined;
+      this.claim(note, by);
       note.schedule = schedule;
       return { ...note };
     });
@@ -342,6 +348,7 @@ export class WorktreeNoteService {
     return await this.mutate(stored => {
       const note = this.visibleNote(stored, worktreeId, noteId)?.note;
       if (note === undefined) return undefined;
+      this.claim(note, 'operator');
       delete note.schedule;
       return { ...note };
     });

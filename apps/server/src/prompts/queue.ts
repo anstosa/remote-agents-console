@@ -19,6 +19,7 @@ type StoredQueues = Record<string, QueuedPrompt[]>;
 
 const maxScopes = 500;
 const maxPromptsPerScope = 50;
+const maxLabelledPerScope = 40;
 const maxStoredTextLength = 10_000_000;
 const maxStoredAttachmentBytes = 100 * 1024 * 1024;
 const validScope = (value: string) => value.length > 0 && value.length <= 4096 && !value.includes('\0');
@@ -69,6 +70,8 @@ export class QueuedPromptService {
       if (stored[scope] === undefined && Object.keys(stored).length >= maxScopes) return undefined;
       const queue = stored[scope] ?? [];
       if (queue.length >= maxPromptsPerScope) return undefined;
+      // the console's own prompts (held back by a budget) leave room for the operator's
+      if (sender.label !== undefined && queue.filter(candidate => candidate.label !== undefined).length >= maxLabelledPerScope) return undefined;
       const prompt: QueuedPrompt = { id: randomBytes(18).toString('base64url'), text, createdAt: new Date().toISOString(), ...senderOf(sender), ...(attachments.length === 0 ? {} : { attachments }), ...(origin === undefined ? {} : { origin }) };
       queue.push(prompt);
       stored[scope] = queue;

@@ -134,6 +134,14 @@ export class Dispatches implements PromptDispatchHooks {
     });
   }
 
+  async handedOver(fromAgentId: string, toAgentId: string): Promise<void> {
+    await this.mutate(records => {
+      const moved = records.filter(record => record.to === fromAgentId);
+      for (const record of moved) record.to = toAgentId;
+      return moved.length > 0;
+    });
+  }
+
   ended(promptId: string, outcome: PromptOutcome, answer?: string): void {
     void this.mutate(records => {
       const index = records.findIndex(candidate => candidate.promptId === promptId);
@@ -165,7 +173,7 @@ export class Dispatches implements PromptDispatchHooks {
     };
     for (const record of [...await this.load()]) {
       // nobody is left to tell
-      if (gone(record.from)) { await this.mutate(records => { records.splice(records.indexOf(record), 1); }); continue; }
+      if (gone(record.from)) { await this.mutate(records => { const index = records.indexOf(record); if (index !== -1) records.splice(index, 1); }); continue; }
       if (record.ended !== undefined) continue;
       const target = live.get(record.to);
       if (target === undefined) { if (gone(record.to)) this.ended(record.promptId, 'gone'); continue; }

@@ -76,6 +76,8 @@ export interface PromptDispatchHooks {
   queued(agentId: string, promptId: string, sender: PromptSender): Promise<void>;
   delivered(agentId: string, promptId: string, sender: PromptSender, entryId: string | undefined): Promise<void>;
   ended(promptId: string, outcome: PromptOutcome, answer?: string): void;
+  /** An Agent restarted as another, whose queue it carries on. */
+  handedOver(fromAgentId: string, toAgentId: string): Promise<void>;
 }
 // the outcome a tracked request's settling means for its prompt
 const outcomeOf = (state: 'complete' | 'failed' | 'interrupted', error: string | undefined): PromptOutcome => {
@@ -207,7 +209,8 @@ export class PromptService {
     const enqueue = async (queued: QueuedPromptService): Promise<QueuedPromptSummary | undefined> => {
       const added = await queued.enqueue(scope, prompt, attachments, origin, sender);
       if (added === undefined) return undefined;
-      if (sender.from !== undefined) await this.dispatchHooks?.queued(agentId, added.id, senderOf(sender));
+      // a record that cannot be kept loses only the report: the prompt is queued
+      if (sender.from !== undefined) await this.dispatchHooks?.queued(agentId, added.id, senderOf(sender)).catch(error => { console.error('[prompts] a dispatch could not be recorded:', error); });
       await this.admitCalendar(transport, added.id, agentId, first.agent.kind, added.createdAt, prompt, attachments);
       if (tracked) this.trackQueuedRequest(added.id, agentId, prompt);
       return added;
@@ -670,6 +673,7 @@ export class PromptService {
     // prompts that cannot move stay with the departed scope and drain into Notes
     if (this.queued !== undefined && !await this.queued.moveScope(from, to)) return;
     await this.calendar?.handOver(fromAgentId, toAgentId).catch(() => undefined);
+    await this.dispatchHooks?.handedOver(fromAgentId, toAgentId).catch(() => undefined);
     // only queued requests have exact transfer identity during a restart handoff
     for (const [requestId, request] of this.trackedRequests) {
       if (request.agentId !== fromAgentId || request.terminalAt !== undefined) continue;
@@ -746,7 +750,7 @@ export class PromptService {
     const intent = requestId === undefined || calendar === undefined ? {} : { intent: (send: SendIntent) => calendar.beforeSend({ id: requestId, agentId, submittedAt: send.sentAt, ...send }) };
     // hold the scope so a quick second submit queues behind this one while its draft renders
     const delivery = await transport.deliver(agentId, prompt, attachments, { ...options, ...intent }, historyPrompt => {
-      this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), historyPrompt });
+      this.phases.set(scope, { state: 'awaiting-start', changedAt: Date.now(), ...(requestId === undefined ? {} : { requestId }), historyPrompt, ...(options.sender === undefined ? {} : { sender: options.sender }) });
     });
     // a rejected target cannot leave an admitted interval eligible for later delivery
     if (delivery.status === 'held' && delivery.intended === true && requestId !== undefined) await calendar?.invalid(requestId, 'missing_lifecycle_evidence').catch(() => undefined);

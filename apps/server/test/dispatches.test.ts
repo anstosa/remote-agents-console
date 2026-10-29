@@ -128,6 +128,19 @@ describe('the Conductor\'s dispatches', () => {
     expect(reports).toEqual([]);
   });
 
+  it('follows a prompt to the Agent its target restarted as', async () => {
+    const { service, queues, reports, agent, settle, advance } = await dispatches();
+    await service.queued('w1', 'prompt-000000000001', { from: 'c1' });
+    await service.handedOver('w1', 'w2');
+    queues.set('w2', [{ id: 'prompt-000000000001' }]);
+    // the old id is gone for good, but the prompt waits on in the new Agent's queue
+    advance(60_000);
+    await service.sweep([agent('c1'), agent('w2')]);
+    await service.sweep([agent('c1'), agent('w2')]);
+    await settle();
+    expect(reports).toEqual([]);
+  });
+
   it('holds each Agent\'s self-started Turns to the hourly budget, pushing once per throttled spell', async () => {
     const { service, pushes, advance } = await dispatches(2);
     const report = { id: 'prompt-000000000009', text: 'r', createdAt: '', label: 'report' } as QueuedPrompt;

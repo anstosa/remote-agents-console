@@ -25,6 +25,18 @@ describe('QueuedPromptService', () => {
     }
   });
 
+  it('keeps room for the operator\'s prompts in a queue the console\'s own labelled prompts fill', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-labelled-queue-'));
+    try {
+      const service = new QueuedPromptService(join(directory, 'queue.json'));
+      for (let index = 0; index < 40; index += 1) expect(await service.enqueue('agent:c1', `report ${index}`, [], undefined, { label: 'report' })).toBeDefined();
+      await expect(service.enqueue('agent:c1', 'one report too many', [], undefined, { label: 'report' })).resolves.toBeUndefined();
+      await expect(service.enqueue('agent:c1', 'The operator\'s prompt')).resolves.toMatchObject({ text: 'The operator\'s prompt' });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   // allow the encoded form of the full decoded budget plus conservative metadata overhead
   it('keeps the serialized attachment budget above the prior bounded payload footprint', () => {
     const encodedDecodedBudget = Math.ceil((100 * 1024 * 1024) / 3) * 4;
