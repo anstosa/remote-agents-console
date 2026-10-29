@@ -442,6 +442,20 @@ from `PI_CODING_AGENT_DIR` (else `~/.pi/agent`) in its own environment.
 processes writing one session file interleave their entries, and neither sees
 the other's turns.
 
+**Deploys, exits and the pin.** Each Pi runs under a holder in a tagged window of
+its Workspace's tmux session, so restarting the console does not stop it: the
+console reconnects and a Turn in flight completes.
+
+- A Pi whose process exits is **Exited**. Its queue is kept and nothing is sent
+  to it; its Panel shows Pi's stderr with Resume, Open holder window and Close.
+  Resume, or sending it a prompt, relaunches it on the same Conversation and the
+  queue drains in order. Close stops Pi and turns its queue into Notes.
+- Only a live Pi blocks a Worktree's Remove; Remove closes an Exited one.
+- The launch menu's Agent list shows the pinned Pi version and the latest one on
+  npm, with no Update button: Pi updates when the console's pin is bumped. A Pi
+  still running another version after a deploy restarts on the pinned one when it
+  is next idle, on the same Conversation, keeping its queue.
+
 ## Reviews
 
 The guided **Review tour** and the opt-in AI **Code review** are both a *Review
