@@ -802,6 +802,21 @@ describe('a structured Agent across a console restart', () => {
     await restarted.app.close();
   });
 
+  it('shows an Exited Agent\'s stderr again after a restart, and reattaches nothing to it', async () => {
+    const fake = fakeAgent();
+    const { app, headers, restart } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'exited' });
+    await app.inject({ method: 'GET', url: '/api/dashboard', headers });
+
+    const next = fakeAgent();
+    const restarted = await restart(next);
+    expect(next.attaches).toEqual([]);
+    expect(await restarted.dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'exited' } });
+    expect((await restarted.app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers: restarted.headers })).json()).toMatchObject({ stderr: 'pi: could not load its extension' });
+    await restarted.app.close();
+  });
+
   it('holds an Agent being reattached as live: a prompt sent meanwhile waits in its queue and never relaunches it', async () => {
     const fake = fakeAgent();
     const { app, headers, restart } = await consoleWith(fake);

@@ -787,15 +787,22 @@ export class LaunchService implements HolderWindows {
 
   // the tmux arguments that reach a holder's pane, or none once the pane is not that holder's any
   // more: a tmux server restart reuses pane ids
-  private async holderPane(holder: HolderRef): Promise<string[] | undefined> {
+  private async holderPane(holder: HolderRef): Promise<{ socketArgs: string[]; dead: boolean } | undefined> {
     const socketArgs = holder.tmuxSocket === undefined ? [] : ['-S', holder.tmuxSocket];
-    const marks = await run(this.tmux, [...socketArgs, 'display-message', '-p', '-t', holder.pane, `#{@rac_role} #{${holderAgentOption}}`]).catch(() => undefined);
-    return marks?.code === 0 && marks.stdout.trim() === `${holderPaneRole} ${holder.agentId}` ? socketArgs : undefined;
+    const marks = await run(this.tmux, [...socketArgs, 'display-message', '-p', '-t', holder.pane, `#{@rac_role} #{${holderAgentOption}} #{pane_dead}`]).catch(() => undefined);
+    const [role, agentId, dead] = marks?.code === 0 ? marks.stdout.trim().split(' ') : [];
+    return role === holderPaneRole && agentId === holder.agentId ? { socketArgs, dead: dead === '1' } : undefined;
+  }
+
+  // whether a holder's pane is this Agent's and its holder still runs (a dead pane's holder, and
+  // its child, have exited, and their pids may belong to other processes by now)
+  async holderRunning(holder: HolderRef): Promise<boolean> {
+    return (await this.holderPane(holder))?.dead === false;
   }
 
   // the last `lines` a holder's pane shows: its child's stderr, and the holder's exit line
   async captureHolder(holder: HolderRef, lines = 40): Promise<string | undefined> {
-    const socketArgs = await this.holderPane(holder);
+    const socketArgs = (await this.holderPane(holder))?.socketArgs;
     if (socketArgs === undefined) return undefined;
     const captured = await run(this.tmux, [...socketArgs, 'capture-pane', '-p', '-J', '-t', holder.pane, '-S', `-${lines}`]);
     return captured.code === 0 ? captured.stdout.trim() : undefined;
@@ -803,7 +810,7 @@ export class LaunchService implements HolderWindows {
 
   // remove a holder's window, which hangs up the holder and its child
   async closeHolder(holder: HolderRef): Promise<void> {
-    const socketArgs = await this.holderPane(holder);
+    const socketArgs = (await this.holderPane(holder))?.socketArgs;
     if (socketArgs !== undefined) await run(this.tmux, [...socketArgs, 'kill-window', '-t', holder.pane]).catch(() => undefined);
   }
 }

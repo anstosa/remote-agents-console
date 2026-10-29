@@ -62,8 +62,10 @@ const cleanupMonitor = new CleanupMonitor(cleanup, dashboardUpdates, push);
 app.addHook('onClose', async () => { clearInterval(dashboardTimer); cleanupMonitor.stop(); notifications.stop(); });
 void dashboardUpdates.refresh().catch(() => {});
 cleanupMonitor.start();
+// reconnect to the structured Agents' holders, which replay what this console has not read, before
+// the scheduler judges a Run by its Agent (for at most 10 s: a holder that never answers holds up nothing)
+const reattached = app.structuredAgents.reattach().catch(error => { console.error('[structured] reattach failed:', error); });
+await Promise.race([reattached, new Promise(resolve => setTimeout(resolve, 10_000).unref())]);
 // fire enabled Schedules unattended, beside the other periodic jobs; buildApp's onClose stops it
 app.scheduler.start();
-// reconnect to the structured Agents' holders, which replay what this console has not read
-void app.structuredAgents.reattach().catch(error => { console.error('[structured] reattach failed:', error); });
 await app.listen(config.listen);

@@ -58,6 +58,7 @@ export interface StructuredProcesses {
 export interface HolderWindows {
   openHolderWindow(place: Place, agentId: string, launch: HolderLaunch): Promise<HolderRef | undefined>;
   captureHolder(holder: HolderRef, lines?: number): Promise<string | undefined>;
+  holderRunning(holder: HolderRef): Promise<boolean>;
   closeHolder(holder: HolderRef): Promise<void>;
 }
 
@@ -102,14 +103,14 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
     async attach(holder, kind, emit) {
       const adapter = structuredAdapterFor(kind);
       // a holder that is gone, or not this Agent's any more, is never reached
-      if (adapter === undefined || await windows.captureHolder(holder) === undefined) return undefined;
+      if (adapter === undefined || !await windows.holderRunning(holder)) return undefined;
       const connected = await connectHolder(holder.socket, { from: holder.read ?? 0, attempts: 3 });
       return connected === undefined ? undefined : clientOver(adapter, holder, connected, emit, { dropped: connected.hello.dropped });
     },
     stderr: (holder, lines) => windows.captureHolder(holder, lines),
     async stop(holder, { kind, home }) {
       // the process is asked to stop, then killed; only while the window is still this Agent's holder
-      if (holder.pid !== undefined && await windows.captureHolder(holder) !== undefined) await terminate(holder.pid);
+      if (holder.pid !== undefined && await windows.holderRunning(holder)) await terminate(holder.pid);
       await windows.closeHolder(holder);
       const teardown = configs[kind]?.teardown;
       // best-effort, as for a pane: a failed teardown never blocks the stop
@@ -270,12 +271,18 @@ export class StructuredAgents {
   /**
    * Reconnect to the processes of the live Agents this console drove before it restarted (ADR
    * 0016): each holder replays the lines read since the Agent's last idle point, so a Turn in
-   * flight completes. An Agent whose process is gone is Exited.
+   * flight completes. An Agent whose process is gone is Exited. One with no process (Exited,
+   * failed, or launched by a console that stopped before it reported in) shows its stderr again.
    */
   async reattach(): Promise<void> {
-    await Promise.all((await this.load()).filter(record => record.lifecycle === 'live' && record.holder !== undefined && !this.live.has(record.id)).map(async record => {
+    await Promise.all((await this.load()).filter(record => record.holder !== undefined && !this.live.has(record.id)).map(async record => {
       const live = this.idle();
       this.live.set(record.id, live);
+      if (record.lifecycle !== 'live') {
+        if (record.lifecycle === 'starting') { record.lifecycle = 'exited'; await this.save(); }
+        await this.readStderr(record, live);
+        return;
+      }
       const generation = live.generation += 1;
       live.busy = true;
       const attached = await this.processes.attach(record.holder!, record.kind, event => this.observe(record, live, generation, event)).catch(() => undefined).finally(() => { live.busy = false; });
@@ -317,10 +324,11 @@ export class StructuredAgents {
   }
 
   // the Agent's lifecycle: one this console holds no connection to has no process it can drive
-  // (one being reattached is still live, so nothing resumes it under its running process)
+  // (one not yet reattached, or being reattached, is still live, so nothing resumes it under its
+  // running process)
   private lifecycle(record: StructuredRecord): AgentLifecycle {
     const live = this.live.get(record.id);
-    return live?.connection === undefined && live?.busy !== true && record.lifecycle === 'live' || live === undefined && record.lifecycle === 'starting' ? 'exited' : record.lifecycle;
+    return live !== undefined && live.connection === undefined && !live.busy && record.lifecycle === 'live' || live === undefined && record.lifecycle === 'starting' ? 'exited' : record.lifecycle;
   }
 
   /**
