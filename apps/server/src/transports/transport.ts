@@ -18,8 +18,11 @@ export type QuestionAnswer = number | string | { dismiss: true };
 export type InterruptOutcome = 'ok' | 'unavailable' | 'not-working';
 /** `unsent` reached nothing; `stuck` may have left the name unsubmitted in the composer. */
 export type RenameOutcome = 'sent' | 'unavailable' | 'busy' | 'unsent' | 'stuck';
-/** A Conversation to switch an Agent to: its kind and id, homed in the Worktree `worktreeId`. */
-export type ConversationTarget = { kind: AgentKind; id: string; worktreeId: string };
+/**
+ * A Conversation to switch an Agent to: its kind and id, homed in the Worktree `worktreeId`, chosen
+ * at the console's mutation generation `chosenAt` (a later mutation refuses the switch).
+ */
+export type ConversationTarget = { kind: AgentKind; id: string; worktreeId: string; chosenAt: number };
 /** The Agent now on the Conversation (a new one when the switch restarted it), or why there is none. */
 export type SwitchOutcome = { status: 'switched'; agentId: string } | { status: 'unavailable' | 'busy' | 'failed' | 'timed-out'; error: string };
 

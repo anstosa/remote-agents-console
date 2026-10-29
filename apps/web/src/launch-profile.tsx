@@ -141,7 +141,7 @@ export function LaunchMenu({ verb, label, resolution, onLaunch, onDismiss, entri
     })}
     {/* retain distinct version and operation errors */}{settings?.errors.map(error => <p key={error} className="launch-menu-error" role="alert">{error}</p>)}
     {unsandboxable.length > 0 && <><hr className="more-menu-divider" /><p className="launch-menu-heading launch-menu-subheading">Without sandbox — this launch only</p>{unsandboxable.map(kind => <button key={`${kind}-unsandboxed`} type="button" role="menuitem" className="launch-row launch-row-unsandboxed" disabled={launchDisabled} onClick={() => onLaunch({ kind, sandboxed: false })}><KindMark kind={kind} /><span className="launch-row-copy"><strong>{agentKindLabel[kind]}</strong><small>{sandboxCopy(kind, adapters?.[kind], false)}</small></span><UnlockIcon /></button>)}</>}
-    {kinds.filter(kind => adapters?.[kind]?.launchable === true && (adapters[kind]?.allowedModels?.length ?? 0) > 0).map(kind => <ModelLaunchRows key={`${kind}-models`} kind={kind} capability={adapters![kind]!} disabled={launchDisabled} onLaunch={onLaunch} />)}
+    {verb === 'Launch' && kinds.filter(kind => adapters?.[kind]?.launchable === true && (adapters[kind]?.allowedModels?.length ?? 0) > 0).map(kind => <ModelLaunchRows key={`${kind}-models`} kind={kind} capability={adapters![kind]!} disabled={launchDisabled} onLaunch={onLaunch} />)}
     {skipped !== undefined && <p className="launch-menu-note">Remembered {agentKindLabel[skipped.kind]} ({scopeCopy(skipped.origin)}) skipped — {skipped.reason}</p>}
     <LaunchMenuEntries entries={entries} />
   </>;

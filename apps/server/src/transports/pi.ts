@@ -212,10 +212,12 @@ export const piClient: ProtocolClient = (channel, emit) => {
     current = { model: model.id, ...(typeof state.thinkingLevel === 'string' ? { effort: state.thinkingLevel } : {}) };
     emit({ type: 'model', current });
   };
+  // the model switched counts, whatever becomes of the Effort: the next `model` event says which it is on
   const apply = async ({ model, effort }: ModelSetting): Promise<boolean> => {
     const slash = model.indexOf('/');
     if (slash <= 0 || (await request({ type: 'set_model', provider: model.slice(0, slash), modelId: model.slice(slash + 1) })).success !== true) return false;
-    return effort === undefined || (await request({ type: 'set_thinking_level', level: effort })).success === true;
+    if (effort !== undefined) await request({ type: 'set_thinking_level', level: effort });
+    return true;
   };
 
   channel.onLine(line => {
@@ -357,7 +359,7 @@ export const piClient: ProtocolClient = (channel, emit) => {
       return true;
     },
     async renameConversation(name) {
-      if ((await request({ type: 'set_session_name', name })).success !== true) return false;
+      if (!accepted(await request({ type: 'set_session_name', name }))) return false;
       await refresh();
       return true;
     },

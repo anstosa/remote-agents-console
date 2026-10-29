@@ -3,10 +3,10 @@ import { expect, test, type Page } from '@playwright/test';
 const gpt = { id: 'openai/gpt-5.6', name: 'GPT-5.6', provider: 'openai', inputPrice: 1.25, outputPrice: 10, contextWindow: 400_000, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh'] };
 const opus = { id: 'openrouter/~anthropic/claude-opus-latest', name: 'Claude Opus', provider: 'openrouter', inputPrice: 5, outputPrice: 25, contextWindow: 200_000, efforts: ['off', 'low', 'medium', 'high'] };
 
-type Structured = { model?: { id: string; name?: string; effort?: string }; models: boolean };
+type Structured = { model?: { id: string; name?: string; effort?: string }; switchable: boolean };
 
 // a console whose Worktree holds one live Pi Agent; every switch and new Conversation it is asked for is recorded
-async function mockConsole(page: Page, { attention = 'finished', structured = { model: { id: gpt.id, name: gpt.name, effort: 'medium' }, models: true }, transcript = [] }: { attention?: 'working' | 'finished'; structured?: Structured; transcript?: unknown[] } = {}) {
+async function mockConsole(page: Page, { attention = 'finished', structured = { model: { id: gpt.id, name: gpt.name, effort: 'medium' }, switchable: true }, transcript = [] }: { attention?: 'working' | 'finished'; structured?: Structured; transcript?: unknown[] } = {}) {
   const posted: Array<{ path: string; body: unknown }> = [];
   await page.route('**/api/**', route => {
     const request = route.request();
@@ -74,7 +74,7 @@ test('the picker says to cancel the turn while the Agent works, and switches not
 
 test('with no Allowed models the chip only shows the model', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
-  await mockConsole(page, { structured: { model: { id: 'openai/gpt-5.6', effort: 'off' }, models: false } });
+  await mockConsole(page, { structured: { model: { id: 'openai/gpt-5.6', effort: 'off' }, switchable: false } });
   await page.goto('/');
   await expect(panelTitle(page).locator('.model-chip')).toHaveText('openai/gpt-5.6 · off');
   await expect(panelTitle(page).getByRole('button', { name: /gpt-5\.6/u })).toHaveCount(0);

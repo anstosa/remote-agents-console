@@ -32,11 +32,11 @@ export type TranscriptItem =
 /** What an Agent has used of its Conversation: its cost so far and how full its context is. */
 export type AgentUsage = { cost: number; contextPercent?: number };
 /**
- * A model an Agent can run on: its `provider/id`, display name and provider, its price per 1M
+ * A model an Agent can run on: the kind's id for it, its display name and provider, its price per 1M
  * input and output tokens, its context window, and the Efforts it supports.
  */
 export type ModelInfo = { id: string; name: string; provider: string; inputPrice?: number; outputPrice?: number; contextWindow?: number; efforts: string[] };
-/** A model (`provider/id`) and the Effort to run it at. */
+/** A model, by the kind's own id for it, and the Effort to run it at. */
 export type ModelSetting = { model: string; effort?: string };
 export type StructuredEvent =
   | { type: 'report'; report: LaunchReport }

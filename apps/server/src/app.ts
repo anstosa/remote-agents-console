@@ -2900,7 +2900,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   };
   // the tmux Transport's Conversation switch: restart the idle Agent resuming the Conversation
   const switchByRestart = async (agentId: string, to: ConversationTarget): Promise<SwitchOutcome> => {
-    const result = await restartIdleConfiguredAgent(agentId, to.worktreeId, prompts.mutationVersion(agentId), prompts.mutationGeneration(), to.id, to.kind);
+    const result = await restartIdleConfiguredAgent(agentId, to.worktreeId, prompts.mutationVersion(agentId), to.chosenAt, to.id, to.kind);
     if (result.status === 'restarted') return { status: 'switched', agentId: result.agentId };
     return { status: result.reason === 'unavailable' ? 'unavailable' : result.reason === 'not-idle' ? 'busy' : result.reason === 'timed-out' ? 'timed-out' : 'failed', error: result.error };
   };
@@ -3087,6 +3087,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (!homed) return reply.code(409).send({ error: 'This conversation does not belong to this worktree.' });
     // fail before any destructive handoff
     if (!launch.canResumeConversation(worktree.id)) return reply.code(409).send({ error: 'Exact chat resume is not configured for this worktree.' });
+    const chosenAt = prompts.mutationGeneration();
     const current = await discovery.dashboard(true);
     const open = worktreeAgents(current.agents, worktree.id);
     // avoid an ambiguous destructive handoff
@@ -3103,7 +3104,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     }
     // a pane Agent switches through its Transport: an idle restart resuming through the row's own Adapter
     if (activeAgent !== undefined) {
-      const result = await transport.switchConversation(activeAgent.id, { kind: resumeKind, id: conversationId, worktreeId: worktree.id });
+      const result = await transport.switchConversation(activeAgent.id, { kind: resumeKind, id: conversationId, worktreeId: worktree.id, chosenAt });
       if (result.status === 'switched') return reply.code(201).send({ agentId: result.agentId });
       // distinguish stale targets and slow restarts from active work
       return reply.code(result.status === 'unavailable' ? 404 : result.status === 'timed-out' ? 504 : 409).send({ error: result.error });

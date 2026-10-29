@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -69,7 +69,8 @@ function compactName(text: string): string | undefined {
 
 // the session files of one working directory, newest first
 async function sessionFiles(cwd: string, env: NodeJS.ProcessEnv): Promise<Array<{ id: string; path: string; mtimeMs: number }>> {
-  const directory = sessionDirectory(cwd, env);
+  // Pi names the directory after its physical working directory
+  const directory = sessionDirectory(await realpath(cwd).catch(() => cwd), env);
   const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
   const files: Array<{ id: string; path: string; mtimeMs: number }> = [];
   for (const entry of entries) {

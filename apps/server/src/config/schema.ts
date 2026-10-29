@@ -94,7 +94,7 @@ const adapterUpdates = z.object({ current: adapterUpdateCommand, latest: adapter
 const adapterEntry = z.object({ program: adapterProgram, args: z.array(adapterArgument).max(64).optional(), env: z.record(adapterEnvName, adapterArgument).optional(), setup: command.optional(), teardown: command.optional(), updates: adapterUpdates.optional() }).strict();
 // Pi's Allowed models: exact `provider/id` entries in the operator's order (the first is the
 // default), each with an optional default Effort; the only models a Pi Agent may run on
-const allowedModels = z.array(z.object({ model: agentModel.refine(value => /^[^/]+\/./u.test(value), 'an Allowed model is an exact `provider/id`'), effort: z.enum(piEfforts).optional() }).strict()).max(50)
+const allowedModels = z.array(z.object({ model: agentModel.refine(value => /^[^/[\]]+\/[^[\]]+$/u.test(value), 'an Allowed model is an exact `provider/id`, never a pattern'), effort: z.enum(piEfforts).optional() }).strict()).max(50)
   .refine(entries => new Set(entries.map(entry => entry.model)).size === entries.length, 'each Allowed model is listed once');
 // the console pins Pi and supplies its program (ADR 0017), so `adapters.pi` only enables the kind
 const piEntry = adapterEntry.omit({ program: true, updates: true }).extend({ allowedModels: allowedModels.optional() }).strict('adapters.pi takes only args, env, setup, teardown and allowedModels: Pi is pinned by the console as its own dependency, so it has no program or update commands');

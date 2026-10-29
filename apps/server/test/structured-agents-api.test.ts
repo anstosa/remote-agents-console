@@ -6,7 +6,8 @@ import { buildApp } from '../src/app.js';
 import { DiscoveryService } from '../src/discovery/service.js';
 import { WorktreeLaunchStore } from '../src/worktrees/store.js';
 import { StructuredAgents, type StructuredLaunch, type StructuredProcesses } from '../src/transports/structured-agents.js';
-import type { ModelInfo, StructuredEvent } from '../src/transports/structured.js';
+import type { ModelInfo, ModelSetting, StructuredEvent } from '../src/transports/structured.js';
+import { WorktreeNoteService } from '../src/notes/service.js';
 import type { AllowedModel } from '../src/adapters/types.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject } from './helpers/config.js';
@@ -20,7 +21,8 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // A scripted structured Agent: it records what it is asked to do and emits the events a test
 // scripts. It reports in as soon as it starts unless told to stay silent. Its Conversation and
 // model operations succeed (unless it `refuses` them) and report what changed, as a client does.
-function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[] } = {}) {
+// A switch lands on `switchedTo` (the Conversation's own model), and `unavailable` models are refused.
+function fakeAgent({ reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[] } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -36,10 +38,10 @@ function fakeAgent({ reports = true, exits = false, refuses = false, models = []
       return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9' }, connection: {
         deliver: async prompt => { delivered.push(prompt); return 'started'; },
         newConversation: async () => { operations.push('new'); if (refuses) return false; emit({ type: 'conversation', id: `new-${conversations += 1}` }); return true; },
-        switchConversation: async reference => { operations.push(`switch ${reference}`); if (refuses) return false; emit({ type: 'conversation', id: 'switched' }); return true; },
+        switchConversation: async reference => { operations.push(`switch ${reference}`); if (refuses) return false; emit({ type: 'conversation', id: 'switched' }); if (switchedTo !== undefined) emit({ type: 'model', current: switchedTo }); return true; },
         renameConversation: async name => { operations.push(`rename ${name}`); if (refuses) return false; emit({ type: 'conversation', id: 'named', name }); return true; },
         models: async () => models,
-        setModel: async setting => { operations.push(`model ${setting.model} ${setting.effort}`); if (refuses) return false; emit({ type: 'model', current: setting }); return true; },
+        setModel: async setting => { operations.push(`model ${setting.model} ${setting.effort}`); if (refuses || unavailable.includes(setting.model)) return false; emit({ type: 'model', current: setting }); return true; },
         close: () => {}
       } };
     },
@@ -60,7 +62,7 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
   const worktrees = async (path: string) => path === project.path ? [{ path: project.path, branch: 'refs/heads/main', detached: false, bare: false, locked: false, prunable: false }] : undefined;
   const discovery = new DiscoveryService(socketFinder([]), paneLister([]) as never, processInspector(), { cachedPullRequest: async () => undefined, invalidateRepositories: () => {} } as never, config.adapters, config.projects, worktreeStore, worktrees, root);
   const structuredAgents = new StructuredAgents(fake.processes, { file: join(root, 'structured-agents.json'), allowedModels: () => allowed, ...(options.reportTimeoutMs === undefined ? {} : { reportTimeoutMs: options.reportTimeoutMs }) });
-  const app = await buildApp(config, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents });
+  const app = await buildApp(config, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents, notes: new WorktreeNoteService(join(root, 'notes.json')) });
   const headers = await authenticatedHeaders(app);
   const dashboardAgent = async (id: string) => (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { id: string }) => agent.id === id);
   return { app, headers, dashboardAgent, root, structuredAgents };
@@ -337,7 +339,7 @@ describe('a structured Agent\'s Allowed models', () => {
     const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
     fake.emit({ type: 'model', current: { model: gpt.id, effort: 'medium' } });
 
-    expect(await dashboardAgent(id)).toMatchObject({ structured: { model: { id: gpt.id, name: 'GPT-5.6', effort: 'medium' }, models: true } });
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { model: { id: gpt.id, name: 'GPT-5.6', effort: 'medium' }, switchable: true } });
     expect((await app.inject({ method: 'GET', url: `/api/agents/${id}/models`, headers })).json()).toEqual({ models: [gpt, opus], current: { model: gpt.id, effort: 'medium' } });
 
     // the entry names no Effort, so the current one carries over
@@ -381,10 +383,46 @@ describe('a structured Agent\'s Allowed models', () => {
     fake.emit({ type: 'model', current: { model: gpt.id, effort: 'off' } });
 
     expect(fake.launches[0]!.model).toBeUndefined();
-    expect(await dashboardAgent(id)).toMatchObject({ structured: { model: { id: gpt.id }, models: false } });
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { model: { id: gpt.id }, switchable: false } });
     expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: gpt.id } })).statusCode).toBe(409);
     expect((await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi', model: gpt.id } })).statusCode).toBe(400);
     expect(fake.operations).toEqual([]);
+    await app.close();
+  });
+
+  it('holds a switched Conversation to the Allowed models, trying each in order, and keeps notices to their Conversation', async () => {
+    const fake = fakeAgent({ models: [gpt, opus], switchedTo: { model: 'openai/o1', effort: 'high' }, unavailable: [gpt.id] });
+    const { app, headers, root } = await consoleWith(fake, { allowedModels });
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'pi'));
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects[0].worktrees[0];
+    await piSession(join(root, 'pi'), join(root, 'repo'), '01a188d1-e7d9-711a-aba8-381b96066aa5', 'Old work');
+    const id: string = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/launch`, headers, payload: { kind: 'pi' } })).json().agentId;
+    fake.emit({ type: 'conversation', id: 'first' });
+    fake.emit({ type: 'model', current: { model: opus.id, effort: 'low' } });
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/model`, headers, payload: { model: opus.id, effort: 'high' } })).statusCode).toBe(204);
+
+    expect((await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/conversations/switch`, headers, payload: { kind: 'pi', id: '01a188d1-e7d9-711a-aba8-381b96066aa5' } })).statusCode).toBe(201);
+    // the first Allowed model is refused, so the next one is taken
+    expect(fake.operations.slice(-2)).toEqual([`model ${gpt.id} medium`, `model ${opus.id} high`]);
+    fake.emit({ type: 'history', items: [{ id: 'h1', kind: 'message', role: 'user', text: 'Old prompt' }] });
+    const items = (await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json().items;
+    // the first Conversation's Effort mark stays with it
+    expect(items.map((item: { text: string }) => item.text)).toEqual(['Old prompt', 'Model → Claude Opus, effort high: openai/o1 is not an Allowed model']);
+    await app.close();
+  });
+
+  it('keeps a Schedule\'s model only while it is an Allowed model', async () => {
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake, { allowedModels });
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects[0].worktrees[0];
+    const note = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/notes`, headers, payload: { title: 'Build', text: 'Check the build' } })).json();
+    const schedule = (payload: object) => app.inject({ method: 'PUT', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/notes/${note.id}/schedule`, headers, payload: { cron: '0 9 * * *', kind: 'pi', target: { worktreeId: worktree.id }, enabled: true, ...payload } });
+
+    const set = await schedule({ model: opus.id, effort: 'high' });
+    expect(set.statusCode).toBe(200);
+    expect(set.json().schedule).toMatchObject({ kind: 'pi', model: opus.id, effort: 'high' });
+    expect((await schedule({ model: 'openai/gpt-4' })).statusCode).toBe(400);
+    expect((await schedule({ effort: 'lots' })).statusCode).toBe(400);
     await app.close();
   });
 });

@@ -71,7 +71,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs)
 
 // what this console knows of one structured Agent's process while it drives it; `busy` while an
 // operation (a delivery, a Conversation or model change) is in flight
-type Live = { connection?: StructuredConnection; working: boolean; busy: boolean; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; notices: number; marked: TranscriptItem[] };
+type Live = { connection?: StructuredConnection; working: boolean; busy: boolean; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -129,7 +129,7 @@ export class StructuredAgents {
     if (model !== undefined && entry === undefined) return false;
     const records = await this.load();
     const record: StructuredRecord = { id: randomUUID(), kind, placeId: place.id, home: place.home, sandboxed: false, lifecycle: 'starting', origin: 'operator', launchedAt: Date.now() };
-    const live: Live = { working: false, busy: false, transcript: [], revision: 0, status: new Map(), notices: 0, marked: [] };
+    const live: Live = { working: false, busy: false, transcript: [], revision: 0, status: new Map(), noticeCount: 0, notices: [] };
     const reported = new Promise<boolean>(resolve => {
       live.reported = resolve;
       setTimeout(() => resolve(false), this.options.reportTimeoutMs ?? 30_000).unref();
@@ -154,7 +154,7 @@ export class StructuredAgents {
     record.holder = started.holder;
     await this.save();
     this.changed(live);
-    if (await reported) await this.checkAllowed(record, live);
+    if (await reported) await this.noteUnreachableModels(record, live);
     else if (record.lifecycle === 'starting') await this.fail(record, live, 'Its process did not report in after starting.', true);
     return true;
   }
@@ -179,22 +179,26 @@ export class StructuredAgents {
 
   /** Start a new Conversation in place while the Agent is idle; it keeps the model and Effort. */
   async newConversation(id: string): Promise<'ok' | StructuredRefusal> {
-    return await this.between(id, async ({ connection }) => await connection.newConversation());
+    return await this.whileIdle(id, async ({ record, live, connection }) => {
+      if (!await connection.newConversation()) return false;
+      await this.holdToAllowedModels(record, live);
+      return true;
+    });
   }
 
   /** Switch to one of the kind's Conversations in place while idle, restoring its model if allowed. */
   async switchConversation(id: string, conversationId: string): Promise<'ok' | StructuredRefusal> {
-    return await this.between(id, async ({ record, live, connection }) => {
+    return await this.whileIdle(id, async ({ record, live, connection }) => {
       const reference = await structuredAdapterFor(record.kind)?.conversations.locate(conversationId, record.home);
       if (reference === undefined || !await connection.switchConversation(reference)) return false;
-      await this.guard(record, live);
+      await this.holdToAllowedModels(record, live);
       return true;
     });
   }
 
   /** Name the current Conversation while the Agent is idle. */
   async rename(id: string, name: string): Promise<'ok' | StructuredRefusal> {
-    return await this.between(id, async ({ connection }) => await connection.renameConversation(name));
+    return await this.whileIdle(id, async ({ connection }) => await connection.renameConversation(name));
   }
 
   /** The Allowed models the Agent can reach, in the operator's order, and the one it is on. */
@@ -202,8 +206,9 @@ export class StructuredAgents {
     const record = (await this.load()).find(candidate => candidate.id === id);
     const live = this.live.get(id);
     if (record === undefined || live?.connection === undefined || record.lifecycle !== 'live') return undefined;
-    live.models ??= await live.connection.models();
-    const reachable = live.models;
+    // an empty list may be a failed read, so it is read again next time
+    const reachable = live.models ?? await live.connection.models();
+    if (reachable.length > 0) live.models = reachable;
     return { models: this.allowed(record.kind).flatMap(entry => reachable.find(model => model.id === entry.model) ?? []), ...(live.model === undefined ? {} : { current: live.model }) };
   }
 
@@ -215,7 +220,7 @@ export class StructuredAgents {
     const record = (await this.load()).find(candidate => candidate.id === id);
     const entry = record === undefined ? undefined : this.allowed(record.kind).find(candidate => candidate.model === setting.model);
     if (record !== undefined && entry === undefined) return 'not-allowed';
-    return await this.between(id, async ({ live, connection }) => {
+    return await this.whileIdle(id, async ({ live, connection }) => {
       const previous = live.model;
       const effort = setting.effort ?? entry?.effort ?? previous?.effort;
       if (!await connection.setModel({ model: setting.model, ...(effort === undefined ? {} : { effort }) })) return false;
@@ -252,7 +257,7 @@ export class StructuredAgents {
       const current = live?.model;
       const name = current === undefined ? undefined : live?.models?.find(model => model.id === current.model)?.name;
       const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
-      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention: live?.working === true ? 'working' : 'finished', placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), structured: { lifecycle, ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), models: this.allowed(record.kind).length > 0 } };
+      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention: live?.working === true ? 'working' : 'finished', placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), structured: { lifecycle, ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: this.allowed(record.kind).length > 0 } };
     });
   }
 
@@ -295,7 +300,7 @@ export class StructuredAgents {
         break;
       case 'conversation':
         // the console's own notices belong to the Conversation they were made in
-        if (record.conversationId !== undefined && record.conversationId !== event.id) live.marked = [];
+        if (record.conversationId !== undefined && record.conversationId !== event.id) live.notices = [];
         record.conversationId = event.id;
         live.conversationName = event.name;
         void this.save();
@@ -303,7 +308,12 @@ export class StructuredAgents {
       case 'model':
         live.model = event.current;
         // the first model a launch reports is held to the Allowed models, as a resume may restore any
-        if (live.guarded !== true) { live.guarded = true; void this.guard(record, live); }
+        if (live.guarded !== true) {
+          live.guarded = true;
+          // nothing is delivered until the Agent is on an Allowed model
+          live.busy = true;
+          void this.holdToAllowedModels(record, live).finally(() => { live.busy = false; });
+        }
         break;
       case 'turn':
         live.working = event.turn.type === 'started';
@@ -321,8 +331,9 @@ export class StructuredAgents {
         break;
       }
       case 'history':
-        // a history replaces the transcript, but not the notices the console made for this Conversation
-        live.transcript = [...event.items, ...live.marked].slice(-maxTranscriptItems);
+        // a history (loaded on a launch or a Conversation change) replaces the transcript, but not the
+        // notices the console made for this Conversation since
+        live.transcript = [...event.items, ...live.notices].slice(-maxTranscriptItems);
         break;
       case 'status':
         if (event.text === undefined) live.status.delete(event.key); else live.status.set(event.key, event.text);
@@ -350,16 +361,16 @@ export class StructuredAgents {
     return live.models?.find(candidate => candidate.id === model)?.name ?? model;
   }
 
-  private notice(live: Live, text: string, tone: 'info' | 'warning' = 'info'): void {
-    live.notices += 1;
-    const item: TranscriptItem = { id: `notice-${live.notices}`, kind: 'notice', text, tone };
-    live.marked.push(item);
+  private notice(live: Live, text: string, tone: 'info' | 'warning' | 'error' = 'info'): void {
+    live.noticeCount += 1;
+    const item: TranscriptItem = { id: `notice-${live.noticeCount}`, kind: 'notice', text, tone };
+    live.notices.push(item);
     live.transcript.push(item);
     this.changed(live);
   }
 
   // run one operation on a live, idle Agent, refusing while it works or another operation runs
-  private async between(id: string, operation: (agent: { record: StructuredRecord; live: Live; connection: StructuredConnection }) => Promise<boolean>): Promise<'ok' | StructuredRefusal> {
+  private async whileIdle(id: string, operation: (agent: { record: StructuredRecord; live: Live; connection: StructuredConnection }) => Promise<boolean>): Promise<'ok' | StructuredRefusal> {
     const record = (await this.load()).find(candidate => candidate.id === id);
     const live = this.live.get(id);
     if (record === undefined || record.lifecycle !== 'live' || live?.connection === undefined) return 'unavailable';
@@ -369,26 +380,30 @@ export class StructuredAgents {
   }
 
   // read the models the Agent can reach once it reports in, and say which Allowed models match none
-  private async checkAllowed(record: StructuredRecord, live: Live): Promise<void> {
+  private async noteUnreachableModels(record: StructuredRecord, live: Live): Promise<void> {
     const allowed = this.allowed(record.kind);
     if (allowed.length === 0 || live.connection === undefined) return;
     const reachable = await live.connection.models().catch(() => undefined);
-    if (reachable === undefined) return;
+    if (reachable === undefined || reachable.length === 0) return;
     live.models = reachable;
     const unmatched = allowed.filter(entry => !reachable.some(model => model.id === entry.model)).map(entry => entry.model);
     if (unmatched.length > 0) this.notice(live, `Allowed models that match nothing reachable: ${unmatched.join(', ')}. Check the spelling and the login.`, 'warning');
     else this.changed(live);
   }
 
-  // hold the Agent to its Allowed models: one on any other moves to the first, marked in the transcript
-  private async guard(record: StructuredRecord, live: Live): Promise<void> {
+  // hold the Agent to its Allowed models: one on any other moves to the first that it can take,
+  // marked in the transcript, and says so when it can take none
+  private async holdToAllowedModels(record: StructuredRecord, live: Live): Promise<void> {
     const allowed = this.allowed(record.kind);
     const current = live.model;
-    const fallback = allowed[0];
-    if (fallback === undefined || current === undefined || live.connection === undefined || allowed.some(entry => entry.model === current.model)) return;
-    const effort = fallback.effort ?? current.effort;
-    if (!await live.connection.setModel({ model: fallback.model, ...(effort === undefined ? {} : { effort }) })) return;
-    this.notice(live, `Model → ${this.modelName(live, fallback.model)}, effort ${live.model?.effort ?? effort}: ${current.model} is not an Allowed model`, 'warning');
+    if (allowed.length === 0 || current === undefined || allowed.some(entry => entry.model === current.model)) return;
+    for (const fallback of allowed) {
+      const effort = fallback.effort ?? current.effort;
+      if (live.connection === undefined || !await live.connection.setModel({ model: fallback.model, ...(effort === undefined ? {} : { effort }) })) continue;
+      this.notice(live, `Model → ${this.modelName(live, fallback.model)}, effort ${live.model?.effort ?? effort}: ${current.model} is not an Allowed model`, 'warning');
+      return;
+    }
+    this.notice(live, `${current.model} is not an Allowed model, and no Allowed model could be applied. Check Settings → Agents → Pi and the logins.`, 'error');
   }
 
   // mark the Agent failed with its stderr; a process still running unheard is stopped, its stderr kept

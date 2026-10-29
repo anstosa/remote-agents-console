@@ -239,8 +239,9 @@ export function ScheduleEditor({ schedule, nextRun, prefill, runsOnText, adapter
     else setRawCron(false);
   }, [openSlot, cron]);
 
-  // a Schedule keeps its model and Effort until its kind changes or they are picked again
-  const apply = (next: ScheduleSetBody) => { void onSet(schedule === undefined || next.kind !== schedule.kind ? next : { ...next, ...(schedule.model === undefined ? {} : { model: schedule.model }), ...(schedule.effort === undefined ? {} : { effort: schedule.effort }) }); };
+  // a Schedule keeps its model and Effort until its kind changes, they are picked again, or its kind
+  // no longer has Allowed models to choose from
+  const apply = (next: ScheduleSetBody) => { void onSet(schedule === undefined || next.kind !== schedule.kind || (kindModels?.length ?? 0) === 0 ? next : { ...next, ...(schedule.model === undefined ? {} : { model: schedule.model }), ...(schedule.effort === undefined ? {} : { effort: schedule.effort }) }); };
   // run this Schedule on one of its kind's Allowed models (else the first) at an Effort (else the model's default)
   const pickModel = (model: string | undefined, effort: string | undefined) => {
     if (schedule === undefined) return;

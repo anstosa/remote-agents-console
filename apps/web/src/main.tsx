@@ -7826,7 +7826,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const title = conversationName ?? displayLabel;
   const switcher = <AgentSwitcher agent={agent} agents={agents} title={title} placeLabel={displayLabel} onSelect={onSelectAgent} />;
   const model = agent.structured?.model;
-  const modelChip = model === undefined ? undefined : <ModelChip agentId={agent.id} model={model} switchable={agent.structured?.models === true} working={active} request={request} onError={detail => onOperationFeedback({ tone: 'error', message: 'Model not switched', detail, worktreeId: agent.worktreeId })} />;
+  const modelChip = model === undefined ? undefined : <ModelChip agentId={agent.id} model={model} switchable={agent.structured?.switchable === true} working={active} request={request} onError={detail => onOperationFeedback({ tone: 'error', message: 'Model not switched', detail, worktreeId: agent.worktreeId })} />;
   const header = (connection: string, menuContent?: (closeMenu: () => void) => ReactNode) => <PanelHeader panelKey="agent" label="agent output" menuContent={menuContent} title={<AgentPanelTitle kind={agent.kind} sandboxed={agent.sandboxed} title={title} switcher={switcher} state={panelState} connection={connection} chip={modelChip} />} actions={<>{workspace.conversations.control}</>} close={<>{cancelButton}{power}<button type="button" className="panel-header-action pane-minimize" aria-label="Minimize agent output" title="Minimize agent (it keeps running)" onClick={() => { /* reject minimizing the last visible split */ workspace.minimizePanel('agent', () => setAgentSplitHidden(workspace.viewKey, true)); }}><PanelIcon path="M5 12h14" /></button></>} />;
   const prompt = <Prompt id={agent.id} history={promptHistory.history} onHistoryChanged={promptHistory.refresh} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} question={dashboardQuestion ?? question} worktreeId={agent.worktreeId} placeId={workspace.place.id} historyControl={<PromptHistoryControl agentId={agent.id} history={promptHistory.history} refreshHistory={promptHistory.refresh} notes={workspace.notes} open={historyOpen} onOpenChange={onHistoryOpenChange} />} />;
   const paneMode = agent.pane?.paneMode;
@@ -7944,7 +7944,7 @@ function AgentPanelTitle({ kind, sandboxed, title, switcher, state, connection =
 }
 
 // A structured Agent's process state (`revision` changes with its transcript)
-type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number; model?: AgentModel; models?: boolean };
+type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number; model?: AgentModel; switchable?: boolean };
 // A tool call as the transcript lists it: one result (a short line, an edit's diff, or a command's
 // last lines with their count). Its full output and a script's source are read when it is opened.
 type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; result?: string; diff?: { path: string; patch: string }; tail?: string; outputLines?: number; output?: string; source?: string; kept?: false };

@@ -226,4 +226,15 @@ describe('Adapter contract suite', () => {
       expect(await pi.locate('01a188d1-e7d9-711a-aba8-381b96066aa5', '/work/repo/sub')).toBeUndefined();
     });
   });
+
+  it('pi launches on its Allowed models, and resumes a Conversation on the model it was on', () => {
+    const pi = structuredAdapters.find(adapter => adapter.kind === 'pi')!;
+    // after the pinned CLI, `--mode rpc` and the RAC extension
+    const own = (input: Parameters<typeof pi.launch>[0]) => pi.launch(input).args.slice(5);
+    expect(own({ cwd: '/work/repo', sandboxed: false })).toEqual([]);
+    expect(own({ cwd: '/work/repo', sandboxed: false, models: { allowed: ['openai/gpt-5.6', 'openrouter/~anthropic/claude-opus-latest'], start: { model: 'openai/gpt-5.6', effort: 'high' } } }))
+      .toEqual(['--models', 'openai/gpt-5.6,openrouter/~anthropic/claude-opus-latest', '--model', 'openai/gpt-5.6', '--thinking', 'high']);
+    expect(own({ cwd: '/work/repo', sandboxed: false, resume: '/sessions/a.jsonl', models: { allowed: ['openai/gpt-5.6'], start: { model: 'openai/gpt-5.6' } } }))
+      .toEqual(['--models', 'openai/gpt-5.6', '--session', '/sessions/a.jsonl']);
+  });
 });
