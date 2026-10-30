@@ -1698,6 +1698,42 @@ describe('the Conductor\'s dispatches', () => {
     await app.close();
   });
 
+  it('pushes a Turn that ends asking a question in prose as a question, the Conductor\'s self-started ones too', async () => {
+    const pushed: AgentNotification[] = [];
+    const fake = fakeAgent();
+    const { app, headers, conductor, call, worker, tick } = await conducting(fake, { deps: { notifications: new AgentNotificationCoordinator(notification => { pushed.push(notification); }, 0) } });
+    const target = await worker();
+    let messages = 0;
+    // a Turn whose final message is `message`, as a client reports it
+    const turn = async (id: string, message: string) => {
+      fake.emitTo(id, { type: 'turn', turn: { type: 'started' } });
+      await tick();
+      fake.emitTo(id, { type: 'transcript', item: { id: `a${messages += 1}`, kind: 'message', role: 'assistant', text: message } });
+      fake.emitTo(id, { type: 'turn', turn: { type: 'settled', message } });
+      await tick();
+      await tick();
+    };
+    const pushes = (kind: AgentNotification['kind']) => pushed.filter(notification => notification.kind === kind).map(notification => notification.url);
+
+    // the operator's own Turn
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${target}/prompt`, headers, payload: { prompt: 'Set up the store', attachments: [] } })).statusCode).toBe(204);
+    await turn(target, 'Which database should I use?');
+    expect(pushes('question')).toEqual([`/#agent=${target}`]);
+    expect((await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { id: string }) => agent.id === target)).toMatchObject({ attention: 'finished', hasMessageQuestion: true });
+
+    // the report Turn the Conductor starts itself: quiet, unless it ends asking
+    await call('queue_prompt', { agent_id: target, prompt: 'Use Postgres' });
+    await turn(target, 'Done.');
+    await turn(conductor, 'Shall I merge it?');
+    expect(pushes('question')).toEqual([`/#agent=${target}`, `/#agent=${conductor}`]);
+    await call('queue_prompt', { agent_id: target, prompt: 'Add a test' });
+    await turn(target, 'Done.');
+    await turn(conductor, 'Merged.');
+    expect(pushes('question')).toHaveLength(2);
+    expect(pushes('finished')).not.toContain(`/#agent=${conductor}`);
+    await app.close();
+  });
+
   it('holds its self-started Turns to its hourly budget: the excess waits in its queue, with one push', async () => {
     const notify = vi.spyOn(PushService.prototype, 'notify').mockResolvedValue(undefined);
     const fake = fakeAgent();

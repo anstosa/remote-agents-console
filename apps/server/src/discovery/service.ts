@@ -182,13 +182,16 @@ export class DiscoveryService {
   private readonly commonDirCache = new Map<string, string | null>();
   // the structured Agents (ADR 0015), recorded at their Places rather than found in panes
   private structuredAgents: () => Promise<readonly Agent[]> = async () => [];
+  // a structured Agent's final message, which its Transport holds
+  private structuredAnswer: (agentId: string) => Promise<string | undefined> = async () => undefined;
   private static readonly refreshCacheMs = 2_000;
   private static readonly gitMetadataCacheMs = 30_000;
   // accept only the PR operations used by discovery
   constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly pullRequests: PullRequestLookup = new PullRequestService(), private readonly adapters: AdapterConfigs = {}, private readonly configuredProjects: readonly Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string) {}
   // list the structured Agents on the dashboard beside the panes' Agents, fresh on every change
-  useStructuredAgents(source: { agents(): Promise<readonly Agent[]>; onChange(listener: () => void): void }): void {
+  useStructuredAgents(source: { agents(): Promise<readonly Agent[]>; onChange(listener: () => void): void; turns: { latestAnswer(agentId: string): Promise<string | undefined> } }): void {
     this.structuredAgents = () => source.agents();
+    this.structuredAnswer = agentId => source.turns.latestAnswer(agentId);
     source.onChange(() => { this.dashboardSnapshot = undefined; });
   }
   // every Project the console knows right now; the list may change between calls, so callers
@@ -810,7 +813,8 @@ export class DiscoveryService {
       ]);
       // native questions replace prose state without starting another transcript read
       if (question !== undefined) this.invalidateMessageQuestion(agent.id);
-      messageQuestionStates.set(agent.id, question === undefined ? this.agentMessageQuestion(agent) : { hasQuestion: false });
+      // a structured Agent's final message is read directly, from the Transport that holds it
+      messageQuestionStates.set(agent.id, question !== undefined ? { hasQuestion: false } : agent.transport === 'structured' ? { hasQuestion: agent.attention === 'finished' && messageAsksQuestion(await this.structuredAnswer(agent.id)) } : this.agentMessageQuestion(agent));
       const branch = meta.branch ?? agent.branch;
       const pullRequest = await this.pullRequests.cachedPullRequest(meta.workspace, branch);
       const gitPrStatus = await this.gitPrComparisonForBase(meta, branch, pullRequest?.baseBranch, defaultBranch);
