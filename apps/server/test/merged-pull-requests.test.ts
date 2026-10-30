@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { PullRequestService } from '../src/pull-requests/service.js';
-import type { Command, Request, ResponseLike } from '../src/pull-requests/github.js';
+import { GithubService } from '../src/github/service.js';
+import type { Request, ResponseLike } from '../src/github/github.js';
 
 const mergedSha = 'a'.repeat(40);
 const otherSha = 'b'.repeat(40);
@@ -18,9 +18,16 @@ function pull(options: { branch?: string; repository?: string; sha?: string; sta
   };
 }
 
-// provide one supported origin without host credential reads
-function service(request: Request, now?: () => number, token: () => Promise<string | undefined> = async () => 'token', command: Command = async () => ({ code: 0, stdout: 'git@github.com:octo/repo.git\n' })): PullRequestService {
-  return new PullRequestService(command, request, now, token);
+const octo = { owner: 'octo', name: 'repo' };
+
+// the module over a scripted GitHub, without host credential reads
+function service(request: Request, now?: () => number, token: () => Promise<string | undefined> = async () => 'token'): GithubService {
+  return new GithubService({ request, token, ...(now === undefined ? {} : { now }) });
+}
+
+// whether GitHub proves one exact head merged
+async function merged(github: GithubService, branch: string, headSha: string, fresh = false): Promise<boolean> {
+  return await github.cleanupHead(octo, branch, headSha, { fresh }) === 'merged';
 }
 
 // return one JSON response through the request boundary
@@ -36,16 +43,16 @@ describe('merged pull request evidence', () => {
       return response([pull({ mergedAt: null })]);
     });
 
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe('closed');
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(false);
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBe('closed');
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
     expect(requests).toBe(1);
   });
 
   it('prefers merged evidence when the exact head has merged and closed-unmerged pull requests', async () => {
     const github = service(async () => response([pull({ mergedAt: null }), pull()]));
 
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe('merged');
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(true);
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBe('merged');
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(true);
   });
 
   it.each([
@@ -54,7 +61,7 @@ describe('merged pull request evidence', () => {
   ])('excludes closed-unmerged evidence for a mismatched %s', async (_name, candidate) => {
     const github = service(async () => response([candidate]));
 
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
   });
 
   it('lets a later-page reopened branch veto closed-unmerged cleanup evidence', async () => {
@@ -68,7 +75,7 @@ describe('merged pull request evidence', () => {
       return response(fullPage);
     });
 
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
     expect(pages).toEqual([1, 2]);
   });
 
@@ -79,7 +86,7 @@ describe('merged pull request evidence', () => {
   ])('excludes closed cleanup evidence with a %s', async (_name, candidate) => {
     const github = service(async () => response([candidate]));
 
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
   });
 
   // a fork PR checks out as `rac/pr/<n>/<sha12>`, a name GitHub never lists as a head branch
@@ -95,7 +102,7 @@ describe('merged pull request evidence', () => {
       return response({ number: 42, ...pull({ ...options, branch: 'contributor-branch', repository: 'someone/fork' }) as object });
     });
 
-    await expect(github.cleanupHead('/workspace', `rac/pr/42/${mergedSha.slice(0, 12)}`, mergedSha)).resolves.toBe(expected);
+    await expect(github.cleanupHead(octo, `rac/pr/42/${mergedSha.slice(0, 12)}`, mergedSha)).resolves.toBe(expected);
     expect(requests).toEqual(['https://api.github.com/repos/octo/repo/pulls/42']);
   });
 
@@ -113,9 +120,9 @@ describe('merged pull request evidence', () => {
       return response([pull({ sha: otherSha })]);
     });
 
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha, false, true)).resolves.toBe(expected);
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha, false, true)).resolves.toBe(expected);
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha, { acceptAncestor: true })).resolves.toBe(expected);
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha, { acceptAncestor: true })).resolves.toBe(expected);
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
     // cached like the exact-head check
     expect(compares).toEqual([`https://api.github.com/repos/octo/repo/compare/${otherSha}...${mergedSha}`]);
   });
@@ -125,9 +132,9 @@ describe('merged pull request evidence', () => {
     let compare: ResponseLike = response({ status: 'behind' });
     const github = service(async (url) => url.includes('/compare/') ? compare : response({ number: 42, ...pull({ sha: otherSha, mergedAt: null, branch: 'contributor-branch', repository: 'someone/fork' }) as object }));
 
-    await expect(github.cleanupHead('/workspace', fork, mergedSha, false, true)).resolves.toBe('closed');
+    await expect(github.cleanupHead(octo, fork, mergedSha, { acceptAncestor: true })).resolves.toBe('closed');
     compare = response({ message: 'Not Found' }, 404);
-    await expect(github.cleanupHead('/workspace', fork, mergedSha, true, true)).resolves.toBeUndefined();
+    await expect(github.cleanupHead(octo, fork, mergedSha, { fresh: true, acceptAncestor: true })).resolves.toBeUndefined();
   });
 
   it('replaces cached closed evidence when fresh validation finds the branch open', async () => {
@@ -138,10 +145,10 @@ describe('merged pull request evidence', () => {
       return response([pull(open ? { state: 'open', mergedAt: null } : { mergedAt: null })]);
     });
 
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe('closed');
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBe('closed');
     open = true;
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha, true)).resolves.toBeUndefined();
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha, { fresh: true })).resolves.toBeUndefined();
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
     expect(requests).toBe(2);
   });
 
@@ -154,9 +161,9 @@ describe('merged pull request evidence', () => {
       return response([pull({ mergedAt: null })]);
     });
 
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe('closed');
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha, true)).resolves.toBeUndefined();
-    await expect(github.cleanupHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBe('closed');
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha, { fresh: true })).resolves.toBeUndefined();
+    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
     expect(requests).toBe(4);
   });
 
@@ -167,7 +174,7 @@ describe('merged pull request evidence', () => {
       return response([{ ...pull({ repository: 'OCTO/REPO', sha: mergedSha.toUpperCase() }), base: { ref: 'release/2026.10' } }]);
     });
 
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(true);
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(true);
 
     expect(requests).toHaveLength(1);
     expect(requests[0]).toContain('/repos/octo/repo/pulls?');
@@ -183,7 +190,7 @@ describe('merged pull request evidence', () => {
       return response([pull({ branch })]);
     });
 
-    await expect(github.mergedHead('/workspace', branch, mergedSha)).resolves.toBe(true);
+    await expect(merged(github, branch, mergedSha)).resolves.toBe(true);
 
     const url = new URL(requested);
     expect(url.searchParams.get('state')).toBe('all');
@@ -204,7 +211,7 @@ describe('merged pull request evidence', () => {
       return response(fullPage);
     });
 
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(false);
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
     expect(pages).toEqual([1, 2]);
   });
 
@@ -212,13 +219,13 @@ describe('merged pull request evidence', () => {
     const fullPage = Array.from({ length: 100 }, (_, index) => pull({ branch: `other/${index}`, repository: 'other/repo', sha: otherSha }));
     const github = service(async (url) => response(new URL(url).searchParams.get('page') === '1' ? fullPage : [pull()]));
 
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(true);
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(true);
   });
 
   it('rejects a merge for an older commit after a branch has been reused', async () => {
     const github = service(async () => response([pull({ sha: otherSha })]));
 
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(false);
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
   });
 
   it.each([
@@ -231,7 +238,7 @@ describe('merged pull request evidence', () => {
   ])('fails closed for %s', async (_name, candidate) => {
     const github = service(async () => response([candidate]));
 
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(false);
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
   });
 
   it('coalesces and caches exact identities until a fresh failure replaces success', async () => {
@@ -245,55 +252,17 @@ describe('merged pull request evidence', () => {
       throw new Error('offline');
     });
 
-    const first = github.mergedHead('/workspace', 'feature/cleanup', mergedSha);
-    const second = github.mergedHead('/workspace', 'feature/cleanup', mergedSha);
+    const first = merged(github, 'feature/cleanup', mergedSha);
+    const second = merged(github, 'feature/cleanup', mergedSha);
     release(response([pull()]));
     await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(true);
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(true);
     expect(requests).toBe(1);
 
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha, true)).resolves.toBe(false);
+    await expect(merged(github, 'feature/cleanup', mergedSha, true)).resolves.toBe(false);
     expect(requests).toBe(4);
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(false);
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
     expect(requests).toBe(4);
-  });
-
-  it('bypasses cached origin discovery during fresh revalidation', async () => {
-    const origins = ['git@github.com:octo/repo.git\n', 'git@github.com:current/repo.git\n'];
-    let commands = 0;
-    const requests: string[] = [];
-    const github = service(async (url) => {
-      requests.push(url);
-      return response(url.includes('/repos/octo/repo/') ? [pull()] : []);
-    }, undefined, async () => 'token', async () => ({ code: 0, stdout: origins[commands++]! }));
-
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(true);
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha, true)).resolves.toBe(false);
-
-    expect(commands).toBe(2);
-    expect(requests[0]).toContain('/repos/octo/repo/pulls?');
-    expect(requests[1]).toContain('/repos/current/repo/pulls?');
-  });
-
-  it('does not reuse success after fresh origin discovery fails', async () => {
-    let commands = 0;
-    let requests = 0;
-    const github = service(async () => {
-      requests += 1;
-      return response([pull()]);
-    }, undefined, async () => 'token', async () => {
-      commands += 1;
-      // make only destructive revalidation lose origin discovery
-      if (commands === 2) throw new Error('git unavailable');
-      return { code: 0, stdout: 'git@github.com:octo/repo.git\n' };
-    });
-
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(true);
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha, true)).resolves.toBe(false);
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(true);
-
-    expect(commands).toBe(3);
-    expect(requests).toBe(2);
   });
 
   it('keeps branch and commit cache identities separate and expires results after sixty seconds', async () => {
@@ -304,15 +273,15 @@ describe('merged pull request evidence', () => {
       return response([pull()]);
     }, () => now);
 
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(true);
-    await expect(github.mergedHead('/workspace', 'feature/other', mergedSha)).resolves.toBe(false);
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', otherSha)).resolves.toBe(false);
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(true);
+    await expect(merged(github, 'feature/other', mergedSha)).resolves.toBe(false);
+    await expect(merged(github, 'feature/cleanup', otherSha)).resolves.toBe(false);
     expect(requests).toBe(3);
     now = 59_999;
-    await github.mergedHead('/workspace', 'feature/cleanup', mergedSha);
+    await merged(github, 'feature/cleanup', mergedSha);
     expect(requests).toBe(3);
     now = 60_000;
-    await github.mergedHead('/workspace', 'feature/cleanup', mergedSha);
+    await merged(github, 'feature/cleanup', mergedSha);
     expect(requests).toBe(4);
   });
 
@@ -325,8 +294,8 @@ describe('merged pull request evidence', () => {
       return response({ message: 'Bad credentials' }, 401);
     }, undefined, async () => `token-${++tokens}`);
 
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(false);
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha, true)).resolves.toBe(false);
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
+    await expect(merged(github, 'feature/cleanup', mergedSha, true)).resolves.toBe(false);
 
     expect(tokens).toBe(2);
     expect(seenAuthorization).toEqual(['Bearer token-1', 'Bearer token-2']);
@@ -340,32 +309,19 @@ describe('merged pull request evidence', () => {
       return response(fullPage);
     });
 
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(false);
+    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
     expect(requests).toBe(100);
   });
 
-  it('rejects invalid input and unavailable repositories before GitHub I/O', async () => {
-    let commands = 0;
+  it('rejects invalid input before GitHub I/O', async () => {
     let requests = 0;
-    const command: Command = async () => {
-      commands += 1;
-      return { code: 1, stdout: '' };
-    };
     const github = service(async () => {
       requests += 1;
       return response([pull()]);
-    }, undefined, async () => 'token', command);
+    });
 
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', 'invalid')).resolves.toBe(false);
-    expect(commands).toBe(0);
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(false);
-    expect(commands).toBe(1);
+    await expect(merged(github, 'feature/cleanup', 'invalid')).resolves.toBe(false);
+    await expect(merged(github, ' ', mergedSha)).resolves.toBe(false);
     expect(requests).toBe(0);
-  });
-
-  it('fails closed when repository discovery throws', async () => {
-    const github = service(async () => response([pull()]), undefined, async () => 'token', async () => { throw new Error('git unavailable'); });
-
-    await expect(github.mergedHead('/workspace', 'feature/cleanup', mergedSha)).resolves.toBe(false);
   });
 });

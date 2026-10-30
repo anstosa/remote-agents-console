@@ -8,7 +8,8 @@ import { cleanWorkingTree, type GitCommand } from '../git/worktree-state.js';
 import { branchCommitSummary, type BranchCommitSummary } from '../git/comparison.js';
 import { worktreeById, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
 import { agentAttentionState } from '../notifications.js';
-import { PullRequestService, forkCheckoutBranch, forkCheckoutNumber, type PullRequestChoice } from './service.js';
+import { GithubService, forkCheckoutBranch, forkCheckoutNumber, problemError, type PullRequestChoice, type RepositoryPullRequests } from '../github/service.js';
+import { GithubRequestError, repositoryPath } from '../github/github.js';
 import type { PullRequestComments, Worktree } from '../domain/models.js';
 
 // bound the local-branch list folded into the availability payload
@@ -59,7 +60,7 @@ export class PullRequestSwitchService {
 
   // switch and move run git in-process and never touch a pane, so the service takes no tmux
   // adapter: it is structurally unable to type into an agent's terminal.
-  constructor(private readonly config: ValidatedConfig, private readonly discovery: DiscoveryService, private readonly pullRequests = new PullRequestService(), private readonly command: GitCommand = runGit) {}
+  constructor(private readonly config: ValidatedConfig, private readonly discovery: DiscoveryService, private readonly github: Pick<GithubService, 'repositoryAt' | 'repository' | 'branch' | 'pullRequest'> = new GithubService(), private readonly command: GitCommand = runGit) {}
 
   // list one worktree's switchable pull requests and local branches, whether or not an agent runs there:
   // the repository-wide list with this worktree's live branch and switch readiness overlaid
@@ -159,9 +160,11 @@ export class PullRequestSwitchService {
       branchOwners.set(branch, owner);
       checkedOut.set(branch, { worktreeId: candidate.id, worktreeName: candidate.label });
     }
-    // list pull requests only for a supported GitHub origin
-    const pullRequestsSupported = await this.pullRequests.supports(anchor.identity);
-    const pullRequests = pullRequestsSupported ? await this.pullRequests.open(anchor.identity) : { own: [], others: [] };
+    // list pull requests only for a supported GitHub origin; a list GitHub could not give is refused, as before
+    const origin = await this.github.repositoryAt(anchor.identity, true);
+    const pullRequestsSupported = origin !== undefined;
+    const pullRequests: RepositoryPullRequests = origin === undefined ? { own: [], others: [] } : await this.github.repository(origin);
+    if (pullRequests.problem !== undefined) throw problemError(pullRequests.problem);
     // apply worktree availability around each checkout branch; a pull request is also held by its
     // `pr-<number>` worktree and by a checkout of an earlier head of the same fork pull request
     const prFolders = discoveredWorktrees.filter(candidate => candidate.projectId === anchor.projectId && !candidate.main);
@@ -250,17 +253,23 @@ export class PullRequestSwitchService {
     const target = await this.discovery.target(agentId);
     if (target === undefined) return undefined;
     const worktree = this.worktree(target.agent.home);
-    return await this.pullRequests.actionsUrl(worktree?.identity ?? target.agent.home);
+    return await this.actionsUrlAt(worktree?.identity ?? target.agent.home);
   }
 
   // the Actions page of the GitHub repository checked out at one folder, with no Agent needed
   async actionsUrlAt(checkout: string): Promise<string | undefined> {
-    return await this.pullRequests.actionsUrl(checkout);
+    const repository = await this.github.repositoryAt(checkout, true);
+    return repository === undefined ? undefined : `https://github.com/${repositoryPath(repository)}/actions`;
   }
 
   // the comments on the open pull request of the branch checked out at one folder
   async commentsAt(checkout: string, branch: string | undefined): Promise<PullRequestComments> {
-    return await this.pullRequests.comments(checkout, branch);
+    const repository = await this.github.repositoryAt(checkout);
+    if (repository === undefined) throw new GithubRequestError('The worktree does not have a supported GitHub origin.', 404);
+    // the branch has a pull request, so it is published
+    const { pullRequest } = branch ? await this.github.branch(repository, branch, true, { wait: true }) : {};
+    if (pullRequest === undefined || pullRequest.status === 'merged') throw new GithubRequestError('This branch has no open pull request.', 404);
+    return await this.github.pullRequest(repository, pullRequest.number);
   }
 
   async switch(worktreeId: string, number: number): Promise<BranchSwitchResult> {

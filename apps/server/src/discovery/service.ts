@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { run } from '../tmux/command.js';
 import { TmuxAdapter } from '../tmux/adapter.js';
 import { ProcInspector, type ProcessInspector } from './processes.js';
-import { PullRequestService } from '../pull-requests/service.js';
+import { GithubService } from '../github/service.js';
 import { messageAsksQuestion, parseReportedAttention, resolveAttention } from '../adapters/attention.js';
 import { adapterCapabilities, adapterFor, adapters, paneExcluded, structuredAdapters } from '../adapters/registry.js';
 import { projectIdOf, worktreeMatchesWorkspace, worktreePathOf, worktreeWireId } from '../workspaces/resolver.js';
@@ -13,7 +13,7 @@ import { gitCommonDir, listWorktrees, type WorktreeEntry } from '../git/worktree
 import { worktreeManagementAvailability } from '../worktrees/management.js';
 import type { WorktreeLaunchStore } from '../worktrees/store.js';
 import type { Adapter, AdapterConfigs, AgentKind, AttentionState, Conversation, ConversationSummary, InlineQuestion } from '../adapters/types.js';
-import type { Agent, AgentPane, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree, GitComparisonSummary, GitStatusSummary, GitUpstreamSummary, Pane, Project, SocketRef, TmuxAgent, Worktree } from '../domain/models.js';
+import type { Agent, AgentPane, Dashboard, DashboardPlace, DashboardProject, DashboardWorktree, GitComparisonSummary, GitStatusSummary, GitUpstreamSummary, Pane, Project, PullRequestSummary, SocketRef, TmuxAgent, Worktree } from '../domain/models.js';
 import { agentPanel } from '../transports/transport.js';
 import { withQuestionShape } from '../adapters/inline-questions.js';
 import { addUntrackedLineStats, comparisonAgainst, prComparisonCandidates, workingStatus } from '../git/comparison.js';
@@ -90,8 +90,8 @@ export async function gitUpstreamSummary(workspace: string, command: GitCommand 
 type GitMeta = { workspace: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary };
 // retain one pending or completed root lookup until expiry
 type RootLookup = { expiresAt: number; value: Promise<string> };
-// discovery requires both PR reads and checkout invalidation
-type PullRequestLookup = Pick<PullRequestService, 'cachedPullRequest' | 'invalidateRepositories'>;
+// discovery reads branch summaries and forgets origins when checkouts change
+type BranchLookup = Pick<GithubService, 'repositoryAt' | 'branch' | 'invalidateRepositories'>;
 // resolve one pane path to its repository root
 export async function workspaceRoot(path: string): Promise<string> {
   const canonical = await realpath(path).catch(() => path);
@@ -186,8 +186,8 @@ export class DiscoveryService {
   private structuredAnswer: (agentId: string) => Promise<string | undefined> = async () => undefined;
   private static readonly refreshCacheMs = 2_000;
   private static readonly gitMetadataCacheMs = 30_000;
-  // accept only the PR operations used by discovery
-  constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly pullRequests: PullRequestLookup = new PullRequestService(), private readonly adapters: AdapterConfigs = {}, private readonly configuredProjects: readonly Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string) {}
+  // take only the GitHub reads discovery needs
+  constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly github: BranchLookup = new GithubService(), private readonly adapters: AdapterConfigs = {}, private readonly configuredProjects: readonly Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string) {}
   // list the structured Agents on the dashboard beside the panes' Agents, fresh on every change
   useStructuredAgents(source: { agents(): Promise<readonly Agent[]>; onChange(listener: () => void): void; turns: { latestAnswer(agentId: string): Promise<string | undefined> } }): void {
     this.structuredAgents = () => source.agents();
@@ -582,7 +582,14 @@ export class DiscoveryService {
     this.gitMetadataInFlight.clear();
     this.workspaceRoots.clear();
     this.commonDirCache.clear();
-    this.pullRequests.invalidateRepositories();
+    this.github.invalidateRepositories();
+  }
+
+  // the branch's pull request as GitHub last reported it; the dashboard never waits on GitHub
+  private async pullRequestOf(meta: GitMeta, branch: string | undefined): Promise<PullRequestSummary | undefined> {
+    if (!branch) return undefined;
+    const repository = await this.github.repositoryAt(meta.workspace);
+    return repository === undefined ? undefined : (await this.github.branch(repository, branch, meta.gitUpstream !== undefined)).pullRequest;
   }
 
   private async discoverWorktrees(): Promise<{ worktrees: Worktree[]; stale: Map<string, string[]>; pins: Record<string, boolean>; projects: readonly Project[] | undefined }> {
@@ -816,7 +823,7 @@ export class DiscoveryService {
       // a structured Agent's final message is read directly, from the Transport that holds it
       messageQuestionStates.set(agent.id, question !== undefined ? { hasQuestion: false } : agent.transport === 'structured' ? { hasQuestion: agent.attention === 'finished' && messageAsksQuestion(await this.structuredAnswer(agent.id)) } : this.agentMessageQuestion(agent));
       const branch = meta.branch ?? agent.branch;
-      const pullRequest = await this.pullRequests.cachedPullRequest(meta.workspace, branch);
+      const pullRequest = await this.pullRequestOf(meta, branch);
       const gitPrStatus = await this.gitPrComparisonForBase(meta, branch, pullRequest?.baseBranch, defaultBranch);
       const details = worktree === undefined
         ? { ...agent, branch, ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }) }
@@ -841,7 +848,7 @@ export class DiscoveryService {
       const base: DashboardWorktree = { id: worktree.id, projectId: worktree.projectId, label: worktree.label, ...(worktree.customLabel === true ? { customLabel: true } : {}), path: worktree.path, available: worktree.available, pinned: worktree.pinned, main: worktree.main, detached: worktree.detached, locked: worktree.locked, order: orderOf.get(worktree.id) ?? 0, ...(worktree.branch === undefined ? {} : { branch: worktree.branch }), ...(worktree.sha === undefined ? {} : { sha: worktree.sha }), ...(consoleShells > 0 ? { consoleShells } : {}), ...(worktree.projectUrl === undefined ? {} : { projectUrl: worktree.projectUrl, projectProxied: worktree.projectPort !== undefined }) };
       if (activeWorktreeIds.has(worktree.id)) return base;
       const meta = await metadataFor(worktree.identity, worktree.defaultBranch);
-      const pullRequest = await this.pullRequests.cachedPullRequest(meta.workspace, meta.branch);
+      const pullRequest = await this.pullRequestOf(meta, meta.branch);
       const gitPrStatus = await this.gitPrComparisonForBase(meta, meta.branch, pullRequest?.baseBranch, worktree.defaultBranch);
       return { ...base, ...(meta.gitStatus === undefined ? {} : { gitStatus: meta.gitStatus }), ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(meta.gitUpstream === undefined ? {} : { gitUpstream: meta.gitUpstream }), ...(pullRequest === undefined ? {} : { pullRequest }) };
     }));

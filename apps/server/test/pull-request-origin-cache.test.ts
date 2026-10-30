@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { PullRequestService } from '../src/pull-requests/service.js';
-import type { Command, Request } from '../src/pull-requests/github.js';
+import { GithubService } from '../src/github/service.js';
+import type { Command } from '../src/github/github.js';
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -19,46 +19,42 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-// return an empty successful pull request response
-const emptyPullRequestResponse = async () => ({ ok: true, json: async () => [] });
-
-// keep origin-cache checks independent of host credentials and token files
-function cacheService(command: Command, request: Request = emptyPullRequestResponse, now?: () => number): PullRequestService {
-  return new PullRequestService(command, request, now, () => undefined);
+// the module over one scripted `git remote get-url origin`; nothing here reaches GitHub
+function cacheService(command: Command, now?: () => number): GithubService {
+  return new GithubService({ command, request: async () => { throw new Error('GitHub must not be asked'); }, token: async () => undefined, ...(now === undefined ? {} : { now }) });
 }
 
-describe('dashboard GitHub origin cache', () => {
+const octo = { owner: 'octo', name: 'repo' };
+
+describe('a checkout\'s GitHub origin', () => {
   // hot dashboard reads must not spawn another remote lookup
-  it('reuses one origin lookup across url and repeated dashboard queries', async () => {
+  it('reuses one origin lookup across repeated reads', async () => {
     const commands: string[] = [];
     const service = cacheService(async (_file, args) => {
       commands.push(args[1] ?? '');
       return { code: 0, stdout: 'git@github.com:octo/repo.git\n' };
-    }, emptyPullRequestResponse);
+    });
 
-    await expect(service.url('/workspace', 'feature/one')).resolves.toBeUndefined();
-    await expect(service.cachedPullRequest('/workspace', 'feature/one')).resolves.toBeUndefined();
-    await expect(service.cachedPullRequest('/workspace', 'feature/two')).resolves.toBeUndefined();
-
+    await expect(service.repositoryAt('/workspace')).resolves.toEqual(octo);
+    await expect(service.repositoryAt('/workspace')).resolves.toEqual(octo);
     expect(commands).toEqual(['/workspace']);
   });
 
-  // branch-specific PR queries share workspace-level origin discovery
-  it('coalesces concurrent origin lookups for different branches', async () => {
+  it('coalesces concurrent origin lookups', async () => {
     const origin = deferred<{ code: number; stdout: string }>();
     let commands = 0;
     const service = cacheService(async () => {
       commands += 1;
       return await origin.promise;
-    }, emptyPullRequestResponse);
+    });
 
-    const first = service.url('/workspace', 'feature/one');
-    const second = service.url('/workspace', 'feature/two');
+    const first = service.repositoryAt('/workspace');
+    const second = service.repositoryAt('/workspace');
     await Promise.resolve();
     expect(commands).toBe(1);
 
     origin.resolve({ code: 0, stdout: 'git@github.com:octo/repo.git\n' });
-    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    await expect(Promise.all([first, second])).resolves.toEqual([octo, octo]);
     expect(commands).toBe(1);
   });
 
@@ -72,25 +68,23 @@ describe('dashboard GitHub origin cache', () => {
       { code: 0, stdout: 'git@github.com:recovered/repo.git\n' }
     ];
     let commands = 0;
-    const service = cacheService(async () => origins[commands++]!, emptyPullRequestResponse, () => now);
+    const service = cacheService(async () => origins[commands++]!, () => now);
 
-    await service.url('/workspace', 'feature/one');
-    await service.cachedPullRequest('/workspace', 'feature/two');
+    await expect(service.repositoryAt('/workspace')).resolves.toEqual(octo);
+    await service.repositoryAt('/workspace');
     expect(commands).toBe(1);
 
     now = 30_000;
-    await service.url('/workspace', 'feature/three');
-    await service.cachedPullRequest('/workspace', 'feature/four');
+    await expect(service.repositoryAt('/workspace')).resolves.toBeUndefined();
+    await service.repositoryAt('/workspace');
     expect(commands).toBe(2);
 
     now = 60_000;
-    await service.url('/workspace', 'feature/five');
-    await service.cachedPullRequest('/workspace', 'feature/six');
+    await expect(service.repositoryAt('/workspace')).resolves.toBeUndefined();
     expect(commands).toBe(3);
 
     now = 90_000;
-    await service.url('/workspace', 'feature/seven');
-    await service.cachedPullRequest('/workspace', 'feature/eight');
+    await expect(service.repositoryAt('/workspace')).resolves.toEqual({ owner: 'recovered', name: 'repo' });
     expect(commands).toBe(4);
   });
 
@@ -102,18 +96,18 @@ describe('dashboard GitHub origin cache', () => {
     const service = cacheService(async () => {
       commands += 1;
       return commands === 1 ? await origin.promise : { code: 0, stdout: 'git@github.com:octo/repo.git\n' };
-    }, emptyPullRequestResponse, () => now);
+    }, () => now);
 
-    const initial = service.url('/workspace', 'feature/one');
+    const initial = service.repositoryAt('/workspace');
     now = 20_000;
     origin.resolve({ code: 0, stdout: 'git@github.com:octo/repo.git\n' });
     await initial;
     now = 49_999;
-    await service.url('/workspace', 'feature/two');
+    await service.repositoryAt('/workspace');
     expect(commands).toBe(1);
 
     now = 50_000;
-    await service.url('/workspace', 'feature/three');
+    await service.repositoryAt('/workspace');
     expect(commands).toBe(2);
   });
 
@@ -123,11 +117,11 @@ describe('dashboard GitHub origin cache', () => {
     const service = cacheService(async (_file, args) => {
       workspaces.push(args[1] ?? '');
       return { code: 0, stdout: 'git@github.com:octo/repo.git\n' };
-    }, emptyPullRequestResponse);
+    });
 
-    await service.url('/one', 'feature/one');
-    await service.url('/two', 'feature/two');
-    await service.cachedPullRequest('/one', 'feature/three');
+    await service.repositoryAt('/one');
+    await service.repositoryAt('/two');
+    await service.repositoryAt('/one');
 
     expect(workspaces).toEqual(['/one', '/two']);
   });
@@ -140,10 +134,10 @@ describe('dashboard GitHub origin cache', () => {
       // fail only the initial lookup
       if (commands === 1) throw new Error('git unavailable');
       return { code: 0, stdout: 'git@github.com:octo/repo.git\n' };
-    }, emptyPullRequestResponse);
+    });
 
-    await expect(service.url('/workspace', 'feature/one')).rejects.toThrow('git unavailable');
-    await expect(service.url('/workspace', 'feature/two')).resolves.toBeUndefined();
+    await expect(service.repositoryAt('/workspace')).rejects.toThrow('git unavailable');
+    await expect(service.repositoryAt('/workspace')).resolves.toEqual(octo);
     expect(commands).toBe(2);
   });
 
@@ -153,23 +147,18 @@ describe('dashboard GitHub origin cache', () => {
     const secondOrigin = deferred<{ code: number; stdout: string }>();
     const origins = [firstOrigin, secondOrigin];
     let commands = 0;
-    const requests: string[] = [];
-    const service = cacheService(async () => await origins[commands++]!.promise, async (url) => {
-      requests.push(url);
-      return { ok: true, json: async () => [] };
-    });
+    const service = cacheService(async () => await origins[commands++]!.promise);
 
-    const stale = service.url('/workspace', 'feature/stale');
+    const stale = service.repositoryAt('/workspace');
     service.invalidateRepositories();
-    const current = service.url('/workspace', 'feature/current');
+    const current = service.repositoryAt('/workspace');
     secondOrigin.resolve({ code: 0, stdout: 'git@github.com:new/repo.git\n' });
-    await expect(current).resolves.toBeUndefined();
+    await expect(current).resolves.toEqual({ owner: 'new', name: 'repo' });
     firstOrigin.resolve({ code: 0, stdout: 'git@github.com:old/repo.git\n' });
-    await expect(stale).resolves.toBeUndefined();
+    await expect(stale).resolves.toEqual({ owner: 'old', name: 'repo' });
 
-    await service.url('/workspace', 'feature/after');
+    await expect(service.repositoryAt('/workspace')).resolves.toEqual({ owner: 'new', name: 'repo' });
     expect(commands).toBe(2);
-    expect(requests.at(-1)).toContain('/repos/new/repo/pulls?');
   });
 
   // old failures cannot evict a replacement lookup
@@ -178,39 +167,33 @@ describe('dashboard GitHub origin cache', () => {
     const secondOrigin = deferred<{ code: number; stdout: string }>();
     const origins = [firstOrigin, secondOrigin];
     let commands = 0;
-    const service = cacheService(async () => await origins[commands++]!.promise, emptyPullRequestResponse);
+    const service = cacheService(async () => await origins[commands++]!.promise);
 
-    const stale = service.url('/workspace', 'feature/stale');
+    const stale = service.repositoryAt('/workspace');
     service.invalidateRepositories();
-    const current = service.url('/workspace', 'feature/current');
+    const current = service.repositoryAt('/workspace');
     secondOrigin.resolve({ code: 0, stdout: 'git@github.com:new/repo.git\n' });
-    await expect(current).resolves.toBeUndefined();
+    await expect(current).resolves.toEqual({ owner: 'new', name: 'repo' });
     firstOrigin.reject(new Error('stale command failure'));
     await expect(stale).rejects.toThrow('stale command failure');
 
-    await service.url('/workspace', 'feature/after');
+    await service.repositoryAt('/workspace');
     expect(commands).toBe(2);
   });
 
-  // mutation revalidation and on-demand links still check the live origin
-  it('keeps open, supports, and actions URL origin discovery fresh', async () => {
+  // mutation revalidation and on-demand links check the live origin
+  it('reads the live origin when asked for a fresh one', async () => {
     const origins = [
       'git@github.com:cached/repo.git\n',
       'https://example.com/unsupported/repo.git\n',
-      'git@github.com:actions/repo.git\n',
-      'git@github.com:open/repo.git\n'
+      'git@github.com:fresh/repo.git\n'
     ];
     let commands = 0;
-    const service = new PullRequestService(async () => ({ code: 0, stdout: origins[commands++]! }), async (url) => {
-      // identify the viewer for the open lookup
-      if (url.endsWith('/user')) return { ok: true, json: async () => ({ login: 'viewer' }) };
-      return { ok: true, json: async () => [] };
-    }, undefined, () => 'token');
+    const service = cacheService(async () => ({ code: 0, stdout: origins[commands++]! }));
 
-    await service.url('/workspace', 'feature/cache');
-    await expect(service.supports('/workspace')).resolves.toBe(false);
-    await expect(service.actionsUrl('/workspace')).resolves.toBe('https://github.com/actions/repo/actions');
-    await expect(service.open('/workspace')).resolves.toEqual({ own: [], others: [] });
-    expect(commands).toBe(4);
+    await expect(service.repositoryAt('/workspace')).resolves.toEqual({ owner: 'cached', name: 'repo' });
+    await expect(service.repositoryAt('/workspace', true)).resolves.toBeUndefined();
+    await expect(service.repositoryAt('/workspace', true)).resolves.toEqual({ owner: 'fresh', name: 'repo' });
+    expect(commands).toBe(3);
   });
 });

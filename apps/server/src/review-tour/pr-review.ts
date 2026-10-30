@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { gitStatusSummary } from '../git/comparison.js';
-import { at, GithubClient, GithubRequestError, githubErrorMessage, githubRepository, githubToken, graphqlError, type Command, type GithubRepository, type GraphqlPayload, type Request, type Token } from '../pull-requests/github.js';
+import { at, GithubRequestError, githubErrorMessage, graphqlError, repositoryPath, type Command, type GithubRepository, type GraphqlPayload } from '../github/github.js';
+import { GithubService } from '../github/service.js';
 import { run } from '../tmux/command.js';
 import { ReviewTourError, type ReviewComparison, type ReviewTourInput } from './contracts.js';
 import { diffRows, type DiffRow } from './diff-rows.js';
@@ -223,6 +224,8 @@ type PlannedThread = { comment: PullRequestReviewComment; path: string; patch: s
 type BatchOutcome = { ambiguous: false; outcomes: ThreadOutcome[] } | { ambiguous: true; reason: string };
 
 const git = '/usr/bin/git';
+// posting reads and writes more than a summary does, so GitHub gets longer to answer
+const timeoutMs = 15_000;
 const pullRequestQuery = 'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){id number url state headRefName headRefOid headRepositoryOwner{login} reviews(states:[PENDING],first:1){nodes{id body commit{oid}}}}}}';
 const reviewQuery = 'query($id:ID!,$after:String){node(id:$id){...on PullRequestReview{id body comments(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{body subjectType}}}}}';
 
@@ -239,9 +242,8 @@ function fileThread(thread: PlannedThread, reason: string): PlannedThread {
 export class PullRequestReviewService {
   // one post per checkout at a time: a second post waits, then finds the first one's markers
   private readonly posting = new Map<string, Promise<unknown>>();
-  private readonly github: GithubClient;
 
-  constructor(private readonly capture: Capture, private readonly command: Command = run, request: Request = fetch, private readonly getToken: Token = githubToken) { this.github = new GithubClient(request, 15_000); }
+  constructor(private readonly capture: Capture, private readonly command: Command = run, private readonly github: Pick<GithubService, 'client' | 'token' | 'repositoryAt' | 'changed'> = new GithubService()) {}
 
   // post a tour's feedback as the operator's draft review on the chosen pull request
   async post(agentId: string, input: PullRequestReviewInput): Promise<PullRequestReviewResult> {
@@ -268,12 +270,12 @@ export class PullRequestReviewService {
     });
     const files = [...new Set(known.map(comment => changes.get(comment.changeId)!.file))];
     await this.requireCommitted(comparison.workspace, files);
-    const repository = await this.repository(comparison.workspace);
+    const repository = await this.github.repositoryAt(comparison.workspace, true);
     // require a GitHub origin and a branch the pull request must be from
     if (repository === undefined) throw new PullRequestReviewError('no_pull_request', false, 'The worktree\'s origin is not a GitHub repository.');
     const branch = comparison.branch;
     if (branch === undefined) throw new PullRequestReviewError('no_pull_request', false, 'The worktree is not on a branch, so it has no pull request.');
-    const token = await this.getToken();
+    const token = await this.github.token();
     if (token === undefined) throw new PullRequestReviewError('no_github_token', false, 'GitHub authentication is not configured. Set RAC_GITHUB_TOKEN or sign in with the gh CLI.');
     const [head, pullRequest] = await Promise.all([this.head(comparison.workspace), this.pullRequest(token, repository, input.pullRequestNumber, branch)]);
     // the comments' lines are local commits' lines, so they must be the PR's head
@@ -293,21 +295,26 @@ export class PullRequestReviewService {
       planned.push(reason === undefined ? line : fileThread(line, reason));
     }
     let review = pullRequest.pending === undefined ? undefined : await this.reviewState(token, pullRequest.pending.id);
-    // open a draft only when there is something to put in it, its body holding the sections
-    if (review === undefined && (planned.length > 0 || input.sections.length > 0)) review = await this.openReview(token, repository, pullRequest.number, branch, pullRequest.id, head, appendSections('', input.sections) ?? '');
-    // append the sections the draft does not hold yet
-    const body = review === undefined ? undefined : appendSections(review.body, input.sections);
-    if (review !== undefined && body !== undefined) review = await this.updateReviewBody(token, review, body);
-    // a comment some earlier post already placed keeps that placement
-    const fresh = planned.filter(thread => {
-      const placed = review?.placed.get(thread.comment.id);
-      if (placed !== undefined) results.set(thread.comment.id, placedResult(thread, placed));
-      return placed === undefined;
-    });
-    if (review !== undefined) {
-      const refused = await this.addThreads(token, review.id, fresh, results);
-      // a line range GitHub refuses goes on the file instead, a different mutation the markers guard
-      await this.addThreads(token, review.id, refused.map(({ thread, reason }) => fileThread(thread, `GitHub refused the line range: ${reason}`)), results);
+    try {
+      // open a draft only when there is something to put in it, its body holding the sections
+      if (review === undefined && (planned.length > 0 || input.sections.length > 0)) review = await this.openReview(token, repository, pullRequest.number, branch, pullRequest.id, head, appendSections('', input.sections) ?? '');
+      // append the sections the draft does not hold yet
+      const body = review === undefined ? undefined : appendSections(review.body, input.sections);
+      if (review !== undefined && body !== undefined) review = await this.updateReviewBody(token, review, body);
+      // a comment some earlier post already placed keeps that placement
+      const fresh = planned.filter(thread => {
+        const placed = review?.placed.get(thread.comment.id);
+        if (placed !== undefined) results.set(thread.comment.id, placedResult(thread, placed));
+        return placed === undefined;
+      });
+      if (review !== undefined) {
+        const refused = await this.addThreads(token, review.id, fresh, results);
+        // a line range GitHub refuses goes on the file instead, a different mutation the markers guard
+        await this.addThreads(token, review.id, refused.map(({ thread, reason }) => fileThread(thread, `GitHub refused the line range: ${reason}`)), results);
+      }
+    } finally {
+      // anything written, even by a post that then failed, changes what the console shows of the pull request
+      if (planned.length > 0 || input.sections.length > 0) this.github.changed(repository, pullRequest.number);
     }
     const finalBody = review?.body ?? '';
     return { status: 'ok', review: { url: `${pullRequest.url}/files`, pullRequest: { number: pullRequest.number, url: pullRequest.url } }, sections: input.sections.map(section => ({ key: section.key, posted: finalBody.includes(sectionMarker(section)) })), comments: input.comments.map(comment => results.get(comment.id)!) };
@@ -327,11 +334,6 @@ export class PullRequestReviewService {
     if (dirty.length > 0) throw new PullRequestReviewError('uncommitted', true, `Commit and push ${dirty.length === 1 ? 'this file' : 'these files'} first; the comments' line numbers must match the pull request: ${dirty.join(', ')}`, { files: dirty });
   }
 
-  private async repository(workspace: string): Promise<GithubRepository | undefined> {
-    const remote = await this.command(git, ['-C', workspace, 'remote', 'get-url', 'origin']);
-    return remote.code === 0 ? githubRepository(remote.stdout) : undefined;
-  }
-
   private async head(workspace: string): Promise<string> {
     const head = await this.command(git, ['-C', workspace, 'rev-parse', '--verify', 'HEAD']);
     if (head.code !== 0) throw new ReviewTourError('scope_unavailable', true);
@@ -342,7 +344,7 @@ export class PullRequestReviewService {
   // the viewer's draft review
   private async pullRequest(token: string, repository: GithubRepository, number: number, branch: string): Promise<PullRequestState> {
     const action = 'GitHub could not load the pull request';
-    const payload = await this.github.query(token, pullRequestQuery, { owner: repository.owner, name: repository.name, number }, action);
+    const payload = await this.github.client.query(token, pullRequestQuery, { owner: repository.owner, name: repository.name, number }, action, timeoutMs);
     const found = at(payload.data, 'repository');
     if (found === null || typeof found !== 'object') throw graphqlError(payload, action);
     const node = at(found, 'pullRequest');
@@ -364,7 +366,7 @@ export class PullRequestReviewService {
     let body = '';
     let after: string | undefined;
     for (let page = 0; page < maxCommentPages; page += 1) {
-      const payload = await this.github.query(token, reviewQuery, { id, ...(after === undefined ? {} : { after }) }, action);
+      const payload = await this.github.client.query(token, reviewQuery, { id, ...(after === undefined ? {} : { after }) }, action, timeoutMs);
       const node = at(payload.data, 'node');
       const nodes = at(node, 'comments', 'nodes');
       if (!Array.isArray(nodes)) throw graphqlError(payload, action);
@@ -384,7 +386,7 @@ export class PullRequestReviewService {
   private async files(token: string, repository: GithubRepository, number: number, wanted: Set<string>): Promise<Map<string, { patch?: string }>> {
     const found = new Map<string, { patch?: string }>();
     for (let page = 1; page <= maxFilePages && found.size < wanted.size; page += 1) {
-      const response = await this.github.get(`https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls/${number}/files?per_page=100&page=${page}`, token, 'GitHub could not list the pull request\'s files');
+      const response = await this.github.client.get(`https://api.github.com/repos/${repositoryPath(repository)}/pulls/${number}/files?per_page=100&page=${page}`, token, 'GitHub could not list the pull request\'s files', timeoutMs);
       const listed = await response.json().catch(() => undefined);
       if (!Array.isArray(listed)) throw new GithubRequestError('GitHub returned invalid pull request files.', 502, undefined, 'transient');
       for (const file of listed) {
@@ -402,7 +404,7 @@ export class PullRequestReviewService {
   private async openReview(token: string, repository: GithubRepository, number: number, branch: string, pullRequestId: string, head: string, body: string): Promise<ReviewState> {
     const action = 'GitHub could not start a draft review';
     try {
-      const payload = await this.github.mutate(token, 'mutation($input:AddPullRequestReviewInput!){addPullRequestReview(input:$input){pullRequestReview{id}}}', { input: { pullRequestId, commitOID: head, ...(body === '' ? {} : { body }) } }, action);
+      const payload = await this.github.client.mutate(token, 'mutation($input:AddPullRequestReviewInput!){addPullRequestReview(input:$input){pullRequestReview{id}}}', { input: { pullRequestId, commitOID: head, ...(body === '' ? {} : { body }) } }, action, timeoutMs);
       const id = at(payload.data, 'addPullRequestReview', 'pullRequestReview', 'id');
       if (typeof id !== 'string') throw graphqlError(payload, action);
       return { id, body, placed: new Map() };
@@ -419,7 +421,7 @@ export class PullRequestReviewService {
   private async updateReviewBody(token: string, review: ReviewState, body: string): Promise<ReviewState> {
     const action = 'GitHub could not update the draft review';
     try {
-      const payload = await this.github.mutate(token, 'mutation($input:UpdatePullRequestReviewInput!){updatePullRequestReview(input:$input){pullRequestReview{id}}}', { input: { pullRequestReviewId: review.id, body } }, action);
+      const payload = await this.github.client.mutate(token, 'mutation($input:UpdatePullRequestReviewInput!){updatePullRequestReview(input:$input){pullRequestReview{id}}}', { input: { pullRequestReviewId: review.id, body } }, action, timeoutMs);
       if (typeof at(payload.data, 'updatePullRequestReview', 'pullRequestReview', 'id') !== 'string') throw graphqlError(payload, action);
       return { ...review, body };
     } catch (error) {
@@ -460,7 +462,7 @@ export class PullRequestReviewService {
     const mutation = threadMutation(inputs);
     let payload: GraphqlPayload;
     try {
-      payload = await this.github.mutate(token, mutation.query, mutation.variables, action, 30_000);
+      payload = await this.github.client.mutate(token, mutation.query, mutation.variables, action, 30_000);
     } catch (error) {
       const reason = error instanceof Error ? error.message : `${action}.`;
       return error instanceof GithubRequestError && error.kind !== 'transient' ? { ambiguous: false, outcomes: inputs.map(() => ({ created: false, reason, refused: false })) } : { ambiguous: true, reason };

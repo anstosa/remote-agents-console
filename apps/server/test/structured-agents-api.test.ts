@@ -135,7 +135,7 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
   const config = testConfig({ scratchDirectory: root, projects: [project, ...(conductor === undefined ? [] : [testProject({ id: 'home', label: 'Conductor', path: home, identity: home, mode: 'directory' })])], adapters: { pi: { program: '/pinned/pi', args: [], env: {}, launchable: true, ...(allowed.length === 0 ? {} : { allowedModels: allowed }) } }, ...(conductor === undefined ? {} : { conductor }), ...options.config });
   const worktreeStore = new WorktreeLaunchStore({ file: join(root, 'worktrees.json') });
   const worktrees = async (path: string) => path === project.path ? [{ path: project.path, branch: 'refs/heads/main', detached: false, bare: false, locked: false, prunable: false }, ...(options.linked === true ? [{ path: join(root, 'feat'), branch: 'refs/heads/feat', detached: false, bare: false, locked: false, prunable: false }] : [])] : undefined;
-  const discovery = new DiscoveryService(socketFinder([]), paneLister([]) as never, processInspector(), { cachedPullRequest: async () => undefined, invalidateRepositories: () => {} } as never, config.adapters, config.projects, worktreeStore, worktrees, root);
+  const discovery = new DiscoveryService(socketFinder([]), paneLister([]) as never, processInspector(), { repositoryAt: async () => undefined, branch: async () => ({}), invalidateRepositories: () => {} } as never, config.adapters, config.projects, worktreeStore, worktrees, root);
   // the console as it starts, over the stores in `root`, driving its structured Agents through `processes`
   const start = async (processes: StructuredProcesses, changed: Partial<ValidatedConfig> = {}) => {
     vi.stubEnv('RAC_DISPATCHES_FILE', join(root, 'dispatches.json'));
@@ -1981,18 +1981,23 @@ describe('the Conductor\'s dispatches', () => {
 
 describe('the Conductor\'s Watches', () => {
   // GitHub as a test scripts it: one pull request (#7 in octo/repo) and the review requests naming
-  // the token's user `me`, answered to the GraphQL queries Watches send
+  // the token's user `me`, answered to the GraphQL queries Watches send; over REST, who `me` is
+  // (counted) and #7 as the repository's one open pull request
   function fakeGithub() {
     const pull = { state: 'OPEN', mergeable: 'MERGEABLE', head: 'a'.repeat(40), rollup: 'PENDING' as string | undefined, threads: [] as Array<{ id: string; resolved: boolean; author: string }> };
     const requests: Array<{ number: number; events: Array<{ id: string; login: string }> }> = [];
-    const request = async (_url: string, init?: RequestInit) => {
-      const { query } = JSON.parse(String(init?.body)) as { query: string };
+    const viewers: string[] = [];
+    const request = async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/user')) { viewers.push(url); return { ok: true, status: 200, json: async () => ({ login: 'me' }) }; }
+      if (url.includes('/pulls?state=open')) return { ok: true, status: 200, json: async () => [{ number: 7, title: 'Watched', draft: false, user: { login: 'me' }, head: { ref: 'feature/watched', sha: pull.head, repo: { full_name: 'octo/repo' } } }] };
+      if (init?.body === undefined) return { ok: false, status: 404, json: async () => ({ message: 'Not Found' }) };
+      const { query } = JSON.parse(String(init.body)) as { query: string };
       const data = query.includes('search(')
-        ? { viewer: { login: 'me' }, search: { nodes: requests.map(({ number, events }) => ({ number, url: `https://github.com/octo/repo/pull/${number}`, timelineItems: { nodes: events.map(({ id, login }) => ({ id, requestedReviewer: { login } })) } })) } }
+        ? { search: { nodes: requests.map(({ number, events }) => ({ number, url: `https://github.com/octo/repo/pull/${number}`, timelineItems: { nodes: events.map(({ id, login }) => ({ id, requestedReviewer: { login } })) } })) } }
         : { repository: { pullRequest: { state: pull.state, mergeable: pull.mergeable, url: 'https://github.com/octo/repo/pull/7', headRefOid: pull.head, commits: { nodes: [{ commit: { statusCheckRollup: pull.rollup === undefined ? null : { state: pull.rollup } } }] }, reviewThreads: { nodes: pull.threads.map(({ id, resolved, author }) => ({ id, isResolved: resolved, isOutdated: false, comments: { nodes: [{ author: { login: author } }] } })) } } } };
       return { ok: true, status: 200, json: async () => ({ data }) };
     };
-    return { pull, requests, request };
+    return { pull, requests, viewers, request };
   }
 
   // command windows as a test scripts them, on a tmux server that outlives each console: each
@@ -2120,6 +2125,18 @@ describe('the Conductor\'s Watches', () => {
     await deployed.app.watches.check();
     expect(await deployed.told()).toEqual([second]);
     await deployed.app.close();
+  });
+
+  // the app's GitHub request reaches the one GitHub module that Watches and the routes share
+  it('reads GitHub for Watches and the pull request routes through one module, finding the viewer once', async () => {
+    const fake = fakeAgent();
+    const { app, headers, call, worktree, github } = await watching(fake);
+    github.requests.push({ number: 3, events: [{ id: 'RR1', login: 'me' }] });
+    await expect(call('watch_review_requests', { worktree_id: worktree })).resolves.toMatchObject({ ok: true });
+
+    const listed = await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(worktree)}/switch-prs`, headers });
+    expect(listed.json()).toMatchObject({ pullRequests: [{ number: 7, title: 'Watched' }], pullRequestsSupported: true });
+    expect(github.viewers).toHaveLength(1);
   });
 
   it('watches review requests to the operator: a first request and a re-request are told, another user\'s are not', async () => {

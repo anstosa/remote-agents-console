@@ -1,7 +1,7 @@
 import { access, mkdir, realpath } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import type { Project, Worktree } from '../domain/models.js';
-import { PullRequestService, forkCheckoutNumber } from '../pull-requests/service.js';
+import { GithubService, forkCheckoutNumber, type PullRequestCleanupStatus } from '../github/service.js';
 import type { PullRequestSwitchService } from '../pull-requests/switch-service.js';
 import { run } from '../tmux/command.js';
 import { repositoryArgs } from '../git/worktrees.js';
@@ -102,7 +102,7 @@ export class WorktreeManagementService {
 
   // share exact-head PR evidence between suggestions and guarded deletion
   // `pullRequestHeads` resolves and fetches a pull request for the `pull-request` Add mode
-  constructor(private readonly projects: () => readonly Project[], private readonly git: GitExec = defaultGit, private readonly pullRequests: Pick<PullRequestService, 'cleanupHead'> = new PullRequestService(), private readonly pullRequestHeads?: Pick<PullRequestSwitchService, 'fetchForWorktree'>) {}
+  constructor(private readonly projects: () => readonly Project[], private readonly git: GitExec = defaultGit, private readonly github: Pick<GithubService, 'repositoryAt' | 'cleanupHead'> = new GithubService(), private readonly pullRequestHeads?: Pick<PullRequestSwitchService, 'fetchForWorktree'>) {}
 
   private project(projectId: string): Project | undefined {
     return this.projects().find(project => project.id === projectId);
@@ -369,7 +369,7 @@ export class WorktreeManagementService {
     // bound requests per repository instead of flooding GitHub for large branch lists
     for (let offset = 0; offset < candidates.length; offset += 4) {
       await Promise.all(candidates.slice(offset, offset + 4).map(async ({ branch, head }) => {
-        const reason = await (acceptAncestor ? this.pullRequests.cleanupHead(project.path, branch, head, false, true) : this.pullRequests.cleanupHead(project.path, branch, head)).catch(() => undefined);
+        const reason = await this.cleanupHead(project.path, branch, head, false, acceptAncestor);
         if (reason !== undefined) reasons.set(branch, reason);
       }));
     }
@@ -524,7 +524,14 @@ export class WorktreeManagementService {
   private async branchCleanupReason(project: Project, branch: string, head: string, fresh: boolean): Promise<CleanupBranch['reason'] | undefined> {
     // keep ordinary git-only repositories independent of GitHub availability
     if (await this.merged(project.path, project.path, head)) return 'merged';
-    return await this.pullRequests.cleanupHead(project.path, branch, head, fresh).catch(() => undefined);
+    return await this.cleanupHead(project.path, branch, head, fresh);
+  }
+
+  // what GitHub proves about one branch head in a checkout; a fresh check reads the live origin, and
+  // any failure proves nothing
+  private async cleanupHead(path: string, branch: string, head: string, fresh: boolean, acceptAncestor = false): Promise<PullRequestCleanupStatus | undefined> {
+    const repository = await this.github.repositoryAt(path, fresh).catch(() => undefined);
+    return repository === undefined ? undefined : await this.github.cleanupHead(repository, branch, head, { fresh, acceptAncestor }).catch(() => undefined);
   }
 
   // resolve only a validated local branch name to an immutable commit

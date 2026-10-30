@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { ReviewTourError, type ReviewComparison } from '../src/review-tour/contracts.js';
 import { ambiguousBatch, commentMarker, coveredRows, fileThreadBody, orderedComment, parsePullRequestReviewInput, placedComments, placementProblem, PullRequestReviewError, PullRequestReviewService, appendSections, sectionMarker, sectionText, threadOutcomes, threadInput, threadMutation, type PullRequestReviewComment, type PullRequestReviewInput } from '../src/review-tour/pr-review.js';
 import { diffRows } from '../src/review-tour/diff-rows.js';
+import { GithubService } from '../src/github/service.js';
 import { testConfig } from './helpers/config.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 
@@ -172,17 +173,13 @@ function harness(scenario: Scenario = {}) {
   let { threadFailure, reviewFailure, updateFailure, queryFailure } = scenario;
   const json = (value: unknown, status = 200) => ({ ok: status < 300, status, json: async () => value });
   const pullNode = () => scenario.pull === null ? null : { id: 'PR_1', number: 7, url: 'https://github.com/octo/repo/pull/7', state: 'OPEN', headRefName: 'feature/x', headRefOid: head, headRepositoryOwner: { login: 'Octo' }, reviews: { nodes: state.review === undefined ? [] : [{ id: state.review.id, body: state.review.body, commit: { oid: state.review.commit } }] }, ...scenario.pull };
-  const service = new PullRequestReviewService(async (agentId, input) => {
-    // the tour's own Comparison choices reach the capture
-    expect(agentId).toBe('agent-1');
-    expect(input).toEqual({ scope: 'pr', includeTests: true, includeDocs: false });
-    return comparison;
-  }, async (_binary, args) => {
+  const command = async (_binary: string, args: string[]) => {
     commands.push(args);
     if (args.includes('status')) return { code: 0, stdout: scenario.dirty === undefined ? '' : ` M ${scenario.dirty}\0` };
     if (args.includes('remote')) return { code: 0, stdout: 'git@github.com:octo/repo.git\n' };
     return { code: 0, stdout: `${scenario.localHead ?? head}\n` };
-  }, async (url, init) => {
+  };
+  const github = new GithubService({ command, token: async () => scenario.token === null ? undefined : scenario.token ?? 'token-1', request: async (url, init) => {
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { query: string; variables: Record<string, unknown> } : undefined;
     requests.push({ url, ...(body === undefined ? {} : { query: body.query, variables: body.variables }) });
     expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer token-1');
@@ -238,9 +235,15 @@ function harness(scenario: Scenario = {}) {
       return failure === 'lost' ? json({ message: 'Bad Gateway' }, 502) : json({ data, ...(errors.length === 0 ? {} : { errors }) });
     }
     return json({ message: 'Not Found' }, 404);
-  }, async () => scenario.token === null ? undefined : scenario.token ?? 'token-1');
+  } });
+  const service = new PullRequestReviewService(async (agentId, input) => {
+    // the tour's own Comparison choices reach the capture
+    expect(agentId).toBe('agent-1');
+    expect(input).toEqual({ scope: 'pr', includeTests: true, includeDocs: false });
+    return comparison;
+  }, command, github);
   const mutations = (name?: string) => requests.filter(entry => entry.query?.startsWith('mutation') === true && (name === undefined || entry.query.includes(`${name}(`)));
-  return { service, requests, commands, state, mutations };
+  return { service, github, requests, commands, state, mutations };
 }
 
 const request = (comments: PullRequestReviewComment[], sections = [general]): PullRequestReviewInput => ({ scope: 'pr', includeTests: true, includeDocs: false, fingerprint, pullRequestNumber: 7, sections, comments });
@@ -254,6 +257,23 @@ async function refusal(promise: Promise<unknown>): Promise<PullRequestReviewErro
 }
 
 describe('pull request review service', () => {
+  it('tells the GitHub module the pull request changed once something was posted', async () => {
+    const { service, github } = harness();
+    const changed = vi.spyOn(github, 'changed');
+    await service.post('agent-1', request([], []));
+    expect(changed).not.toHaveBeenCalled();
+    await service.post('agent-1', request([comment()]));
+    expect(changed).toHaveBeenCalledWith({ owner: 'octo', name: 'repo' }, 7);
+  });
+
+  it('tells the GitHub module of a post that failed once it had tried to write', async () => {
+    const { service, github, mutations } = harness({ reviewFailure: 'unapplied' });
+    const changed = vi.spyOn(github, 'changed');
+    await expect(service.post('agent-1', request([comment()]))).rejects.toBeInstanceOf(PullRequestReviewError);
+    expect(mutations('addPullRequestReview')).toHaveLength(1);
+    expect(changed).toHaveBeenCalledWith({ owner: 'octo', name: 'repo' }, 7);
+  });
+
   it('opens a draft review and places line, file and failed comments', async () => {
     const { service, requests, commands, mutations } = harness({ refuse: ['refused'] });
     const comments = [

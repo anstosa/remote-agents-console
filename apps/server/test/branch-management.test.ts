@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../src/tmux/command.js';
 import { WorktreeManagementService } from '../src/worktrees/management.js';
-import type { PullRequestService } from '../src/pull-requests/service.js';
+import type { PullRequestCleanupStatus } from '../src/github/service.js';
 import { testProject, testWorktree } from './helpers/config.js';
 
 const directories: string[] = [];
@@ -22,8 +22,16 @@ const git = async (path: string, ...args: string[]) => {
   return result.stdout.trim();
 };
 
-// create one managed repository
-async function repository(pullRequests?: Pick<PullRequestService, 'cleanupHead'>) {
+// what GitHub proves about a branch head, asked of the checkout at `path`
+type CleanupHead = (path: string, branch: string, sha: string, fresh: boolean, acceptAncestor: boolean) => Promise<PullRequestCleanupStatus | undefined>;
+
+// create one managed repository; its GitHub module names each checkout's origin after its path,
+// so a fake can act on the checkout while GitHub is asked
+async function repository(github?: { cleanupHead: CleanupHead; repositoryAt?: (path: string, fresh?: boolean) => Promise<{ owner: string; name: string } | undefined> }) {
+  const pullRequests = github === undefined ? undefined : {
+    repositoryAt: github.repositoryAt ?? (async (path: string) => ({ owner: path, name: 'origin' })),
+    cleanupHead: async ({ owner }: { owner: string }, branch: string, sha: string, { fresh = false, acceptAncestor = false } = {}) => await github.cleanupHead(owner, branch, sha, fresh, acceptAncestor)
+  };
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-branches-')));
   directories.push(root);
   await git(root, 'init', '-q', '-b', 'main');
@@ -49,6 +57,21 @@ async function unmergedFeature(root: string) {
 }
 
 describe('guarded branch deletion', () => {
+  // a deletion rechecks the live origin; an origin that is gone or cannot be read proves nothing
+  it.each([
+    ['is no longer on GitHub', async () => undefined],
+    ['cannot be read', async () => { throw new Error('git unavailable'); }]
+  ] as const)('keeps a closed PR branch when the live origin %s', async (_name, live) => {
+    const repositoryAt = vi.fn(async (path: string, fresh?: boolean) => fresh === true ? await live() : { owner: path, name: 'origin' });
+    const { root, service } = await repository({ cleanupHead: async () => 'closed', repositoryAt });
+    const head = await unmergedFeature(root);
+
+    await expect(service.cleanupBranches()).resolves.toEqual([{ projectId: 'proj', projectLabel: 'Project', branch: 'feature', reason: 'closed' }]);
+    await expect(service.deleteCleanupBranch('proj', 'feature', 'closed')).resolves.toBe(false);
+    expect(repositoryAt).toHaveBeenCalledWith(root, true);
+    expect(await git(root, 'rev-parse', 'feature')).toBe(head);
+  });
+
   // closed pull requests can be selected without being misreported as merged
   it('suggests and deletes an explicitly selected closed PR branch while preserving manual loss warnings', async () => {
     const cleanupHead = vi.fn(async () => 'closed' as const);
@@ -60,7 +83,7 @@ describe('guarded branch deletion', () => {
     await expect(service.deleteBranchGuarded('proj', 'feature', false)).resolves.toMatchObject({ ok: false, error: expect.stringContaining('confirm deleting unpushed work') });
     await expect(service.deleteCleanupBranch('proj', 'main', 'closed')).resolves.toBe(false);
     await expect(service.deleteCleanupBranch('proj', 'feature', 'closed')).resolves.toBe(true);
-    expect(cleanupHead).toHaveBeenCalledWith(root, 'feature', head, true);
+    expect(cleanupHead).toHaveBeenCalledWith(root, 'feature', head, true, false);
     await expect(git(root, 'show-ref', '--verify', 'refs/heads/feature')).rejects.toThrow();
   });
 
@@ -118,7 +141,7 @@ describe('guarded branch deletion', () => {
     // exercise cleanup and acknowledged manual deletion against the same race
     if (mode === 'cleanup') await expect(service.deleteCleanupBranch('proj', 'feature', reason)).resolves.toBe(false);
     else await expect(service.deleteBranchGuarded('proj', 'feature', true)).resolves.toMatchObject({ ok: false, status: 409 });
-    expect(cleanupHead).toHaveBeenCalledWith(root, 'feature', originalHead, true);
+    expect(cleanupHead).toHaveBeenCalledWith(root, 'feature', originalHead, true, false);
     expect(advancedHead).not.toBe(originalHead);
     expect(await git(root, 'rev-parse', 'feature')).toBe(advancedHead);
   });
@@ -189,7 +212,7 @@ describe('guarded branch deletion', () => {
     await expect(service.cleanupBranches()).resolves.toEqual([{ projectId: 'proj', projectLabel: 'Project', branch: 'squashed', reason: 'merged' }]);
     await expect(service.branchRemoval('proj', 'squashed')).resolves.toMatchObject({ ok: true, facts: { merged: true } });
     await expect(service.deleteCleanupBranch('proj', 'squashed', 'merged')).resolves.toBe(true);
-    expect(cleanupHead).toHaveBeenCalledWith(root, 'squashed', mergedSha, true);
+    expect(cleanupHead).toHaveBeenCalledWith(root, 'squashed', mergedSha, true, false);
     await expect(git(root, 'show-ref', '--verify', 'refs/heads/squashed')).rejects.toThrow();
   });
 

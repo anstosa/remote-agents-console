@@ -243,7 +243,7 @@ describe('WorktreeManagementService.add — from a pull request', () => {
   function service(project: ReturnType<typeof testProject>, listed: Listed[], dashboardWorktrees: object[] = [], command: GitCommand = run) {
     const main = testWorktree({ id: `proj:${project.path}`, projectId: 'proj', path: project.path, identity: project.path, main: true });
     const discovery = { worktreesNow: () => [main], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [{ worktrees: dashboardWorktrees }] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: listed.map(pullRequest => ({ ...pullRequest, title: 'Work', draft: false, url: `https://github.com/octo/repo/pull/${pullRequest.number}` })), others: [] }) };
+    const pulls = { repositoryAt: async () => ({ owner: 'octo', name: 'repo' }), repository: async () => ({ own: listed.map(pullRequest => ({ ...pullRequest, title: 'Work', draft: false, url: `https://github.com/octo/repo/pull/${pullRequest.number}` })), others: [] }) };
     const switching = new PullRequestSwitchService({} as ValidatedConfig, discovery as never, pulls as never, command);
     return new WorktreeManagementService(() => [project], undefined, undefined, switching);
   }

@@ -1,4 +1,5 @@
-import { at, GithubClient, GithubRequestError, graphqlError, githubToken, type GithubRepository, type Request, type Token } from '../pull-requests/github.js';
+import { at, GithubRequestError, graphqlError, type GithubRepository } from '../github/github.js';
+import { GithubService } from '../github/service.js';
 
 /** A pull request as a Watch compares it: its state, head commit, settled checks, mergeability and review threads. */
 export type PullRequestState = {
@@ -27,7 +28,7 @@ const pullRequestQuery = `query($owner:String!,$repo:String!,$number:Int!){repos
   reviewThreads(last:100){nodes{id isResolved isOutdated comments(first:1){nodes{author{login}}}}}
 }}}`;
 // `user-review-requested` matches a request naming the user, not one of their teams
-const reviewRequestsQuery = `query($q:String!){viewer{login} search(query:$q,type:ISSUE,first:50){nodes{... on PullRequest{
+const reviewRequestsQuery = `query($q:String!){search(query:$q,type:ISSUE,first:50){nodes{... on PullRequest{
   number url
   timelineItems(itemTypes:[REVIEW_REQUESTED_EVENT],last:20){nodes{... on ReviewRequestedEvent{id requestedReviewer{... on User{login}}}}}
 }}}}`;
@@ -35,12 +36,11 @@ const checkStates: Record<string, PullRequestState['checks']> = { SUCCESS: 'pass
 const nodes = (connection: unknown): unknown[] => { const value = at(connection, 'nodes'); return Array.isArray(value) ? value : []; };
 
 export class GithubWatchReader implements WatchGithub {
-  private readonly github: GithubClient;
-  constructor(request: Request = fetch, private readonly token: Token = githubToken) { this.github = new GithubClient(request); }
+  constructor(private readonly github: Pick<GithubService, 'client' | 'token' | 'viewer'> = new GithubService()) {}
 
   async pullRequest({ owner, name }: GithubRepository, number: number): Promise<PullRequestState> {
     const action = `GitHub could not read pull request #${number}`;
-    const payload = await this.github.query(await this.required(), pullRequestQuery, { owner, repo: name, number }, action);
+    const payload = await this.github.client.query(await this.required(), pullRequestQuery, { owner, repo: name, number }, action);
     const node = at(payload, 'data', 'repository', 'pullRequest');
     const [state, url, head] = [at(node, 'state'), at(node, 'url'), at(node, 'headRefOid')];
     if (state !== 'OPEN' && state !== 'CLOSED' && state !== 'MERGED' || typeof url !== 'string' || typeof head !== 'string') throw graphqlError(payload, action);
@@ -56,10 +56,10 @@ export class GithubWatchReader implements WatchGithub {
 
   async reviewRequests({ owner, name }: GithubRepository): Promise<ReviewRequest[]> {
     const action = `GitHub could not read the review requests in ${owner}/${name}`;
-    const payload = await this.github.query(await this.required(), reviewRequestsQuery, { q: `repo:${owner}/${name} is:pr is:open user-review-requested:@me` }, action);
-    const viewer = at(payload, 'data', 'viewer', 'login');
+    const payload = await this.github.client.query(await this.required(), reviewRequestsQuery, { q: `repo:${owner}/${name} is:pr is:open user-review-requested:@me` }, action);
     const found = at(payload, 'data', 'search');
-    if (typeof viewer !== 'string' || found === null || typeof found !== 'object') throw graphqlError(payload, action);
+    if (found === null || typeof found !== 'object') throw graphqlError(payload, action);
+    const viewer = await this.github.viewer();
     return nodes(found).flatMap(pull => {
       const [number, url] = [at(pull, 'number'), at(pull, 'url')];
       if (!Number.isInteger(number) || typeof url !== 'string') return [];
@@ -70,7 +70,7 @@ export class GithubWatchReader implements WatchGithub {
   }
 
   private async required(): Promise<string> {
-    const token = await this.token();
+    const token = await this.github.token();
     if (token === undefined) throw new GithubRequestError('GitHub authentication is not configured: set RAC_GITHUB_TOKEN or log in with gh.', 503);
     return token;
   }

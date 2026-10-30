@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Pane } from '../src/domain/models.js';
 import { DiscoveryService, workspaceRoot } from '../src/discovery/service.js';
-import { PullRequestService } from '../src/pull-requests/service.js';
+import { GithubService } from '../src/github/service.js';
 import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
 
 const git = vi.hoisted(() => ({ run: vi.fn() }));
@@ -168,17 +168,18 @@ describe('discovery repository root cache', () => {
   it('reloads a changed GitHub origin after checkout invalidation', async () => {
     let owner = 'old';
     const command = vi.fn(async () => ({ code: 0, stdout: `git@github.com:${owner}/repo.git\n` }));
-    const pullRequests = new PullRequestService(command, async url => {
+    const github = new GithubService({ command, token: async () => undefined, request: async url => {
       const repository = new URL(url).pathname.split('/').slice(2, 4).join('/');
       const pull = { number: 1, title: 'Cache', state: 'open', html_url: `https://github.com/${repository}/pull/1` };
       return { ok: true, json: async () => url.includes('/pulls?') ? [pull] : {} };
-    }, undefined, () => undefined);
-    const service = new DiscoveryService(undefined, undefined, undefined, pullRequests);
-    await expect(pullRequests.url('/repo', 'feature/cache')).resolves.toBe('https://github.com/old/repo/pull/1');
+    } });
+    const service = new DiscoveryService(undefined, undefined, undefined, github);
+    const url = async () => (await github.branch((await github.repositoryAt('/repo'))!, 'feature/cache', true, { wait: true })).pullRequest?.url;
+    await expect(url()).resolves.toBe('https://github.com/old/repo/pull/1');
     owner = 'new';
-    await expect(pullRequests.url('/repo', 'feature/cache')).resolves.toBe('https://github.com/old/repo/pull/1');
+    await expect(url()).resolves.toBe('https://github.com/old/repo/pull/1');
     service.invalidateWorktrees();
-    await expect(pullRequests.url('/repo', 'feature/cache')).resolves.toBe('https://github.com/new/repo/pull/1');
+    await expect(url()).resolves.toBe('https://github.com/new/repo/pull/1');
     expect(command).toHaveBeenCalledTimes(2);
   });
 });

@@ -21,7 +21,7 @@ import { WorktreeNoteService } from '../src/notes/service.js';
 import { ReviewTourStore } from '../src/review-tour/store.js';
 import { ChangeAskStore } from '../src/asks/changes.js';
 import type { ReviewTour } from '../src/review-tour/contracts.js';
-import { PullRequestLookupError } from '../src/pull-requests/service.js';
+import { GithubRequestError } from '../src/github/github.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from '../src/dashboard/updates.js';
 const config: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen:{host:'127.0.0.1',port:8787},publicOrigin:new URL('https://agents.example.com'),trustedProxyIps:new Set(['127.0.0.1']),pollIntervalMs:500,adapters:{},projects:[] };
 let queueDirectory: string | undefined;
@@ -688,7 +688,7 @@ describe('pull request switch API', () => {
   // preserve lookup failures across the HTTP boundary
   it('returns an actionable gateway error when GitHub lookup fails', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
-    const prSwitch = { available: async () => { throw new PullRequestLookupError('GitHub could not load pull requests (503).'); } };
+    const prSwitch = { available: async () => { throw new GithubRequestError('GitHub could not load pull requests (503).'); } };
     const pullRequestApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 17).toString('base64url')), prSwitch: prSwitch as never });
     try {
       const boot = await pullRequestApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });

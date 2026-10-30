@@ -493,7 +493,7 @@ describe('DiscoveryService dashboard', () => {
     // stateless PR responses need no cache invalidation
     const pullRequests = { invalidateRepositories: () => {},
       // hold the second agent after the first agent has finished enrichment
-      cachedPullRequest: async () => {
+      branch: async () => ({}), repositoryAt: async () => {
         calls += 1;
         // wait only on the second pane's first dashboard
         if (calls === 2) { startedSecond(); await blocked; }
@@ -501,9 +501,12 @@ describe('DiscoveryService dashboard', () => {
       }
     };
     const latestMessage = vi.spyOn(adapterFor('codex')!.conversations!, 'latestMessage').mockResolvedValue('Deploy where?');
+    // a checkout on a branch, so each agent's enrichment reads its pull request
+    const checkout = await mkdtemp(join(tmpdir(), 'rac-dashboard-'));
+    execFileSync('git', ['init', '-q', '-b', 'main', checkout]);
     const service = new DiscoveryService(socketFinder(), paneLister([
-      { paneId: '%1', sessionId: '$0', pid: 123, path: '/tmp', title: 'Ready' },
-      { paneId: '%2', sessionId: '$1', pid: 124, path: '/tmp', title: 'Ready' }
+      { paneId: '%1', sessionId: '$0', pid: 123, path: checkout, title: 'Ready' },
+      { paneId: '%2', sessionId: '$1', pid: 124, path: checkout, title: 'Ready' }
     ]) as never, processInspector(), pullRequests);
     try {
       const building = service.dashboard();
@@ -519,6 +522,7 @@ describe('DiscoveryService dashboard', () => {
     } finally {
       releaseSecond();
       latestMessage.mockRestore();
+      await rm(checkout, { recursive: true, force: true });
     }
   });
 
@@ -776,10 +780,13 @@ describe('DiscoveryService dashboard', () => {
     const firstLookupStarted = new Promise<void>(resolve => { markFirstLookupStarted = resolve; });
     const firstLookupBlocked = new Promise<void>(resolve => { releaseFirstLookup = resolve; });
     const finder = { find: async () => [socket] };
-    const tmux = { markSessionPlace: async () => true, listPanes: async () => [{ paneId: '%1', sessionId: '$0', pid: 123, path: '/tmp', title }] };
+    // a checkout on a branch, so the agent's enrichment reads its pull request
+    const checkout = await mkdtemp(join(tmpdir(), 'rac-dashboard-'));
+    execFileSync('git', ['init', '-q', '-b', 'main', checkout]);
+    const tmux = { markSessionPlace: async () => true, listPanes: async () => [{ paneId: '%1', sessionId: '$0', pid: 123, path: checkout, title }] };
     const processes = { recognizeAgent: async (pid: number) => ({ kind: 'codex' as const, pid, wrapped: false }) };
     // stateless PR responses need no cache invalidation
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => {
+    const pullRequests = { invalidateRepositories: () => {}, branch: async () => ({}), repositoryAt: async () => {
       pullRequestLookups += 1;
       // hold only the older dashboard after it captured Ready
       if (pullRequestLookups === 1) {
@@ -799,6 +806,7 @@ describe('DiscoveryService dashboard', () => {
 
     expect(newer.agents[0]?.attention).toBe('working');
     await expect(service.dashboard()).resolves.toMatchObject({ agents: [{ attention: 'working' }] });
+    await rm(checkout, { recursive: true, force: true });
   });
 
   it('resolves a known target without repeating global discovery after the dashboard cache expires', async () => {
@@ -845,10 +853,11 @@ describe('DiscoveryService dashboard', () => {
   // concurrent enrichment and the next cached read share one dashboard
   it('coalesces concurrent dashboard enrichment so slow polls cannot accumulate', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'rac-dashboard-'));
+    execFileSync('git', ['init', '-q', '-b', 'main', workspace]);
     let lookups = 0;
     // stateless PR responses need no cache invalidation
     const pullRequests = { invalidateRepositories: () => {},
-      cachedPullRequest: async () => {
+      branch: async () => ({}), repositoryAt: async () => {
         lookups += 1;
         await new Promise(resolve => setTimeout(resolve, 10));
         return undefined;

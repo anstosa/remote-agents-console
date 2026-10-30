@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { basename } from 'node:path';
 import type { GitComparisonSummary, GitStatusSummary } from '../src/domain/models.js';
 import type { WorktreeEntry } from '../src/git/worktrees.js';
 
@@ -20,6 +21,7 @@ vi.mock('../src/git/comparison.js', async (importOriginal) => ({
 }));
 
 import { DiscoveryService } from '../src/discovery/service.js';
+import { GithubService } from '../src/github/service.js';
 import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
 import { testProject } from './helpers/config.js';
 
@@ -41,6 +43,31 @@ function comparisonCallsWith(base: string): unknown[][] {
 // return candidate reads for one normalized PR base
 function candidateCallsWith(base: string): unknown[][] {
   return git.prComparisonCandidates.mock.calls.filter(([, , prBase]) => prBase === base);
+}
+
+type ListedPullRequest = { number: number; title: string; baseBranch?: string };
+let clock = 0;
+
+// the GitHub module over a scripted GitHub: each checkout's origin is acme/<its folder name>, and
+// `listed` names the open pull request GitHub has for that repository's branch, if any
+function githubListing(listed: (repository: string) => ListedPullRequest | undefined): GithubService {
+  return new GithubService({
+    now: () => clock,
+    token: async () => 'token',
+    command: async (_binary, args) => ({ code: 0, stdout: `git@github.com:acme/${basename(args[args.indexOf('-C') + 1] ?? '')}.git\n` }),
+    request: async (url) => {
+      const repository = new URL(url).pathname.split('/')[3] ?? '';
+      const pull = url.includes('/pulls?') ? listed(repository) : undefined;
+      const body = !url.includes('/pulls?') ? {} : pull === undefined ? [] : [{ number: pull.number, title: pull.title, state: 'open', html_url: `https://github.com/acme/${repository}/pull/${pull.number}`, ...(pull.baseBranch === undefined ? {} : { base: { ref: pull.baseBranch } }) }];
+      return { ok: true, status: 200, json: async () => body };
+    }
+  });
+}
+
+// let a minute pass and each workspace's branch summary arrive, as discovery's next poll sees it
+async function settle(github: GithubService, ...workspaces: string[]): Promise<void> {
+  clock += 60_000;
+  for (const workspace of workspaces) await github.branch((await github.repositoryAt(workspace))!, 'feature/cache', true, { wait: true });
 }
 
 // make one ordinary named worktree
@@ -85,10 +112,11 @@ describe('DiscoveryService pull request comparison cache', () => {
     const workspace = '/workspaces/missing-pr-base';
     const project = testProject({ id: 'missing-base', path: workspace, defaultBranch: 'develop' });
     // simulate incomplete GitHub metadata without a lookup failure
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => ({ number: 9, title: 'Incomplete', status: 'open' as const, url: 'https://github.com/acme/app/pull/9' }) };
+    const pullRequests = githubListing(() => ({ number: 9, title: 'Incomplete' }));
     const panes = active ? [{ paneId: '%1', sessionId: '$1', pid: 101, path: workspace, title: 'Ready' }] : [];
     // expose a synthetic checkout for either presentation path
     const service = new DiscoveryService(socketFinder(), paneLister(panes) as never, processInspector(), pullRequests, undefined, [project], undefined, async () => [worktree(workspace)]);
+    await settle(pullRequests, workspace);
 
     const dashboard = await service.dashboard(false, true);
     const view = dashboard.agents[0] ?? dashboard.projects[0]?.worktrees[0];
@@ -104,17 +132,19 @@ describe('DiscoveryService pull request comparison cache', () => {
     configuredBases.set(workspace, 'release/configured');
     let baseBranch: string | undefined;
     // publish PR metadata after the initial fallback snapshot
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => baseBranch === undefined ? undefined : { number: 9, title: 'Release', status: 'open' as const, url: 'https://github.com/acme/app/pull/9', baseBranch } };
+    const pullRequests = githubListing(() => baseBranch === undefined ? undefined : { number: 9, title: 'Release', baseBranch });
     const panes = active ? [{ paneId: '%1', sessionId: '$1', pid: 101, path: workspace, title: 'Ready' }] : [];
     // expose one synthetic checkout without real filesystem dependencies
     const service = new DiscoveryService(socketFinder(), paneLister(panes) as never, processInspector(), pullRequests, undefined, [project], undefined, async () => [worktree(workspace)]);
 
+    await settle(pullRequests, workspace);
     const fallback = await service.dashboard(false, true);
     expect(service.worktreesNow()[0]?.defaultBranch).toBe('develop');
     expect(fallback.agents[0]?.gitPrStatus ?? fallback.projects[0]?.worktrees[0]?.gitPrStatus).toMatchObject({ base: 'origin/release/configured' });
     expect(git.prComparisonCandidates).toHaveBeenCalledWith(workspace, 'feature/cache', undefined, 'develop');
 
     baseBranch = 'release';
+    await settle(pullRequests, workspace);
     const withPullRequest = await service.dashboard(false, true);
     expect(withPullRequest.agents[0]?.gitPrStatus ?? withPullRequest.projects[0]?.worktrees[0]?.gitPrStatus).toMatchObject({ base: 'origin/release/configured' });
     expect(git.comparisonAgainst).toHaveBeenCalledTimes(1);
@@ -127,9 +157,10 @@ describe('DiscoveryService pull request comparison cache', () => {
     configuredBases.set(workspace, 'missing/configured');
     sourceBases.set(workspace, 'source/task');
     unavailableBases.add('origin/missing/configured');
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => ({ number: 9, title: 'Release', status: 'open' as const, url: 'https://github.com/acme/app/pull/9', baseBranch: 'release/foo' }) };
+    const pullRequests = githubListing(() => ({ number: 9, title: 'Release', baseBranch: 'release/foo' }));
     const panes = active ? [{ paneId: '%1', sessionId: '$1', pid: 101, path: workspace, title: 'Ready' }] : [];
     const service = new DiscoveryService(socketFinder(), paneLister(panes) as never, processInspector(), pullRequests, undefined, [project], undefined, async () => [worktree(workspace)]);
+    await settle(pullRequests, workspace);
 
     const dashboard = await service.dashboard(false, true);
     const view = dashboard.agents[0] ?? dashboard.projects[0]?.worktrees[0];
@@ -138,13 +169,13 @@ describe('DiscoveryService pull request comparison cache', () => {
   });
 
   it('coalesces agents sharing one workspace and reuses their PR-base comparison on fresh pane scans', async () => {
-    // stateless PR responses need no cache invalidation
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => ({ number: 1, title: 'Cache', status: 'open' as const, url: 'https://github.com/acme/app/pull/1', baseBranch: 'release' }) };
+    const pullRequests = githubListing(() => ({ number: 1, title: 'Cache', baseBranch: 'release' }));
     const panes = [
       { paneId: '%1', sessionId: '$1', pid: 101, path: '/workspaces/app', title: '⠋ Working' },
       { paneId: '%2', sessionId: '$2', pid: 102, path: '/workspaces/app', title: 'Ready' }
     ];
     const service = new DiscoveryService(socketFinder(), paneLister(panes) as never, processInspector(), pullRequests);
+    await settle(pullRequests, '/workspaces/app');
 
     const first = await service.dashboard(false, true);
     panes[0]!.title = 'Ready';
@@ -163,14 +194,15 @@ describe('DiscoveryService pull request comparison cache', () => {
 
   it('uses metadata fallback directly when PR metadata is absent or names the same base', async () => {
     let baseBranch: string | undefined;
-    // stateless PR responses need no cache invalidation
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => baseBranch === undefined ? undefined : { number: 1, title: 'Main base', status: 'open' as const, url: 'https://github.com/acme/app/pull/1', baseBranch } };
+    const pullRequests = githubListing(() => baseBranch === undefined ? undefined : { number: 1, title: 'Main base', baseBranch });
     const service = new DiscoveryService(socketFinder(), paneLister([
       { paneId: '%1', sessionId: '$1', pid: 101, path: '/workspaces/app', title: 'Ready' }
     ]) as never, processInspector(), pullRequests);
 
+    await settle(pullRequests, '/workspaces/app');
     const withoutPullRequest = await service.dashboard(false, true);
     baseBranch = 'main';
+    await settle(pullRequests, '/workspaces/app');
     const matchingBase = await service.dashboard(false, true);
 
     expect(withoutPullRequest.agents[0]?.gitPrStatus).toEqual({ base: 'origin/main', files: 1, changes: [] });
@@ -180,17 +212,19 @@ describe('DiscoveryService pull request comparison cache', () => {
 
   it('keys cached comparisons by normalized base and workspace', async () => {
     const bases = new Map([['/workspaces/app-a', 'staging'], ['/workspaces/app-b', 'staging']]);
-    // stateless PR responses need no cache invalidation
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async (workspace: string) => ({ number: 1, title: 'Cache', status: 'open' as const, url: 'https://github.com/acme/app/pull/1', baseBranch: bases.get(workspace) }) };
+    const pullRequests = githubListing(repository => ({ number: 1, title: 'Cache', baseBranch: bases.get(`/workspaces/${repository}`)! }));
     const service = new DiscoveryService(socketFinder(), paneLister([
       { paneId: '%1', sessionId: '$1', pid: 101, path: '/workspaces/app-a', title: 'Ready' },
       { paneId: '%2', sessionId: '$2', pid: 102, path: '/workspaces/app-b', title: 'Ready' }
     ]) as never, processInspector(), pullRequests);
 
+    await settle(pullRequests, '/workspaces/app-a', '/workspaces/app-b');
     await service.dashboard(false, true);
     bases.set('/workspaces/app-a', 'release');
+    await settle(pullRequests, '/workspaces/app-a', '/workspaces/app-b');
     await service.dashboard(false, true);
     bases.set('/workspaces/app-a', 'origin/release');
+    await settle(pullRequests, '/workspaces/app-a', '/workspaces/app-b');
     await service.dashboard(false, true);
 
     expect(comparisonCallsWith('origin/staging').map(([workspace, candidates]) => [workspace, (candidates as string[])[0]])).toEqual([
@@ -205,9 +239,9 @@ describe('DiscoveryService pull request comparison cache', () => {
   it('reuses the cached PR-base comparison for an idle worktree', async () => {
     const workspace = '/workspaces/idle';
     const project = testProject({ id: 'idle', label: 'Idle', path: workspace });
-    // stateless PR responses need no cache invalidation
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => ({ number: 2, title: 'Idle cache', status: 'open' as const, url: 'https://github.com/acme/app/pull/2', baseBranch: 'release' }) };
+    const pullRequests = githubListing(() => ({ number: 2, title: 'Idle cache', baseBranch: 'release' }));
     const service = new DiscoveryService(socketFinder([]), paneLister([]) as never, processInspector({ codex: false }), pullRequests, undefined, [project], undefined, async path => path === workspace ? [worktree(workspace)] : undefined);
+    await settle(pullRequests, workspace);
 
     const first = await service.dashboard(false, true);
     const second = await service.dashboard(false, true);
@@ -220,11 +254,11 @@ describe('DiscoveryService pull request comparison cache', () => {
   it('starts a new comparison after metadata expiry and explicit invalidation', async () => {
     let now = 100_000;
     vi.spyOn(Date, 'now').mockImplementation(() => now);
-    // stateless PR responses need no cache invalidation
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => ({ number: 3, title: 'Refresh cache', status: 'open' as const, url: 'https://github.com/acme/app/pull/3', baseBranch: 'release' }) };
+    const pullRequests = githubListing(() => ({ number: 3, title: 'Refresh cache', baseBranch: 'release' }));
     const service = new DiscoveryService(socketFinder(), paneLister([
       { paneId: '%1', sessionId: '$1', pid: 101, path: '/workspaces/app', title: 'Ready' }
     ]) as never, processInspector(), pullRequests);
+    await settle(pullRequests, '/workspaces/app');
 
     await service.dashboard(false, true);
     now += 30_001;
@@ -241,11 +275,11 @@ describe('DiscoveryService pull request comparison cache', () => {
 
   it('caches the fallback after an unavailable PR base for the metadata generation', async () => {
     unavailableBases.add('origin/release');
-    // stateless PR responses need no cache invalidation
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => ({ number: 4, title: 'Missing base', status: 'open' as const, url: 'https://github.com/acme/app/pull/4', baseBranch: 'release' }) };
+    const pullRequests = githubListing(() => ({ number: 4, title: 'Missing base', baseBranch: 'release' }));
     const service = new DiscoveryService(socketFinder(), paneLister([
       { paneId: '%1', sessionId: '$1', pid: 101, path: '/workspaces/app', title: 'Ready' }
     ]) as never, processInspector(), pullRequests);
+    await settle(pullRequests, '/workspaces/app');
 
     const first = await service.dashboard(false, true);
     const second = await service.dashboard(false, true);
@@ -262,11 +296,11 @@ describe('DiscoveryService pull request comparison cache', () => {
       if (candidates[0] === 'origin/release' && failures-- > 0) throw new Error('comparison failed');
       return { comparison: { base: candidates[0]!, files: 1, changes: [] }, gitBase: 'abc123' };
     });
-    // stateless PR responses need no cache invalidation
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => ({ number: 5, title: 'Retry cache', status: 'open' as const, url: 'https://github.com/acme/app/pull/5', baseBranch: 'release' }) };
+    const pullRequests = githubListing(() => ({ number: 5, title: 'Retry cache', baseBranch: 'release' }));
     const service = new DiscoveryService(socketFinder(), paneLister([
       { paneId: '%1', sessionId: '$1', pid: 101, path: '/workspaces/app', title: 'Ready' }
     ]) as never, processInspector(), pullRequests);
+    await settle(pullRequests, '/workspaces/app');
 
     await expect(service.dashboard(false, true)).rejects.toThrow('comparison failed');
     await expect(service.dashboard(false, true)).resolves.toMatchObject({ agents: [{ gitPrStatus: { base: 'origin/release' } }] });
@@ -289,11 +323,11 @@ describe('DiscoveryService pull request comparison cache', () => {
       if (call === 1) { markStarted(); await blocked; }
       return { comparison: { base: candidates[0]!, files: call, changes: [] }, gitBase: `release${call}` };
     });
-    // stateless PR responses need no cache invalidation
-    const pullRequests = { invalidateRepositories: () => {}, cachedPullRequest: async () => ({ number: 6, title: 'Invalidate cache', status: 'open' as const, url: 'https://github.com/acme/app/pull/6', baseBranch: 'release' }) };
+    const pullRequests = githubListing(() => ({ number: 6, title: 'Invalidate cache', baseBranch: 'release' }));
     const service = new DiscoveryService(socketFinder(), paneLister([
       { paneId: '%1', sessionId: '$1', pid: 101, path: '/workspaces/app', title: 'Ready' }
     ]) as never, processInspector(), pullRequests);
+    await settle(pullRequests, '/workspaces/app');
 
     const stale = service.dashboard(false, true);
     await started;

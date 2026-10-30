@@ -6,7 +6,7 @@ import type { StackProcessState } from '../domain/models.js';
 import type { ConsoleEvents } from '../events.js';
 import { fenced, redactIntegrationText } from '../integrations/text.js';
 import type { Place } from '../places/places.js';
-import type { GithubRepository } from '../pull-requests/github.js';
+import type { GithubRepository } from '../github/github.js';
 import type { HolderRef, HolderStatus } from '../transports/structured-agents.js';
 import type { LineChannel } from '../transports/structured.js';
 import { standInRequest, type PullRequestState, type ReviewRequest, type WatchGithub } from './github.js';

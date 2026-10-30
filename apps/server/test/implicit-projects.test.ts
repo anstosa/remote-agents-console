@@ -28,7 +28,7 @@ async function gitRepo(name = 'ferry'): Promise<{ root: string; repo: string }> 
   return { root, repo };
 }
 
-const noPullRequests = { cachedPullRequest: async () => undefined, invalidateRepositories: () => {} };
+const noPullRequests = { repositoryAt: async () => undefined, branch: async () => ({}), invalidateRepositories: () => {} };
 // a discovery over one agent pane in `path`, session `$0`, optionally already marked
 function discovery(path: string, options: { mark?: string; projects?: Parameters<typeof testProject>[0][]; pins?: Record<string, boolean>; scratchDirectory?: string; panes?: Partial<Pane>[] } = {}) {
   const tmux = paneLister(options.panes ?? [{ paneId: '%1', sessionId: '$0', pid: 123, path, title: 'Agent' }]);

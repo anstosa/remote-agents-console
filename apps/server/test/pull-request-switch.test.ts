@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PullRequestSwitchService } from '../src/pull-requests/switch-service.js';
+import { GithubService } from '../src/github/service.js';
 import type { ValidatedConfig } from '../src/config/schema.js';
 import type { GitCommand } from '../src/git/worktree-state.js';
 import type { AttentionState } from '../src/adapters/types.js';
@@ -14,6 +15,7 @@ const config: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], list
 const agent = { id: 'agent-1', pane: { paneId: '%1', sessionId: '$1', socketFingerprint: 'socket' }, home: worktree.identity, branch: 'feature/current', title: 'Ready', attention: 'finished' as AttentionState };
 const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
 const headSha = 'a'.repeat(40);
+const octo = { owner: 'octo', name: 'repo' };
 const choices = [{ number: 7, title: 'Draft work', branch: 'feature/draft', headSha, headOnOrigin: true, draft: true, url: 'https://github.com/octo/repo/pull/7' }];
 
 const commonRepositoryResult = { code: 0, stdout: '/repositories/project/.git\n' };
@@ -95,7 +97,7 @@ function switchService(repository: Awaited<ReturnType<typeof createSwitchReposit
   const targetAgent = { ...agent, home: repository.targetPath, branch: 'main', attention };
   const agents = attention === undefined ? [] : [targetAgent];
   const discovery = { worktreesNow: () => [targetWorktree], refresh: async () => agents, dashboard: async () => ({ generation: 1, places: [], agents, projects: [] }) };
-  const pulls = { supports: async () => true, open: async () => ({ own: [{ number: choice.number, title: 'Draft work', branch: choice.branch, headSha: choice.headSha, headOnOrigin: choice.headOnOrigin, draft: false, url: `https://github.com/octo/repo/pull/${choice.number}` }], others: [] }) };
+  const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: [{ number: choice.number, title: 'Draft work', branch: choice.branch, headSha: choice.headSha, headOnOrigin: choice.headOnOrigin, draft: false, url: `https://github.com/octo/repo/pull/${choice.number}` }], others: [] }) };
   const service = new PullRequestSwitchService(config, discovery as never, pulls as never, command);
   return { service, targetWorktree };
 }
@@ -109,7 +111,7 @@ async function dirtyMoveSource(sourcePath: string) {
 }
 
 // assemble one standard move service around a real repository
-function moveService(repository: Awaited<ReturnType<typeof createMoveRepository>>, command: GitCommand = run, pulls: object = { supports: async () => true, open: async () => ({ own: [{ ...choices[0], headSha: repository.headSha }], others: [] }) }, targetAttention: AttentionState = 'finished', sourceAttention: AttentionState = 'finished') {
+function moveService(repository: Awaited<ReturnType<typeof createMoveRepository>>, command: GitCommand = run, pulls: object = { repositoryAt: async () => octo, repository: async () => ({ own: [{ ...choices[0], headSha: repository.headSha }], others: [] }) }, targetAttention: AttentionState = 'finished', sourceAttention: AttentionState = 'finished') {
   const targetWorktree = { ...worktree, id: `cora:${repository.targetPath}`, path: repository.targetPath, identity: repository.targetPath };
   const sourceWorktree = { ...worktree, id: 'delta', projectId: 'cora', label: 'Delta', path: repository.sourcePath, identity: repository.sourcePath };
   const targetAgent = { ...agent, home: repository.targetPath, branch: 'main', attention: targetAttention };
@@ -124,12 +126,12 @@ function moveService(repository: Awaited<ReturnType<typeof createMoveRepository>
 }
 
 // list local branches with no pull requests, so feature/draft appears as a plain branch
-const branchOnlyPulls = { supports: async () => true, open: async () => ({ own: [], others: [] }) };
+const branchOnlyPulls = { repositoryAt: async () => octo, repository: async () => ({ own: [], others: [] }) };
 
 describe('pull request switching', () => {
   it('finds GitHub Actions for configured worktrees and scratch repositories', async () => {
     const requested: string[] = [];
-    const pulls = { actionsUrl: async (workspace: string) => { requested.push(workspace); return 'https://github.com/octo/repo/actions'; } };
+    const pulls = { repositoryAt: async (workspace: string) => { requested.push(workspace); return octo; } };
     const configured = new PullRequestSwitchService(config, { worktreesNow: () => [worktree], target: async () => ({ agent, socket }) } as never, pulls as never, cleanCommand);
     const scratchAgent = { ...agent, home: '/scratch/repo' };
     const scratch = new PullRequestSwitchService(config, { worktreesNow: () => [worktree], target: async () => ({ agent: scratchAgent, socket }) } as never, pulls as never, cleanCommand);
@@ -141,7 +143,7 @@ describe('pull request switching', () => {
 
   it('marks a pull request unavailable when another agent has its branch checked out', async () => {
     const discovery = { worktreesNow: () => [worktree, { ...worktree, id: 'delta', label: 'Delta', path: '/worktrees/delta', identity: '/worktrees/delta' }], dashboard: async () => ({ generation: 1, places: [], agents: [agent, { ...agent, id: 'agent-2', home: '/worktrees/delta', branch: 'feature/draft', worktreeId: 'delta' }], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, cleanCommand);
 
     await expect(service.available(worktree.id)).resolves.toEqual({ enabled: true, pullRequests: [{ ...choices[0], checkoutBranch: 'feature/draft', checkedOut: true, openIn: { agentId: 'agent-2', worktreeId: 'delta', worktreeName: 'Delta' } }], otherPullRequests: [], branches: [], pullRequestsSupported: true });
@@ -152,7 +154,7 @@ describe('pull request switching', () => {
   it('marks a pull request unavailable when the target worktree already has its branch checked out', async () => {
     const currentAgent = { ...agent, branch: 'feature/draft', worktreeId: worktree.id };
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent: currentAgent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [currentAgent], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const command = async (_binary: string, args: string[]) => {
       // expose the current symbolic branch
       if (args.includes('symbolic-ref')) return { code: 0, stdout: 'feature/draft\n' };
@@ -168,7 +170,7 @@ describe('pull request switching', () => {
   it('marks the live target branch checked out when the dashboard branch is stale', async () => {
     const staleAgent = { ...agent, worktreeId: worktree.id };
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent: staleAgent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [staleAgent], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const command = async (_binary: string, args: string[]) => {
       // expose the branch changed after dashboard caching
       if (args.includes('symbolic-ref')) return { code: 0, stdout: 'feature/draft\n' };
@@ -191,7 +193,7 @@ describe('pull request switching', () => {
       const sourceWorktree = { ...worktree, id: 'delta', label: 'Delta', identity: '/worktrees/delta', path: '/worktrees/delta' };
       const sourceAgent = { ...agent, id: 'agent-2', home: sourceWorktree.identity, branch: 'feature/draft', worktreeId: 'delta' };
       const discovery = { worktreesNow: () => [worktree, sourceWorktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent, sourceAgent], projects: [] }) };
-      const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+      const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
       const command = async (_binary: string, args: string[]) => {
         // expose two paths for one repository directory
         if (args.includes('--git-common-dir')) return { code: 0, stdout: `${args[1] === worktree.identity ? targetAlias : sourceAlias}\n` };
@@ -210,8 +212,8 @@ describe('pull request switching', () => {
     let pullRequestsLoaded = false;
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
     const pulls = {
-      supports: async () => true,
-      open: async () => {
+      repositoryAt: async () => octo,
+      repository: async () => {
         // delay the simulated remote lookup
         await Promise.resolve();
         // finish the worktree transition
@@ -234,7 +236,7 @@ describe('pull request switching', () => {
   it('identifies a pull request checked out in an inactive worktree', async () => {
     const deltaView = { id: 'delta', projectId: 'cora', label: 'Delta', path: '/worktrees/delta', available: true, pinned: false, main: false, detached: false, locked: false, order: 1, branch: 'feature/draft' };
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [{ id: 'cora', label: 'Cora', available: true, worktrees: [deltaView] }] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, cleanCommand);
 
     await expect(service.available(worktree.id)).resolves.toEqual({ enabled: true, pullRequests: [{ ...choices[0], checkoutBranch: 'feature/draft', checkedOut: true, openIn: { worktreeId: 'delta', worktreeName: 'Delta' } }], otherPullRequests: [], branches: [], pullRequestsSupported: true });
@@ -260,7 +262,7 @@ describe('pull request switching', () => {
   it('lists local branches annotated with the worktree that holds each', async () => {
     const deltaView = { id: 'delta', projectId: 'cora', label: 'Delta', path: '/worktrees/delta', available: true, pinned: false, main: false, detached: false, locked: false, order: 1, branch: 'feature/draft' };
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [{ id: 'cora', label: 'Cora', available: true, worktrees: [deltaView] }] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: [], others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: [], others: [] }) };
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand('feature/current\nfeature/draft\nfeature/solo\n'));
 
     const availability = await service.available(worktree.id);
@@ -273,7 +275,7 @@ describe('pull request switching', () => {
 
   it('excludes the current branch and branches already shown as pull requests', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand('feature/current\nfeature/draft\nfeature/solo\n'));
 
     const availability = await service.available(worktree.id);
@@ -283,7 +285,7 @@ describe('pull request switching', () => {
 
   it('caps the local-branch list for repositories with very many branches', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: [], others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: [], others: [] }) };
     const listing = Array.from({ length: 250 }, (_value, index) => `feature/branch-${index}`).join('\n');
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand(listing));
 
@@ -294,7 +296,7 @@ describe('pull request switching', () => {
   // optional history reads must not hold checkout choices hostage
   it('returns every branch with fresh readiness when the summary budget expires', async () => {
     const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [] }) };
-    const pulls = { supports: async () => false };
+    const pulls = { repositoryAt: async () => undefined };
     const listing = Array.from({ length: 200 }, (_value, index) => `feature/branch-${index}`).join('\n');
     let dirty = false;
     const listBranches = branchListingCommand(listing);
@@ -334,7 +336,7 @@ describe('pull request switching', () => {
     const coraView = { id: worktree.id, projectId: 'cora', label: 'Cora', path: worktree.path, available: true, pinned: true, main: true, detached: false, locked: false, order: 0, branch: 'feature/current' };
     const deltaView = { id: 'delta', projectId: 'cora', label: 'Delta', path: '/worktrees/delta', available: true, pinned: false, main: false, detached: false, locked: false, order: 1, branch: 'feature/draft' };
     const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [{ id: 'cora', label: 'Cora', available: true, worktrees: [coraView, deltaView] }] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand('feature/current\nfeature/draft\nfeature/solo\n'));
 
     await expect(service.branchList('cora')).resolves.toEqual({
@@ -353,7 +355,7 @@ describe('pull request switching', () => {
     const prFolder = { ...worktree, id: 'cora:/wts/pr-7', label: 'Cora · pr-7', path: '/wts/pr-7', identity: '/wts/pr-7', main: false, branch: 'feature/elsewhere' };
     const echoView = { id: 'echo', projectId: 'cora', label: 'Echo', path: '/worktrees/echo', available: true, pinned: false, main: false, detached: false, locked: false, order: 1, branch: `rac/pr/8/${'c'.repeat(12)}` };
     const discovery = { worktreesNow: () => [worktree, prFolder], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [{ id: 'cora', label: 'Cora', available: true, worktrees: [echoView] }] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: [choices[0], fork], others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: [choices[0], fork], others: [] }) };
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand(''));
 
     expect((await service.branchList('cora'))?.pullRequests).toEqual([
@@ -365,7 +367,7 @@ describe('pull request switching', () => {
   it('returns local branches with pull requests unsupported when there is no GitHub origin', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
     // fail closed if the GitHub-only path is ever queried
-    const pulls = { supports: async () => false, open: async () => { throw new Error('GitHub must not be queried without a supported origin'); } };
+    const pulls = { repositoryAt: async () => undefined, repository: async () => { throw new Error('GitHub must not be queried without a supported origin'); } };
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand('feature/current\nfeature/solo\n'));
 
     await expect(service.available(worktree.id)).resolves.toEqual({ enabled: true, pullRequests: [], otherPullRequests: [], branches: [{ branch: 'feature/solo', checkedOut: false }], pullRequestsSupported: false });
@@ -373,7 +375,7 @@ describe('pull request switching', () => {
 
   it('returns undefined when the target worktree is not a git checkout', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
-    const pulls = { supports: async () => false, open: async () => { throw new Error('unused'); } };
+    const pulls = { repositoryAt: async () => undefined, repository: async () => { throw new Error('unused'); } };
     // reject an unreadable repository identity before any listing
     const command = async (_binary: string, args: string[]) => args.includes('--git-common-dir') ? { code: 128, stdout: '' } : { code: 0, stdout: '' };
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, command);
@@ -384,7 +386,7 @@ describe('pull request switching', () => {
   it('ignores matching branch names from another repository', async () => {
     const otherWorktree = { ...worktree, id: 'delta', label: 'Delta', path: '/worktrees/delta', identity: '/worktrees/delta' };
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [{ ...agent, id: 'agent-2', home: otherWorktree.identity, branch: 'feature/draft', worktreeId: 'delta' }], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const command = async (_binary: string, args: string[]) => {
       // separate repository identities by worktree path
       if (args.includes('--git-common-dir')) return { code: 0, stdout: args[1] === worktree.identity ? '/repositories/target/.git\n' : '/repositories/source/.git\n' };
@@ -806,7 +808,7 @@ describe('pull request switching', () => {
 
   it('keeps switching disabled when the working tree is dirty', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const command = async (_binary: string, args: string[]) => {
       // share one fake repository identity
       if (args.includes('--git-common-dir')) return commonRepositoryResult;
@@ -821,7 +823,7 @@ describe('pull request switching', () => {
 
   it('allows switching when HEAD is pushed to a remote branch without a configured upstream', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const command = async (_binary: string, args: string[]) => {
       // share one fake repository identity
       if (args.includes('--git-common-dir')) return commonRepositoryResult;
@@ -836,7 +838,7 @@ describe('pull request switching', () => {
 
   it('allows switching from a clean detached HEAD without requiring a remote ref', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const command = async (_binary: string, args: string[]) => {
       // share one fake repository identity
       if (args.includes('--git-common-dir')) return commonRepositoryResult;
@@ -851,7 +853,7 @@ describe('pull request switching', () => {
 
   it('allows switching from a clean branch whose configured upstream is gone', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const command = async (_binary: string, args: string[]) => {
       // share one fake repository identity
       if (args.includes('--git-common-dir')) return commonRepositoryResult;
@@ -868,7 +870,7 @@ describe('pull request switching', () => {
 
   it('enables switching from a clean branch that is not yet pushed', async () => {
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [] }) };
     const command = async (_binary: string, args: string[]) => {
       // share one fake repository identity
       if (args.includes('--git-common-dir')) return commonRepositoryResult;
@@ -888,7 +890,7 @@ describe('pull request switching', () => {
     const otherHeadSha = 'b'.repeat(40);
     const other = { number: 8, title: 'Other work', branch: 'main', headSha: otherHeadSha, headOnOrigin: false, draft: false, url: 'https://github.com/octo/repo/pull/8' };
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent, { ...agent, id: 'agent-2', branch: 'main' }], projects: [] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: choices, others: [other] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: choices, others: [other] }) };
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, cleanCommand);
 
     await expect(service.available(worktree.id)).resolves.toMatchObject({ pullRequests: [{ number: 7 }], otherPullRequests: [{ number: 8, branch: 'main', checkoutBranch: `rac/pr/8/${otherHeadSha.slice(0, 12)}`, checkedOut: false }] });
@@ -916,7 +918,7 @@ describe('pull request switching', () => {
   it('rejects a plain switch to a branch open in another worktree', async () => {
     const deltaView = { id: 'delta', projectId: 'cora', label: 'Delta', path: '/worktrees/delta', available: true, pinned: false, main: false, detached: false, locked: false, order: 1, branch: 'feature/draft' };
     const discovery = { worktreesNow: () => [worktree], target: async () => ({ agent, socket }), dashboard: async () => ({ generation: 1, places: [], agents: [agent], projects: [{ id: 'cora', label: 'Cora', available: true, worktrees: [deltaView] }] }) };
-    const pulls = { supports: async () => true, open: async () => ({ own: [], others: [] }) };
+    const pulls = { repositoryAt: async () => octo, repository: async () => ({ own: [], others: [] }) };
     const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand('feature/current\nfeature/draft\nfeature/solo\n'));
 
     // feature/draft is open in another worktree, so it must be moved, never plain-switched
@@ -1060,4 +1062,31 @@ describe('pull request switching', () => {
       await rm(repository.root, { recursive: true, force: true });
     }
   }, 15_000);
+});
+
+describe('pull request switching over the GitHub module', () => {
+  const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [] }) };
+  const pulled = (state: string, mergedAt: string | null) => [{ number: 9, title: 'Retries', state, draft: false, merged_at: mergedAt, html_url: 'https://github.com/octo/repo/pull/9' }];
+  // the real module over a scripted GitHub, for a checkout whose origin is octo/repo
+  const switching = (pulls: unknown, token: string | null = 'token') => new PullRequestSwitchService(config, discovery as never, new GithubService({
+    token: async () => token ?? undefined,
+    command: async () => ({ code: 0, stdout: 'git@github.com:octo/repo.git\n' }),
+    request: async (url, init) => {
+      if (url.includes('/pulls?')) return { ok: true, status: 200, json: async () => pulls };
+      if (String(init?.body).includes('reviews(')) return { ok: true, status: 200, json: async () => ({ data: { repository: { pullRequest: { id: 'PR9', url: 'https://github.com/octo/repo/pull/9', reviewThreads: { nodes: [] }, reviews: { nodes: [] }, comments: { nodes: [] } } } } }) };
+      return { ok: false, status: 404, json: async () => ({ message: 'Not Found' }) };
+    }
+  }), cleanCommand);
+
+  it('reads the comments of the branch\'s open pull request, and refuses a branch without one', async () => {
+    await expect(switching(pulled('open', null)).commentsAt('/worktrees/cora', 'feature/retries')).resolves.toEqual({ number: 9, url: 'https://github.com/octo/repo/pull/9', threads: [], reviews: [], comments: [] });
+    await expect(switching([]).commentsAt('/worktrees/cora', 'feature/none')).rejects.toMatchObject({ statusCode: 404 });
+    await expect(switching(pulled('closed', '2026-10-01T00:00:00Z')).commentsAt('/worktrees/cora', 'feature/merged')).rejects.toMatchObject({ statusCode: 404 });
+    await expect(switching(pulled('open', null), null).commentsAt('/worktrees/cora', 'feature/retries')).rejects.toMatchObject({ statusCode: 503 });
+  });
+
+  it('refuses the list when GitHub cannot give it, as before', async () => {
+    await expect(switching([], null).available(worktree.id)).rejects.toMatchObject({ statusCode: 503, message: 'GitHub authentication is not configured for pull request lookup.' });
+    await expect(switching([]).available(worktree.id)).rejects.toMatchObject({ statusCode: 502, message: 'GitHub could not identify the authenticated user (404): Not Found' });
+  });
 });

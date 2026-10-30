@@ -4,11 +4,12 @@ import { join } from 'node:path';
 import { run } from '../tmux/command.js';
 
 // The console's one way to talk to GitHub: which token, which repository an origin names, how a
-// failure reads, and a small client. A query (a REST GET or a GraphQL query) is retried on a
-// gateway failure; a mutation is sent once, since a lost response may still have been applied.
+// failure reads, and the one client every request goes through. A query (a REST GET or a GraphQL
+// query) is retried on a gateway failure; a mutation is sent once, since a lost response may still
+// have been applied.
 
 export type Command = (binary: string, args: string[]) => Promise<{ code: number; stdout: string }>;
-export type ResponseLike = { ok: boolean; status?: number; json(): Promise<unknown> };
+export type ResponseLike = { ok: boolean; status?: number; headers?: { get(name: string): string | null }; json(): Promise<unknown> };
 export type Request = (input: string, init?: RequestInit) => Promise<ResponseLike>;
 export type Token = () => Promise<string | undefined>;
 export type GithubRepository = { owner: string; name: string };
@@ -22,10 +23,15 @@ const graphqlUrl = 'https://api.github.com/graphql';
 const queryAttempts = 3;
 const retryableStatuses = new Set([500, 502, 503, 504]);
 const forbiddenGraphqlTypes = new Set(['FORBIDDEN', 'INSUFFICIENT_SCOPES']);
+// GitHub's advice for a 429 that names no time to wait
+const defaultRateLimitWaitMs = 60_000;
+// a rate limit resets within the hour, so a longer wait is a bad header or a skewed clock
+const maxHoldMs = 3_600_000;
 
 export class GithubRequestError extends Error {
-  // `statusCode` is the console's own reply status; `githubStatus` is GitHub's
-  constructor(message: string, readonly statusCode = 502, readonly githubStatus?: number, readonly kind: GithubFailureKind = 'rejected') {
+  // `statusCode` is the console's own reply status; `githubStatus` is GitHub's; `until` is when a
+  // rate limit lets requests through again
+  constructor(message: string, readonly statusCode = 502, readonly githubStatus?: number, readonly kind: GithubFailureKind = 'rejected', readonly until?: number) {
     super(message);
     this.name = 'GithubRequestError';
   }
@@ -46,6 +52,11 @@ export function at(value: unknown, ...keys: string[]): unknown {
 export function githubRepository(remote: string): GithubRepository | undefined {
   const match = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https:\/\/github\.com\/)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i.exec(remote.trim());
   return match === null ? undefined : { owner: match[1]!, name: match[2]! };
+}
+
+// `owner/name`, encoded for a URL path
+export function repositoryPath({ owner, name }: GithubRepository): string {
+  return `${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
 }
 
 /** The GitHub repository a checkout's origin names, if it names one. */
@@ -100,12 +111,34 @@ export function graphqlError(payload: GraphqlPayload, action: string): GithubReq
   return new GithubRequestError(first === undefined ? `${action}.` : `${action}: ${first}`, 502, undefined, kind);
 }
 
+type ClientOptions = { timeoutMs?: number; now?: () => number; refused?: () => void };
+
+// Every request the console sends goes through one client, as GitHub asks: one at a time, slower
+// while any budget runs low, and none while a rate limit holds them back. `refused` hears of a 401,
+// or a 403 that is not a rate limit, so the token and viewer are looked up again.
 export class GithubClient {
-  constructor(private readonly request: Request = fetch, private readonly timeoutMs = 8_000) {}
+  private queue: Promise<unknown> = Promise.resolve();
+  // when each token's rate limit lets requests through again ('' for none)
+  private readonly holds = new Map<string, number>();
+  // the last budget GitHub reported for each resource (core, graphql, search…)
+  private readonly budgets = new Map<string, { low: boolean; reset: number }>();
+  private readonly timeoutMs: number;
+  private readonly now: () => number;
+
+  constructor(private readonly request: Request = fetch, private readonly options: ClientOptions = {}) {
+    this.timeoutMs = options.timeoutMs ?? 8_000;
+    this.now = options.now ?? Date.now;
+  }
+
+  // `ms`, doubled while any budget is below 20% remaining
+  interval(ms: number): number {
+    const now = this.now();
+    return [...this.budgets.values()].some(budget => budget.low && budget.reset > now) ? ms * 2 : ms;
+  }
 
   // one REST GET, retried on a gateway failure
   async get(url: string, token: string | undefined, action: string, timeoutMs = this.timeoutMs): Promise<ResponseLike> {
-    return await this.send(url, { headers: githubHeaders(token) }, action, queryAttempts, timeoutMs);
+    return await this.send(url, token, { headers: githubHeaders(token) }, action, queryAttempts, timeoutMs);
   }
 
   // one GraphQL query, retried on a gateway failure; `errors` are the caller's to read
@@ -119,31 +152,73 @@ export class GithubClient {
   }
 
   private async graphql(token: string, query: string, variables: Record<string, unknown>, action: string, attempts: number, timeoutMs: number): Promise<GraphqlPayload> {
-    const response = await this.send(graphqlUrl, { method: 'POST', headers: { ...githubHeaders(token), 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables }) }, action, attempts, timeoutMs);
+    const response = await this.send(graphqlUrl, token, { method: 'POST', headers: { ...githubHeaders(token), 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables }) }, action, attempts, timeoutMs);
     const payload = await response.json().catch(() => undefined);
     if (payload === null || typeof payload !== 'object') throw new GithubRequestError(`${action}: GitHub returned invalid data.`, 502, response.status, 'transient');
     return payload as GraphqlPayload;
   }
 
   // send one request, up to `attempts` times while GitHub's gateway fails
-  private async send(input: string, init: RequestInit, action: string, attempts: number, timeoutMs: number): Promise<ResponseLike> {
+  private async send(input: string, token: string | undefined, init: RequestInit, action: string, attempts: number, timeoutMs: number): Promise<ResponseLike> {
     let failure = new GithubRequestError(`${action} because the request failed.`, 502, undefined, 'transient');
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      let response: ResponseLike;
+      let sent: { response: ResponseLike; until?: number };
       try {
-        response = await this.request(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-      } catch {
-        // normalize transport failures and timeouts
+        sent = await this.turn(input, token, init, action, timeoutMs);
+      } catch (error) {
+        // a rate limit's hold is final; transport failures and timeouts are retried
+        if (error instanceof GithubRequestError) throw error;
         failure = new GithubRequestError(`${action} because the request failed.`, 502, undefined, 'transient');
         continue;
       }
+      const { response } = sent;
       if (response.ok) return response;
       const detail = githubErrorMessage(await response.json().catch(() => undefined));
       const status = Number.isInteger(response.status) ? ` (${response.status})` : '';
-      failure = new GithubRequestError(detail === undefined ? `${action}${status}.` : `${action}${status}: ${detail}`, 502, response.status, failureKind(response.status, detail));
+      // a secondary rate limit may name no wait; GitHub asks for at least a minute
+      const until = sent.until ?? ((response.status === 403 || response.status === 429) && /rate limit/iu.test(detail ?? '') ? this.hold(token, this.now() + defaultRateLimitWaitMs) : undefined);
+      if (response.status === 401 || response.status === 403 && until === undefined) this.options.refused?.();
+      failure = new GithubRequestError(detail === undefined ? `${action}${status}.` : `${action}${status}: ${detail}`, 502, response.status, until === undefined ? failureKind(response.status, detail) : 'transient', until);
       // a permanent failure is not retried
       if (!retryableStatuses.has(response.status ?? 0)) break;
     }
     throw failure;
+  }
+
+  // send one request once every earlier one has finished, unless a rate limit holds back the
+  // token's requests; `until` is the hold this response started
+  private async turn(input: string, token: string | undefined, init: RequestInit, action: string, timeoutMs: number): Promise<{ response: ResponseLike; until?: number }> {
+    const turn = this.queue.then(async () => {
+      const held = this.holds.get(token ?? '') ?? 0;
+      if (held > this.now()) throw new GithubRequestError(`${action}: GitHub's rate limit holds requests until ${new Date(held).toISOString()}.`, 502, undefined, 'transient', held);
+      const response = await this.request(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      const until = this.observe(response, token);
+      return { response, ...(until === undefined ? {} : { until }) };
+    });
+    this.queue = turn.catch(() => undefined);
+    return await turn;
+  }
+
+  // record the budget a response reports, and hold back the token's requests after a 403 or 429
+  // that names a wait
+  private observe(response: ResponseLike, token: string | undefined): number | undefined {
+    const header = (name: string): number | undefined => {
+      const value = response.headers?.get(name)?.trim();
+      return value === undefined || value === '' || !Number.isFinite(Number(value)) ? undefined : Number(value);
+    };
+    const [remaining, limit, reset] = [header('x-ratelimit-remaining'), header('x-ratelimit-limit'), header('x-ratelimit-reset')];
+    if (remaining !== undefined && limit !== undefined && limit > 0 && reset !== undefined) this.budgets.set(response.headers?.get('x-ratelimit-resource') ?? 'core', { low: remaining < limit * 0.2, reset: reset * 1_000 });
+    if (response.status !== 403 && response.status !== 429) return undefined;
+    const retryAfter = header('retry-after');
+    const until = retryAfter !== undefined ? this.now() + retryAfter * 1_000 : remaining === 0 && reset !== undefined ? reset * 1_000 : response.status === 429 ? this.now() + defaultRateLimitWaitMs : undefined;
+    return until === undefined ? undefined : this.hold(token, until);
+  }
+
+  // hold back one token's requests until `until`, never past GitHub's hourly window; a hold
+  // reached without a token does not hold back the token found later
+  private hold(token: string | undefined, until: number): number {
+    const held = Math.max(this.holds.get(token ?? '') ?? 0, Math.min(until, this.now() + maxHoldMs));
+    this.holds.set(token ?? '', held);
+    return held;
   }
 }
