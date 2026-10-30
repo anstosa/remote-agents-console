@@ -107,7 +107,9 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       const spec = adapter.launch({ cwd: place.home, sandboxed, nonce, ...(role === undefined ? {} : { role }), ...(rendered === undefined ? {} : { files: rendered }), ...(located === undefined ? {} : { resume: located }), ...(latest === true ? { continue: true as const } : {}), ...(allowed.length === 0 ? {} : { models: { allowed: allowed.map(entry => entry.model), ...(model === undefined ? {} : { start: model }) } }) });
       const holder = await windows.openHolderWindow(place, id, { program: configured.program, args: [...spec.args, ...configured.args], env: { ...configured.env, ...spec.env }, ...(configured.setup === undefined ? {} : { setup: configured.setup }) });
       if (holder === undefined) return undefined;
-      const connected = await connectHolder(holder.socket);
+      // a holder that a slow login shell or setup holds up is waited for as long as its launch
+      // report is (30 s), not given up on first
+      const connected = await connectHolder(holder.socket, { attempts: 300 });
       if (connected === undefined) { await windows.closeHolder(holder); return undefined; }
       return clientOver(adapter, holder, connected, emit);
     },
