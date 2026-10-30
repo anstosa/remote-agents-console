@@ -7672,7 +7672,8 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     const label = displayLabel;
     onOperationFeedback({ tone: 'pending', message: `Restarting ${label}…`, detail: 'Closing the agent, running the resume alias, and waiting for the conversation to reconnect.', worktreeId: agent.worktreeId });
     try {
-      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}/restart`, choice === undefined ? { method: 'POST' } : launchRequestInit(choice));
+      // keep default restarts parseable through chunked tunnel transports
+      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}/restart`, choice === undefined ? emptyJsonMutation('POST') : launchRequestInit(choice));
       // surface failed restarts after refreshing the closed agent; the errors are global because
       // an unpinned Worktree's tab closes with its last agent, taking a tab-scoped message with it
       if (!response.ok) {

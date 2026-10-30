@@ -168,6 +168,8 @@ test('clears and restarts an idle agent from the power menu', async ({ page }) =
     // hold restart while its progress state is visible
     if (url.pathname === '/api/agents/agent-1/restart' && request.method() === 'POST') {
       restartRequests += 1;
+      // require explicit json framing like a chunked tunnel transport
+      if (request.headers()['content-type'] !== 'application/json' || request.postData() !== '{}') return route.fulfill({ status: 415, json: { error: 'Unsupported Media Type' } });
       await restartFinished;
       agentId = 'agent-2';
       return route.fulfill({ status: 201, json: { agentId } });
