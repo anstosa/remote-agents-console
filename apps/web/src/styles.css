@@ -327,8 +327,8 @@ html.software-keyboard-open .tabs { display: none; }
 .agent-output { position: relative; min-width: 0; min-height: 0; }
 .structured-transcript { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; }
 /* a structured Agent's transcript: one group per prompt, one line per tool call */
-.transcript-log { flex: 1; box-sizing: border-box; width: 100%; min-height: 0; padding: .5rem 1rem 1rem; overflow-y: auto; overscroll-behavior: contain; font-size: .8rem; line-height: 1.45; }
-.transcript-earlier { display: block; margin: 0 auto .5rem; padding: .35rem .8rem; border: 1px solid var(--surface-1); border-radius: 999px; background: var(--surface-0); color: var(--text); font: inherit; font-size: .72rem; cursor: pointer; }
+.transcript-log { flex: 1; box-sizing: border-box; width: 100%; min-height: 0; padding: .5rem 1rem 1rem; overflow-y: auto; overscroll-behavior: contain; line-height: 1.45; }
+.transcript-earlier { display: block; margin: 0 auto .5rem; padding: .35rem .8rem; border: 1px solid var(--surface-1); border-radius: 999px; background: var(--surface-0); color: var(--text); font: inherit; font-size: .9em; cursor: pointer; }
 .transcript-group { margin: .6rem 0 .9rem; padding-left: .55rem; border-left: 2px solid var(--surface-1); }
 .transcript-group.live { border-left-color: var(--peach); }
 .transcript-line, .transcript-result { display: grid; grid-template-columns: 1.2rem minmax(0, 1fr); margin: .15rem 0; }
@@ -356,11 +356,11 @@ html.software-keyboard-open .tabs { display: none; }
 .transcript-console-prompt .transcript-console-text { margin: .2rem 0 .2rem 1.2rem; color: var(--subtext-0); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* an Agent's own text inside a report: data, never instructions */
 .transcript-untrusted { margin: .25rem 0 .25rem 1.2rem; padding: .3rem .45rem; border: 1px dashed color-mix(in srgb, var(--yellow) 60%, transparent); border-radius: .3rem; }
-.transcript-untrusted small { color: var(--yellow); font-size: .7rem; }
+.transcript-untrusted small { color: var(--yellow); font-size: .875em; }
 .transcript-untrusted pre { margin: .2rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 .transcript-notice.warning .transcript-glyph { color: var(--yellow); }
 .transcript-notice.error .transcript-glyph { color: var(--red); }
-.transcript-group-end { margin: .35rem 0 0 1.2rem; font-size: .72rem; }
+.transcript-group-end { margin: .35rem 0 0 1.2rem; font-size: .9em; }
 /* each tool call is a button; its chevron is a real touch target */
 .transcript-tool-line { display: grid; grid-template-columns: 1.2rem minmax(0, 1fr) auto; align-items: center; width: 100%; min-height: 2.25rem; margin: 0; padding: 0; border: 0; border-radius: .3rem; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
 .transcript-tool-line::before { content: "●" / ""; color: var(--green); text-align: center; }
@@ -369,11 +369,11 @@ html.software-keyboard-open .tabs { display: none; }
 .transcript-tool-line:is(:hover, .open) { background: var(--surface-0); }
 .transcript-tool-line b { color: var(--lavender); }
 .transcript-tool-text { overflow-wrap: anywhere; }
-.transcript-chevron { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; color: var(--overlay-1); font-size: 1.15rem; }
+.transcript-chevron { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; color: var(--overlay-1); font-size: 1.44em; }
 .transcript-chevron::before { content: "▸" / ""; }
 .transcript-tool-line:is(:hover, .open) .transcript-chevron { color: var(--lavender); }
 .transcript-tool-line.open .transcript-chevron::before { content: "▾" / ""; }
-.transcript-result { margin: 0 0 .25rem 1.2rem; color: var(--subtext-0); font-size: .75rem; }
+.transcript-result { margin: 0 0 .25rem 1.2rem; color: var(--subtext-0); font-size: .94em; }
 .transcript-result > :last-child { min-width: 0; }
 .transcript-result pre, .transcript-open pre { margin: 0; overflow-x: auto; font: inherit; white-space: pre; }
 .transcript-link { padding: 0; border: 0; background: none; color: var(--blue); font: inherit; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; cursor: pointer; }
@@ -389,7 +389,7 @@ html.software-keyboard-open .tabs { display: none; }
 .transcript-diff-line.removed { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
 .transcript-diff-line.hunk-header { background: color-mix(in srgb, var(--blue) 8%, transparent); color: var(--blue); }
 /* an opened tool call: its full output as plain text, and a script's source */
-.transcript-open { display: grid; gap: .35rem; max-height: 60vh; margin: .2rem 0 .4rem 1.2rem; padding: .35rem; overflow: auto; border: 1px solid var(--surface-1); border-radius: .3rem; background: var(--crust); color: var(--subtext-0); font-size: .75rem; }
+.transcript-open { display: grid; gap: .35rem; max-height: 60vh; margin: .2rem 0 .4rem 1.2rem; padding: .35rem; overflow: auto; border: 1px solid var(--surface-1); border-radius: .3rem; background: var(--crust); color: var(--subtext-0); font-size: .94em; }
 .transcript-source { padding: .3rem .4rem; border-radius: .25rem; background: var(--mantle); color: var(--text); }
 .transcript-children { margin-left: 1.2rem; }
 .transcript-statusline { display: flex; gap: .6rem; overflow: hidden; padding: .2rem .75rem; border-top: 1px solid var(--surface-0); background: var(--mantle); color: var(--overlay-1); font-size: .68rem; white-space: nowrap; }

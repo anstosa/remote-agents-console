@@ -211,6 +211,13 @@ test('on a wide screen the transcript fills the panel', async ({ page }) => {
   expect(transcript.width).toBe(panel.width);
 });
 
+test('the transcript reads at the terminal font size', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('rac.terminal-font-size', '17'));
+  await mockPi(page, { items: [{ id: 'm1', kind: 'message', role: 'user', text: 'Hello' }, { id: 'm2', kind: 'message', role: 'assistant', text: 'Hi there' }] });
+  await page.goto('/');
+  await expect(log(page).locator('.transcript-answer p')).toHaveCSS('font-size', '17px');
+});
+
 test('⋮ offers Raw events and Open holder window, each in a dialog', async ({ page }) => {
   await mockPi(page, { items: [{ id: 'm1', kind: 'message', role: 'user', text: 'Hi' }] });
   await page.goto('/');

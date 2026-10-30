@@ -20,6 +20,7 @@ import { ConfiguredButtonList, ConfiguredButtonsProvider, type ButtonActionDraft
 import { clearTerminalCommand, pruneTerminalCommands, stageTerminalCommand, terminalCommandKey, terminalCommandLimitMessage, TerminalCommandDraft } from './terminal-command-draft.js';
 import { type CarouselPanel, type PanelCarousel, PanelDots, usePanelCarousel, usePanelSwipe } from './panel-carousel.js';
 import { MarkdownBlocks, NoteMarkdown } from './note-markdown.js';
+import { useTerminalFontSize } from './terminal-font-size.js';
 import { ProjectOpen } from './project-open.js';
 import type { CodePanelReview } from './code-panel/code-panel.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
@@ -8128,6 +8129,8 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
   const following = useRef(true);
   // while earlier lines load: the page size asked for, and the distance from the bottom to keep
   const anchor = useRef<{ limit: number; fromBottom: number } | undefined>(undefined);
+  // the terminal's font size, so a transcript reads at the size a terminal Agent's output does
+  const fontSize = useTerminalFontSize();
   useEffect(() => {
     let cancelled = false;
     void request(`/api/agents/${encodeURIComponent(agentId)}/transcript?limit=${limit}`).then(response => response.ok ? response.json() : undefined).then((payload: Omit<TranscriptPage, 'agentId' | 'limit'> | undefined) => {
@@ -8160,7 +8163,7 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
   const status = current?.status;
   const showStatus = status !== undefined && (status.extension.length > 0 || status.cost !== undefined || status.contextPercent !== undefined);
   return <div className="structured-transcript">
-    <div ref={log} className="transcript-log" role="log" aria-label="Transcript" onScroll={event => { const list = event.currentTarget; following.current = list.scrollHeight - list.scrollTop - list.clientHeight < 8; }}>
+    <div ref={log} className="transcript-log" role="log" aria-label="Transcript" style={{ fontSize }} onScroll={event => { const list = event.currentTarget; following.current = list.scrollHeight - list.scrollTop - list.clientHeight < 8; }}>
       {current !== undefined && current.earlier > 0 && <button type="button" className="transcript-earlier" onClick={loadEarlier}>Load earlier</button>}
       {groups.map((group, index) => {
         const live = index === groups.length - 1 && group.end === undefined && agent.attention === 'working';
