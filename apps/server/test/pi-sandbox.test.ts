@@ -44,7 +44,7 @@ describe('a Sandboxed Pi session\'s policy', () => {
       expect(pathRefusal('write', { path: join(homedir(), '.config', 'git', 'config'), content: 'x' }, cwd, policy)).toMatch(/outside/);
     }
     const policy = sessionPolicy(rendered(), { cwd: join(root, 'app'), stateDir: '/h/.pi/agent', tempDir: '/tmp/rac-pi-1' });
-    expect(policy.filesystem.denyRead).toEqual(expect.arrayContaining([join(homedir(), '.ssh'), join(homedir(), '.claude', '.credentials.json'), join(homedir(), '.codex', 'auth.json')]));
+    expect(policy.filesystem.denyRead).toEqual(expect.arrayContaining([join(homedir(), '.ssh'), join(homedir(), '.git-credentials'), join(homedir(), '.netrc'), join(homedir(), '.npmrc'), join(homedir(), '.docker', 'config.json'), join(homedir(), '.config', 'gcloud'), join(homedir(), '.claude', '.credentials.json'), join(homedir(), '.codex', 'auth.json')]));
     expect(policy.filesystem.denyWrite).toEqual(expect.arrayContaining([join(root, 'app', '.claude', 'settings.json'), join(root, 'app', '.claude', 'settings.local.json')]));
   });
 

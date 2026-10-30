@@ -42,7 +42,7 @@ export type SessionPaths = { cwd: string; stateDir: string; git?: { dir: string;
 // Conversations
 const piSecrets = ['auth.json', 'oauth.json', 'mcp-auth.json', 'models.json', 'mcp.json', 'sessions'];
 // the operator's other credentials a command never needs
-const homeSecrets = ['.ssh', '.gnupg', '.aws', '.config/gh', '.claude/.credentials.json', '.codex/auth.json'];
+const homeSecrets = ['.ssh', '.gnupg', '.aws', '.config/gh', '.config/gcloud', '.docker/config.json', '.git-credentials', '.netrc', '.npmrc', '.claude/.credentials.json', '.codex/auth.json'];
 /** What in a repository's git directory configures git, runs code, or points git elsewhere. */
 export const gitDirections = ['config', 'config.worktree', 'hooks', 'info', 'modules', 'commondir', 'worktrees', 'remotes', 'branches'];
 // what other tools run code from, as the sandbox runtime protects it from commands: these names
