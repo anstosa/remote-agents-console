@@ -125,7 +125,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined || bwrap === '')('a
     await writeFile(join(root, 'pi', 'auth.json'), '{"openai":"key"}');
     await mkdir(join(root, 'private', 'holders'), { recursive: true });
     await writeFile(join(root, 'private', 'note'), 'console state');
-    const holder = await windows.open(place, 'watch-4', `cat '${join(root, 'pi', 'auth.json')}' 2>/dev/null || echo no auth; ls '${join(root, 'private')}' 2>/dev/null || echo no private`, 'pi');
+    const holder = await windows.open(place, 'watch-4', `cat '${join(root, 'pi', 'auth.json')}' 2>/dev/null || echo no auth; cat '${join(root, 'private', 'note')}' 2>/dev/null || echo no private`, 'pi');
     expect(await read((await windows.connect(holder!, 0))!, 2)).toEqual(['no auth', 'no private']);
   });
 
