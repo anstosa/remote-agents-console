@@ -28,15 +28,15 @@ export function WatchesButton({ agentId, watches, request, onError }: { agentId:
     }
   };
   const label = `${watches.length} ${watches.length === 1 ? 'Watch' : 'Watches'}`;
-  return <div className="model-chip-control" ref={anchorRef}>
-    <button type="button" className={`model-chip watches-chip${open ? ' active' : ''}`} aria-haspopup="dialog" aria-expanded={open} title="What the Conductor watches" onClick={() => setOpen(value => !value)}>{label}<span className="flyout-caret" aria-hidden="true" /></button>
-    {open && <FlyoutPortal onDismiss={() => setOpen(false)}><div ref={flyoutRef} className="model-picker" style={style} role="dialog" aria-label="Watches">
-      <p className="model-picker-heading">Watches</p>
-      {watches.length === 0 ? <p className="model-picker-note">Nothing is watched. The Conductor sets Watches on pull requests, Stack processes, review requests and commands.</p> : watches.map(watch => <div key={watch.id} className="watch-row">
+  return <div className="watches-control" ref={anchorRef}>
+    <button type="button" className={`watches-chip${open ? ' active' : ''}`} aria-haspopup="dialog" aria-expanded={open} title="What the Conductor watches" onClick={() => setOpen(value => !value)}>{label}<span className="flyout-caret" aria-hidden="true" /></button>
+    {open && <FlyoutPortal onDismiss={() => setOpen(false)}><div ref={flyoutRef} className="watches-list" style={style} role="dialog" aria-label="Watches">
+      <p className="watches-heading">Watches</p>
+      {watches.length === 0 ? <p className="watches-note">Nothing is watched. The Conductor sets Watches on pull requests, Stack processes, review requests and commands.</p> : watches.map(watch => <div key={watch.id} className="watch-row">
         <span><strong>{watch.description}</strong><small>{kindLabel[watch.kind]} · since {new Date(watch.createdAt).toLocaleString()}</small></span>
         <button type="button" disabled={removing === watch.id} aria-label={`Remove ${watch.description}`} onClick={() => void remove(watch)}>Remove</button>
       </div>)}
-      <p className="model-picker-note">Each event is a Turn of its own, held to its hourly budget.</p>
+      <p className="watches-note">Each event is a Turn of its own, held to its hourly budget.</p>
     </div></FlyoutPortal>}
   </div>;
 }

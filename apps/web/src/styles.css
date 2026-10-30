@@ -389,13 +389,13 @@ html.software-keyboard-open .tabs { display: none; }
 .transcript-statusline { display: flex; gap: .6rem; overflow: hidden; padding: .2rem .75rem; border-top: 1px solid var(--surface-0); background: var(--mantle); color: var(--overlay-1); font-size: .68rem; white-space: nowrap; }
 .transcript-extension-status { color: var(--green); }
 /* the model chip in a structured Agent's header, and its picker of Allowed models */
-.model-chip-control { position: relative; display: inline-flex; min-width: 0; }
-.model-chip { display: inline-flex; min-width: 0; max-width: 14rem; height: 1.25rem; align-items: center; gap: .3rem; padding: 0 .5rem; overflow: hidden; border: 1px solid var(--surface-1); border-radius: 999px; background: transparent; color: var(--subtext-0); font: 650 .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-button.model-chip:hover, button.model-chip.active { border-color: var(--lavender); color: var(--text); }
-.model-picker { position: absolute; z-index: var(--layer-popover); display: grid; width: min(24rem, calc(100vw - 1.5rem)); gap: .25rem; padding: .4rem; border: 1px solid color-mix(in srgb, var(--lavender) 48%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 96%, transparent); box-shadow: 0 .8rem 2rem color-mix(in srgb, var(--crust) 80%, transparent); }
-.model-picker-heading { margin: .3rem .4rem .1rem; color: var(--overlay-1); font: 800 .58rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.model-chip-control, .watches-control { position: relative; display: inline-flex; min-width: 0; }
+.model-chip, .watches-chip { display: inline-flex; min-width: 0; max-width: 14rem; height: 1.25rem; align-items: center; gap: .3rem; padding: 0 .5rem; overflow: hidden; border: 1px solid var(--surface-1); border-radius: 999px; background: transparent; color: var(--subtext-0); font: 650 .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+button.model-chip:hover, button.model-chip.active, .watches-chip:hover, .watches-chip.active { border-color: var(--lavender); color: var(--text); }
+.model-picker, .watches-list { position: absolute; z-index: var(--layer-popover); display: grid; width: min(24rem, calc(100vw - 1.5rem)); gap: .25rem; padding: .4rem; border: 1px solid color-mix(in srgb, var(--lavender) 48%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 96%, transparent); box-shadow: 0 .8rem 2rem color-mix(in srgb, var(--crust) 80%, transparent); }
+.model-picker-heading, .watches-heading { margin: .3rem .4rem .1rem; color: var(--overlay-1); font: 800 .58rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
 .model-picker-warning { margin: 0 .4rem; color: var(--peach); font-size: .72rem; }
-.model-picker-note { margin: .2rem .4rem; color: var(--subtext-0); font-size: .68rem; }
+.model-picker-note, .watches-note { margin: .2rem .4rem; color: var(--subtext-0); font-size: .68rem; }
 .watch-row { display: flex; align-items: center; gap: .5rem; padding: .3rem .4rem; border-radius: var(--control-radius); }
 .watch-row > span { display: grid; flex: 1; min-width: 0; gap: .1rem; }
 .watch-row strong { overflow: hidden; color: var(--text); font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
