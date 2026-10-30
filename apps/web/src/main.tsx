@@ -7872,20 +7872,24 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
       if (mounted.current) setRestarting(false);
     }
   };
-  // clear one configured agent conversation
+  // clear one configured agent conversation; a structured Agent takes no slash commands, so it
+  // starts a new Conversation instead
   const clear = async () => {
     const operationKey = clearOperationKey(agent.id);
     // serialize clear requests
     if (clearing || !beginPendingOperation(operationKey, workspace.viewKey)) return;
     setClearing(true);
     const label = displayLabel;
-    onOperationFeedback({ tone: 'pending', message: `Clearing ${label}…`, detail: 'Sending /clear to reset the current Codex conversation.', worktreeId: agent.worktreeId });
+    const structured = agent.structured !== undefined;
+    onOperationFeedback({ tone: 'pending', message: `Clearing ${label}…`, detail: structured ? 'Starting a new conversation.' : 'Sending /clear to reset the current Codex conversation.', worktreeId: agent.worktreeId });
     try {
-      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: '/clear', attachments: [] }) });
+      const response = structured
+        ? await request(`/api/agents/${encodeURIComponent(agent.id)}/conversations/new`, { method: 'POST' })
+        : await request(`/api/agents/${encodeURIComponent(agent.id)}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: '/clear', attachments: [] }) });
       // surface failed clears
       if (!response.ok) return onOperationFeedback({ tone: 'error', message: `${label} could not clear`, detail: await launchError(response), worktreeId: agent.worktreeId });
       await promptHistory.refresh();
-      onOperationFeedback({ tone: 'success', message: `${label} cleared`, detail: 'The /clear command was sent and the conversation is resetting.', worktreeId: agent.worktreeId });
+      onOperationFeedback({ tone: 'success', message: `${label} cleared`, detail: structured ? 'It is on a new conversation.' : 'The /clear command was sent and the conversation is resetting.', worktreeId: agent.worktreeId });
     } catch {
       onOperationFeedback({ tone: 'error', message: `${label} could not clear`, detail: 'The console could not be reached. The conversation was not cleared.', worktreeId: agent.worktreeId });
     }

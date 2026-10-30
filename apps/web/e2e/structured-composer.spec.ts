@@ -12,8 +12,8 @@ async function mockPi(page: Page, { attention = 'working', structured = {}, canc
   await page.route('**/api/**', route => {
     const request = route.request();
     const url = new URL(request.url());
-    if (request.method() === 'POST' && /^\/api\/agents\/agent-1\/(?:steer|cancel|question)$/u.test(url.pathname)) {
-      posts.push({ path: url.pathname.slice('/api/agents/agent-1/'.length), body: request.postDataJSON() as unknown });
+    if (request.method() === 'POST' && /^\/api\/agents\/agent-1\/(?:steer|cancel|question|prompt|conversations\/new)$/u.test(url.pathname)) {
+      posts.push({ path: url.pathname.slice('/api/agents/agent-1/'.length), body: request.postData() === null ? undefined : request.postDataJSON() as unknown });
       return url.pathname.endsWith('/cancel') ? route.fulfill({ json: { steers: cancelled } }) : route.fulfill({ status: 204 });
     }
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
@@ -126,4 +126,13 @@ test('text the Agent offers never replaces a draft', async ({ page }) => {
   await mockPi(page, { attention: 'finished', structured: { draft: { id: 1, text: 'Suggested next step' } } });
   await page.goto('/');
   await expect(prompt(page)).toHaveValue('My own draft');
+});
+
+test('Clear starts a new Conversation, since a structured Agent takes no slash commands', async ({ page }) => {
+  const posts = await mockPi(page, { attention: 'finished' });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Agent power options' }).click();
+  await page.getByRole('menu', { name: 'Agent power options' }).getByRole('menuitem', { name: 'Clear' }).click();
+  await expect.poll(() => posts).toEqual([{ path: 'conversations/new', body: undefined }]);
+  await expect(page.getByRole('status').filter({ hasText: 'Cora cleared' })).toContainText('new conversation');
 });
