@@ -212,6 +212,9 @@ export class StructuredAgents {
   /** Called whenever an Agent's state or transcript changes. */
   onChange(listener: () => void): void { this.listeners.add(listener); }
 
+  /** Settles once every record write queued so far has landed, so a stopping console keeps them. */
+  async saved(): Promise<void> { await this.mutation; }
+
   /**
    * Launch a `kind` Agent at the Place, Sandboxed or not, resuming `resume` on the model it was on,
    * or on a new Conversation on `model`, else the first Allowed model, at the Effort asked for, else
