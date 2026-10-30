@@ -13,6 +13,7 @@ import { connectHolder, type AgentUsage, type HolderHello, type LineChannel, typ
 import { agentPanel, type InterruptOutcome, type QuestionAnswer, type TurnEvent } from './transport.js';
 import { validPrompt } from '../prompts/validation.js';
 import type { StructuredTurnTransport } from '../prompts/service.js';
+import { setAside } from '../set-aside.js';
 
 /**
  * Where a structured Agent's process runs: its holder's socket and tmux pane (ADR 0016), the
@@ -930,7 +931,7 @@ export class StructuredAgents {
       parsed = undefined;
     }
     if (Array.isArray(parsed) && parsed.every(isStoredRecord)) return parsed;
-    console.warn(`[structured] ${this.file} is not a valid list of structured Agents; starting with none`);
+    await setAside(this.file, 'structured');
     return [];
   }
 

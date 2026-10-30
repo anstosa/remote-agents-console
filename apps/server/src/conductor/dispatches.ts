@@ -6,6 +6,7 @@ import { fenced, limitText, redactIntegrationText } from '../integrations/text.j
 import type { PromptHistoryEntry } from '../prompt-history/service.js';
 import type { PromptSender, QueuedPrompt } from '../prompts/queue.js';
 import type { PromptDispatchHooks, PromptOutcome } from '../prompts/service.js';
+import { setAside } from '../set-aside.js';
 
 /**
  * A prompt one Agent queued to another (ADR 0018), kept until its sender has been told how it
@@ -222,7 +223,7 @@ export class Dispatches implements PromptDispatchHooks {
       return typeof record === 'object' && record !== null && typeof record.promptId === 'string' && typeof record.from === 'string' && typeof record.to === 'string';
     };
     if (Array.isArray(parsed) && parsed.every(valid)) return parsed;
-    console.warn(`[dispatches] ${this.file} is not a valid list of dispatches; starting with none`);
+    await setAside(this.file, 'dispatches');
     return [];
   }
 

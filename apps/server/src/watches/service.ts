@@ -10,6 +10,7 @@ import type { GithubRepository } from '../pull-requests/github.js';
 import type { HolderRef, HolderStatus } from '../transports/structured-agents.js';
 import type { LineChannel } from '../transports/structured.js';
 import { standInRequest, type PullRequestState, type ReviewRequest, type WatchGithub } from './github.js';
+import { setAside } from '../set-aside.js';
 
 type Base = { id: string; owner: string; description: string; createdAt: string; sequence: number; outbox: string[]; ended?: true };
 type PullRequestWatch = Base & { kind: 'pull_request'; repository: GithubRepository; number: number; url: string; seen: { checks?: { head: string; state: 'passed' | 'failed' }; conflict: boolean; threads: string[] } };
@@ -446,7 +447,7 @@ export class Watches {
       return typeof watch === 'object' && watch !== null && typeof watch.id === 'string' && typeof watch.owner === 'string' && typeof watch.kind === 'string' && Array.isArray(watch.outbox);
     };
     if (!Array.isArray(parsed) || !parsed.every(valid)) {
-      console.warn(`[watches] ${this.file} is not a valid list of Watches; starting with none`);
+      await setAside(this.file, 'watches');
       return [];
     }
     for (const watch of parsed) for (const text of watch.outbox) this.unconfirmed.add(text);
