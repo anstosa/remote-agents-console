@@ -58,7 +58,8 @@ Ubuntu runners use Node 22 and the pnpm version pinned in `package.json`.
 
 - Lint and typecheck cover both applications.
 - Server tests install and probe tmux, with the shell and native-build tools
-  needed to run the real-terminal suites instead of silently skipping them.
+  needed to run the real-terminal suites instead of silently skipping them, and
+  bubblewrap and socat, so the Sandboxed Pi cases run too.
 - Settings script tests run independently of the server suite. `pnpm test`
   alone does not include these tests or the browser tests.
 - All Playwright specs run across eight isolated shards with one worker each.

@@ -43,6 +43,8 @@ const clients: ContractClient[] = [{
 }];
 
 const tmux = execFileSync('/bin/sh', ['-c', 'command -v tmux || true'], { encoding: 'utf8' }).trim();
+// the sandbox runtime's tools, without which a Sandboxed launch cannot engage its sandbox
+const sandboxRuns = ['bwrap', 'socat'].every(tool => execFileSync('/bin/sh', ['-c', `command -v ${tool} || true`], { encoding: 'utf8' }).trim() !== '');
 // the window's login shell, as the console-shell suite resolves it (the default /usr/bin/zsh may not exist)
 const loginShell = [process.env.RAC_INTERACTIVE_SHELL?.trim(), process.env.SHELL?.trim(), '/usr/bin/zsh', '/bin/bash'].find((path): path is string => path !== undefined && ['zsh', 'bash', 'fish'].includes(interactiveShellName(path)) && existsSync(path));
 const tmuxSocketsWork = (() => {
@@ -187,13 +189,13 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     await agent.next('turn', event => event.type === 'turn' && event.turn.type !== 'started');
   };
 
-  it('reports its sandbox engaged when launched Sandboxed', async () => {
+  it.skipIf(!sandboxRuns)('reports its sandbox engaged when launched Sandboxed', async () => {
     const { next, events } = await launched(client, { sandboxed: true });
     expect(await next('report')).toMatchObject({ report: { sandbox: { engaged: true }, nonce } });
     expect(events).toContainEqual({ type: 'status', key: 'rac-sandbox', text: 'sandboxed' });
   }, 60_000);
 
-  it('confines a Sandboxed Agent\'s commands and file tools to its Place', async () => {
+  it.skipIf(!sandboxRuns)('confines a Sandboxed Agent\'s commands and file tools to its Place', async () => {
     const agent = await launched(client, { sandboxed: true, replies: [
       { tool: 'bash', args: { command: 'touch ../outside-bash.txt; touch inside-bash.txt; ls -A ../private' } },
       { tool: 'write', args: { path: '../outside-write.txt', content: 'x' } },
@@ -211,7 +213,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(existsSync(join(agent.home, 'inside-write.txt'))).toBe(true);
   }, 60_000);
 
-  it('gives a Sandboxed Agent\'s commands only the allowlisted environment, and no tmux', async () => {
+  it.skipIf(!sandboxRuns)('gives a Sandboxed Agent\'s commands only the allowlisted environment, and no tmux', async () => {
     const agent = await launched(client, { sandboxed: true, env: { OPENROUTER_API_KEY: 'sk-contract', CONTRACT_KEPT: 'kept', LC_CONTRACT: 'locale' }, sandboxEnv: ['CONTRACT_KEPT'], replies: [
       // the Workspace's tmux socket is `<root>/tmux`, beside the place
       { tool: 'bash', args: { command: `env; ${tmux} -S ../tmux list-sessions; echo tmux=$?` } },
@@ -244,7 +246,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(agent.toolResult(2)).toContain('outside the paths the sandbox may write');
   }, 60_000);
 
-  it('lets a Sandboxed Agent commit in a linked Worktree but not configure or repoint git', async () => {
+  it.skipIf(!sandboxRuns)('lets a Sandboxed Agent commit in a linked Worktree but not configure or repoint git', async () => {
     const agent = await launched(client, { sandboxed: true, git: 'linked', replies: [
       { tool: 'bash', args: { command: [
         'git -c user.name=Agent -c user.email=agent@example.com commit -q --allow-empty -m sandboxed; echo commit=$?',
@@ -276,7 +278,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(agent.toolResult(3)).toContain('protected in the sandbox');
   }, 60_000);
 
-  it('lets a Sandboxed Agent commit in a repository\'s main checkout but write nothing that configures or redirects git', async () => {
+  it.skipIf(!sandboxRuns)('lets a Sandboxed Agent commit in a repository\'s main checkout but write nothing that configures or redirects git', async () => {
     // each a file, or a folder a file goes in, that git reads its configuration, code or whereabouts from
     const protectedPaths = ['config', 'config.worktree', 'commondir', 'hooks/pre-commit', 'info/attributes', 'modules/x/config', 'worktrees/x/gitdir', 'remotes/origin', 'branches/origin'];
     const attempts = protectedPaths.map(path => `mkdir -p "$(dirname .git/${path})" 2>/dev/null; printf '[core]\\n\\tfsmonitor = touch ../pwned\\n' > .git/${path} 2>/dev/null && echo wrote:${path}`);
@@ -321,7 +323,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     return agent;
   };
 
-  it('runs no fsmonitor of a nested repository a command adds as a submodule', async () => {
+  it.skipIf(!sandboxRuns)('runs no fsmonitor of a nested repository a command adds as a submodule', async () => {
     const agent = await plantedThenConsoleGit([
       evil('fsmonitor'),
       'mkdir sub && git -C sub init -q && git -C sub -c user.name=A -c user.email=a@b commit -q --allow-empty -m s',
@@ -331,7 +333,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(existsSync(join(agent.root, 'pwned-fsmonitor'))).toBe(false);
   }, 60_000);
 
-  it('does not read a bare repository a command makes at the Worktree root after breaking .git', async () => {
+  it.skipIf(!sandboxRuns)('does not read a bare repository a command makes at the Worktree root after breaking .git', async () => {
     const agent = await plantedThenConsoleGit([
       evil('gpg'),
       'mv .git/HEAD .git/HEAD.bak', 'git init -q --bare fake', 'cp -r fake/HEAD fake/objects fake/refs .',
@@ -342,7 +344,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(existsSync(join(agent.root, 'pwned-gpg'))).toBe(false);
   }, 60_000);
 
-  it('lets a Sandboxed Agent ask the operator with ask_user', async () => {
+  it.skipIf(!sandboxRuns)('lets a Sandboxed Agent ask the operator with ask_user', async () => {
     const { connection, next } = await launched(client, { sandboxed: true });
     expect(await next('report')).toMatchObject({ report: { sandbox: { engaged: true } } });
     expect(await connection.deliver('Please ask me a question')).toBe('started');
@@ -545,7 +547,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect(scriptOutput(agent)).toContain('Script aborted');
   }, 60_000);
 
-  it('refuses a Sandboxed Conductor script\'s out-of-policy commands and file writes', async () => {
+  it.skipIf(!sandboxRuns)('refuses a Sandboxed Conductor script\'s out-of-policy commands and file writes', async () => {
     const agent = await conductor([
       'const results = await Promise.allSettled([',
       '  tools.bash({ command: "touch ../outside-bash.txt" }),',

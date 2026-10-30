@@ -59,9 +59,13 @@ jobs:
       - name: Install and verify terminal prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends g++ make python3 git tmux zsh util-linux
+          sudo apt-get install --yes --no-install-recommends g++ make python3 git tmux zsh util-linux bubblewrap socat
           tmux -S "$RUNNER_TEMP/test-probe.sock" new-session -d -s probe
           tmux -S "$RUNNER_TEMP/test-probe.sock" kill-server
+          # the Pi sandbox's bwrap needs unprivileged user namespaces, which Ubuntu 24.04's
+          # AppArmor refuses by default
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / --dev /dev --unshare-all true
       - run: pnpm install --frozen-lockfile
       # build the production bundle consumed by the server static boundary
       - run: pnpm --filter @rac/web build
