@@ -75,6 +75,20 @@ test('each prompt starts a group that ends with its tool calls and cost; the wor
   expect(rule).toBe(peach);
 });
 
+test('an answer renders its markdown', async ({ page }) => {
+  await mockPi(page, { items: [
+    { id: 'm1', kind: 'message', role: 'user', text: 'Summarize' },
+    { id: 'm2', kind: 'message', role: 'assistant', text: '## Status\n\n- **Cora** is done\n- `main` is behind\n\n```\npnpm test\n```' }
+  ] });
+  await page.goto('/');
+  const answer = log(page).locator('.transcript-answer');
+  await expect(answer.getByRole('heading', { name: 'Status', level: 2 })).toBeVisible();
+  await expect(answer.getByRole('listitem')).toHaveText(['Cora is done', 'main is behind']);
+  await expect(answer.locator('li strong')).toHaveText('Cora');
+  await expect(answer.locator('li code')).toHaveText('main');
+  await expect(answer.locator('pre code')).toHaveText('pnpm test');
+});
+
 test('a tool line shows its verb, target, duration and one result line, and expands to its full output', async ({ page }) => {
   const output = Array.from({ length: 12 }, (_, line) => `test ${line + 1} ok`).join('\n');
   await page.setViewportSize({ width: 390, height: 844 });

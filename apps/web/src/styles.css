@@ -339,6 +339,12 @@ html.software-keyboard-open .tabs { display: none; }
 .transcript-prompt .transcript-glyph { color: var(--blue); }
 .transcript-steer, .transcript-steer .transcript-glyph { color: var(--mauve); }
 .transcript-answer .transcript-glyph { color: var(--text); }
+/* an answer's markdown, sized to the transcript rather than a Note pane */
+.note-markdown.transcript-markdown { height: auto; min-height: auto; overflow: visible; padding: 0; font-size: inherit; line-height: inherit; cursor: auto; overflow-wrap: anywhere; }
+.note-markdown.transcript-markdown :is(p, ul, ol, blockquote, pre, .note-table-scroll) { margin-bottom: .55em; }
+.note-markdown.transcript-markdown :is(h1, h2, h3, h4, h5, h6) { margin: .8em 0 .35em; }
+.note-markdown.transcript-markdown > :first-child { margin-top: 0; }
+.note-markdown.transcript-markdown > :last-child { margin-bottom: 0; }
 .transcript-thinking { color: var(--overlay-1); font-style: italic; }
 .transcript-notice { color: var(--subtext-0); }
 /* who sent a prompt: the Agent it came from (a link), or what the console sent it as */

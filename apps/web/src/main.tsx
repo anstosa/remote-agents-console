@@ -19,7 +19,7 @@ import { PanelExpandContext, type PanelAction, type PanelExpansion, PanelHeader,
 import { ConfiguredButtonList, ConfiguredButtonsProvider, type ButtonActionDraft, type ButtonCatalog, useConfiguredButtons, useConfiguredButtonsBusy } from './configured-buttons.js';
 import { clearTerminalCommand, pruneTerminalCommands, stageTerminalCommand, terminalCommandKey, terminalCommandLimitMessage, TerminalCommandDraft } from './terminal-command-draft.js';
 import { type CarouselPanel, type PanelCarousel, PanelDots, usePanelCarousel, usePanelSwipe } from './panel-carousel.js';
-import { NoteMarkdown } from './note-markdown.js';
+import { MarkdownBlocks, NoteMarkdown } from './note-markdown.js';
 import { ProjectOpen } from './project-open.js';
 import type { CodePanelReview } from './code-panel/code-panel.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
@@ -8171,7 +8171,7 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
             if (line.kind === 'tool') return <TranscriptToolLine key={line.id} agentId={agentId} item={line} childrenOf={children} revision={state?.revision} onOpenDiff={onOpenDiff} />;
             if (line.kind === 'message') return line.role === 'user'
               ? <TranscriptLine key={line.id} className="transcript-steer" glyph="⤷">{line.text}<span className="transcript-dim"> (steer)</span></TranscriptLine>
-              : <TranscriptLine key={line.id} className="transcript-answer" glyph="●">{line.text}</TranscriptLine>;
+              : <div key={line.id} className="transcript-line transcript-answer"><span className="transcript-glyph" aria-hidden="true">●</span><div className="note-markdown transcript-markdown"><MarkdownBlocks text={line.text} /></div></div>;
             if (line.kind === 'notice') return <TranscriptLine key={line.id} className={`transcript-notice ${line.tone}`} glyph="※">{line.text}</TranscriptLine>;
             // thinking shows only while live, unless Show thinking is on
             if (line.kind !== 'thinking' || (!showThinking && line.live !== true) || (line.text === '' && line.live !== true)) return null;
