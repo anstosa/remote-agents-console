@@ -5,7 +5,7 @@ const { run } = vi.hoisted(() => ({ run: vi.fn() }));
 vi.mock('../src/tmux/command.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/tmux/command.js')>()), run }));
 
 import { existsSync } from 'node:fs';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LaunchService, composeCommand, composeLaunch, expandCommand, expandHomeCommand, scratchLabel, withoutFlags, type TmuxSession } from '../src/launch/service.js';
@@ -1609,5 +1609,23 @@ describe('Review run Agent matching', () => {
     expect(atPlace('cora')(agent)).toBe(false);
     expect(reviewRunAgent('run_abcdefgh1234')(agent)).toBe(true);
     expect(inWorktree('cora')({ worktreeId: 'cora' } as never)).toBe(true);
+  });
+});
+
+describe('the console\'s private directory', () => {
+  const holder = { program: '/bin/true', args: [], env: {} };
+  it('is made owner-only, and refused when it is open to others, as one another user made first would be', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'rac-private-'));
+    tempDirs.push(parent);
+    const fresh = join(parent, 'fresh');
+    await new LaunchService(codex, undefined, undefined, undefined, undefined, () => [cora()], undefined, undefined, fresh).openHolderWindow(worktreePlace(cora()), 'agent-1', holder);
+    expect((await stat(fresh)).mode & 0o777).toBe(0o700);
+    expect((await stat(join(fresh, 'holders'))).mode & 0o777).toBe(0o700);
+
+    const open = join(parent, 'open');
+    await mkdir(open, { mode: 0o700 });
+    await chmod(open, 0o777);
+    await expect(new LaunchService(codex, undefined, undefined, undefined, undefined, () => [cora()], undefined, undefined, open).openHolderWindow(worktreePlace(cora()), 'agent-1', holder)).rejects.toThrow(/not private/);
+    expect(existsSync(join(open, 'holders'))).toBe(false);
   });
 });

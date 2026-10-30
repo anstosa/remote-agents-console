@@ -1,4 +1,4 @@
-import { mkdir, open, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open,unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { resolveAgentProgram, type ValidatedConfig } from '../config/schema.js';
@@ -664,8 +664,7 @@ export class LaunchService implements HolderWindows {
   // bootstrap, run out of the process table) and return the descriptor path plus the runner
   // entrypoint. Shared by every local launch: a fresh session or a window in an existing one.
   private async writeLaunchDescriptor(id: string, command: string, site: LaunchSite): Promise<{ descriptor: string; runner: string }> {
-    await mkdir(this.root, { recursive: true, mode: 0o700 });
-    const descriptor = join(this.root, `${id}.json`);
+    const descriptor = join(await this.privateDirectory(), `${id}.json`);
     const payload = { program: this.localShell, args: ['-lc', interactiveShellBootstrap(expandHomeCommand(command, site.cwd), site.home, this.localShell)], cwd: site.cwd };
     const handle = await open(descriptor, 'wx', 0o600);
     await handle.writeFile(JSON.stringify(payload));
@@ -769,6 +768,19 @@ export class LaunchService implements HolderWindows {
     return (await run(this.tmux, [...socket, 'set-option', '-p', '-t', target, '@rac_sandboxed', '1'])).code === 0;
   }
 
+  // The console's private directory, or a folder in it, made owner-only. One that is not the
+  // console user's, or is open to others (another user made it first in the shared /tmp, say), is
+  // refused: launch descriptors and holder sockets live there.
+  private async privateDirectory(name?: string): Promise<string> {
+    const directories = name === undefined ? [this.root] : [this.root, join(this.root, name)];
+    for (const directory of directories) {
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const info = await lstat(directory);
+      if (!info.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0) throw new Error(`${directory} is not private to the console: it must be the console user's own, with mode 0700`);
+    }
+    return directories.at(-1)!;
+  }
+
   // Open a structured Agent's holder window in its Place's Workspace session, creating the session
   // when the Place has none (ADR 0016). The holder serves the launch's stdio on a socket in the
   // console's private directory. The window is tagged while it runs a placeholder, so it is never
@@ -776,9 +788,7 @@ export class LaunchService implements HolderWindows {
   // through the operator's login shell, with its environment and setup, as a pane launch does.
   async openHolderWindow(place: Place, agentId: string, launch: HolderLaunch): Promise<HolderRef | undefined> {
     if (this.hostSocket !== undefined) return undefined;
-    const directory = join(this.root, 'holders');
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const socket = join(directory, `${agentId}.sock`);
+    const socket = join(await this.privateDirectory('holders'), `${agentId}.sock`);
     const [node, ...holder] = holderArgv(socket, [launch.program, ...launch.args]);
     const command = composeLaunch(node!, holder, [], launch.env, {}, launch.setup);
     const cwd = placeHostRoot(place);
