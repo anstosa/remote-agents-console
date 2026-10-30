@@ -1,6 +1,6 @@
 import { run } from '../tmux/command.js';
 import { repositoryArgs } from '../git/worktrees.js';
-import type { Project, PullRequestCheckStatus, PullRequestComment, PullRequestComments, PullRequestIssues, PullRequestReviewThread, PullRequestSummary } from '../domain/models.js';
+import type { Project, PullRequestCheckStatus, PullRequestComment, PullRequestComments, PullRequestIssues, PullRequestReviewThread, PullRequestSummary, Worktree } from '../domain/models.js';
 import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, githubToken, repositoryPath, type Command, type GithubRepository, type GraphqlPayload, type Request, type Token } from './github.js';
 
 export type PullRequestCleanupStatus = 'merged' | 'closed';
@@ -13,9 +13,35 @@ export type GithubProblem = { kind: 'no-token' | 'rate-limited' | 'failing'; mes
 export type Fetched<T> = T & { fetchedAt?: number; problem?: GithubProblem };
 export type BranchSummary = Fetched<{ pullRequest?: PullRequestSummary }>;
 export type RepositoryPullRequests = Fetched<OpenPullRequestChoices & { issues: RepositoryIssue[] }>;
+/**
+ * Why a Pull request is Waiting on me: a current, unresolved Review thread someone else spoke last
+ * on; failing checks; merge conflicts; a reviewer's changes requested on the head as it still is;
+ * or a Review request, flagged when it was Re-requested.
+ */
+export type OverviewReason =
+  | { kind: 'thread'; id: string; author: string; path: string }
+  | { kind: 'checks' }
+  | { kind: 'conflicts' }
+  | { kind: 'changes'; id: string; author: string }
+  | { kind: 'review'; reRequested?: true };
+/** Where tapping an Overview row goes: the Worktree holding the item, or else its Project's main worktree. */
+export type OverviewDestination = { kind: 'worktree' | 'project'; worktreeId: string; label: string };
+/**
+ * One row of the Overview. `reasons` is empty unless it is Waiting on me; the rest are hints:
+ * commits pushed since my review, an approval, a draft, the Issues a PR closes, the PRs linked to
+ * an Issue, labels. `checks` is set on my own PRs only.
+ */
+export type OverviewItem = {
+  repository: string; number: number; title: string; url: string; author?: string; updatedAt?: string;
+  draft?: true; checks?: PullRequestCheckStatus; reasons: OverviewReason[];
+  newCommits?: true; approved?: true; closes?: number[]; linkedPullRequests?: number[]; labels?: string[];
+  destination?: OverviewDestination;
+};
+/** The Overview's three lists, each GitHub's newest first, with how many GitHub found in all. */
+export type Overview = Fetched<{ mine: OverviewItem[]; reviews: OverviewItem[]; issues: OverviewItem[]; totals: { mine: number; reviews: number; issues: number } }>;
 /** Runs the poll; injected so tests turn the clock by hand. */
 export type Timer = { set(run: () => void, ms: number): unknown; clear(handle: unknown): void };
-export type GithubServiceOptions = { request?: Request; command?: Command; now?: () => number; token?: Token; timer?: Timer; projects?: () => readonly Project[] };
+export type GithubServiceOptions = { request?: Request; command?: Command; now?: () => number; token?: Token; timer?: Timer; projects?: () => readonly Project[]; worktrees?: () => readonly Worktree[] };
 
 // one pull request as the module keeps it; `unresolvedThreads` and `closingIssues` are only known
 // from a read that asked for them
@@ -30,6 +56,9 @@ type BranchEntry = Entry & { repository: GithubRepository; name: string; publish
 // one repository in one GraphQL read: its lists, and the branches to look up
 type Plan = { repository: GithubRepository; list: boolean; branches: BranchEntry[] };
 type OriginEntry = { expiresAt?: number; pending: Promise<GithubRepository | undefined> };
+// an Overview row as read, with the heads that find its Worktree: a PR's own, an Issue's linked PRs'
+type OverviewRow = Omit<OverviewItem, 'destination'> & { heads: { number: number; branch: string; onOrigin: boolean }[] };
+type OverviewEntry = Entry & { mine?: OverviewRow[]; reviews?: OverviewRow[]; issues?: OverviewRow[]; totals?: Overview['totals'] };
 
 // how often the poll runs while watched, and how old data may be before a read refreshes it
 const freshMs = 60_000;
@@ -49,6 +78,8 @@ const readAction = 'GitHub could not read pull requests';
 const maxAncestorCompares = 3;
 const maxCompares = 1_000;
 const maxRemoteHeads = 8;
+// a Refresh this soon after the last read answers from it, so repeated clicks cannot drain the budget
+const refreshFloorMs = 10_000;
 
 const realTimer: Timer = {
   set: (run, ms) => setTimeout(run, ms).unref(),
@@ -73,6 +104,14 @@ const commentsQuery = `query($owner:String!,$repo:String!,$number:Int!){reposito
 // count its threads and the issues it closes
 const pullFields = 'number title url state isDraft baseRefName headRefName headRefOid isCrossRepository viewerDidAuthor mergeable statusCheckRollup{state}';
 const fullPullFields = `${pullFields} reviewThreads(first:100){nodes{isResolved isOutdated}} closingIssuesReferences(first:10){nodes{number}}`;
+// the Overview's three searches, newest first; review threads and their last speaker are read
+// for my own PRs only, since they cost the most
+const overviewPullFields = 'number title url state isDraft updatedAt repository{nameWithOwner} author{login} headRefName headRefOid isCrossRepository mergeable statusCheckRollup{state} labels(first:5){nodes{name}}';
+const overviewSearches = {
+  mine: { query: 'is:pr is:open author:@me archived:false sort:updated-desc', first: 20, fields: `...on PullRequest{${overviewPullFields} latestOpinionatedReviews(first:10){nodes{id state author{login} commit{oid}}} reviewThreads(last:50){nodes{id isResolved isOutdated path comments(last:1){nodes{author{login} viewerDidAuthor}}}} closingIssuesReferences(first:5){nodes{number}}}` },
+  reviews: { query: 'is:pr is:open review-requested:@me archived:false sort:updated-desc', first: 30, fields: `...on PullRequest{${overviewPullFields} viewerLatestReviewRequest{id} viewerLatestReview{state commit{oid}}}` },
+  assigned: { query: 'is:issue is:open assignee:@me archived:false sort:updated-desc', first: 50, fields: '...on Issue{number title url state updatedAt repository{nameWithOwner} author{login} labels(first:5){nodes{name}} closedByPullRequestsReferences(first:5){nodes{number headRefName isCrossRepository repository{nameWithOwner}}}}' }
+} as const;
 
 // the `nodes` of one GraphQL connection
 function nodes(connection: unknown): unknown[] {
@@ -151,10 +190,16 @@ function summary(pull: Pull): PullRequestSummary {
   };
 }
 
-// one GraphQL read of `plans`; every name and number travels as a variable
-function readQuery(plans: readonly Plan[], full: boolean): { query: string; variables: Record<string, unknown> } {
+// one GraphQL read of `plans`, and of the Overview's searches with `overview`; every name, number
+// and search travels as a variable
+function readQuery(plans: readonly Plan[], full: boolean, overview: boolean): { query: string; variables: Record<string, unknown> } {
   const declared: string[] = [];
   const variables: Record<string, unknown> = {};
+  const searches = overview ? Object.entries(overviewSearches).map(([alias, search]) => {
+    declared.push(`$q_${alias}:String!`);
+    variables[`q_${alias}`] = search.query;
+    return `${alias}:search(type:ISSUE,first:${search.first},query:$q_${alias}){issueCount nodes{${search.fields}}}`;
+  }) : [];
   const repositories = plans.map((plan, index) => {
     declared.push(`$o${index}:String!`, `$n${index}:String!`);
     variables[`o${index}`] = plan.repository.owner;
@@ -175,7 +220,80 @@ function readQuery(plans: readonly Plan[], full: boolean): { query: string; vari
     });
     return `r${index}:repository(owner:$o${index},name:$n${index}){${fields.join(' ')}}`;
   });
-  return { query: `query(${declared.join(',')}){${repositories.join(' ')}}`, variables };
+  return { query: `query(${declared.join(',')}){${[...searches, ...repositories].join(' ')}}`, variables };
+}
+
+// the fields every Overview row has; undefined for a node that is not one, or not open
+function overviewRow(value: unknown): OverviewRow | undefined {
+  const [number, title, url, repository, state] = [positive(at(value, 'number')), at(value, 'title'), githubUrl(at(value, 'url')), at(value, 'repository', 'nameWithOwner'), at(value, 'state')];
+  if (number === undefined || typeof title !== 'string' || url === undefined || typeof repository !== 'string' || !repository.includes('/') || state !== 'OPEN') return undefined;
+  const [author, updatedAt] = [at(value, 'author', 'login'), at(value, 'updatedAt')];
+  const labels = nodes(at(value, 'labels')).map(label => at(label, 'name')).filter((name): name is string => typeof name === 'string');
+  return { repository, number, title, url, ...(typeof author === 'string' ? { author } : {}), ...(typeof updatedAt === 'string' ? { updatedAt } : {}), reasons: [], ...(labels.length === 0 ? {} : { labels }), heads: [] };
+}
+
+// a pull request's own head, which finds the Worktree holding it
+function pullHead(value: unknown, number: number): OverviewRow['heads'] {
+  const branch = at(value, 'headRefName');
+  return typeof branch === 'string' ? [{ number, branch, onOrigin: at(value, 'isCrossRepository') === false }] : [];
+}
+
+// my pull request is Waiting on me, unless a draft, for each current, unresolved thread someone
+// else (bots too) spoke last on, failing checks, conflicts, and each reviewer's changes requested
+// on the head as it still is; pending checks and approvals never count. Approval is read from the
+// reviews, since these repositories leave `reviewDecision` null.
+function myPullRow(value: unknown): OverviewRow[] {
+  const row = overviewRow(value);
+  if (row === undefined) return [];
+  const draft = at(value, 'isDraft') === true;
+  const checks = checkStatus(at(value, 'statusCheckRollup'));
+  const reviews = nodes(at(value, 'latestOpinionatedReviews'));
+  const threads = nodes(at(value, 'reviewThreads')).flatMap((thread): OverviewReason[] => {
+    const [id, path, last] = [at(thread, 'id'), at(thread, 'path'), nodes(at(thread, 'comments'))[0]];
+    if (typeof id !== 'string' || typeof path !== 'string' || last === undefined || at(thread, 'isResolved') !== false || at(thread, 'isOutdated') !== false || at(last, 'viewerDidAuthor') !== false) return [];
+    const author = at(last, 'author', 'login');
+    return [{ kind: 'thread', id, path, author: typeof author === 'string' ? author : 'ghost' }];
+  });
+  const changes = reviews.flatMap((review): OverviewReason[] => {
+    const [id, author] = [at(review, 'id'), at(review, 'author', 'login')];
+    return at(review, 'state') === 'CHANGES_REQUESTED' && typeof id === 'string' && at(review, 'commit', 'oid') === at(value, 'headRefOid') ? [{ kind: 'changes', id, author: typeof author === 'string' ? author : 'ghost' }] : [];
+  });
+  const reasons: OverviewReason[] = draft ? [] : [...threads, ...(checks === 'failed' ? [{ kind: 'checks' as const }] : []), ...(at(value, 'mergeable') === 'CONFLICTING' ? [{ kind: 'conflicts' as const }] : []), ...changes];
+  const states = reviews.map(review => at(review, 'state'));
+  const closes = nodes(at(value, 'closingIssuesReferences')).map(issue => positive(at(issue, 'number'))).filter((issue): issue is number => issue !== undefined);
+  return [{
+    ...row, heads: pullHead(value, row.number), checks, reasons,
+    ...(draft ? { draft: true as const } : {}),
+    ...(states.includes('APPROVED') && changes.length === 0 ? { approved: true as const } : {}),
+    ...(closes.length === 0 ? {} : { closes })
+  }];
+}
+
+// a Review request is Waiting on me while it still asks (the search's own rule, teams included)
+// and is not a draft; it was Re-requested when it asks again after a review of mine, not counting
+// my unsubmitted Draft review
+function reviewRow(value: unknown): OverviewRow[] {
+  const row = overviewRow(value);
+  if (row === undefined) return [];
+  const draft = at(value, 'isDraft') === true;
+  const review = at(value, 'viewerLatestReview');
+  const reviewed = review !== null && typeof review === 'object' && at(review, 'state') !== 'PENDING';
+  const reRequested = reviewed && at(value, 'viewerLatestReviewRequest', 'id') !== undefined;
+  const reviewedAt = reviewed ? at(review, 'commit', 'oid') : undefined;
+  return [{
+    ...row, heads: pullHead(value, row.number),
+    ...(draft ? { draft: true as const } : { reasons: [reRequested ? { kind: 'review', reRequested: true } : { kind: 'review' }] }),
+    ...(typeof reviewedAt === 'string' && reviewedAt !== at(value, 'headRefOid') ? { newCommits: true as const } : {})
+  }];
+}
+
+// an Issue is never Waiting on me; the pull requests linked to it in its own repository find its Worktree
+function issueRow(value: unknown): OverviewRow[] {
+  const row = overviewRow(value);
+  if (row === undefined) return [];
+  const linked = nodes(at(value, 'closedByPullRequestsReferences')).filter(pull => typeof at(pull, 'repository', 'nameWithOwner') === 'string' && (at(pull, 'repository', 'nameWithOwner') as string).toLowerCase() === row.repository.toLowerCase());
+  const heads = linked.flatMap(pull => { const number = positive(at(pull, 'number')); return number === undefined ? [] : pullHead(pull, number); });
+  return [{ ...row, heads, ...(heads.length === 0 ? {} : { linkedPullRequests: heads.map(head => head.number) }) }];
 }
 
 // a branch's pull requests as one alias gave them
@@ -228,18 +346,21 @@ export class GithubService {
   private readonly readToken: Token;
   private readonly timer: Timer;
   private readonly projects: () => readonly Project[];
+  private readonly worktrees: () => readonly Worktree[];
+  private readonly overviewEntry: OverviewEntry = {};
   private viewerMemo?: { token: string; login: Promise<string> };
   private viewers = 0;
   private scheduled?: unknown;
   private lastPollAt?: number;
   private changes = 0;
 
-  constructor({ request = fetch, command = run, now = Date.now, token = githubToken, timer = realTimer, projects = () => [] }: GithubServiceOptions = {}) {
+  constructor({ request = fetch, command = run, now = () => Date.now(), token = githubToken, timer = realTimer, projects = () => [], worktrees = () => [] }: GithubServiceOptions = {}) {
     this.command = command;
     this.now = now;
     this.readToken = token;
     this.timer = timer;
     this.projects = projects;
+    this.worktrees = worktrees;
     this.client = new GithubClient(request, { now, refused: () => { this.viewerMemo = undefined; } });
   }
 
@@ -321,6 +442,55 @@ export class GithubService {
     }
     const open = entry.open ?? [];
     return { own: open.filter(pull => pull.mine).map(choice), others: open.filter(pull => !pull.mine).map(choice), issues: entry.issues ?? [], ...fetched(entry) };
+  }
+
+  /**
+   * The operator's open Pull requests, Review requests and assigned Issues across every repository
+   * they can access, with why each is Waiting on me and where tapping it goes. Answers from what the
+   * poll read; data older than a minute is refreshed behind the answer, unless it was never read,
+   * or `fresh` asks for it read again now (Refresh, Retry), which data under ten seconds old answers.
+   */
+  async overview({ fresh = false }: { fresh?: boolean } = {}): Promise<Overview> {
+    const entry = this.overviewEntry;
+    const forced = fresh && (entry.fetchedAt === undefined || this.now() - entry.fetchedAt >= refreshFloorMs);
+    if (forced || this.stale(entry)) {
+      const refreshing = entry.refreshing ?? this.read([], false, true);
+      if (forced || entry.fetchedAt === undefined) await refreshing; else this.background(refreshing);
+    }
+    const destination = await this.destinations();
+    const rows = (list: OverviewRow[] | undefined): OverviewItem[] => (list ?? []).map(({ heads, ...row }) => {
+      const found = destination(row.repository, heads);
+      return found === undefined ? row : { ...row, destination: found };
+    });
+    return { mine: rows(entry.mine), reviews: rows(entry.reviews), issues: rows(entry.issues), totals: entry.totals ?? { mine: 0, reviews: 0, issues: 0 }, ...fetched(entry) };
+  }
+
+  // where an Overview row in a repository goes: the Worktree holding one of its heads, else its
+  // Project's main worktree; nowhere in the console for a repository with no Project
+  private async destinations(): Promise<(repository: string, heads: OverviewRow['heads']) => OverviewDestination | undefined> {
+    const projects = new Map<string, Project>();
+    for (const { project, repository } of await this.projectRepositories()) if (!projects.has(repositoryKey(repository))) projects.set(repositoryKey(repository), project);
+    const worktrees = this.worktrees();
+    return (repository, heads) => {
+      // GitHub's `owner/name`, keyed as `repositoryKey` keys it
+      const project = projects.get(repository.toLowerCase());
+      if (project === undefined) return undefined;
+      const own = worktrees.filter(worktree => worktree.projectId === project.id);
+      const holder = own.find(worktree => worktree.branch !== undefined && heads.some(head => forkCheckoutNumber(worktree.branch!) === head.number || (head.onOrigin && worktree.branch === head.branch)));
+      if (holder !== undefined) return { kind: 'worktree', worktreeId: holder.id, label: holder.label };
+      const main = own.find(worktree => worktree.main);
+      return main === undefined ? undefined : { kind: 'project', worktreeId: main.id, label: project.label };
+    };
+  }
+
+  // each repository Project and the GitHub repository its origin names
+  private async projectRepositories(): Promise<{ project: Project; repository: GithubRepository }[]> {
+    const found: { project: Project; repository: GithubRepository }[] = [];
+    for (const project of this.projects()) {
+      const repository = project.mode === 'repository' ? await this.repositoryAt(project.path).catch(() => undefined) : undefined;
+      if (repository !== undefined) found.push({ project, repository });
+    }
+    return found;
   }
 
   /**
@@ -430,16 +600,14 @@ export class GithubService {
       plans.set(key, found);
       return found;
     };
-    for (const project of this.projects()) {
-      const repository = project.mode === 'repository' ? await this.repositoryAt(project.path).catch(() => undefined) : undefined;
-      if (repository !== undefined) plan(repository);
-    }
+    for (const { repository } of await this.projectRepositories()) plan(repository);
     for (const entry of this.branches.values()) {
       if (!this.tracked(entry)) continue;
       const found = plan(entry.repository);
       if (this.polledByName(entry)) found.branches.push(entry);
     }
-    await this.read([...plans.values()], false);
+    // the searches go in a read of their own, so a slow or failing search cannot stall the lists
+    await Promise.all([this.read([...plans.values()], false), this.overviewEntry.refreshing ?? this.read([], false, true)]);
   }
 
   private tracked(entry: BranchEntry): boolean {
@@ -495,13 +663,14 @@ export class GithubService {
     if (this.stale(entry)) await this.read([{ repository: entry.repository, list: false, branches: [entry] }], true);
   }
 
-  // one GraphQL read of `plans`, stored as it arrives; a failure keeps every entry's last data
-  // beside the problem. `full` also counts a looked-up branch's threads and closing issues.
-  private async read(plans: readonly Plan[], full: boolean): Promise<void> {
+  // one GraphQL read of `plans` (and the Overview's searches, with `overview`), stored as it
+  // arrives; a failure keeps every entry's last data beside the problem. `full` also counts a
+  // looked-up branch's threads and closing issues.
+  private async read(plans: readonly Plan[], full: boolean, overview = false): Promise<void> {
     const wanted = plans.filter(plan => plan.list || plan.branches.length > 0);
-    if (wanted.length === 0) return;
-    const entries = wanted.flatMap(plan => this.planEntries(plan));
-    const reading = this.fetch(wanted, full);
+    if (wanted.length === 0 && !overview) return;
+    const entries = [...wanted.flatMap(plan => this.planEntries(plan)), ...(overview ? [this.overviewEntry] : [])];
+    const reading = this.fetch(wanted, full, overview);
     const settled = reading.then(() => undefined, () => undefined);
     for (const entry of entries) entry.refreshing = settled;
     try {
@@ -511,18 +680,26 @@ export class GithubService {
     }
   }
 
-  private async fetch(plans: readonly Plan[], full: boolean): Promise<void> {
+  private async fetch(plans: readonly Plan[], full: boolean, overview: boolean): Promise<void> {
     const started = this.now();
+    const searched = overview ? [this.overviewEntry] : [];
     const token = await this.token();
-    if (token === undefined) return this.failed(plans, { kind: 'no-token', message: missingToken });
+    if (token === undefined) return this.failed(plans, { kind: 'no-token', message: missingToken }, searched);
     let payload: GraphqlPayload;
     try {
-      const { query, variables } = readQuery(plans, full);
+      const { query, variables } = readQuery(plans, full, overview);
       payload = await this.client.query(token, query, variables, readAction);
     } catch (error) {
       // anything but GitHub's own trouble is a bug
       if (!(error instanceof GithubRequestError)) throw error;
-      return this.failed(plans, problemOf(error));
+      return this.failed(plans, problemOf(error), searched);
+    }
+    if (overview) {
+      const [mine, reviews, assigned] = [at(payload, 'data', 'mine'), at(payload, 'data', 'reviews'), at(payload, 'data', 'assigned')];
+      const total = (search: unknown): number => positive(at(search, 'issueCount')) ?? 0;
+      // a search GitHub withheld (named in `errors`) is not an empty one
+      if ([mine, reviews, assigned].some(search => search === null || typeof search !== 'object')) this.failed([], { kind: 'failing', message: graphqlError(payload, readAction).message }, searched);
+      else this.store(this.overviewEntry, started, { mine: nodes(mine).flatMap(myPullRow), reviews: nodes(reviews).flatMap(reviewRow), issues: nodes(assigned).flatMap(issueRow), totals: { mine: total(mine), reviews: total(reviews), issues: total(assigned) } });
     }
     plans.forEach((plan, index) => {
       const node = at(payload, 'data', `r${index}`);
@@ -553,12 +730,10 @@ export class GithubService {
     if (changed) this.changes += 1;
   }
 
-  private failed(plans: readonly Plan[], problem: GithubProblem): void {
-    for (const plan of plans) {
-      for (const entry of this.planEntries(plan)) {
-        if (JSON.stringify(entry.problem) !== JSON.stringify(problem)) this.changes += 1;
-        entry.problem = problem;
-      }
+  private failed(plans: readonly Plan[], problem: GithubProblem, others: readonly Entry[] = []): void {
+    for (const entry of [...plans.flatMap(plan => this.planEntries(plan)), ...others]) {
+      if (JSON.stringify(entry.problem) !== JSON.stringify(problem)) this.changes += 1;
+      entry.problem = problem;
     }
   }
 

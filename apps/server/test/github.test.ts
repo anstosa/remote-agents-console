@@ -4,8 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { githubRepository, githubToken, hostsToken, type Request } from '../src/github/github.js';
 import { GithubService, type GithubServiceOptions } from '../src/github/service.js';
-import { testProject } from './helpers/config.js';
-import { answer, graphqlGithub, manualTimer, reply, settled, sha, type GraphqlCall, type World } from './helpers/github-graphql.js';
+import { answer, graphqlGithub, polled, reply, settled, sha, type GraphqlCall, type World } from './helpers/github-graphql.js';
 
 // gh's multi-account hosts.yml: bob is github.com's active account, and another host has its own token
 const multiAccountHosts = `ghe.example.com:
@@ -88,25 +87,6 @@ describe('GitHub origins', () => {
     expect(githubRepository('https://example.com/octo/repo.git')).toBeUndefined();
   });
 });
-
-// the module over a scripted GraphQL world, with a hand-run timer and clock, whose Projects are
-// checkouts named after their repository (`/src/octo/repo` is octo/repo)
-function polled(world: World | (() => World), options: GithubServiceOptions & { repositories?: string[] } = {}) {
-  const clock = { now: 0 };
-  const scripted = graphqlGithub(world);
-  const timers = manualTimer();
-  const projects = (options.repositories ?? ['octo/repo']).map(name => testProject({ id: name.replace('/', '-'), path: `/src/${name}` }));
-  const service = new GithubService({
-    request: scripted.request,
-    command: async (_binary, args) => ({ code: 0, stdout: `git@github.com:${args[args.indexOf('-C') + 1]!.slice('/src/'.length)}.git\n` }),
-    token: async () => 'private-token',
-    now: () => clock.now,
-    timer: timers.timer,
-    projects: () => projects,
-    ...options
-  });
-  return { service, calls: scripted.calls, timers, clock };
-}
 
 // the repositories, lists and branches one GraphQL read asked for
 function asked({ query, variables }: GraphqlCall): { repositories: string[]; lists: number; branches: unknown[] } {
