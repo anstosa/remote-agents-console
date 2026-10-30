@@ -74,7 +74,7 @@ export type StructuredEvent =
  * What became of a delivered prompt: a Turn started, it was handled at once without one, the Agent
  * is `busy` (already working, for now), or it was refused outright.
  */
-export type Delivery = 'started' | 'handled' | 'busy' | 'refused';
+export type PromptDisposition = 'started' | 'handled' | 'busy' | 'refused';
 /**
  * A protocol client's connection to one Agent process; closing it leaves the process running.
  * The Conversation and model operations run between Turns; each answers false when the Agent
@@ -83,7 +83,7 @@ export type Delivery = 'started' | 'handled' | 'busy' | 'refused';
  */
 export interface StructuredConnection {
   /** Deliver a prompt as a Turn; an Agent already working answers `busy`. */
-  deliver(prompt: string): Promise<Delivery>;
+  deliver(prompt: string): Promise<PromptDisposition>;
   newConversation(): Promise<boolean>;
   /** Switch to a Conversation by the reference its kind's store located. */
   switchConversation(reference: string): Promise<boolean>;

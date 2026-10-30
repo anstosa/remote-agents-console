@@ -12,7 +12,7 @@ import { QueuedPromptService } from '../src/prompts/queue.js';
 import { StructuredAgents, type HolderRef, type RawLine, type StructuredLaunch, type StructuredProcesses } from '../src/transports/structured-agents.js';
 import { PushService } from '../src/push-service.js';
 import { AgentNotificationCoordinator, type AgentNotification } from '../src/notifications.js';
-import type { Delivery, LaunchReport, ModelInfo, ModelSetting, StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
+import type { PromptDisposition, LaunchReport, ModelInfo, ModelSetting, StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
 import type { QuestionAnswer } from '../src/transports/transport.js';
 import { WorktreeNoteService } from '../src/notes/service.js';
 import type { AllowedModel } from '../src/adapters/types.js';
@@ -46,7 +46,7 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
-  const dispositions: Array<Delivery | 'gone'> = [];
+  const dispositions: Array<PromptDisposition | 'gone'> = [];
   const answers: Array<[string, QuestionAnswer]> = [];
   let pending: string[] = [];
   let emit: (event: StructuredEvent) => void = () => {};

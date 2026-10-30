@@ -9,7 +9,7 @@ import type { Place } from '../places/places.js';
 import { expandCommand } from '../launch/service.js';
 import { run } from '../tmux/command.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
-import { connectHolder, type AgentUsage, type HolderHello, type LineChannel, type Delivery, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
+import { connectHolder, type AgentUsage, type HolderHello, type LineChannel, type PromptDisposition, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
 import { agentPanel, type InterruptOutcome, type QuestionAnswer, type TurnEvent } from './transport.js';
 import { validPrompt } from '../prompts/validation.js';
 import type { StructuredTurnTransport } from '../prompts/service.js';
@@ -458,7 +458,7 @@ export class StructuredAgents {
    * Deliver a prompt as a Turn: only to a live Agent that is not already working (`busy` until
    * then, as is one not live). A prompt from the queue is marked so in the transcript.
    */
-  async deliver(id: string, prompt: string, { queued = false, label }: { queued?: boolean; label?: PromptLabel } = {}): Promise<Delivery | undefined> {
+  async deliver(id: string, prompt: string, { queued = false, label }: { queued?: boolean; label?: PromptLabel } = {}): Promise<PromptDisposition | undefined> {
     const record = (await this.load()).find(candidate => candidate.id === id);
     if (record === undefined) return undefined;
     const live = this.live.get(id);
