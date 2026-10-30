@@ -104,7 +104,7 @@ async function openSettings(page: import('@playwright/test').Page, adapters: unk
 
 // open the shared agent chooser from the persistent toolbar
 async function openAgentMenu(page: import('@playwright/test').Page) {
-  await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^Choose agent/u }).click();
+  await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^(?:Choose|Launch) agent/u }).click();
   return page.getByRole('menu', { name: 'Choose agent' });
 }
 
@@ -259,6 +259,7 @@ test('shows agent versions and updates in launch menu with indicator on launch b
   await expect(codexLine).toHaveCSS('transition-property', 'background-color');
   await expect(menu.getByRole('group', { name: 'OMX agent' }).getByText('v0.21.3', { exact: true })).toBeVisible();
   await menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' }).click();
+  await openAgentMenu(page);
   await expect(menu.getByRole('group', { name: 'Codex agent' }).getByText('v0.153.2', { exact: true })).toBeVisible();
   await expect(menu.getByRole('menuitem', { name: /Update Codex/u })).toHaveCount(0);
   await expect(launch.locator('.launch-update-dot')).toHaveCount(0);
@@ -485,6 +486,35 @@ test('resizes settings and switches splits without closing it', async ({ page })
 
 });
 
+const updateFlyoutViewports = [
+  { name: 'desktop', width: 1280, height: 720 },
+  { name: 'phone', width: 390, height: 844 }
+] as const;
+
+// cover both responsive launcher controls with the installer request still pending
+for (const viewport of updateFlyoutViewports) {
+  test(`closes the agent flyout immediately after starting an update on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const adapters = { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } };
+    await openSettings(page, adapters, { open: false, agentUpdates: [{ kind: 'codex', currentVersion: '0.152.1', latestVersion: '0.153.2', updateAvailable: true }] });
+    let updateStarted = false;
+    // hold the mocked installer so closure cannot depend on its response
+    await page.route('**/api/agents/codex/update', async () => {
+      updateStarted = true;
+      await new Promise<void>(() => { /* keep the installer pending */ });
+    });
+    const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+    const trigger = toolbar.getByRole('button', { name: /^(?:Choose|Launch) agent/u });
+    const menu = await openAgentMenu(page);
+    await menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' }).click();
+    // prove the click reached the installer before checking dismissal
+    await expect.poll(() => updateStarted).toBe(true);
+    await expect(menu).toHaveCount(0);
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await expect(toolbar.locator('.update-progress-ring')).toBeVisible();
+  });
+}
+
 test('opens the full settings workspace beside desktop output and above narrow static controls', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   const settingsPage = await openSettings(page, {});
@@ -560,6 +590,9 @@ test('keeps the agent update orbit visible across desktop and phone launcher sta
   await expect.poll(() => sampleUpdateOrbit(ring)).toEqual({ startAngle: 0, quarterAngle: 90 });
 
   // preserve the orbit while minimizing and restoring the phone agent panel
+  // keep another split visible while the agent is minimized
+  await page.getByRole('button', { name: 'Global settings' }).click();
+  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
   await page.getByRole('button', { name: 'Minimize agent output' }).click();
   await expect(page.locator('.log-output')).toHaveCount(0);
   const showAgent = toolbar.getByRole('button', { name: /Show agent — update in progress$/u });
@@ -645,8 +678,9 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
   const omxUpdate = menu.getByRole('menuitem', { name: 'Update OMX to 0.22.0' });
   await codexUpdate.click();
   await expect.poll(() => starts.codex).toMatchObject({ contentType: 'application/json', body: '{}' });
-  await expect(menu.getByRole('alert')).toHaveCount(0);
   await expect.poll(() => polls.codex).toBeGreaterThan(0);
+  await openAgentMenu(page);
+  await expect(menu.getByRole('alert')).toHaveCount(0);
   await expect(codexUpdate).toContainText('Updating…');
   await expect(codexUpdate).toBeDisabled();
   await expect(omxUpdate).toBeDisabled();
@@ -669,6 +703,7 @@ test('polls queued Codex and OMX updates through completion', async ({ page }) =
   await omxUpdate.click();
   await expect.poll(() => starts.omx).toMatchObject({ contentType: 'application/json', body: '{}' });
   await expect.poll(() => polls.omx).toBeGreaterThan(0);
+  await openAgentMenu(page);
   await expect(omxUpdate).toContainText('Updating…');
   expect(posts.omx).toBe(1);
   complete.add('omx');
@@ -711,6 +746,7 @@ test('recovers agent update polling after a transient HTML 524 response', async 
   const update = menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
   await update.click();
   await expect.poll(() => polls).toBe(1);
+  await openAgentMenu(page);
   await expect(update).toContainText('Updating…');
   await expect(page.getByRole('alert', { name: 'Reconnecting to console' })).toHaveCount(0);
   await page.clock.runFor(1_001);
@@ -748,11 +784,9 @@ test('shows a dismissible toast after a queued agent update fails with its menu 
 
   const update = menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
   await update.click();
-  await expect(update).toContainText('Updating…');
+  await expect(menu).toHaveCount(0);
   await expect(toolbar.getByRole('button', { name: /Choose agent — update in progress$/u })).toBeVisible();
   await expect(toolbar.locator('.update-progress-ring')).toBeVisible();
-  await toolbar.getByRole('button', { name: /^Choose agent/u }).click();
-  await expect(menu).toHaveCount(0);
   const toast = page.getByRole('alert', { name: 'Agent update failed' });
   await page.clock.runFor(1_001);
   await expect(toast).toContainText('Agent update failed after starting.');
@@ -778,7 +812,9 @@ test('shows a dismissible toast after a queued agent update fails with its menu 
   expect(posts).toBe(2);
   // an explicit retry replaces undismissed feedback without leaving a stale error
   failUpdate = false;
+  await openAgentMenu(page);
   await update.click();
+  await openAgentMenu(page);
   await expect(update).toContainText('Updating…');
   await expect(toast).toHaveCount(0);
   expect(posts).toBe(3);
@@ -804,6 +840,7 @@ test('shows a dismissible toast when an agent update cannot start', async ({ pag
   const toast = page.getByRole('alert', { name: 'Agent update failed' });
   await expect(toast).toContainText('Another agent update is already running.');
   await expect(toast.locator('.toast-timer-bar')).toHaveCount(0);
+  await openAgentMenu(page);
   await expect(menu.getByRole('alert')).toHaveCount(0);
   await expect(update).toBeEnabled();
   await toast.getByRole('button', { name: 'Dismiss operation status' }).click();
@@ -846,6 +883,7 @@ test('rejects stale and mismatched agent update jobs', async ({ page }) => {
   const codexUpdate = menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
   await codexUpdate.click();
   await expect(page.getByRole('alert', { name: 'Agent update failed' })).toContainText(staleMessage);
+  await openAgentMenu(page);
   await expect(codexUpdate).toBeEnabled();
   await expect(menu.getByRole('group', { name: 'Codex agent' }).getByText('v0.152.1 → v0.153.2', { exact: true })).toBeVisible();
 
@@ -853,6 +891,7 @@ test('rejects stale and mismatched agent update jobs', async ({ page }) => {
   await omxUpdate.click();
   await expect(page.getByRole('alert', { name: 'Agent update failed' })).toBeVisible();
   await expect(page.getByRole('alert', { name: 'Agent update failed' })).not.toContainText(staleMessage);
+  await openAgentMenu(page);
   await expect(omxUpdate).toBeEnabled();
   await expect(menu.getByRole('group', { name: 'OMX agent' }).getByText('v0.21.3 → v0.22.0', { exact: true })).toBeVisible();
   expect(posts).toEqual({ codex: 1, omx: 1 });
@@ -885,6 +924,7 @@ test('stops transient agent update polling at the seventeen-minute deadline', as
   const unknownStatus = 'Update status is unavailable. The update may still be running; check installed versions before retrying.';
   const update = menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
   await update.click();
+  await openAgentMenu(page);
   await expect(update).toContainText('Updating…');
   await page.clock.runFor(1_001);
   await expect.poll(() => polls).toBeGreaterThan(0);
@@ -923,6 +963,7 @@ test('does not retry an agent update POST after an HTML 524 response', async ({ 
   const update = menu.getByRole('menuitem', { name: 'Update Codex to 0.153.2' });
   await update.click();
   await expect(page.getByRole('alert', { name: 'Agent update failed' })).toContainText(unknownStatus);
+  await openAgentMenu(page);
   await expect(update).toBeEnabled();
   expect({ posts, polls }).toEqual({ posts: 1, polls: 0 });
   await page.waitForTimeout(1_100);
