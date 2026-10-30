@@ -256,7 +256,7 @@ A question about changed code, sent as a Review run that resumes the Conversatio
 _Avoid_: Chat (a Conversation is the agent's own transcript)
 
 **Pull request**:
-The GitHub pull request a Worktree's branch is open as, found through the Worktree's `origin`. The operator picks it when posting a Review tour, and the console checks it is open and from this branch.
+Any GitHub pull request, whether or not a local Worktree holds its branch. A Worktree's branch has one when a pull request is open from it, found through the Worktree's `origin`; that is the one the operator picks when posting a Review tour, and the console checks it is open and from this branch.
 _Avoid_: PR (fine as a UI label), merge request
 
 **Draft review**:
@@ -266,3 +266,29 @@ _Avoid_: Pending review, review draft, submitted review
 **Review thread**:
 Comments on a Pull request anchored to lines of one file, with their replies. Only GitHub resolves one. The git flyout's PR comments list shows the unresolved ones, alongside review summaries and conversation comments, and adds the ones the operator picks to the composer; the console never writes back.
 _Avoid_: Inline comment (a Review tour's own), PR comment (for a thread)
+
+### GitHub
+
+**Issue**:
+A GitHub issue in a repository the operator can access.
+_Avoid_: Ticket, task (both are the operator's planning notes, not GitHub's)
+
+**Linked issue**:
+An Issue tied to a Pull request or Worktree: one the Pull request closes on GitHub, or one the console created the Worktree for.
+_Avoid_: Related issue, referenced issue (a bare `#12` mention links nothing)
+
+**Review request**:
+A Pull request by someone else that asks for the operator's review. It is **Re-requested** when the request was made again after the operator had already reviewed it.
+_Avoid_: Assigned PR, review assignment
+
+**Overview**:
+The app-wide view of the operator's Pull requests, Review requests and assigned Issues across every repository they can access, calling out what needs their attention. It belongs to no Place.
+_Avoid_: Dashboard (the server's WebSocket feed is already called that), inbox, home
+
+**GitHub panel**:
+The Panel showing one Project's Pull requests and Issues alongside its local Worktrees and branches. Its contents are the same in every Workspace of the Project.
+_Avoid_: PR panel, Pull requests panel
+
+**Waiting on me**:
+A Pull request whose next move is the operator's. A Review request is Waiting on me while it is open, not a draft, and still asks for their review. One of their own Pull requests is, unless a draft, while someone else spoke last on an unresolved, current Review thread, its checks fail, it has merge conflicts, or a reviewer requested changes and nothing has been pushed since. Derived from GitHub alone; the operator never marks it done. Issues are never Waiting on me.
+_Avoid_: Needs attention (an Agent's Attention state), action required
