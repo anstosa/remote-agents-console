@@ -231,7 +231,6 @@ export type CodePanelView = {
   viewMode: CodePanelViewMode;
   wrapLines: boolean;
   railCollapsed: boolean;
-  supportingExpanded: boolean;
   fileCollapse: Record<string, { collapsed: boolean; revision: number }>;
   scroll?: ScrollAnchor;
   listAnchor?: ScrollAnchor;

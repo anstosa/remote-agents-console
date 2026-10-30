@@ -36,6 +36,8 @@ const storedFlag = (key: string, value: string): (() => [boolean, (on: boolean) 
 export const useDiffSplit = storedFlag('rac.diff-split', 'split');
 // Whether diffs hide changes that are only whitespace (see withoutWhitespaceChanges).
 export const useIgnoreWhitespace = storedFlag('rac.diff-ignore-whitespace', 'ignore');
+// Whether the Code panel's all-files scroll includes the supporting (docs and tests) group.
+export const useShowSupporting = storedFlag('rac.code-show-supporting', 'show');
 
 // Track an element's own content width through a callback ref, so the observer re-attaches whenever
 // the element remounts. Reports +Infinity until the first measurement.

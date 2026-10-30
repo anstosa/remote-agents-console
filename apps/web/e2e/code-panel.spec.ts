@@ -522,7 +522,7 @@ test('maps a diff line to the working-tree line the editor opens', async ({ page
   expect(lines).toEqual({ first: 3, removed: 3, context: 3, between: 9, after: 31, added: 18, crossSide: 3 });
 });
 
-test('renders implementation changes and exposes View docs as an unchecked checkbox', async ({ page }) => {
+test('renders implementation changes and exposes View docs and tests as an unchecked checkbox', async ({ page }) => {
   await mountPanel(page, patchOf([trackedFile('src/app.ts'), trackedFile('src/widget.ts'), trackedFile('src/app.test.ts')]));
 
   // the panel title is the Comparison picker, seeded to Working
@@ -535,11 +535,16 @@ test('renders implementation changes and exposes View docs as an unchecked check
   await expect(diffHeaders(page)).toHaveCount(2);
 
   const menu = await openCodeViewMenu(panel(page));
-  const toggle = menu.getByRole('checkbox', { name: /View docs \(1\)/iu });
+  const toggle = menu.getByRole('checkbox', { name: /View docs and tests \(1\)/iu });
   await expect(toggle).not.toBeChecked();
   await toggle.click();
-  // checking View docs appends the test file to the same scroll
+  // checking View docs and tests appends the test file to the same scroll
   await expect(diffHeaders(page)).toHaveCount(3);
+
+  // the choice is remembered across a reload
+  await mountPanel(page, patchOf([trackedFile('src/app.ts'), trackedFile('src/widget.ts'), trackedFile('src/app.test.ts')]));
+  await expect(diffHeaders(page)).toHaveCount(3);
+  await expect((await openCodeViewMenu(panel(page))).getByRole('checkbox', { name: /View docs and tests \(1\)/iu })).toBeChecked();
 });
 
 test('keeps the Comparison picker when a Comparison resolves with no files', async ({ page }) => {
@@ -1016,7 +1021,7 @@ test('opens a Code panel of the Working changes from the Git flyout', async ({ p
   await expect(panel(page).locator('.code-pane-title')).toHaveText('Working changes');
   // the implementation file renders; the test file stays behind the collapsed supporting group
   await expect(diffHeaders(page)).toHaveCount(1);
-  await expect((await openCodeViewMenu(panel(page))).getByRole('checkbox', { name: /View docs \(1\)/iu })).not.toBeChecked();
+  await expect((await openCodeViewMenu(panel(page))).getByRole('checkbox', { name: /View docs and tests \(1\)/iu })).not.toBeChecked();
 });
 
 test('deep-links a flyout file row into the panel and picks Working / All PR', async ({ page }) => {

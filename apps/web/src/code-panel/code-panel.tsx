@@ -17,7 +17,7 @@ import { useColorTheme } from '../color-theme.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand } from '../panel-header.js';
 import { useTerminalFontSize } from '../terminal-font-size.js';
 import { groupComparisonFiles, previewImageByteLimit, type CodePanelCommit, type CodePanelMode, type CodePanelState, type CodePanelView, type CodePanelViewMode, type ExpandedLines, type ScrollAnchor, type ComparisonChange, type ComparisonFile, type ComparisonFileContents, type ComparisonPatch, type FilePreviewView, type PreviewImage, type RevisionFile } from './comparison.js';
-import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useIgnoreWhitespace, useObservedWidth } from './diff-layout.js';
+import { DiffLayoutSegment, SPLIT_MIN_WIDTH, useDiffSplit, useIgnoreWhitespace, useObservedWidth, useShowSupporting } from './diff-layout.js';
 import { diffJumpLine, EditorJumpButton, isPlaceRelativePath, type EditorTarget } from './editor-jump.js';
 import { annotatedItem, codeViewBaseOptions, codeViewStyle, diffItemForContents, diffItemForFile, fileItemForContents, fileVersion, hunkLinesOnlyCSS, loadedFilesFromContents, rememberExpandedLines, withoutWhitespaceChanges } from './items.js';
 import { useMovedLines } from './moved-lines.js';
@@ -224,7 +224,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   const selectionActions = useSelectionActions();
   const theme = useColorTheme();
   const fontSize = useTerminalFontSize();
-  const [supportingExpanded, setSupportingExpanded] = useState(savedView?.supportingExpanded ?? false);
+  const [supportingExpanded, setSupportingExpanded] = useShowSupporting();
   // the Workspace's expansion, which promotes this panel over its siblings
   const expanded = usePanelExpand('code')?.expanded === true;
   const [viewMode, setViewMode] = useState<CodePanelViewMode>(savedView?.viewMode ?? 'hunks');
@@ -592,7 +592,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   // A layout cleanup, because the scroll position is only readable before the DOM is removed.
   const snapshot = (): CodePanelView => {
     const scroll = filePreview === undefined && restoreRef.current === undefined ? currentAnchor() : restoreRef.current;
-    return { viewMode, wrapLines, railCollapsed, supportingExpanded, fileCollapse, ...(scroll === undefined ? {} : { scroll }), ...(anchorRef.current === undefined ? {} : { listAnchor: anchorRef.current }), ...(expandedLines.size === 0 ? {} : { expanded: new Map(expandedLines) }) };
+    return { viewMode, wrapLines, railCollapsed, fileCollapse, ...(scroll === undefined ? {} : { scroll }), ...(anchorRef.current === undefined ? {} : { listAnchor: anchorRef.current }), ...(expandedLines.size === 0 ? {} : { expanded: new Map(expandedLines) }) };
   };
   const latestSnapshot = useRef(snapshot);
   latestSnapshot.current = snapshot;
@@ -731,7 +731,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
       <DiffLayoutSegment split={effectiveSplit} onChange={setSplit} />
     </div>}
     {/* keep labels mounted through their forwarded click, then reveal the newly configured view */}
-    {selectedPath === undefined && groups.supporting.length > 0 && <label className="code-pane-view-check" onClick={event => event.stopPropagation()}><input type="checkbox" checked={supportingExpanded} onChange={event => { setSupportingExpanded(event.target.checked); closeMenu(); }} />View docs <small>({groups.supporting.length})</small></label>}
+    {selectedPath === undefined && groups.supporting.length > 0 && <label className="code-pane-view-check" onClick={event => event.stopPropagation()}><input type="checkbox" checked={supportingExpanded} onChange={event => { setSupportingExpanded(event.target.checked); closeMenu(); }} />View docs and tests <small>({groups.supporting.length})</small></label>}
     {effectiveMode !== 'plain' && <label className="code-pane-view-check" onClick={event => event.stopPropagation()}><input type="checkbox" checked={ignoreWhitespace} onChange={event => { setIgnoreWhitespace(event.target.checked); closeMenu(); }} />Ignore whitespace</label>}
     <label className="code-pane-view-check" onClick={event => event.stopPropagation()}><input type="checkbox" checked={wrapLines} onChange={event => { setWrapLines(event.target.checked); closeMenu(); }} />Wrap lines</label>
   </div> : undefined;
