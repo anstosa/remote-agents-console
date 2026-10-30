@@ -3,6 +3,7 @@ import { connect, type Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import type { QuestionField } from '../adapters/types.js';
 import type { QuestionAnswer, TurnEvent } from './transport.js';
+import type { PromptLabel } from '../prompts/queue.js';
 
 /**
  * The structured Transport (ADR 0015): the protocol-neutral interface a protocol client offers
@@ -28,7 +29,8 @@ export type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: 
  * streams), a notice from the Agent's extension, a tool call, and the end of a Turn with its cost and tool calls.
  */
 export type TranscriptItem =
-  | { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string; steer?: true; queued?: true }
+  // a prompt the console sent of its own carries its `label`
+  | { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string; steer?: true; queued?: true; label?: PromptLabel }
   | { id: string; kind: 'thinking'; text: string; live?: true }
   | { id: string; kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error' }
   | { id: string; kind: 'settled'; outcome: 'done' | 'cancelled' | 'failed'; cost?: number; toolCalls?: number }

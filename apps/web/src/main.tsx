@@ -8062,7 +8062,7 @@ type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'faile
 // last lines with their count). Its full output and a script's source are read when it is opened.
 type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; result?: string; diff?: { path: string; patch: string }; tail?: string; outputLines?: number; output?: string; source?: string; kept?: false };
 type TranscriptItem =
-  | { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string; steer?: true; queued?: true }
+  | { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string; steer?: true; queued?: true; label?: PromptSender['label'] }
   | { id: string; kind: 'thinking'; text: string; live?: true }
   | { id: string; kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error' }
   | { id: string; kind: 'settled'; outcome: 'done' | 'cancelled' | 'failed'; cost?: number; toolCalls?: number }
@@ -8090,11 +8090,12 @@ function transcriptGroups(items: readonly TranscriptItem[]): TranscriptGroup[] {
 }
 
 // A prompt the console sent on an Agent's behalf (a report, a Watch's event, a scheduled Run),
-// shown as a labelled row: its first line names it, and an Agent's own text it carries, fenced
+// shown as a labelled row when the console marked it with its `label` (text that only starts like
+// one is an ordinary prompt): its first line names it, and an Agent's own text it carries, fenced
 // between `<<<untrusted-…` and `untrusted-…>>>` lines, is shown as plain text in a box marked untrusted.
-function consolePrompt(text: string): ReactNode | undefined {
-  const match = /^\[RAC (report|event|run)\] ?(.*)$/u.exec(text.split('\n', 1)[0] ?? '');
-  if (match === null) return undefined;
+function consolePrompt(text: string, label: PromptSender['label']): ReactNode | undefined {
+  if (label === undefined) return undefined;
+  const heading = (text.split('\n', 1)[0] ?? '').replace(/^\[RAC (?:report|event|run)\] ?/u, '');
   const parts: ReactNode[] = [];
   const lines = text.split('\n').slice(1);
   let plain: string[] = [];
@@ -8108,7 +8109,7 @@ function consolePrompt(text: string): ReactNode | undefined {
     index = end;
   }
   flush();
-  return <div className="transcript-console-prompt"><p className="transcript-line transcript-prompt"><span className="transcript-glyph" aria-hidden="true">›</span><span><span className="prompt-sender-chip label">{promptLabelNames[match[1]!]}</span> {match[2]}</span></p>{parts}</div>;
+  return <div className="transcript-console-prompt"><p className="transcript-line transcript-prompt"><span className="transcript-glyph" aria-hidden="true">›</span><span><span className="prompt-sender-chip label">{promptLabelNames[label]}</span> {heading}</span></p>{parts}</div>;
 }
 
 function TranscriptLine({ className, glyph, children }: { className: string; glyph: string; children: ReactNode }) {
@@ -8165,7 +8166,7 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
         const live = index === groups.length - 1 && group.end === undefined && agent.attention === 'working';
         const toolCalls = group.end?.toolCalls ?? 0;
         return <section key={group.head?.id ?? group.lines[0]?.id ?? group.end?.id} className={`transcript-group${live ? ' live' : ''}`}>
-          {group.head !== undefined && (consolePrompt(group.head.text) ?? <TranscriptLine className="transcript-prompt" glyph="›">{group.head.text}{group.head.queued === true && <span className="transcript-dim"> (from the queue)</span>}</TranscriptLine>)}
+          {group.head !== undefined && (consolePrompt(group.head.text, group.head.label) ?? <TranscriptLine className="transcript-prompt" glyph="›">{group.head.text}{group.head.queued === true && <span className="transcript-dim"> (from the queue)</span>}</TranscriptLine>)}
           {group.lines.map(line => {
             if (line.kind === 'tool') return <TranscriptToolLine key={line.id} agentId={agentId} item={line} childrenOf={children} revision={state?.revision} onOpenDiff={onOpenDiff} />;
             if (line.kind === 'message') return line.role === 'user'

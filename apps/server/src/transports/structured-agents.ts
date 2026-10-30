@@ -13,6 +13,7 @@ import { connectHolder, type AgentUsage, type HolderHello, type LineChannel, typ
 import { agentPanel, type InterruptOutcome, type QuestionAnswer, type TurnEvent } from './transport.js';
 import { validPrompt } from '../prompts/validation.js';
 import type { StructuredTurnTransport } from '../prompts/service.js';
+import type { PromptLabel } from '../prompts/queue.js';
 import { setAside } from '../set-aside.js';
 
 /**
@@ -143,7 +144,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
 // by `offers` so the web takes each one once. `nonce` is what the latest process's launch report
 // must echo, and `refusal` why its report refused it. `access` is the console MCP token a
 // Conductor's process is given once it reports in, and `scripts` the deadlines of its scripts running
-type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
+type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -457,20 +458,21 @@ export class StructuredAgents {
    * Deliver a prompt as a Turn: only to a live Agent that is not already working (`busy` until
    * then, as is one not live). A prompt from the queue is marked so in the transcript.
    */
-  async deliver(id: string, prompt: string, { queued = false } = {}): Promise<Delivery | undefined> {
+  async deliver(id: string, prompt: string, { queued = false, label }: { queued?: boolean; label?: PromptLabel } = {}): Promise<Delivery | undefined> {
     const record = (await this.load()).find(candidate => candidate.id === id);
     if (record === undefined) return undefined;
     const live = this.live.get(id);
     if (record.lifecycle !== 'live' || live?.connection === undefined || live.working || live.busy || live.resyncing === true) return 'busy';
     live.busy = true;
     live.queuedNext = queued;
+    live.labelNext = label;
     // the Turn this prompt starts settles afresh, and an offered draft is spent
     live.turn = undefined;
     live.draft = undefined;
     try {
       const connection = live.connection;
       const delivery = await connection.deliver(prompt);
-      if (delivery !== 'started') live.queuedNext = undefined;
+      if (delivery !== 'started') { live.queuedNext = undefined; live.labelNext = undefined; }
       // a process that went with the prompt unanswered refused nothing: the queue waits for a resume
       return delivery === 'refused' && live.connection !== connection ? 'busy' : delivery;
     } finally { live.busy = false; }
@@ -544,7 +546,7 @@ export class StructuredAgents {
     held: () => false,
     mark: async () => ({}),
     deliver: async (id, prompt, _attachments, options) => {
-      const delivery = await this.deliver(id, prompt, { queued: options.waited === true });
+      const delivery = await this.deliver(id, prompt, { queued: options.waited === true, ...(options.sender?.label === undefined ? {} : { label: options.sender.label }) });
       if (delivery === undefined) return { status: 'refused' };
       if (delivery === 'busy') return { status: 'busy' };
       return delivery === 'refused' ? { status: 'held' } : { status: 'submitted', instant: delivery === 'handled', prompt };
@@ -774,7 +776,9 @@ export class StructuredAgents {
         if (item.kind === 'message' && item.role === 'user' && item.steer !== true) {
           live.prompt = item.text;
           if (live.queuedNext === true) item = { ...item, queued: true };
+          if (live.labelNext !== undefined) item = { ...item, label: live.labelNext };
           live.queuedNext = undefined;
+          live.labelNext = undefined;
         }
         if (item.kind === 'tool' && item.source !== undefined && item.parentId === undefined) this.watchScript(record, live, item);
         const index = live.transcript.findIndex(candidate => candidate.id === item.id);
