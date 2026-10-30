@@ -201,15 +201,10 @@ export function attachTerminalSelection(container: HTMLElement, handle: Streamed
     return selection.focusNode !== null && container.contains(selection.focusNode);
   };
 
-  // keep the toolbar within the viewport around this pane
-  const toolbarPosition = (bottom: number): Pick<TerminalSelection, 'top' | 'left'> => {
-    const bounds = container.getBoundingClientRect();
+  // place the toolbar below the selection's end; CSS keeps it horizontally on screen
+  const toolbarPosition = (bottom: number, right: number): Pick<TerminalSelection, 'top' | 'left'> => {
     const maximumTop = Math.max(8, window.innerHeight - 48);
-    const maximumLeft = Math.max(8, window.innerWidth - 8);
-    return {
-      top: Math.max(8, Math.min(maximumTop, bottom + 8)),
-      left: Math.max(8, Math.min(maximumLeft, bounds.left + bounds.width / 2))
-    };
+    return { top: Math.max(8, Math.min(maximumTop, bottom + 8)), left: right };
   };
 
   // restore a flashed xterm palette only outside native selection mode
@@ -295,7 +290,7 @@ export function attachTerminalSelection(container: HTMLElement, handle: Streamed
       const range = selection !== null && selection.rangeCount > 0 ? selection.getRangeAt(0) : undefined;
       const bounds = range === undefined ? undefined : (Array.from(range.getClientRects()).at(-1) ?? range.getBoundingClientRect());
       const text = projectedSelectionText(selection, terminal) ?? selection?.toString() ?? '';
-      options.onSelection(!text || bounds === undefined ? undefined : { text, ...toolbarPosition(bounds.bottom) });
+      options.onSelection(!text || bounds === undefined ? undefined : { text, ...toolbarPosition(bounds.bottom, bounds.right) });
       return;
     }
     // clear the toolbar with the terminal selection
@@ -314,7 +309,9 @@ export function attachTerminalSelection(container: HTMLElement, handle: Streamed
     const screenBounds = screen.getBoundingClientRect();
     const viewportRow = position.end.y - terminal.buffer.active.viewportY + 1;
     const selectionBottom = screenBounds.top + viewportRow * (screenBounds.height / terminal.rows);
-    options.onSelection({ text, ...toolbarPosition(selectionBottom) });
+    // xterm reports the end column 0-based and exclusive, so it counts the cells before the end edge
+    const selectionRight = screenBounds.left + position.end.x * (screenBounds.width / terminal.cols);
+    options.onSelection({ text, ...toolbarPosition(selectionBottom, selectionRight) });
   };
 
   // identify browser-owned text independently of terminal mouse reporting

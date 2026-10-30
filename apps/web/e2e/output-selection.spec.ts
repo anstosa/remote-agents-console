@@ -139,6 +139,39 @@ test('shows selection actions for a terminal drag selection and adds to the prom
   await expect(page.locator('.log-output')).not.toHaveClass(/selection-active/u);
 });
 
+test('places the selection actions under the end of the selection, inside the viewport', async ({ page }) => {
+  await installPaneMock(page);
+  await routeSelectionApi(page);
+  await page.goto('/');
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await pushBytes(page, 'agent-1', `${'\r\n'.repeat(8)}Near the start${' '.repeat(26)}Mid-line selection\r\n`);
+  const screen = page.locator('.log-canvas .xterm-screen');
+  const row = page.locator('.log-canvas .xterm-rows > div', { hasText: 'Mid-line selection' });
+  await expect(row).toBeVisible();
+  const [screenBounds, rowBounds, cellWidth] = await Promise.all([screen.boundingBox(), row.boundingBox(), terminalCellWidth(page.locator('.log-canvas'))]);
+  // require rendered geometry before dragging exact terminal cells
+  if (screenBounds === null || rowBounds === null) throw new Error('selection row has no rendered bounds');
+  const y = rowBounds.y + rowBounds.height / 2;
+  const toolbar = page.getByRole('toolbar', { name: 'Output selection actions' });
+  const drag = async (from: number, to: number) => {
+    await page.mouse.move(screenBounds.x + cellWidth * from, y);
+    await page.mouse.down();
+    await page.mouse.move(screenBounds.x + cellWidth * to, y, { steps: 4 });
+    await page.mouse.up();
+    await expect(toolbar).toBeVisible();
+    return (await toolbar.boundingBox())!;
+  };
+
+  // centred under where a mid-line selection ends
+  const endX = screenBounds.x + cellWidth * 58;
+  const mid = await drag(40.25, 57.75);
+  expect(Math.abs(mid.x + mid.width / 2 - endX)).toBeLessThan(cellWidth);
+
+  // shifted right rather than cut off when the selection ends near the left edge
+  const near = await drag(0.25, 4.75);
+  expect(near.x).toBeGreaterThanOrEqual(7);
+});
+
 // repaint xterm's selection rather than only toggling a native selection class
 test('flashes a copied desktop selection green then restores its highlight', async ({ context, page }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);

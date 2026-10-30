@@ -6126,7 +6126,7 @@ function TerminalPane({ worktreeId, paneId, name, onMinimize, onExit, onRename, 
     {/* keep helper keys with their terminal instead of replacing the static toolbar; CSS shows them on a phone or above a software keyboard */}
     {mobileActive && <MobileTerminalKeys id={paneId} />}
     {/* keep selection actions hidden with their terminal panel */}
-    {selection && <div className="output-selection-toolbar" role="toolbar" aria-label={`Selection actions for terminal ${name}`} style={{ top: selection.top, left: selection.left }} onPointerDown={event => event.preventDefault()}>
+    {selection && <div className="output-selection-toolbar" role="toolbar" aria-label={`Selection actions for terminal ${name}`} style={{ top: selection.top, '--toolbar-x': `${selection.left}px` } as React.CSSProperties} onPointerDown={event => event.preventDefault()}>
       <button type="button" disabled={!selectionActions?.canCreateNote || selection.text.length > 30_000} onClick={async () => { /* reveal and deselect only once the note is created, so a failure can be retried */ if (await selectionActions?.createNote(selection.text)) { expand?.restore(); clearSelectionRef.current(); } }}>Create note</button>
       <button type="button" disabled={selectionActions?.addToPrompt === undefined} onClick={() => { /* reveal the draft without sending it */ expand?.restore(); selectionActions?.addToPrompt?.(selection.text); clearSelectionRef.current(); }}>Add to prompt</button>
       <button type="button" onClick={() => void copySelectionRef.current(selection.text)}>Copy</button>
@@ -7049,7 +7049,7 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
   const expanded = expand?.expanded === true;
   const [inputActive, setInputActive] = useState(false);
   const [selectionActive, setSelectionActive] = useState(false);
-  const [selectionToolbar, setSelectionToolbar] = useState<{ text: string; top: number }>();
+  const [selectionToolbar, setSelectionToolbar] = useState<TerminalSelection>();
   // the toolbar's Copy copies, flashes, then deselects; its other actions deselect when done
   const copyOutputSelectionRef = useRef<(value: string) => Promise<void>>(copyText);
   const clearOutputSelectionRef = useRef<() => void>(() => {});
@@ -7216,7 +7216,7 @@ function Log({ id, onTurnOff, embedded = false, codexScrollControls = false, onQ
   const processing = processingLabel !== undefined;
   const visibleStatus = processing ? 'Starting' : status;
   // an expanded sibling hides the output, and its selection actions with it
-  const selectionActions = selectionToolbar === undefined || (expand?.anyExpanded === true && !expanded) ? null : createPortal(<div className={`output-selection-toolbar${embedded ? ' embedded' : ''}`} role="toolbar" aria-label="Output selection actions" style={{ top: selectionToolbar.top }} onPointerDown={event => event.preventDefault()}>
+  const selectionActions = selectionToolbar === undefined || (expand?.anyExpanded === true && !expanded) ? null : createPortal(<div className={`output-selection-toolbar${embedded ? ' embedded' : ''}`} role="toolbar" aria-label="Output selection actions" style={{ top: selectionToolbar.top, '--toolbar-x': `${selectionToolbar.left}px` } as React.CSSProperties} onPointerDown={event => event.preventDefault()}>
     {notes !== undefined && <button type="button" disabled={!notes.canCreate || selectionToolbar.text.length > 30_000} onClick={() => void notes.createWithText(selectionToolbar.text, assistantNoteTitle(selectionToolbar.text)).then(created => { /* reveal the new note; a failure keeps the selection to retry */ if (created) { expand?.restore(); clearOutputSelectionRef.current(); } })}>Create note</button>}
     {notes?.active === true && <button type="button" disabled={!notes.canAppendToActive(selectionToolbar.text)} onClick={() => { expand?.restore(); notes.appendToActive(selectionToolbar.text); clearOutputSelectionRef.current(); }}>Append to note</button>}
     {onAddToPrompt !== undefined && <button type="button" onClick={() => { onAddToPrompt(selectionToolbar.text); clearOutputSelectionRef.current(); }}>Add to prompt</button>}
