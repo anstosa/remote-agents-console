@@ -201,13 +201,14 @@ test('a long transcript starts with Load earlier, which reads more of it', async
   await expect.poll(() => requested.at(-1)).toBe('?limit=400');
 });
 
-test('on a wide screen the transcript keeps a reading width', async ({ page }) => {
+test('on a wide screen the transcript fills the panel', async ({ page }) => {
   await page.setViewportSize({ width: 1800, height: 900 });
   await mockPi(page, { items: [{ id: 'm1', kind: 'message', role: 'user', text: 'Hello' }] });
   await page.goto('/');
-  const width = (await log(page).locator('.transcript-group').boundingBox())!.width;
-  const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize));
-  expect(width).toBeLessThanOrEqual(52 * rem);
+  const panel = (await page.locator('.log-split > .log-output .structured-transcript').boundingBox())!;
+  const transcript = (await log(page).boundingBox())!;
+  expect(transcript.x).toBe(panel.x);
+  expect(transcript.width).toBe(panel.width);
 });
 
 test('⋮ offers Raw events and Open holder window, each in a dialog', async ({ page }) => {
