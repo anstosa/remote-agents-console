@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/app.js';
@@ -1172,6 +1172,20 @@ describe('an Exited structured Agent', () => {
     const notes = JSON.stringify((await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(placeId)}/notes`, headers })).json());
     expect(notes).toContain('Second');
     expect(notes).toContain('Third');
+    await app.close();
+  });
+
+  it('stays, with its queue, when its Close cannot be recorded', async () => {
+    const fake = fakeAgent();
+    const { app, headers, dashboardAgent, id, queued, root } = await exited(fake);
+    // the stores' folder turns read-only, so the record of the Close cannot be written
+    await chmod(root, 0o500);
+    try {
+      expect((await app.inject({ method: 'DELETE', url: `/api/agents/${id}`, headers })).statusCode).toBe(500);
+    } finally { await chmod(root, 0o700); }
+    expect(fake.closed()).toBe(false);
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'exited' } });
+    expect((await queued()).map((prompt: { text: string }) => prompt.text)).toEqual(['Second', 'Third']);
     await app.close();
   });
 });

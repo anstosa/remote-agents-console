@@ -638,11 +638,17 @@ export class StructuredAgents {
     const records = await this.load();
     const record = records.find(candidate => candidate.id === id);
     if (record === undefined || record.role === 'conductor' && !retired) return false;
+    // nothing is stopped or forgotten until the Close is recorded: an Agent whose Close cannot be
+    // written stays, its queue with it
+    const index = records.indexOf(record);
+    records.splice(index, 1);
+    if (!await this.save()) {
+      records.splice(index, 0, record);
+      throw new Error(`The Agent could not be closed: ${this.file} could not be written.`);
+    }
     this.live.get(id)?.connection?.close();
-    records.splice(records.indexOf(record), 1);
     this.live.delete(id);
     if (record.holder !== undefined) await this.processes.stop(record.holder, record);
-    await this.save();
     this.changed();
     return true;
   }
@@ -929,7 +935,8 @@ export class StructuredAgents {
   }
 
   // write the records in order, each write replacing the file whole
-  private save(): Promise<void> {
+  // (whether it was written, which a caller that must not go on without it checks)
+  private save(): Promise<boolean> {
     const write = this.mutation.then(async () => {
       const records = await this.load();
       await mkdir(dirname(this.file), { recursive: true });
@@ -938,7 +945,7 @@ export class StructuredAgents {
       await rename(next, this.file);
     });
     this.mutation = write.catch(error => { console.error(`[structured] ${this.file} could not be written:`, error instanceof Error ? error.message : error); });
-    return this.mutation;
+    return write.then(() => true, () => false);
   }
 }
 
