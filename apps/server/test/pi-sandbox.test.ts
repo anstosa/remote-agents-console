@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { commandEnv, pathRefusal, sessionPolicy, type SandboxPolicy } from '../src/adapters/pi-sandbox.js';
+import { commandEnv, fileOperations, pathRefusal, sessionPolicy, type SandboxPolicy } from '../src/adapters/pi-sandbox.js';
 
 // The Pi-free sandbox policy the RAC Pi extension applies (ADR 0004): what a session's policy
 // holds, which file-tool paths it refuses, and the environment a sandboxed command gets.
@@ -149,6 +149,65 @@ describe('the file-tool path policy', () => {
   it('leaves other tools alone and refuses a file tool without a usable path', () => {
     expect(pathRefusal('bash', { command: 'cat /etc/passwd' }, cwd, policy)).toBeUndefined();
     expect(pathRefusal('read', {}, cwd, policy)).toMatch(/path/);
+  });
+});
+
+describe('the file tools\' own operations', () => {
+  let policy: SandboxPolicy;
+  let cwd = '';
+  let ops: ReturnType<typeof fileOperations>;
+  beforeEach(async () => {
+    cwd = join(root, 'work');
+    await mkdir(join(cwd, 'sub'), { recursive: true });
+    await mkdir(join(root, 'state'), { recursive: true });
+    await mkdir(join(root, 'outside'), { recursive: true });
+    await writeFile(join(root, 'state', 'auth.json'), 'secret');
+    await writeFile(join(root, 'outside', 'rc'), 'keep');
+    await writeFile(join(cwd, 'README.md'), 'hi');
+    policy = sessionPolicy(rendered({ denyRead: [] }), { cwd, stateDir: join(root, 'state'), tempDir: join(root, 'tmp') });
+    ops = fileOperations(() => ({ policy, cwd }));
+  });
+  // what a command running beside the tool does between the path check and the tool's use
+  const swap = async (path: string, target: string) => { await rm(path, { recursive: true, force: true }); await symlink(target, path); };
+
+  it('read, write and make folders inside the Worktree, through links that stay inside', async () => {
+    expect((await ops.readFile(join(cwd, 'README.md'))).toString()).toBe('hi');
+    await ops.mkdir(join(cwd, 'src', 'deep'));
+    await ops.writeFile(join(cwd, 'src', 'deep', 'new.ts'), 'one');
+    await symlink(join(cwd, 'README.md'), join(cwd, 'readme-link'));
+    await ops.writeFile(join(cwd, 'readme-link'), 'two');
+    expect(await readFile(join(cwd, 'src', 'deep', 'new.ts'), 'utf8')).toBe('one');
+    expect(await readFile(join(cwd, 'README.md'), 'utf8')).toBe('two');
+  });
+
+  it('refuse reading a file swapped for a link to a secret after its path was checked', async () => {
+    const path = join(cwd, 'notes.txt');
+    await writeFile(path, 'plain');
+    expect(pathRefusal('read', { path }, cwd, policy)).toBeUndefined();
+    await swap(path, join(root, 'state', 'auth.json'));
+    await expect(ops.readFile(path)).rejects.toThrow(/not readable/);
+    await expect(ops.read(path, async opened => (await readFile(opened)).toString())).rejects.toThrow(/not readable/);
+  });
+
+  it('refuse writing through a file or folder swapped for a link out, leaving what is outside untouched', async () => {
+    const file = join(cwd, 'notes.txt');
+    await writeFile(file, 'plain');
+    expect(pathRefusal('write', { path: file }, cwd, policy)).toBeUndefined();
+    await swap(file, join(root, 'outside', 'rc'));
+    await expect(ops.writeFile(file, 'evil')).rejects.toThrow(/outside/);
+    expect(await readFile(join(root, 'outside', 'rc'), 'utf8')).toBe('keep');
+
+    expect(pathRefusal('write', { path: join(cwd, 'sub', 'new') }, cwd, policy)).toBeUndefined();
+    await swap(join(cwd, 'sub'), join(root, 'outside'));
+    await expect(ops.writeFile(join(cwd, 'sub', 'new'), 'evil')).rejects.toThrow(/outside/);
+    await expect(ops.mkdir(join(cwd, 'sub', 'made', 'deeper'))).rejects.toThrow(/outside/);
+    expect(await readdir(join(root, 'outside'))).toEqual(['rc']);
+  });
+
+  it('refuse writing what the policy protects, and anything before the policy is loaded', async () => {
+    await expect(ops.mkdir(join(cwd, '.vscode'))).rejects.toThrow(/protected/);
+    await expect(ops.writeFile(join(cwd, '.bashrc'), 'x')).rejects.toThrow(/protected/);
+    await expect(fileOperations(() => undefined).readFile(join(cwd, 'README.md'))).rejects.toThrow(/policy/);
   });
 });
 

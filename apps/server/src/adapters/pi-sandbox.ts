@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
+import { constants, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdir, open, readFile, readlink, stat, type FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -161,18 +162,80 @@ export function pathRefusal(tool: string, input: Record<string, unknown>, cwd: s
   if (!searches && tool !== 'read' && tool !== 'write' && tool !== 'edit') return undefined;
   const raw = input.path ?? (searches ? '.' : undefined);
   if (typeof raw !== 'string') return `${tool} needs a path`;
-  const { allowWrite, denyWrite } = policy.filesystem;
-  // the file tools run in Pi's own process, whose /proc shows its environment and every other
-  // process's; a command's /proc is the sandbox's own
-  const denyRead = [...policy.filesystem.denyRead, '/proc'];
+  const denied = deniedReads(policy);
   const unreadable = `${raw} is not readable in the sandbox`;
-  if (tool === 'read') return readVariants(toolPath(raw, cwd)).some(path => underAny(canonical(path), denyRead)) ? unreadable : undefined;
+  if (tool === 'read') return readVariants(toolPath(raw, cwd)).some(path => underAny(canonical(path), denied)) ? unreadable : undefined;
   const path = canonical(toolPath(raw, cwd));
-  if (searches) return underAny(path, denyRead) || denyRead.some(denied => isUnder(canonical(denied), path)) ? unreadable : undefined;
-  if (!underAny(path, allowWrite)) return `${raw} is outside the paths the sandbox may write`;
+  if (searches) return underAny(path, denied) || denied.some(root => isUnder(canonical(root), path)) ? unreadable : undefined;
+  const reason = unwritable(path, cwd, policy);
+  return reason === undefined ? undefined : `${raw} ${reason}`;
+}
+
+// the file tools run in Pi's own process, whose /proc shows its environment and every other
+// process's; a command's /proc is the sandbox's own
+const deniedReads = (policy: SandboxPolicy): string[] => [...policy.filesystem.denyRead, '/proc'];
+// why a file tool may not write `path`, whose links are resolved, or `undefined` when it may
+function unwritable(path: string, cwd: string, policy: SandboxPolicy): string | undefined {
+  if (!underAny(path, policy.filesystem.allowWrite)) return 'is outside the paths the sandbox may write';
   const inWorktree = relative(canonical(cwd), path);
   const runsCodeHere = !inWorktree.startsWith('..') && (runsCode.files.includes(basename(path)) || runsCode.folders.some(folder => `${sep}${inWorktree}${sep}`.includes(`${sep}${folder}${sep}`)));
-  return runsCodeHere || underAny(path, denyWrite) ? `${raw} is protected in the sandbox` : undefined;
+  return runsCodeHere || underAny(path, policy.filesystem.denyWrite) ? 'is protected in the sandbox' : undefined;
+}
+
+/**
+ * The operations Pi's `read`, `write` and `edit` run with in a Sandboxed session. `pathRefusal`
+ * checks a path before a tool runs, but a command running beside it (a Watch's, or code mode's
+ * nested `bash`) could swap a link in between, so each of these opens the file first and checks
+ * where the opened file really is. A new file or folder is made in the folder that was checked,
+ * never through a link, and nothing is truncated before its check.
+ */
+export function fileOperations(session: () => { policy: SandboxPolicy; cwd: string } | undefined) {
+  const loaded = () => {
+    const current = session();
+    if (current === undefined) throw new Error('The sandbox policy is not loaded');
+    return current;
+  };
+  // `path` opened, unless `refusal` refuses where the opened file really is
+  const openChecked = async (path: string, flags: number, refusal: (real: string) => string | undefined): Promise<FileHandle> => {
+    const handle = await open(path, flags);
+    try {
+      const reason = refusal(await readlink(`/proc/self/fd/${handle.fd}`));
+      if (reason !== undefined) throw new Error(`${path} ${reason}`);
+      return handle;
+    } catch (error) { await handle.close(); throw error; }
+  };
+  const readable = (real: string) => underAny(real, deniedReads(loaded().policy)) ? 'is not readable in the sandbox' : undefined;
+  const writable = (real: string) => { const { policy, cwd } = loaded(); return unwritable(real, cwd, policy); };
+  // `use` given `path` as a name in its parent folder, opened and checked with that name in it
+  const inParent = async <T>(path: string, use: (named: string) => Promise<T>): Promise<T> => {
+    const parent = await openChecked(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY, real => writable(join(real, basename(path))));
+    try { return await use(`/proc/self/fd/${parent.fd}/${basename(path)}`); } finally { await parent.close(); }
+  };
+  /** `use` given the file at `path` opened and checked readable, by a name no command can swap. */
+  const read = async <T>(path: string, use: (opened: string) => Promise<T>): Promise<T> => {
+    const handle = await openChecked(path, constants.O_RDONLY, readable);
+    try { return await use(`/proc/self/fd/${handle.fd}`); } finally { await handle.close(); }
+  };
+  const makeDir = async (dir: string): Promise<void> => {
+    try { await stat(dir); return; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (dirname(dir) !== dir) await makeDir(dirname(dir));
+    await inParent(dir, named => mkdir(named)).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'EEXIST') throw error; });
+  };
+  return {
+    read,
+    readFile: (path: string): Promise<Buffer> => read(path, opened => readFile(opened)),
+    async writeFile(path: string, content: string): Promise<void> {
+      let handle: FileHandle;
+      try {
+        handle = await openChecked(path, constants.O_WRONLY | constants.O_NONBLOCK, writable);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        handle = await inParent(path, named => open(named, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
+      }
+      try { await handle.truncate(0); await handle.writeFile(content, 'utf8'); } finally { await handle.close(); }
+    },
+    mkdir: async (dir: string): Promise<void> => { loaded(); await makeDir(dir); }
+  };
 }
 
 // what every sandboxed command keeps of the environment, besides `LC_*` and the policy's names

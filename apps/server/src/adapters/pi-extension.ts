@@ -2,8 +2,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
-import { createBashToolDefinition, createCodemodeExtension, createLocalBashOperations, createMcpExtension, getAgentDir, VERSION, type BashOperations, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { commandEnv, pathRefusal, sessionPolicyFrom, type SandboxPolicy } from './pi-sandbox.js';
+import { access, constants } from 'node:fs/promises';
+import { createBashToolDefinition, createCodemodeExtension, createEditToolDefinition, createLocalBashOperations, createMcpExtension, createReadToolDefinition, createWriteToolDefinition, detectSupportedImageMimeTypeFromFile, getAgentDir, VERSION, type BashOperations, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { commandEnv, fileOperations, pathRefusal, sessionPolicyFrom, type SandboxPolicy } from './pi-sandbox.js';
 
 /**
  * The RAC Pi extension, loaded into every Pi the console launches (ADR 0017). Pi loads it
@@ -22,7 +23,8 @@ import { commandEnv, pathRefusal, sessionPolicyFrom, type SandboxPolicy } from '
  * A Sandboxed launch (`RAC_SANDBOX_POLICY` names the rendered policy) arms the sandbox at every
  * session start (ADR 0004): `bash` runs each command through the sandbox runtime with an
  * allowlisted environment, and one `tool_call` handler refuses file-tool paths the policy denies,
- * for calls a script makes as for the model's own. It fails closed: when the runtime cannot
+ * for calls a script makes as for the model's own; `read`, `write` and `edit` check again the file
+ * they opened, since a command running beside them can swap a link. It fails closed: when the runtime cannot
  * start, `bash` refuses with the reason and the path policy still applies.
  *
  * Launched as the Conductor (`RAC_ROLE`, ADR 0018), it adds Pi's MCP support with no configured
@@ -61,6 +63,7 @@ export default function rac(pi: ExtensionAPI): void {
   // the session's policy (unset until known: every file tool is refused meanwhile) and why its
   // runtime is not running, if it is not
   let policy: SandboxPolicy | undefined;
+  let cwd = process.cwd();
   let failure: string | undefined = 'the sandbox has not started';
   let tempDir: string | undefined;
   if (policyFile !== undefined) {
@@ -73,9 +76,13 @@ export default function rac(pi: ExtensionAPI): void {
         try { return await local.exec(wrapped, cwd, { ...options, env: commandEnv(options.env ?? process.env, policy.env) }); } finally { SandboxManager.cleanupAfterCommand(); }
       }
     };
-    // one at a time with the other tools, so no command can swap a file between the path policy's
-    // check and a file tool's use of it
+    // one at a time with the model's other tools; a command running beside a file tool anyway (a
+    // Watch's, or code mode's nested `bash`) meets the file tools' own checks
     pi.registerTool({ ...createBashToolDefinition(process.cwd(), { operations }), executionMode: 'sequential' });
+    const files = fileOperations(() => policy === undefined ? undefined : { policy, cwd });
+    pi.registerTool(createReadToolDefinition(process.cwd(), { operations: { readFile: files.readFile, access: path => access(path, constants.R_OK), detectImageMimeType: path => files.read(path, detectSupportedImageMimeTypeFromFile) } }));
+    pi.registerTool(createWriteToolDefinition(process.cwd(), { operations: { writeFile: files.writeFile, mkdir: files.mkdir } }));
+    pi.registerTool(createEditToolDefinition(process.cwd(), { operations: { readFile: files.readFile, writeFile: files.writeFile, access: path => access(path, constants.R_OK | constants.W_OK) } }));
     pi.on('tool_call', (event, ctx) => {
       if (policy === undefined) return { block: true, reason: `The sandbox policy is not loaded: ${failure}` };
       const reason = pathRefusal(event.toolName, event.input as Record<string, unknown>, ctx.cwd, policy);
@@ -88,6 +95,7 @@ export default function rac(pi: ExtensionAPI): void {
       try {
         if (tempDir !== undefined) rmSync(tempDir, { recursive: true, force: true });
         tempDir = mkdtempSync(join(tmpdir(), 'rac-pi-'));
+        cwd = ctx.cwd;
         policy = sessionPolicyFrom(policyFile, { cwd: ctx.cwd, stateDir: getAgentDir(), tempDir }, process.env);
         // the runtime points each command's TMPDIR here
         process.env.CLAUDE_CODE_TMPDIR = tempDir;
