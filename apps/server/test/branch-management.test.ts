@@ -27,10 +27,18 @@ type CleanupHead = (path: string, branch: string, sha: string, fresh: boolean, a
 
 // create one managed repository; its GitHub module names each checkout's origin after its path,
 // so a fake can act on the checkout while GitHub is asked
-async function repository(github?: { cleanupHead: CleanupHead; repositoryAt?: (path: string, fresh?: boolean) => Promise<{ owner: string; name: string } | undefined> }) {
+async function repository(github?: { cleanupHead: CleanupHead; repositoryAt?: (path: string, fresh?: boolean) => Promise<{ owner: string; name: string } | undefined>; batches?: string[][] }) {
   const pullRequests = github === undefined ? undefined : {
     repositoryAt: github.repositoryAt ?? (async (path: string) => ({ owner: path, name: 'origin' })),
-    cleanupHead: async ({ owner }: { owner: string }, branch: string, sha: string, { fresh = false, acceptAncestor = false } = {}) => await github.cleanupHead(owner, branch, sha, fresh, acceptAncestor)
+    cleanupHeads: async ({ owner }: { owner: string }, heads: readonly { branch: string; head: string }[], { fresh = false, acceptAncestor = false } = {}) => {
+      const statuses = new Map<string, PullRequestCleanupStatus>();
+      github.batches?.push(heads.map(({ branch }) => branch));
+      for (const { branch, head } of heads) {
+        const status = await github.cleanupHead(owner, branch, head, fresh, acceptAncestor);
+        if (status !== undefined) statuses.set(branch, status);
+      }
+      return statuses;
+    }
   };
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-branches-')));
   directories.push(root);
@@ -169,17 +177,10 @@ describe('guarded branch deletion', () => {
   });
 
   // large branch sets should be complete without unbounded remote fanout
-  it('bounds PR lookups and skips checked-out and default branches', async () => {
-    let active = 0;
-    let peak = 0;
-    const cleanupHead = vi.fn(async () => {
-      active += 1;
-      peak = Math.max(peak, active);
-      await new Promise(resolve => setTimeout(resolve, 5));
-      active -= 1;
-      return 'merged' as const;
-    });
-    const { root, service } = await repository({ cleanupHead });
+  it('asks GitHub about every inactive branch at once and skips checked-out and default branches', async () => {
+    const batches: string[][] = [];
+    const cleanupHead = vi.fn(async () => 'merged' as const);
+    const { root, service } = await repository({ cleanupHead, batches });
     const head = await unmergedFeature(root);
     // create enough inactive refs to require multiple batches
     for (let index = 0; index < 9; index += 1) await git(root, 'branch', `feature-${index}`, head);
@@ -188,9 +189,7 @@ describe('guarded branch deletion', () => {
     expect(candidates).toHaveLength(9);
     expect(candidates.map(candidate => candidate.branch)).not.toContain('feature-0');
     expect(candidates.map(candidate => candidate.branch)).not.toContain('main');
-    expect(cleanupHead).toHaveBeenCalledTimes(9);
-    expect(peak).toBeLessThanOrEqual(4);
-    expect(peak).toBeGreaterThan(1);
+    expect(batches).toEqual([Array.from({ length: 8 }, (_, index) => `feature-${index + 1}`).concat('feature').sort()]);
   });
 
   // recognize squash and release merges without relying on rewritten commit ancestry

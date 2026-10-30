@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PullRequestSwitchService } from '../src/pull-requests/switch-service.js';
 import { GithubService } from '../src/github/service.js';
+import { answer, graphqlGithub, reply, type GraphqlCall, type World } from './helpers/github-graphql.js';
 import type { ValidatedConfig } from '../src/config/schema.js';
 import type { GitCommand } from '../src/git/worktree-state.js';
 import type { AttentionState } from '../src/adapters/types.js';
@@ -1066,27 +1067,40 @@ describe('pull request switching', () => {
 
 describe('pull request switching over the GitHub module', () => {
   const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [] }) };
-  const pulled = (state: string, mergedAt: string | null) => [{ number: 9, title: 'Retries', state, draft: false, merged_at: mergedAt, html_url: 'https://github.com/octo/repo/pull/9' }];
-  // the real module over a scripted GitHub, for a checkout whose origin is octo/repo
-  const switching = (pulls: unknown, token: string | null = 'token') => new PullRequestSwitchService(config, discovery as never, new GithubService({
+  const pulled = (state: 'OPEN' | 'MERGED'): World => ({ 'octo/repo': { pulls: [{ number: 9, title: 'Retries', branch: state === 'OPEN' ? 'feature/retries' : 'feature/merged', state }] } });
+  // the real module over a scripted GitHub, for a checkout whose origin is octo/repo; `world` null
+  // has GitHub refuse every read
+  const switching = (world: World | null, token: string | null = 'token') => new PullRequestSwitchService(config, discovery as never, new GithubService({
     token: async () => token ?? undefined,
     command: async () => ({ code: 0, stdout: 'git@github.com:octo/repo.git\n' }),
-    request: async (url, init) => {
-      if (url.includes('/pulls?')) return { ok: true, status: 200, json: async () => pulls };
-      if (String(init?.body).includes('reviews(')) return { ok: true, status: 200, json: async () => ({ data: { repository: { pullRequest: { id: 'PR9', url: 'https://github.com/octo/repo/pull/9', reviewThreads: { nodes: [] }, reviews: { nodes: [] }, comments: { nodes: [] } } } } }) };
-      return { ok: false, status: 404, json: async () => ({ message: 'Not Found' }) };
+    request: async (_url, init) => {
+      if (world === null) return reply({ message: 'Not Found' }, 404);
+      if (String(init?.body).includes('reviews(')) return reply({ data: { repository: { pullRequest: { id: 'PR9', url: 'https://github.com/octo/repo/pull/9', reviewThreads: { nodes: [] }, reviews: { nodes: [] }, comments: { nodes: [] } } } } });
+      return reply(answer(world, JSON.parse(String(init?.body)) as GraphqlCall));
     }
   }), cleanCommand);
 
   it('reads the comments of the branch\'s open pull request, and refuses a branch without one', async () => {
-    await expect(switching(pulled('open', null)).commentsAt('/worktrees/cora', 'feature/retries')).resolves.toEqual({ number: 9, url: 'https://github.com/octo/repo/pull/9', threads: [], reviews: [], comments: [] });
-    await expect(switching([]).commentsAt('/worktrees/cora', 'feature/none')).rejects.toMatchObject({ statusCode: 404 });
-    await expect(switching(pulled('closed', '2026-10-01T00:00:00Z')).commentsAt('/worktrees/cora', 'feature/merged')).rejects.toMatchObject({ statusCode: 404 });
-    await expect(switching(pulled('open', null), null).commentsAt('/worktrees/cora', 'feature/retries')).rejects.toMatchObject({ statusCode: 503 });
+    await expect(switching(pulled('OPEN')).commentsAt('/worktrees/cora', 'feature/retries')).resolves.toEqual({ number: 9, url: 'https://github.com/octo/repo/pull/9', threads: [], reviews: [], comments: [] });
+    await expect(switching({ 'octo/repo': {} }).commentsAt('/worktrees/cora', 'feature/none')).rejects.toMatchObject({ statusCode: 404 });
+    await expect(switching(pulled('MERGED')).commentsAt('/worktrees/cora', 'feature/merged')).rejects.toMatchObject({ statusCode: 404 });
+    await expect(switching(pulled('OPEN'), null).commentsAt('/worktrees/cora', 'feature/retries')).rejects.toMatchObject({ statusCode: 503 });
+  });
+
+  it('reads a branch\'s pull request again when it is over a minute old, as an Agent waiting on CI needs', async () => {
+    let now = 0;
+    let checks: 'PENDING' | 'SUCCESS' = 'PENDING';
+    const scripted = graphqlGithub(() => ({ 'octo/repo': { pulls: [{ number: 9, branch: 'feature/ci', checks }] } }));
+    const service = new PullRequestSwitchService(config, discovery as never, new GithubService({ token: async () => 'token', now: () => now, command: async () => ({ code: 0, stdout: 'git@github.com:octo/repo.git\n' }), request: scripted.request }), cleanCommand);
+
+    await expect(service.pullRequestAt('/worktrees/cora', 'feature/ci')).resolves.toMatchObject({ number: 9, checks: 'pending' });
+    checks = 'SUCCESS';
+    now = 60_000;
+    await expect(service.pullRequestAt('/worktrees/cora', 'feature/ci')).resolves.toMatchObject({ number: 9, checks: 'passed' });
   });
 
   it('refuses the list when GitHub cannot give it, as before', async () => {
-    await expect(switching([], null).available(worktree.id)).rejects.toMatchObject({ statusCode: 503, message: 'GitHub authentication is not configured for pull request lookup.' });
-    await expect(switching([]).available(worktree.id)).rejects.toMatchObject({ statusCode: 502, message: 'GitHub could not identify the authenticated user (404): Not Found' });
+    await expect(switching({}, null).available(worktree.id)).rejects.toMatchObject({ statusCode: 503, message: 'GitHub authentication is not configured for pull request lookup.' });
+    await expect(switching(null).available(worktree.id)).rejects.toMatchObject({ statusCode: 502, message: 'GitHub could not read pull requests (404): Not Found' });
   });
 });

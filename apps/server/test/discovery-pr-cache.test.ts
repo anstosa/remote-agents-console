@@ -22,6 +22,7 @@ vi.mock('../src/git/comparison.js', async (importOriginal) => ({
 
 import { DiscoveryService } from '../src/discovery/service.js';
 import { GithubService } from '../src/github/service.js';
+import { answer, reply, type GraphqlCall } from './helpers/github-graphql.js';
 import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
 import { testProject } from './helpers/config.js';
 
@@ -55,11 +56,14 @@ function githubListing(listed: (repository: string) => ListedPullRequest | undef
     now: () => clock,
     token: async () => 'token',
     command: async (_binary, args) => ({ code: 0, stdout: `git@github.com:acme/${basename(args[args.indexOf('-C') + 1] ?? '')}.git\n` }),
-    request: async (url) => {
-      const repository = new URL(url).pathname.split('/')[3] ?? '';
-      const pull = url.includes('/pulls?') ? listed(repository) : undefined;
-      const body = !url.includes('/pulls?') ? {} : pull === undefined ? [] : [{ number: pull.number, title: pull.title, state: 'open', html_url: `https://github.com/acme/${repository}/pull/${pull.number}`, ...(pull.baseBranch === undefined ? {} : { base: { ref: pull.baseBranch } }) }];
-      return { ok: true, status: 200, json: async () => body };
+    request: async (_url, init) => {
+      const call = JSON.parse(String(init?.body)) as GraphqlCall;
+      const names = Object.keys(call.variables).filter(name => /^n\d+$/u.test(name)).map(name => String(call.variables[name]));
+      const world = Object.fromEntries(names.map(name => {
+        const pull = listed(name);
+        return [`acme/${name}`, { pulls: pull === undefined ? [] : [{ number: pull.number, title: pull.title, branch: 'feature/cache', base: pull.baseBranch ?? null }] }];
+      }));
+      return reply(answer(world, call));
     }
   });
 }
@@ -103,6 +107,36 @@ beforeEach(() => {
     const base = candidates.find(candidate => !unavailableBases.has(candidate));
     // all unavailable candidates produce no comparison
     return base === undefined ? undefined : { comparison: { base, files: 1, changes: [] }, gitBase: 'abc123' };
+  });
+});
+
+describe('DiscoveryService and the GitHub poll', () => {
+  it('reads a published branch\'s repository again after its origin ref moves, and never waits on GitHub', async () => {
+    const workspace = '/workspaces/pushed';
+    let remote = 'a'.repeat(40);
+    const calls: GraphqlCall[] = [];
+    git.run.mockImplementation(async (_binary: string, args: string[]) => {
+      if (args.includes('--show-toplevel')) return { code: 0, stdout: `${workspace}\n` };
+      if (args.includes('symbolic-ref')) return { code: 0, stdout: 'feature/cache\n' };
+      if (args.includes('for-each-ref')) return { code: 0, stdout: `refs/heads/feature/cache\t${'f'.repeat(40)}\t\nrefs/remotes/origin/feature/cache\t${remote}\t\n` };
+      return { code: 1, stdout: '' };
+    });
+    const github = new GithubService({ now: () => clock, token: async () => 'token', command: async () => ({ code: 0, stdout: 'git@github.com:acme/pushed.git\n' }), request: async (_url, init) => {
+      const call = JSON.parse(String(init?.body)) as GraphqlCall;
+      calls.push(call);
+      return reply(answer({ 'acme/pushed': {} }, call));
+    } });
+    const service = new DiscoveryService(socketFinder(), paneLister([]) as never, processInspector(), github, undefined, [testProject({ id: 'pushed', path: workspace })], undefined, async () => [worktree(workspace)]);
+
+    await service.dashboard(false, true);
+    await service.dashboard(false, true);
+    expect(calls).toHaveLength(0);
+    remote = 'b'.repeat(40);
+    service.invalidateWorktrees();
+    await service.dashboard(false, true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    // the published branch is in the repository's read; nothing else was asked
+    expect(calls.map(call => call.variables)).toEqual([{ o0: 'acme', n0: 'pushed', b0_0: 'feature/cache' }]);
   });
 });
 

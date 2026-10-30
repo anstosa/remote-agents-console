@@ -9672,6 +9672,11 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     let socket: WebSocket | undefined;
     let retry: number | undefined;
     let retryDelay = 500;
+    // tell the server whether this browser shows the console, so it polls GitHub only while one does
+    const reportVisibility = () => {
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ v: 1, type: 'visibility', visible: document.visibilityState === 'visible' }));
+    };
+    document.addEventListener('visibilitychange', reportVisibility);
     const reconnect = () => {
       if (closed || retry !== undefined) return;
       retry = window.setTimeout(() => {
@@ -9690,6 +9695,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
         if (closed || typeof payload.ticket !== 'string') return reconnect();
         const ws = new WebSocket(`${location.origin.replace(/^http/, 'ws')}/ws/dashboard`, ['rac', payload.ticket]);
         socket = ws;
+        ws.onopen = reportVisibility;
         ws.onmessage = event => {
           if (closed || socket !== ws) return;
           try {
@@ -9714,6 +9720,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     void connect();
     return () => {
       closed = true;
+      document.removeEventListener('visibilitychange', reportVisibility);
       dashboardPushSynchronized.current = false;
       dashboardPushFreshUntil.current = 0;
       if (retry !== undefined) window.clearTimeout(retry);

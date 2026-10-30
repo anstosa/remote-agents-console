@@ -23,6 +23,7 @@ import type { Project } from '../src/domain/models.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject } from './helpers/config.js';
 import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
+import { answer, reply, type GraphqlCall } from './helpers/github-graphql.js';
 
 const dirs: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); vi.restoreAllMocks(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -1981,17 +1982,18 @@ describe('the Conductor\'s dispatches', () => {
 
 describe('the Conductor\'s Watches', () => {
   // GitHub as a test scripts it: one pull request (#7 in octo/repo) and the review requests naming
-  // the token's user `me`, answered to the GraphQL queries Watches send; over REST, who `me` is
-  // (counted) and #7 as the repository's one open pull request
+  // the token's user `me`, answered to the GraphQL queries Watches send, and #7 as the repository's
+  // one open pull request to the module's reads; over REST, who `me` is (counted)
   function fakeGithub() {
     const pull = { state: 'OPEN', mergeable: 'MERGEABLE', head: 'a'.repeat(40), rollup: 'PENDING' as string | undefined, threads: [] as Array<{ id: string; resolved: boolean; author: string }> };
     const requests: Array<{ number: number; events: Array<{ id: string; login: string }> }> = [];
     const viewers: string[] = [];
     const request = async (url: string, init?: RequestInit) => {
       if (url.endsWith('/user')) { viewers.push(url); return { ok: true, status: 200, json: async () => ({ login: 'me' }) }; }
-      if (url.includes('/pulls?state=open')) return { ok: true, status: 200, json: async () => [{ number: 7, title: 'Watched', draft: false, user: { login: 'me' }, head: { ref: 'feature/watched', sha: pull.head, repo: { full_name: 'octo/repo' } } }] };
       if (init?.body === undefined) return { ok: false, status: 404, json: async () => ({ message: 'Not Found' }) };
-      const { query } = JSON.parse(String(init.body)) as { query: string };
+      const call = JSON.parse(String(init.body)) as GraphqlCall;
+      const { query } = call;
+      if (query.includes(':repository(')) return reply(answer({ 'octo/repo': { pulls: [{ number: 7, title: 'Watched', branch: 'feature/watched', sha: pull.head, mine: true }] } }, call));
       const data = query.includes('search(')
         ? { search: { nodes: requests.map(({ number, events }) => ({ number, url: `https://github.com/octo/repo/pull/${number}`, timelineItems: { nodes: events.map(({ id, login }) => ({ id, requestedReviewer: { login } })) } })) } }
         : { repository: { pullRequest: { state: pull.state, mergeable: pull.mergeable, url: 'https://github.com/octo/repo/pull/7', headRefOid: pull.head, commits: { nodes: [{ commit: { statusCheckRollup: pull.rollup === undefined ? null : { state: pull.rollup } } }] }, reviewThreads: { nodes: pull.threads.map(({ id, resolved, author }) => ({ id, isResolved: resolved, isOutdated: false, comments: { nodes: [{ author: { login: author } }] } })) } } } };

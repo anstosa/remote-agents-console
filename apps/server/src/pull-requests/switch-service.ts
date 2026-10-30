@@ -10,7 +10,7 @@ import { worktreeById, worktreeMatchesWorkspace } from '../workspaces/resolver.j
 import { agentAttentionState } from '../notifications.js';
 import { GithubService, forkCheckoutBranch, forkCheckoutNumber, problemError, type PullRequestChoice, type RepositoryPullRequests } from '../github/service.js';
 import { GithubRequestError, repositoryPath } from '../github/github.js';
-import type { PullRequestComments, Worktree } from '../domain/models.js';
+import type { PullRequestComments, PullRequestSummary, Worktree } from '../domain/models.js';
 
 // bound the local-branch list folded into the availability payload
 const maxSwitchableBranches = 200;
@@ -64,11 +64,12 @@ export class PullRequestSwitchService {
 
   // list one worktree's switchable pull requests and local branches, whether or not an agent runs there:
   // the repository-wide list with this worktree's live branch and switch readiness overlaid
-  async available(worktreeId: string, includeCommitSummaries = true): Promise<PullRequestSwitchAvailability | undefined> {
+  // `fresh` waits for pull requests under a minute old, as before checking one out
+  async available(worktreeId: string, includeCommitSummaries = true, fresh = false): Promise<PullRequestSwitchAvailability | undefined> {
     const worktree = worktreeById(this.discovery.worktreesNow(), worktreeId);
     if (worktree === undefined) return undefined;
     const head = await this.command('/usr/bin/git', ['-C', worktree.identity, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
-    const list = await this.repositoryList(worktree, head.code === 0 ? head.stdout.trim() : '', includeCommitSummaries);
+    const list = await this.repositoryList(worktree, head.code === 0 ? head.stdout.trim() : '', includeCommitSummaries, fresh);
     if (list === undefined) return undefined;
     // reflect git changes completed while remote and branch metadata were loading
     const enabled = await this.switchReady(worktree);
@@ -89,7 +90,7 @@ export class PullRequestSwitchService {
     this.branchMutationInProgress = true;
     try {
       const anchor = this.projectAnchor(projectId);
-      const list = anchor === undefined ? undefined : await this.repositoryList(anchor, undefined, false);
+      const list = anchor === undefined ? undefined : await this.repositoryList(anchor, undefined, false, true);
       if (anchor === undefined || list === undefined || !list.pullRequestsSupported) return { error: 'Pull requests are unavailable for this project.' };
       const pullRequest = this.checkoutCandidate(list, number);
       if ('error' in pullRequest) return pullRequest;
@@ -115,7 +116,7 @@ export class PullRequestSwitchService {
 
   // the repository-wide list, read through one checkout. A `currentBranch` ('' when detached) makes it
   // that checkout's own list: its live branch outranks cached ownership and is left off the local branches.
-  private async repositoryList(anchor: Worktree, currentBranch: string | undefined, includeCommitSummaries: boolean): Promise<RepositoryBranchList | undefined> {
+  private async repositoryList(anchor: Worktree, currentBranch: string | undefined, includeCommitSummaries: boolean, fresh = false): Promise<RepositoryBranchList | undefined> {
     const discoveredWorktrees = this.discovery.worktreesNow();
     // require one canonical repository identity, not merely a GitHub origin
     const repository = await this.repositoryIdentity(anchor.identity);
@@ -160,11 +161,11 @@ export class PullRequestSwitchService {
       branchOwners.set(branch, owner);
       checkedOut.set(branch, { worktreeId: candidate.id, worktreeName: candidate.label });
     }
-    // list pull requests only for a supported GitHub origin; a list GitHub could not give is refused, as before
+    // list pull requests only for a supported GitHub origin; a list GitHub never gave is refused, as before
     const origin = await this.github.repositoryAt(anchor.identity, true);
     const pullRequestsSupported = origin !== undefined;
-    const pullRequests: RepositoryPullRequests = origin === undefined ? { own: [], others: [] } : await this.github.repository(origin);
-    if (pullRequests.problem !== undefined) throw problemError(pullRequests.problem);
+    const pullRequests: RepositoryPullRequests = origin === undefined ? { own: [], others: [], issues: [] } : await this.github.repository(origin, { wait: fresh });
+    if (pullRequests.problem !== undefined && pullRequests.fetchedAt === undefined) throw problemError(pullRequests.problem);
     // apply worktree availability around each checkout branch; a pull request is also held by its
     // `pr-<number>` worktree and by a checkout of an earlier head of the same fork pull request
     const prFolders = discoveredWorktrees.filter(candidate => candidate.projectId === anchor.projectId && !candidate.main);
@@ -262,12 +263,18 @@ export class PullRequestSwitchService {
     return repository === undefined ? undefined : `https://github.com/${repositoryPath(repository)}/actions`;
   }
 
+  // the pull request of the branch checked out at one folder, refreshed when over a minute old
+  async pullRequestAt(checkout: string, branch: string): Promise<PullRequestSummary | undefined> {
+    const repository = await this.github.repositoryAt(checkout);
+    return repository === undefined ? undefined : (await this.github.branch(repository, branch, undefined, { wait: true })).pullRequest;
+  }
+
   // the comments on the open pull request of the branch checked out at one folder
   async commentsAt(checkout: string, branch: string | undefined): Promise<PullRequestComments> {
     const repository = await this.github.repositoryAt(checkout);
     if (repository === undefined) throw new GithubRequestError('The worktree does not have a supported GitHub origin.', 404);
-    // the branch has a pull request, so it is published
-    const { pullRequest } = branch ? await this.github.branch(repository, branch, true, { wait: true }) : {};
+    const { pullRequest, problem } = branch ? await this.github.branch(repository, branch, undefined, { wait: true }) : {};
+    if (pullRequest === undefined && problem !== undefined) throw problemError(problem);
     if (pullRequest === undefined || pullRequest.status === 'merged') throw new GithubRequestError('This branch has no open pull request.', 404);
     return await this.github.pullRequest(repository, pullRequest.number);
   }
@@ -277,7 +284,7 @@ export class PullRequestSwitchService {
     if (this.branchMutationInProgress) return { error: mutationInProgress };
     this.branchMutationInProgress = true;
     try {
-      const available = await this.available(worktreeId, false);
+      const available = await this.available(worktreeId, false, true);
       if (available === undefined) return { error: switchingUnavailable };
       const pullRequest = this.checkoutCandidate(available, number);
       if ('error' in pullRequest) return pullRequest;
@@ -329,7 +336,7 @@ export class PullRequestSwitchService {
     if (!Number.isInteger(number) || number < 1 || this.branchMutationInProgress) return 'unavailable';
     this.branchMutationInProgress = true;
     try {
-      const available = await this.available(worktreeId, false);
+      const available = await this.available(worktreeId, false, true);
       const pullRequest = [...(available?.pullRequests ?? []), ...(available?.otherPullRequests ?? [])].find(candidate => candidate.number === number);
       if (available === undefined || pullRequest === undefined) return 'unavailable';
       return await this.moveCheckedOutBranch(worktreeId, available.enabled, { branch: pullRequest.checkoutBranch, checkedOut: pullRequest.checkedOut, openIn: pullRequest.openIn });

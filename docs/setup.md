@@ -982,7 +982,7 @@ is ahead of or behind its upstream:
   It force-deletes the branch after the checkout is removed; if that delete
   fails, the removal still stands and the failure is reported.
 
-A Worktree whose pull request has merged or closed shows a **PR merged · Remove** or **PR closed · Remove** chip on its launcher row, read from GitHub each time the launcher opens. It only opens the Remove dialog above, with all its safeguards. The checkout's branch must still be checked out there and sit at the pull request's final head, or behind it (as when the author pushed more commits after the Worktree was created); a lookup failure offers nothing. For a fork pull request's `rac/pr/<number>/…` branch, the Remove dialog counts commits the fetched `refs/rac/pull/<number>` contains as pushed, since GitHub holds them.
+A Worktree whose pull request has merged or closed shows a **PR merged · Remove** or **PR closed · Remove** chip on its launcher row, from the console's GitHub data (read again when it is over a minute old). It only opens the Remove dialog above, with all its safeguards. The checkout's branch must still be checked out there and sit at the pull request's final head, or behind it (as when the author pushed more commits after the Worktree was created); a lookup failure offers nothing. For a fork pull request's `rac/pr/<number>/…` branch, the Remove dialog counts commits the fetched `refs/rac/pull/<number>` contains as pushed, since GitHub holds them.
 
 Removing a Worktree kills its idle shell, removes the checkout, and deletes its
 console records (pin, last-used kind, review tour). It never
@@ -1223,7 +1223,10 @@ silently replacing keys. Fix the stored file or legacy pair and retry.
 
 If a worktree has a GitHub `origin` remote and the host has GitHub CLI
 credentials (or `RAC_GITHUB_TOKEN`), the console can show a link to its open
-pull request. The lookup is read-only and its result is cached briefly. The
+pull request. The console reads GitHub once a minute while a browser shows it,
+and not at all while every browser is hidden; a pull request status asked for
+by an Agent, the cleanup scan and the launcher read just what they need when
+the data is over a minute old. The
 same credentials let a guided review of an All PR tour post its notes and
 comments to that pull request as your draft review (GitHub shows it as
 Pending), which you then finish on GitHub; that needs a token allowed to write

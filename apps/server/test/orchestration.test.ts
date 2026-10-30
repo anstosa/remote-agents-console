@@ -65,7 +65,7 @@ function dependencies(overrides: Partial<OrchestrationDependencies> = {}): Orche
       log: async () => undefined
     },
     workspaceFiles: { preview: async (_workspace, path) => ({ path, size: 12, binary: false, truncated: false, content: 'abcdefghijkl' }) },
-    pullRequests: { available: async () => ({ enabled: true, pullRequests: [] }), actionsUrl: async () => undefined, switch: async () => 'switched' as const },
+    pullRequests: { available: async () => ({ enabled: true, pullRequests: [] }), actionsUrl: async () => undefined, switch: async () => 'switched' as const, pullRequestAt: async () => undefined },
     newTasks: { available: async () => ({ enabled: true }), start: async () => true },
     loadInstances: async () => [{ id: config.publicOrigin.origin, name: config.name, url: config.publicOrigin.origin, local: true }, { id: 'https://remote.example.com', name: 'Remote', url: 'https://remote.example.com', local: false }],
     launchWorktree: async () => true,
@@ -133,6 +133,18 @@ describe('OrchestrationService', () => {
     await expect(unavailable.switchPullRequest({ agentId: activeAgent.id, number: 7 })).resolves.toMatchObject({ ok: false, error: { code: 'conflict' } });
     const busy = new OrchestrationService(dependencies({ pullRequests: { ...dependencies().pullRequests, switch: async () => 'busy' as const } }));
     await expect(busy.switchPullRequest({ agentId: activeAgent.id, number: 7 })).resolves.toMatchObject({ ok: false, error: { code: 'conflict' } });
+  });
+
+  // the dashboard serves the poll, which stops while no browser watches; an Agent waiting on CI must not read it stale
+  it('reports the current pull request read fresh, not as the dashboard last saw it', async () => {
+    const asked: string[][] = [];
+    const deps = dependencies({ pullRequests: { ...dependencies().pullRequests, pullRequestAt: async (checkout, branch) => { asked.push([checkout, branch]); return { number: 8, title: 'Fresh', status: 'open', url: 'https://github.com/octo/repo/pull/8', checks: 'passed' }; } } });
+    const dashboard = await deps.loadDashboard();
+    const agent = { ...dashboard.agents[0]!, branch: 'feature/ci', pullRequest: { number: 8, title: 'Fresh', status: 'open' as const, url: 'https://github.com/octo/repo/pull/8', checks: 'pending' as const } };
+    const service = new OrchestrationService({ ...deps, loadDashboard: async () => ({ ...dashboard, agents: [agent] }) });
+
+    await expect(service.pullRequestStatus(agent.id)).resolves.toMatchObject({ ok: true, value: { current: { number: 8, checks: 'passed' } } });
+    expect(asked).toEqual([[agent.home, 'feature/ci']]);
   });
 
   it('answers an inline question only for a hashed id and an in-range index', async () => {

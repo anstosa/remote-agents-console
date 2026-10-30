@@ -155,6 +155,14 @@ export class GithubClient {
     const response = await this.send(graphqlUrl, token, { method: 'POST', headers: { ...githubHeaders(token), 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables }) }, action, attempts, timeoutMs);
     const payload = await response.json().catch(() => undefined);
     if (payload === null || typeof payload !== 'object') throw new GithubRequestError(`${action}: GitHub returned invalid data.`, 502, response.status, 'transient');
+    const { data, errors } = payload as GraphqlPayload;
+    // a rate limit GitHub reports in a 200's errors holds requests back as a 403 or 429 does: until
+    // the reset the response named (already held), else for GitHub's minute
+    if ((data === null || data === undefined) && Array.isArray(errors) && errors.some(error => at(error, 'type') === 'RATE_LIMITED')) {
+      const held = this.holds.get(token) ?? 0;
+      const until = held > this.now() ? held : this.hold(token, this.now() + defaultRateLimitWaitMs);
+      throw new GithubRequestError(graphqlError(payload as GraphqlPayload, action).message, 502, response.status, 'transient', until);
+    }
     return payload as GraphqlPayload;
   }
 
@@ -200,7 +208,7 @@ export class GithubClient {
   }
 
   // record the budget a response reports, and hold back the token's requests after a 403 or 429
-  // that names a wait
+  // that names a wait, or until the reset after any answer that spent the last of a budget
   private observe(response: ResponseLike, token: string | undefined): number | undefined {
     const header = (name: string): number | undefined => {
       const value = response.headers?.get(name)?.trim();
@@ -208,7 +216,7 @@ export class GithubClient {
     };
     const [remaining, limit, reset] = [header('x-ratelimit-remaining'), header('x-ratelimit-limit'), header('x-ratelimit-reset')];
     if (remaining !== undefined && limit !== undefined && limit > 0 && reset !== undefined) this.budgets.set(response.headers?.get('x-ratelimit-resource') ?? 'core', { low: remaining < limit * 0.2, reset: reset * 1_000 });
-    if (response.status !== 403 && response.status !== 429) return undefined;
+    if (response.status !== 403 && response.status !== 429) return remaining === 0 && reset !== undefined ? this.hold(token, reset * 1_000) : undefined;
     const retryAfter = header('retry-after');
     const until = retryAfter !== undefined ? this.now() + retryAfter * 1_000 : remaining === 0 && reset !== undefined ? reset * 1_000 : response.status === 429 ? this.now() + defaultRateLimitWaitMs : undefined;
     return until === undefined ? undefined : this.hold(token, until);

@@ -2,8 +2,10 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { githubRepository, githubToken, hostsToken, type Request, type ResponseLike } from '../src/github/github.js';
+import { githubRepository, githubToken, hostsToken, type Request } from '../src/github/github.js';
 import { GithubService, type GithubServiceOptions } from '../src/github/service.js';
+import { testProject } from './helpers/config.js';
+import { answer, graphqlGithub, manualTimer, reply, settled, sha, type GraphqlCall, type World } from './helpers/github-graphql.js';
 
 // gh's multi-account hosts.yml: bob is github.com's active account, and another host has its own token
 const multiAccountHosts = `ghe.example.com:
@@ -22,11 +24,6 @@ other.example.com:
     oauth_token: gho_other
 `;
 const octo = { owner: 'octo', name: 'repo' };
-
-// one GitHub response, with any headers GitHub sends
-function reply(body: unknown, status = 200, headers: Record<string, string> = {}): ResponseLike {
-  return { ok: status >= 200 && status < 300, status, headers: new Headers(headers), json: async () => body };
-}
 
 // the module over a scripted GitHub, for a checkout whose origin is octo/repo
 function github(request: Request, options: GithubServiceOptions = {}): GithubService {
@@ -92,207 +89,413 @@ describe('GitHub origins', () => {
   });
 });
 
-describe('a branch\'s pull request summary', () => {
-  it('summarizes the branch\'s open pull request and serves it from cache', async () => {
-    const requests: string[] = [];
-    const service = github(async (url, init) => {
-      requests.push(url);
-      expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer private-token');
-      if (url.endsWith('/pulls/42')) return reply({ mergeable: true, mergeable_state: 'clean' });
-      if (url.endsWith('/graphql')) return reply({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } });
-      return reply([{ number: 42, title: 'Voice input', state: 'open', draft: false, merged_at: null, html_url: 'https://github.com/octo/repo/pull/42', base: { ref: 'staging' } }]);
-    }, { now: () => 1_000 });
-
-    const summary = { pullRequest: { number: 42, title: 'Voice input', status: 'open', url: 'https://github.com/octo/repo/pull/42', baseBranch: 'staging', checks: 'pending' }, fetchedAt: 1_000 };
-    await expect(service.branch(octo, 'feature/voice', true, { wait: true })).resolves.toEqual(summary);
-    await expect(service.branch(octo, 'feature/voice', true)).resolves.toEqual(summary);
-    expect(requests).toHaveLength(3);
-    // merged pull requests are found too
-    expect(new URL(requests[0]!).searchParams.get('state')).toBe('all');
-    expect(requests[0]).toContain('head=octo%3Afeature%2Fvoice');
+// the module over a scripted GraphQL world, with a hand-run timer and clock, whose Projects are
+// checkouts named after their repository (`/src/octo/repo` is octo/repo)
+function polled(world: World | (() => World), options: GithubServiceOptions & { repositories?: string[] } = {}) {
+  const clock = { now: 0 };
+  const scripted = graphqlGithub(world);
+  const timers = manualTimer();
+  const projects = (options.repositories ?? ['octo/repo']).map(name => testProject({ id: name.replace('/', '-'), path: `/src/${name}` }));
+  const service = new GithubService({
+    request: scripted.request,
+    command: async (_binary, args) => ({ code: 0, stdout: `git@github.com:${args[args.indexOf('-C') + 1]!.slice('/src/'.length)}.git\n` }),
+    token: async () => 'private-token',
+    now: () => clock.now,
+    timer: timers.timer,
+    projects: () => projects,
+    ...options
   });
+  return { service, calls: scripted.calls, timers, clock };
+}
 
-  it('answers at once while the first lookup runs, and with the summary after it', async () => {
-    const service = github(async () => reply([
-      { number: 40, title: 'Closed without merge', state: 'closed', draft: false, merged_at: null, html_url: 'https://github.com/octo/repo/pull/40' },
-      { number: 41, title: 'Merged work', state: 'closed', draft: false, merged_at: '2026-07-28T20:00:00Z', html_url: 'https://github.com/octo/repo/pull/41' }
-    ]));
+// the repositories, lists and branches one GraphQL read asked for
+function asked({ query, variables }: GraphqlCall): { repositories: string[]; lists: number; branches: unknown[] } {
+  const repositories = Object.keys(variables).filter(name => /^o\d+$/u.test(name)).map(name => `${String(variables[name])}/${String(variables[`n${name.slice(1)}`])}`);
+  return { repositories, lists: query.match(/open:pullRequests\(/gu)?.length ?? 0, branches: Object.keys(variables).filter(name => /^b\d+_\d+$/u.test(name)).map(name => variables[name]) };
+}
 
-    await expect(service.branch(octo, 'feature/card', true)).resolves.toEqual({});
-    await new Promise(resolve => setTimeout(resolve, 0));
-    await expect(service.branch(octo, 'feature/card', true)).resolves.toMatchObject({ pullRequest: { number: 41, title: 'Merged work', status: 'merged', url: 'https://github.com/octo/repo/pull/41', checks: 'pending' } });
-  });
+describe('the poll', () => {
+  it('sends nothing while no browser watches, and polls at once and every minute while one does', async () => {
+    const { service, calls, timers, clock } = polled({ 'octo/repo': {} });
+    await settled();
+    expect(timers.delays()).toEqual([]);
+    expect(calls).toHaveLength(0);
 
-  it('reports merge conflicts, failing checks, and unresolved current review threads', async () => {
-    const sha = 'a'.repeat(40);
-    const service = github(async (url) => {
-      if (url.includes('/pulls?')) return reply([{ number: 77, title: 'Needs attention', state: 'open', draft: false, merged_at: null, html_url: 'https://github.com/octo/repo/pull/77', head: { sha } }]);
-      if (url.endsWith('/pulls/77')) return reply({ mergeable: false, mergeable_state: 'dirty' });
-      if (url.includes('/check-runs')) return reply({ check_runs: [{ conclusion: 'failure' }, { conclusion: 'success' }] });
-      if (url.endsWith('/status')) return reply({ state: 'success' });
-      if (url.endsWith('/graphql')) return reply({ data: { repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: false, isOutdated: false }, { isResolved: false, isOutdated: true }, { isResolved: true, isOutdated: false }] } } } } });
-      return reply({}, 404);
-    });
+    const release = service.watch();
+    expect(timers.delays()).toEqual([0]);
+    await timers.fire();
+    expect(calls).toHaveLength(1);
+    expect(timers.delays()).toEqual([60_000]);
+    clock.now = 60_000;
+    await timers.fire();
+    expect(calls).toHaveLength(2);
 
-    await expect(service.branch(octo, 'feature/fixup', true, { wait: true })).resolves.toMatchObject({ pullRequest: {
-      number: 77,
-      checks: 'failed',
-      issues: { mergeConflicts: true, failingChecks: true, unresolvedComments: true },
-      unresolvedThreads: 1
-    } });
-  });
-
-  it('refreshes a summary after sixty seconds', async () => {
-    const sha = 'b'.repeat(40);
-    let now = 0;
-    let pending = true;
-    const service = github(async (url) => {
-      if (url.includes('/pulls?')) return reply([{ number: 78, title: 'CI state', state: 'open', draft: false, merged_at: null, html_url: 'https://github.com/octo/repo/pull/78', head: { sha } }]);
-      if (url.endsWith('/pulls/78')) return reply({ mergeable: true, mergeable_state: 'clean' });
-      if (url.includes('/check-runs')) return reply({ check_runs: [{ status: pending ? 'in_progress' : 'completed', conclusion: pending ? null : 'success' }] });
-      if (url.endsWith('/status')) return reply({ statuses: [{ state: 'success' }] });
-      if (url.endsWith('/graphql')) return reply({ data: { repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: false, isOutdated: false }] } } } } });
-      return reply({}, 404);
-    }, { now: () => now });
-
-    await expect(service.branch(octo, 'feature/ci', true, { wait: true })).resolves.toMatchObject({ pullRequest: { checks: 'pending', issues: { unresolvedComments: true } } });
-    pending = false;
-    now = 59_999;
-    await expect(service.branch(octo, 'feature/ci', true, { wait: true })).resolves.toMatchObject({ pullRequest: { checks: 'pending' }, fetchedAt: 0 });
-    now = 60_000;
-    await expect(service.branch(octo, 'feature/ci', true, { wait: true })).resolves.toMatchObject({ pullRequest: { checks: 'passed', issues: { unresolvedComments: true } }, fetchedAt: 60_000 });
-  });
-
-  it('does not expose an untrusted PR URL', async () => {
-    const service = github(async () => reply([{ number: 42, title: 'Untrusted', state: 'open', draft: false, merged_at: null, html_url: 'https://example.com/pull/42' }]));
-    await expect(service.branch(octo, 'feature', true, { wait: true })).resolves.toEqual({ fetchedAt: expect.any(Number) });
-  });
-
-  it('prefers a current draft over an older merged pull request for the branch', async () => {
-    const service = github(async () => reply([
-      { number: 12, title: 'Previous merge', state: 'closed', draft: false, merged_at: '2026-07-20T20:00:00Z', html_url: 'https://github.com/octo/repo/pull/12' },
-      { number: 13, title: 'Current draft', state: 'open', draft: true, merged_at: null, html_url: 'https://github.com/octo/repo/pull/13' }
-    ]));
-
-    await expect(service.branch(octo, 'feature/draft', true, { wait: true })).resolves.toMatchObject({ pullRequest: { number: 13, title: 'Current draft', status: 'draft', url: 'https://github.com/octo/repo/pull/13', checks: 'pending' } });
-  });
-
-  it('keeps the last summary beside the problem when GitHub fails', async () => {
-    let now = 0;
-    let failing = false;
-    const service = github(async (url) => {
-      if (failing) return reply({ message: 'Server Error' }, 500);
-      return url.includes('/pulls?') ? reply([{ number: 9, title: 'Retries', state: 'open', draft: false, merged_at: null, html_url: 'https://github.com/octo/repo/pull/9' }]) : reply({}, 404);
-    }, { now: () => now });
-
-    await service.branch(octo, 'feature/retries', true, { wait: true });
-    failing = true;
-    now = 60_000;
-    await expect(service.branch(octo, 'feature/retries', true, { wait: true })).resolves.toEqual({
-      pullRequest: expect.objectContaining({ number: 9 }),
-      fetchedAt: 0,
-      problem: { kind: 'failing', message: 'GitHub could not look up the branch\'s pull request (500): Server Error' }
-    });
-  });
-
-  it('refreshes the summaries of a pull request another writer changed', async () => {
-    const lookups: string[] = [];
-    const service = github(async (url) => {
-      if (!url.includes('/pulls?')) return reply({}, 404);
-      const branch = new URL(url).searchParams.get('head')!.split(':')[1]!;
-      lookups.push(branch);
-      const number = branch === 'feature/posted' ? 5 : 6;
-      return reply([{ number, title: branch, state: 'open', draft: false, merged_at: null, html_url: `https://github.com/octo/repo/pull/${number}` }]);
-    });
-    await service.branch(octo, 'feature/posted', true, { wait: true });
-    await service.branch(octo, 'feature/other', true, { wait: true });
-
-    service.changed(octo, 5);
-    await service.branch(octo, 'feature/posted', true, { wait: true });
-    await service.branch(octo, 'feature/other', true, { wait: true });
-
-    expect(lookups).toEqual(['feature/posted', 'feature/other', 'feature/posted']);
-  });
-
-  it('does not let a lookup that began before a change stand for the changed pull request', async () => {
-    let release!: () => void;
-    const held = new Promise<void>(resolve => { release = resolve; });
-    let lookups = 0;
-    let now = 0;
-    const service = github(async (url) => {
-      if (!url.includes('/pulls?')) return reply({}, 404);
-      lookups += 1;
-      if (lookups === 2) await held;
-      return reply([{ number: 5, title: `Lookup ${lookups}`, state: 'open', draft: false, merged_at: null, html_url: 'https://github.com/octo/repo/pull/5' }]);
-    }, { now: () => now });
-    await service.branch(octo, 'feature/posted', true, { wait: true });
-
-    now = 60_000;
-    const stale = service.branch(octo, 'feature/posted', true, { wait: true });
-    await new Promise(resolve => setTimeout(resolve, 0));
-    service.changed(octo, 5);
     release();
-    await stale;
+    expect(timers.delays()).toEqual([]);
+    // releasing twice does not release someone else's handle
+    const other = service.watch();
+    release();
+    expect(timers.delays()).toHaveLength(1);
+    other();
+    expect(timers.delays()).toEqual([]);
+  });
 
-    await expect(service.branch(octo, 'feature/posted', true, { wait: true })).resolves.toMatchObject({ pullRequest: { title: 'Lookup 3' } });
+  it('keeps one schedule for many watchers', async () => {
+    const { service, calls, timers } = polled({ 'octo/repo': {} });
+    const first = service.watch();
+    service.watch();
+    expect(timers.delays()).toEqual([0]);
+    await timers.fire();
+    expect(calls).toHaveLength(1);
+    first();
+    expect(timers.delays()).toEqual([60_000]);
+  });
+
+  it('schedules nothing after a poll the last browser left while it ran', async () => {
+    let answer: () => void = () => undefined;
+    const answered = new Promise<void>(resolve => { answer = resolve; });
+    const scripted = graphqlGithub({ 'octo/repo': {} });
+    const { service, timers } = polled({}, { request: async (url, init) => { await answered; return await scripted.request(url, init); } });
+    const release = service.watch();
+    await timers.fire();
+    release();
+    answer();
+    await settled();
+    expect(scripted.calls.length + scripted.searches.length).toBe(2);
+    expect(timers.delays()).toEqual([]);
+  });
+
+  it('fires as soon as a browser returns after the data has aged', async () => {
+    const { service, calls, timers, clock } = polled({ 'octo/repo': {} });
+    const release = service.watch();
+    await timers.fire();
+    release();
+    clock.now = 20_000;
+    const again = service.watch();
+    // the poll from 20s ago is still fresh: the next one keeps its minute
+    expect(timers.delays()).toEqual([40_000]);
+    again();
+    clock.now = 90_000;
+    service.watch();
+    expect(timers.delays()).toEqual([0]);
+    await timers.fire();
+    expect(calls).toHaveLength(2);
+  });
+
+  it('polls every Project\'s open pull requests and issues, and each tracked published branch, in one read', async () => {
+    const { service, calls, timers } = polled({ 'octo/repo': {}, 'octo/tools': {}, 'acme/other': {} }, { repositories: ['octo/repo', 'octo/tools'] });
+    await service.branch({ owner: 'octo', name: 'repo' }, 'feature/pushed', true);
+    await service.branch({ owner: 'octo', name: 'repo' }, 'feature/local', false);
+    await service.branch({ owner: 'acme', name: 'other' }, 'fix', true);
+    await service.branch({ owner: 'octo', name: 'repo' }, `rac/pr/42/${sha('c').slice(0, 12)}`, false);
+    service.watch();
+    await timers.fire();
+
+    expect(calls).toHaveLength(1);
+    expect(asked(calls[0]!)).toEqual({ repositories: ['octo/repo', 'octo/tools', 'acme/other'], lists: 3, branches: ['feature/pushed', 42, 'fix'] });
+    expect(calls[0]!.query).toContain('issues(states:OPEN');
+    expect(calls[0]!.query).toContain('closingIssuesReferences');
+  });
+
+  it('stops polling a branch ten minutes after its last read', async () => {
+    const { service, calls, timers, clock } = polled({ 'octo/repo': {} });
+    await service.branch(octo, 'feature/old', true);
+    service.watch();
+    await timers.fire();
+    clock.now = 599_999;
+    await timers.fire();
+    clock.now = 600_000;
+    await timers.fire();
+    expect(calls.map(call => asked(call).branches)).toEqual([['feature/old'], ['feature/old'], []]);
+  });
+
+  it('polls half as often while a budget is below 20%', async () => {
+    const { service, timers } = polled({}, { request: async () => reply({ data: {} }, 200, { 'x-ratelimit-remaining': '999', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '3600' }) });
+    service.watch();
+    await timers.fire();
+    expect(timers.delays()).toEqual([120_000]);
+  });
+
+  it('moves the revision when the data changes, and only then', async () => {
+    let title = 'First';
+    const { service, timers, clock } = polled(() => ({ 'octo/repo': { pulls: [{ number: 1, branch: 'feature', title }] } }));
+    const start = service.revision;
+    service.watch();
+    await timers.fire();
+    const polledOnce = service.revision;
+    expect(polledOnce).toBeGreaterThan(start);
+    clock.now = 60_000;
+    await timers.fire();
+    expect(service.revision).toBe(polledOnce);
+    title = 'Renamed';
+    clock.now = 120_000;
+    await timers.fire();
+    expect(service.revision).toBeGreaterThan(polledOnce);
   });
 });
 
-describe('a repository\'s open pull requests', () => {
-  it('lists the viewer\'s own pull requests, with their status, apart from others\'', async () => {
-    const sha = 'c'.repeat(40);
-    const service = github(async (url) => {
-      if (url.endsWith('/user')) return reply({ login: 'me' });
-      if (url.endsWith('/pulls/7')) return reply({ mergeable: false, mergeable_state: 'dirty' });
-      if (url.includes('/check-runs')) return reply({ check_runs: [{ status: 'completed', conclusion: 'failure' }] });
-      if (url.endsWith('/status')) return reply({ statuses: [] });
-      if (url.endsWith('/graphql')) return reply({ data: { repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: false, isOutdated: false }] } } } } });
-      return reply([
-        { number: 7, title: 'Draft work', draft: true, html_url: 'https://github.com/octo/repo/pull/7', user: { login: 'me' }, head: { ref: 'feature/draft', sha, repo: { full_name: 'octo/repo' } } },
-        { number: 8, title: 'Other user', draft: false, html_url: 'https://attacker@github.com/wrong/repo/pull/999', user: { login: 'someone-else' }, head: { ref: 'feature/other', sha: 'd'.repeat(40), repo: { full_name: 'contributor/repo' } } }
-      ]);
-    }, { now: () => 5 });
+describe('a repository\'s open pull requests and issues', () => {
+  const world: World = { 'octo/repo': {
+    pulls: [
+      { number: 7, branch: 'feature/draft', title: 'Draft work', draft: true, mine: true, sha: sha('c'), mergeable: 'CONFLICTING', checks: 'FAILURE', threads: [{ isResolved: false, isOutdated: false }] },
+      { number: 8, branch: 'feature/other', title: 'Other user', head: 'contributor/repo', sha: sha('d') },
+      { number: 9, branch: 'gone', state: 'MERGED' }
+    ],
+    issues: [{ number: 3, title: 'Crash on start' }]
+  } };
+
+  it('serves the poll\'s lists without asking GitHub, the viewer\'s own apart from others\'', async () => {
+    const { service, calls, timers } = polled(world);
+    service.watch();
+    await timers.fire();
 
     await expect(service.repository(octo)).resolves.toEqual({
-      own: [{ number: 7, title: 'Draft work', draft: true, url: 'https://github.com/octo/repo/pull/7', branch: 'feature/draft', headSha: sha, headOnOrigin: true, checks: 'failed', issues: { mergeConflicts: true, failingChecks: true, unresolvedComments: true } }],
-      others: [{ number: 8, title: 'Other user', draft: false, url: 'https://github.com/octo/repo/pull/8', branch: 'feature/other', headSha: 'd'.repeat(40), headOnOrigin: false }],
-      fetchedAt: 5
+      own: [{ number: 7, title: 'Draft work', draft: true, url: 'https://github.com/octo/repo/pull/7', branch: 'feature/draft', headSha: sha('c'), headOnOrigin: true, checks: 'failed', issues: { mergeConflicts: true, failingChecks: true, unresolvedComments: true } }],
+      others: [{ number: 8, title: 'Other user', draft: false, url: 'https://github.com/octo/repo/pull/8', branch: 'feature/other', headSha: sha('d'), headOnOrigin: false }],
+      issues: [{ number: 3, title: 'Crash on start', url: 'https://github.com/octo/repo/issues/3' }],
+      fetchedAt: 0
     });
+    expect(calls).toHaveLength(1);
   });
 
-  it('reports a failed viewer lookup as a problem and looks the viewer up again next time', async () => {
-    let viewerRequests = 0;
-    const service = github(async (url) => {
-      // fail one complete retry cycle
-      if (url.endsWith('/user') && ++viewerRequests <= 3) return reply({ message: 'GitHub is temporarily unavailable.' }, 503);
-      if (url.endsWith('/user')) return reply({ login: 'me' });
-      return reply([]);
-    });
+  it('waits on GitHub only for a repository it never read, and then for that repository alone', async () => {
+    const { service, calls } = polled({ ...world, 'acme/other': {} }, { repositories: ['octo/repo', 'acme/other'] });
+    await service.branch(octo, 'feature/draft', true);
+    await service.branch({ owner: 'acme', name: 'other' }, 'fix', true);
 
-    await expect(service.repository(octo)).resolves.toEqual({ own: [], others: [], problem: { kind: 'failing', message: 'GitHub could not identify the authenticated user (503): GitHub is temporarily unavailable.' } });
-    await expect(service.repository(octo)).resolves.toEqual({ own: [], others: [], fetchedAt: expect.any(Number) });
-    expect(viewerRequests).toBe(4);
+    await expect(service.repository(octo)).resolves.toMatchObject({ own: [{ number: 7 }], fetchedAt: 0 });
+    expect(calls.map(asked)).toEqual([{ repositories: ['octo/repo'], lists: 1, branches: ['feature/draft'] }]);
+  });
+
+  it('answers with the old lists at once after a minute, and refreshes them behind', async () => {
+    let title = 'Draft work';
+    const { service, calls, clock } = polled(() => ({ 'octo/repo': { pulls: [{ number: 7, branch: 'feature/draft', title, mine: true }] } }));
+    await service.repository(octo);
+    title = 'Renamed';
+    clock.now = 59_999;
+    await expect(service.repository(octo)).resolves.toMatchObject({ own: [{ title: 'Draft work' }] });
+    expect(calls).toHaveLength(1);
+    clock.now = 60_000;
+    await expect(service.repository(octo)).resolves.toMatchObject({ own: [{ title: 'Draft work' }], fetchedAt: 0 });
+    await settled();
+    await expect(service.repository(octo)).resolves.toMatchObject({ own: [{ title: 'Renamed' }], fetchedAt: 60_000 });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('waits for lists under a minute old when the reader is about to act on them', async () => {
+    let title = 'Draft work';
+    const { service, clock } = polled(() => ({ 'octo/repo': { pulls: [{ number: 7, branch: 'feature/draft', title, mine: true }] } }));
+    await service.repository(octo);
+    title = 'Renamed';
+    clock.now = 60_000;
+    await expect(service.repository(octo, { wait: true })).resolves.toMatchObject({ own: [{ title: 'Renamed' }], fetchedAt: 60_000 });
   });
 
   it('reports a missing token without asking GitHub', async () => {
-    let requests = 0;
-    const service = github(async () => { requests += 1; return reply([]); }, { token: async () => undefined });
+    const { service, calls } = polled(world, { token: async () => undefined });
 
-    await expect(service.repository(octo)).resolves.toEqual({ own: [], others: [], problem: { kind: 'no-token', message: 'GitHub authentication is not configured for pull request lookup.' } });
-    expect(requests).toBe(0);
+    await expect(service.repository(octo)).resolves.toEqual({ own: [], others: [], issues: [], problem: { kind: 'no-token', message: 'GitHub authentication is not configured for pull request lookup.' } });
+    expect(calls).toHaveLength(0);
   });
 
   it('keeps the last lists beside the problem when GitHub fails', async () => {
     let failing = false;
-    const service = github(async (url) => {
-      if (url.endsWith('/user')) return reply({ login: 'me' });
-      if (failing) return reply({ message: 'Server Error' }, 502);
-      return reply([{ number: 8, title: 'Other user', draft: false, user: { login: 'someone-else' }, head: { ref: 'feature/other', sha: 'd'.repeat(40), repo: { full_name: 'octo/repo' } } }]);
-    }, { now: () => 7 });
-
+    const scripted = graphqlGithub(world);
+    const { service, clock } = polled(world, { request: async (url, init) => failing ? reply({ message: 'Server Error' }, 502) : await scripted.request(url, init) });
     await service.repository(octo);
     failing = true;
-    await expect(service.repository(octo)).resolves.toMatchObject({ others: [{ number: 8 }], fetchedAt: 7, problem: { kind: 'failing' } });
+    clock.now = 60_000;
+    await service.repository(octo);
+    await settled();
+    await expect(service.repository(octo)).resolves.toMatchObject({ others: [{ number: 8 }], fetchedAt: 0, problem: { kind: 'failing' } });
+  });
+
+  it('reports a repository GitHub does not show as a problem, without losing the others', async () => {
+    const { service, timers } = polled({ 'octo/repo': world['octo/repo']! }, { repositories: ['octo/repo', 'octo/private'] });
+    service.watch();
+    await timers.fire();
+
+    await expect(service.repository(octo)).resolves.toMatchObject({ own: [{ number: 7 }], fetchedAt: 0 });
+    await expect(service.repository({ owner: 'octo', name: 'private' })).resolves.toMatchObject({ own: [], problem: { kind: 'failing' } });
+  });
+});
+
+describe('a branch\'s pull request summary', () => {
+  it('never asks GitHub for a read that does not wait, however old its data', async () => {
+    const { service, calls, clock } = polled({ 'octo/repo': {} });
+    await expect(service.branch(octo, 'feature', true)).resolves.toEqual({});
+    clock.now = 3_600_000;
+    await service.branch(octo, 'feature', true, { remoteHead: sha('a') });
+    await settled();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('summarizes an open pull request from the poll, with conflicts, failing checks and unresolved current threads', async () => {
+    const { service, timers } = polled({ 'octo/repo': { pulls: [
+      { number: 77, branch: 'feature/fixup', title: 'Needs attention', base: 'staging', mergeable: 'CONFLICTING', checks: 'FAILURE', threads: [{ isResolved: false, isOutdated: false }, { isResolved: false, isOutdated: true }, { isResolved: true, isOutdated: false }] }
+    ] } });
+    await service.branch(octo, 'feature/fixup', true);
+    service.watch();
+    await timers.fire();
+
+    await expect(service.branch(octo, 'feature/fixup', true)).resolves.toEqual({ pullRequest: {
+      number: 77, title: 'Needs attention', status: 'open', url: 'https://github.com/octo/repo/pull/77', baseBranch: 'staging', checks: 'failed',
+      issues: { mergeConflicts: true, failingChecks: true, unresolvedComments: true },
+      unresolvedThreads: 1
+    }, fetchedAt: 0 });
+  });
+
+  it('matches an unpublished branch\'s open pull request from its Project\'s list', async () => {
+    const { service, calls, timers } = polled({ 'octo/repo': { pulls: [{ number: 5, branch: 'feature/local', checks: 'PENDING' }] } });
+    await service.branch(octo, 'feature/local', false);
+    service.watch();
+    await timers.fire();
+
+    expect(asked(calls[0]!).branches).toEqual([]);
+    await expect(service.branch(octo, 'feature/local', false)).resolves.toMatchObject({ pullRequest: { number: 5, status: 'open', checks: 'pending' } });
+  });
+
+  it.each([
+    ['a merged pull request', [{ number: 41, branch: 'feature', state: 'MERGED' as const, checks: null }], { number: 41, status: 'merged', checks: 'passed' }],
+    ['nothing for one closed without merging', [{ number: 40, branch: 'feature', state: 'CLOSED' as const }], undefined],
+    ['a current draft over an older merge', [{ number: 12, branch: 'feature', state: 'MERGED' as const }, { number: 13, branch: 'feature', draft: true, checks: 'PENDING' as const }], { number: 13, status: 'draft', checks: 'pending' }],
+    ['nothing for a fork\'s branch of the same name', [{ number: 14, branch: 'feature', head: 'someone/repo' }], undefined],
+    ['nothing for an untrusted URL', [{ number: 15, branch: 'feature', url: 'https://example.com/pull/15' }], undefined]
+  ])('shows %s', async (_name, pulls, expected) => {
+    const { service, timers } = polled({ 'octo/repo': { pulls } });
+    await service.branch(octo, 'feature', true);
+    service.watch();
+    await timers.fire();
+
+    const { pullRequest } = await service.branch(octo, 'feature', true);
+    if (expected === undefined) expect(pullRequest).toBeUndefined(); else expect(pullRequest).toMatchObject(expected);
+  });
+
+  it('falls back on the open list when GitHub has more pull requests for the name than it gave', async () => {
+    const forks = Array.from({ length: 20 }, (_, index) => ({ number: 100 + index, branch: 'patch-1', head: `fork${index}/repo` }));
+    const { service, timers } = polled({ 'octo/repo': { pulls: [{ number: 5, branch: 'patch-1' }, ...forks] } });
+    await service.branch(octo, 'patch-1', true);
+    service.watch();
+    await timers.fire();
+
+    await expect(service.branch(octo, 'patch-1', true)).resolves.toMatchObject({ pullRequest: { number: 5, status: 'open' } });
+  });
+
+  it('finds a fork checkout\'s pull request by its number', async () => {
+    const { service, timers } = polled({ 'octo/repo': { pulls: [{ number: 42, branch: 'contributor-branch', head: 'someone/fork', state: 'MERGED' }] } });
+    const fork = `rac/pr/42/${sha('a').slice(0, 12)}`;
+    await service.branch(octo, fork, false);
+    service.watch();
+    await timers.fire();
+
+    await expect(service.branch(octo, fork, false)).resolves.toMatchObject({ pullRequest: { number: 42, status: 'merged' } });
+  });
+
+  it('refreshes just that branch on a waiting read older than a minute', async () => {
+    let checks: 'PENDING' | 'SUCCESS' = 'PENDING';
+    const { service, calls, clock } = polled(() => ({ 'octo/repo': { pulls: [{ number: 78, branch: 'feature/ci', checks, threads: [{ isResolved: false, isOutdated: false }] }] } }));
+    await service.branch(octo, 'feature/other', true);
+
+    await expect(service.branch(octo, 'feature/ci', true, { wait: true })).resolves.toMatchObject({ pullRequest: { checks: 'pending', unresolvedThreads: 1 }, fetchedAt: 0 });
+    checks = 'SUCCESS';
+    clock.now = 59_999;
+    await expect(service.branch(octo, 'feature/ci', true, { wait: true })).resolves.toMatchObject({ pullRequest: { checks: 'pending' }, fetchedAt: 0 });
+    clock.now = 60_000;
+    await expect(service.branch(octo, 'feature/ci', true, { wait: true })).resolves.toMatchObject({ pullRequest: { checks: 'passed', unresolvedThreads: 1 }, fetchedAt: 60_000 });
+    expect(calls.map(asked)).toEqual([{ repositories: ['octo/repo'], lists: 0, branches: ['feature/ci'] }, { repositories: ['octo/repo'], lists: 0, branches: ['feature/ci'] }]);
+  });
+
+  it('refreshes an unpublished branch through its repository\'s list, never by name', async () => {
+    const { service, calls } = polled({ 'octo/repo': { pulls: [{ number: 5, branch: 'feature/local' }] } });
+
+    await expect(service.branch(octo, 'feature/local', false, { wait: true })).resolves.toMatchObject({ pullRequest: { number: 5 } });
+    expect(calls.map(asked)).toEqual([{ repositories: ['octo/repo'], lists: 1, branches: [] }]);
+  });
+
+  it('keeps what the dashboard last said about publication when a reader does not know', async () => {
+    const { service, calls } = polled({ 'octo/repo': {} });
+    await service.branch(octo, 'feature/local', false);
+
+    await service.branch(octo, 'feature/local', undefined, { wait: true });
+    expect(asked(calls[0]!)).toMatchObject({ lists: 1, branches: [] });
+  });
+
+  it('keeps the last summary beside the problem when GitHub fails', async () => {
+    let failing = false;
+    const scripted = graphqlGithub({ 'octo/repo': { pulls: [{ number: 9, branch: 'feature/retries' }] } });
+    const { service, clock } = polled({}, { request: async (url, init) => failing ? reply({ message: 'Server Error' }, 500) : await scripted.request(url, init) });
+    await service.branch(octo, 'feature/retries', true, { wait: true });
+    failing = true;
+    clock.now = 60_000;
+
+    await expect(service.branch(octo, 'feature/retries', true, { wait: true })).resolves.toEqual({
+      pullRequest: expect.objectContaining({ number: 9 }),
+      fetchedAt: 0,
+      problem: { kind: 'failing', message: 'GitHub could not read pull requests (500): Server Error' }
+    });
+  });
+
+  it('refreshes the repository when a tracked branch\'s remote ref moves', async () => {
+    const { service, calls } = polled({ 'octo/repo': {} });
+    await service.branch(octo, 'feature', true, { remoteHead: sha('a') });
+    await service.branch(octo, 'feature', true, { remoteHead: sha('a') });
+    await settled();
+    expect(calls).toHaveLength(0);
+
+    await service.branch(octo, 'feature', true, { remoteHead: sha('b') });
+    await settled();
+    expect(calls.map(asked)).toEqual([{ repositories: ['octo/repo'], lists: 1, branches: ['feature'] }]);
+  });
+
+  it('reads two checkouts of one branch, fetched at different times, as one push at most', async () => {
+    const { service, calls } = polled({ 'octo/repo': {} });
+    for (let tick = 0; tick < 3; tick += 1) {
+      await service.branch(octo, 'main', true, { remoteHead: sha('a') });
+      await service.branch(octo, 'main', true, { remoteHead: sha('b') });
+    }
+    await settled();
+    expect(calls).toHaveLength(1);
+  });
+
+  it('still shows the merge of a branch whose remote ref the merge pruned', async () => {
+    let state: 'OPEN' | 'MERGED' = 'OPEN';
+    const { service, clock } = polled(() => ({ 'octo/repo': { pulls: [{ number: 6, branch: 'feature/pushed', state }] } }));
+    await service.branch(octo, 'feature/pushed', true, { wait: true });
+    state = 'MERGED';
+    clock.now = 60_000;
+
+    await expect(service.branch(octo, 'feature/pushed', false, { wait: true })).resolves.toMatchObject({ pullRequest: { number: 6, status: 'merged' } });
+  });
+
+  it('reports a list GitHub withheld as a problem, not as an empty list', async () => {
+    const scripted = graphqlGithub({ 'octo/repo': { pulls: [{ number: 7, branch: 'feature/draft', mine: true }] } });
+    const { service } = polled({}, { request: async (url, init) => {
+      const body = await (await scripted.request(url, init)).json() as { data: { r0: Record<string, unknown> } };
+      return reply({ data: { r0: { ...body.data.r0, issues: null } }, errors: [{ type: 'FORBIDDEN', message: 'Resource not accessible by integration' }] });
+    } });
+
+    await expect(service.repository(octo)).resolves.toMatchObject({ own: [], problem: { kind: 'failing', message: 'GitHub could not read pull requests: Resource not accessible by integration' } });
+  });
+
+  it('refreshes the repository when another writer changes one of its pull requests', async () => {
+    const { service, calls } = polled({ 'octo/repo': {} });
+    service.changed(octo, 5);
+    await settled();
+    expect(calls.map(asked)).toEqual([{ repositories: ['octo/repo'], lists: 1, branches: [] }]);
+  });
+});
+
+describe('check states', () => {
+  it.each([
+    ['SUCCESS', 'passed'],
+    ['FAILURE', 'failed'],
+    ['ERROR', 'failed'],
+    ['PENDING', 'pending'],
+    ['EXPECTED', 'pending'],
+    [null, 'passed']
+  ] as const)('reads a %s rollup as %s', async (rollup, expected) => {
+    const { service } = polled({ 'octo/repo': { pulls: [{ number: 1, branch: 'feature', checks: rollup }] } });
+    await expect(service.branch(octo, 'feature', true, { wait: true })).resolves.toMatchObject({ pullRequest: { checks: expected } });
   });
 });
 
@@ -346,18 +549,21 @@ describe('a pull request\'s detail', () => {
   });
 });
 
+// an empty octo/repo, as GitHub answers the module's reads of it
+const empty = (init?: RequestInit) => reply(answer({ 'octo/repo': {} }, JSON.parse(String(init?.body)) as GraphqlCall));
+
 describe('the shared GitHub client', () => {
   it('sends one request at a time', async () => {
     let inFlight = 0;
     let most = 0;
-    const service = github(async () => {
+    const service = github(async (_url, init) => {
       most = Math.max(most, ++inFlight);
       await new Promise(resolve => setTimeout(resolve, 1));
       inFlight -= 1;
-      return reply([]);
+      return empty(init);
     });
 
-    await Promise.all([service.branch(octo, 'one', true, { wait: true }), service.branch(octo, 'two', true, { wait: true }), service.cleanupHead(octo, 'three', 'a'.repeat(40))]);
+    await Promise.all([service.branch(octo, 'one', true, { wait: true }), service.branch(octo, 'two', true, { wait: true }), service.cleanupHeads(octo, [{ branch: 'three', head: sha('a') }])]);
     expect(most).toBe(1);
   });
 
@@ -365,9 +571,9 @@ describe('the shared GitHub client', () => {
     let now = 1_000_000;
     let limited = true;
     let requests = 0;
-    const service = github(async () => {
+    const service = github(async (_url, init) => {
       requests += 1;
-      return limited ? reply({ message: 'secondary rate limit' }, 429, { 'retry-after': '30' }) : reply([]);
+      return limited ? reply({ message: 'secondary rate limit' }, 429, { 'retry-after': '30' }) : empty(init);
     }, { now: () => now });
 
     await expect(service.branch(octo, 'one', true, { wait: true })).resolves.toEqual({ problem: { kind: 'rate-limited', message: expect.any(String), until: 1_030_000 } });
@@ -382,27 +588,62 @@ describe('the shared GitHub client', () => {
   it('waits for the reset time after a 403 for an exhausted budget', async () => {
     let now = 1_000_000;
     let requests = 0;
-    const service = github(async () => {
+    const service = github(async (_url, init) => {
       requests += 1;
-      return requests === 1 ? reply({ message: 'API rate limit exceeded' }, 403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '1100' }) : reply([]);
+      return requests === 1 ? reply({ message: 'API rate limit exceeded' }, 403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '1100' }) : empty(init);
     }, { now: () => now });
 
     await expect(service.branch(octo, 'one', true, { wait: true })).resolves.toMatchObject({ problem: { kind: 'rate-limited', until: 1_100_000 } });
     now = 1_099_999;
-    await expect(service.cleanupHead(octo, 'two', 'a'.repeat(40))).resolves.toBeUndefined();
+    await expect(service.cleanupHeads(octo, [{ branch: 'two', head: sha('a') }])).resolves.toEqual(new Map());
     expect(requests).toBe(1);
     now = 1_100_000;
     await expect(service.branch(octo, 'three', true, { wait: true })).resolves.toEqual({ fetchedAt: 1_100_000 });
     expect(requests).toBe(2);
   });
 
+  it('holds requests back after a 200 whose GraphQL errors say RATE_LIMITED, until the reset or for a minute', async () => {
+    let now = 1_000_000;
+    let requests = 0;
+    const limited = (headers: Record<string, string>) => reply({ data: null, errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded for user ID 1.' }] }, 200, headers);
+    const service = github(async (_url, init) => {
+      requests += 1;
+      return requests === 1 ? limited({ 'x-ratelimit-remaining': '0', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '1100' }) : requests === 3 ? limited({}) : empty(init);
+    }, { now: () => now });
+
+    await expect(service.branch(octo, 'one', true, { wait: true })).resolves.toMatchObject({ problem: { kind: 'rate-limited', until: 1_100_000 } });
+    await expect(service.branch(octo, 'two', true, { wait: true })).resolves.toMatchObject({ problem: { kind: 'rate-limited', until: 1_100_000 } });
+    expect(requests).toBe(1);
+    now = 1_100_000;
+    await expect(service.branch(octo, 'three', true, { wait: true })).resolves.toEqual({ fetchedAt: 1_100_000 });
+    // naming no reset, it holds for GitHub's minute
+    await expect(service.branch(octo, 'four', true, { wait: true })).resolves.toMatchObject({ problem: { kind: 'rate-limited', until: 1_160_000 } });
+    await expect(service.branch(octo, 'five', true, { wait: true })).resolves.toMatchObject({ problem: { kind: 'rate-limited', until: 1_160_000 } });
+    expect(requests).toBe(3);
+  });
+
+  it('holds requests back after an answer that spent the last of the budget, until its reset', async () => {
+    let now = 1_000_000;
+    let requests = 0;
+    const service = github(async (_url, init) => {
+      requests += 1;
+      return reply((await empty(init).json()) as object, 200, requests === 1 ? { 'x-ratelimit-remaining': '0', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '1100' } : {});
+    }, { now: () => now });
+
+    await expect(service.branch(octo, 'one', true, { wait: true })).resolves.toEqual({ fetchedAt: 1_000_000 });
+    await expect(service.branch(octo, 'two', true, { wait: true })).resolves.toMatchObject({ problem: { kind: 'rate-limited', until: 1_100_000 } });
+    expect(requests).toBe(1);
+    now = 1_100_000;
+    await expect(service.branch(octo, 'three', true, { wait: true })).resolves.toEqual({ fetchedAt: 1_100_000 });
+  });
+
   it('holds requests for a minute after a secondary rate limit that names no wait, and keeps the viewer', async () => {
     let now = 1_000_000;
     const sent: string[] = [];
-    const service = github(async (url) => {
+    const service = github(async (url, init) => {
       sent.push(url);
       if (url.endsWith('/user')) return reply({ login: 'me' });
-      return sent.length === 2 ? reply({ message: 'You have exceeded a secondary rate limit.' }, 403) : reply([]);
+      return sent.length === 2 ? reply({ message: 'You have exceeded a secondary rate limit.' }, 403) : empty(init);
     }, { now: () => now });
 
     await service.viewer();
@@ -415,11 +656,11 @@ describe('the shared GitHub client', () => {
     expect(sent).toHaveLength(3);
   });
 
-  it('does not hold back a new token behind a limit reached without one, nor past the hour', async () => {
+  it('does not hold back a new token behind a limit reached with another, nor past the hour', async () => {
     let now = 1_000_000;
-    let token: string | undefined;
-    const service = github(async (_url, init) => new Headers(init?.headers).has('Authorization')
-      ? reply([])
+    let token = 'spent';
+    const service = github(async (_url, init) => new Headers(init?.headers).get('Authorization') === 'Bearer fresh-login'
+      ? empty(init)
       : reply({ message: 'API rate limit exceeded' }, 403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-limit': '60', 'x-ratelimit-reset': '999999999' }), { now: () => now, token: async () => token });
 
     await expect(service.branch(octo, 'one', true, { wait: true })).resolves.toMatchObject({ problem: { kind: 'rate-limited', until: 1_000_000 + 3_600_000 } });
@@ -429,32 +670,35 @@ describe('the shared GitHub client', () => {
 
   it('doubles the refresh interval while a budget is below 20%, until the budget resets', async () => {
     let now = 0;
-    const lookups: string[] = [];
-    const service = github(async (url) => {
-      const branch = new URL(url).searchParams.get('head')!.split(':')[1]!;
+    const lookups: unknown[] = [];
+    const service = github(async (_url, init) => {
+      const branch = (JSON.parse(String(init?.body)) as GraphqlCall).variables.b0_0;
       lookups.push(branch);
-      // only the first answer reports a budget: low, and reset at 50s
-      return reply([], 200, branch === 'low' ? { 'x-ratelimit-remaining': '999', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '50' } : {});
+      // only the answers for `low` report a budget: low, and reset at 150s
+      return reply((await empty(init).json()) as object, 200, branch === 'low' ? { 'x-ratelimit-remaining': '999', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '150' } : {});
     }, { now: () => now });
 
     await service.branch(octo, 'low', true, { wait: true });
     now = 60_000;
     await service.branch(octo, 'low', true, { wait: true });
     expect(lookups).toEqual(['low']);
-    // read after the reset, so the usual minute applies again
-    await service.branch(octo, 'after', true, { wait: true });
     now = 120_000;
     await service.branch(octo, 'low', true, { wait: true });
+    expect(lookups).toEqual(['low', 'low']);
+    // after the reset the usual minute applies again
+    now = 150_000;
     await service.branch(octo, 'after', true, { wait: true });
-    expect(lookups).toEqual(['low', 'after', 'low', 'after']);
+    now = 210_000;
+    await service.branch(octo, 'after', true, { wait: true });
+    expect(lookups).toEqual(['low', 'low', 'after', 'after']);
   });
 
   it('keeps the usual interval at 20% remaining', async () => {
     let now = 0;
     let requests = 0;
-    const service = github(async () => {
+    const service = github(async (_url, init) => {
       requests += 1;
-      return reply([], 200, { 'x-ratelimit-remaining': '1000', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '3600' });
+      return reply((await empty(init).json()) as object, 200, { 'x-ratelimit-remaining': '1000', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '3600' });
     }, { now: () => now });
 
     await service.branch(octo, 'feature', true, { wait: true });

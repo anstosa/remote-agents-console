@@ -72,7 +72,7 @@ type PromptFacade = Pick<PromptService, 'submitFrom' | 'inFlight' | 'listQueued'
 type HistoryFacade = Pick<PromptHistoryService, 'list'>;
 type WorktreeCommandFacade = Pick<WorktreeCommandService, 'actions' | 'state' | 'start' | 'log' | 'processLog'>;
 type WorkspaceFileFacade = Pick<WorkspaceFileService, 'preview'>;
-type PullRequestSwitchFacade = Pick<PullRequestSwitchService, 'available' | 'actionsUrl' | 'switch'>;
+type PullRequestSwitchFacade = Pick<PullRequestSwitchService, 'available' | 'actionsUrl' | 'switch' | 'pullRequestAt'>;
 type NewTaskFacade = Pick<NewTaskService, 'available' | 'start'>;
 
 export type OrchestrationDependencies = {
@@ -440,11 +440,13 @@ export class OrchestrationService {
       if (agent === undefined) return failure('not_found', 'Agent not found.');
       const switching = agent.worktreeId === undefined ? undefined : await this.dependencies.pullRequests.available(agent.worktreeId);
       const actionsUrl = await this.dependencies.pullRequests.actionsUrl(agentId).catch(() => undefined);
+      // the dashboard serves the poll's data, which stops while no browser watches; an Agent waiting on CI reads it fresh
+      const current = agent.branch === undefined ? agent.pullRequest : await this.dependencies.pullRequests.pullRequestAt(agent.home, agent.branch).catch(() => agent.pullRequest);
       // require at least one observable pull request surface
-      if (switching === undefined && agent.pullRequest === undefined && agent.gitPrStatus === undefined && actionsUrl === undefined) return failure('unavailable', 'Pull request status is unavailable.');
+      if (switching === undefined && current === undefined && agent.gitPrStatus === undefined && actionsUrl === undefined) return failure('unavailable', 'Pull request status is unavailable.');
       return success({
         ...(switching === undefined ? {} : { switching }),
-        ...(agent.pullRequest === undefined ? {} : { current: agent.pullRequest }),
+        ...(current === undefined ? {} : { current }),
         ...(agent.gitPrStatus === undefined ? {} : { comparison: agent.gitPrStatus }),
         ...(actionsUrl === undefined ? {} : { actionsUrl })
       });

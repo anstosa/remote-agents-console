@@ -1,109 +1,70 @@
 import { describe, expect, it } from 'vitest';
-import { GithubService } from '../src/github/service.js';
-import type { Request, ResponseLike } from '../src/github/github.js';
+import { GithubService, type PullRequestCleanupStatus } from '../src/github/service.js';
+import type { Request } from '../src/github/github.js';
+import { testProject } from './helpers/config.js';
+import { graphqlGithub, manualTimer, reply, sha, type PullFixture, type World } from './helpers/github-graphql.js';
 
-const mergedSha = 'a'.repeat(40);
-const otherSha = 'b'.repeat(40);
-
-// build one complete GitHub pull request identity
-function pull(options: { branch?: string; repository?: string; sha?: string; state?: string; mergedAt?: unknown } = {}): unknown {
-  return {
-    state: options.state ?? 'closed',
-    merged_at: options.mergedAt === undefined ? '2026-10-10T12:00:00Z' : options.mergedAt,
-    head: {
-      ref: options.branch ?? 'feature/cleanup',
-      sha: options.sha ?? mergedSha,
-      repo: { full_name: options.repository ?? 'octo/repo' }
-    }
-  };
-}
-
+const mergedSha = sha('a');
+const otherSha = sha('b');
 const octo = { owner: 'octo', name: 'repo' };
+const fork = `rac/pr/42/${mergedSha.slice(0, 12)}`;
 
-// the module over a scripted GitHub, without host credential reads
-function service(request: Request, now?: () => number, token: () => Promise<string | undefined> = async () => 'token'): GithubService {
-  return new GithubService({ request, token, ...(now === undefined ? {} : { now }) });
-}
-
-// whether GitHub proves one exact head merged
-async function merged(github: GithubService, branch: string, headSha: string, fresh = false): Promise<boolean> {
-  return await github.cleanupHead(octo, branch, headSha, { fresh }) === 'merged';
-}
-
-// return one JSON response through the request boundary
-function response(value: unknown, status = 200): ResponseLike {
-  return { ok: status >= 200 && status < 300, status, json: async () => value };
-}
-
-describe('merged pull request evidence', () => {
-  it('classifies an exact closed-unmerged head without changing merged-only evidence', async () => {
-    let requests = 0;
-    const github = service(async () => {
-      requests += 1;
-      return response([pull({ mergedAt: null })]);
-    });
-
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBe('closed');
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
-    expect(requests).toBe(1);
+// the module over a scripted GitHub; compares answer with `compare` and are recorded
+function service(world: World | (() => World), options: { now?: () => number; compare?: (url: string) => ReturnType<Request>; token?: () => Promise<string | undefined>; request?: Request } = {}) {
+  const scripted = graphqlGithub(world);
+  const compares: string[] = [];
+  const github = new GithubService({
+    request: options.request ?? (async (url, init) => {
+      if (url.includes('/compare/')) { compares.push(url); return await (options.compare ?? (async () => reply({ message: 'Not Found' }, 404)))(url); }
+      return await scripted.request(url, init);
+    }),
+    token: options.token ?? (async () => 'token'),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    command: async () => ({ code: 0, stdout: 'git@github.com:octo/repo.git\n' }),
+    projects: () => [testProject({ id: 'repo', path: '/src/octo/repo' })]
   });
+  return { github, calls: scripted.calls, compares };
+}
 
-  it('prefers merged evidence when the exact head has merged and closed-unmerged pull requests', async () => {
-    const github = service(async () => response([pull({ mergedAt: null }), pull()]));
+const closed = (pull: Omit<PullFixture, 'number' | 'branch'> & { number?: number; branch?: string } = {}): PullFixture => ({ number: 1, branch: 'feature/cleanup', state: 'CLOSED', sha: mergedSha, ...pull });
+const merged = (pull: Omit<PullFixture, 'number' | 'branch'> & { number?: number; branch?: string } = {}): PullFixture => closed({ state: 'MERGED', ...pull });
 
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBe('merged');
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(true);
+// what GitHub proves about one head
+async function status(github: GithubService, branch: string, head: string, options: { fresh?: boolean; acceptAncestor?: boolean } = {}): Promise<PullRequestCleanupStatus | undefined> {
+  return (await github.cleanupHeads(octo, [{ branch, head }], options)).get(branch);
+}
+
+describe('cleanup evidence', () => {
+  it.each([
+    ['closed', [closed()]],
+    ['merged', [merged()]],
+    ['merged', [closed({ number: 1 }), merged({ number: 2 })]]
+  ] as const)('proves an exact head %s', async (expected, pulls) => {
+    const { github } = service({ 'octo/repo': { pulls: [...pulls] } });
+    await expect(status(github, 'feature/cleanup', mergedSha)).resolves.toBe(expected);
   });
 
   it.each([
-    ['older head', pull({ mergedAt: null, sha: otherSha })],
-    ['fork head', pull({ mergedAt: null, repository: 'someone/fork' })]
-  ])('excludes closed-unmerged evidence for a mismatched %s', async (_name, candidate) => {
-    const github = service(async () => response([candidate]));
-
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
-  });
-
-  it('lets a later-page reopened branch veto closed-unmerged cleanup evidence', async () => {
-    const pages: number[] = [];
-    const fullPage = [pull({ mergedAt: null }), ...Array.from({ length: 99 }, (_, index) => pull({ branch: `fork/${index}`, repository: 'other/repo', sha: otherSha }))];
-    const github = service(async (url) => {
-      const page = Number(new URL(url).searchParams.get('page'));
-      pages.push(page);
-      // expose the reopened branch only after the full first page
-      if (page === 2) return response([pull({ state: 'open', mergedAt: null, sha: otherSha })]);
-      return response(fullPage);
-    });
-
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
-    expect(pages).toEqual([1, 2]);
-  });
-
-  it.each([
-    ['missing merge marker', { state: 'closed', head: { ref: 'feature/cleanup', sha: mergedSha, repo: { full_name: 'octo/repo' } } }],
-    ['numeric merge marker', pull({ mergedAt: 1 })],
-    ['empty merge marker', pull({ mergedAt: ' ' })]
-  ])('excludes closed cleanup evidence with a %s', async (_name, candidate) => {
-    const github = service(async () => response([candidate]));
-
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    ['an older head', [merged({ sha: otherSha })]],
+    ['a fork\'s branch of the same name', [merged({ head: 'someone/repo' })]],
+    ['an open pull request for the branch', [merged({ number: 1 }), { number: 2, branch: 'feature/cleanup', sha: otherSha }]],
+    ['more pull requests than GitHub gave', Array.from({ length: 21 }, (_, index) => merged({ number: index + 1 }))],
+    ['one GitHub gave that cannot be read', [merged({ number: 1 }), merged({ number: 2, sha: 'not-a-sha' })]]
+  ])('proves nothing for %s', async (_name, pulls) => {
+    const { github } = service({ 'octo/repo': { pulls } });
+    await expect(status(github, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
   });
 
   // a fork PR checks out as `rac/pr/<n>/<sha12>`, a name GitHub never lists as a head branch
   it.each([
-    ['merged', { mergedAt: '2026-10-10T12:00:00Z' }, 'merged'],
-    ['closed', { mergedAt: null }, 'closed'],
-    ['open', { state: 'open', mergedAt: null }, undefined],
-    ['moved on', { sha: otherSha, mergedAt: null }, undefined]
-  ] as const)('classifies a console fork checkout by its pull request number when %s', async (_name, options, expected) => {
-    const requests: string[] = [];
-    const github = service(async (url) => {
-      requests.push(url);
-      return response({ number: 42, ...pull({ ...options, branch: 'contributor-branch', repository: 'someone/fork' }) as object });
-    });
-
-    await expect(github.cleanupHead(octo, `rac/pr/42/${mergedSha.slice(0, 12)}`, mergedSha)).resolves.toBe(expected);
-    expect(requests).toEqual(['https://api.github.com/repos/octo/repo/pulls/42']);
+    ['merged', { state: 'MERGED' as const }, 'merged'],
+    ['closed', { state: 'CLOSED' as const }, 'closed'],
+    ['open', { state: 'OPEN' as const }, undefined],
+    ['moved on', { state: 'CLOSED' as const, sha: otherSha }, undefined]
+  ] as const)('classifies a console fork checkout by its pull request number when %s', async (_name, pull, expected) => {
+    const { github, calls } = service({ 'octo/repo': { pulls: [{ number: 42, branch: 'contributor-branch', head: 'someone/fork', sha: mergedSha, ...pull }] } });
+    await expect(status(github, fork, mergedSha)).resolves.toBe(expected);
+    expect(calls[0]!.variables).toMatchObject({ b0_0: 42 });
   });
 
   // a worktree offer also takes a checkout the author pushed past before the pull request closed;
@@ -113,215 +74,113 @@ describe('merged pull request evidence', () => {
     ['identical', 'merged'],
     ['ahead', undefined],
     ['diverged', undefined]
-  ] as const)('accepts a head behind a closed pull request\'s final head for a worktree offer only when GitHub compares it %s', async (status, expected) => {
-    const compares: string[] = [];
-    const github = service(async (url) => {
-      if (url.includes('/compare/')) { compares.push(url); return response({ status }); }
-      return response([pull({ sha: otherSha })]);
-    });
+  ] as const)('accepts a head behind a closed pull request\'s final head for a worktree offer only when GitHub compares it %s', async (compared, expected) => {
+    const { github, compares } = service({ 'octo/repo': { pulls: [merged({ sha: otherSha })] } }, { compare: async () => reply({ status: compared }) });
 
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha, { acceptAncestor: true })).resolves.toBe(expected);
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha, { acceptAncestor: true })).resolves.toBe(expected);
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
-    // cached like the exact-head check
+    await expect(status(github, 'feature/cleanup', mergedSha, { acceptAncestor: true })).resolves.toBe(expected);
+    await expect(status(github, 'feature/cleanup', mergedSha, { acceptAncestor: true })).resolves.toBe(expected);
+    await expect(status(github, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    // two commits compare the same way for good
     expect(compares).toEqual([`https://api.github.com/repos/octo/repo/compare/${otherSha}...${mergedSha}`]);
   });
 
-  it('accepts a fork checkout behind its pull request\'s final head, and fails closed when GitHub cannot compare', async () => {
-    const fork = `rac/pr/42/${mergedSha.slice(0, 12)}`;
-    let compare: ResponseLike = response({ status: 'behind' });
-    const github = service(async (url) => url.includes('/compare/') ? compare : response({ number: 42, ...pull({ sha: otherSha, mergedAt: null, branch: 'contributor-branch', repository: 'someone/fork' }) as object }));
-
-    await expect(github.cleanupHead(octo, fork, mergedSha, { acceptAncestor: true })).resolves.toBe('closed');
-    compare = response({ message: 'Not Found' }, 404);
-    await expect(github.cleanupHead(octo, fork, mergedSha, { fresh: true, acceptAncestor: true })).resolves.toBeUndefined();
-  });
-
-  it('replaces cached closed evidence when fresh validation finds the branch open', async () => {
-    let open = false;
-    let requests = 0;
-    const github = service(async () => {
-      requests += 1;
-      return response([pull(open ? { state: 'open', mergedAt: null } : { mergedAt: null })]);
-    });
-
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBe('closed');
-    open = true;
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha, { fresh: true })).resolves.toBeUndefined();
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
-    expect(requests).toBe(2);
-  });
-
-  it('replaces cached closed evidence when fresh validation fails', async () => {
-    let requests = 0;
-    const github = service(async () => {
-      requests += 1;
-      // fail every retry after the initial closed proof
-      if (requests > 1) throw new Error('offline');
-      return response([pull({ mergedAt: null })]);
-    });
-
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBe('closed');
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha, { fresh: true })).resolves.toBeUndefined();
-    await expect(github.cleanupHead(octo, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
-    expect(requests).toBe(4);
-  });
-
-  it('accepts an exact merged head into any base branch without unrelated API calls', async () => {
-    const requests: string[] = [];
-    const github = service(async (url) => {
-      requests.push(url);
-      return response([{ ...pull({ repository: 'OCTO/REPO', sha: mergedSha.toUpperCase() }), base: { ref: 'release/2026.10' } }]);
-    });
-
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(true);
-
-    expect(requests).toHaveLength(1);
-    expect(requests[0]).toContain('/repos/octo/repo/pulls?');
-    expect(requests[0]).not.toContain('base=');
-    expect(requests.every(url => url.includes('/pulls?'))).toBe(true);
-  });
-
-  it('encodes the owner-qualified head query and exact page controls', async () => {
-    const branch = 'feature/slash + space';
-    let requested = '';
-    const github = service(async (url) => {
-      requested = url;
-      return response([pull({ branch })]);
-    });
-
-    await expect(merged(github, branch, mergedSha)).resolves.toBe(true);
-
-    const url = new URL(requested);
-    expect(url.searchParams.get('state')).toBe('all');
-    expect(url.searchParams.get('head')).toBe(`octo:${branch}`);
-    expect(url.searchParams.get('per_page')).toBe('100');
-    expect(url.searchParams.get('page')).toBe('1');
-    expect(requested).toContain('head=octo%3Afeature%2Fslash+%2B+space');
-  });
-
-  it('continues after a matched merge and lets a later open pull request veto cleanup', async () => {
-    const pages: number[] = [];
-    const fullPage = [pull(), ...Array.from({ length: 99 }, (_, index) => pull({ branch: `fork/${index}`, repository: 'other/repo', sha: otherSha }))];
-    const github = service(async (url) => {
-      const page = Number(new URL(url).searchParams.get('page'));
-      pages.push(page);
-      // expose an open reuse only after the full first page
-      if (page === 2) return response([pull({ state: 'open', mergedAt: null, sha: otherSha })]);
-      return response(fullPage);
-    });
-
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
-    expect(pages).toEqual([1, 2]);
-  });
-
-  it('finds an exact merge on a later page', async () => {
-    const fullPage = Array.from({ length: 100 }, (_, index) => pull({ branch: `other/${index}`, repository: 'other/repo', sha: otherSha }));
-    const github = service(async (url) => response(new URL(url).searchParams.get('page') === '1' ? fullPage : [pull()]));
-
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(true);
-  });
-
-  it('rejects a merge for an older commit after a branch has been reused', async () => {
-    const github = service(async () => response([pull({ sha: otherSha })]));
-
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
+  it('compares nothing when the head is exactly the final head', async () => {
+    const { github, compares } = service({ 'octo/repo': { pulls: [merged()] } }, { compare: async () => reply({ status: 'behind' }) });
+    await expect(status(github, 'feature/cleanup', mergedSha, { acceptAncestor: true })).resolves.toBe('merged');
+    expect(compares).toEqual([]);
   });
 
   it.each([
-    ['missing head identity', { state: 'closed', merged_at: '2026-10-10T12:00:00Z' }],
-    ['malformed head sha', pull({ sha: 'not-a-sha' })],
-    ['fork head identity', pull({ repository: 'someone/fork' })],
-    ['different branch identity', pull({ branch: 'feature/other' })],
-    ['closed but unmerged', pull({ mergedAt: null })],
-    ['empty merge timestamp', pull({ mergedAt: ' ' })]
-  ])('fails closed for %s', async (_name, candidate) => {
-    const github = service(async () => response([candidate]));
-
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
+    ['behind', 'closed'],
+    ['unknown to GitHub', undefined]
+  ] as const)('accepts a fork checkout behind its pull request\'s final head, and fails closed when GitHub cannot compare (%s)', async (compared, expected) => {
+    const { github } = service({ 'octo/repo': { pulls: [{ number: 42, branch: 'contributor-branch', head: 'someone/fork', state: 'CLOSED', sha: otherSha }] } }, { compare: async () => compared === 'behind' ? reply({ status: 'behind' }) : reply({ message: 'Not Found' }, 404) });
+    await expect(status(github, fork, mergedSha, { acceptAncestor: true })).resolves.toBe(expected);
   });
 
-  it('coalesces and caches exact identities until a fresh failure replaces success', async () => {
-    let requests = 0;
-    let release!: (value: ResponseLike) => void;
-    const pending = new Promise<ResponseLike>((resolve) => { release = resolve; });
-    const github = service(async () => {
-      requests += 1;
-      // hold the initial request so concurrent callers must share it
-      if (requests === 1) return await pending;
-      throw new Error('offline');
-    });
-
-    const first = merged(github, 'feature/cleanup', mergedSha);
-    const second = merged(github, 'feature/cleanup', mergedSha);
-    release(response([pull()]));
-    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(true);
-    expect(requests).toBe(1);
-
-    await expect(merged(github, 'feature/cleanup', mergedSha, true)).resolves.toBe(false);
-    expect(requests).toBe(4);
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
-    expect(requests).toBe(4);
-  });
-
-  it('keeps branch and commit cache identities separate and expires results after sixty seconds', async () => {
+  it('serves heads from data under a minute old, and reads them again after', async () => {
     let now = 0;
-    let requests = 0;
-    const github = service(async () => {
-      requests += 1;
-      return response([pull()]);
-    }, () => now);
-
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(true);
-    await expect(merged(github, 'feature/other', mergedSha)).resolves.toBe(false);
-    await expect(merged(github, 'feature/cleanup', otherSha)).resolves.toBe(false);
-    expect(requests).toBe(3);
+    const { github, calls } = service({ 'octo/repo': { pulls: [merged()] } }, { now: () => now });
+    await status(github, 'feature/cleanup', mergedSha);
     now = 59_999;
-    await merged(github, 'feature/cleanup', mergedSha);
-    expect(requests).toBe(3);
+    await expect(status(github, 'feature/cleanup', mergedSha)).resolves.toBe('merged');
+    expect(calls).toHaveLength(1);
     now = 60_000;
-    await merged(github, 'feature/cleanup', mergedSha);
-    expect(requests).toBe(4);
+    await status(github, 'feature/cleanup', mergedSha);
+    expect(calls).toHaveLength(2);
   });
 
-  it('invalidates rejected credentials and fails closed', async () => {
-    let tokens = 0;
-    const seenAuthorization: Array<string | null> = [];
-    const github = service(async (_url, init) => {
-      const headers = new Headers(init?.headers);
-      seenAuthorization.push(headers.get('Authorization'));
-      return response({ message: 'Bad credentials' }, 401);
-    }, undefined, async () => `token-${++tokens}`);
+  it('takes a watched branch\'s heads from the poll without asking GitHub again', async () => {
+    const timers = manualTimer();
+    const scripted = graphqlGithub({ 'octo/repo': { pulls: [merged()] } });
+    const github = new GithubService({ request: scripted.request, token: async () => 'token', now: () => 0, timer: timers.timer, command: async () => ({ code: 0, stdout: 'git@github.com:octo/repo.git\n' }), projects: () => [testProject({ id: 'repo', path: '/src/octo/repo' })] });
+    await github.branch(octo, 'feature/cleanup', true);
+    github.watch();
+    await timers.fire();
 
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
-    await expect(merged(github, 'feature/cleanup', mergedSha, true)).resolves.toBe(false);
-
-    expect(tokens).toBe(2);
-    expect(seenAuthorization).toEqual(['Bearer token-1', 'Bearer token-2']);
+    await expect(status(github, 'feature/cleanup', mergedSha)).resolves.toBe('merged');
+    expect(scripted.calls).toHaveLength(1);
   });
 
-  it('fails closed when pagination reaches the bounded maximum without an ending page', async () => {
-    let requests = 0;
-    const fullPage = Array.from({ length: 100 }, (_, index) => pull({ branch: `other/${index}`, repository: 'other/repo', sha: otherSha }));
-    const github = service(async () => {
-      requests += 1;
-      return response(fullPage);
-    });
+  it('never looks up a branch the dashboard reads as unpublished', async () => {
+    const { github, calls } = service({ 'octo/repo': { pulls: [merged()] } });
+    await github.branch(octo, 'feature/cleanup', false);
 
-    await expect(merged(github, 'feature/cleanup', mergedSha)).resolves.toBe(false);
-    expect(requests).toBe(100);
+    await expect(status(github, 'feature/cleanup', mergedSha, { fresh: true })).resolves.toBeUndefined();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('looks every candidate up in one read', async () => {
+    const { github, calls } = service({ 'octo/repo': { pulls: [merged({ branch: 'one' }), closed({ number: 2, branch: 'two' })] } });
+
+    await expect(github.cleanupHeads(octo, [{ branch: 'one', head: mergedSha }, { branch: 'two', head: mergedSha }, { branch: 'three', head: mergedSha }])).resolves.toEqual(new Map([['one', 'merged'], ['two', 'closed']]));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.variables).toMatchObject({ b0_0: 'one', b0_1: 'two', b0_2: 'three' });
+  });
+
+  it('replaces closed evidence when a fresh check finds the branch open', async () => {
+    let open = false;
+    const { github, calls } = service(() => ({ 'octo/repo': { pulls: [closed({ state: open ? 'OPEN' : 'CLOSED' })] } }));
+
+    await expect(status(github, 'feature/cleanup', mergedSha)).resolves.toBe('closed');
+    open = true;
+    await expect(status(github, 'feature/cleanup', mergedSha, { fresh: true })).resolves.toBeUndefined();
+    await expect(status(github, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    expect(calls).toHaveLength(2);
+  });
+
+  it('proves nothing when a fresh check fails, nor after it until GitHub answers again', async () => {
+    let failing = false;
+    const scripted = graphqlGithub({ 'octo/repo': { pulls: [merged()] } });
+    const { github } = service({}, { request: async (url, init) => { if (failing) throw new Error('offline'); return await scripted.request(url, init); } });
+
+    await expect(status(github, 'feature/cleanup', mergedSha)).resolves.toBe('merged');
+    failing = true;
+    await expect(status(github, 'feature/cleanup', mergedSha, { fresh: true })).resolves.toBeUndefined();
+    await expect(status(github, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+    failing = false;
+    await expect(status(github, 'feature/cleanup', mergedSha, { fresh: true })).resolves.toBe('merged');
+  });
+
+  it('proves nothing when GitHub refuses the token', async () => {
+    const { github } = service({}, { request: async () => reply({ message: 'Bad credentials' }, 401) });
+    await expect(status(github, 'feature/cleanup', mergedSha)).resolves.toBeUndefined();
+  });
+
+  it('passes a branch name to GitHub as a variable, never in the query', async () => {
+    const branch = 'feature/"quote" + space';
+    const { github, calls } = service({ 'octo/repo': { pulls: [merged({ branch })] } });
+
+    await expect(status(github, branch, mergedSha)).resolves.toBe('merged');
+    expect(calls[0]!.query).not.toContain('quote');
+    expect(calls[0]!.variables.b0_0).toBe(branch);
   });
 
   it('rejects invalid input before GitHub I/O', async () => {
-    let requests = 0;
-    const github = service(async () => {
-      requests += 1;
-      return response([pull()]);
-    });
+    const { github, calls } = service({ 'octo/repo': { pulls: [merged()] } });
 
-    await expect(merged(github, 'feature/cleanup', 'invalid')).resolves.toBe(false);
-    await expect(merged(github, ' ', mergedSha)).resolves.toBe(false);
-    expect(requests).toBe(0);
+    await expect(status(github, 'feature/cleanup', 'invalid')).resolves.toBeUndefined();
+    await expect(status(github, ' ', mergedSha)).resolves.toBeUndefined();
+    expect(calls).toHaveLength(0);
   });
 });

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { Pane } from '../src/domain/models.js';
 import { DiscoveryService, workspaceRoot } from '../src/discovery/service.js';
 import { GithubService } from '../src/github/service.js';
+import { answer, reply, type GraphqlCall } from './helpers/github-graphql.js';
 import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
 
 const git = vi.hoisted(() => ({ run: vi.fn() }));
@@ -168,10 +169,10 @@ describe('discovery repository root cache', () => {
   it('reloads a changed GitHub origin after checkout invalidation', async () => {
     let owner = 'old';
     const command = vi.fn(async () => ({ code: 0, stdout: `git@github.com:${owner}/repo.git\n` }));
-    const github = new GithubService({ command, token: async () => undefined, request: async url => {
-      const repository = new URL(url).pathname.split('/').slice(2, 4).join('/');
-      const pull = { number: 1, title: 'Cache', state: 'open', html_url: `https://github.com/${repository}/pull/1` };
-      return { ok: true, json: async () => url.includes('/pulls?') ? [pull] : {} };
+    const github = new GithubService({ command, token: async () => 'token', request: async (_url, init) => {
+      const call = JSON.parse(String(init?.body)) as GraphqlCall;
+      const repository = `${String(call.variables.o0)}/repo`;
+      return reply(answer({ [repository]: { pulls: [{ number: 1, title: 'Cache', branch: 'feature/cache' }] } }, call));
     } });
     const service = new DiscoveryService(undefined, undefined, undefined, github);
     const url = async () => (await github.branch((await github.repositoryAt('/repo'))!, 'feature/cache', true, { wait: true })).pullRequest?.url;

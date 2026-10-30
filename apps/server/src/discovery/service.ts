@@ -87,7 +87,19 @@ export async function gitUpstreamSummary(workspace: string, command: GitCommand 
   if (!Number.isSafeInteger(ahead) || !Number.isSafeInteger(behind)) return undefined;
   return { upstream: name, ahead, behind };
 }
-type GitMeta = { workspace: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary };
+// a branch is published when it has an upstream configured (even one since deleted) or an
+// `origin/<branch>` ref; `remoteHead` is that ref's commit, which moves on a push
+type GitPublication = { published: boolean; remoteHead: string | null };
+export async function gitPublication(workspace: string, branch: string, command: GitCommand = run): Promise<GitPublication> {
+  const [local, remote] = [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`];
+  const listed = await command('/usr/bin/git', ['-C', workspace, 'for-each-ref', '--format=%(refname)%09%(objectname)%09%(upstream)', local, remote]);
+  // a pattern also matches refs beneath it, so only the exact refs count
+  const rows = listed.code === 0 ? listed.stdout.split('\n').map(line => line.split('\t')) : [];
+  const upstream = rows.find(([ref]) => ref === local)?.[2] ?? '';
+  const remoteHead = rows.find(([ref]) => ref === remote)?.[1] ?? '';
+  return { published: upstream !== '' || remoteHead !== '', remoteHead: remoteHead === '' ? null : remoteHead };
+}
+type GitMeta = { workspace: string; branch?: string; gitStatus?: GitStatusSummary; gitPrStatus?: GitComparisonSummary; gitUpstream?: GitUpstreamSummary; publication?: GitPublication };
 // retain one pending or completed root lookup until expiry
 type RootLookup = { expiresAt: number; value: Promise<string> };
 // discovery reads branch summaries and forgets origins when checkouts change
@@ -108,12 +120,13 @@ async function gitMeta(path: string, rootKnown = false, defaultBranch?: string):
   // enrich untracked line counts
   if (gitStatus !== undefined) await addUntrackedLineStats(workspace, gitStatus);
   const branch = symbolicBranch.code === 0 ? symbolicBranch.stdout.trim() : undefined;
-  const [gitPrStatus, gitUpstream] = await Promise.all([
+  const [gitPrStatus, gitUpstream, publication] = await Promise.all([
     gitPrComparison(workspace, branch, gitStatus, undefined, defaultBranch),
-    branch === undefined ? Promise.resolve(undefined) : gitUpstreamSummary(workspace)
+    branch === undefined ? Promise.resolve(undefined) : gitUpstreamSummary(workspace),
+    branch === undefined ? Promise.resolve(undefined) : gitPublication(workspace, branch)
   ]);
   // return symbolic branches directly
-  if (branch !== undefined) return { workspace, branch, ...(gitStatus === undefined ? {} : { gitStatus }), ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(gitUpstream === undefined ? {} : { gitUpstream }) };
+  if (branch !== undefined) return { workspace, branch, ...(gitStatus === undefined ? {} : { gitStatus }), ...(gitPrStatus === undefined ? {} : { gitPrStatus }), ...(gitUpstream === undefined ? {} : { gitUpstream }), ...(publication === undefined ? {} : { publication }) };
   const sha = await run('/usr/bin/git', ['-C', workspace, 'rev-parse', '--short', 'HEAD']);
   return { workspace, ...(sha.code === 0 ? { branch: sha.stdout.trim() } : {}), ...(gitStatus === undefined ? {} : { gitStatus }), ...(gitPrStatus === undefined ? {} : { gitPrStatus }) };
 }
@@ -585,11 +598,12 @@ export class DiscoveryService {
     this.github.invalidateRepositories();
   }
 
-  // the branch's pull request as GitHub last reported it; the dashboard never waits on GitHub
+  // the branch's pull request as the poll last read it; the dashboard never waits on GitHub, and
+  // its reads keep the branch in the poll
   private async pullRequestOf(meta: GitMeta, branch: string | undefined): Promise<PullRequestSummary | undefined> {
     if (!branch) return undefined;
     const repository = await this.github.repositoryAt(meta.workspace);
-    return repository === undefined ? undefined : (await this.github.branch(repository, branch, meta.gitUpstream !== undefined)).pullRequest;
+    return repository === undefined ? undefined : (await this.github.branch(repository, branch, meta.publication?.published ?? false, meta.publication === undefined ? {} : { remoteHead: meta.publication.remoteHead })).pullRequest;
   }
 
   private async discoverWorktrees(): Promise<{ worktrees: Worktree[]; stale: Map<string, string[]>; pins: Record<string, boolean>; projects: readonly Project[] | undefined }> {

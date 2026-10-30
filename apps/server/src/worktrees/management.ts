@@ -102,7 +102,7 @@ export class WorktreeManagementService {
 
   // share exact-head PR evidence between suggestions and guarded deletion
   // `pullRequestHeads` resolves and fetches a pull request for the `pull-request` Add mode
-  constructor(private readonly projects: () => readonly Project[], private readonly git: GitExec = defaultGit, private readonly github: Pick<GithubService, 'repositoryAt' | 'cleanupHead'> = new GithubService(), private readonly pullRequestHeads?: Pick<PullRequestSwitchService, 'fetchForWorktree'>) {}
+  constructor(private readonly projects: () => readonly Project[], private readonly git: GitExec = defaultGit, private readonly github: Pick<GithubService, 'repositoryAt' | 'cleanupHeads'> = new GithubService(), private readonly pullRequestHeads?: Pick<PullRequestSwitchService, 'fetchForWorktree'>) {}
 
   private project(projectId: string): Project | undefined {
     return this.projects().find(project => project.id === projectId);
@@ -319,7 +319,7 @@ export class WorktreeManagementService {
       // only consult GitHub for inactive branches not already proven merged locally
       const candidates = heads.filter(({ branch, checkout }) => branch !== defaultBranch && checkout === '' && !eligible.has(branch));
       // preserve the distinction between merged and closed-unmerged work
-      for (const [branch, reason] of await this.pullRequestReasons(project, candidates)) eligible.set(branch, { projectId: project.id, projectLabel: project.label, branch, reason });
+      for (const [branch, reason] of await this.cleanupHeads(project.path, candidates, false)) eligible.set(branch, { projectId: project.id, projectLabel: project.label, branch, reason });
       byProject.push([...eligible.values()]);
     }
     return byProject.flat().sort((left, right) => left.projectLabel.localeCompare(right.projectLabel) || left.branch.localeCompare(right.branch));
@@ -343,7 +343,7 @@ export class WorktreeManagementService {
         const ref = heads.find(candidate => candidate.branch === worktree.branch);
         return ref === undefined || ref.branch === defaultBranch || (ref.checkout !== worktree.path && ref.checkout !== worktree.identity) ? [] : [{ ...ref, worktreeId: worktree.id }];
       });
-      const reasons = await this.pullRequestReasons(project, candidates, true);
+      const reasons = await this.cleanupHeads(project.path, candidates, false, true);
       for (const { branch, worktreeId } of candidates) {
         const reason = reasons.get(branch);
         if (reason !== undefined) closed.push({ worktreeId, reason });
@@ -360,20 +360,6 @@ export class WorktreeManagementService {
       const [branch = '', head = '', checkout = ''] = line.split('\t');
       return { branch, head, checkout };
     }).filter(({ branch, head }) => branch !== '' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head));
-  }
-
-  // the pull request cleanup reason of each branch head that has one; `acceptAncestor` also takes
-  // a head behind a closed pull request's final head, which only a worktree offer may
-  private async pullRequestReasons(project: Project, candidates: readonly { branch: string; head: string }[], acceptAncestor = false): Promise<Map<string, CleanupBranch['reason']>> {
-    const reasons = new Map<string, CleanupBranch['reason']>();
-    // bound requests per repository instead of flooding GitHub for large branch lists
-    for (let offset = 0; offset < candidates.length; offset += 4) {
-      await Promise.all(candidates.slice(offset, offset + 4).map(async ({ branch, head }) => {
-        const reason = await this.cleanupHead(project.path, branch, head, false, acceptAncestor);
-        if (reason !== undefined) reasons.set(branch, reason);
-      }));
-    }
-    return reasons;
   }
 
   // read fresh loss-prevention facts for one local branch
@@ -524,14 +510,15 @@ export class WorktreeManagementService {
   private async branchCleanupReason(project: Project, branch: string, head: string, fresh: boolean): Promise<CleanupBranch['reason'] | undefined> {
     // keep ordinary git-only repositories independent of GitHub availability
     if (await this.merged(project.path, project.path, head)) return 'merged';
-    return await this.cleanupHead(project.path, branch, head, fresh);
+    return (await this.cleanupHeads(project.path, [{ branch, head }], fresh)).get(branch);
   }
 
-  // what GitHub proves about one branch head in a checkout; a fresh check reads the live origin, and
-  // any failure proves nothing
-  private async cleanupHead(path: string, branch: string, head: string, fresh: boolean, acceptAncestor = false): Promise<PullRequestCleanupStatus | undefined> {
-    const repository = await this.github.repositoryAt(path, fresh).catch(() => undefined);
-    return repository === undefined ? undefined : await this.github.cleanupHead(repository, branch, head, { fresh, acceptAncestor }).catch(() => undefined);
+  // what GitHub proves about branch heads in a checkout; a fresh check reads the live origin, and
+  // any failure proves nothing. `acceptAncestor` also takes a head behind a closed pull request's
+  // final head, which only a worktree offer may
+  private async cleanupHeads(path: string, heads: readonly { branch: string; head: string }[], fresh: boolean, acceptAncestor = false): Promise<Map<string, PullRequestCleanupStatus>> {
+    const repository = heads.length === 0 ? undefined : await this.github.repositoryAt(path, fresh).catch(() => undefined);
+    return repository === undefined ? new Map() : await this.github.cleanupHeads(repository, heads, { fresh, acceptAncestor }).catch(() => new Map());
   }
 
   // resolve only a validated local branch name to an immutable commit
