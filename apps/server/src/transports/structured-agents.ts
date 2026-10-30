@@ -270,11 +270,14 @@ export class StructuredAgents {
     return await this.relaunch(record, live, conversationId ?? record.conversationId) === true;
   }
 
-  /** Stop the Agent's process, if it runs, and start it again on its Conversation, keeping its id and queue. */
+  /**
+   * Stop the Agent's process, if it runs, and start it again on its Conversation, keeping its id and
+   * queue. Not while it works: its Turn would never end, and the queue behind it would not wait.
+   */
   async restart(id: string): Promise<boolean> {
     const record = (await this.load()).find(candidate => candidate.id === id);
     const live = this.live.get(id) ?? this.idle();
-    if (record === undefined || live.busy || record.lifecycle === 'starting') return false;
+    if (record === undefined || live.busy || live.working || record.lifecycle === 'starting') return false;
     this.live.set(id, live);
     return await this.relaunch(record, live, record.conversationId) === true;
   }

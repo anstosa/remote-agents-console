@@ -1357,6 +1357,21 @@ describe('the Conductor', () => {
     await app.close();
   });
 
+  it('refuses a Restart while it works, which would leave its Turn and queue behind', async () => {
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake, { conductor: {} });
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/restart`, headers, payload: {} })).statusCode).toBe(409);
+    expect(fake.launches).toHaveLength(1);
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'done' } });
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/restart`, headers, payload: {} })).statusCode).toBe(204);
+    expect(fake.launches).toHaveLength(2);
+    await app.close();
+  });
+
   it('reads within its scopes: tools it lacks a scope for are hidden and refused, and it reaches no other instance', async () => {
     await integrationFiles();
     const fake = fakeAgent();
