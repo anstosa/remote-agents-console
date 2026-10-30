@@ -3,10 +3,6 @@
   pointer-events: none;
 }
 
-.files-grid .files-row-skeleton:hover {
-  background: transparent;
-}
-
 .files-row-skeleton > span {
   display: flex;
   align-items: center;
@@ -44,10 +40,4 @@
   height: 1rem;
   margin: 0 auto;
   border-radius: 50%;
-}
-
-@media (max-width: 600px) {
-  .files-grid .files-row-skeleton > span:nth-child(4)::before {
-    content: none;
-  }
 }

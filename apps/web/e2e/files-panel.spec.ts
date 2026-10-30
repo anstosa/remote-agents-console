@@ -9,10 +9,76 @@ async function openFiles(page: Page) {
   await page.goto('/');
   await seedPaneSize(page, 'agent-1', 80, 24);
   await pushBytes(page, 'agent-1', 'Ready\r\n');
-  await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: 'Files' }).click();
+  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+  // reveal the folded Files action on phones
+  if (await toolbar.getByRole('button', { name: 'Files', exact: true }).count() === 0) {
+    await toolbar.getByRole('button', { name: 'More options', exact: true }).click();
+  }
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
   const panel = page.getByRole('region', { name: 'Files' });
   await expect(panel.getByRole('grid')).toBeVisible();
   return { fixture, panel };
+}
+
+// preserve flush table geometry at desktop and phone widths
+for (const width of [1_600, 768, 390, 320]) {
+  // check the visible header and selection without tinted row surfaces
+  test(`keeps the Files table flush and rows transparent at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { panel } = await openFiles(page);
+    const grid = panel.getByRole('grid');
+    const rows = grid.locator('.files-row:not(.files-row-skeleton)');
+    // preserve the same spacing when the split fills the workspace
+    for (const expanded of [false, true]) {
+      // expand only after checking the ordinary split
+      if (expanded) {
+        await panel.getByRole('button', { name: 'Expand files', exact: true }).click();
+        await expect(panel.getByRole('button', { name: 'Restore files', exact: true })).toBeVisible();
+      }
+      // wait for the listing after an expanded panel remounts
+      await expect(rows).toHaveCount(4);
+      await expect(grid.getByRole('columnheader')).toHaveCount(6);
+      // measure the same table header at every viewport width
+      const geometry = await panel.evaluate(element => {
+        const bounds = element.getBoundingClientRect();
+        const gridBounds = element.querySelector('.files-grid')!.getBoundingClientRect();
+        const header = element.querySelector('.panel-header')!.getBoundingClientRect();
+        const contentHeader = element.querySelector('.files-grid-head')!;
+        return {
+          left: gridBounds.left - bounds.left,
+          right: bounds.right - gridBounds.right,
+          bottom: bounds.bottom - gridBounds.bottom,
+          headerGap: contentHeader.getBoundingClientRect().top - header.bottom,
+          rootFont: Number.parseFloat(getComputedStyle(document.documentElement).fontSize)
+        };
+      });
+      expect(Math.abs(geometry.left)).toBeLessThanOrEqual(1);
+      expect(Math.abs(geometry.right)).toBeLessThanOrEqual(1);
+      expect(Math.abs(geometry.bottom)).toBeLessThanOrEqual(1);
+      expect(geometry.headerGap).toBeGreaterThanOrEqual(geometry.rootFont * .4 - 1);
+      // keep square corners and horizontal table borders only
+      await expect(grid).toHaveCSS('border-radius', '0px');
+      await expect(grid).toHaveCSS('border-left-width', '0px');
+      await expect(grid).toHaveCSS('border-right-width', '0px');
+      await expect(grid).toHaveCSS('border-top-width', '1px');
+      await expect(grid).toHaveCSS('border-bottom-width', '1px');
+      await expect(grid).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      await expect(grid).toHaveCSS('background-image', 'none');
+      await expect(rows.first()).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      const alpha = rows.filter({ hasText: 'alpha.txt' });
+      await alpha.hover();
+      await expect(alpha).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      await alpha.locator('[data-label="Owner"]').click();
+      await expect(alpha).toHaveAttribute('aria-selected', 'true');
+      await expect(alpha).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      await expect(alpha).toHaveCSS('background-image', 'none');
+      // keep the selected edge marker visible
+      expect(await alpha.evaluate(element => getComputedStyle(element).boxShadow)).toContain('inset');
+      // clear selection consistently before checking another split mode
+      await alpha.locator('[data-label="Owner"]').click({ modifiers: ['Control'] });
+      await expect(alpha).toHaveAttribute('aria-selected', 'false');
+    }
+  });
 }
 
 test('shows table skeletons for initial and refresh reads without exposing cached rows', async ({ page }) => {
