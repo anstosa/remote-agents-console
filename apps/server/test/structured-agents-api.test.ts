@@ -140,6 +140,8 @@ async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { report
   const start = async (processes: StructuredProcesses, changed: Partial<ValidatedConfig> = {}) => {
     vi.stubEnv('RAC_DISPATCHES_FILE', join(root, 'dispatches.json'));
     vi.stubEnv('RAC_WATCHES_FILE', join(root, 'watches.json'));
+    // keep the console's own socket finder off the operator's live tmux server
+    vi.stubEnv('RAC_HOST_TMUX_SOURCE', join(root, 'tmux'));
     const structuredAgents = new StructuredAgents(processes, { file: join(root, 'structured-agents.json'), allowedModels: () => allowed, ...(options.reportTimeoutMs === undefined ? {} : { reportTimeoutMs: options.reportTimeoutMs }) });
     const app = await buildApp({ ...config, ...changed }, { auth: await testAuthService(), discovery, worktreeStore, structuredAgents, promptHistory: new PromptHistoryService(join(root, 'history.json')), queuedPrompts: new QueuedPromptService(join(root, 'queue.json')), notes: new WorktreeNoteService(join(root, 'notes.json')), ...options.deps });
     const headers = await authenticatedHeaders(app);

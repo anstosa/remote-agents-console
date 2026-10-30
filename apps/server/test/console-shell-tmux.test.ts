@@ -164,8 +164,9 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('Console shells (r
     expect(await new TmuxAdapter().renamePaneName(fixture.socket, pane!, '')).toBe(true);
     expect((await launch.placeConsoleShells(worktree))[0]!.paneName).toBeUndefined();
 
-    // a shell whose foreground command is not the login shell reads as busy
-    const busyPane = await new TmuxAdapter().createConsoleShellWindow(fixture.socket, fixture.session, fixture.worktreeDir, ['cat'], '');
+    // a shell whose foreground command is not the login shell reads as busy; two words, so tmux
+    // execs `cat` rather than run it through default-shell (`fish -c cat` stays in the foreground)
+    const busyPane = await new TmuxAdapter().createConsoleShellWindow(fixture.socket, fixture.session, fixture.worktreeDir, ['cat', '-'], '');
     const busyShell = (await launch.placeConsoleShells(worktree)).find(shell => shell.paneId === busyPane);
     expect(busyShell).toBeDefined();
     expect(launch.consoleShellBusy(busyShell!)).toBe(true);

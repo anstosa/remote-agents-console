@@ -152,6 +152,8 @@ describe('button host command runner', () => {
     await mkdir(socketDirectory, { recursive: true });
     vi.stubEnv('RAC_HOST_TMUX_DIR', socketDirectory);
     vi.stubEnv('RAC_HOST_REPOSITORY', root);
+    // the tmux on PATH, as the runner's /usr/bin default is not every host's
+    vi.stubEnv('RAC_TMUX_BIN', (await execFileAsync('/bin/sh', ['-c', 'command -v tmux'])).stdout.trim());
     const startup = join(root, 'startup.sh');
     await writeFile(startup, 'cd /\n');
     // hostile inner startup files must not retarget the already verified cwd

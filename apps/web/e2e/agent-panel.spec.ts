@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { installPaneMock, paneConnectCount, pushBytes, seedPaneSize } from './pane-stream-mock.js';
 import { expectSplitProgressBorder } from './progress-border-assertions.js';
 
-type MockAgent = { attention?: 'working' | 'finished' | 'question'; kind?: 'claude' | 'codex' | 'pi'; panel?: 'terminal' | 'transcript'; structured?: { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number } };
+type MockAgent = { attention?: 'working' | 'finished' | 'question'; kind?: 'claude' | 'codex' | 'pi'; panel?: 'terminal' | 'transcript'; structured?: { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; reason?: string; revision: number }; newTaskConfigured?: boolean };
 type MockOptions = { conversationName?: string; notes?: Array<{ id: string; text: string }>; transcript?: { items: unknown[]; stderr?: string } };
 
 // stub the routes a live Worktree agent (or, with no agent, its pinned Worktree) preloads
@@ -13,7 +13,7 @@ async function mockConsole(page: Page, agent: MockAgent | undefined, { conversat
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') {
       const worktree = { id: 'cora', projectId: 'app', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'cora', available: true, pinned: true, order: 0 };
-      const agents = agent === undefined ? [] : [{ id: 'agent-1', panel: agent.panel ?? 'terminal', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', branch: 'cora', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, kind: agent.kind ?? 'claude', ...(agent.attention === undefined ? {} : { attention: agent.attention }), ...(agent.structured === undefined ? {} : { structured: agent.structured }), queuedPromptCount: 0 }];
+      const agents = agent === undefined ? [] : [{ id: 'agent-1', panel: agent.panel ?? 'terminal', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready', branch: 'cora', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, kind: agent.kind ?? 'claude', ...(agent.attention === undefined ? {} : { attention: agent.attention }), ...(agent.structured === undefined ? {} : { structured: agent.structured }), ...(agent.newTaskConfigured === undefined ? {} : { newTaskConfigured: agent.newTaskConfigured }), queuedPromptCount: 0 }];
       return route.fulfill({ json: { generation: 1, agents, projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] } });
     }
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
@@ -25,6 +25,7 @@ async function mockConsole(page: Page, agent: MockAgent | undefined, { conversat
     if (url.pathname === '/api/worktrees/cora/notes' && request.method() === 'GET') return route.fulfill({ json: { notes } });
     if (url.pathname === '/api/worktrees/cora/panes') return route.fulfill({ json: { panes: [] } });
     if (url.pathname === '/api/agents/agent-1/deactivate') return route.fulfill({ status: 204 });
+    if (url.pathname === '/api/agents/agent-1/new-task' && request.method() === 'GET') return route.fulfill({ json: { enabled: false, reason: 'The worktree has uncommitted changes.' } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 }
@@ -34,7 +35,7 @@ const workspaceControls = (page: Page) => page.getByRole('region', { name: 'Work
 
 test('the agent output is a panel with a floating header and the composer at its foot', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
-  await mockConsole(page, { attention: 'finished' });
+  await mockConsole(page, { attention: 'finished', newTaskConfigured: true });
   await page.goto('/');
   const panel = agentPanel(page);
   await expect(panel).toBeVisible();
