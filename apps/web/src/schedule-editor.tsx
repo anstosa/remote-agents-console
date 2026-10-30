@@ -388,7 +388,8 @@ export function ScheduleEditor({ schedule, nextRun, prefill, runsOnText, adapter
               </button>
             ))}
           </div>
-          {kindModels !== undefined && kindModels.length > 0 && <>
+          {/* the Conductor runs on its own configured model, which a Schedule cannot change */}
+          {kindModels !== undefined && kindModels.length > 0 && !('conductor' in schedule.target) && <>
             <p className="schedule-popover-title">Model · this Schedule only</p>
             <div className="schedule-rows" role="radiogroup" aria-label="Model">
               <button type="button" role="radio" aria-checked={schedule.model === undefined} className="launch-row" onClick={() => pickModel(undefined, schedule.effort)}><span className="launch-row-copy"><strong>Default</strong><small>The first Allowed model</small></span></button>

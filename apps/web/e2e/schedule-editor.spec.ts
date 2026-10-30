@@ -388,3 +388,16 @@ test('aims a Schedule at the Conductor, and shows a Run it was delivered as a qu
   await expect(last).toContainText('delivered');
   await expect(last).not.toHaveClass(/bad/u);
 });
+
+test('offers a model and Effort for a Schedule, but none for one aimed at the Conductor, which runs on its own', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await mount(page, { cron: '0 9 * * *', kind: 'pi', target: { worktreeId: 'wt-main' }, enabled: true });
+  await editorOf(page).getByRole('button', { name: 'Agent' }).click();
+  await expect(editorOf(page).getByRole('radiogroup', { name: 'Model' })).toBeVisible();
+
+  await mount(page, { cron: '0 9 * * *', kind: 'pi', target: { conductor: true }, enabled: true });
+  await editorOf(page).getByRole('button', { name: 'Agent' }).click();
+  await expect(editorOf(page).getByRole('dialog', { name: 'Agent' })).toBeVisible();
+  await expect(editorOf(page).getByRole('radiogroup', { name: 'Model' })).toHaveCount(0);
+  await expect(editorOf(page).getByLabel('Effort')).toHaveCount(0);
+});

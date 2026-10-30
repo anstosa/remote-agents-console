@@ -10,7 +10,7 @@ declare global { interface Window { scheduleEmitted: Emitted[] } }
 const adapterOptions: ScheduleAdapterOption[] = [
   { kind: 'claude', launchable: true, detail: 'Sandbox enforced by console' },
   { kind: 'codex', launchable: true, detail: "Uses Codex's own sandbox" },
-  { kind: 'pi', launchable: false, detail: 'Pi is not configured', unavailableReason: 'Pi is not configured' },
+  { kind: 'pi', launchable: false, detail: 'Pi is not configured', unavailableReason: 'Pi is not configured', models: [{ model: 'openai/gpt-5.6' }], efforts: ['low', 'high'] },
 ];
 const targetOptions: ScheduleTargetOption[] = [
   { target: { scratch: true }, label: 'Scratch', available: true, kind: 'codex', origin: 'last used for scratch' },
