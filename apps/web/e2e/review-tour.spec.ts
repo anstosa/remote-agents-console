@@ -1532,6 +1532,14 @@ test('asks the guide about diff lines from the gutter, with follow-ups, and copi
   await expect(dialog.getByLabel('Comment on line 12')).toHaveValue('It counts **retries**.\n\nFour is the limit.');
 });
 
+test('reads the overview and step write-up at the terminal font size', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('rac.terminal-font-size', '17'));
+  const { dialog } = await openTriageTour(page);
+  await expect(dialog.locator('.review-tour-explanation p')).toHaveCSS('font-size', '17px');
+  await dialog.getByRole('button', { name: 'Back' }).click();
+  await expect(dialog.locator('.review-tour-overview p')).toHaveCSS('font-size', '17px');
+});
+
 test('restores a guide question still being answered, and keeps its thread when it fails unstored', async ({ page }) => {
   let fail = false;
   const anchor = { changeId: 'chg_route0001', file: 'src/route.ts', side: 'additions', startLine: 11, endLine: 12, excerpt: '+const b = 3;\n+const c = 4;' };
