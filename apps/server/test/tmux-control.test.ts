@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { mkdtemp as mkdtempAsync, lstat, readFile, writeFile, rm as rmAsync } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
@@ -33,12 +33,100 @@ const tmuxSocketsWork = (() => {
 })();
 
 const fixtures: Array<{ root: string; socket: string }> = [];
+const scriptedRoots: string[] = [];
+
+// scripted replies isolate control-mode ordering from a live tmux server
+type ScriptedScenario = {
+  captureError?: boolean;
+  captureLines?: string[];
+  metaError?: boolean;
+  outputWrite?: 'same' | 'next';
+  postCaptureOutput?: string;
+  preCaptureOutput?: string;
+  stallCapture?: boolean;
+};
+
+// start a deterministic control-mode peer for seed boundary tests
+async function scriptedClient(scenario: ScriptedScenario): Promise<{ client: TmuxControlClient; commands: string }> {
+  const root = await mkdtempAsync(join(tmpdir(), 'rac-control-scripted-'));
+  scriptedRoots.push(root);
+  const binary = join(root, 'tmux-script.mjs');
+  const scenarioPath = join(root, 'scenario.json');
+  const commands = `${scenarioPath}.commands`;
+  await writeFile(scenarioPath, JSON.stringify(scenario));
+  await writeFile(binary, `#!${process.execPath}
+import { appendFileSync, readFileSync } from 'node:fs';
+
+const scenarioPath = process.argv[process.argv.indexOf('-S') + 1];
+const scenario = JSON.parse(readFileSync(scenarioPath, 'utf8'));
+const commands = \`${'${scenarioPath}'}.commands\`;
+let input = '';
+let commandNumber = 0;
+
+// format one command reply block
+const block = (lines, ok = true) => {
+  commandNumber += 1;
+  const body = lines.length === 0 ? '' : \`${'${lines.join("\\n")}'}\\n\`;
+  return \`%begin 1 ${'${commandNumber}'} 0\\n${'${body}'}%${'${ok ? "end" : "error"}'} 1 ${'${commandNumber}'} 0\\n\`;
+};
+
+process.stdout.write(block([]));
+process.stdin.on('data', chunk => {
+  input += chunk.toString();
+  let newline = input.indexOf('\\n');
+  // drain complete client commands
+  while (newline >= 0) {
+    const command = input.slice(0, newline);
+    input = input.slice(newline + 1);
+    appendFileSync(commands, \`${'${command}'}\\n\`);
+    // detach ends the fixture
+    if (command === 'detach') process.exit(0);
+    // subscriptions are unrelated to the seed sequence
+    if (command.startsWith('refresh-client ')) process.stdout.write(block([]));
+    // metadata selects the requested screen mode
+    else if (command.startsWith('display-message ')) {
+      process.stdout.write(block(scenario.metaError ? ['metadata failed'] : ['0 2 3 1 0 0 0 1'], !scenario.metaError));
+    // capture controls the atomic reply/output boundary
+    } else if (command.startsWith('capture-pane ')) {
+      if (scenario.preCaptureOutput !== undefined) process.stdout.write(\`%output %1 ${'${scenario.preCaptureOutput}'}\\n\`);
+      if (!scenario.stallCapture) {
+        const reply = block(scenario.captureError ? ['capture failed'] : (scenario.captureLines ?? ['captured']), !scenario.captureError);
+        const output = scenario.postCaptureOutput === undefined ? '' : \`%output %1 ${'${scenario.postCaptureOutput}'}\\n\`;
+        // one write reproduces the parser's same-chunk drain
+        if (scenario.outputWrite === 'same') process.stdout.write(\`${'${reply}'}${'${output}'}\`);
+        else {
+          process.stdout.write(reply);
+          // the next write must preserve the same boundary
+          if (output !== '') process.stdout.write(output);
+        }
+      }
+    } else process.stdout.write(block([]));
+    newline = input.indexOf('\\n');
+  }
+});
+`, { mode: 0o700 });
+  const client = new TmuxControlClient(binary, scenarioPath, 'fixture', () => {});
+  await client.ready;
+  return { client, commands };
+}
+
+// collect a delivered seed for byte-parity assertions
+async function seedBytes(client: TmuxControlClient, pane: string, depth: number): Promise<Buffer> {
+  let delivered: Buffer | undefined;
+  const accepted = await client.seed(pane, depth, bytes => { delivered = bytes; return true; });
+  expect(accepted).toBe(true);
+  expect(delivered).toBeDefined();
+  return delivered!;
+}
 
 afterEach(async () => {
+  // reap real tmux fixtures
   for (const { root, socket } of fixtures.splice(0)) {
     await run(tmux, ['-S', socket, 'kill-server']).catch(() => undefined);
     await rmAsync(root, { recursive: true, force: true }).catch(() => undefined);
   }
+  // reap deterministic executable fixtures
+  for (const root of scriptedRoots.splice(0)) await rmAsync(root, { recursive: true, force: true }).catch(() => undefined);
 });
 
 // a fixture session with one pane running `cat`, whose tty echoes every typed byte as
@@ -56,12 +144,90 @@ async function fixtureSession(): Promise<{ ref: SocketRef; socket: string; pane:
 }
 
 async function eventually(check: () => boolean): Promise<void> {
+  // bound asynchronous fixture observation
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (check()) return;
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   throw new Error('control client did not reach the expected state');
 }
+
+describe('tmux control client seed boundary', () => {
+  it('delivers the seed before same-chunk output without replaying earlier output', async () => {
+    const { client } = await scriptedClient({ captureLines: ['snapshot'], preCaptureOutput: 'before', postCaptureOutput: 'after', outputWrite: 'same' });
+    const events: string[] = [];
+    try {
+      client.subscribe('%1', { onOutput: bytes => { events.push(`output:${bytes.toString()}`); }, onReseed: () => {}, onResize: () => {}, onExit: () => {} });
+      const seeded = await client.seed('%1', 100, bytes => { events.push(`seed:${bytes.toString('latin1')}`); return true; });
+      await eventually(() => events.includes('output:after'));
+
+      expect(seeded).toBe(true);
+      expect(events).toHaveLength(3);
+      expect(events[0]).toBe('output:before');
+      expect(events[1]).toContain('seed:');
+      expect(events[1]).toContain('snapshot');
+      expect(events[2]).toBe('output:after');
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it('delivers the seed before output from the immediately following write', async () => {
+    const { client } = await scriptedClient({ postCaptureOutput: 'after', outputWrite: 'next' });
+    const events: string[] = [];
+    try {
+      client.subscribe('%1', { onOutput: bytes => { events.push(`output:${bytes.toString()}`); }, onReseed: () => {}, onResize: () => {}, onExit: () => {} });
+      expect(await client.seed('%1', 100, () => { events.push('seed'); return true; })).toBe(true);
+      await eventually(() => events.includes('output:after'));
+      expect(events).toEqual(['seed', 'output:after']);
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it.each([
+    ['metadata', { metaError: true }],
+    ['capture', { captureError: true }]
+  ] as const)('does not deliver after a %s error', async (_label, scenario) => {
+    const { client } = await scriptedClient(scenario);
+    const deliver = vi.fn(() => true);
+    try {
+      expect(await client.seed('%1', 100, deliver)).toBe(false);
+      expect(deliver).not.toHaveBeenCalled();
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it('does not deliver a capture completed after disposal', async () => {
+    const { client, commands } = await scriptedClient({ stallCapture: true });
+    const deliver = vi.fn(() => true);
+    const pending = client.seed('%1', 100, deliver);
+    await eventually(() => {
+      try { return readFileSync(commands, 'utf8').includes('capture-pane '); } catch { return false; }
+    });
+    client.dispose();
+
+    await expect(pending).resolves.toBe(false);
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  // retain both refused and throwing delivery outcomes without duplicating setup
+  it.each([
+    ['refused', () => false],
+    ['throwing', () => { throw new Error('delivery failed'); }]
+  ] as const)('contains %s delivery without losing following output', async (_label, deliver) => {
+    const { client } = await scriptedClient({ postCaptureOutput: 'after', outputWrite: 'same' });
+    const output: string[] = [];
+    try {
+      client.subscribe('%1', { onOutput: bytes => { output.push(bytes.toString()); }, onReseed: () => {}, onResize: () => {}, onExit: () => {} });
+      await expect(client.seed('%1', 100, deliver)).resolves.toBe(false);
+      await eventually(() => output.includes('after'));
+    } finally {
+      client.dispose();
+    }
+  });
+});
 
 describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
   // TmuxAdapter and PaneStreamRegistry resolve the binary from the env; on the host tmux
@@ -498,7 +664,7 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       client.subscribe(pane, { onOutput: () => { /* observe prompt output */ seen = true; }, onReseed: () => {}, onResize: () => {}, onExit: () => {} });
       expect((await run(tmux, ['-S', socket, 'send-keys', '-t', pane, '-l', 'hello seed'])).code).toBe(0);
       await eventually(() => seen);
-      const seed = (await client.seed(pane, 100)).toString('latin1');
+      const seed = (await seedBytes(client, pane, 100)).toString('latin1');
       // paint the capture then return to the first-row prompt
       const capture = await run(tmux, ['-S', socket, 'capture-pane', '-e', '-p', '-J', '-t', pane, '-S', '-100']);
       const cursor = await run(tmux, ['-S', socket, 'display-message', '-p', '-t', pane, '#{cursor_x} #{cursor_y}']);
@@ -519,7 +685,7 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       await client.ready;
       expect(await client.sendInput(pane, Buffer.from('\x1b[4mUNDERLINED\n'))).toBe(true);
       await expect.poll(async () => (await run(tmux, ['-S', socket, 'capture-pane', '-e', '-p', '-t', pane])).stdout).toMatch(/\x1b\[4mUNDERLINED/u);
-      const seed = (await client.seed(pane, 100)).toString('latin1');
+      const seed = (await seedBytes(client, pane, 100)).toString('latin1');
       expect(seed).toContain('\x1b[4mUNDERLINED');
       // the final SGR the browser parses is a full reset, not the capture's underline
       expect([...seed.matchAll(/\x1b\[[\d;:]*m/gu)].at(-1)?.[0]).toBe('\x1b[0m');
@@ -535,13 +701,13 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
     try {
       await client.ready;
       const mouseModes = '#{mouse_standard_flag} #{mouse_button_flag} #{mouse_all_flag} #{mouse_utf8_flag} #{mouse_sgr_flag}';
-      const initial = (await client.seed(pane, 100)).toString('latin1');
+      const initial = (await seedBytes(client, pane, 100)).toString('latin1');
       expect(initial).not.toMatch(/\x1b\[\?100[02356]h/u);
 
       // exercise the normal-buffer protocol and legacy coordinate encoding
       expect(await client.sendInput(pane, Buffer.from('\x1b[?1000h\x1b[?1005h\n'))).toBe(true);
       await expect.poll(async () => (await run(tmux, ['-S', socket, 'display-message', '-p', '-t', pane, mouseModes])).stdout.trim()).toBe('1 0 0 1 0');
-      const standard = (await client.seed(pane, 100)).toString('latin1');
+      const standard = (await seedBytes(client, pane, 100)).toString('latin1');
       expect(standard).toContain('\x1b[?1000h');
       expect(standard).toContain('\x1b[?1005h');
       expect(standard).not.toMatch(/\x1b\[\?100[236]h/u);
@@ -549,14 +715,14 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       // switch protocols rather than carrying stale reporting flags forward
       expect(await client.sendInput(pane, Buffer.from('\x1b[?1000l\x1b[?1005l\x1b[?1002h\n'))).toBe(true);
       await expect.poll(async () => (await run(tmux, ['-S', socket, 'display-message', '-p', '-t', pane, mouseModes])).stdout.trim()).toBe('0 1 0 0 0');
-      const button = (await client.seed(pane, 100)).toString('latin1');
+      const button = (await seedBytes(client, pane, 100)).toString('latin1');
       expect(button).toContain('\x1b[?1002h');
       expect(button).not.toMatch(/\x1b\[\?100[0356]h/u);
 
       // disabling the final protocol must not create phantom reporting
       expect(await client.sendInput(pane, Buffer.from('\x1b[?1002l\n'))).toBe(true);
       await expect.poll(async () => (await run(tmux, ['-S', socket, 'display-message', '-p', '-t', pane, mouseModes])).stdout.trim()).toBe('0 0 0 0 0');
-      expect((await client.seed(pane, 100)).toString('latin1')).not.toMatch(/\x1b\[\?100[02356]h/u);
+      expect((await seedBytes(client, pane, 100)).toString('latin1')).not.toMatch(/\x1b\[\?100[02356]h/u);
     } finally {
       client.dispose();
     }
@@ -575,7 +741,7 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       await eventually(() => bytes > 0);
       // wait for tmux to parse the screen, reporting protocol and coordinate encoding
       await expect.poll(async () => (await run(tmux, ['-S', socket, 'display-message', '-p', '-t', pane, '#{alternate_on} #{mouse_all_flag} #{mouse_sgr_flag}'])).stdout.trim()).toBe('1 1 1');
-      const seed = (await client.seed(pane, 100)).toString('latin1');
+      const seed = (await seedBytes(client, pane, 100)).toString('latin1');
       // enters the alt screen, clears, paints row one absolutely and restores the cursor
       expect(seed.startsWith('\x1b[?1049h\x1b[H\x1b[2J')).toBe(true);
       expect(seed).toContain('\x1b[1;1H');

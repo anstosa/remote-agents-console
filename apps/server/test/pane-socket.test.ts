@@ -35,6 +35,8 @@ function fakePaneStream() {
   const inputs: Buffer[] = [];
   const seedDepths: number[] = [];
   let seedBytes: Buffer = Buffer.from('SEED');
+  let seedOutput: Buffer | undefined;
+  let seedHandler: ((deliver: (bytes: Buffer) => boolean) => Promise<boolean>) | undefined;
   let captureText = 'idle';
   let assistantMessage: string | undefined;
   // windowId is the pane socket's liveness signal (a gone pane has none), so a closed pane is
@@ -46,14 +48,29 @@ function fakePaneStream() {
     capture: async () => captureText,
     windowId: async () => windowId,
     sendInput: async (_pane, bytes) => { inputs.push(Buffer.from(bytes)); return inputAccepted; },
-    seed: async (_pane, depth) => { seedDepths.push(depth); return seedBytes; }
+    // model output immediately after the snapshot reply in the same parser turn
+    seed: async (_pane, depth, deliver) => {
+      seedDepths.push(depth);
+      // let lifecycle cases hold or refuse the snapshot boundary
+      if (seedHandler !== undefined) return seedHandler(deliver);
+      const delivered = deliver(seedBytes);
+      // a live redraw can follow the capture before an awaiting caller resumes
+      if (seedOutput !== undefined) subscriber?.onOutput?.(seedOutput);
+      return delivered;
+    }
   };
   const provider: PaneStreamProvider = { get: () => client, openPaneKeys: () => new Set(), closeAll: () => {} };
   return {
     provider,
     inputs,
     seedDepths,
+    // observe readiness before sending pre-viewport stream events
+    subscribed: () => subscriber !== undefined,
     setSeed: (value: Buffer) => { seedBytes = value; },
+    // script the first live redraw at the capture boundary
+    setSeedOutput: (value: Buffer) => { seedOutput = value; },
+    // control deferred capture replies and failures without changing transport behavior
+    setSeedHandler: (value: (deliver: (bytes: Buffer) => boolean) => Promise<boolean>) => { seedHandler = value; },
     setWindowId: (value: string | undefined) => { windowId = value; },
     refuseInput: () => { inputAccepted = false; },
     setCapture: (value: string) => { captureText = value; },
@@ -182,6 +199,141 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe('/ws/pane seed and size', () => {
+  // an early tmux recovery must wait for a usable browser grid
+  it('defers a reseed before the first viewport until size is sent', async () => {
+    const stream = fakePaneStream();
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    await waitFor(stream.subscribed);
+    stream.fire('onReseed');
+    await delay(20);
+
+    expect(stream.seedDepths).toEqual([]);
+    expect(conn.binary).toEqual([]);
+    conn.viewport();
+    await waitFor(() => conn.binary.length > 0);
+    expect(conn.order.indexOf('frame:size')).toBeGreaterThanOrEqual(0);
+    expect(conn.order.indexOf('frame:size')).toBeLessThan(conn.order.indexOf('binary'));
+    expect(stream.seedDepths).toHaveLength(1);
+  });
+
+  // reconnect when resizing succeeds but its actual grid cannot be reported
+  it('refuses to seed when the post-resize size read fails', async () => {
+    const stream = fakePaneStream();
+    const size = vi.fn().mockResolvedValueOnce({ cols: 80, rows: 24, clientLimit: { cols: 80, rows: 24 } }).mockResolvedValue(undefined);
+    const { tmux, resizes } = fakeTmux(stream, { size });
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport();
+    await waitFor(() => conn.closeCode() !== undefined || conn.binary.length > 0);
+
+    expect(resizes).toContainEqual({ cols: 80, rows: 24 });
+    expect(conn.closeCode()).toBe(1011);
+    expect(conn.binary).toEqual([]);
+    expect(stream.seedDepths).toEqual([]);
+  });
+
+  // authority may be revoked while the tmux capture is still pending
+  it('refuses deferred seed delivery after control is lost', async () => {
+    const stream = fakePaneStream();
+    let active = true;
+    let pending: { deliver: (bytes: Buffer) => boolean; resolve: (delivered: boolean) => void } | undefined;
+    // hold the snapshot until the control lease changes
+    stream.setSeedHandler(deliver => new Promise(resolve => { pending = { deliver, resolve }; }));
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux, controlActive: () => active });
+    conn.viewport();
+    await waitFor(() => pending !== undefined);
+    active = false;
+
+    expect(pending!.deliver(Buffer.from('REVOKED-SEED'))).toBe(false);
+    pending!.resolve(false);
+    await waitFor(() => conn.closeCode() !== undefined);
+    stream.output(Buffer.from('REVOKED-LIVE'));
+    await delay(20);
+    expect(conn.binary).toEqual([]);
+    expect(conn.closeCode()).toBe(1008);
+  });
+
+  // closing a viewer must retire a capture without replacing its close reason
+  it('refuses deferred seed delivery after the viewer closes', async () => {
+    const stream = fakePaneStream();
+    let pending: { deliver: (bytes: Buffer) => boolean; resolve: (delivered: boolean) => void } | undefined;
+    // retain the capture callback beyond the client connection lifetime
+    stream.setSeedHandler(deliver => new Promise(resolve => { pending = { deliver, resolve }; }));
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport();
+    await waitFor(() => pending !== undefined);
+    open.at(-1)!.ws.close(1000);
+    await waitFor(() => conn.closeCode() !== undefined);
+
+    expect(pending!.deliver(Buffer.from('CLOSED-SEED'))).toBe(false);
+    pending!.resolve(false);
+    stream.output(Buffer.from('CLOSED-LIVE'));
+    await delay(20);
+    expect(conn.binary).toEqual([]);
+    expect(conn.closeCode()).toBe(1000);
+  });
+
+  // never lose the first restored transcript repaint behind the snapshot gate
+  it('sends size, seed and an immediate post-capture redraw in order', async () => {
+    const stream = fakePaneStream();
+    stream.setSeed(Buffer.from('OPENING-SESSION'));
+    stream.setSeedOutput(Buffer.from('RESTORED-HISTORY'));
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport(100, 30);
+
+    await waitFor(() => conn.binary.length === 2);
+    expect(conn.binary.map(bytes => bytes.toString())).toEqual(['OPENING-SESSION', 'RESTORED-HISTORY']);
+    const sizeAt = conn.order.indexOf('frame:size');
+    expect(sizeAt).toBeGreaterThanOrEqual(0);
+    expect(conn.order.slice(sizeAt).filter(event => event === 'frame:size' || event === 'binary')).toEqual(['frame:size', 'binary', 'binary']);
+  });
+
+  // never declare a baseline-less connection live after an unsuccessful capture
+  it.each(['refused', 'rejected'])('reconnects when initial seed delivery is %s', async outcome => {
+    const stream = fakePaneStream();
+    stream.setSeedHandler(async () => {
+      // exercise both the failed reply and rejected command paths
+      if (outcome === 'rejected') throw new Error('capture failed');
+      return false;
+    });
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport();
+
+    await waitFor(() => conn.closeCode() !== undefined);
+    expect(conn.closeCode()).toBe(1011);
+    expect(conn.binary).toEqual([]);
+  });
+
+  // a superseded capture must not reopen the live gate while its replacement is pending
+  it('ignores old seed delivery and failure after a newer reseed starts', async () => {
+    const stream = fakePaneStream();
+    const pending: Array<{ deliver: (bytes: Buffer) => boolean; resolve: (delivered: boolean) => void }> = [];
+    stream.setSeedHandler(deliver => new Promise(resolve => { pending.push({ deliver, resolve }); }));
+    const { tmux } = fakeTmux(stream);
+    const conn = await connect(stream.provider, { tmux });
+    conn.viewport();
+    await waitFor(() => pending.length === 1);
+    stream.fire('onReseed');
+    await waitFor(() => pending.length === 2);
+
+    expect(pending[0]!.deliver(Buffer.from('STALE-SEED'))).toBe(false);
+    pending[0]!.resolve(false);
+    // let the old failure settle while the replacement still owns the live gate
+    await delay(20);
+    stream.output(Buffer.from('PRE-NEW-SEED'));
+    expect(pending[1]!.deliver(Buffer.from('NEW-SEED'))).toBe(true);
+    stream.output(Buffer.from('RESTORED-HISTORY'));
+    pending[1]!.resolve(true);
+
+    await waitFor(() => conn.binary.length === 2);
+    expect(conn.binary.map(bytes => bytes.toString())).toEqual(['NEW-SEED', 'RESTORED-HISTORY']);
+    expect(conn.closeCode()).toBeUndefined();
+  });
+
   it('sends the actual size then the seed after the first viewport', async () => {
     const stream = fakePaneStream();
     stream.setSeed(Buffer.from('SEEDBYTES'));
@@ -375,9 +527,11 @@ describe('/ws/pane flow control', () => {
     // acking below the 64 KiB low-water mark reseeds: a reseed frame, then a fresh seed whose
     // distinct bytes prove the replacement screen is actually re-delivered (not just the frame)
     stream.setSeed(Buffer.from('RECOVERY-SEED'));
+    stream.setSeedOutput(Buffer.from('RECOVERY-REDRAW'));
     conn.send({ type: 'ack', bytes: 8 * 64 * 1024 });
     await waitFor(() => conn.frames.some(frame => frame.type === 'reseed'));
     await waitFor(() => conn.binary.some(buffer => buffer.toString() === 'RECOVERY-SEED'));
+    await waitFor(() => conn.binary.some(buffer => buffer.toString() === 'RECOVERY-REDRAW'));
   });
 });
 

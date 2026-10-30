@@ -59,12 +59,12 @@ export type PaneClient = {
   windowId(pane: string): Promise<string | undefined>;
   // type bytes into the pane byte-exact (`send-keys -H`) over the connection, no spawn
   sendInput(pane: string, bytes: Buffer): Promise<boolean>;
-  // a Capture reconstructed as a byte seed for the Pane stream, issued on the connection
-  // so tmux orders it exactly against `%output` (the browser applies the seed, then only
-  // bytes after the reply's end). Alternate screen: each row painted with absolute
-  // positioning and the cursor restored. Normal screen: history joined with CRLF, cleared
-  // first and the cursor restored. An empty buffer on failure.
-  seed(pane: string, depth: number): Promise<Buffer>;
+  // a capture reconstructed as a byte seed for the pane stream, issued on the connection
+  // so tmux orders it exactly against `%output`. delivery runs while the reply closes,
+  // before the parser advances to later output. alternate screen: each row painted with
+  // absolute positioning and the cursor restored. normal screen: history joined with CRLF,
+  // cleared first and the cursor restored. false means capture or delivery failed.
+  seed(pane: string, depth: number, deliver: (bytes: Buffer) => boolean): Promise<boolean>;
 };
 export type PaneStreamProvider = {
   get(socket: SocketRef, session: string): PaneClient;
@@ -73,7 +73,7 @@ export type PaneStreamProvider = {
   closeAll(): void;
 };
 
-type BlockWaiter = { resolve: (reply: CommandReply) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
+type BlockWaiter = { complete: (reply: CommandReply) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 
 export class TmuxControlClient implements PaneClient {
   private readonly child: ChildProcessWithoutNullStreams;
@@ -95,7 +95,7 @@ export class TmuxControlClient implements PaneClient {
     // no terminal is attached, and refuses with "client is read-only" (the paste still lands).
     const flags = options.commandOnly ? 'ignore-size,no-output,no-detach-on-destroy' : 'ignore-size';
     this.child = spawn(binary, ['-S', socketPath, ...(options.commandOnly ? ['-N'] : []), '-C', 'attach-session', ...(options.commandOnly ? ['-E'] : []), ...(session === undefined ? [] : ['-t', session]), '-f', flags], { env: safeEnv() });
-    this.ready = new Promise<void>((resolve, reject) => this.blockWaiters.push({ resolve: reply => {
+    this.ready = new Promise<void>((resolve, reject) => this.blockWaiters.push({ complete: reply => {
       // failed attaches are not usable connections
       if (reply.ok) resolve();
       else { reject(new Error('control attach failed')); this.fail('control client lost'); }
@@ -123,7 +123,8 @@ export class TmuxControlClient implements PaneClient {
     switch (event.type) {
       case 'block': {
         const waiter = this.blockWaiters.shift();
-        if (waiter !== undefined) { clearTimeout(waiter.timer); waiter.resolve({ ok: event.ok, lines: event.lines }); }
+        // complete inside the parser callback before it advances to later output
+        if (waiter !== undefined) { clearTimeout(waiter.timer); waiter.complete({ ok: event.ok, lines: event.lines }); }
         return;
       }
       case 'output': this.notifyActivity(event.pane, event.data); return;
@@ -147,13 +148,24 @@ export class TmuxControlClient implements PaneClient {
     return setTimeout(() => this.fail('control client lost'), this.options.timeoutMs ?? commandTimeoutMs);
   }
 
-  // send a command and await its reply block; rejects if the client is gone or stalls
-  async command(text: string): Promise<CommandReply> {
+  // map a reply synchronously at its parser boundary
+  private async commandMapped<T>(text: string, map: (reply: CommandReply) => T): Promise<T> {
+    // reject commands after teardown
     if (this.disposed) throw new Error('control client disposed');
-    return await new Promise<CommandReply>((resolve, reject) => {
-      this.blockWaiters.push({ resolve, reject, timer: this.armTimeout() });
+    return await new Promise<T>((resolve, reject) => {
+      // contain mapper failures inside the command promise
+      const complete = (reply: CommandReply): void => {
+        try { resolve(map(reply)); }
+        catch (error) { reject(error instanceof Error ? error : new Error('control command mapper failed')); }
+      };
+      this.blockWaiters.push({ complete, reject, timer: this.armTimeout() });
       this.child.stdin.write(`${text}\n`);
     });
+  }
+
+  // send a command and await its reply block; rejects if the client is gone or stalls
+  async command(text: string): Promise<CommandReply> {
+    return await this.commandMapped(text, reply => reply);
   }
 
   /**
@@ -303,14 +315,18 @@ export class TmuxControlClient implements PaneClient {
    * SGR reset; otherwise the last captured cell's style (an underlined link, say) becomes the
    * browser's pen and colours everything the program writes next. reply lines are
    * byte-preserving (latin1); the ASCII control prefixes stay ASCII, so latin1 reproduces the
-   * exact bytes a spawned capture would print.
+   * exact bytes a spawned capture would print. the delivery callback runs synchronously
+   * when the final capture reply closes, before the parser advances to later `%output`.
    */
-  async seed(pane: string, depth: number): Promise<Buffer> {
-    if (!paneId.test(pane) || !Number.isInteger(depth) || depth < 1 || depth > maxCaptureDepth) return Buffer.alloc(0);
+  async seed(pane: string, depth: number, deliver: (bytes: Buffer) => boolean): Promise<boolean> {
+    // reject invalid capture boundaries
+    if (!paneId.test(pane) || !Number.isInteger(depth) || depth < 1 || depth > maxCaptureDepth) return false;
     await this.ready.catch(() => undefined);
-    if (this.disposed) return Buffer.alloc(0);
+    // stop after connection loss
+    if (this.disposed) return false;
     const meta = await this.command(`display-message -p -t ${pane} '#{alternate_on} #{cursor_x} #{cursor_y} #{mouse_standard_flag} #{mouse_button_flag} #{mouse_all_flag} #{mouse_utf8_flag} #{mouse_sgr_flag}'`).catch(() => undefined);
-    if (meta?.ok !== true) return Buffer.alloc(0);
+    // metadata failure cannot produce a faithful seed
+    if (meta?.ok !== true) return false;
     const [alt, cursorX, cursorY, mouseStandard, mouseButton, mouseAll, mouseUtf8, mouseSgr] = (meta.lines[0] ?? '').trim().split(' ');
     // restore the live cursor after either screen capture
     const x = Number(cursorX);
@@ -318,16 +334,22 @@ export class TmuxControlClient implements PaneClient {
     const cursor = Number.isInteger(x) && Number.isInteger(y) ? `\x1b[${y + 1};${x + 1}H` : '';
     // restore only the reporting and encoding modes tmux currently has enabled
     const mouseModes = `${mouseStandard === '1' ? '\x1b[?1000h' : ''}${mouseButton === '1' ? '\x1b[?1002h' : ''}${mouseAll === '1' ? '\x1b[?1003h' : ''}${mouseUtf8 === '1' ? '\x1b[?1005h' : ''}${mouseSgr === '1' ? '\x1b[?1006h' : ''}`;
+    // alternate screens require absolute row painting
     if (alt === '1') {
-      const capture = await this.command(`capture-pane -e -p -N -t ${pane}`).catch(() => undefined);
-      if (capture?.ok !== true) return Buffer.alloc(0);
-      let out = '\x1b[?1049h\x1b[H\x1b[2J';
-      capture.lines.forEach((line, index) => { out += `\x1b[${index + 1};1H${line}`; });
-      return Buffer.from(`${out}\x1b[0m${mouseModes}${cursor}`, 'latin1');
+      return await this.commandMapped(`capture-pane -e -p -N -t ${pane}`, capture => {
+        // failed captures never reach the socket
+        if (!capture.ok) return false;
+        let out = '\x1b[?1049h\x1b[H\x1b[2J';
+        // paint each row without newline wrapping
+        capture.lines.forEach((line, index) => { out += `\x1b[${index + 1};1H${line}`; });
+        return deliver(Buffer.from(`${out}\x1b[0m${mouseModes}${cursor}`, 'latin1'));
+      }).catch(() => false);
     }
-    const capture = await this.command(`capture-pane -e -p -J -t ${pane} -S -${depth}`).catch(() => undefined);
-    if (capture?.ok !== true) return Buffer.alloc(0);
-    return Buffer.from(`\x1b[H\x1b[2J${capture.lines.join('\r\n')}\x1b[0m${mouseModes}${cursor}`, 'latin1');
+    return await this.commandMapped(`capture-pane -e -p -J -t ${pane} -S -${depth}`, capture => {
+      // failed captures never reach the socket
+      if (!capture.ok) return false;
+      return deliver(Buffer.from(`\x1b[H\x1b[2J${capture.lines.join('\r\n')}\x1b[0m${mouseModes}${cursor}`, 'latin1'));
+    }).catch(() => false);
   }
 
   private async continuePane(pane: string): Promise<void> {

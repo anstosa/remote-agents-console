@@ -3673,7 +3673,13 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const sendBinary = (bytes: Buffer) => { if (!control.active(s.id)) return socket.close(1008); if (socket.readyState === socket.OPEN) socket.send(bytes); };
       // report the pane's ACTUAL size, so a smaller attached terminal the coordinator yields
       // to is the grid the browser conforms to (Sizing, ADR 0008)
-      const reportSize = async () => { const size = await tmux.size(socketRef, pane); if (size !== undefined) sendFrame({ type: 'size', cols: size.cols, rows: size.rows }); };
+      const reportSize = async (): Promise<boolean> => {
+        const size = await tmux.size(socketRef, pane);
+        // an unknown grid cannot authorize the initial snapshot
+        if (size === undefined) return false;
+        sendFrame({ type: 'size', cols: size.cols, rows: size.rows });
+        return socket.readyState === socket.OPEN;
+      };
       let cols = 120;
       let rows = 36;
       let seedDepth = 2_000;
@@ -3684,30 +3690,39 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       const lowWatermark = 64 * 1024;
       let unacked = 0;
       let dropped = false;
-      // `seeding` covers a seed Capture in flight: %output that arrives then landed before the
-      // reply's end, so it is already in the seed and is dropped — the browser applies the seed
-      // and then only bytes after it (spec). KNOWN LIMITATION: a post-`%end` %output delivered
-      // in the *same* read chunk as the reply is dropped too (its onOutput fires synchronously
-      // before the microtask that clears `seeding`); rare because the capture reply spans many
-      // chunks, and only corrected by the next reseed (%pause, flow-control recovery, reconnect).
+      // discard pre-capture output already represented by the seed; its delivery opens the
+      // live gate synchronously at the reply boundary, before any following redraw
       let seeding = true;
       let seeded = false;
+      let seedGeneration = 0;
       const forward = (bytes: Buffer) => {
         if (seeding) return;
         if (unacked >= highWatermark) { dropped = true; return; }
         unacked += bytes.length;
         sendBinary(bytes);
       };
+      // replace the screen and resume live bytes at the capture reply boundary
       const reseed = async () => {
         // a fresh seed re-establishes the whole screen, so the pre-reseed in-flight count is
         // void: reset it (and clear a lingering drop) so backpressure restarts from the seed
         seeding = true;
+        const generation = ++seedGeneration;
         unacked = 0;
         dropped = false;
-        const seed = await paneClient.seed(pane, seedDepth);
-        if (socket.readyState !== socket.OPEN) { seeding = false; return; }
-        sendBinary(seed);
+        const delivered = await paneClient.seed(pane, seedDepth, seed => {
+          // an older capture cannot replace a newer snapshot or release its live gate
+          if (generation !== seedGeneration || socket.readyState !== socket.OPEN) return false;
+          // preserve take-control policy before sending the snapshot
+          if (!control.active(s.id)) { socket.close(1008); return false; }
+          sendBinary(seed);
+          seeding = false;
+          return true;
+        }).catch(() => false);
+        // a stale failure must not close a newer snapshot stream
+        if (generation !== seedGeneration || delivered) return;
         seeding = false;
+        // reconnect rather than forwarding live bytes without a usable baseline
+        if (socket.readyState === socket.OPEN) socket.close(1011);
       };
       const seedOnce = () => { if (seeded || socket.readyState !== socket.OPEN) return; seeded = true; void reseed(); };
       // the Agent-pane derive: a quiet window after %output takes one deep Capture, feeding the
@@ -3780,13 +3795,25 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // early-return path without ever reporting a size, firing the seed ahead of the winning
       // viewport's size when a mount-time viewport burst coalesces into one read.
       const viewport = new LatestViewportScheduler(
-        async (nextCols, nextRows) => { await windowKeyReady; const resized = await viewportLease().resize(nextCols, nextRows); await reportSize(); if (resized) seedOnce(); return resized; },
+        async (nextCols, nextRows) => {
+          await windowKeyReady;
+          const resized = await viewportLease().resize(nextCols, nextRows);
+          const reported = await reportSize();
+          // release the first snapshot only after its grid reached the viewer
+          if (resized && reported) seedOnce();
+          return resized && reported;
+        },
         () => {}
       );
       const unsubscribePane = paneClient.subscribe(pane, {
         ...(derives ? { onActivity: armDerive } : {}),
         onOutput: forward,
-        onReseed: () => { sendFrame({ type: 'reseed' }); void reseed(); },
+        onReseed: () => {
+          // the first successful viewport owns size-before-seed initialization
+          if (!seeded) return;
+          sendFrame({ type: 'reseed' });
+          void reseed();
+        },
         onResize: () => { void reclamp(); },
         onClipboard: (text: string) => sendFrame({ type: 'clipboard', text }),
         // the session ended or the control client was lost; forward the reason and let the browser reconnect
