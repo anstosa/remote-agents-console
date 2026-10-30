@@ -153,9 +153,9 @@ export class WorktreeManagementService {
 
   // `origin/HEAD` when the remote publishes one, else the checkout's own HEAD branch
   private async defaultBranch(path: string): Promise<string | undefined> {
-    const origin = await this.git(['-C', path, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    const origin = await this.git([...repositoryArgs(path), 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
     if (origin.code === 0) { const ref = origin.stdout.trim(); const slash = ref.indexOf('/'); if (ref !== '') return slash === -1 ? ref : ref.slice(slash + 1); }
-    const head = await this.git(['-C', path, 'symbolic-ref', '--short', 'HEAD']);
+    const head = await this.git([...repositoryArgs(path), 'symbolic-ref', '--short', 'HEAD']);
     return head.code === 0 && head.stdout.trim() !== '' ? head.stdout.trim() : undefined;
   }
 
@@ -196,7 +196,7 @@ export class WorktreeManagementService {
     if (!added.ok) return added;
     if (head.fork) return { ...added, fork: true };
     if (!head.existing) {
-      const tracked = await this.git(['-C', path, 'branch', '--set-upstream-to', head.upstream]);
+      const tracked = await this.git([...repositoryArgs(path), 'branch', '--set-upstream-to', head.upstream]);
       // the checkout stands without its upstream; only pull and push lose their default
       if (tracked.code !== 0) console.warn(`[worktrees] ${path}: could not track ${head.upstream}: ${tracked.stderr.trim()}`);
     }
@@ -354,7 +354,7 @@ export class WorktreeManagementService {
 
   // every local branch with its commit and the checkout holding it ('' when none)
   private async branchHeads(path: string): Promise<{ branch: string; head: string; checkout: string }[] | undefined> {
-    const listed = await this.git(['-C', path, 'for-each-ref', '--format=%(refname:strip=2)\t%(objectname)\t%(worktreepath)', 'refs/heads']);
+    const listed = await this.git([...repositoryArgs(path), 'for-each-ref', '--format=%(refname:strip=2)\t%(objectname)\t%(worktreepath)', 'refs/heads']);
     if (listed.code !== 0) return undefined;
     return listed.stdout.split('\n').map(line => {
       const [branch = '', head = '', checkout = ''] = line.split('\t');
@@ -451,14 +451,14 @@ export class WorktreeManagementService {
 
   // the number of changed paths in the worktree, untracked included
   private async dirtyCount(path: string): Promise<number> {
-    const status = await this.git(['-C', path, 'status', '--porcelain', '--untracked-files=all']);
+    const status = await this.git([...repositoryArgs(path), 'status', '--porcelain', '--untracked-files=all']);
     return status.code !== 0 ? 0 : status.stdout.split('\n').filter(line => line.trim() !== '').length;
   }
 
   // whether one ref is safely on the remote: contained in an `origin/*` ref, or the
   // branch's upstream is gone (deleted on the remote, as after a squash-merge)
   private async pushed(path: string, branch?: string, ref = 'HEAD'): Promise<boolean> {
-    const contained = await this.git(['-C', path, 'branch', '-r', '--contains', ref, '--list', 'origin/*']);
+    const contained = await this.git([...repositoryArgs(path), 'branch', '-r', '--contains', ref, '--list', 'origin/*']);
     if (contained.code === 0 && contained.stdout.split('\n').some(line => line.trim() !== '' && !line.includes('->'))) return true;
     // a branch whose upstream was deleted on the remote (e.g. after a squash-merge) was still
     // pushed; git marks it `[gone]` in the upstream track field. `@{upstream}` itself no longer
@@ -467,8 +467,8 @@ export class WorktreeManagementService {
     // a fork pull request's checkout is held on GitHub as refs/pull/<n>/head, which the
     // console fetched into refs/rac/pull/<n>
     const forkNumber = forkCheckoutNumber(branch);
-    if (forkNumber !== undefined && (await this.git(['-C', path, 'merge-base', '--is-ancestor', ref, `refs/rac/pull/${forkNumber}`])).code === 0) return true;
-    const track =await this.git(['-C', path, 'for-each-ref', '--format=%(upstream:track)', `refs/heads/${branch}`]);
+    if (forkNumber !== undefined && (await this.git([...repositoryArgs(path), 'merge-base', '--is-ancestor', ref, `refs/rac/pull/${forkNumber}`])).code === 0) return true;
+    const track =await this.git([...repositoryArgs(path), 'for-each-ref', '--format=%(upstream:track)', `refs/heads/${branch}`]);
     return track.code === 0 && track.stdout.includes('[gone]');
   }
 
@@ -480,14 +480,14 @@ export class WorktreeManagementService {
     for (const targetRef of [`origin/${branch}`, branch]) {
       // code 0 = contained; code 1 = ref resolved but HEAD not merged there; other = missing
       // ref. A missing-or-unmerged remote default still checks the local one before giving up.
-      if ((await this.git(['-C', path, 'merge-base', '--is-ancestor', candidateRef, targetRef])).code === 0) return true;
+      if ((await this.git([...repositoryArgs(path), 'merge-base', '--is-ancestor', candidateRef, targetRef])).code === 0) return true;
     }
     return false;
   }
 
   // HEAD's divergence from its configured upstream, or undefined when there is none
   private async aheadBehind(path: string): Promise<{ ahead: number; behind: number } | undefined> {
-    const counts = await this.git(['-C', path, 'rev-list', '--left-right', '--count', 'HEAD...@{upstream}']);
+    const counts = await this.git([...repositoryArgs(path), 'rev-list', '--left-right', '--count', 'HEAD...@{upstream}']);
     const match = counts.code === 0 ? /^(\d+)\s+(\d+)$/u.exec(counts.stdout.trim()) : null;
     if (match === null) return undefined;
     const ahead = Number(match[1]); const behind = Number(match[2]);
@@ -531,7 +531,7 @@ export class WorktreeManagementService {
   private async branchHead(path: string, branch: string): Promise<string | undefined> {
     // reject revision expressions before passing a ref to git
     if (invalidBranchReason(branch) !== undefined) return undefined;
-    const result = await this.git(['-C', path, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`]);
+    const result = await this.git([...repositoryArgs(path), 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`]);
     const head = result.stdout.trim();
     return result.code === 0 && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head) ? head : undefined;
   }
@@ -556,13 +556,13 @@ export class WorktreeManagementService {
     return (await this.git(['check-ref-format', '--branch', branch])).code === 0;
   }
   private async branchExists(path: string, branch: string): Promise<boolean> {
-    return (await this.git(['-C', path, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
+    return (await this.git([...repositoryArgs(path), 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
   }
   private async commitResolves(path: string, base: string): Promise<boolean> {
-    return (await this.git(['-C', path, 'rev-parse', '--verify', '--quiet', `${base}^{commit}`])).code === 0;
+    return (await this.git([...repositoryArgs(path), 'rev-parse', '--verify', '--quiet', `${base}^{commit}`])).code === 0;
   }
   private async checkedOutElsewhere(path: string, branch: string): Promise<boolean> {
-    const listed = await this.git(['-C', path, 'for-each-ref', '--format', '%(worktreepath)', `refs/heads/${branch}`]);
+    const listed = await this.git([...repositoryArgs(path), 'for-each-ref', '--format', '%(worktreepath)', `refs/heads/${branch}`]);
     return listed.code === 0 && listed.stdout.trim() !== '';
   }
   private async pathExists(path: string): Promise<boolean> {

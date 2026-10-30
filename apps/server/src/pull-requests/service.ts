@@ -1,4 +1,5 @@
 import { run } from '../tmux/command.js';
+import { repositoryArgs } from '../git/worktrees.js';
 import type { PullRequestCheckStatus, PullRequestComment, PullRequestComments, PullRequestIssues, PullRequestReviewThread, PullRequestSummary } from '../domain/models.js';
 import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, githubToken, type Command, type GithubRepository, type Request, type ResponseLike, type Token } from './github.js';
 
@@ -286,7 +287,7 @@ export class PullRequestService {
   }
 
   private async repository(workspace: string): Promise<GithubRepository | undefined> {
-    const remote = await this.command('/usr/bin/git', ['-C', workspace, 'remote', 'get-url', 'origin']);
+    const remote = await this.command('/usr/bin/git', [...repositoryArgs(workspace), 'remote', 'get-url', 'origin']);
     return remote.code === 0 ? githubRepository(remote.stdout) : undefined;
   }
 

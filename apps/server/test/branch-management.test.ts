@@ -349,3 +349,19 @@ describe('closed pull request worktrees', () => {
     expect(cleanupHead).not.toHaveBeenCalled();
   });
 });
+
+describe('a bare repository Project', () => {
+  // the console's git takes a bare repository only when named explicitly (`safe.bareRepository=explicit`)
+  it('resolves its default branch and finds its merged branches', async () => {
+    const { root } = await repository();
+    await git(root, 'branch', 'done');
+    const bare = `${root}-store.git`;
+    directories.push(bare);
+    await git(root, 'clone', '-q', '--bare', root, bare);
+    const project = testProject({ id: 'bare', label: 'Bare', path: bare, identity: bare, worktreesDirectory: `${bare}-worktrees`, available: true });
+    const service = new WorktreeManagementService(() => [project]);
+
+    await expect(service.branches('bare')).resolves.toMatchObject({ ok: true, defaultBranch: 'main' });
+    await expect(service.cleanupBranches()).resolves.toEqual([{ projectId: 'bare', projectLabel: 'Bare', branch: 'done', reason: 'merged' }]);
+  });
+});
