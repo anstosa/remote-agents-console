@@ -18,12 +18,6 @@ export type ClipboardContents = {
   files: File[];
 };
 
-type ClipboardState =
-  | { status: 'checking' }
-  | { status: 'ready'; contents: ClipboardContents }
-  | { status: 'empty' }
-  | { status: 'unavailable' };
-
 export type SelectionContextMode = {
   id: string;
   label: string;
@@ -74,11 +68,11 @@ function clipboardFile(blob: Blob, index: number): File {
   return new File([blob], `pasted-image-${index + 1}.${extension}`, { type: blob.type, lastModified: Date.now() });
 }
 
-// read the clipboard only from the explicit context-menu gesture
-async function readClipboard(): Promise<ClipboardState> {
+// read the clipboard only once Paste is chosen: Firefox asks for confirmation with its own popup on every read
+async function readClipboard(): Promise<ClipboardContents | undefined> {
   const clipboard = navigator.clipboard;
-  // disable paste when the browser exposes no async clipboard surface
-  if (clipboard === undefined) return { status: 'unavailable' };
+  // paste nothing when the browser exposes no async clipboard surface
+  if (clipboard === undefined) return undefined;
   try {
     // retain images for ordinary paste when rich clipboard reads are supported
     if (typeof clipboard.read === 'function') {
@@ -101,14 +95,13 @@ async function readClipboard(): Promise<ClipboardState> {
       }
       // match textarea paste by reducing html to readable text
       if (!text && html) text = htmlClipboardText(html);
-      return text || files.length > 0 ? { status: 'ready', contents: { text, files } } : { status: 'empty' };
+      return { text, files };
     }
     // fall back to text-only clipboard access on older browsers
-    const text = await clipboard.readText();
-    return text ? { status: 'ready', contents: { text, files: [] } } : { status: 'empty' };
+    return { text: await clipboard.readText(), files: [] };
   } catch {
-    // permission denial stays disabled rather than pretending the clipboard is empty
-    return { status: 'unavailable' };
+    // a denied or dismissed permission prompt is the user declining the paste
+    return undefined;
   }
 }
 
@@ -120,8 +113,8 @@ function appendGroup(items: ContextMenuItem[], group: ContextMenuItem[]) {
   items.push(...group);
 }
 
-// build one menu from the current selection and clipboard snapshot
-function selectionItems(options: SelectionContextMenuOptions, clipboard: ClipboardState): ContextMenuItem[] {
+// build one menu from the current selection
+function selectionItems(options: SelectionContextMenuOptions): ContextMenuItem[] {
   const selected = options.selectedText;
   const items: ContextMenuItem[] = [];
   appendGroup(items, (options.modes ?? []).map(mode => ({
@@ -132,16 +125,21 @@ function selectionItems(options: SelectionContextMenuOptions, clipboard: Clipboa
     checked: mode.checked,
     onSelect: mode.onSelect
   })));
-  const ready = clipboard.status === 'ready' ? clipboard.contents : undefined;
-  const pasteReady = ready !== undefined && (Boolean(ready.text) || options.pasteAcceptsFiles === true && ready.files.length > 0);
-  const pasteLabel = clipboard.status === 'checking' ? 'Paste (checking clipboard)' : clipboard.status === 'unavailable' ? 'Paste unavailable' : 'Paste';
+  const { paste, pastePlain } = options;
   appendGroup(items, [
     { type: 'action', id: 'select-all', label: 'Select all', onSelect: options.selectAll },
     ...(options.cut === undefined ? [] : [{ type: 'action' as const, id: 'cut', label: 'Cut', disabled: !selected, onSelect: options.cut }]),
     { type: 'action', id: 'copy', label: 'Copy', disabled: !selected, onSelect: options.copy },
     ...(options.copyUrl === undefined ? [] : [{ type: 'action' as const, id: 'copy-url', label: 'Copy URL', onSelect: options.copyUrl }]),
-    { type: 'action', id: 'paste', label: pasteLabel, disabled: options.pasteDisabled || options.paste === undefined || !pasteReady, onSelect: () => ready === undefined ? undefined : options.paste?.(ready) },
-    { type: 'action', id: 'paste-plain', label: 'Paste plain', disabled: options.pasteDisabled || options.pastePlain === undefined || !ready?.text, onSelect: () => ready === undefined ? undefined : options.pastePlain?.(ready.text) }
+    { type: 'action', id: 'paste', label: 'Paste', disabled: options.pasteDisabled || paste === undefined, onSelect: async () => {
+      const contents = await readClipboard();
+      // an empty clipboard pastes nothing
+      if (contents !== undefined && (contents.text || options.pasteAcceptsFiles === true && contents.files.length > 0)) await paste?.(contents);
+    } },
+    { type: 'action', id: 'paste-plain', label: 'Paste plain', disabled: options.pasteDisabled || pastePlain === undefined, onSelect: async () => {
+      const text = (await readClipboard())?.text;
+      if (text) await pastePlain?.(text);
+    } }
   ]);
   const actions = options.selectionActions;
   // expose transfer actions only for a real selection
@@ -153,16 +151,6 @@ function selectionItems(options: SelectionContextMenuOptions, clipboard: Clipboa
   return items;
 }
 
-// open immediately, then refresh paste availability after the clipboard read settles
 export function openSelectionContextMenu(event: globalThis.MouseEvent | ReactMouseEvent, options: SelectionContextMenuOptions) {
-  const needsClipboard = options.pasteDisabled !== true && (options.paste !== undefined || options.pastePlain !== undefined);
-  let clipboard: ClipboardState = needsClipboard ? { status: 'checking' } : { status: 'unavailable' };
-  const handle = openContextMenu(event, { label: options.label, items: () => selectionItems(options, clipboard) });
-  // skip clipboard permission prompts for readonly split menus
-  if (!needsClipboard) return handle;
-  void readClipboard().then(next => {
-    clipboard = next;
-    handle.update();
-  });
-  return handle;
+  return openContextMenu(event, { label: options.label, items: selectionItems(options) });
 }

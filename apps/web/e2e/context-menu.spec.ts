@@ -12,6 +12,7 @@ type ClipboardWindow = typeof window & { __contextClipboard: {
   pendingWrites: number;
   releaseWrite?: () => void;
   writes: string[];
+  reads: number;
 } };
 
 const coraId = 'repo:/repo/wts/cora';
@@ -39,11 +40,13 @@ async function installClipboardMock(page: Page, text = '', image = false) {
       deferWrite: false,
       pendingWrites: 0,
       releaseWrite: undefined as (() => void) | undefined,
-      writes: [] as string[]
+      writes: [] as string[],
+      reads: 0
     };
     const clipboard = {
       // expose rich text and image representations to context-menu paste
       read: async () => {
+        state.reads += 1;
         // emulate a browser permission denial on demand
         if (state.denied) throw new DOMException('Clipboard access denied', 'NotAllowedError');
         const types = [...(state.text ? ['text/plain'] : []), ...(state.image ? ['image/png'] : [])];
@@ -59,7 +62,7 @@ async function installClipboardMock(page: Page, text = '', image = false) {
           }
         }];
       },
-      readText: async () => state.text,
+      readText: async () => { state.reads += 1; return state.text; },
       writeText: async (value: string) => {
         // emulate an asynchronous clipboard write rejection on demand
         if (state.writeDenied) throw new DOMException('Clipboard write denied', 'NotAllowedError');
@@ -440,6 +443,8 @@ test('prompt menu preserves selection and distinguishes rich paste, plain paste 
   await prompt.click({ button: 'right' });
   let menu = page.getByRole('menu', { name: 'Prompt actions' });
   await expect(menu).toBeVisible();
+  // opening the menu must not read the clipboard, which makes Firefox show its own Paste popup
+  expect(await page.evaluate(() => (window as unknown as ClipboardWindow).__contextClipboard.reads)).toBe(0);
   await expect.poll(() => prompt.evaluate((element: HTMLTextAreaElement) => [element.selectionStart, element.selectionEnd])).toEqual([6, 10]);
   await expect(menu.getByRole('menuitem', { name: 'Copy', exact: true })).toBeEnabled();
   await expect(menu.getByRole('menuitem', { name: 'Paste', exact: true })).toBeEnabled();
@@ -461,8 +466,11 @@ test('prompt menu preserves selection and distinguishes rich paste, plain paste 
   await prompt.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(element.value.length, element.value.length));
   await prompt.click({ button: 'right' });
   menu = page.getByRole('menu', { name: 'Prompt actions' });
-  await expect(menu.getByRole('menuitem', { name: 'Paste', exact: true })).toBeEnabled();
-  await expect(menu.getByRole('menuitem', { name: 'Paste plain', exact: true })).toBeDisabled();
+  await menu.getByRole('menuitem', { name: 'Paste plain', exact: true }).click();
+  await expect(prompt).toHaveValue('alpha clipboard text');
+  await expect(page.getByLabel('Selected attachments')).toHaveCount(0);
+  await prompt.click({ button: 'right' });
+  menu = page.getByRole('menu', { name: 'Prompt actions' });
   await menu.getByRole('menuitem', { name: 'Paste', exact: true }).click();
   await expect(page.getByLabel('Selected attachments')).toContainText('pasted-image-1.png');
 
@@ -470,15 +478,16 @@ test('prompt menu preserves selection and distinguishes rich paste, plain paste 
   await prompt.click({ button: 'right' });
   menu = page.getByRole('menu', { name: 'Prompt actions' });
   await expect(menu.getByRole('menuitem', { name: 'Copy', exact: true })).toBeDisabled();
-  await expect(menu.getByRole('menuitem', { name: 'Paste', exact: true })).toBeDisabled();
-  await expect(menu.getByRole('menuitem', { name: 'Paste plain', exact: true })).toBeDisabled();
-  await page.keyboard.press('Escape');
+  await menu.getByRole('menuitem', { name: 'Paste', exact: true }).click();
+  await expect(menu).toHaveCount(0);
+  await expect(prompt).toHaveValue('alpha clipboard text');
 
   await page.evaluate(() => { (window as unknown as ClipboardWindow).__contextClipboard.denied = true; });
   await prompt.click({ button: 'right' });
   menu = page.getByRole('menu', { name: 'Prompt actions' });
-  await expect(menu.getByRole('menuitem', { name: 'Paste unavailable' })).toBeDisabled();
-  await expect(menu.getByRole('menuitem', { name: 'Paste plain' })).toBeDisabled();
+  await menu.getByRole('menuitem', { name: 'Paste', exact: true }).click();
+  await expect(menu).toHaveCount(0);
+  await expect(prompt).toHaveValue('alpha clipboard text');
 });
 
 test('prompt Cut requires a selection, copies exactly and stays absent from readonly output menus', async ({ page }) => {
@@ -865,7 +874,6 @@ test('agent output menu preserves selection, copies without gutter columns and p
   await expect(menu.locator('[role="menuitemradio"][aria-checked="true"]')).toHaveCount(1);
   await expect(menu.getByRole('menuitem', { name: 'Copy', exact: true })).toBeDisabled();
   await expect(menu.getByRole('menuitem', { name: 'Copy URL', exact: true })).toHaveCount(0);
-  await expect(menu.getByRole('menuitem', { name: 'Paste', exact: true })).toBeDisabled();
   await page.keyboard.press('Escape');
 
   const bounds = await row.boundingBox();
@@ -987,7 +995,7 @@ test('Code select all reaches rendered text across diff shadow roots from header
   await rightClickHeader();
   let menu = page.getByRole('menu', { name: 'Code options' });
   await expect(menu.getByRole('menuitemradio', { name: 'Working changes' })).toHaveAttribute('aria-checked', 'true');
-  await expect(menu.getByRole('menuitem', { name: 'Paste unavailable' })).toBeDisabled();
+  await expect(menu.getByRole('menuitem', { name: 'Paste', exact: true })).toBeDisabled();
   await menu.getByRole('menuitem', { name: 'Select all' }).click();
   await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() ?? '')).toContain('export const contextSelection = true;');
   await rightClickHeader();
