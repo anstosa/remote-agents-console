@@ -313,11 +313,11 @@ html.software-keyboard-open .tabs { display: none; }
 .empty-workspace-warning { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: .4rem; margin: 0; padding: .5rem .6rem; border: 1px solid color-mix(in srgb, var(--yellow) 50%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--yellow) 8%, transparent); color: var(--yellow); font-size: .76rem; }
 .empty-workspace-warning button { padding: .2rem .55rem; border: 1px solid var(--yellow); border-radius: var(--control-radius); background: transparent; color: var(--yellow); font: inherit; font-weight: 800; cursor: pointer; }
 /* leave terminal and Code compositions to the generic grid without outranking the phone override */
-.log-split.has-note:not(.has-browser):where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .has-settings, .no-agent)), .log-split.has-browser:not(.has-note):where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .has-settings, .no-agent)) { grid-template-rows: repeat(2, minmax(8rem, 1fr)); }
-.log-split.has-note.has-browser:where(:not(.has-terminals, .has-files, .has-code, .has-review, .has-stack, .has-settings, .no-agent)) { grid-template-rows: repeat(3, minmax(8rem, 1fr)); }
+.log-split.has-note:not(.has-browser):where(:not(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-settings, .no-agent)), .log-split.has-browser:not(.has-note):where(:not(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-settings, .no-agent)) { grid-template-rows: repeat(2, minmax(8rem, 1fr)); }
+.log-split.has-note.has-browser:where(:not(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-settings, .no-agent)) { grid-template-rows: repeat(3, minmax(8rem, 1fr)); }
 /* Terminals, Code or no agent panel make the split a list of panels; in a portrait area they stack
    as rows, in a wide area they become columns (below), and on a phone one panel shows at a time. */
-.log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-review, .log-split.has-stack, .log-split.has-settings, .log-split.no-agent { grid-template: none; grid-template-columns: minmax(0, 1fr); grid-auto-flow: row; grid-auto-rows: minmax(8rem, 1fr); }
+.log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-preview, .log-split.has-review, .log-split.has-stack, .log-split.has-settings, .log-split.no-agent { grid-template: none; grid-template-columns: minmax(0, 1fr); grid-auto-flow: row; grid-auto-rows: minmax(8rem, 1fr); }
 .split-resizer { display: none; }
 .log-output { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .log-output.expanded { width: 100%; height: 100%; }
@@ -1041,17 +1041,17 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 .code-pane-file-collapse[aria-expanded='true'] svg { transform: rotate(90deg); }
 @keyframes note-pane-appear { from { opacity: 0; } to { opacity: 1; } }
 @container output-area (min-aspect-ratio: 1 / 1) {
-  .log-split.has-note:not(.has-browser):not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)); }
-  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
-  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
+  .log-split.has-note:not(.has-browser):not(.has-terminals):not(.has-files):not(.has-code, .has-preview):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)); }
+  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code, .has-preview):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
+  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code, .has-preview):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
   /* With one or more Terminals, a Code panel or no agent panel the split is a generic list of
      columns (agent, terminals, note, browser, code), each `minmax(390px, <weight>fr)`, built in JS
      as `--split-cols`. */
-  .log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-review, .log-split.has-stack, .log-split.has-settings, .log-split.no-agent { grid-template: minmax(0, 1fr) / var(--split-cols); }
+  .log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-preview, .log-split.has-review, .log-split.has-stack, .log-split.has-settings, .log-split.no-agent { grid-template: minmax(0, 1fr) / var(--split-cols); }
   /* remove the hidden browser divider's track when fixing the mobile preview width */
-  .log-split:is(.has-terminals, .has-review, .has-settings, .no-agent):has(> .browser-pane.mobile:not(.expanded)) { --browser-split-cols: var(--split-pane-min-width); }
-  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-review):not(.has-settings):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) var(--split-pane-min-width); }
-  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-review):not(.has-settings):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) var(--split-pane-min-width); }
+  .log-split:is(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-settings, .no-agent):has(> .browser-pane.mobile:not(.expanded)) { --browser-split-cols: var(--split-pane-min-width); }
+  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code):not(.has-preview):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) var(--split-pane-min-width); }
+  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code):not(.has-preview):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) var(--split-pane-min-width); }
   .split-resizer { position: relative; z-index: 5; display: block; width: .45rem; min-width: .45rem; height: 100%; cursor: col-resize; touch-action: none; outline: 0; }
   .split-resizer::after { position: absolute; inset: 0 calc(50% - .5px); background: var(--surface-1); content: ''; transition: background .12s ease, box-shadow .12s ease; }
   .split-resizer:is(:hover, :focus-visible)::after { background: var(--blue); box-shadow: 0 0 .5rem color-mix(in srgb, var(--blue) 48%, transparent); }
@@ -1084,9 +1084,9 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
   .log-split > :is(.log-output, .terminal-pane).expanded > :is(.agent-composer, .mobile-terminal-keys) { padding-bottom: .375rem; }
 }
 /* preserve output width above software keyboards */
-html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-review, .has-stack, .has-terminals) { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
-html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-review, .has-stack, .has-terminals) > :is(.note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .split-resizer) { display: none; }
-html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-review, .has-stack, .has-terminals) > .log-output { display: grid; }
+html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-terminals) { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-terminals) > :is(.note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .split-resizer) { display: none; }
+html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-terminals) > .log-output { display: grid; }
 /* keep the entire static bottom bar behind any open software keyboard */
 html.software-keyboard-open .agent-view > .workspace-toolbar { display: none; }
 /* retain the keyboard gutter for split panes and pending session prompts */
@@ -1364,7 +1364,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 :is(.panel-dots, .panel-split-menu) .note-dot { --dot-color: var(--yellow); }
 :is(.panel-dots, .panel-split-menu) .browser-dot { --dot-color: var(--blue); }
 :is(.panel-dots, .panel-split-menu) .files-dot { --dot-color: var(--sky); }
-:is(.panel-dots, .panel-split-menu) .code-dot { --dot-color: var(--mauve); }
+:is(.panel-dots, .panel-split-menu) :is(.code-dot, .preview-dot) { --dot-color: var(--mauve); }
 :is(.panel-dots, .panel-split-menu) .review-dot { --dot-color: var(--pink); }
 :is(.panel-dots, .panel-split-menu) .stack-dot { --dot-color: var(--teal); }
 /* list open splits by title and mark the one currently in view */

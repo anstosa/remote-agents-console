@@ -241,23 +241,23 @@ async function expectToolbarEditorAction(editor: Locator, expectedButtons = 2) {
 
 test.describe.configure({ timeout: 90_000 });
 
-test('previews base Compose in the active workspace Code split and returns to Docker', async ({ page }) => {
+test('previews base Compose in the active workspace Preview split and returns to Docker', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const { settings, state } = await setupNativeEditor(page);
   await selectSource(settings, 'Docker');
   await settings.getByRole('button', { name: 'View base compose.yaml', exact: true }).click();
 
-  const code = page.getByRole('region', { name: 'Code changes' });
-  await expect(code).toBeVisible();
-  await expect(code.getByRole('button', { name: '‹ Settings', exact: true })).toBeVisible();
-  await expect(code.locator('.code-pane-crumb-current')).toHaveText('compose.yaml');
-  await expect(code.getByText('ghcr.io/example/rac:base')).toBeVisible();
-  await expect(code.getByText(/RAC_TOKEN:\s+"\*{8}"/u)).toBeVisible();
-  await expect(code.getByRole('button', { name: /Open .* in the editor/u })).toHaveCount(0);
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview).toBeVisible();
+  await expect(preview.getByRole('button', { name: '‹ Settings', exact: true })).toBeVisible();
+  await expect(preview.locator('.code-pane-crumb-current')).toHaveText('compose.yaml');
+  await expect(preview.getByText('ghcr.io/example/rac:base')).toBeVisible();
+  await expect(preview.getByText(/RAC_TOKEN:\s+"\*{8}"/u)).toBeVisible();
+  await expect(preview.getByRole('button', { name: /Open .* in the editor/u })).toHaveCount(0);
   await expect(page.locator('body')).not.toContainText(protectedMarker);
 
-  await code.getByRole('button', { name: '‹ Settings', exact: true }).click();
-  await expect(code).toHaveCount(0);
+  await preview.getByRole('button', { name: '‹ Settings', exact: true }).click();
+  await expect(preview).toHaveCount(0);
   await expect(settings).toBeVisible();
   await expect(settings.getByRole('heading', { name: 'Docker', exact: true })).toBeVisible();
   expect(state.shellBodies).toEqual([]);
@@ -265,10 +265,10 @@ test('previews base Compose in the active workspace Code split and returns to Do
 
   // closing Settings retires a transient preview owned by this workspace
   await settings.getByRole('button', { name: 'View base compose.yaml', exact: true }).click();
-  await expect(code).toBeVisible();
+  await expect(preview).toBeVisible();
   await settings.getByRole('button', { name: 'Close settings', exact: true }).click();
   await expect(settings).toHaveCount(0);
-  await expect(code).toHaveCount(0);
+  await expect(preview).toHaveCount(0);
   await expect(page.getByRole('button', { name: '‹ Settings', exact: true })).toHaveCount(0);
 });
 
@@ -279,14 +279,15 @@ test('returns a retained workspace Code split to its comparison when Settings cl
   await expect(code.getByText('No changes to show.', { exact: true })).toBeVisible();
   await selectSource(settings, 'Docker');
   await settings.getByRole('button', { name: 'View base compose.yaml', exact: true }).click();
-  await expect(code.getByRole('button', { name: '‹ Settings', exact: true })).toBeVisible();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview.getByRole('button', { name: '‹ Settings', exact: true })).toBeVisible();
 
   // only the Settings-owned file view closes; retained Changes remains open
   await settings.getByRole('button', { name: 'Close settings', exact: true }).click();
   await expect(settings).toHaveCount(0);
+  await expect(preview).toHaveCount(0);
   await expect(code).toBeVisible();
   await expect(code.getByText('No changes to show.', { exact: true })).toBeVisible();
-  await expect(code.getByRole('button', { name: '‹ Settings', exact: true })).toHaveCount(0);
   expect(state.shellBodies).toEqual([]);
   expectNoSettingsSideEffects(state);
 });

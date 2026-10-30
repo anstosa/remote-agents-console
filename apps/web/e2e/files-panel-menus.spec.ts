@@ -38,6 +38,8 @@ test('row actions target only their row while selected-row context actions targe
   // the trailing row menu ignores the wider selection
   await alpha.getByRole('button', { name: 'Actions for alpha.txt' }).click();
   const rowMenu = page.getByRole('menu', { name: 'Actions for alpha.txt' });
+  await expect(rowMenu.getByRole('menuitem', { name: 'Preview', exact: true })).toBeVisible();
+  await expect(rowMenu.getByRole('menuitem', { name: 'Edit', exact: true })).toHaveCount(0);
   await rowMenu.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   const oneDelete = page.getByRole('dialog', { name: 'Permanently delete' });
   await expect(oneDelete).toContainText('alpha.txt');
@@ -49,6 +51,8 @@ test('row actions target only their row while selected-row context actions targe
   // right-clicking one selected row scopes actions to the whole selection
   await alpha.locator('[data-label="Owner"]').click({ button: 'right' });
   const selectedMenu = page.getByRole('menu', { name: 'Actions for 2 selected items' });
+  await expect(selectedMenu.getByRole('menuitem', { name: 'Preview', exact: true })).toHaveCount(0);
+  await expect(selectedMenu.getByRole('menuitem', { name: 'Edit', exact: true })).toHaveCount(0);
   await selectedMenu.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   const selectedDelete = page.getByRole('dialog', { name: 'Permanently delete' });
   await expect(selectedDelete).toContainText('.hidden');
@@ -85,7 +89,11 @@ test('folder menu mutations exchange the clicked directory capability before tar
   const { fixture, panel } = await openFiles(page);
   const sub = fileRow(panel, 'sub');
   await sub.locator('[data-label="Owner"]').click({ button: 'right' });
-  await page.getByRole('menu', { name: 'Actions for sub' }).getByRole('menuitem', { name: 'New file here', exact: true }).click();
+  const subMenu = page.getByRole('menu', { name: 'Actions for sub' });
+  await expect(subMenu.getByRole('menuitem', { name: 'Open', exact: true })).toBeVisible();
+  await expect(subMenu.getByRole('menuitem', { name: 'Preview', exact: true })).toHaveCount(0);
+  await expect(subMenu.getByRole('menuitem', { name: 'Edit', exact: true })).toHaveCount(0);
+  await subMenu.getByRole('menuitem', { name: 'New file here', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Create file' });
   await dialog.getByRole('textbox', { name: 'Name' }).fill('scoped.txt');
   await dialog.getByRole('button', { name: 'Create', exact: true }).click();
@@ -184,7 +192,7 @@ test('favorites menu adds the current directory first and opens saved folders an
   await expect(star).toHaveCSS('fill', 'none');
   await expect(favoritesMenu.locator('.files-favorite-menu-row').getByRole('button', { name: /remove/i })).toHaveCount(0);
   await favoritesMenu.getByRole('menuitem', { name: 'alpha.txt', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Code changes' }).getByText('outside root preview')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'File preview' }).getByText('outside root preview')).toBeVisible();
 });
 
 // keep native text selection out of range-selection gestures only
@@ -218,7 +226,7 @@ test('Shift-click ranges do not create native text selection on rows or file nam
   await expect(hidden).toHaveAttribute('aria-selected', 'true');
   await expect(alpha).toHaveAttribute('aria-selected', 'true');
   await expect(zeta).toHaveAttribute('aria-selected', 'false');
-  await expect(page.getByRole('region', { name: 'Code changes' })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'File preview' })).toHaveCount(0);
   expect(await page.evaluate(() => window.getSelection()?.toString())).toBe('');
 
   // unmodified metadata selection remains available for copying

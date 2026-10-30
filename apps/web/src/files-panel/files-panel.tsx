@@ -163,7 +163,7 @@ function FavoriteMenuRow({ favorite, busy, onOpen, onAcknowledge }: { favorite: 
 }
 
 // the full host files panel for one place
-export function FilesPanel({ controller, onOpenFile }: { controller: FilesController; onOpenFile: (entry: FileEntry) => void | Promise<void> }) {
+export function FilesPanel({ controller, onOpenFile, onPreviewFile, onEditFile }: { controller: FilesController; onOpenFile: (entry: FileEntry) => void | Promise<void>; onPreviewFile?: (entry: FileEntry) => void | Promise<void>; onEditFile?: (entry: FileEntry) => void | Promise<void> }) {
   const phone = usePhoneLayout();
   const openFolder = useContext(OpenFolderContext);
   const expanded = usePanelExpand('files')?.expanded === true;
@@ -215,6 +215,20 @@ export function FilesPanel({ controller, onOpenFile }: { controller: FilesContro
     if (isDirectory(entry)) { void controller.navigate(entry.hostPath); return; }
     // let the workspace choose the configured editor or Code fallback
     if (isPreviewable(entry)) void onOpenFile(entry);
+  };
+
+  // preview one file through the explicit action or default opener
+  const preview = (entry: FileEntry) => {
+    closeMenus();
+    // reject unsupported objects before dispatch
+    if (isPreviewable(entry)) void (onPreviewFile ?? onOpenFile)(entry);
+  };
+
+  // edit one file only when the workspace supplies an editor action
+  const edit = (entry: FileEntry) => {
+    closeMenus();
+    // preserve optional editor availability
+    if (isPreviewable(entry)) void onEditFile?.(entry);
   };
 
   // submit the editable absolute host path
@@ -491,8 +505,11 @@ export function FilesPanel({ controller, onOpenFile }: { controller: FilesContro
   const entryMenuItems = (entries: FileEntry[]) => {
     const one = entries.length === 1 ? entries[0] : undefined;
     const folder = one !== undefined && isDirectory(one) ? one : undefined;
+    const file = one !== undefined && isPreviewable(one) ? one : undefined;
     return <>
-      {one !== undefined && (isDirectory(one) || isPreviewable(one)) && <MenuItem onSelect={() => activate(one)}>Open</MenuItem>}
+      {folder !== undefined && <MenuItem onSelect={() => activate(folder)}>Open</MenuItem>}
+      {file !== undefined && <MenuItem onSelect={() => preview(file)}>Preview</MenuItem>}
+      {file !== undefined && onEditFile !== undefined && <MenuItem onSelect={() => edit(file)}>Edit</MenuItem>}
       {folder !== undefined && openFolder !== undefined && <MenuItem onSelect={() => { closeMenus(); openFolder(folder.hostPath); }}>Open as Workspace</MenuItem>}
       {folder !== undefined && <><MenuItem disabled={busy} onSelect={() => void openCreate('create-file', folder)}>New file here</MenuItem><MenuItem disabled={busy} onSelect={() => void openCreate('create-folder', folder)}>New folder here</MenuItem><MenuItem disabled={busy} onSelect={() => void openUpload(folder)}>Upload files here</MenuItem><MenuItem disabled={busy || controller.clipboard === undefined} onSelect={() => void paste(folder)}>Paste here</MenuItem><hr className="more-menu-divider" role="separator" /></>}
       {one !== undefined && <MenuItem disabled={busy} onSelect={() => openRename(one)}>Rename</MenuItem>}

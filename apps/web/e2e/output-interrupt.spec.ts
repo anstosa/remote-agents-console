@@ -86,14 +86,14 @@ test('keys stay local when the composer or Code panel owns focus', async ({ page
   await page.waitForTimeout(100);
   expect(await paneInputText(page, 'agent-1')).toBe('');
 
-  // the output file opens in the Code panel, not the retired preview dialog
+  // open the output file in the preview split, not the retired dialog
   const previewLink = page.getByRole('link', { name: 'Preview apps/web/src/main.tsx' });
   await previewLink.click();
-  const codePanel = page.getByRole('region', { name: 'Code changes' });
-  await expect(codePanel.getByRole('button', { name: 'Close file' })).toBeVisible();
-  await codePanel.getByRole('button', { name: 'Close file' }).focus();
+  const previewPanel = page.getByRole('region', { name: 'File preview' });
+  await expect(previewPanel.getByRole('button', { name: 'Close file' })).toBeVisible();
+  await previewPanel.getByRole('button', { name: 'Close file' }).focus();
   await page.keyboard.press('Escape');
-  await expect(codePanel).toBeVisible();
+  await expect(previewPanel).toBeVisible();
   expect(await paneInputText(page, 'agent-1')).toBe('');
 });
 

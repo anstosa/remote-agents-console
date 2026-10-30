@@ -51,6 +51,8 @@ import { AdaptersContext, AgentLaunchSettingsContext, AgentAccountsMenuContext, 
 import { ScheduleEditor, defaultScheduleCron, lastRunNeedsAttention, scheduleInvalid, type Schedule, type ScheduleAdapterOption, type ScheduleSetBody, type ScheduleTarget, type ScheduleTargetOption } from './schedule-editor.js';
 import { useBrowserPermissionBroker } from './browser-permissions.js';
 import { FilesPanel } from './files-panel/files-panel.js';
+import { useFilePreview, type FilePreviewController } from './file-preview.js';
+import { useFileOpenAction } from './file-open-action.js';
 import { saveFilesOpen, useFilesController } from './files-panel/controller.js';
 import type { FileEntry } from './files-panel/contracts.js';
 import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './settings/settings-center.js';
@@ -5305,7 +5307,7 @@ type TerminalColumn = { key: string; label: string; node: ReactElement<TerminalC
 type SplitSizes = Record<string, number>;
 type SplitStyle = React.CSSProperties & { '--agent-split': string; '--note-split': string; '--browser-split': string; '--split-cols': string };
 type SplitDrag = { pointerId: number; startX: number; left: string; right: string; leftWidth: number; rightWidth: number; sizes: SplitSizes; resized?: SplitSizes };
-type FixedSplitPanelKey = 'agent' | 'note' | 'browser' | 'files' | 'code' | 'review' | 'stack' | 'settings';
+type FixedSplitPanelKey = 'agent' | 'note' | 'browser' | 'files' | 'code' | 'preview' | 'review' | 'stack' | 'settings';
 type SplitPanelKind = FixedSplitPanelKey | 'terminal';
 // keep fixed split identity in one typed source of truth
 const fixedSplitPanels: { [Key in FixedSplitPanelKey]: { selector: string; kind: Key; title: string } } = {
@@ -5313,7 +5315,8 @@ const fixedSplitPanels: { [Key in FixedSplitPanelKey]: { selector: string; kind:
   note: { selector: '.note-pane', kind: 'note', title: 'Note' },
   browser: { selector: '.browser-pane', kind: 'browser', title: 'Project browser' },
   files: { selector: '.files-pane', kind: 'files', title: 'Files' },
-  code: { selector: '.code-pane', kind: 'code', title: 'Code changes' },
+  code: { selector: '.code-pane:not(.preview-pane)', kind: 'code', title: 'Code changes' },
+  preview: { selector: '.preview-pane', kind: 'preview', title: 'Preview' },
   review: { selector: '.review-pane', kind: 'review', title: 'Guided review' },
   stack: { selector: '.stack-pane', kind: 'stack', title: 'Stack' },
   settings: { selector: '.client-settings-page', kind: 'settings', title: 'Settings' }
@@ -5353,6 +5356,27 @@ const saveSplitSizes = (worktreeId: string | undefined, signature: string, sizes
 // grammar/theme chunks) never lands in the dashboard's eager bundle — it loads the first time a
 // reviewer opens changes. Its module is the app's only importer of the library.
 const CodePanel = lazy(() => import('./code-panel/code-panel.js'));
+// share lazy syntax and image rendering without coupling split state
+const PreviewPanel = lazy(() => import('./code-panel/code-panel.js').then(module => ({ default: module.PreviewPanel })));
+
+// render one transient preview beside any retained code comparison
+function PreviewPane({ controller, onReturnToFiles, onReturnToSettings, onOpenInEditor }: { controller: FilePreviewController; onReturnToFiles?: () => void; onReturnToSettings?: () => void; onOpenInEditor?: (target: EditorTarget) => void }) {
+  const editorConfigured = useContext(EditorConfiguredContext);
+  const view = controller.view;
+  // closed previews mount no lazy renderer
+  if (view === undefined) return null;
+  // return to the original split without discarding its local draft
+  const back = () => {
+    controller.close();
+    view.onReturn?.();
+    // use explicit source ownership for navigation
+    if (view.source === 'files') onReturnToFiles?.();
+    else if (view.source === 'settings') onReturnToSettings?.();
+  };
+  return <Suspense fallback={<section className="code-pane preview-pane" role="region" aria-label="File preview"><CodeLoading kind="file" path={view.path} /></section>}>
+    <PreviewPanel filePreview={view} onBack={back} onClose={controller.close} onRetry={controller.refresh} onEdit={editorConfigured ? view.onEdit : undefined} onOpenInEditor={onOpenInEditor} />
+  </Suspense>;
+}
 // Render one Worktree's open Code panel from its controller (callers gate on `controller.open`, so
 // this is only mounted while open). The lazy chunk resolves behind a lightweight fallback so the
 // split does not jump.
@@ -5384,39 +5408,39 @@ function CodePane({ controller, worktreeId, prAvailable, branch, review, onOpenI
 // `expansion` is the Workspace's expanded panel; a split without a Workspace keeps its own.
 // On a phone the panels sit in a swipe carousel, one per screen; `onCarousel` hears its panels and
 // the one in view, for the toolbar's dots.
-function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, code, codeController, review, stack, withSettings = false, terminals, terminalSelectionActions, onCarousel, initialPanelsReady, expansion: workspaceExpansion }: { worktreeId?: string; output?: ReactNode; empty?: ReactNode; note?: ReactNode; browser?: ReactNode; files?: ReactNode; code?: ReactNode; codeController?: CodePanelController; review?: ReactNode; stack?: ReactNode; withSettings?: boolean; terminals?: TerminalColumn[]; terminalSelectionActions?: TerminalSelectionActions; onCarousel?: (carousel: PanelCarousel) => void; initialPanelsReady?: boolean; expansion?: PanelExpansion }) {
+function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, code, preview, previewController: workspacePreview, review, stack, withSettings = false, terminals, terminalSelectionActions, onCarousel, initialPanelsReady, expansion: workspaceExpansion }: { worktreeId?: string; output?: ReactNode; empty?: ReactNode; note?: ReactNode; browser?: ReactNode; files?: ReactNode; code?: ReactNode; preview?: ReactNode; previewController?: FilePreviewController; review?: ReactNode; stack?: ReactNode; withSettings?: boolean; terminals?: TerminalColumn[]; terminalSelectionActions?: TerminalSelectionActions; onCarousel?: (carousel: PanelCarousel) => void; initialPanelsReady?: boolean; expansion?: PanelExpansion }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const settingsState = useContext(ClientSettingsSplitContext);
   const editorConfigured = useContext(EditorConfiguredContext);
   const ownExpansion = usePanelExpansion();
   const expansion = workspaceExpansion ?? ownExpansion;
   // support read-only settings previews even before a workspace exists
-  const standaloneCode = useCodePanel(undefined, request);
-  const previewController = codeController ?? standaloneCode;
+  const standalonePreview = useFilePreview(worktreeId, request);
+  const previewController = workspacePreview ?? standalonePreview;
   // retire settings previews when their return destination is explicitly closed
   useEffect(() => {
-    // retain ordinary file previews and any saved comparison behind the base file
-    if (withSettings && !settingsState?.open && previewController.filePreview?.source === 'settings') previewController.closeFilePreview();
-  }, [withSettings, settingsState?.open, previewController.filePreview?.source, previewController.closeFilePreview]);
+    // retain ordinary file previews when settings closes
+    if (withSettings && !settingsState?.open && previewController.view?.source === 'settings') previewController.close();
+  }, [withSettings, settingsState?.open, previewController.view?.source, previewController.close]);
   // return from the base file to the same settings split
   const returnToSettings = () => { expansion.restore(); carousel.show('settings'); };
-  const codePane = code ?? (standaloneCode.open ? <CodePane controller={standaloneCode} prAvailable={false} onReturnToSettings={returnToSettings} /> : null);
+  const previewPane = preview ?? (standalonePreview.open ? <PreviewPane controller={standalonePreview} onReturnToSettings={returnToSettings} /> : null);
   // resolve native editor ownership where the global Settings page is rendered
   const settingsEditor = {
     configured: editorConfigured,
     placeId: worktreeId,
     open: !editorConfigured || worktreeId === undefined ? undefined : async (target: SettingsEditorTarget) => {
       expansion.restore();
-      return await openEditorShell(worktreeId, { settingsSource: target });
+      return await openEditorShell(worktreeId, { settingsSource: target }, previewController.beginFileAction());
     },
     // reuse catalog bytes instead of sending a host path through Files
     preview: (target: SettingsPreviewTarget) => {
       expansion.restore();
       const mounted = previewController.open;
       previewController.openContentPreview(target.path, target.content);
-      // wait for the destination column when opening Code for the first time
-      if (mounted) carousel.show('code');
-      else window.requestAnimationFrame(() => carousel.show('code'));
+      // wait for the preview column on its first mount
+      if (mounted) carousel.show('preview');
+      else window.requestAnimationFrame(() => carousel.show('preview'));
     }
   };
   const settingsPane = withSettings && settingsState?.open ? <SettingsTerminalEditorContext.Provider value={settingsEditor}>{settingsState.page}</SettingsTerminalEditorContext.Provider> : null;
@@ -5425,7 +5449,8 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
   const hasNote = note !== undefined && note !== null;
   const hasBrowser = browser !== undefined && browser !== null;
   const hasFiles = files !== undefined && files !== null;
-  const hasCode = codePane !== undefined && codePane !== null;
+  const hasCode = code !== undefined && code !== null;
+  const hasPreview = previewPane !== undefined && previewPane !== null;
   const hasReview = review !== undefined && review !== null;
   const hasStack = stack !== undefined && stack !== null;
   const termCols = terminals ?? [];
@@ -5438,7 +5463,8 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
     ...(hasNote ? [{ key: 'note', node: note }] : []),
     ...(hasBrowser ? [{ key: 'browser', node: browser }] : []),
     ...(hasFiles ? [{ key: 'files', node: files }] : []),
-    ...(hasCode ? [{ key: 'code', node: codePane }] : []),
+    ...(hasCode ? [{ key: 'code', node: code }] : []),
+    ...(hasPreview ? [{ key: 'preview', node: previewPane }] : []),
     ...(hasReview ? [{ key: 'review', node: review }] : []),
     ...(hasStack ? [{ key: 'stack', node: stack }] : []),
     ...(hasSettings ? [{ key: 'settings', node: settingsPane }] : [])
@@ -5582,7 +5608,7 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
     return index === 0 ? [node] : [resizer(columns[index - 1].key, column.key), node];
   });
   const mobileView = carousel.visibleKey !== undefined ? ` mobile-${splitPanelKind(carousel.visibleKey)}-view` : '';
-  return <PanelExpandContext.Provider value={expansionScope.context}><div ref={containerRef} className={`log-split${hasAgent ? '' : ' no-agent'}${hasNote ? ' has-note' : ''}${hasBrowser ? ' has-browser' : ''}${hasFiles ? ' has-files' : ''}${hasCode ? ' has-code' : ''}${hasReview ? ' has-review' : ''}${hasStack ? ' has-stack' : ''}${hasSettings ? ' has-settings' : ''}${hasTerminals ? ' has-terminals' : ''}${mobileView}`} style={style} onKeyDown={expansionScope.onKeyDown} onPointerDownCapture={preserveMiddleClickPress} onMouseDownCapture={preserveMiddleClickPress} onPointerDown={startContentSwipe} onPointerUp={contentSwipe.onPointerUp} onPointerCancel={contentSwipe.onPointerCancel} onTouchStart={startContentTouchSwipe} onTouchEnd={contentSwipe.onTouchEnd} onTouchCancel={contentSwipe.onTouchCancel} onClickCapture={contentSwipe.onClickCapture}>{columns.length === 0 ? empty : laidOut}</div></PanelExpandContext.Provider>;
+  return <PanelExpandContext.Provider value={expansionScope.context}><div ref={containerRef} className={`log-split${hasAgent ? '' : ' no-agent'}${hasNote ? ' has-note' : ''}${hasBrowser ? ' has-browser' : ''}${hasFiles ? ' has-files' : ''}${hasCode ? ' has-code' : ''}${hasPreview ? ' has-preview' : ''}${hasReview ? ' has-review' : ''}${hasStack ? ' has-stack' : ''}${hasSettings ? ' has-settings' : ''}${hasTerminals ? ' has-terminals' : ''}${mobileView}`} style={style} onKeyDown={expansionScope.onKeyDown} onPointerDownCapture={preserveMiddleClickPress} onMouseDownCapture={preserveMiddleClickPress} onPointerDown={startContentSwipe} onPointerUp={contentSwipe.onPointerUp} onPointerCancel={contentSwipe.onPointerCancel} onTouchStart={startContentTouchSwipe} onTouchEnd={contentSwipe.onTouchEnd} onTouchCancel={contentSwipe.onTouchCancel} onClickCapture={contentSwipe.onClickCapture}>{columns.length === 0 ? empty : laidOut}</div></PanelExpandContext.Provider>;
 }
 
 // One pane of a Worktree the picker can show as a Terminal (the wire shape of
@@ -5714,10 +5740,12 @@ const requestTerminalFocus = (placeId: string, terminal: OpenTerminal) => {
   else focus();
 };
 // open a relative editor jump or token-bound host file in a focused terminal
-const openEditorShell = async (placeId: string, target: EditorShellTarget): Promise<string | undefined> => {
+const openEditorShell = async (placeId: string, target: EditorShellTarget, isCurrent?: () => boolean): Promise<string | undefined> => {
   const key = placeItemKey(placeId);
   const generation = workspaceOpenGeneration(key);
   const created = await createPlaceShell(placeId, { editor: true, ...target });
+  // retain superseded server shells without taking focus or reporting stale failures
+  if (isCurrent?.() === false) return undefined;
   if (!('paneId' in created)) return created.error;
   let panes = await listPlacePanes(placeId);
   let shell = panes?.find(pane => pane.paneId === created.paneId);
@@ -5729,11 +5757,13 @@ const openEditorShell = async (placeId: string, target: EditorShellTarget): Prom
       panes = await listPlacePanes(placeId);
       shell = panes?.find(pane => pane.paneId === created.paneId);
     }
-    // repeated successful absence means Code is the usable fallback
+    // superseded pane reads cannot report an older file's failure
+    if (isCurrent?.() === false) return undefined;
+    // repeated absence leaves preview as the usable fallback
     if (panes !== undefined && shell === undefined) return 'The editor terminal is no longer available.';
   }
   // keep a newer close-all intact while retaining the already-created editor shell
-  if (workspaceOpenStillCurrent(key, generation)) requestTerminalFocus(placeId, { paneId: created.paneId, name: shell === undefined ? 'editor' : terminalPaneLabel(shell) });
+  if (workspaceOpenStillCurrent(key, generation) && isCurrent?.() !== false) requestTerminalFocus(placeId, { paneId: created.paneId, name: shell === undefined ? 'editor' : terminalPaneLabel(shell) });
   return undefined;
 };
 // The open Terminal panels of one Worktree and the picker's live pane list. Panels persist
@@ -6611,6 +6641,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   const browser = useProjectBrowser(place.projectUrl, place.id, place.projectProxied);
   const code = useCodePanel(place.worktreeId, request, comparisonChangeSignal(place.gitStatus, place.gitPrStatus, place.attention));
   const files = useFilesController(place.id, request);
+  const preview = useFilePreview(place.id ?? agentId, request);
   const stackPanel = useStackPanel(place.worktreeId);
   // keep the toolbar dots aligned with the visible phone panel
   const [carousel, setCarousel] = useState<PanelCarousel>();
@@ -6622,11 +6653,11 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   // open ordinary Terminal file mentions through the owning Place's preview route
   const openTerminalFile = terminalPlaceId === undefined ? undefined : (path: string) => {
     expansion.restore();
-    const mounted = code.open;
-    code.openFilePreview(path, `/api/worktrees/${encodeURIComponent(terminalPlaceId)}/file-preview`);
+    const mounted = preview.open;
+    preview.openFilePreview(path, `/api/worktrees/${encodeURIComponent(terminalPlaceId)}/file-preview`);
     // reveal the existing split immediately or after its first mount
-    if (mounted) carousel?.show('code');
-    else window.requestAnimationFrame(() => carousel?.show('code'));
+    if (mounted) carousel?.show('preview');
+    else window.requestAnimationFrame(() => carousel?.show('preview'));
   };
   const terminals = useTerminalViews(terminalPlaceId, onOperationFeedback, openTerminalFile);
   // keep note capture available even when the agent panel is minimized
@@ -6634,11 +6665,11 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   const promptNote = promptDraftId === undefined ? undefined : { id: promptDraftId, placeId: place.id, worktreeId: place.worktreeId, onOperationFeedback };
   const placeNotes = useWorktreeNotes(place.id, expansion, agentId, notes.agentWorking, notes.latestAssistantMessage, notes.latestAssistantMessageOverflows, notes.onPromptHistoryChanged, notes.promptHistory, notes.schedulePrefill, notes.onLaunchAndRun, notes.launchRunLabel, promptNote, (path, url, restore) => {
     expansion.restore();
-    code.openFilePreview(path, url, { source: 'notes', onReturn: () => {
+    preview.openFilePreview(path, url, { source: 'notes', onReturn: () => {
       // return only to the original surviving note and preserve its draft
       if (restore()) pendingWorkspaceJumps.set(key, 'note');
     } });
-    pendingWorkspaceJumps.set(key, 'code');
+    pendingWorkspaceJumps.set(key, 'preview');
   });
   const [gitExpanded, setGitExpanded] = useState(false);
   const key = place.id === undefined ? `agent-${agentId ?? 'pending'}` : placeItemKey(place.id);
@@ -6735,6 +6766,8 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
     else if (panelKey === 'browser') browser.close();
     else if (panelKey === 'files') files.close();
     else if (panelKey === 'code') code.close();
+    // previews close without changing retained comparisons
+    else if (panelKey === 'preview') preview.close();
     else if (panelKey === 'stack') stackPanel.close();
     // the cached review remains restorable after this action
     else if (panelKey === 'review') minimizePanel(panelKey, () => onCloseReview?.());
@@ -6768,6 +6801,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
           browser.close();
           files.close();
           code.close();
+          preview.close();
           stackPanel.close();
           onCloseReview?.();
           terminals.closeAll();
@@ -6809,20 +6843,21 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   const showAgent = () => { pendingWorkspaceJumps.set(key, 'agent'); setAgentSplitHidden(key, false); };
   // open the Stack panel (on `selection`, when given) and bring it into view
   const openStackPanel = (selection?: StackSelection) => { stackPanel.openOn(selection); pendingWorkspaceJumps.set(key, 'stack'); };
-  // share configured-editor terminals between Code jumps and full-host Files entries
+  // share configured-editor terminals between code jumps and files
   const editorConfigured = useContext(EditorConfiguredContext);
   const placeId = place.id;
-  const openInEditor = !editorConfigured || placeId === undefined ? undefined : async (target: EditorShellTarget): Promise<boolean> => {
+  const openInEditor = !editorConfigured || placeId === undefined ? undefined : async (target: EditorShellTarget, options?: { previewFallback?: boolean; isCurrent?: () => boolean }): Promise<boolean> => {
+    const isCurrent = options?.isCurrent ?? preview.beginFileAction();
     expansion.restore();
     const generation = workspaceOpenGeneration(key);
-    const failure = await openEditorShell(placeId, target);
-    // superseded editor failures must not reopen Code as a fallback
-    if (!workspaceOpenStillCurrent(key, generation)) return true;
+    const failure = await openEditorShell(placeId, target, isCurrent);
+    // superseded editor failures must not reopen a preview
+    if (!workspaceOpenStillCurrent(key, generation) || !isCurrent()) return true;
     // preserve editor failure feedback while allowing a Files preview fallback
-    if (failure !== undefined) onOperationFeedback?.({ tone: 'error', message: 'objectToken' in target ? 'The editor did not open; trying Code instead' : 'The editor did not open', detail: failure });
+    if (failure !== undefined) onOperationFeedback?.({ tone: 'error', message: options?.previewFallback ? 'The editor did not open; trying Preview instead' : 'The editor did not open', detail: failure });
     return failure === undefined;
   };
-  return { place, browser, files, code, stackPanel, openStackPanel, terminals, carousel, setCarousel: reportCarousel, conversations, notes: placeNotes, expansion, gitExpanded, setGitExpanded, agentHidden, showAgent, minimizePanel, openInEditor, viewKey: key };
+  return { place, browser, files, code, preview, stackPanel, openStackPanel, terminals, carousel, setCarousel: reportCarousel, conversations, notes: placeNotes, expansion, gitExpanded, setGitExpanded, agentHidden, showAgent, minimizePanel, openInEditor, viewKey: key };
 }
 type WorkspaceState = ReturnType<typeof useWorkspace>;
 // The git actions only an Agent offers (push, fixup, guided review); an agentless Workspace passes
@@ -6844,7 +6879,8 @@ function WorkspaceGitStatus({ workspace, actions, onToggle }: { workspace: Works
 // shows `empty` instead. With no agent panel the Workspace is idle.
 // `onOpenWorktreeStack` is a used process's Open in the Stack panel, which switches to its Worktree.
 function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, onOpenWorktreeStack }: { workspace: WorkspaceState; output?: ReactNode; empty?: ReactNode; git?: WorkspaceGitActions; reviewPanel?: ReactNode; onAddToPrompt?: (text: string) => void; onOpenWorktreeStack?: (worktreeId: string) => void }) {
-  const { place, browser, files, code, stackPanel, notes, expansion } = workspace;
+  const { place, browser, files, code, preview, stackPanel, notes, expansion } = workspace;
+  const fileOpenAction = useFileOpenAction();
   const projects = useContext(ProjectsContext);
   const visibleOutput = workspace.agentHidden ? undefined : output;
   const idle = visibleOutput === undefined || visibleOutput === null;
@@ -6873,25 +6909,31 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
   const browserPane = browser.url === undefined || browser.homeUrl === undefined ? null : <ProjectBrowserPane url={browser.url} homeUrl={browser.homeUrl} proxied={browser.proxied} worktreeId={place.id} navigationRequest={browser.navigationRequest} onNavigate={browser.navigate} onClose={browser.close} />;
   const review = git === undefined || (git.onReview === undefined && git.reviewUnavailable === undefined) ? undefined : { onReview: git.onReview, open: git.review !== undefined, generating: git.review?.generating === true, unavailable: git.reviewUnavailable };
   const openInEditor = workspace.openInEditor;
-  // prefer the configured editor and retain Code as the file-open fallback
-  const openFilesEntry = async (entry: FileEntry) => {
-    // require one place for editor and preview routing
+  // preview file capabilities independently of code comparisons
+  const previewFilesEntry = (entry: FileEntry) => {
+    // require one place for authenticated file routing
     if (place.id === undefined) return;
     expansion.restore();
-    // keep host paths behind the server-validated object capability
-    if (openInEditor !== undefined && await openInEditor({ objectToken: entry.objectToken })) return;
-    const mounted = code.open;
-    code.openFilePreview(entry.hostPath, `/api/worktrees/${encodeURIComponent(place.id)}/files/preview`, { body: { objectToken: entry.objectToken }, source: 'files' });
-    // wait one frame only when the code split must mount first
-    if (mounted) workspace.carousel?.show('code'); else window.requestAnimationFrame(() => workspace.carousel?.show('code'));
+    preview.openFilePreview(entry.hostPath, `/api/worktrees/${encodeURIComponent(place.id)}/files/preview`, { body: { objectToken: entry.objectToken }, source: 'files', onEdit: openInEditor === undefined ? undefined : () => { void openInEditor({ objectToken: entry.objectToken }); } });
+    pendingWorkspaceJumps.set(workspace.viewKey, 'preview');
   };
-  const filesPane = files.open && place.id !== undefined ? <FilesPanel controller={files} onOpenFile={openFilesEntry} /> : null;
+  // use the browser default and retain a preview fallback after editor failures
+  const openFilesEntry = async (entry: FileEntry) => {
+    const isCurrent = preview.beginFileAction();
+    // edit is never attempted without a configured workspace editor
+    if (fileOpenAction === 'edit' && openInEditor !== undefined && await openInEditor({ objectToken: entry.objectToken }, { previewFallback: true, isCurrent })) return;
+    // newer previews or editor choices own the destination after the await
+    if (!isCurrent()) return;
+    previewFilesEntry(entry);
+  };
+  const filesPane = files.open && place.id !== undefined ? <FilesPanel controller={files} onOpenFile={openFilesEntry} onPreviewFile={previewFilesEntry} onEditFile={openInEditor === undefined ? undefined : async entry => { /* explicit edit retains error feedback without changing views */ await openInEditor({ objectToken: entry.objectToken }); }} /> : null;
+  const previewPane = preview.open ? <PreviewPane controller={preview} onReturnToFiles={() => { /* return to the same directory and selection */ expansion.restore(); workspace.carousel?.show('files'); }} onReturnToSettings={() => { /* retain the settings draft */ expansion.restore(); workspace.carousel?.show('settings'); }} onOpenInEditor={openInEditor === undefined ? undefined : target => { /* retain line-aware editor navigation */ void openInEditor(target); }} /> : null;
   const codePane = code.open ? <CodePane controller={code} {...(place.worktreeId === undefined ? {} : { worktreeId: place.worktreeId })} prAvailable={place.gitPrStatus !== undefined} branch={place.branch} review={review} onReturnToFiles={() => { expansion.restore(); workspace.carousel?.show('files'); }} onReturnToSettings={() => { /* retain settings drafts while returning from the read-only base */ expansion.restore(); workspace.carousel?.show('settings'); }} {...(openInEditor === undefined ? {} : { onOpenInEditor: (target: EditorTarget) => void openInEditor(target) })} /> : null;
   const stackName = stackPlaceName(place.worktreeId, projects);
   const placeId = place.id;
   // the Stack panel shows only for a Worktree whose stack has processes to show
   const stackPane = !stackPanel.open || place.worktreeId === undefined || (place.stack?.processes?.length ?? 0) === 0 ? null : <StackPanel worktreeId={place.worktreeId} title={stackName === undefined ? 'this worktree' : `${stackName.project} / ${stackName.worktree}`} stack={place.stack} selection={stackPanel.selection} onSelect={stackPanel.select} onClose={stackPanel.close} handlers={stackHandlers(place.worktreeId)} onOpenWorktree={onOpenWorktreeStack} onOpenTerminal={placeId === undefined ? undefined : (paneId, name) => { /* on a phone an already-open panel is scrolled to; a new one comes into view as it opens */ workspace.carousel?.show(paneId); requestTerminalFocus(placeId, { paneId, name }); }} readOutput={processOutput} clearOutput={clearProcessOutput} />;
-  return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} codeController={code} review={reviewPanel} stack={stackPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesSettled} /></div></section></SelectionActionsContext.Provider>;
+  return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} preview={previewPane} previewController={preview} review={reviewPanel} stack={stackPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesSettled} /></div></section></SelectionActionsContext.Provider>;
 }
 
 type LogProps = { id: string; onTurnOff?: () => void; embedded?: boolean; codexScrollControls?: boolean; onQuestion: (question: ChoiceQuestion | undefined) => void; onMetadata?: (response: string | undefined, overflow: boolean) => void; header?: (connection: string) => ReactNode; composer?: ReactNode; notes?: WorktreeNotes; onAddToPrompt?: (text: string) => void; onOpenUrl?: (url: string) => boolean; onOpenFile?: (path: string) => void; processingLabel?: string; processingDetail?: string };
@@ -7553,7 +7595,7 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
   // the current Agent's prompt history (the hook refetches when the switcher changes Agent)
   const promptHistory = usePromptHistory(agent.id);
   const workspace = useWorkspace({ id: agent.placeId ?? agent.worktreeId, worktreeId: agent.worktreeId, path: agent.home, stack: agent.stack, projectUrl: agent.projectUrl, projectProxied: agent.projectProxied, branch: agent.branch, gitStatus: agent.gitStatus, gitPrStatus: agent.gitPrStatus, pullRequest: agent.pullRequest, attention: agents.map(candidate => candidate.attention ?? '').join(' ') }, { agentId: agent.id, noteOptions: { agentWorking: active, latestAssistantMessage, latestAssistantMessageOverflows, onPromptHistoryChanged: promptHistory.refresh, promptHistory: promptHistory.history, schedulePrefill }, onNavigateWorktree, onOperationFeedback, onCloseReview: () => { /* close the latest review even when it arrived during confirmation */ if (agent.worktreeId !== undefined) onCloseReview(agent.worktreeId); } });
-  const { browser: projectBrowser, code: projectCode, setGitExpanded } = workspace;
+  const { browser: projectBrowser, preview: projectPreview, setGitExpanded } = workspace;
   // keep the latest response each Agent's output reports
   const reportMetadata = useCallback((agentId: string, message: string | undefined, overflows: boolean) => setLatest({ agentId, message, overflows }), []);
   // a switch closes the previous Agent's history
@@ -7563,9 +7605,13 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
     setHistoryOpen(open);
     if (open) setGitExpanded(false);
   }, [setGitExpanded]);
-  // open a pane file link in code using the selected agent's preview endpoint
+  // open a pane file link using the selected agent's preview endpoint
   // keep the agent-keyed `/tmp` screenshot bridge
-  const openFileInCode = useCallback((path: string) => { void projectCode.openFilePreview(path, `/api/agents/${encodeURIComponent(agent.id)}/file-preview`); }, [projectCode, agent.id]);
+  const openFileInPreview = (path: string) => {
+    workspace.expansion.restore();
+    projectPreview.openFilePreview(path, `/api/agents/${encodeURIComponent(agent.id)}/file-preview`);
+    pendingWorkspaceJumps.set(workspace.viewKey, 'preview');
+  };
   // route output links to the project browser only while its preview is open and the host matches
   const openOutputUrl = (url: string) => projectBrowser.url !== undefined && projectBrowser.homeUrl !== undefined && outputUrlMatchesHost(url, projectBrowser.homeUrl) && projectBrowser.openUrl(url);
   const pushPendingKey = `prompt:${agent.id}`;
@@ -7598,7 +7644,7 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
   // selected output and Terminal text append to the current Agent's draft without queueing it
   const addToPrompt = (text: string) => setPromptDraft(agent.id, current => appendTextBlock(current, text));
   // the panel is keyed by Agent, so a switch swaps its output, draft, queue and pending actions
-  const output = <AgentPanel key={agent.id} agent={agent} agents={agents} onSelectAgent={onSelectAgent} active={active} displayLabel={displayLabel} workspace={workspace} promptHistory={promptHistory} historyOpen={historyOpen} onHistoryOpenChange={changeHistoryOpen} latestAssistantMessage={latestAssistantMessage} onMetadata={reportMetadata} onAddToPrompt={addToPrompt} onOpenFile={openFileInCode} onOpenUrl={openOutputUrl} onDeleted={onDeleted} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} />;
+  const output = <AgentPanel key={agent.id} agent={agent} agents={agents} onSelectAgent={onSelectAgent} active={active} displayLabel={displayLabel} workspace={workspace} promptHistory={promptHistory} historyOpen={historyOpen} onHistoryOpenChange={changeHistoryOpen} latestAssistantMessage={latestAssistantMessage} onMetadata={reportMetadata} onAddToPrompt={addToPrompt} onOpenFile={openFileInPreview} onOpenUrl={openOutputUrl} onDeleted={onDeleted} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} />;
   return <article className="agent-view"><Workspace workspace={workspace} output={output} git={gitActions} reviewPanel={review?.panel} onAddToPrompt={addToPrompt} onOpenWorktreeStack={onOpenWorktreeStack} />{tabBar}{renderNotifications(upstreamRebase)}<WorkspaceToolbar workspace={workspace} agentCount={agents.length} launch={launch} onOpenWorktreeStack={onOpenWorktreeStack} git={gitActions} onGitToggle={() => setHistoryOpen(false)} cleanupControl={cleanupControl} menu={{ agentId: agent.id, worktreeId: agent.worktreeId, git: agent.worktreeId !== undefined || agent.placeId === undefined, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason }} /></article>;
 }
 
@@ -7899,11 +7945,13 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
   // on a phone the ⋮ opens secondary panels or brings an open one into view
   const menuPanels: PlaceMenuPanel[] = [];
   if (phone && workspace !== undefined) {
-    const { browser, files, code, carousel } = workspace;
+    const { browser, files, code, preview, carousel } = workspace;
     if (browser.homeUrl !== undefined) menuPanels.push({ key: 'browser', label: 'Browser', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{browserGlyph}</svg>, title: 'Show the project in the browser panel', onSelect: () => browser.open ? carousel?.show('browser') : browser.toggle() });
     if (place?.id !== undefined) menuPanels.push({ key: 'files', label: 'Files', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{filesGlyph}</svg>, title: 'Show the host Files panel', onSelect: () => files.open ? carousel?.show('files') : files.show() });
     if (worktreeId !== undefined && (place?.stack?.processes?.length ?? 0) > 0) menuPanels.push({ key: 'stack', label: 'Stack', icon: <StackIcon path={stackGlyphs.panel} className="more-menu-icon" />, title: 'Show the Stack panel', onSelect: () => workspace.openStackPanel() });
     if (worktreeId !== undefined) menuPanels.push({ key: 'code', label: 'Code', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{codeGlyph}</svg>, title: 'Show the working changes in the Code panel', onSelect: () => code.open ? carousel?.show('code') : code.openChanges('working') });
+    // expose the transient preview only while it has a file
+    if (preview.open) menuPanels.push({ key: 'preview', label: 'Preview', icon: <PanelIcon path={panelIcons.eye} />, title: 'Show the file preview', onSelect: () => carousel?.show('preview') });
   }
   // toolbar actions must not dismiss the mounted settings split
   return <section className="workspace-toolbar" aria-label="Workspace toolbar"><div className="workspace-toolbar-actions">
@@ -10360,6 +10408,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       note: <PanelIcon path="M5 3h14a2 2 0 0 1 2 2v10l-6 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2ZM15 21v-6h6" />,
       browser: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{browserGlyph}</svg>,
       code: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{codeGlyph}</svg>,
+      preview: <PanelIcon path={panelIcons.eye} />,
       stack: <StackIcon path={stackGlyphs.panel} className="more-menu-icon" />,
       settings: <PanelIcon path="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 3v2m0 14v2M3 12h2m14 0h2M6 6l1 1m10 10 1 1M6 18l1-1m10-10 1-1" />
     };

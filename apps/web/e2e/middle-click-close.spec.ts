@@ -427,9 +427,9 @@ test('middle-clicking output links navigates without closing Agent or Terminal p
   await expect.poll(() => harness.previews.map(request => ({ path: request.path, body: request.body }))).toEqual([
     { path: '/api/worktrees/cora/file-preview', body: JSON.stringify({ path: 'src/terminal.ts' }) }
   ]);
-  const code = page.getByRole('region', { name: 'Code changes' });
-  await expect(code).toBeVisible();
-  await expect(code.getByText('export const terminal = true;')).toBeVisible();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview).toBeVisible();
+  await expect(preview.getByText('export const terminal = true;')).toBeVisible();
   await expect(terminal).toBeVisible();
   expect(mutations(harness)).toEqual([]);
 });

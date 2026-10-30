@@ -105,18 +105,18 @@ test('browses host paths, exposes metadata, selects rows and opens only file nam
   const hidden = rows.filter({ hasText: '.hidden' });
   await hidden.locator('[role="gridcell"][data-label="Owner"]').click();
   await expect(hidden).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByRole('region', { name: 'Code changes' })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'File preview' })).toHaveCount(0);
   const alpha = rows.filter({ hasText: 'alpha.txt' });
   await alpha.locator('[role="gridcell"][data-label="Owner"]').click({ modifiers: ['Control'] });
   await expect(alpha).toHaveAttribute('aria-selected', 'true');
 
   // an unmodified file-name click sends only its object token to the separate host preview route
   await alpha.getByRole('button', { name: 'alpha.txt', exact: true }).click();
-  const code = page.getByRole('region', { name: 'Code changes' });
-  await expect(code.getByRole('button', { name: '‹ Files' })).toBeVisible();
-  await expect(code.getByText('outside root preview')).toBeVisible();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview.getByRole('button', { name: '‹ Files' })).toBeVisible();
+  await expect(preview.getByText('outside root preview')).toBeVisible();
   expect(fixture.records.find(record => record.path.endsWith('/files/preview'))?.body).toEqual({ objectToken: 'object-token:alpha.txt:00000000' });
-  await code.getByRole('button', { name: '‹ Files' }).click();
+  await preview.getByRole('button', { name: '‹ Files' }).click();
   await expect(panel).toBeVisible();
 
   // one header path control replaces the title, breadcrumb and duplicate form
@@ -250,6 +250,6 @@ test('refreshes rewritten favorites after rename and surfaces a later refresh fa
   await expect(panel.getByRole('alert')).toHaveCount(0);
   await panel.getByRole('button', { name: 'Favorites' }).click();
   await page.getByRole('menu', { name: 'Favorites' }).getByRole('menuitem', { name: /renamed\.txt/u }).click();
-  await expect(page.getByRole('region', { name: 'Code changes' }).getByText('outside root preview')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'File preview' }).getByText('outside root preview')).toBeVisible();
   expect(fixture.records.findLast(record => record.path.endsWith('/files/preview'))?.body).toEqual({ objectToken: 'object-token:renamed.txt:00000000' });
 });

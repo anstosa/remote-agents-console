@@ -33,7 +33,7 @@ test('opens Files from Workspace More options and toggles multiple row bodies', 
   await expect(toolbar.getByRole('group', { name: 'Panels' }).locator('.files-dot')).toHaveAttribute('data-current', 'true');
 });
 
-test('file-name taps open Code and back returns to Files in the carousel', async ({ page }) => {
+test('file-name taps open Preview and back returns to Files in the carousel', async ({ page }) => {
   await installPaneMock(page);
   await installFilesFixture(page);
   await page.goto('/');
@@ -43,13 +43,13 @@ test('file-name taps open Code and back returns to Files in the carousel', async
   await page.getByRole('button', { name: 'Files', exact: true }).click();
   const files = page.getByRole('region', { name: 'Files' });
   await files.getByRole('button', { name: 'alpha.txt', exact: true }).tap();
-  const code = page.getByRole('region', { name: 'Code changes' });
-  await expect(code).toBeInViewport({ ratio: 0.9 });
-  await code.getByRole('button', { name: '‹ Files' }).tap();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview).toBeInViewport({ ratio: 0.9 });
+  await preview.getByRole('button', { name: '‹ Files' }).tap();
   await expect(files).toBeInViewport({ ratio: 0.9 });
 });
 
-test('file-name taps reveal an already-mounted off-screen Code panel', async ({ page }) => {
+test('file-name taps reveal Preview beside an already-mounted off-screen Code panel', async ({ page }) => {
   await installPaneMock(page);
   await installFilesFixture(page);
   await page.goto('/');
@@ -65,9 +65,9 @@ test('file-name taps reveal an already-mounted off-screen Code panel', async ({ 
   const files = page.getByRole('region', { name: 'Files' });
   await expect(files).toBeInViewport({ ratio: 0.9 });
   await files.getByRole('button', { name: 'alpha.txt', exact: true }).tap();
-  const code = page.getByRole('region', { name: 'Code changes' });
-  await expect(code).toBeInViewport({ ratio: 0.9 });
-  await expect(code.getByText('outside root preview')).toBeVisible();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview).toBeInViewport({ ratio: 0.9 });
+  await expect(preview.getByText('outside root preview')).toBeVisible();
 });
 
 test('mobile sort controls retain directories above files in descending order', async ({ page }) => {

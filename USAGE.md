@@ -230,7 +230,7 @@ other architecture decisions.
 | **Conversations and notes** | Name, list and resume each agent's own Conversations from the console, and keep autosaved Markdown notes with reusable file attachments beside output. Both are shared automatically across a Project's worktrees. A note's **Show in all workspaces** option also makes it available in other Projects and Scratch. |
 | **Guided review** | Generate an AI-narrated tour of active Working or All PR implementation changes, visit or skip each logical step, and send consolidated feedback to the agent. |
 | **Operations** | Install as a browser app, enable notifications, review stale runtime cleanup targets, and deploy with Docker Compose plus an optional Cloudflare Tunnel. |
-| **Files** | Browse the ordinary host account's filesystem from any Place, open files in the configured editor or browser Code fallback, manage files with explicit delete/conflict confirmation, download files or ZIPs, and save favorites per exact Place. |
+| **Files** | Browse the ordinary host account's filesystem from any Place, preview files in their own split or open them in the configured editor, manage files with explicit delete/conflict confirmation, download files or ZIPs, and save favorites per exact Place. |
 | **Conversational control** | Connect ChatGPT through scoped remote MCP or use the built-in OpenAI Realtime voice dialog to inspect and direct the same agents. |
 
 ### Review implementation changes
@@ -294,9 +294,13 @@ requirements](https://developer.mozilla.org/en-US/docs/Web/API/Clipboard_API#sec
 
 Open **Files** from the desktop Workspace toolbar or the mobile three-dot menu.
 It starts at the selected Place's host folder and can navigate outside it.
-Click a filename to open it in the configured editor, or in Code when no editor
-is configured or an editor terminal cannot be opened. This also works outside
-the worktree. Click the rest of its row to select it. Ctrl/Command toggles
+Click a filename to use the default file action from Settings → Interface.
+The initial default is Edit, falling back to Preview when no editor is configured
+or an editor terminal cannot be opened. This also works outside the worktree.
+File menus always offer **Preview** and offer **Edit** only when an editor is
+configured. Preview opens an independent resizable split with syntax-highlighted
+text and supported image previews, without replacing Code changes.
+Click the rest of its row to select it. Ctrl/Command toggles
 selection and Shift selects a range; mobile row taps toggle multiple entries.
 Rows include owner, permissions, modification time, and readable size. Sort any
 metadata column; Name starts ascending with

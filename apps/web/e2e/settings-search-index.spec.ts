@@ -142,6 +142,7 @@ test('indexes Interface and Projects controls under their owning pages', () => {
   expect(fieldAt(results, 'interface', ['colorTheme'])).toBeDefined();
   expect(fieldAt(results, 'interface', ['reducedMotion'])).toBeDefined();
   expect(fieldAt(results, 'interface', ['flyoutMarkers'])).toBeDefined();
+  expect(fieldAt(results, 'interface', ['fileOpenAction'])).toBeDefined();
   expect(fieldAt(results, 'projects', ['dynamicWorktrees'])).toBeDefined();
   expect(fieldAt(results, 'interface', ['buttons', 'pullRequest', '0', 'text'])).toBeDefined();
   expect(fieldAt(results, 'app', ['buttons', 'pullRequest', '0', 'text'])).toBeUndefined();

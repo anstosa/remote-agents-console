@@ -2,8 +2,8 @@ import { expect, test } from '@playwright/test';
 import { installPaneMock, seedPaneSize, pushBytes, pushMetadata } from './pane-stream-mock.js';
 import { clickPanelAction } from './panel-header';
 
-// pane paths open the code split without retaining a response-files flyout
-test('opens pane file links in the Code panel without requesting response-file metadata', async ({ page }) => {
+// pane paths open previews without retaining a response-files flyout
+test('opens pane file links in Preview without requesting response-file metadata', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 600 });
   await installPaneMock(page);
   await page.addInitScript(() => {
@@ -50,17 +50,17 @@ test('opens pane file links in the Code panel without requesting response-file m
   };
   await emit('Updated apps/web/src/main.tsx:1444 and docs/setup.md.', 'Updated `apps/web/src/main.tsx:1444` and `docs/setup.md`.');
 
-  const panel = page.getByRole('region', { name: 'Code changes' });
+  const panel = page.getByRole('region', { name: 'File preview' });
   await expect(page.locator('.agent-panel').getByRole('toolbar', { name: 'Agent output actions' }).getByRole('button', { name: /Files from latest response/u })).toHaveCount(0);
   expect(messageFileRequests).toBe(0);
 
-  // clicking a file link in the pane output opens that file in the Code panel (a plain-file view),
+  // open pane-output links in the dedicated file preview split
   // never the old modal dialog
   const outputPath = page.getByRole('link', { name: 'Preview apps/web/src/main.tsx' });
   await expect(outputPath).toHaveAttribute('data-output-file-path', 'apps/web/src/main.tsx');
   await outputPath.click();
   await expect(panel).toBeVisible();
-  await expect(panel.getByRole('button', { name: '‹ Changes' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: '‹ Preview' })).toBeVisible();
   await expect(panel.getByText('main.tsx', { exact: true })).toBeVisible();
   await expect(panel.getByText('export const ready = true;')).toBeVisible();
   // the retired dialog never appears

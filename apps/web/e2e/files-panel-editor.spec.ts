@@ -118,13 +118,13 @@ test('configured editor opens an outside-worktree file from its fresh opaque cap
   await expect(terminal).toBeVisible();
   await seedPaneSize(page, '%9', 80, 24);
   await pushBytes(page, '%9', 'Opened outside.txt\r\n');
-  await expect(page.getByRole('region', { name: 'Code changes' })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'File preview' })).toHaveCount(0);
   expect(fixture.records.filter(record => record.path.endsWith('/files/preview'))).toEqual([]);
   expect(pageErrors).toEqual([]);
   await page.screenshot({ path: '/tmp/remoteagents-files-editor-desktop.png', fullPage: true });
 });
 
-test('favorite activation and row-menu Open use the configured editor preference', async ({ page }) => {
+test('favorite activation and row-menu Edit use the configured editor preference', async ({ page }) => {
   const { fixture, panel, shellBodies, pageErrors } = await openFiles(page);
   const alpha = fileRow(panel, 'alpha.txt');
   await alpha.getByRole('button', { name: 'Actions for alpha.txt' }).click();
@@ -136,29 +136,68 @@ test('favorite activation and row-menu Open use the configured editor preference
 
   const zeta = fileRow(panel, 'zeta.bin');
   await zeta.getByRole('button', { name: 'Actions for zeta.bin' }).click();
-  await page.getByRole('menu', { name: 'Actions for zeta.bin' }).getByRole('menuitem', { name: 'Open', exact: true }).click();
+  const zetaMenu = page.getByRole('menu', { name: 'Actions for zeta.bin' });
+  await zetaMenu.getByRole('menuitem', { name: 'Edit', exact: true }).click();
   await expect.poll(() => shellBodies.length).toBe(2);
   expect(shellBodies[1]).toEqual({ editor: true, objectToken: 'object-token:zeta.bin:00000000' });
   expect(fixture.records.filter(record => record.path.endsWith('/files/preview'))).toEqual([]);
-  await expect(page.getByRole('region', { name: 'Code changes' })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'File preview' })).toHaveCount(0);
   expect(pageErrors).toEqual([]);
 });
 
-test('without a configured editor a filename retains the Code preview behavior', async ({ page }) => {
-  const { fixture, panel, shellBodies, pageErrors } = await openFiles(page, { editor: false });
-  await panel.getByRole('button', { name: 'alpha.txt', exact: true }).click();
-  const code = page.getByRole('region', { name: 'Code changes' });
-  await expect(code.getByText('outside root preview')).toBeVisible();
+test('configured editor keeps Preview as an explicit file-viewing action', async ({ page }) => {
+  const { fixture, panel, shellBodies, pageErrors } = await openFiles(page);
+  const alpha = fileRow(panel, 'alpha.txt');
+  await alpha.getByRole('button', { name: 'Actions for alpha.txt' }).click();
+  const menu = page.getByRole('menu', { name: 'Actions for alpha.txt' });
+  await menu.getByRole('menuitem', { name: 'Preview', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'File preview' }).getByText('outside root preview')).toBeVisible();
   expect(shellBodies).toEqual([]);
   expect(fixture.records.find(record => record.path.endsWith('/files/preview'))?.body).toEqual({ objectToken: 'object-token:alpha.txt:00000000' });
   expect(pageErrors).toEqual([]);
 });
 
-test('a repeatedly missing created editor pane falls back to Code', async ({ page }) => {
+test('saved Preview default leaves explicit Edit available with a configured editor', async ({ page }) => {
+  // persist the browser preference before the application loads
+  await page.addInitScript(() => localStorage.setItem('rac.file-open-action', 'preview'));
+  const { fixture, panel, shellBodies, pageErrors } = await openFiles(page);
+  const alpha = fileRow(panel, 'alpha.txt');
+
+  await alpha.getByRole('button', { name: 'alpha.txt', exact: true }).click();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview.getByText('outside root preview')).toBeVisible();
+  expect(shellBodies).toEqual([]);
+  expect(fixture.records.find(record => record.path.endsWith('/files/preview'))?.body).toEqual({ objectToken: 'object-token:alpha.txt:00000000' });
+
+  await preview.getByRole('button', { name: '‹ Files' }).click();
+  await alpha.getByRole('button', { name: 'Actions for alpha.txt' }).click();
+  await page.getByRole('menu', { name: 'Actions for alpha.txt' }).getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await expect.poll(() => shellBodies.length).toBe(1);
+  expect(shellBodies[0]).toEqual({ editor: true, objectToken: 'object-token:alpha.txt:00000000' });
+  expect(pageErrors).toEqual([]);
+});
+
+test('without a configured editor a filename retains the preview behavior', async ({ page }) => {
+  const { fixture, panel, shellBodies, pageErrors } = await openFiles(page, { editor: false });
+  const alpha = fileRow(panel, 'alpha.txt');
+  await alpha.getByRole('button', { name: 'Actions for alpha.txt' }).click();
+  const menu = page.getByRole('menu', { name: 'Actions for alpha.txt' });
+  await expect(menu.getByRole('menuitem', { name: 'Preview', exact: true })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Edit', exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await panel.getByRole('button', { name: 'alpha.txt', exact: true }).click();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview.getByText('outside root preview')).toBeVisible();
+  expect(shellBodies).toEqual([]);
+  expect(fixture.records.find(record => record.path.endsWith('/files/preview'))?.body).toEqual({ objectToken: 'object-token:alpha.txt:00000000' });
+  expect(pageErrors).toEqual([]);
+});
+
+test('a repeatedly missing created editor pane falls back to Preview', async ({ page }) => {
   const { fixture, panel, shellBodies, paneReadsAfterShell, pageErrors } = await openFiles(page, { paneVisibility: 'missing' });
   await panel.getByRole('button', { name: 'alpha.txt', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Code changes' }).getByText('outside root preview')).toBeVisible();
-  await expect(page.getByRole('alert').filter({ hasText: 'The editor did not open; trying Code instead' })).toContainText('The editor terminal is no longer available.');
+  await expect(page.getByRole('region', { name: 'File preview' }).getByText('outside root preview')).toBeVisible();
+  await expect(page.getByRole('alert').filter({ hasText: 'The editor did not open; trying Preview instead' })).toContainText('The editor terminal is no longer available.');
   expect(shellBodies).toEqual([{ editor: true, objectToken: 'object-token:alpha.txt:00000000' }]);
   expect(paneReadsAfterShell()).toBe(3);
   expect(fixture.records.find(record => record.path.endsWith('/files/preview'))?.body).toEqual({ objectToken: 'object-token:alpha.txt:00000000' });
@@ -166,25 +205,25 @@ test('a repeatedly missing created editor pane falls back to Code', async ({ pag
   expect(pageErrors).toEqual([]);
 });
 
-test('one stale pane listing recovers into the configured editor without Code', async ({ page }) => {
+test('one stale pane listing recovers into the configured editor without Preview', async ({ page }) => {
   const { fixture, panel, shellBodies, paneReadsAfterShell, pageErrors } = await openFiles(page, { paneVisibility: 'stale-once' });
   await panel.getByRole('button', { name: 'alpha.txt', exact: true }).click();
   await expect.poll(() => paneReadsAfterShell()).toBe(2);
   await expect(page.locator('.terminal-pane[data-panel-key="%9"]')).toBeVisible();
   expect(shellBodies).toEqual([{ editor: true, objectToken: 'object-token:alpha.txt:00000000' }]);
   expect(fixture.records.filter(record => record.path.endsWith('/files/preview'))).toEqual([]);
-  await expect(page.getByRole('region', { name: 'Code changes' })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'File preview' })).toHaveCount(0);
   expect(pageErrors).toEqual([]);
 });
 
 // exercise each shell-creation failure class through the same visible fallback
 for (const failure of [400, 500, 'network'] as const) {
-  test(`editor ${failure} failure falls back to Code with feedback`, async ({ page }) => {
+  test(`editor ${failure} failure falls back to Preview with feedback`, async ({ page }) => {
     const { fixture, panel, shellBodies, pageErrors } = await openFiles(page, { failure });
     await panel.getByRole('button', { name: 'alpha.txt', exact: true }).click();
-    const code = page.getByRole('region', { name: 'Code changes' });
-    await expect(code.getByText('outside root preview')).toBeVisible();
-    const feedback = page.getByRole('alert').filter({ hasText: 'The editor did not open; trying Code instead' });
+    const preview = page.getByRole('region', { name: 'File preview' });
+    await expect(preview.getByText('outside root preview')).toBeVisible();
+    const feedback = page.getByRole('alert').filter({ hasText: 'The editor did not open; trying Preview instead' });
     await expect(feedback).toBeVisible();
     await expect(feedback).toContainText(failure === 'network' ? 'Console unavailable' : `editor rejected with ${failure}`);
     expect(shellBodies).toEqual([{ editor: true, objectToken: 'object-token:alpha.txt:00000000' }]);
@@ -193,10 +232,66 @@ for (const failure of [400, 500, 'network'] as const) {
   });
 }
 
+// preserve the latest destination across delayed editor success and failure
+for (const outcome of ['success', 'failure'] as const) {
+  // cover both files actions and an independently scoped preview source
+  for (const destination of ['filename', 'explicit-preview', 'output-link'] as const) {
+    test(`a newer ${destination} choice survives an older editor ${outcome}`, async ({ page }) => {
+      await page.setViewportSize({ width: 1_800, height: 900 });
+      const { panel, shellBodies, pageErrors } = await openFiles(page, { failure: outcome === 'failure' ? 500 : undefined });
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const previewBodies: unknown[] = [];
+      // hold the first shell before the existing fixture settles it
+      await page.route('**/api/worktrees/cora/shells', async route => { await held; await route.fallback(); });
+      // identify the newer capability-backed file without returning the old file's contents
+      await page.route('**/api/worktrees/cora/files/preview', route => {
+        previewBodies.push(route.request().postDataJSON());
+        return route.fulfill({ json: { path: '/home/ubuntu/project/zeta.bin', size: 19, binary: false, truncated: false, content: 'newest destination\n' } });
+      });
+      // retain the agent-scoped output-link route as a distinct source
+      await page.route('**/api/agents/agent-1/file-preview', route => {
+        previewBodies.push(route.request().postDataJSON());
+        return route.fulfill({ json: { path: 'apps/web/src/newest.ts', size: 19, binary: false, truncated: false, content: 'newest destination\n' } });
+      });
+      const firstRequest = page.waitForRequest(request => request.url().endsWith('/worktrees/cora/shells'));
+      await panel.getByRole('button', { name: 'alpha.txt', exact: true }).click();
+      await firstRequest;
+      // select the newer destination while the original editor is still pending
+      if (destination === 'filename') {
+        await panel.getByRole('button', { name: 'zeta.bin', exact: true }).click();
+      } else if (destination === 'explicit-preview') {
+        await fileRow(panel, 'zeta.bin').getByRole('button', { name: 'Actions for zeta.bin' }).click();
+        await page.getByRole('menu', { name: 'Actions for zeta.bin' }).getByRole('menuitem', { name: 'Preview', exact: true }).click();
+      } else {
+        await pushBytes(page, 'agent-1', `${'\r\n'.repeat(20)}Updated apps/web/src/newest.ts\r\n`);
+        await page.getByRole('link', { name: 'Preview apps/web/src/newest.ts' }).click();
+      }
+      const preview = page.getByRole('region', { name: 'File preview' });
+      await expect(preview.getByText('newest destination')).toBeVisible();
+      const focusedAction = preview.getByRole('button', { name: 'Close file', exact: true });
+      await focusedAction.focus();
+      await expect(focusedAction).toBeFocused();
+      const firstResponse = page.waitForResponse(response => response.url().endsWith('/worktrees/cora/shells'));
+      release();
+      await (await firstResponse).finished();
+      // flush resulting focus and rendering work before checking the settled destination
+      await page.evaluate(() => new Promise<void>(resolve => { requestAnimationFrame(() => requestAnimationFrame(() => resolve())); }));
+      await expect(preview.getByText('newest destination')).toBeVisible();
+      await expect(focusedAction).toBeFocused();
+      await expect(page.locator('.terminal-pane[data-panel-key="%9"]')).toHaveCount(0);
+      await expect(page.getByRole('alert').filter({ hasText: 'editor rejected with 500' })).toHaveCount(0);
+      expect(shellBodies).toEqual([{ editor: true, objectToken: 'object-token:alpha.txt:00000000' }]);
+      expect(previewBodies).toEqual([destination === 'output-link' ? { path: 'apps/web/src/newest.ts' } : { objectToken: 'object-token:zeta.bin:00000000' }]);
+      expect(pageErrors).toEqual([]);
+    });
+  }
+}
+
 test.describe('phone editor preference', () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  test('configured editor terminal replaces Code as the visible file destination', async ({ page }) => {
+  test('configured editor terminal replaces Preview as the visible file destination', async ({ page }) => {
     const { fixture, panel, shellBodies, pageErrors } = await openFiles(page);
     await panel.getByRole('button', { name: 'alpha.txt', exact: true }).tap();
     await expect.poll(() => shellBodies.length).toBe(1);
@@ -205,7 +300,7 @@ test.describe('phone editor preference', () => {
     await seedPaneSize(page, '%9', 44, 20);
     await pushBytes(page, '%9', 'Opened alpha.txt\r\n');
     expect(shellBodies[0]).toEqual({ editor: true, objectToken: 'object-token:alpha.txt:00000000' });
-    await expect(page.getByRole('region', { name: 'Code changes' })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'File preview' })).toHaveCount(0);
     expect(fixture.records.filter(record => record.path.endsWith('/files/preview'))).toEqual([]);
     expect(pageErrors).toEqual([]);
     await page.screenshot({ path: '/tmp/remoteagents-files-editor-mobile.png', fullPage: true });

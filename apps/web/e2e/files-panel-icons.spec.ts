@@ -106,7 +106,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     const textRow = panel.locator('.files-row').filter({ has: page.getByRole('button', { name: 'readme.md', exact: true }) });
     await textRow.getByRole('img').click();
     await expect(textRow).toHaveAttribute('aria-selected', 'true');
-    await expect(page.getByRole('region', { name: 'Code changes' })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'File preview' })).toHaveCount(0);
 
     // favorites share the artwork without changing their accessible labels
     await panel.getByRole('button', { name: 'Favorites', exact: true }).click();

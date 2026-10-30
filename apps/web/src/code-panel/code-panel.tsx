@@ -992,11 +992,24 @@ function CommitRowsLoading() {
 // `{type:'file'}` item) so it gets real syntax highlighting; an image (including the agent `/tmp`
 // screenshot bridge), a binary file, and the over-cap truncation notice are plain non-library views.
 // the back action returns to the source panel or comparison
-function FileView({ filePreview, options, style, expanded, onBack, onClose, onOpenInEditor }: { filePreview: FilePreviewView; options: PanelOptions; style: CSSProperties; expanded: boolean; onBack: () => void; onClose: () => void; onOpenInEditor?: (target: EditorTarget) => void }) {
+// reuse the highlighted file renderer in an independent preview split
+export function PreviewPanel({ filePreview, onBack, onClose, onRetry, onEdit, onOpenInEditor }: { filePreview: FilePreviewView; onBack: () => void; onClose: () => void; onRetry: () => void; onEdit?: () => void; onOpenInEditor?: (target: EditorTarget) => void }) {
+  const theme = useColorTheme();
+  const fontSize = useTerminalFontSize();
+  const expanded = usePanelExpand('preview')?.expanded === true;
+  // keep syntax highlighting consistent with the code split
+  const options = useMemo<PanelOptions>(() => codeViewBaseOptions(theme === 'latte' ? 'light' : 'dark', fontSize), [theme, fontSize]);
+  return <FileView key={filePreview.path} panelKey="preview" filePreview={filePreview} options={options} style={codeViewStyle(fontSize) as CSSProperties} expanded={expanded} onBack={onBack} onClose={onClose} onRetry={onRetry} onEdit={onEdit} onOpenInEditor={onOpenInEditor} />;
+}
+
+// render source bytes without changing the comparison's selected file
+function FileView({ filePreview, options, style, expanded, onBack, onClose, onOpenInEditor, panelKey = 'code', onRetry, onEdit }: { filePreview: FilePreviewView; options: PanelOptions; style: CSSProperties; expanded: boolean; onBack: () => void; onClose: () => void; onOpenInEditor?: (target: EditorTarget) => void; panelKey?: 'code' | 'preview'; onRetry?: () => void; onEdit?: () => void }) {
   const selectionActions = useSelectionActions();
   const { path, state, preview } = filePreview;
   const [copied, setCopied] = useState(false);
+  // reset path feedback when navigating between files
   useEffect(() => setCopied(false), [path]);
+  // copy the canonical preview path without changing focus
   const copyPath = async () => {
     try { await copyToClipboard(path); setCopied(true); } catch { setCopied(false); }
   };
@@ -1005,25 +1018,26 @@ function FileView({ filePreview, options, style, expanded, onBack, onClose, onOp
   // the header's editor button opens the selected line, else the top; only a path inside the Place
   // can be opened; a pane link may name a host path such as a `/tmp` screenshot
   const [selection, setSelection] = useState<CodeViewLineSelection | null>(null);
-  const backLabel = filePreview.source === 'settings' ? 'Settings' : filePreview.source === 'files' ? 'Files' : filePreview.source === 'notes' ? 'Note' : 'Changes';
+  const backLabel = filePreview.source === 'settings' ? 'Settings' : filePreview.source === 'files' ? 'Files' : filePreview.source === 'notes' ? 'Note' : panelKey === 'preview' ? 'Preview' : 'Changes';
   const renderHeaderMetadata = () => {
     // keep scoped source snapshots read only
     if (filePreview.source === 'settings' || filePreview.source === 'notes' || onOpenInEditor === undefined || !isPlaceRelativePath(path)) return null;
     return <EditorJumpButton file={path} line={selection === null ? 1 : Math.min(selection.range.start, selection.range.end)} onOpen={onOpenInEditor} />;
   };
   return (
-    <section onAuxClickCapture={event => closeOnMiddleClick(event, onClose)} className={`code-pane code-pane-file${expanded ? ' expanded' : ''}`} style={style} role="region" aria-label="Code changes" onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={event => codeContextMenu(event, selectionActions)}>
-      <PanelHeader panelKey="code" label="code panel" title={<nav className="code-pane-crumbs" aria-label="Location">
+    <section onAuxClickCapture={event => closeOnMiddleClick(event, onClose)} className={`code-pane code-pane-file${panelKey === 'preview' ? ' preview-pane' : ''}${expanded ? ' expanded' : ''}`} style={style} role="region" aria-label={panelKey === 'preview' ? 'File preview' : 'Code changes'} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={event => codeContextMenu(event, selectionActions)}>
+      <PanelHeader panelKey={panelKey} label={panelKey === 'preview' ? 'preview panel' : 'code panel'} title={<nav className="code-pane-crumbs" aria-label="Location">
           <button type="button" className="code-pane-crumb-back" onClick={onBack}>‹ {backLabel}</button>
           <span className="code-pane-crumb-sep" aria-hidden="true">/</span>
           <span className="code-pane-crumb-current" title={path}>{basename(path)}</span>
         </nav>}
+        actions={onEdit === undefined ? undefined : <button type="button" className="panel-header-action" aria-label="Edit" title="Open in configured editor" onClick={onEdit}><PanelIcon path={panelIcons.editor} /></button>}
         secondary={[{ key: 'copy-path', label: copied ? 'Path copied' : 'Copy path', className: copied ? 'copied' : undefined, icon: <PanelIcon path={copied ? panelIcons.check : panelIcons.copy} />, onSelect: () => void copyPath() }]}
         close={{ key: 'close', label: 'Close file', title: 'Close', icon: <PanelIcon path={panelIcons.close} />, onSelect: onClose }} />
       <div className="code-pane-main">
         <div className="code-pane-body">
           {state === 'loading' && <CodeLoading kind="file" path={path} />}
-          {state === 'error' && <p className="code-pane-status" role="alert">Preview unavailable.</p>}
+          {state === 'error' && <p className="code-pane-status" role="alert">Preview unavailable. {onRetry !== undefined && <button type="button" className="code-pane-retry" onClick={onRetry}>Retry</button>}</p>}
           {state === 'ready' && preview !== undefined && <>
             {/* inline only complete supported images */}
             {preview.binary && preview.image !== undefined && <div className="code-pane-file-image"><RasterImage image={preview.image} label={`Preview of ${path}`} /></div>}

@@ -1,7 +1,7 @@
 # Design
 
 ## Source of truth
-Status: Active. Updated: 2026-10-28. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls, workspace toolbar decorators, public homepage and policies.
+Status: Active. Updated: 2026-10-30. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls, workspace toolbar decorators, public homepage and policies, independent file previews.
 Evidence: existing Settings forms and split confirmation, `compose.yaml`, the
 host settings queue/applier, and Cloudflare's official Tunnel setup documentation.
 Toolbar evidence: `apps/web/src/styles.css`, browser layout regressions, and the
@@ -131,8 +131,15 @@ continuous JavaScript animation clock.
 Conversations opens immediately into one flyout with search first and a scrollable
 four-and-a-half-row viewport, clamped to short screens. Rows expose relative activity,
 cwd, and current-conversation editing; historical resume safeguards remain intact.
-File paths and stored Note attachment filenames open the Code split through their
-existing scoped preview routes, not duplicate preview modals. Uploads remain available.
+File paths and stored Note attachment filenames open a dedicated Preview split through
+the existing scoped preview routes, independently of Code comparisons. Reuse highlighted
+source and bounded raster rendering with loading, failure, binary and truncation states.
+Files menus offer Preview and, only with a configured editor, Edit. Filename and favorite
+activation follows the browser Interface setting Default file action; preserve Edit as
+the initial default and fall back to Preview when no editor is configured or launch fails.
+Explicit Preview never launches an editor. Settings base-file previews remain redacted
+and read-only. Preview shares split resizing, expand/close, keyboard navigation and the
+phone carousel. Uploads remain available.
 Cleanup loading rows contain decorative checkbox shapes, never consent inputs or
 target identities. Only settled real controls determine destructive selections;
 actual cleanup submission retains its working feedback and closed-PR opt-in rule.

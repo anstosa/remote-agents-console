@@ -828,11 +828,11 @@ test('ordinary Windows drag selects Codex output starting on a file link', async
   await page.mouse.click(start.x, start.y, { button: 'right' });
   const contextMenu = page.getByRole('menu', { name: 'Agent actions' });
   await expect(contextMenu).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Code changes' })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'File preview' })).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(contextMenu).toHaveCount(0);
   await fileLink.click();
-  await expect(page.getByRole('region', { name: 'Code changes' }).getByRole('button', { name: 'Close file' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'File preview' }).getByRole('button', { name: 'Close file' })).toBeVisible();
 });
 
 // keep xterm's custom-label hyperlinks clickable through the owned selection surface

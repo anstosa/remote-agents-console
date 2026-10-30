@@ -353,6 +353,21 @@ test("saves notification sounds from Interface without changing files", async ({
   await expect(sounds).not.toBeChecked();
 });
 
+// stage and persist the browser-local file activation default
+test("saves the default file action from Interface", async ({ page }) => {
+  const { settings, state } = await setupBrowserDrafts(page, true);
+  const edit = settings.getByRole("radio", { name: "Edit", exact: true });
+  const preview = settings.getByRole("radio", { name: "Preview", exact: true });
+  await expect(edit).toHaveAttribute("aria-checked", "true");
+  await preview.click();
+  await expect(preview).toHaveAttribute("aria-checked", "true");
+  expect(await page.evaluate(() => localStorage.getItem("rac.file-open-action"))).toBeNull();
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(settings.getByRole("button", { name: "Save changes", exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem("rac.file-open-action"))).toBe("preview");
+  expect(state.fileSaves).toHaveLength(0);
+});
+
 // read only applied browser state outside the settings draft
 const appliedBrowserState = (page: Page) =>
   page.evaluate(() => ({

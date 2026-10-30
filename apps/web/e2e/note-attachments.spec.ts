@@ -193,7 +193,7 @@ test('places an icon-only attachment picker beside Send and shows the second pic
 });
 
 // route supported note attachments through the code split
-test('previews text and image note attachments in Code and returns to the mounted note', async ({ page }) => {
+test('previews text and image note attachments in Preview and returns to the mounted note', async ({ page }) => {
   const imageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
   const fixture = noteFixture({
     id: 'note-identifier-001',
@@ -211,12 +211,12 @@ test('previews text and image note attachments in Code and returns to the mounte
 
   const textTrigger = dialog.getByRole('button', { name: 'Preview note attachment: notes.md' });
   await textTrigger.click();
-  let code = page.getByRole('region', { name: 'Code changes' });
+  let code = page.getByRole('region', { name: 'File preview' });
   await expect(code.getByText('# Saved context')).toBeVisible();
   await expect(code.getByRole('button', { name: '‹ Note' })).toBeVisible();
   await expect(code.getByRole('button', { name: /Open notes\.md/u })).toHaveCount(0);
   await expect(page.getByRole('dialog', { name: /File preview:/u })).toHaveCount(0);
-  // capture the note-scoped Code view on demand
+  // capture the note-scoped preview on demand
   if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/note-code-desktop.png` });
   await code.getByRole('button', { name: '‹ Note' }).click();
   await expect(code).toHaveCount(0);
@@ -224,7 +224,7 @@ test('previews text and image note attachments in Code and returns to the mounte
 
   const imageTrigger = dialog.getByRole('button', { name: 'Preview note attachment: screenshot.png' });
   await imageTrigger.click();
-  code = page.getByRole('region', { name: 'Code changes' });
+  code = page.getByRole('region', { name: 'File preview' });
   const image = code.getByRole('img', { name: 'Preview of screenshot.png' });
   await expect(image).toBeVisible();
   await expect.poll(() => image.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
@@ -235,7 +235,7 @@ test('previews text and image note attachments in Code and returns to the mounte
   expect(fixture.previewRequests).toEqual(['notes.md', 'screenshot.png']);
 });
 
-// every note preview uses the same complete-raster contract as the code split
+// use the same complete-raster contract in every note preview
 // reject malformed successful responses before constructing an image source
 test('rejects a note attachment image with mismatched mime and magic', async ({ page }) => {
   const path = 'screenshot.png';
@@ -247,13 +247,14 @@ test('rejects a note attachment image with mismatched mime and magic', async ({ 
   await page.goto('/');
   const dialog = await openNote(page, 'Invalid raster');
   await dialog.getByRole('button', { name: `Preview note attachment: ${path}` }).click();
-  const code = page.getByRole('region', { name: 'Code changes' });
-  await expect(code.getByRole('alert')).toHaveText('Preview unavailable.');
+  const code = page.getByRole('region', { name: 'File preview' });
+  await expect(code.getByRole('alert')).toHaveText('Preview unavailable. Retry');
+  await expect(code.getByRole('button', { name: 'Retry', exact: true })).toBeEnabled();
   await expect(code.getByRole('img')).toHaveCount(0);
   await expect(page.getByRole('dialog', { name: `File preview: ${path}` })).toHaveCount(0);
 });
 
-// preserve bounded preview failures and stale-response safety in the code split
+// preserve bounded preview failures and stale-response safety in the preview split
 test('shows failed, binary, truncated, and safely returned note attachment previews', async ({ page }) => {
   let finishSlowPreview!: () => void;
   // hold one response beyond its closed dialog
@@ -282,32 +283,35 @@ test('shows failed, binary, truncated, and safely returned note attachment previ
   const dialog = await openNote(page, 'Preview boundaries');
 
   await dialog.getByRole('button', { name: 'Preview note attachment: unavailable.txt' }).click();
-  let code = page.getByRole('region', { name: 'Code changes' });
-  await expect(code.getByRole('alert')).toHaveText('Preview unavailable.');
+  let code = page.getByRole('region', { name: 'File preview' });
+  await expect(code.getByRole('alert')).toHaveText('Preview unavailable. Retry');
+  await expect(code.getByRole('button', { name: 'Retry', exact: true })).toBeEnabled();
   await code.getByRole('button', { name: '‹ Note' }).click();
 
   await dialog.getByRole('button', { name: 'Preview note attachment: archive.zip' }).click();
-  code = page.getByRole('region', { name: 'Code changes' });
+  code = page.getByRole('region', { name: 'File preview' });
   await expect(code).toContainText('Binary file — no preview available.');
   await code.getByRole('button', { name: '‹ Note' }).click();
 
   await dialog.getByRole('button', { name: 'Preview note attachment: large.txt' }).click();
-  code = page.getByRole('region', { name: 'Code changes' });
+  code = page.getByRole('region', { name: 'File preview' });
   await expect(code).toContainText('bounded beginning');
   await expect(code).toContainText('Preview limited to the first 256 KB.');
   await code.getByRole('button', { name: '‹ Note' }).click();
 
   const slowTrigger = dialog.getByRole('button', { name: 'Preview note attachment: slow.txt' });
-  // observe the late response before checking stale state
-  const slowResponse = page.waitForResponse(response => response.url().endsWith(`/api/worktrees/cora/notes/${fixture.note.id}/attachments/preview`)
-    && response.request().postDataJSON()?.path === 'slow.txt');
+  // observe cancellation of the exact in-flight attachment preview
+  const slowRequest = page.waitForRequest(request => request.url().endsWith(`/api/worktrees/cora/notes/${fixture.note.id}/attachments/preview`)
+    && request.postDataJSON()?.path === 'slow.txt');
   await slowTrigger.click();
-  code = page.getByRole('region', { name: 'Code changes' });
+  const request = await slowRequest;
+  code = page.getByRole('region', { name: 'File preview' });
   await expect(code.getByRole('status', { name: 'Loading file' })).toBeVisible();
   await expect(code.locator('.progress-loading')).toHaveCount(0);
+  const aborted = page.waitForEvent('requestfailed', { predicate: failed => failed === request });
   await code.getByRole('button', { name: '‹ Note' }).click();
+  await aborted;
   finishSlowPreview();
-  await slowResponse;
   await expect(code).toHaveCount(0);
   await expect(dialog).toBeVisible();
 });

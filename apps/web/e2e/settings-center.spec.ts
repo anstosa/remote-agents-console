@@ -1144,6 +1144,29 @@ async function setupSettings(
       return route.fulfill({ json: { available: false } });
     if (path === "/api/settings/status")
       return route.fulfill({ json: state.status });
+    // settle background integration reads without unrelated console errors
+    if (path === "/api/settings/cloudflare/health" && request.method() === "GET")
+      return route.fulfill({
+        json: { state: "disabled", failures: 0, reconnecting: false, canReconnect: false },
+      });
+    // keep calendar setup disconnected in this settings-only fixture
+    if (path === "/api/settings/google-calendar" && request.method() === "GET")
+      return route.fulfill({
+        json: {
+          enabled: false,
+          available: false,
+          connected: false,
+          status: "disabled",
+          calendars: [],
+          setup: {
+            clientId: false,
+            clientSecret: false,
+            tokenKey: false,
+            redirectUri: "http://127.0.0.1:4173/api/settings/google-calendar/callback",
+          },
+          counts: { pending: 0, delivered: 0, failed: 0, suppressed: 0 },
+        },
+      });
     // expose safe tunnel metadata before its page first opens
     if (path === "/api/settings/cloudflare" && request.method() === "GET")
       return route.fulfill({
@@ -2761,7 +2784,8 @@ test("previews the redacted base Compose beside an unsaved Docker draft", async 
       previewRequests.push(request.url());
   });
   page.on("console", (message) => {
-    if (message.type() === "error") consoleErrors.push(message.text());
+    // retain resource locations for fixture failures
+    if (message.type() === "error") consoleErrors.push(`${message.text()} (${message.location().url})`);
   });
   const { settings, state, sources } = await setupSettings(page, false);
   await selectSettingsSection(settings, "compose-override", "Docker");
@@ -2899,18 +2923,18 @@ test("previews the redacted base Compose beside an unsaved Docker draft", async 
   await page.setViewportSize({ width: 1440, height: 900 });
 
   await preview.click();
-  const code = page.getByRole("region", { name: "Code changes" });
-  await expect(code).toBeVisible();
+  const previewPanel = page.getByRole("region", { name: "File preview" });
+  await expect(previewPanel).toBeVisible();
   await expect(
-    code.getByRole("button", { name: "‹ Settings", exact: true }),
+    previewPanel.getByRole("button", { name: "‹ Settings", exact: true }),
   ).toBeVisible();
-  await expect(code.locator(".code-pane-crumb-current")).toHaveText(
+  await expect(previewPanel.locator(".code-pane-crumb-current")).toHaveText(
     "compose.yaml",
   );
-  await expect(code.getByText("ghcr.io/example/rac:base")).toBeVisible();
-  await expect(code.getByText(/RAC_SESSION_SECRET:\s+\*{8}/u)).toBeVisible();
+  await expect(previewPanel.getByText("ghcr.io/example/rac:base")).toBeVisible();
+  await expect(previewPanel.getByText(/RAC_SESSION_SECRET:\s+\*{8}/u)).toBeVisible();
   await expect(
-    code.getByRole("button", { name: /Open .* in the editor/u }),
+    previewPanel.getByRole("button", { name: /Open .* in the editor/u }),
   ).toHaveCount(0);
   await expect(page.locator("body")).not.toContainText(protectedSourceMarker);
   await expect(settings).toBeVisible();
@@ -2925,8 +2949,8 @@ test("previews the redacted base Compose beside an unsaved Docker draft", async 
   expect(state.restarts).toBe(0);
   expect(consoleErrors).toEqual([]);
 
-  await code.getByRole("button", { name: "‹ Settings", exact: true }).click();
-  await expect(code).toHaveCount(0);
+  await previewPanel.getByRole("button", { name: "‹ Settings", exact: true }).click();
+  await expect(previewPanel).toHaveCount(0);
   await expect(settings).toBeVisible();
   await expect(docker).toHaveValue(draft);
 
@@ -2944,15 +2968,15 @@ test("previews the redacted base Compose beside an unsaved Docker draft", async 
   await selectSettingsSection(settings, "compose-override", "Docker");
   await expect(docker).toHaveValue(draft);
 
-  // closing dirty Settings also retires its transient fallback Code preview
+  // closing dirty Settings also retires its transient preview split
   await preview.click();
-  await expect(code).toBeVisible();
+  await expect(previewPanel).toBeVisible();
   await settings
     .getByRole("button", { name: "Close settings", exact: true })
     .click();
   await confirmSettingsClose(page);
   await expect(settings).toHaveCount(0);
-  await expect(code).toHaveCount(0);
+  await expect(previewPanel).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "‹ Settings", exact: true }),
   ).toHaveCount(0);

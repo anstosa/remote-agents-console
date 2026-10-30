@@ -212,6 +212,7 @@ function addBrowserFields(index: FieldIndex): void {
     { pageId: 'interface', label: 'Reduced motion', path: ['reducedMotion'], keywords: 'animation shimmer pulse accessibility' },
     { pageId: 'interface', label: 'Notification sounds', path: ['notificationSounds'], keywords: 'alert chime audio mute silent' },
     { pageId: 'interface', label: 'Flyout markers', path: ['flyoutMarkers'], keywords: 'carets menu buttons' },
+    { pageId: 'interface', label: 'Default file action', path: ['fileOpenAction'], keywords: 'open files preview edit editor' },
     { pageId: 'projects', label: 'Dynamic worktrees', path: ['dynamicWorktrees'], keywords: 'launcher multiple worktrees' }
   ];
   // add stable browser field identities
