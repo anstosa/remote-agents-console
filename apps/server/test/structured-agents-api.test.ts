@@ -36,7 +36,8 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // `fails`. Its Conversation and model operations succeed (unless it `refuses` them) and report
 // what changed, as a client does. A switch lands on `switchedTo` (the Conversation's own model),
 // and `unavailable` models are refused.
-// Each delivery answers with the next of `dispositions`, then `started`; a steer waits as pending
+// Each delivery answers with the next of `dispositions`, then `started` (`gone`: its process exits
+// with the delivery unanswered, which the client answers as refused); a steer waits as pending
 // until the Agent takes it or a cancel returns it, and a cancel aborts the Turn before it answers.
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
@@ -45,7 +46,7 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
-  const dispositions: Delivery[] = [];
+  const dispositions: Array<Delivery | 'gone'> = [];
   const answers: Array<[string, QuestionAnswer]> = [];
   let pending: string[] = [];
   let emit: (event: StructuredEvent) => void = () => {};
@@ -59,7 +60,13 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
   const grants: Array<{ url: string; token: string }> = [];
   let reporting = reports;
   const connection = (): StructuredConnection => ({
-    deliver: async prompt => { delivered.push(prompt); return dispositions.shift() ?? 'started'; },
+    deliver: async prompt => {
+      delivered.push(prompt);
+      const disposition = dispositions.shift() ?? 'started';
+      if (disposition !== 'gone') return disposition;
+      emit({ type: 'exited' });
+      return 'refused';
+    },
     newConversation: async () => { operations.push('new'); if (refuses) return false; emit({ type: 'conversation', id: `new-${conversations += 1}` }); return true; },
     switchConversation: async reference => { operations.push(`switch ${reference}`); if (refuses) return false; emit({ type: 'conversation', id: 'switched' }); if (switchedTo !== undefined) emit({ type: 'model', current: switchedTo }); return true; },
     renameConversation: async name => { operations.push(`rename ${name}`); if (refuses) return false; emit({ type: 'conversation', id: 'named', name }); return true; },
@@ -694,6 +701,22 @@ describe('a structured Agent\'s queued prompts', () => {
     expect(fake.delivered).toEqual(['First', 'Second']);
     expect((await queued()).prompts).toEqual([]);
     expect(JSON.stringify((await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(placeId)}/notes`, headers })).json())).toContain('Second');
+    await app.close();
+  });
+
+  it('keeps the queue for a resume when the process exits with a delivery in flight', async () => {
+    const fake = fakeAgent();
+    const { app, headers, prompt, queued, dashboardAgent, id } = await working(fake);
+    expect((await prompt('Second')).statusCode).toBe(204);
+
+    fake.dispositions.push('gone');
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'done' } });
+    await dashboardAgent(id);
+    expect(await dashboardAgent(id)).toMatchObject({ structured: { lifecycle: 'exited' } });
+    expect(fake.delivered).toEqual(['First', 'Second']);
+    expect((await queued()).prompts).toMatchObject([{ text: 'Second' }]);
+    const { placeId } = await dashboardAgent(id);
+    expect(JSON.stringify((await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(placeId)}/notes`, headers })).json())).not.toContain('Second');
     await app.close();
   });
 

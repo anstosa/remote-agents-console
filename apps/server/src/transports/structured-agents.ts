@@ -462,9 +462,11 @@ export class StructuredAgents {
     live.turn = undefined;
     live.draft = undefined;
     try {
-      const delivery = await live.connection.deliver(prompt);
+      const connection = live.connection;
+      const delivery = await connection.deliver(prompt);
       if (delivery !== 'started') live.queuedNext = undefined;
-      return delivery;
+      // a process that went with the prompt unanswered refused nothing: the queue waits for a resume
+      return delivery === 'refused' && live.connection !== connection ? 'busy' : delivery;
     } finally { live.busy = false; }
   }
 
