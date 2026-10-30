@@ -1,4 +1,109 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
+
+const currentId = 'aaaaaaaa-2222-4333-8444-555555555555';
+const now = Date.now();
+type ConversationRow = {
+  kind: 'claude' | 'codex';
+  id: string;
+  name: string;
+  automatic: boolean;
+  lastActiveAt: number;
+  directory: string;
+  worktreeId?: string;
+  consoleNamed: boolean;
+  reviewRun: boolean;
+  current: boolean;
+};
+
+const baseRows: ConversationRow[] = Array.from({ length: 7 }, (_, index) => ({
+  kind: 'claude',
+  id: index === 0 ? currentId : `${index}bbbbbbb-2222-4333-8444-555555555555`,
+  name: index === 0 ? 'Diagnose the shell' : `Historical conversation ${index}`,
+  automatic: false,
+  lastActiveAt: now - (index + 1) * 3_600_000,
+  directory: index === 0 ? '/worktrees/cora' : `/worktrees/archive-${index}`,
+  worktreeId: 'cora',
+  consoleNamed: index < 2,
+  reviewRun: false,
+  current: index === 0,
+}));
+const reviewRow: ConversationRow = {
+  kind: 'claude',
+  id: '99999999-2222-4333-8444-555555555555',
+  name: 'Tour repository layout',
+  automatic: false,
+  lastActiveAt: now - 30_000,
+  directory: '/worktrees/cora',
+  worktreeId: 'cora',
+  consoleNamed: true,
+  reviewRun: true,
+  current: false,
+};
+
+type ConversationMockOptions = {
+  rows?: ConversationRow[];
+  readGate?: Promise<void>;
+  readFailures?: number;
+  renameError?: string | (() => string | undefined);
+  onName?: (body: unknown) => void;
+  switchError?: string;
+  onSwitch?: (worktreeId: string, body: unknown) => void;
+  onRemove?: (kind: string, id: string) => void;
+  extraAgents?: Array<{ id: string; sessionId: string; home: string; worktreeId: string; worktreeLabel: string; worktreeOrder: number; title: string }>;
+};
+
+// mock the live-agent bootstrap and conversation resource
+async function mockConsole(page: Page, options: ConversationMockOptions = {}) {
+  let rows = options.rows ?? [...baseRows, reviewRow];
+  let reads = 0;
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    // submit the current conversation rename
+    if (url.pathname === '/api/agents/agent-1/conversations/name' && request.method() === 'POST') {
+      const body = request.postDataJSON() as { name: string };
+      options.onName?.(body);
+      const renameError = typeof options.renameError === 'function' ? options.renameError() : options.renameError;
+      // reject only the attempts selected by this scenario
+      if (renameError !== undefined) return route.fulfill({ status: 409, json: { error: renameError } });
+      rows = rows.some(row => row.current)
+        ? rows.map(row => row.current ? { ...row, name: body.name, consoleNamed: true } : row)
+        : [{ ...baseRows[0]!, name: body.name, consoleNamed: true }];
+      return route.fulfill({ status: 201, json: { conversation: rows.find(row => row.current) } });
+    }
+    // expose accidental historical resume requests
+    const switchMatch = url.pathname.match(/^\/api\/worktrees\/([^/]+)\/conversations\/switch$/u);
+    if (switchMatch !== null && request.method() === 'POST') {
+      options.onSwitch?.(switchMatch[1]!, request.postDataJSON());
+      if (options.switchError !== undefined) return route.fulfill({ status: 409, json: { error: options.switchError } });
+      return route.fulfill({ status: 201, json: { agentId: `resumed-${switchMatch[1]}` } });
+    }
+    const removeMatch = url.pathname.match(/^\/api\/worktrees\/cora\/conversations\/([^/]+)\/([^/]+)$/u);
+    if (removeMatch !== null && request.method() === 'DELETE') {
+      options.onRemove?.(removeMatch[1]!, removeMatch[2]!);
+      rows = rows.map(row => row.kind === removeMatch[1] && row.id === removeMatch[2] ? { ...row, consoleNamed: false } : row);
+      return route.fulfill({ status: 204, body: '' });
+    }
+    // restore one controlling browser
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // expose one current conversation
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { claude: { launchable: true }, codex: { launchable: false } }, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready' }, ...(options.extraAgents ?? [])], projects: [] } });
+    // provide agent bootstrap data
+    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
+    if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
+    if (url.pathname === '/api/worktrees/cora/notes' && request.method() === 'GET') return route.fulfill({ json: { notes: [] } });
+    // hold the initial list when a loading assertion needs it
+    if (url.pathname === '/api/worktrees/cora/conversations' && request.method() === 'GET') {
+      reads += 1;
+      await options.readGate;
+      if (reads <= (options.readFailures ?? 0)) return route.fulfill({ status: 503, json: { error: 'conversation list unavailable' } });
+      return route.fulfill({ json: { conversations: rows, canResume: true } });
+    }
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+}
 
 // require one rendered element box
 function requireBounds(bounds: { x: number; y: number; width: number; height: number } | null, label: string): asserts bounds is { x: number; y: number; width: number; height: number } {
@@ -6,356 +111,297 @@ function requireBounds(bounds: { x: number; y: number; width: number; height: nu
   if (bounds === null) throw new Error(`${label} bounds unavailable`);
 }
 
-const currentId = 'aaaaaaaa-2222-4333-8444-555555555555';
-const now = Date.now();
-const conversations = [
-  { kind: 'claude', id: currentId, name: 'Diagnose the shell', automatic: false, lastActiveAt: now - 3_600_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: true },
-  { kind: 'claude', id: 'bbbbbbbb-2222-4333-8444-555555555555', name: 'tmux fish shell issue', automatic: true, lastActiveAt: now - 86_400_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: false },
-  { kind: 'claude', id: 'cccccccc-2222-4333-8444-555555555555', name: 'Release plan review', automatic: false, lastActiveAt: now - 172_800_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: false },
-];
-
-// stub every route the live-agent view preloads, plus the conversations list
-async function mockConsole(page: import('@playwright/test').Page, onConversations?: (url: URL) => void) {
-  await page.route('**/api/**', route => {
-    const request = route.request();
-    const url = new URL(request.url());
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready' }], projects: [] } });
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/agents/agent-1/prompt-history') return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname === '/api/worktrees/cora/notes' && request.method() === 'GET') return route.fulfill({ json: { notes: [] } });
-    if (url.pathname === '/api/worktrees/cora/conversations' && request.method() === 'GET') {
-      onConversations?.(url);
-      return route.fulfill({ json: { conversations, canResume: true } });
-    }
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
-  });
-}
-
-// keep the opposing conversation bubbles distinct from the note sheet
-test('shows two opposing conversation bubbles on desktop and phone', async ({ page }) => {
-  await mockConsole(page);
-  await page.goto('/');
-  // preserve the icon and its interaction in both layouts
-  for (const viewport of [{ width: 900, height: 780 }, { width: 390, height: 844 }]) {
+// preserve the opposing-bubble glyph in both toolbar layouts
+for (const viewport of [{ width: 900, height: 780 }, { width: 390, height: 844 }]) {
+  test(`shows the opposing conversation bubbles at ${viewport.width}px`, async ({ page }) => {
+    await mockConsole(page);
     await page.setViewportSize(viewport);
-    const control = page.getByRole('button', { name: 'Conversations (0)', exact: true });
+    await page.goto('/');
+    const control = page.getByRole('button', { name: /^Conversations/u });
     const icon = control.locator('svg');
     await expect(icon).toBeVisible();
-    await expect(icon).toHaveAttribute('aria-hidden', 'true');
     await expect(icon).toHaveCSS('fill', 'none');
     await expect(icon.locator('path')).toHaveCount(2);
-    await expect(icon.locator('path').nth(0)).toHaveAttribute('d', 'M4 3h11a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7l-5 4V5a2 2 0 0 1 2-2Z');
-    await expect(icon.locator('path').nth(1)).toHaveAttribute('d', 'M20 8a2 2 0 0 1 2 2v11l-4-3h-7a2 2 0 0 1-2-2');
-    // keep the glyph centered within the control on both layouts
     const controlBounds = await control.boundingBox();
     const iconBounds = await icon.boundingBox();
     requireBounds(controlBounds, 'conversations control');
     requireBounds(iconBounds, 'conversations icon');
     expect(Math.abs(iconBounds.x + iconBounds.width / 2 - controlBounds.x - controlBounds.width / 2)).toBeLessThan(0.5);
     expect(Math.abs(iconBounds.y + iconBounds.height / 2 - controlBounds.y - controlBounds.height / 2)).toBeLessThan(0.5);
-    await control.click();
-    await expect(control).toHaveAttribute('aria-expanded', 'true');
-    await expect(page.locator('.conversations-menu')).toBeVisible();
-    await page.keyboard.press('Escape');
-    await expect(control).toHaveAttribute('aria-expanded', 'false');
-  }
-});
+  });
+}
 
-test('lists named conversations in a searchable dialog on the desktop', async ({ page }) => {
-  let listedWithAgent = false;
-  await mockConsole(page, url => { listedWithAgent = url.searchParams.get('agentId') === 'agent-1'; });
+// lock the flyout-first loading contract
+test('opens the searchable flyout immediately and settles into a 4.5-row list', async ({ page }) => {
+  let releaseConversations!: () => void;
+  const conversationsReleased = new Promise<void>(resolve => {
+    releaseConversations = resolve;
+  });
+  await mockConsole(page, { readGate: conversationsReleased });
   await page.setViewportSize({ width: 900, height: 780 });
   await page.goto('/');
-
-  const control = page.getByRole('button', { name: 'Conversations' });
-  // the closed control counts the console-named conversations (none yet)
-  await expect(control).toHaveAccessibleName('Conversations (0)');
+  const control = page.getByRole('button', { name: /^Conversations/u });
   await control.click();
-  const menu = page.locator('.conversations-menu');
-  await menu.locator('.conversations-all').click();
-  // the live agent is passed so the current row resolves
-  await expect.poll(() => listedWithAgent).toBe(true);
+  const flyout = page.locator('.conversations-menu');
+  try {
+    await expect(flyout).toBeVisible();
+    await expect(control).toHaveAttribute('aria-expanded', 'true');
+    await expect(flyout.getByRole('searchbox', { name: 'Search conversations' })).toBeFocused();
+    await expect(flyout.locator('.conversation-row-skeleton')).toHaveCount(5);
+    await expect(flyout.getByRole('button', { name: 'All conversations' })).toHaveCount(0);
+    await expect(page.locator('.conversations-dialog')).toHaveCount(0);
+    // capture the held desktop loading state on demand
+    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/conversations-desktop.png` });
+  } finally {
+    // release the held read during failed assertions too
+    releaseConversations();
+  }
 
-  const dialog = page.locator('.conversations-dialog');
-  await expect(dialog.getByRole('heading', { name: 'Conversations' })).toBeVisible();
-  // the block that applies to every row is stated once at the top
-  await expect(dialog.locator('.conversations-note')).toBeVisible();
-  const rows = dialog.locator('.conversation-row');
-  await expect(rows).toHaveCount(3);
-  // newest-active first, as the server ordered them
-  await expect(rows.first()).toContainText('Diagnose the shell');
-  // the current row carries the CURRENT pill and aria-current
-  const currentRow = dialog.locator('.conversation-row.current');
-  await expect(currentRow).toHaveAttribute('aria-current', 'true');
-  await expect(currentRow.locator('.conversation-pill')).toHaveText('CURRENT');
-  // an automatic title renders in italics
-  const automaticRow = dialog.locator('.conversation-row.automatic');
-  await expect(automaticRow).toContainText('tmux fish shell issue');
-  await expect(automaticRow.locator('.conversation-copy strong')).toHaveCSS('font-style', 'italic');
-  // a Claude row shows its kind glyph and relative age
-  await expect(currentRow.locator('.conversation-copy small')).toContainText('Claude');
-
-  // search narrows on the conversation name
-  await dialog.getByRole('searchbox').fill('release');
-  await expect(dialog.locator('.conversation-row')).toHaveCount(1);
-  await expect(dialog.locator('.conversation-row')).toContainText('Release plan review');
-  await dialog.getByRole('searchbox').fill('');
-  await expect(dialog.locator('.conversation-row')).toHaveCount(3);
-
-  await dialog.getByRole('button', { name: 'Close conversations' }).click();
-  await expect(dialog).toBeHidden();
-});
-
-const owenId = 'dddddddd-2222-4333-8444-555555555555';
-const orphanId = 'eeeeeeee-2222-4333-8444-555555555555';
-const codexId = 'ffffffff-2222-4333-8444-555555555555';
-// a richer list: current, resumable-here, a sibling-Worktree row, an orphaned row, and an
-// unlaunchable-kind row, across two Worktrees of one Project
-const resumableConversations = [
-  { kind: 'claude', id: currentId, name: 'Diagnose the shell', automatic: false, lastActiveAt: now - 3_600_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: true },
-  { kind: 'claude', id: 'bbbbbbbb-2222-4333-8444-555555555555', name: 'Release plan review', automatic: false, lastActiveAt: now - 7_200_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: false },
-  { kind: 'claude', id: owenId, name: 'Owen investigation', automatic: false, lastActiveAt: now - 10_800_000, directory: '/worktrees/owen', worktreeId: 'owen', consoleNamed: false, reviewRun: false, current: false },
-  { kind: 'claude', id: orphanId, name: 'Old scratch chat', automatic: false, lastActiveAt: now - 14_400_000, directory: '/gone/away', consoleNamed: false, reviewRun: false, current: false },
-  { kind: 'codex', id: codexId, name: 'Retired codex thread', lastActiveAt: now - 18_000_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: false, reviewRun: false, current: false },
-];
-
-// two agents on two Worktrees of one Project; Claude is launchable, Codex is not
-async function mockResumableConsole(page: import('@playwright/test').Page, onSwitch: (worktreeId: string, body: unknown) => void, switchError?: string) {
-  await page.route('**/api/**', route => {
-    const request = route.request();
-    const url = new URL(request.url());
-    const switchMatch = url.pathname.match(/^\/api\/worktrees\/([^/]+)\/conversations\/switch$/u);
-    if (switchMatch !== null && request.method() === 'POST') {
-      onSwitch(switchMatch[1]!, request.postDataJSON());
-      if (switchError !== undefined) return route.fulfill({ status: 409, json: { error: switchError } });
-      return route.fulfill({ status: 201, json: { agentId: `resumed-${switchMatch[1]}` } });
-    }
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { claude: { launchable: true }, codex: { launchable: false } }, agents: [
-      { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready' },
-      { id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/owen', worktreeId: 'owen', worktreeLabel: 'Owen', worktreeOrder: 1, title: 'Ready' },
-    ], projects: [] } });
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname.endsWith('/conversations') && request.method() === 'GET') return route.fulfill({ json: { conversations: resumableConversations, canResume: true } });
-    if (url.pathname.endsWith('/notes') && request.method() === 'GET') return route.fulfill({ json: { notes: [] } });
-    if (url.pathname.endsWith('/tickets')) return route.fulfill({ json: { ticket: 'log-ticket' } });
-    if (url.pathname.endsWith('/saved-prompts')) return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname.endsWith('/prompt-history')) return route.fulfill({ json: { prompts: [] } });
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  const list = flyout.locator('.conversations-list');
+  const rows = list.locator('.conversation-row');
+  await expect(rows).toHaveCount(7);
+  await expect(rows.first()).toContainText('/worktrees/cora');
+  await expect(rows.first()).toContainText(/\d+\s+h ago/u);
+  await expect(rows.first().getByRole('button', { name: /Edit/u })).toBeEnabled();
+  await expect(rows.nth(1).getByRole('button', { name: /Edit/u })).toBeDisabled();
+  await expect(rows.nth(1).getByRole('button', { name: /Edit/u })).toHaveAttribute('title', /active conversation/u);
+  const geometry = await list.evaluate(element => {
+    const row = element.querySelector<HTMLElement>('.conversation-row');
+    if (row === null) throw new Error('conversation row missing');
+    const rowHeight = row.getBoundingClientRect().height;
+    const listHeight = element.getBoundingClientRect().height;
+    return { ratio: listHeight / rowHeight, scrolls: element.scrollHeight > element.clientHeight };
   });
-}
-
-// open the full-screen dialog from the active (Cora) agent's Conversations control
-async function openDialog(page: import('@playwright/test').Page) {
-  await page.getByRole('button', { name: /^Conversations/ }).click();
-  await page.locator('.conversations-menu').locator('.conversations-all').click();
-  return page.locator('.conversations-dialog');
-}
-
-test('disables rows that cannot be resumed: the current one, an orphaned one, and an unlaunchable kind', async ({ page }) => {
-  await mockResumableConsole(page, () => {});
-  await page.setViewportSize({ width: 900, height: 780 });
-  await page.goto('/');
-  const dialog = await openDialog(page);
-  const button = (name: string) => dialog.locator('.conversation-row', { hasText: name }).locator('button.conversation-choice');
-  // the current Conversation, an orphaned directory, and an unconfigured kind are inert
-  await expect(button('Diagnose the shell')).toBeDisabled();
-  await expect(button('Old scratch chat')).toBeDisabled();
-  await expect(button('Retired codex thread')).toBeDisabled();
-  // a homed Conversation of a launchable kind resumes, here or on a sibling Worktree
-  await expect(button('Release plan review')).toBeEnabled();
-  await expect(button('Owen investigation')).toBeEnabled();
+  expect(geometry.ratio).toBeGreaterThan(4.35);
+  expect(geometry.ratio).toBeLessThan(4.75);
+  expect(geometry.scrolls).toBe(true);
 });
 
-test('resumes a same-Worktree Conversation in place and closes the dialog', async ({ page }) => {
-  const switches: Array<{ worktreeId: string; body: unknown }> = [];
-  await mockResumableConsole(page, (worktreeId, body) => switches.push({ worktreeId, body }));
-  await page.setViewportSize({ width: 900, height: 780 });
+// match ordinary conversations by name, cwd, or kind and gate review runs behind search
+test('filters the flyout by name, cwd, and kind while hiding review runs from the default list', async ({ page }) => {
+  await mockConsole(page);
   await page.goto('/');
-  const dialog = await openDialog(page);
-  await dialog.locator('.conversation-row', { hasText: 'Release plan review' }).locator('button.conversation-choice').click();
-  // the switch runs on the current Worktree with the row's kind and id
-  await expect.poll(() => switches).toEqual([{ worktreeId: 'cora', body: { kind: 'claude', id: 'bbbbbbbb-2222-4333-8444-555555555555' } }]);
-  await expect(dialog).toBeHidden();
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  const search = flyout.getByRole('searchbox', { name: 'Search conversations' });
+  const rows = flyout.locator('.conversation-row');
+  await expect(rows).toHaveCount(7);
+  await expect(flyout).not.toContainText('Tour repository layout');
+  await search.fill('archive-3');
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText('Historical conversation 3');
+  await search.fill('claude');
+  await expect(rows).toHaveCount(8);
+  await expect(rows.filter({ hasText: 'Tour repository layout' })).toHaveCount(1);
+  await search.fill('tour');
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText('Tour repository layout');
 });
 
-test('keeps the dialog open and shows the reason when a same-Worktree resume fails', async ({ page }) => {
-  await mockResumableConsole(page, () => {}, 'Close duplicate worktree agents before switching chats.');
-  await page.setViewportSize({ width: 900, height: 780 });
+// keep a failed list distinct from a confirmed empty list and make it retryable
+test('shows only an actionable error after a failed conversation read and retries in place', async ({ page }) => {
+  await mockConsole(page, { readFailures: 1 });
   await page.goto('/');
-  const dialog = await openDialog(page);
-  await dialog.locator('.conversation-row', { hasText: 'Release plan review' }).locator('button.conversation-choice').click();
-  // the dialog stays put and surfaces the server's reason inline on a same-Worktree resume
-  await expect(dialog).toBeVisible();
-  await expect(dialog.locator('.conversations-error')).toContainText('Close duplicate worktree agents');
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  await expect(flyout.getByRole('alert')).toContainText('Unable to load conversations');
+  await expect(flyout).not.toContainText('No named conversations in this project yet.');
+  await expect(flyout.locator('.conversation-row-skeleton')).toHaveCount(0);
+  await expect(flyout.getByRole('button', { name: 'Name current conversation' })).toHaveCount(0);
+  await expect(flyout.locator('.conversation-edit')).toHaveCount(0);
+  await flyout.getByRole('button', { name: 'Retry' }).click();
+  await expect(flyout.getByRole('alert')).toHaveCount(0);
+  await expect(flyout.locator('.conversation-row')).toHaveCount(7);
+  await expect(flyout.locator('.conversation-row.current .conversation-edit')).toBeEnabled();
+  await expect(flyout.locator('.conversation-row:not(.current) .conversation-edit:enabled')).toHaveCount(0);
 });
 
-test('resumes a sibling-Worktree Conversation by navigating to that Worktree first', async ({ page }) => {
-  const switches: Array<{ worktreeId: string; body: unknown }> = [];
-  await mockResumableConsole(page, (worktreeId, body) => switches.push({ worktreeId, body }));
-  await page.setViewportSize({ width: 900, height: 780 });
+// preserve naming after a successful list confirms no current row
+test('offers current conversation naming after a valid empty list', async ({ page }) => {
+  await mockConsole(page, { rows: [] });
   await page.goto('/');
-  // Cora is the active tab to begin with
-  await expect(page.getByRole('tab', { name: /Cora/ })).toHaveAttribute('aria-selected', 'true');
-  const dialog = await openDialog(page);
-  await dialog.locator('.conversation-row', { hasText: 'Owen investigation' }).locator('button.conversation-choice').click();
-  // the console navigates to Owen's tab and switches there
-  await expect(page.getByRole('tab', { name: /Owen/ })).toHaveAttribute('aria-selected', 'true');
-  await expect.poll(() => switches).toEqual([{ worktreeId: 'owen', body: { kind: 'claude', id: owenId } }]);
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  await expect(flyout.getByRole('alert')).toHaveCount(0);
+  await expect(flyout).toContainText('No named conversations in this project yet.');
+  await expect(flyout.getByRole('button', { name: 'Name current conversation' })).toBeEnabled();
 });
 
-// a Project-wide list with a live Cora agent, some rows already named through the console, and
-// a POST /name that confirms (or not) and a DELETE that forgets the record. The conversations
-// GET reflects the record changes so a reload shows the quick list update.
-async function mockNamingConsole(page: import('@playwright/test').Page, options: { confirm?: boolean; rows?: typeof conversations } = {}) {
-  const { confirm = true, rows = conversations } = options;
-  const state = { names: [] as unknown[], removed: [] as string[], namedCurrent: false };
-  await page.route('**/api/**', route => {
-    const request = route.request();
-    const url = new URL(request.url());
-    if (url.pathname === '/api/agents/agent-1/conversations/name' && request.method() === 'POST') {
-      state.names.push(request.postDataJSON());
-      if (!confirm) return route.fulfill({ status: 409, json: { error: 'The agent did not confirm the name.' } });
-      state.namedCurrent = true;
-      return route.fulfill({ status: 201, json: { conversation: { ...rows[0], consoleNamed: true } } });
-    }
-    const removeMatch = url.pathname.match(/^\/api\/worktrees\/cora\/conversations\/([^/]+)\/([^/]+)$/u);
-    if (removeMatch !== null && request.method() === 'DELETE') { state.removed.push(`${removeMatch[1]}/${removeMatch[2]}`); return route.fulfill({ status: 204, body: '' }); }
-    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { claude: { launchable: true } }, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', worktreeOrder: 0, title: 'Ready' }], projects: [] } });
-    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (url.pathname.endsWith('/tickets')) return route.fulfill({ json: { ticket: 'log-ticket' } });
-    if (url.pathname.endsWith('/saved-prompts')) return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname.endsWith('/prompt-history')) return route.fulfill({ json: { prompts: [] } });
-    if (url.pathname.endsWith('/notes') && request.method() === 'GET') return route.fulfill({ json: { notes: [] } });
-    if (url.pathname.endsWith('/conversations') && request.method() === 'GET') {
-      const listed = rows.map(row => row.current ? { ...row, consoleNamed: state.namedCurrent } : row);
-      return route.fulfill({ json: { conversations: listed, canResume: true } });
-    }
-    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+// retain an unnamed current draft after a rename mutation fails
+test('keeps valid-empty naming editable after a failed rename and allows retry', async ({ page }) => {
+  const names: unknown[] = [];
+  let attempts = 0;
+  await mockConsole(page, {
+    rows: [],
+    onName: body => names.push(body),
+    // fail only the first rename mutation
+    renameError: () => attempts++ === 0 ? 'The agent did not confirm the name.' : undefined
   });
-  return state;
-}
-
-test('names the current conversation from the fly-out and shows it in the quick list', async ({ page }) => {
-  const state = await mockNamingConsole(page);
-  await page.setViewportSize({ width: 900, height: 780 });
   await page.goto('/');
-  await page.getByRole('button', { name: /^Conversations/ }).click();
-  const menu = page.locator('.conversations-menu');
-  // the Name field placeholder offers to rename the current conversation
-  const input = menu.getByRole('textbox', { name: 'Name this conversation' });
-  await expect(input).toHaveAttribute('placeholder', /Diagnose the shell/);
-  await input.fill('Shell diagnosis');
-  await menu.getByRole('button', { name: 'Name conversation' }).click();
-  // the console submits the name; on confirm the list reloads and the row joins the quick list
-  await expect.poll(() => state.names).toEqual([{ name: 'Shell diagnosis' }]);
-  await expect(menu.locator('.conversation-rows .conversation-row')).toHaveText(/Diagnose the shell/);
-  await expect(page.getByRole('button', { name: /^Conversations/ })).toHaveAccessibleName('Conversations (1)');
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  await flyout.getByRole('button', { name: 'Name current conversation' }).click();
+  const input = flyout.getByRole('textbox', { name: 'Name this conversation' });
+  await input.fill('Recovered conversation');
+  await input.press('Enter');
+  await expect(flyout.getByRole('alert')).toContainText('did not confirm');
+  await expect(input).toBeVisible();
+  await expect(input).toHaveValue('Recovered conversation');
+  await input.press('Enter');
+  await expect.poll(() => names).toEqual([{ name: 'Recovered conversation' }, { name: 'Recovered conversation' }]);
+  await expect(flyout.locator('.conversation-row.current')).toContainText('Recovered conversation');
+  await expect(input).toHaveCount(0);
 });
 
-test('shows the reason inline when the agent does not confirm the name', async ({ page }) => {
-  await mockNamingConsole(page, { confirm: false });
-  await page.setViewportSize({ width: 900, height: 780 });
+// rename only the current conversation in place
+test('edits the current conversation inline with Escape and Enter semantics', async ({ page }) => {
+  const names: unknown[] = [];
+  await mockConsole(page, { onName: body => names.push(body) });
   await page.goto('/');
-  await page.getByRole('button', { name: /^Conversations/ }).click();
-  const menu = page.locator('.conversations-menu');
-  await menu.getByRole('textbox', { name: 'Name this conversation' }).fill('Shell diagnosis');
-  await menu.getByRole('button', { name: 'Name conversation' }).click();
-  await expect(menu.locator('.conversation-error')).toContainText('did not confirm');
-  // nothing joined the quick list
-  await expect(menu.locator('.conversation-rows')).toHaveCount(0);
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  const current = flyout.locator('.conversation-row.current');
+  await current.getByRole('button', { name: /Edit/u }).click();
+  const input = current.getByRole('textbox', { name: 'Name this conversation' });
+  await expect(input).toBeFocused();
+  await expect(input).toHaveValue('Diagnose the shell');
+  await input.fill('Discarded rename');
+  await input.press('Escape');
+  await expect(input).toHaveCount(0);
+  expect(names).toEqual([]);
+
+  await current.getByRole('button', { name: /Edit/u }).click();
+  await current.getByRole('textbox', { name: 'Name this conversation' }).fill('Shell diagnosis');
+  await current.getByRole('textbox', { name: 'Name this conversation' }).press('Enter');
+  await expect.poll(() => names).toEqual([{ name: 'Shell diagnosis' }]);
+  await expect(current).toContainText('Shell diagnosis');
 });
 
-// six console-named rows across the Project, newest-active first, to exercise the five-row cap
-const consoleNamedRows = Array.from({ length: 6 }, (_, index) => ({
-  kind: 'claude', id: `1${index}111111-2222-4333-8444-555555555555`, name: `Named ${index}`,
-  automatic: false, lastActiveAt: now - index * 3_600_000, directory: '/worktrees/cora', worktreeId: 'cora', consoleNamed: true, reviewRun: false, current: false,
-}));
-
-test('the fly-out shows at most five console-named rows, newest first, each removable', async ({ page }) => {
-  const state = await mockNamingConsole(page, { rows: consoleNamedRows });
-  await page.setViewportSize({ width: 900, height: 780 });
+// keep a rejected rename editable and explain the failure inline
+test('keeps inline rename open when the agent rejects the name', async ({ page }) => {
+  await mockConsole(page, { renameError: 'The agent did not confirm the name.' });
   await page.goto('/');
-  await page.getByRole('button', { name: /^Conversations/ }).click();
-  const menu = page.locator('.conversations-menu');
-  const rows = menu.locator('.conversation-rows .conversation-row');
-  await expect(rows).toHaveCount(5);
-  // newest-active first, as the server ordered them
-  await expect(rows.first()).toContainText('Named 0');
-  await expect(rows.nth(4)).toContainText('Named 4');
-  // removing a row forgets the record; the sixth row takes its place, still capped at five
-  await rows.first().locator('.conversation-remove').click();
-  await expect.poll(() => state.removed).toEqual(['claude/10111111-2222-4333-8444-555555555555']);
-  await expect(menu.locator('.conversation-rows')).not.toContainText('Named 0');
-  await expect(rows).toHaveCount(5);
-  await expect(rows.last()).toContainText('Named 5');
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  const current = flyout.locator('.conversation-row.current');
+  await current.getByRole('button', { name: /Edit/u }).click();
+  const input = current.getByRole('textbox', { name: 'Name this conversation' });
+  await input.fill('Unconfirmed name');
+  await input.press('Enter');
+  await expect(flyout.getByRole('alert')).toContainText('did not confirm');
+  await expect(input).toBeVisible();
 });
 
-test('the empty state shows the Name field and the All conversations row only', async ({ page }) => {
-  await mockNamingConsole(page, { rows: [conversations[1]!] });
-  await page.setViewportSize({ width: 900, height: 780 });
-  await page.goto('/');
-  await page.getByRole('button', { name: /^Conversations/ }).click();
-  const menu = page.locator('.conversations-menu');
-  await expect(menu.getByRole('textbox', { name: 'Name this conversation' })).toBeVisible();
-  await expect(menu.locator('.conversations-all')).toBeVisible();
-  // no console-named rows, so the quick list is absent
-  await expect(menu.locator('.conversation-rows')).toHaveCount(0);
-});
-
-test('the dialog splits Named here from All named', async ({ page }) => {
-  // the console-named row is a non-current one, so the mock's current-row rewrite leaves it be
-  const mixed = [
-    { ...conversations[0]! },
-    { ...conversations[1]!, consoleNamed: true },
-    { ...conversations[2]! },
+// retain resume guards while limiting edits to the current conversation
+test('keeps current, orphaned, and unlaunchable rows inert while historical edits stay disabled', async ({ page }) => {
+  const rows: ConversationRow[] = [
+    baseRows[0]!,
+    baseRows[1]!,
+    { ...baseRows[2]!, worktreeId: undefined, directory: '/gone/away', name: 'Orphaned conversation' },
+    { ...baseRows[3]!, kind: 'codex', name: 'Unlaunchable Codex conversation' },
   ];
-  await mockNamingConsole(page, { rows: mixed });
-  await page.setViewportSize({ width: 900, height: 780 });
+  await mockConsole(page, { rows });
   await page.goto('/');
-  const dialog = await openDialog(page);
-  const headings = dialog.locator('.conversations-heading');
-  await expect(headings).toHaveText(['Named here', 'All named']);
-  // the console-named row sits under Named here with a Remove control
-  const namedHere = dialog.locator('.conversation-rows').first();
-  await expect(namedHere.locator('.conversation-row')).toHaveCount(1);
-  await expect(namedHere.locator('.conversation-remove')).toBeVisible();
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  await expect(flyout.locator('.conversation-row.current .conversation-choice')).toBeDisabled();
+  await expect(flyout.locator('.conversation-row', { hasText: 'Historical conversation 1' }).locator('.conversation-choice')).toBeEnabled();
+  await expect(flyout.locator('.conversation-row', { hasText: 'Orphaned conversation' }).locator('.conversation-choice')).toBeDisabled();
+  await expect(flyout.locator('.conversation-row', { hasText: 'Unlaunchable Codex conversation' }).locator('.conversation-choice')).toBeDisabled();
+  await expect(flyout.locator('.conversation-row:not(.current) .conversation-edit')).toHaveCount(3);
+  await expect(flyout.locator('.conversation-row:not(.current) .conversation-edit:enabled')).toHaveCount(0);
+  await expect(page.locator('.conversations-dialog')).toHaveCount(0);
 });
 
-test('Tour and Review run conversations show only to a search, in their own group', async ({ page }) => {
-  const run = { ...conversations[1]!, name: '🗺 Tour · cora', consoleNamed: true, reviewRun: true };
-  await mockNamingConsole(page, { rows: [conversations[0]!, run, conversations[2]!] });
-  await page.setViewportSize({ width: 900, height: 780 });
+// resume one launchable historical row without opening a second surface
+test('resumes a same-worktree conversation from the flyout and closes it on success', async ({ page }) => {
+  const switches: Array<{ worktreeId: string; body: unknown }> = [];
+  await mockConsole(page, { onSwitch: (worktreeId, body) => switches.push({ worktreeId, body }) });
   await page.goto('/');
-  // neither the fly-out's quick list nor its count include the run
-  await page.getByRole('button', { name: 'Conversations (0)' }).click();
-  await expect(page.locator('.conversations-menu .conversation-rows')).toHaveCount(0);
-  await page.locator('.conversations-menu .conversations-all').click();
-  const dialog = page.locator('.conversations-dialog');
-  await expect(dialog.locator('.conversations-heading')).toHaveText(['All named']);
-  await expect(dialog).not.toContainText('🗺 Tour · cora');
-  await dialog.getByRole('searchbox', { name: 'Search conversations' }).fill('tour');
-  await expect(dialog.locator('.conversations-heading')).toHaveText(['Tour and Review runs']);
-  await expect(dialog.locator('.conversation-row')).toContainText('🗺 Tour · cora');
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  await flyout.locator('.conversation-row', { hasText: 'Historical conversation 1' }).locator('.conversation-choice').click();
+  await expect.poll(() => switches).toEqual([{ worktreeId: 'cora', body: { kind: 'claude', id: baseRows[1]!.id } }]);
+  await expect(flyout).toHaveCount(0);
+  await expect(page.locator('.conversations-dialog')).toHaveCount(0);
 });
 
-test('opens the conversations dialog full-screen on a phone', async ({ page }) => {
+// retain the list and explain a rejected same-worktree resume
+test('keeps the flyout open when a same-worktree resume fails', async ({ page }) => {
+  await mockConsole(page, { switchError: 'Close duplicate worktree agents before switching chats.' });
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  await flyout.locator('.conversation-row', { hasText: 'Historical conversation 1' }).locator('.conversation-choice').click();
+  await expect(flyout).toBeVisible();
+  await expect(flyout.getByRole('alert')).toContainText('Close duplicate worktree agents');
+});
+
+// navigate before resuming a conversation owned by a sibling worktree
+test('resumes a sibling-worktree conversation through its home worktree', async ({ page }) => {
+  const sibling = { ...baseRows[1]!, name: 'Owen investigation', directory: '/worktrees/owen', worktreeId: 'owen' };
+  const switches: Array<{ worktreeId: string; body: unknown }> = [];
+  await mockConsole(page, {
+    rows: [baseRows[0]!, sibling],
+    extraAgents: [{ id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/owen', worktreeId: 'owen', worktreeLabel: 'Owen', worktreeOrder: 1, title: 'Ready' }],
+    onSwitch: (worktreeId, body) => switches.push({ worktreeId, body }),
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  await page.locator('.conversations-menu .conversation-row', { hasText: 'Owen investigation' }).locator('.conversation-choice').click();
+  await expect(page.getByRole('tab', { name: /Owen/u })).toHaveAttribute('aria-selected', 'true');
+  await expect.poll(() => switches).toEqual([{ worktreeId: 'owen', body: { kind: 'claude', id: sibling.id } }]);
+});
+
+// remove only the console record while leaving the conversation list intact
+test('removes a console-named conversation from the flyout', async ({ page }) => {
+  const removed: string[] = [];
+  await mockConsole(page, { onRemove: (kind, id) => removed.push(`${kind}/${id}`) });
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  const historical = flyout.locator('.conversation-row', { hasText: 'Historical conversation 1' });
+  await historical.getByRole('button', { name: /Remove Historical conversation 1/u }).click();
+  await expect.poll(() => removed).toEqual([`claude/${baseRows[1]!.id}`]);
+  await expect(historical.getByRole('button', { name: /Remove/u })).toHaveCount(0);
+  await expect(historical).toBeVisible();
+});
+
+// ignore a late list after the flyout closes
+test('does not reopen after a dismissed conversation request settles', async ({ page }) => {
+  let releaseConversations!: () => void;
+  const conversationsReleased = new Promise<void>(resolve => {
+    releaseConversations = resolve;
+  });
+  await mockConsole(page, { readGate: conversationsReleased });
+  await page.goto('/');
+  const control = page.getByRole('button', { name: /^Conversations/u });
+  await control.click();
+  await expect(page.locator('.conversations-menu')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.conversations-menu')).toHaveCount(0);
+  releaseConversations();
+  await page.waitForTimeout(50);
+  await expect(page.locator('.conversations-menu')).toHaveCount(0);
+  await expect(control).toBeFocused();
+});
+
+// keep the phone flyout inside the viewport without introducing a modal
+test('keeps the conversation flyout scrollable inside a phone viewport', async ({ page }) => {
   await mockConsole(page);
   await page.setViewportSize({ width: 390, height: 780 });
   await page.goto('/');
-
-  await page.getByRole('button', { name: 'Conversations' }).click();
-  await page.locator('.conversations-menu').locator('.conversations-all').click();
-  const surface = page.locator('.conversations-dialog > div');
-  await expect(surface).toBeVisible();
-  const bounds = await surface.boundingBox();
-  requireBounds(bounds, 'conversations dialog');
-  // full-screen: the surface spans the whole phone viewport
-  expect(bounds.width).toBe(390);
-  expect(bounds.x).toBe(0);
-  await expect(page.locator('.conversation-row.current .conversation-pill')).toHaveText('CURRENT');
+  await page.getByRole('button', { name: /^Conversations/u }).click();
+  const flyout = page.locator('.conversations-menu');
+  await expect(flyout).toBeVisible();
+  const bounds = await flyout.boundingBox();
+  requireBounds(bounds, 'conversation flyout');
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+  expect(bounds.y).toBeGreaterThanOrEqual(0);
+  expect(bounds.y + bounds.height).toBeLessThanOrEqual(780);
+  await expect(flyout.locator('.conversations-list')).toHaveCSS('overflow-y', 'auto');
+  await expect(page.locator('.conversations-dialog')).toHaveCount(0);
+  // capture the phone flyout on demand
+  if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/conversations-phone.png` });
 });

@@ -93,6 +93,26 @@ const mountFilePreview = async (page: Page, filePreview: FilePreviewView, editor
   }, { view: filePreview, withEditor: editor });
 };
 
+test('renders source-specific File loading skeletons', async ({ page }) => {
+  // source and raster paths receive distinct semantic skeletons while their preview is pending
+  await mountFilePreview(page, { path: 'src/app.ts', state: 'loading' });
+  await expect(panel(page).getByRole('status', { name: 'Loading file' })).toBeVisible();
+  await expect(panel(page).locator('.code-loading-file .code-loading-line')).toHaveCount(10);
+  await expect(panel(page).locator('.progress-loading')).toHaveCount(0);
+  // capture the source loading skeleton on demand
+  if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/code-file-desktop.png` });
+  await mountFilePreview(page, { path: 'assets/shot.png', state: 'loading' });
+  await expect(panel(page).getByRole('status', { name: 'Loading image' })).toBeVisible();
+  await expect(panel(page).locator('.code-loading-image-canvas')).toHaveCount(1);
+});
+
+test('keeps Note-scoped attachments read only and returns to Note', async ({ page }) => {
+  // Note-scoped filenames remain labels rather than workspace editor targets
+  await mountFilePreview(page, { path: 'src/note.ts', state: 'ready', source: 'notes', preview: { path: 'src/note.ts', size: 22, truncated: false, binary: false, content: 'export const note = 1;\n' } }, true);
+  await expect(panel(page).getByRole('button', { name: '‹ Note' })).toBeVisible();
+  await expect(panel(page).getByRole('button', { name: /Open src\/note\.ts/u })).toHaveCount(0);
+});
+
 test('renders each File view state: text through the library, image inline, binary/error placeholders', async ({ page }) => {
   // a text file is a plain-file view rendered by the diff library (real highlighting), with a back crumb
   await mountFilePreview(page, { path: 'src/app.ts', state: 'ready', preview: { path: 'src/app.ts', size: 40, truncated: false, binary: false, content: 'export const answer = 42;\n' } });
@@ -115,6 +135,7 @@ test('renders each File view state: text through the library, image inline, bina
   // a failed preview reports it
   await mountFilePreview(page, { path: 'gone.ts', state: 'error' });
   await expect(panel(page).getByText(/Preview unavailable/u)).toBeVisible();
+
 });
 
 // exercise comparison images through the real controller and payload guard
@@ -147,7 +168,13 @@ for (const side of ['added', 'deleted'] as const) {
     const path = 'assets/logo.png';
     const image = imageRevision(path);
     await mountPanel(page, patchOf([imageChange(path, side === 'added' ? '??' : ' D')]), { [path]: { path, base: side === 'added' ? null : image, working: side === 'added' ? image : null } });
+    await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).holdLoads());
     await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
+    const loading = panel(page).getByRole('status', { name: 'Loading image' });
+    await expect(loading.getByText(side === 'added' ? 'After' : 'Before', { exact: true })).toBeVisible();
+    await expect(loading.getByText(side === 'added' ? 'Before' : 'After', { exact: true })).toHaveCount(0);
+    await expect(loading.locator('.code-loading-image-canvas')).toHaveCount(1);
+    await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).releaseLoads());
     await expect(panel(page).getByRole('img', { name: `${side === 'added' ? 'After' : 'Before'}: ${path}`, exact: true })).toBeVisible();
     await expect(panel(page).getByRole('img')).toHaveCount(1);
     await expect(panel(page).getByText(side === 'added' ? 'File added' : 'File deleted', { exact: true })).toBeVisible();
@@ -230,6 +257,8 @@ test('ignores an image response after selecting another file', async ({ page }) 
   await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).holdLoads());
   await panel(page).getByRole('button', { name: `Preview ${path}`, exact: true }).click();
   await expect(panel(page).getByRole('status')).toContainText('Loading image');
+  await expect(panel(page).locator('.code-loading-images.comparison .code-loading-image-canvas')).toHaveCount(2);
+  await expect(panel(page).locator('.progress-loading')).toHaveCount(0);
   await panel(page).getByRole('button', { name: 'All files', exact: true }).click();
   await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).releaseLoads());
   await expect(panel(page).getByText('const b = 3;')).toBeVisible();
@@ -695,14 +724,26 @@ test('highlights code moved between files, and re-indented moves once whitespace
 });
 
 test('covers a size-capped file with a Load anyway placeholder instead of a diff', async ({ page }) => {
-  await mountPanel(page, patchOf([trackedFile('src/app.ts'), cappedFile('src/generated.ts')]));
+  await mountPanel(page, patchOf([trackedFile('src/app.ts'), cappedFile('src/generated.ts')]), { 'src/generated.ts': contentsOf('src/generated.ts', baseFile, workingFile) });
 
   // the capped file is a placeholder, not a rendered diff
   await expect(panel(page).getByText('src/generated.ts')).toBeVisible();
   await expect(panel(page).getByText('File too large to preview')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Load anyway' })).toBeVisible();
+  const load = page.getByRole('button', { name: 'Load anyway' });
+  await expect(load).toBeVisible();
   // only the non-capped file rendered a diff
   await expect(diffHeaders(page)).toHaveCount(1);
+  // an explicit load replaces only its own row with a file skeleton
+  await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).holdLoads());
+  await load.click();
+  const loadingRow = panel(page).getByRole('status', { name: 'Loading src/generated.ts' });
+  await expect(loadingRow).toBeVisible();
+  await expect(loadingRow.locator('.skeleton')).toHaveCount(4);
+  await expect(panel(page).getByRole('button', { name: 'Load anyway' })).toHaveCount(0);
+  await expect(panel(page).locator('.progress-loading')).toHaveCount(0);
+  await expect(diffHeaders(page)).toHaveCount(1);
+  await page.evaluate(async () => (await import('/e2e/code-panel-fixture.tsx')).releaseLoads());
+  await expect(diffHeaders(page)).toHaveCount(2);
 });
 
 test('filters to one file from the rail and restores scroll on the way back', async ({ page }) => {

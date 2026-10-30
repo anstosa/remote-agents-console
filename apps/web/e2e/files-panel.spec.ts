@@ -15,6 +15,81 @@ async function openFiles(page: Page) {
   return { fixture, panel };
 }
 
+test('shows table skeletons for initial and refresh reads without exposing cached rows', async ({ page }) => {
+  await page.setViewportSize({ width: 1_600, height: 900 });
+  await installPaneMock(page);
+  await installFilesFixture(page);
+  let activeHold: { started: () => void; wait: Promise<void> } | undefined;
+  // prepare one controlled listing response
+  const holdNextList = () => {
+    let started!: () => void;
+    let release!: () => void;
+    const began = new Promise<void>(resolve => { started = resolve; });
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    activeHold = { started, wait };
+    return { began, release };
+  };
+  // pause only the explicitly armed list request
+  await page.route('**/api/worktrees/cora/files/list', async route => {
+    const hold = activeHold;
+    activeHold = undefined;
+    // preserve every unarmed fixture response
+    if (hold !== undefined) { hold.started(); await hold.wait; }
+    await route.fallback();
+  });
+  const initial = holdNextList();
+  await page.goto('/');
+  await seedPaneSize(page, 'agent-1', 80, 24);
+  await pushBytes(page, 'agent-1', 'Ready\r\n');
+  await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: 'Files' }).click();
+  await initial.began;
+  const panel = page.getByRole('region', { name: 'Files' });
+  const grid = panel.getByRole('grid');
+  const loadingStatus = panel.getByRole('status', { includeHidden: true }).filter({ hasText: 'Loading files…' });
+  await expect(loadingStatus).toHaveCount(1);
+  await expect(grid).toHaveAttribute('aria-busy', 'true');
+  expect(await loadingStatus.evaluate(element => element.closest('[role="grid"]') === null)).toBe(true);
+  const directGridRoles = await grid.locator(':scope > *').evaluateAll(elements => elements.map(element => element.getAttribute('role')));
+  expect(directGridRoles.every(role => role === 'row' || role === 'rowgroup')).toBe(true);
+  await expect(grid.getByRole('columnheader', { name: 'Name' })).toBeVisible();
+  await expect(grid.locator('.files-row-skeleton')).toHaveCount(4);
+  expect(await grid.locator('.files-row-skeleton').evaluateAll(rows => rows.every(row => row.getAttribute('aria-hidden') === 'true'))).toBe(true);
+  await expect(grid.locator('.files-row-skeleton').first().getByRole('gridcell', { includeHidden: true })).toHaveCount(6);
+  await expect(grid.locator('.files-row-skeleton').first().locator('.skeleton')).toHaveCount(6);
+  const skeletonCellCounts = await grid.locator('.files-row-skeleton').evaluateAll(rows => rows.map(row => row.querySelectorAll('[role="gridcell"] .skeleton').length));
+  expect(skeletonCellCounts).toEqual([6, 6, 6, 6]);
+  await expect(grid.locator('.files-row:not(.files-row-skeleton)')).toHaveCount(0);
+  await expect(grid.locator('.progress-border')).toHaveCount(0);
+  // capture the held table loading state on demand
+  if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/files-desktop.png` });
+  initial.release();
+  await expect(grid.locator('.files-row:not(.files-row-skeleton)')).toHaveCount(4);
+
+  const alpha = grid.locator('.files-row').filter({ hasText: 'alpha.txt' });
+  await alpha.locator('[data-label="Owner"]').click();
+  await grid.getByRole('button', { name: 'Sort by Size' }).click();
+  await alpha.getByRole('button', { name: 'Actions for alpha.txt' }).click();
+  await page.getByRole('menu', { name: 'Actions for alpha.txt' }).getByRole('menuitem', { name: 'Add to favorites' }).click();
+  await expect(alpha.getByLabel('Favorite: available')).toBeVisible();
+
+  const refresh = holdNextList();
+  await panel.getByRole('button', { name: 'Refresh files' }).click();
+  await refresh.began;
+  await expect(loadingStatus).toHaveCount(1);
+  await expect(grid).toHaveAttribute('aria-busy', 'true');
+  expect(await loadingStatus.evaluate(element => element.closest('[role="grid"]') === null)).toBe(true);
+  await expect(grid.locator('.files-row-skeleton')).toHaveCount(4);
+  await expect(grid.locator('.files-row:not(.files-row-skeleton)')).toHaveCount(0);
+  await expect(grid).not.toContainText('alpha.txt');
+  await expect(grid.getByRole('columnheader', { name: 'Size' })).toHaveAttribute('aria-sort', 'ascending');
+  await expect(panel.getByRole('button', { name: 'Refresh files' })).not.toHaveClass(/progress-/u);
+  refresh.release();
+  const refreshedAlpha = grid.locator('.files-row').filter({ hasText: 'alpha.txt' });
+  await expect(refreshedAlpha).toHaveAttribute('aria-selected', 'true');
+  await expect(refreshedAlpha.getByLabel('Favorite: available')).toBeVisible();
+  await expect(grid.locator('.files-row-skeleton')).toHaveCount(0);
+});
+
 test('browses host paths, exposes metadata, selects rows and opens only file names', async ({ page }) => {
   const { fixture, panel } = await openFiles(page);
   const rows = panel.locator('.files-row');

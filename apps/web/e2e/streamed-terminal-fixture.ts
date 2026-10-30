@@ -29,7 +29,7 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
 // mount the scripted pane with optional codex transcript controls
 export const renderStreamedTerminal = async (
   container: HTMLElement,
-  options: { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean } = {}
+  options: { width?: string; height?: string; scrollback?: number; reconnectDelayMs?: number; upperCaseInput?: boolean; codexScrollControls?: boolean; missingCellMetadata?: boolean; captureOpenUrls?: boolean; loadingKind?: 'agent' | 'terminal' } = {}
 ): Promise<void> => {
   container.style.width = options.width ?? '640px';
   container.style.height = options.height ?? '320px';
@@ -48,6 +48,8 @@ export const renderStreamedTerminal = async (
     // capture plain-link routing while leaving modified activations on their native path
     onOpenUrl: options.captureOpenUrls ? url => { openedUrls.push(url); return true; } : undefined,
     onQuestion: question => questions.push(question),
+    // expose both placeholder variants before output arrives
+    ...(options.loadingKind === undefined ? {} : { loadingKind: options.loadingKind }),
     connect: next => {
       handlers = next;
       connectCount += 1;

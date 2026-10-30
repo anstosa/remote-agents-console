@@ -1,5 +1,83 @@
 import { expect, test, type Page } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder } from './progress-border-assertions';
+
+type RepositoryCommitFrame = {
+  prDisabled: boolean;
+  branchesDisabled: boolean;
+  prBusy: boolean;
+  branchesBusy: boolean;
+  skeletonTabs: number;
+  cachedPullRequest: boolean;
+  cachedActions: number;
+  workingSelected: boolean;
+  prsSelected: boolean;
+  error: string;
+  retry: boolean;
+};
+
+// record every connected paintable repository panel commit
+async function installRepositoryCommitRecorder(page: Page) {
+  await page.evaluate(() => {
+    type Frame = RepositoryCommitFrame;
+    const frames: Frame[] = [];
+    let previous = '';
+    // snapshot only complete visible flyout subtrees
+    const capture = () => {
+      const panels = [...document.querySelectorAll<HTMLElement>('.git-status-panel')].filter(panel => {
+        const style = getComputedStyle(panel);
+        return panel.isConnected && style.display !== 'none' && style.visibility !== 'hidden' && panel.getClientRects().length > 0;
+      });
+      // retain each distinct paintable state
+      for (const panel of panels) {
+        const pr = panel.querySelector<HTMLButtonElement>('[role="tab"][aria-label="PRs"]');
+        const branches = panel.querySelector<HTMLButtonElement>('[role="tab"][aria-label="Branches"]');
+        const working = [...panel.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(tab => tab.textContent?.trim() === 'Working');
+        // ignore partial portal construction
+        if (pr === null || branches === null || working === undefined) continue;
+        const frame: Frame = {
+          prDisabled: pr.disabled,
+          branchesDisabled: branches.disabled,
+          prBusy: pr.getAttribute('aria-busy') === 'true',
+          branchesBusy: branches.getAttribute('aria-busy') === 'true',
+          skeletonTabs: panel.querySelectorAll('.git-tab-skeleton').length,
+          cachedPullRequest: panel.textContent?.includes('Cached PR') ?? false,
+          cachedActions: panel.querySelectorAll('.switch-pr-actions').length,
+          workingSelected: working.getAttribute('aria-selected') === 'true',
+          prsSelected: pr.getAttribute('aria-selected') === 'true',
+          error: panel.querySelector<HTMLElement>('[role="alert"]')?.textContent?.trim() ?? '',
+          retry: panel.querySelector<HTMLButtonElement>('button[aria-label="Retry repository choices"]') !== null
+        };
+        const serialized = JSON.stringify(frame);
+        // collapse duplicate mutation notifications
+        if (serialized !== previous) {
+          frames.push(frame);
+          previous = serialized;
+        }
+      }
+    };
+    const appendChild = Node.prototype.appendChild;
+    const insertBefore = Node.prototype.insertBefore;
+    // capture a fully prepared portal at the connection boundary
+    Node.prototype.appendChild = function<T extends Node>(this: Node, child: T): T {
+      const result = appendChild.call(this, child) as T;
+      capture();
+      return result;
+    };
+    // capture alternative react insertion paths
+    Node.prototype.insertBefore = function<T extends Node>(this: Node, child: T, reference: Node | null): T {
+      const result = insertBefore.call(this, child, reference) as T;
+      capture();
+      return result;
+    };
+    const observer = new MutationObserver(capture);
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+    (window as unknown as { __repositoryCommitFrames: Frame[] }).__repositoryCommitFrames = frames;
+  });
+}
+
+// read the paintable states captured inside the browser
+async function repositoryCommitFrames(page: Page): Promise<RepositoryCommitFrame[]> {
+  return page.evaluate(() => (window as unknown as { __repositoryCommitFrames?: RepositoryCommitFrame[] }).__repositoryCommitFrames ?? []);
+}
 
 // open one branch flyout tab
 async function openBranchTab(page: Page, name: 'PRs' | 'Branches') {
@@ -42,7 +120,6 @@ test('prefetches shared repository choices and refreshes them when reopened', as
   await branchButton.click();
   const panel = page.getByRole('region', { name: 'Changed files' });
   const tabs = panel.getByRole('tablist', { name: 'Branch views' });
-  expect(await tabs.getByRole('tab').allTextContents()).toEqual(['Working', 'PRs', 'Branches']);
   const workingTab = tabs.getByRole('tab', { name: 'Working', exact: true });
   const pullRequestsTab = tabs.getByRole('tab', { name: 'PRs', exact: true });
   const branchesTab = tabs.getByRole('tab', { name: 'Branches', exact: true });
@@ -59,37 +136,28 @@ test('prefetches shared repository choices and refreshes them when reopened', as
   await expect(workingTab).toHaveCSS('box-shadow', selectionEffect.shadow);
   await expect.poll(() => pullRequestRequests).toBe(1);
   await expect(panel).toHaveAttribute('aria-busy', 'false');
-  await expect(workingTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(workingTab).toBeEnabled();
+  await expect(workingTab).toHaveText('Working');
+  await expect(pullRequestsTab).toBeDisabled();
+  await expect(branchesTab).toBeDisabled();
   await expect(pullRequestsTab).toHaveAttribute('aria-busy', 'true');
   await expect(branchesTab).toHaveAttribute('aria-busy', 'true');
-  await expectProgressBorder(pullRequestsTab, 'blue');
-  await expectProgressBorder(branchesTab, 'blue');
-  await expectClockwiseProgressBorder(pullRequestsTab);
+  await expect(pullRequestsTab.locator('.git-tab-skeleton')).toHaveCount(1);
+  await expect(branchesTab.locator('.git-tab-skeleton')).toHaveCount(1);
+  await expect(pullRequestsTab.locator('.update-progress-ring')).toHaveCount(0);
+  await expect(branchesTab.locator('.update-progress-ring')).toHaveCount(0);
+  // capture the held repository loading state on demand
+  if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/pr-tabs-desktop.png` });
   const [panelBox, tabsBox] = await Promise.all([panel.boundingBox(), tabs.boundingBox()]);
   expect(panelBox).not.toBeNull();
   expect(tabsBox).not.toBeNull();
   // require rendered flyout bounds
   if (panelBox === null || tabsBox === null) throw new Error('branch flyout bounds unavailable');
   expect(Math.abs(panelBox.y + panelBox.height - (tabsBox.y + tabsBox.height))).toBeLessThanOrEqual(1);
-  await pullRequestsTab.click();
-  await expect(pullRequestsTab).toHaveCSS('background-image', selectionEffect.background);
-  await expect(pullRequestsTab).toHaveCSS('box-shadow', selectionEffect.shadow);
-  await expect(workingTab).toHaveCSS('box-shadow', 'none');
-  await expect(panel).toHaveAttribute('aria-busy', 'true');
-  await expect(panel.locator('.git-status-panel-header')).not.toContainText('Loading');
-  await expect(panel.locator('.git-status-panel-header').getByRole('status')).toHaveCount(0);
-  await branchesTab.click();
-  await expect(branchesTab).toHaveCSS('background-image', selectionEffect.background);
-  await expect(branchesTab).toHaveCSS('box-shadow', selectionEffect.shadow);
-  await expect(pullRequestsTab).toHaveCSS('box-shadow', 'none');
-  await expect(panel).toHaveAttribute('aria-busy', 'true');
-  await expect(panel.locator('.git-status-panel-header')).not.toContainText('Loading');
-  await expect(panel.locator('.git-status-panel-header').getByRole('status')).toHaveCount(0);
   expect(pullRequestRequests).toBe(1);
-  await workingTab.click();
-  await expect(panel).toHaveAttribute('aria-busy', 'false');
-  await expectProgressBorder(pullRequestsTab, 'blue');
   finishPullRequests();
+  await expect(pullRequestsTab).toBeEnabled();
+  await expect(branchesTab).toBeEnabled();
   await expect(pullRequestsTab).not.toHaveAttribute('aria-busy');
   await expect(branchesTab).not.toHaveAttribute('aria-busy');
   await expect(pullRequestsTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
@@ -109,14 +177,21 @@ test('prefetches shared repository choices and refreshes them when reopened', as
   const checkout = pullRequestOption.getByRole('button', { name: 'Checkout' });
   await expect(checkout).toBeEnabled();
   await page.mouse.click(4, 4);
+  await installRepositoryCommitRecorder(page);
   await branchButton.click();
   await expect.poll(() => pullRequestRequests).toBe(2);
-  await expectProgressBorder(pullRequestsTab, 'blue');
-  await expectProgressBorder(branchesTab, 'blue');
+  const heldFrames = await repositoryCommitFrames(page);
+  expect(heldFrames.length).toBeGreaterThan(0);
+  expect(heldFrames.every(frame => frame.prDisabled && frame.branchesDisabled && frame.prBusy && frame.branchesBusy && frame.skeletonTabs === 2)).toBe(true);
+  expect(heldFrames.every(frame => !frame.cachedPullRequest && frame.cachedActions === 0)).toBe(true);
+  await expect(pullRequestsTab).toBeDisabled();
+  await expect(branchesTab).toBeDisabled();
+  await expect(pullRequestsTab.locator('.git-tab-skeleton')).toHaveCount(1);
+  await expect(panel.getByRole('link', { name: '#2567: Make prompt actions fit' })).toHaveCount(0);
+  finishPullRequestRefresh();
+  await expect(pullRequestsTab).toBeEnabled();
   await pullRequestsTab.click();
   await expect(pullRequest).toBeVisible();
-  await expect(checkout).toBeDisabled();
-  finishPullRequestRefresh();
   await expect(checkout).toBeEnabled();
   await expect(pullRequestsTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
   await expect(branchesTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
@@ -432,7 +507,7 @@ test('moves an occupied pull request into the current worktree', async ({ page }
   await expect(page.getByText('Pull request moved here', { exact: true })).toBeVisible();
 });
 
-test('shows the workspace pull request cache while refreshing after a tab remount', async ({ page }) => {
+test('hides the workspace pull request cache behind skeleton tabs while refreshing after a remount', async ({ page }) => {
   let pullRequestRequests = 0;
   let finishRefresh!: () => void;
   const refreshFinished = new Promise<void>(resolve => { finishRefresh = resolve; });
@@ -470,15 +545,19 @@ test('shows the workspace pull request cache while refreshing after a tab remoun
   await page.mouse.click(4, 4);
   await page.getByRole('tab', { name: /^Delta/u }).click();
   await page.getByRole('tab', { name: /^Cora/u }).click();
-  await openBranchTab(page, 'PRs');
+  await page.getByRole('button', { name: /^Git status:/u }).click();
 
   const menu = page.locator('.git-status-panel');
   await expect.poll(() => pullRequestRequests).toBe(2);
+  await expect(menu.getByRole('tab', { name: 'PRs', exact: true })).toBeDisabled();
+  await expect(menu.getByRole('tab', { name: 'Branches', exact: true })).toBeDisabled();
   await expect(menu.getByRole('tab', { name: 'PRs', exact: true })).toHaveAttribute('aria-busy', 'true');
   await expect(menu.getByRole('tab', { name: 'Branches', exact: true })).toHaveAttribute('aria-busy', 'true');
-  await expectProgressBorder(menu.getByRole('tab', { name: 'PRs', exact: true }), 'blue');
-  await expect(menu.getByRole('link', { name: '#401: Cached PR' })).toBeVisible();
+  await expect(menu.getByRole('tab', { name: 'PRs', exact: true }).locator('.git-tab-skeleton')).toHaveCount(1);
+  await expect(menu.getByRole('link', { name: '#401: Cached PR' })).toHaveCount(0);
   finishRefresh();
+  await expect(menu.getByRole('tab', { name: 'PRs', exact: true })).toBeEnabled();
+  await menu.getByRole('tab', { name: 'PRs', exact: true }).click();
   await expect(menu.getByRole('link', { name: '#402: Refreshed PR' })).toBeVisible();
   await expect(menu.getByRole('link', { name: '#401: Cached PR' })).toHaveCount(0);
   await expect(menu.getByRole('tab', { name: 'PRs', exact: true }).locator(':scope > .update-progress-ring')).toHaveCount(0);
@@ -486,7 +565,7 @@ test('shows the workspace pull request cache while refreshing after a tab remoun
 });
 
 // protect cached actions after refresh failures
-test('disables stale pull request switching when a refresh fails', async ({ page }) => {
+test('keeps cached pull request actions hidden when a refresh fails', async ({ page }) => {
   let pullRequestRequests = 0;
   await page.route('**/api/**', async route => {
     const request = route.request();
@@ -521,18 +600,20 @@ test('disables stale pull request switching when a refresh fails', async ({ page
   await expect(page.getByRole('link', { name: '#401: Cached PR' })).toBeEnabled();
   // dismiss through the click-blocking backdrop
   await page.mouse.click(4, 4);
-  await page.getByRole('tab', { name: /^Delta/u }).click();
-  await page.getByRole('tab', { name: /^Cora/u }).click();
-  await openBranchTab(page, 'PRs');
+  await installRepositoryCommitRecorder(page);
+  await page.getByRole('button', { name: /^Git status:/u }).click();
 
   const menu = page.locator('.git-status-panel');
-  const stalePullRequest = menu.getByRole('link', { name: '#401: Cached PR' });
-  const staleCheckout = menu.getByRole('group', { name: '#401: Cached PR; Open', exact: true }).getByRole('button', { name: 'Checkout' });
-  await expect(menu.getByRole('alert')).toHaveText('GitHub could not load pull requests (503).');
-  await expect(stalePullRequest).toBeVisible();
-  await expect(stalePullRequest).toBeEnabled();
-  await expect(staleCheckout).toBeDisabled();
-  await expect(staleCheckout).toHaveAttribute('title', 'Pull request list could not be refreshed');
+  await expect(menu.getByRole('alert')).toContainText('GitHub could not load pull requests (503).');
+  const frames = await repositoryCommitFrames(page);
+  const loadingIndex = frames.findIndex(frame => frame.skeletonTabs === 2 && frame.prBusy && frame.branchesBusy);
+  expect(loadingIndex).toBeGreaterThanOrEqual(0);
+  const firstSettled = frames.slice(loadingIndex + 1).find(frame => frame.skeletonTabs === 0);
+  expect(firstSettled).toMatchObject({ cachedPullRequest: false, cachedActions: 0, workingSelected: true, prsSelected: false, retry: true });
+  expect(firstSettled?.error).toContain('GitHub could not load pull requests');
+  await expect(menu.getByRole('tab', { name: 'PRs', exact: true })).toBeDisabled();
+  await expect(menu.getByRole('tab', { name: 'Branches', exact: true })).toBeDisabled();
+  await expect(menu.getByRole('link', { name: '#401: Cached PR' })).toHaveCount(0);
 });
 
 test('shows the empty pull request state in the PRs tab', async ({ page }) => {
@@ -550,21 +631,28 @@ test('shows the empty pull request state in the PRs tab', async ({ page }) => {
 
   await page.goto('/');
   const menu = await openBranchTab(page, 'PRs');
-  const empty = menu.getByRole('status', { name: 'No open pull requests.', exact: true });
+  const empty = menu.locator('.git-status-repository-empty').filter({ hasText: /^No open pull requests\.$/u });
   await expect(empty).toBeVisible();
+  await expect(empty).toHaveCSS('display', 'grid');
+  await expect(empty).toHaveCSS('place-items', 'center');
+  expect((await empty.boundingBox())!.height).toBeGreaterThanOrEqual(100);
   await expect(menu.getByRole('tab', { name: 'PRs' })).toHaveAttribute('aria-selected', 'true');
   await expect(menu.getByRole('tab', { name: 'Working' })).toHaveAttribute('aria-selected', 'false');
+  await menu.getByRole('tab', { name: 'Working' }).click();
+  const footer = menu.locator('.git-status-panel-footer');
+  const mode = footer.getByRole('group', { name: 'Git change view' });
+  await expect(footer.locator(':scope > .pull-request-card')).toHaveCount(0);
+  await expect(mode).toHaveCSS('grid-column-start', '3');
 });
 
 // expose failed pull request lookups
-test('shows the GitHub error instead of an empty pull request state', async ({ page }) => {
+// keep repository destinations inert until one successful list response
+test('skeletonizes repository tabs through loading and error, then enables them after retry', async ({ page }) => {
   let finishFailure!: () => void;
-  // hold the shared failure through border assertions
+  let repositoryRequests = 0;
   const failureFinished = new Promise<void>(resolve => {
-    // expose failure completion to the test
     finishFailure = resolve;
   });
-  // serve one failed pull request request
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     // authenticate the browser
@@ -575,38 +663,47 @@ test('shows the GitHub error instead of an empty pull request state', async ({ p
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // provide agent bootstrap data
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
-    // provide saved prompts
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
-    // fail the shared repository lookup
+    // fail once, then return one valid empty list
     if (url.pathname === '/api/worktrees/cora/switch-prs') {
-      await failureFinished;
-      return route.fulfill({ status: 502, json: { error: 'GitHub could not load pull requests (503): temporary outage.' } });
+      repositoryRequests += 1;
+      if (repositoryRequests === 1) {
+        await failureFinished;
+        return route.fulfill({ status: 502, json: { error: 'Repository choices are temporarily unavailable.' } });
+      }
+      return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
   await page.goto('/');
   await page.getByRole('button', { name: /^Git status:/u }).click();
-  const menu = page.getByRole('region', { name: 'Changed files' });
-  const workingTab = menu.getByRole('tab', { name: 'Working', exact: true });
-  const pullRequestsTab = menu.getByRole('tab', { name: 'PRs', exact: true });
-  const branchesTab = menu.getByRole('tab', { name: 'Branches', exact: true });
-  await expect(workingTab).toHaveAccessibleName('Working');
-  await expect(pullRequestsTab).toHaveAccessibleName('PRs');
-  await expect(branchesTab).toHaveAccessibleName('Branches');
-  await expect(workingTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
-  await expectProgressBorder(pullRequestsTab, 'blue');
-  await expectProgressBorder(branchesTab, 'blue');
-  await pullRequestsTab.click();
-  await expect(menu).toHaveAttribute('aria-busy', 'true');
+  const panel = page.getByRole('region', { name: 'Changed files' });
+  const workingTab = panel.getByRole('tab', { name: 'Working', exact: true });
+  const pullRequestsTab = panel.getByRole('tab', { name: 'PRs', exact: true });
+  const branchesTab = panel.getByRole('tab', { name: 'Branches', exact: true });
+  await expect(workingTab).toBeEnabled();
+  await expect(workingTab).toHaveAttribute('aria-selected', 'true');
+  await expect(pullRequestsTab).toBeDisabled();
+  await expect(branchesTab).toBeDisabled();
+  await expect(pullRequestsTab.locator('.git-tab-skeleton')).toHaveCount(1);
+  await expect(branchesTab.locator('.git-tab-skeleton')).toHaveCount(1);
+  await expect(pullRequestsTab).not.toHaveClass(/progress-border/u);
+  await expect(branchesTab).not.toHaveClass(/progress-border/u);
+
   finishFailure();
-  await expect(menu.getByRole('alert', { name: 'GitHub could not load pull requests (503): temporary outage.' })).toBeVisible();
-  await expect(menu.getByRole('status', { name: 'No open pull requests.' })).toHaveCount(0);
-  await expect(menu).toHaveAttribute('aria-busy', 'false');
-  await expect(pullRequestsTab).not.toHaveAttribute('aria-busy');
-  await expect(branchesTab).not.toHaveAttribute('aria-busy');
-  await expect(pullRequestsTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
-  await expect(branchesTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
+  await expect(panel.getByRole('alert')).toContainText('Repository choices are temporarily unavailable.');
+  await expect(pullRequestsTab).toBeDisabled();
+  await expect(branchesTab).toBeDisabled();
+  await expect(workingTab).toHaveAttribute('aria-selected', 'true');
+  await panel.getByRole('button', { name: 'Retry repository choices' }).click();
+  await expect.poll(() => repositoryRequests).toBe(2);
+  await expect(pullRequestsTab).toBeEnabled();
+  await expect(branchesTab).toBeEnabled();
+  await expect(pullRequestsTab.locator('.git-tab-skeleton')).toHaveCount(0);
+  await expect(branchesTab.locator('.git-tab-skeleton')).toHaveCount(0);
+  await expect(pullRequestsTab).toHaveText('PRs');
+  await expect(branchesTab).toHaveText('Branches');
 });
 
 // expose shared lookup failures in the branches tab
@@ -629,9 +726,11 @@ test('shows the repository error instead of an empty branch state', async ({ pag
   });
 
   await page.goto('/');
-  const panel = await openBranchTab(page, 'Branches');
-  await expect(panel.getByRole('alert', { name: 'Repository choices are temporarily unavailable.' })).toBeVisible();
-  await expect(panel.getByRole('status', { name: 'No other local branches.' })).toHaveCount(0);
+  await page.getByRole('button', { name: /^Git status:/u }).click();
+  const panel = page.getByRole('region', { name: 'Changed files' });
+  await expect(panel.getByRole('alert')).toContainText('Repository choices are temporarily unavailable.');
+  await expect(panel.getByRole('tab', { name: 'Branches', exact: true })).toBeDisabled();
+  await expect(panel.locator('.git-status-repository-empty').filter({ hasText: /^No other local branches\.$/u })).toHaveCount(0);
 });
 
 // reject incomplete repository payloads
@@ -654,13 +753,15 @@ test('shows invalid repository data instead of legacy branch defaults', async ({
   });
 
   await page.goto('/');
-  const panel = await openBranchTab(page, 'Branches');
-  await expect(panel.getByRole('alert', { name: 'The console returned invalid repository data.' })).toBeVisible();
-  await expect(panel.getByRole('status', { name: 'No other local branches.' })).toHaveCount(0);
+  await page.getByRole('button', { name: /^Git status:/u }).click();
+  const panel = page.getByRole('region', { name: 'Changed files' });
+  await expect(panel.getByRole('alert')).toContainText('The console returned invalid repository data.');
+  await expect(panel.getByRole('tab', { name: 'Branches', exact: true })).toBeDisabled();
+  await expect(panel.locator('.git-status-repository-empty').filter({ hasText: /^No other local branches\.$/u })).toHaveCount(0);
 });
 
 // cancel only when the complete branch flyout closes
-test('keeps repository loading across inner tabs and ignores a dismissed response', async ({ page }) => {
+test('keeps repository tabs inert and ignores a dismissed response', async ({ page }) => {
   let finishDismissedRequest!: () => void;
   let finishCurrentRequest!: () => void;
   let repositoryRequests = 0;
@@ -705,15 +806,10 @@ test('keeps repository loading across inner tabs and ignores a dismissed respons
   const pullRequestsTab = panel.getByRole('tab', { name: 'PRs', exact: true });
   const branchesTab = panel.getByRole('tab', { name: 'Branches', exact: true });
   await expect.poll(() => repositoryRequests).toBe(1);
-  await pullRequestsTab.click();
-  await expect(panel).toHaveAttribute('aria-busy', 'true');
-  await branchesTab.click();
-  await expect(panel).toHaveAttribute('aria-busy', 'true');
+  await expect(pullRequestsTab).toBeDisabled();
+  await expect(branchesTab).toBeDisabled();
+  await expect(pullRequestsTab.locator('.git-tab-skeleton')).toHaveCount(1);
   expect(repositoryRequests).toBe(1);
-  await workingTab.click();
-  await expect(panel).toHaveAttribute('aria-busy', 'false');
-  await expectProgressBorder(pullRequestsTab, 'blue');
-  await expectProgressBorder(branchesTab, 'blue');
 
   // dismiss the whole flyout to cancel its request
   await page.mouse.click(4, 4);
@@ -721,12 +817,13 @@ test('keeps repository loading across inner tabs and ignores a dismissed respons
   await branchButton.click();
   await expect.poll(() => repositoryRequests).toBe(2);
   await expect(workingTab).toHaveAttribute('aria-selected', 'true');
-  await expectProgressBorder(pullRequestsTab, 'blue');
+  await expect(pullRequestsTab).toBeDisabled();
   finishDismissedRequest();
-  await pullRequestsTab.click();
   await expect(panel.getByRole('link', { name: '#501: Dismissed response' })).toHaveCount(0);
-  await expectProgressBorder(pullRequestsTab, 'blue');
+  await expect(pullRequestsTab).toBeDisabled();
   finishCurrentRequest();
+  await expect(pullRequestsTab).toBeEnabled();
+  await pullRequestsTab.click();
   await expect(panel.getByRole('link', { name: '#502: Current response' })).toBeVisible();
   await expect(pullRequestsTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
   await expect(branchesTab.locator(':scope > .update-progress-ring')).toHaveCount(0);
@@ -850,9 +947,9 @@ test('shows the empty branch state and pull requests unavailable without a GitHu
 
   await page.goto('/');
   const menu = await openBranchTab(page, 'Branches');
-  await expect(menu.getByRole('status', { name: 'No other local branches.', exact: true })).toBeVisible();
+  await expect(menu.locator('.git-status-repository-empty').filter({ hasText: /^No other local branches\.$/u })).toBeVisible();
   await menu.getByRole('tab', { name: 'PRs', exact: true }).click();
-  await expect(menu.getByRole('status', { name: 'Pull requests unavailable.', exact: true })).toBeVisible();
+  await expect(menu.locator('.git-status-repository-empty').filter({ hasText: /^Pull requests unavailable\.$/u })).toBeVisible();
   expect(repositoryRequests).toBe(1);
 });
 

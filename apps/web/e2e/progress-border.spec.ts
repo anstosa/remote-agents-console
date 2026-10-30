@@ -1,7 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner, expectSynchronizedProgressBorders } from './progress-border-assertions';
+import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions';
 import { mockAccountSocket, openCodexAccounts } from './account-fixture';
-import { installPaneMock } from './pane-stream-mock';
+import { dropPane, installPaneMock, paneConnectCount, pushBytes, seedPaneSize } from './pane-stream-mock';
 
 test.describe.configure({ timeout: 60_000 });
 
@@ -97,8 +97,8 @@ test('frames startup with a clockwise border or reduced-motion spinner', async (
   await expect(ring).toHaveCount(0);
 });
 
-// classify account reads as constant loading motion
-test('uses linear loading motion while ChatGPT accounts load', async ({ page }) => {
+// reserve account rows without borrowing mutation motion
+test('uses skeleton rows while ChatGPT accounts load', async ({ page }) => {
   const accountsGate = createGate();
   await mockAccountSocket(page);
   await page.route('**/api/**', async route => {
@@ -121,10 +121,13 @@ test('uses linear loading motion while ChatGPT accounts load', async ({ page }) 
   });
 
   const accounts = await openCodexAccounts(page);
-  const loader = accounts.getByRole('status').filter({ hasText: 'Loading ChatGPT accounts…' });
+  const loader = accounts.getByRole('status', { name: 'Loading accounts and usage' });
   try {
-    await expectProgressBorder(loader, 'blue', 'loading');
-    await expectClockwiseProgressBorder(loader, 'loading');
+    await expect(loader).toBeVisible();
+    await expect(accounts.locator('.account-skeleton')).toHaveCount(3);
+    await expect(accounts.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    expect(await loader.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
   } finally {
     // release the account read during failed assertions too
     accountsGate.release();
@@ -132,9 +135,10 @@ test('uses linear loading motion while ChatGPT accounts load', async ({ page }) 
   await expect(loader).toHaveCount(0);
 });
 
-// align branch reads that mount after an existing connection loader
-test('synchronizes late branch loaders with the active connection loader', async ({ page }) => {
+// keep branch skeletons independent from an existing connection loader
+test('keeps branch and agent connection skeletons free of loading borders', async ({ page }) => {
   const branchesGate = createGate();
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await installPaneMock(page);
   await page.route('**/api/**', async route => {
     const request = route.request();
@@ -158,39 +162,72 @@ test('synchronizes late branch loaders with the active connection loader', async
   });
 
   await page.goto('/');
-  const connection = page.locator('.agent-output > .log-loading');
-  await expectProgressBorder(connection, 'blue', 'loading');
-  await expectClockwiseProgressBorder(connection, 'loading');
+  const connection = page.locator('.agent-output .log-canvas > .streamed-terminal-status');
+  await expect(connection).toBeVisible();
+  await expect(connection).toHaveAttribute('aria-busy', 'true');
+  const agentSkeleton = connection.locator('.output-skeleton-agent');
+  await expect(agentSkeleton).toBeVisible();
+  await expect(agentSkeleton.locator('.output-skeleton-prompt')).not.toHaveCount(0);
+  await expect(agentSkeleton.locator('.output-skeleton-paragraph')).not.toHaveCount(0);
+  await expect(agentSkeleton.locator('.output-skeleton-tool')).not.toHaveCount(0);
+  await expect(agentSkeleton.locator('.output-skeleton-terminal, .output-skeleton-command')).toHaveCount(0);
+  await expect.poll(() => connection.locator('.skeleton').count()).toBeGreaterThanOrEqual(6);
+  await expect(connection.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
+  const canvas = page.locator('.agent-output .log-canvas');
+  // measure full output coverage without including panel chrome or the composer
+  const measureAgentSkeleton = async () => {
+    const [canvasBox, skeletonBox, shapes] = await Promise.all([
+      canvas.boundingBox(),
+      agentSkeleton.boundingBox(),
+      // serialize every visible placeholder shape for coverage math
+      agentSkeleton.locator('.skeleton:visible').evaluateAll(elements => elements.map(element => {
+        const bounds = element.getBoundingClientRect();
+        return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+      }))
+    ]);
+    // return an empty measurement before geometry exists
+    if (canvasBox === null || skeletonBox === null || shapes.length === 0) return { coverage: 0, lastShape: 0, shapes: shapes.length };
+    const canvasBottom = canvasBox.y + canvasBox.height;
+    // exclude shapes fully clipped beyond the output viewport
+    const visibleShapes = shapes.filter(shape => shape.y < canvasBottom && shape.y + shape.height > canvasBox.y);
+    // return an empty fill when every shape is clipped
+    if (visibleShapes.length === 0) return { coverage: skeletonBox.height / canvasBox.height, lastShape: 0, shapes: 0 };
+    const lastBottom = Math.max(...visibleShapes.map(shape => Math.min(shape.y + shape.height, canvasBottom)));
+    return {
+      coverage: skeletonBox.height / canvasBox.height,
+      lastShape: (lastBottom - canvasBox.y) / canvasBox.height,
+      shapes: visibleShapes.length
+    };
+  };
+  await expect.poll(async () => (await measureAgentSkeleton()).coverage).toBeGreaterThanOrEqual(0.9);
+  await expect.poll(async () => (await measureAgentSkeleton()).lastShape).toBeGreaterThanOrEqual(0.9);
+  if (process.env.SHOT_DIR) await canvas.screenshot({ path: `${process.env.SHOT_DIR}/connection-agent-desktop.png` });
+  await page.setViewportSize({ width: 320, height: 900 });
+  await expect.poll(async () => (await measureAgentSkeleton()).coverage).toBeGreaterThanOrEqual(0.9);
+  await expect.poll(async () => (await measureAgentSkeleton()).lastShape).toBeGreaterThanOrEqual(0.9);
+  const phoneShapeCount = (await measureAgentSkeleton()).shapes;
+  if (process.env.SHOT_DIR) await canvas.screenshot({ path: `${process.env.SHOT_DIR}/connection-agent-phone.png` });
+  await page.setViewportSize({ width: 320, height: 1200 });
+  await expect.poll(async () => (await measureAgentSkeleton()).shapes).toBeGreaterThan(phoneShapeCount);
+  await expect.poll(async () => (await measureAgentSkeleton()).lastShape).toBeGreaterThanOrEqual(0.9);
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole('button', { name: /^Git status:/u }).click();
   const branchPanel = page.getByRole('region', { name: 'Changed files' });
   const pullRequests = branchPanel.getByRole('tab', { name: 'PRs', exact: true });
   const branches = branchPanel.getByRole('tab', { name: 'Branches', exact: true });
-  const loadingBorders = page.locator('.progress-loading:has(> .update-progress-ring)');
   try {
-    await expectProgressBorder(pullRequests, 'blue', 'loading');
-    await expectProgressBorder(branches, 'blue', 'loading');
-    await expectSynchronizedProgressBorders(loadingBorders, 3, 'loading');
-    await expectClockwiseProgressBorder(branches, 'loading');
+    await expect(pullRequests).toBeDisabled();
+    await expect(branches).toBeDisabled();
+    await expect(pullRequests).toHaveAttribute('aria-busy', 'true');
+    await expect(branches).toHaveAttribute('aria-busy', 'true');
+    await expect(pullRequests.locator('.git-tab-skeleton')).toHaveCount(1);
+    await expect(branches.locator('.git-tab-skeleton')).toHaveCount(1);
+    await expect(branchPanel.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
+    await expect(page.locator('.progress-loading:has(> .update-progress-ring)')).toHaveCount(0);
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    await expectSynchronizedProgressBorders(loadingBorders, 3, 'loading', true);
-    await expectReducedMotionSpinner(connection, 'blue', 'loading');
-    await page.emulateMedia({ reducedMotion: 'no-preference' });
-    await expectSynchronizedProgressBorders(loadingBorders, 3, 'loading');
-
-    // restart loading motion through the app preference boundary
-    await page.evaluate(() => {
-      localStorage.setItem('rac.reduced-motion', 'enabled');
-      window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', newValue: 'enabled' }));
-    });
-    await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
-    await expectSynchronizedProgressBorders(loadingBorders, 3, 'loading', true);
-    await page.evaluate(() => {
-      localStorage.removeItem('rac.reduced-motion');
-      window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', oldValue: 'enabled' }));
-    });
-    await expect(page.locator('html')).not.toHaveAttribute('data-motion', 'reduced');
-    await expectSynchronizedProgressBorders(loadingBorders, 3, 'loading');
+    expect(await connection.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
+    expect(await branchPanel.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
   } finally {
     // release repository choices during failed assertions too
     branchesGate.release();
@@ -198,10 +235,24 @@ test('synchronizes late branch loaders with the active connection loader', async
   await expect(pullRequests.locator(':scope > .update-progress-ring')).toHaveCount(0);
   await expect(branches.locator(':scope > .update-progress-ring')).toHaveCount(0);
   await expect(connection).toBeVisible();
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await seedPaneSize(page, 'agent-1');
+  await pushBytes(page, 'agent-1', 'Cached agent output\r\n');
+  await expect(connection).toBeHidden();
+  const connects = await paneConnectCount(page, 'agent-1');
+  await dropPane(page, 'agent-1');
+  await expect.poll(() => paneConnectCount(page, 'agent-1')).toBeGreaterThan(connects);
+  await expect(connection).toBeVisible();
+  await expect(connection).toContainText('Reconnecting…');
+  await expect(connection.locator('.output-skeleton-agent')).toBeVisible();
+  await expect(connection.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
+  await seedPaneSize(page, 'agent-1');
+  await pushBytes(page, 'agent-1', 'Fresh agent output\r\n');
+  await expect(connection).toBeHidden();
 });
 
-// distinguish cleanup reads from the user-confirmed cleanup mutation
-test('uses loading motion for cleanup reads and working motion for cleanup submission', async ({ page }) => {
+// distinguish cleanup skeletons from the user-confirmed cleanup mutation
+test('uses skeleton rows for cleanup reads and working motion only for cleanup submission', async ({ page }) => {
   const initialReadGate = createGate();
   const cachedReadGate = createGate();
   const submissionGate = createGate();
@@ -236,12 +287,14 @@ test('uses loading motion for cleanup reads and working motion for cleanup submi
   const cleanupTrigger = page.getByRole('button', { name: 'Review 1 cleanup target' });
   await cleanupTrigger.click();
   const dialog = page.getByRole('dialog', { name: 'Cleanup', exact: true });
-  const footerProgress = dialog.getByRole('button', { name: 'Working…', exact: true });
-  const initialProgress = dialog.locator('.progress-border:has(> .update-progress-ring)');
   try {
-    await expectProgressBorder(dialog.getByRole('status').filter({ hasText: 'Searching for cleanup targets…' }), 'blue', 'loading');
-    await expectProgressBorder(footerProgress, 'red', 'loading');
-    await expectSynchronizedProgressBorders(initialProgress, 2, 'loading');
+    await expect(dialog.getByRole('status', { name: 'Loading cleanup targets' })).toBeVisible();
+    await expect(dialog.locator('.cleanup-skeleton')).toHaveCount(3);
+    await expect(dialog.getByRole('checkbox')).toHaveCount(0);
+    await expect(dialog.locator('.progress-border')).toHaveCount(0);
+    await expect(dialog.locator('.cleanup-actions button')).toBeDisabled();
+    // capture the held cleanup read on demand
+    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/cleanup-desktop.png` });
   } finally {
     // release the initial read during failed assertions too
     initialReadGate.release();
@@ -252,15 +305,18 @@ test('uses loading motion for cleanup reads and working motion for cleanup submi
   await cleanupTrigger.click();
   try {
     await expect.poll(() => cleanupReads).toBe(2);
-    await expect(dialog.getByRole('checkbox', { name: /Stale Codex agent/u })).toBeVisible();
-    await expectProgressBorder(footerProgress, 'red', 'loading');
-    await expectClockwiseProgressBorder(footerProgress, 'loading');
+    await expect(dialog.getByRole('status', { name: 'Loading cleanup targets' })).toBeVisible();
+    await expect(dialog.locator('.cleanup-skeleton')).toHaveCount(3);
+    await expect(dialog.getByText('Stale Codex agent')).toHaveCount(0);
+    await expect(dialog.getByRole('checkbox')).toHaveCount(0);
+    await expect(dialog.locator('.progress-border')).toHaveCount(0);
   } finally {
     // release the cached-list read during failed assertions too
     cachedReadGate.release();
   }
 
   await dialog.getByRole('button', { name: 'Cleanup', exact: true }).click();
+  const footerProgress = dialog.getByRole('button', { name: 'Working…', exact: true });
   try {
     await expect.poll(() => cleanupSubmissions).toBe(1);
     await expectProgressBorder(footerProgress, 'red', 'working');
@@ -272,8 +328,8 @@ test('uses loading motion for cleanup reads and working motion for cleanup submi
   await expect(dialog).toHaveCount(0);
 });
 
-// distinguish note list reads from explicit note creation
-test('uses loading motion for note reads and working motion for note creation', async ({ page }) => {
+// distinguish note list skeletons from explicit note creation
+test('uses a toolbar skeleton for note reads and working motion for note creation', async ({ page }) => {
   const readGate = createGate();
   const creationGate = createGate();
   let noteReads = 0;
@@ -310,8 +366,15 @@ test('uses loading motion for note reads and working motion for note creation', 
   const notes = page.locator('.notes-toggle');
   try {
     await expect.poll(() => noteReads).toBe(1);
-    await expectProgressBorder(notes, 'blue', 'loading');
-    await expectClockwiseProgressBorder(notes, 'loading');
+    await expect(notes).toHaveClass(/notes-read-loading/u);
+    await expect(notes.locator('.notes-button-skeleton')).toHaveCount(1);
+    await expect(notes.locator('.update-progress-ring')).toHaveCount(0);
+    await expect(notes).not.toHaveClass(/progress-border/u);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    expect(await notes.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
+    // capture the reduced-motion note skeleton on demand
+    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/notes-reduced-motion.png` });
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
   } finally {
     // release the note read during failed assertions too
     readGate.release();

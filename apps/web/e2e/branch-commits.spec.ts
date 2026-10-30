@@ -24,11 +24,11 @@ const commitPatch = (path: string) => `diff --git a/${path} b/${path}\nnew file 
 
 // mount one worktree with an agent, counting commit-log loads (or failing them) and recording the
 // comparisons the code panel asks for
-async function mount(page: Page, failCommits = false, base = worktree.gitPrStatus.base) {
+async function mount(page: Page, failCommits = false, base = worktree.gitPrStatus.base, commitGate?: Promise<void> | ((load: number) => Promise<void> | undefined)) {
   const loads = { count: 0 };
   const comparisons: unknown[] = [];
   const gitPrStatus = { ...worktree.gitPrStatus, base };
-  await page.route('**/api/**', route => {
+  await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // keep the unmodified git ref in dashboard data
@@ -41,6 +41,7 @@ async function mount(page: Page, failCommits = false, base = worktree.gitPrStatu
     if (url.pathname === '/api/worktrees/active/commits') {
       expect(url.search).toBe('');
       loads.count += 1;
+      await (typeof commitGate === 'function' ? commitGate(loads.count) : commitGate);
       return failCommits ? route.fulfill({ status: 404, json: { error: 'commits unavailable' } }) : route.fulfill({ json: { ...commits, base } });
     }
     // return the same resolved base for whole-branch patches
@@ -57,6 +58,47 @@ async function mount(page: Page, failCommits = false, base = worktree.gitPrStatu
   await page.getByRole('button', { name: /^Git status: feature\/commits/u }).click();
   return { panel: page.getByRole('region', { name: 'Changed files' }), loads, comparisons };
 }
+
+// preserve commit-card rhythm while the By commit read is pending
+test('shows commit skeleton cards instead of a spinner while loading', async ({ page }) => {
+  let releaseCommits!: () => void;
+  const commitsFinished = new Promise<void>(resolve => { releaseCommits = resolve; });
+  await page.addInitScript(() => localStorage.setItem('rac.git-change-grouping', 'commit'));
+  const { panel } = await mount(page, false, worktree.gitPrStatus.base, commitsFinished);
+  try {
+    await expect(panel.getByRole('status', { name: 'Loading commits' })).toBeVisible();
+    await expect(panel.locator('.commit-skeleton')).toHaveCount(3);
+    await expect(panel.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
+    await expect(panel).not.toContainText('Loading commits…');
+  } finally {
+    // release the commit read during failed assertions too
+    releaseCommits();
+  }
+  await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+  await expect(panel.locator('.commit-skeleton')).toHaveCount(0);
+});
+
+// hide stale commit cards whenever an expanded By commit view refreshes
+test('returns to commit skeleton cards while refreshing an expanded By commit view', async ({ page }) => {
+  let releaseRefresh!: () => void;
+  const refreshFinished = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  await page.addInitScript(() => localStorage.setItem('rac.git-change-grouping', 'commit'));
+  const { panel, loads } = await mount(page, false, worktree.gitPrStatus.base, load => load === 2 ? refreshFinished : undefined);
+  await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+  await page.mouse.click(4, 4);
+  await page.getByRole('button', { name: /^Git status: feature\/commits/u }).click();
+  try {
+    await expect.poll(() => loads.count).toBe(2);
+    await expect(panel.getByRole('status', { name: 'Loading commits' })).toBeVisible();
+    await expect(panel.locator('.commit-skeleton')).toHaveCount(3);
+    await expect(panel).not.toContainText('Show commit details');
+  } finally {
+    // release the refresh during failed assertions too
+    releaseRefresh();
+  }
+  await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+  await expect(panel).toContainText('Show commit details');
+});
 
 // retain the resolved non-main base across flyout grouping and code navigation
 test('groups the All PR files by commit and remembers the choice', async ({ page }) => {

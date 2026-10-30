@@ -2,16 +2,15 @@ import { expect, test } from '@playwright/test';
 import { installPaneMock, seedPaneSize, pushBytes, pushMetadata } from './pane-stream-mock.js';
 import { clickPanelAction } from './panel-header';
 
-// The response-files flyout and a pane file link both open the file in the Code panel's File view now,
-// not the retired modal preview dialog: text renders through the diff library, an image (including the
-// agent /tmp screenshot bridge) renders inline, and the old `.response-file-dialog` never appears.
-test('opens response files and pane file links in the Code panel File view', async ({ page }) => {
+// pane paths open the code split without retaining a response-files flyout
+test('opens pane file links in the Code panel without requesting response-file metadata', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 600 });
   await installPaneMock(page);
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (value: string) => { (window as unknown as { __copiedPath?: string }).__copiedPath = value; } } });
   });
 
+  let messageFileRequests = 0;
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -26,10 +25,8 @@ test('opens response files and pane file links in the Code panel File view', asy
     // the panel's background Comparison load has no changes to show
     if (url.pathname === '/api/worktrees/cora/comparison') return route.fulfill({ json: { kind: 'working', base: 'HEAD', gitBase: 'HEAD', files: [], fingerprint: '', truncated: false } });
     if (url.pathname === '/api/agents/agent-1/message-files') {
-      // omit temporary images from the completed-response file menu
-      if (request.postDataJSON().message === 'Screenshots: /tmp/agent-screenshot.png') return route.fulfill({ json: { files: [] } });
-      expect(request.postDataJSON()).toEqual({ message: 'Updated `apps/web/src/main.tsx:1444` and `docs/setup.md`.' });
-      return route.fulfill({ json: { files: [{ path: 'apps/web/src/main.tsx', size: 1_234 }, { path: 'docs/setup.md', size: 80 }] } });
+      messageFileRequests += 1;
+      return route.fulfill({ status: 410, json: { error: 'response file discovery removed' } });
     }
     if (url.pathname === '/api/agents/agent-1/file-preview') {
       // return one host temporary image preview (the /tmp screenshot bridge stays on the agent route)
@@ -54,9 +51,8 @@ test('opens response files and pane file links in the Code panel File view', asy
   await emit('Updated apps/web/src/main.tsx:1444 and docs/setup.md.', 'Updated `apps/web/src/main.tsx:1444` and `docs/setup.md`.');
 
   const panel = page.getByRole('region', { name: 'Code changes' });
-  // the response-files control rides in the agent panel's header
-  const filesButton = page.locator('.agent-panel').getByRole('toolbar', { name: 'Agent output actions' }).getByRole('button', { name: 'Files from latest response (2)' });
-  await expect(filesButton).toBeVisible();
+  await expect(page.locator('.agent-panel').getByRole('toolbar', { name: 'Agent output actions' }).getByRole('button', { name: /Files from latest response/u })).toHaveCount(0);
+  expect(messageFileRequests).toBe(0);
 
   // clicking a file link in the pane output opens that file in the Code panel (a plain-file view),
   // never the old modal dialog
@@ -71,14 +67,6 @@ test('opens response files and pane file links in the Code panel File view', asy
   await expect(page.locator('.response-file-dialog')).toHaveCount(0);
   await expect(page.getByRole('dialog', { name: /File preview:/u })).toHaveCount(0);
 
-  // the response-files flyout still lists the files; a row opens the same File view
-  await filesButton.click();
-  const filesMenu = page.getByLabel('Files from latest response', { exact: true });
-  await expect(filesMenu).toContainText('apps/web/src/main.tsx');
-  await expect(filesMenu).toContainText('docs/setup.md');
-  await page.getByRole('button', { name: /apps\/web\/src\/main\.tsx/u }).click();
-  await expect(panel.getByText('export const ready = true;')).toBeVisible();
-
   // the File view owns copy-path (from the retired dialog)
   await clickPanelAction(panel, 'Copy path');
   await expect.poll(() => page.evaluate(() => (window as unknown as { __copiedPath?: string }).__copiedPath)).toBe('apps/web/src/main.tsx');
@@ -90,4 +78,5 @@ test('opens response files and pane file links in the Code panel File view', asy
   await expect(image).toBeVisible();
   await expect.poll(() => image.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
   await expect(page.locator('.response-file-dialog')).toHaveCount(0);
+  expect(messageFileRequests).toBe(0);
 });

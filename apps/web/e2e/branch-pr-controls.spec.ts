@@ -53,7 +53,7 @@ async function mountDashboard(page: Page, options: DashboardMount) {
       return route.fulfill({ json: { prompts: [] } });
     }
     // expose repository tabs
-    if (/^\/api\/agents\/[^/]+\/switch-prs$/u.test(url.pathname)) return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
+    if (/^\/api\/worktrees\/[^/]+\/switch-prs$/u.test(url.pathname)) return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
     // record configured action submissions
     if (url.pathname === '/api/button-actions' && request.method() === 'POST') {
       await options.onPrompt?.(request.postDataJSON());
@@ -174,6 +174,39 @@ test('keeps the current pull request in the Working footer and queues one active
   expect(historyRequests).toBeGreaterThanOrEqual(1);
 });
 
+// expand the flyout while keeping the current pr centered and reachable
+test('centers the current pull request across viewport-bounded flyout widths', async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1_600, height: 1_000 });
+  await mountDashboard(page, { dashboard: { generation: 1, agents: [activeAgent], projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [activeWorktree] }] } });
+
+  await page.getByRole('button', { name: /^Git status: feature\/current-pr-controls/u }).click();
+  const panel = page.getByRole('region', { name: 'Changed files' });
+  const footer = panel.locator('.git-status-panel-footer');
+  const card = footer.locator(':scope > .pull-request-card');
+  // exercise wide, breakpoint, phone, and smallest supported layouts
+  for (const viewport of [{ width: 1_600, height: 1_000 }, { width: 1_440, height: 900 }, { width: 900, height: 500 }, { width: 600, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 700 }]) {
+    await page.setViewportSize(viewport);
+    await expect.poll(async () => { /* wait for the resize refit */ return (await renderedBox(panel)).width; }).toBeLessThanOrEqual(viewport.width);
+    const [panelBox, footerBox, cardBox] = await Promise.all([renderedBox(panel), renderedBox(footer), renderedBox(card)]);
+    expect(panelBox.x).toBeGreaterThanOrEqual(0);
+    expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(viewport.width + 1);
+    expect(footerBox.x).toBeGreaterThanOrEqual(panelBox.x);
+    expect(footerBox.x + footerBox.width).toBeLessThanOrEqual(panelBox.x + panelBox.width + 1);
+    expect(await page.evaluate(() => { /* measure page overflow */ return document.documentElement.scrollWidth; })).toBeLessThanOrEqual(viewport.width);
+    // require horizontal growth and geometric centering above the stacked breakpoint
+    if (viewport.width > 900) {
+      expect(panelBox.width).toBeGreaterThan(720);
+      expect(Math.abs(cardBox.x + cardBox.width / 2 - footerBox.x - footerBox.width / 2)).toBeLessThanOrEqual(1);
+    } else {
+      // keep every stacked footer control reachable on bounded viewports
+      await expectReachableWithin(footer, panel);
+    }
+    // retain the requested wide and phone render evidence
+    if (viewport.width === 1_600 || viewport.width === 390) await page.screenshot({ path: testInfo.outputPath(`pr-flyout-${viewport.width}.png`), fullPage: true });
+  }
+});
+
 // keep toolbar pr health floating while card indicators retain their normal layout
 test('floats compact branch indicators from the same corners at every width', async ({ page }, testInfo) => {
   test.setTimeout(120_000);
@@ -239,14 +272,25 @@ test('floats compact branch indicators from the same corners at every width', as
   };
   // switch through the phone sheet or the labelled desktop tabs
   const switchWorkspace = async (label: RegExp) => {
-    const directTab = page.getByRole('tab', { name: label });
-    // use a labelled tab whenever the tab strip exposes one
-    if (await directTab.isVisible()) {
-      await directTab.click();
+    const phone = await page.evaluate(() => { /* use the app's phone breakpoint */ return innerWidth <= 768; });
+    // use the selected dropdown and its sheet on compact layouts
+    if (phone) {
+      const selected = page.getByRole('tab', { selected: true });
+      const selectedName = await selected.getAttribute('aria-label');
+      // leave the already selected mobile tab closed
+      if (selectedName !== null && label.test(selectedName)) return;
+      await selected.click();
+      const workspaces = page.getByRole('dialog', { name: 'Workspaces' });
+      await expect(workspaces).toBeVisible();
+      await workspaces.getByRole('button', { name: label }).click();
+      await expect(workspaces).toHaveCount(0);
       return;
     }
-    await page.getByRole('tab', { selected: true }).click();
-    await page.getByRole('dialog', { name: 'Workspaces' }).getByRole('button', { name: label }).click();
+    const directTab = page.getByRole('tab', { name: label });
+    await expect(directTab).toBeVisible();
+    // leave the already selected desktop tab untouched
+    if (await directTab.getAttribute('aria-selected') === 'true') return;
+    await directTab.click();
   };
   // validate phones, the breakpoint edges and a wide desktop
   for (const width of [390, 600, 601, 1440]) {

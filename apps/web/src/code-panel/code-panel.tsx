@@ -24,6 +24,8 @@ import { useMovedLines } from './moved-lines.js';
 import { orderedRange, patchRowIndex, patchRows } from './patch-rows.js';
 import { askLines } from '../asks.js';
 import type { LineAsks } from '../ask-thread.js';
+import { Skeleton } from '../skeleton.js';
+import { CodeLoading, type CodeLoadingImageSides } from './loading.js';
 
 // an annotation is the Ask thread under some lines
 type PanelAnnotation = { askId: string } | undefined;
@@ -61,8 +63,8 @@ export type CodePanelProps = {
   patch: ComparisonPatch | undefined;
   // the one file the panel is filtered to, or undefined for the all-files scroll
   selectedPath: string | undefined;
-  // the File the panel is showing (a response file or terminal link), or undefined for a Comparison;
-  // when set the panel renders the File view instead of the Changes layout
+  // the scoped source or pane-link file shown instead of a comparison
+  // undefined keeps the changes layout
   filePreview?: FilePreviewView;
   // whether an All PR Comparison (and so its commits) exists to pick
   prAvailable: boolean;
@@ -117,6 +119,16 @@ type VersionedItem = { patchVersion: number; item: PanelItem };
 type OverrideNeed = { path: string; version: number };
 
 const basename = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
+
+// derive which image revisions can exist from the git status
+const imageLoadingSides = (change: ComparisonChange): CodeLoadingImageSides => {
+  const status = change.code.trim();
+  // additions have no base revision
+  if (status === 'A' || status === '??') return 'after';
+  // deletions have no working revision
+  if (status === 'D') return 'before';
+  return 'both';
+};
 
 // offer previews for capped raster paths without treating svg source as an image
 const isImagePath = (path: string): boolean => /\.(?:png|jpe?g|gif|webp)$/iu.test(path);
@@ -653,7 +665,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   if (selectedPreviewFile !== undefined) {
     const version = previewVersion(selectedPreviewFile, comparisonKey, patch?.gitBase);
     const initialContents = previewOverride?.version === version ? previewOverride.contents : undefined;
-    selectedPreviewBody = <ComparisonFilePreview key={version} path={selectedPreviewFile.change.path} loadFile={loadFile} onText={contents => setPreviewOverride({ version, contents })} initialContents={initialContents} options={options} onOpenInEditor={onOpenInEditor} />;
+    selectedPreviewBody = <ComparisonFilePreview key={version} path={selectedPreviewFile.change.path} loadFile={loadFile} onText={contents => setPreviewOverride({ version, contents })} initialContents={initialContents} imageSides={imageLoadingSides(selectedPreviewFile.change)} options={options} onOpenInEditor={onOpenInEditor} />;
   }
   const fileCount = groups.implementation.length + groups.supporting.length;
   const style = codeViewStyle(fontSize) as CSSProperties;
@@ -698,7 +710,7 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     </div>
   );
 
-  // A File view (a response-file row or a terminal link) takes over the whole panel as a peer of the
+  // a file preview from a scoped source or pane link takes over the panel as a peer of the
   // Comparison — text through the same diff library for real highlighting, an image / binary
   // placeholder / over-cap notice as plain views. It replaces the Changes layout while it is open.
   if (filePreview !== undefined) return <FileView filePreview={filePreview} options={options} style={style} expanded={expanded} onBack={onCloseFile} onClose={onClose} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} />;
@@ -767,37 +779,39 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
           </aside>
         )}
         <div className="code-pane-body">
-          {state === 'loading' && <p className="code-pane-status progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading changes…</p>}
+          {state === 'loading' && <CodeLoading />}
           {state === 'error' && <p className="code-pane-status" role="alert">Unable to load changes.{onRetry !== undefined && <> <button type="button" className="code-pane-retry" onClick={onRetry}>Retry</button></>}</p>}
           {state === 'ready' && fileCount === 0 && <p className="code-pane-status">No changes to show.</p>}
           {state === 'ready' && fileCount > 0 && <>
             {missing && <p className="code-pane-status" role="alert">This file isn't part of the current changes. <button type="button" className="code-pane-retry" onClick={backToAll}>Back to all files</button></p>}
             {/* keep binary candidates outside the text diff renderer */}
             {selectedPreviewFile !== undefined ? selectedPreviewBody : <>
-            {plainForSelected !== undefined && plainForSelected.contents === undefined && plainForSelected.error !== true && <p className="code-pane-status progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading file…</p>}
+            {plainForSelected !== undefined && plainForSelected.contents === undefined && plainForSelected.error !== true && <CodeLoading kind="file" path={selectedPath} />}
             {plainForSelected?.error === true && <p className="code-pane-status" role="alert">Unable to load this file.</p>}
             {selectedPath === undefined && patch?.truncated === true && <p className="code-pane-notice">Some files were left out because the change set is very large.</p>}
             {placeholders.length > 0 && (
               <ul className="code-pane-placeholders">
                 {placeholders.map(placeholder => (
-                  <li key={placeholder.path} className={`code-pane-placeholder ${placeholder.reason}`}>
-                    <span className="code-pane-placeholder-path" title={placeholder.path}>{placeholder.path}</span>
-                    <span className="code-pane-placeholder-note">
-                      {placeholder.reason === 'capped' && 'File too large to preview'}
-                      {placeholder.reason === 'binary' && 'Binary file'}
-                      {placeholder.reason === 'metadata' && (placeholder.note ?? 'Not a regular file')}
-                      {placeholder.reason === 'unrenderable' && 'Diff unavailable'}
-                    </span>
-                    {/* open raster candidates without requesting every file up front */}
-                    {(placeholder.reason === 'binary' || (placeholder.reason !== 'metadata' && isImagePath(placeholder.path))) && <button type="button" className="code-pane-load" aria-label={`Preview ${placeholder.path}`} onClick={() => openFile(placeholder.path)}>Preview</button>}
-                    {/* retain an inline load or retry action for other withheld files */}
-                    {placeholder.reason !== 'binary' && !isImagePath(placeholder.path) && (placeholder.reason === 'capped' || placeholder.reason === 'unrenderable') && (
-                      <>
-                        {/* explain failures without removing their recovery control */}
-                        {loadStatus[placeholder.path] === 'error' && <span className="code-pane-placeholder-error">Could not load</span>}
-                        <button type="button" className={`code-pane-load${loadStatus[placeholder.path] === 'loading' ? ' progress-border progress-blue progress-loading' : ''}`} aria-busy={loadStatus[placeholder.path] === 'loading' || undefined} disabled={loadStatus[placeholder.path] === 'loading'} onClick={() => void loadAnyway(placeholder.path)}>{loadStatus[placeholder.path] === 'loading' && <span className="update-progress-ring" aria-hidden="true" />}{loadLabels[loadStatus[placeholder.path] ?? 'idle']}</button>
-                      </>
-                    )}
+                  <li key={placeholder.path} className={`code-pane-placeholder ${placeholder.reason}`} aria-busy={loadStatus[placeholder.path] === 'loading' || undefined}>
+                    {loadStatus[placeholder.path] === 'loading' ? <InlineFileLoading path={placeholder.path} /> : <>
+                      <span className="code-pane-placeholder-path" title={placeholder.path}>{placeholder.path}</span>
+                      <span className="code-pane-placeholder-note">
+                        {placeholder.reason === 'capped' && 'File too large to preview'}
+                        {placeholder.reason === 'binary' && 'Binary file'}
+                        {placeholder.reason === 'metadata' && (placeholder.note ?? 'Not a regular file')}
+                        {placeholder.reason === 'unrenderable' && 'Diff unavailable'}
+                      </span>
+                      {/* open raster candidates without requesting every file up front */}
+                      {(placeholder.reason === 'binary' || (placeholder.reason !== 'metadata' && isImagePath(placeholder.path))) && <button type="button" className="code-pane-load" aria-label={`Preview ${placeholder.path}`} onClick={() => openFile(placeholder.path)}>Preview</button>}
+                      {/* retain an inline load or retry action for other withheld files */}
+                      {placeholder.reason !== 'binary' && !isImagePath(placeholder.path) && (placeholder.reason === 'capped' || placeholder.reason === 'unrenderable') && (
+                        <>
+                          {/* explain failures without removing their recovery control */}
+                          {loadStatus[placeholder.path] === 'error' && <span className="code-pane-placeholder-error">Could not load</span>}
+                          <button type="button" className="code-pane-load" onClick={() => void loadAnyway(placeholder.path)}>{loadLabels[loadStatus[placeholder.path] ?? 'idle']}</button>
+                        </>
+                      )}
+                    </>}
                   </li>
                 ))}
               </ul>
@@ -824,6 +838,19 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
       </div>
     </section>
   );
+}
+
+// replace only one pending placeholder row with compact file geometry
+function InlineFileLoading({ path }: { path: string }) {
+  return <div className="code-loading-inline-file" role="status" aria-label={`Loading ${path}`}>
+    <span className="sr-only">Loading {path}…</span>
+    <Skeleton className="code-loading-inline-path" />
+    <div className="code-loading-inline-lines" aria-hidden="true">
+      <Skeleton />
+      <Skeleton />
+      <Skeleton />
+    </div>
+  </div>;
 }
 
 // decode raster bytes only in an image element and report corrupt data accessibly
@@ -870,7 +897,7 @@ function ImageRevision({ revision, side, options, onOpenInEditor }: { revision: 
 }
 
 // request only the selected comparison and discard results after navigation or refresh
-function ComparisonFilePreview({ path, loadFile, onText, initialContents, options, onOpenInEditor }: { path: string; loadFile: CodePanelProps['loadFile']; onText: (contents: ComparisonFileContents) => void; initialContents: ComparisonFileContents | undefined; options: PanelOptions; onOpenInEditor?: (target: EditorTarget) => void }) {
+function ComparisonFilePreview({ path, loadFile, onText, initialContents, imageSides, options, onOpenInEditor }: { path: string; loadFile: CodePanelProps['loadFile']; onText: (contents: ComparisonFileContents) => void; initialContents: ComparisonFileContents | undefined; imageSides: CodeLoadingImageSides; options: PanelOptions; onOpenInEditor?: (target: EditorTarget) => void }) {
   const [result, setResult] = useState<{ state: 'loading' } | { state: 'error' } | { state: 'ready'; contents: ComparisonFileContents }>(() => initialContents === undefined ? { state: 'loading' } : { state: 'ready', contents: initialContents });
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -897,12 +924,12 @@ function ComparisonFilePreview({ path, loadFile, onText, initialContents, option
     if (result.state === 'ready' && isTextComparison(result.contents)) onText(result.contents);
   }, [result, onText]);
   // keep loading and retry feedback inside the selected file
-  if (result.state === 'loading') return <p className="code-pane-status progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading image…</p>;
+  if (result.state === 'loading') return <CodeLoading kind="image" path={path} imageSides={imageSides} />;
   // failed requests never fall through to broken image elements
   if (result.state === 'error') return <p className="code-pane-status" role="alert">Unable to load image preview. <button type="button" className="code-pane-retry" onClick={() => setAttempt(current => current + 1)}>Retry</button></p>;
   const { base, working } = result.contents;
   // wait one commit for the existing text renderer to take over
-  if (isTextComparison(result.contents)) return <p className="code-pane-status" role="status">Loading file…</p>;
+  if (isTextComparison(result.contents)) return <CodeLoading kind="file" path={path} />;
   return <div className="code-pane-image-comparison" aria-label={`Image changes: ${path}`} role="group">
     {/* retain only revisions that actually existed */}
     {base !== null && <ImageRevision revision={base} side="Before" options={options} />}
@@ -940,7 +967,7 @@ function ComparisonPicker({ mode, commit, prAvailable, onSetMode, loadCommits, o
     <button type="button" role="menuitemradio" aria-checked={commit === undefined && mode === 'pr'} disabled={!prAvailable} title={prAvailable ? 'Compare the whole PR' : 'Merge target unavailable'} onClick={() => choose(() => onSetMode('pr'))}>All PR changes</button>
     {listCommits && <>
       <p className="code-pane-picker-label">Commits</p>
-      {commits === 'loading' && <p className="code-pane-picker-note" role="status">Loading commits…</p>}
+      {commits === 'loading' && <CommitRowsLoading />}
       {commits === 'error' && <p className="code-pane-picker-note" role="alert">Commits unavailable</p>}
       {Array.isArray(commits) && commits.length === 0 && <p className="code-pane-picker-note">No commits yet</p>}
       {Array.isArray(commits) && commits.map(entry => <button key={entry.sha} type="button" role="menuitemradio" aria-checked={entry.sha === commit?.sha} className="code-pane-picker-commit" title={entry.subject} onClick={() => choose(() => onSelectCommit(entry))}><span>{entry.subject}</span><code>{entry.sha.slice(0, 7)}</code></button>)}
@@ -948,7 +975,19 @@ function ComparisonPicker({ mode, commit, prAvailable, onSetMode, loadCommits, o
   </div></FlyoutPortal>}</>;
 }
 
-// The panel's File view: one file opened from a response-file row or a terminal link, filling the
+// mirror commit menu rows until commit metadata arrives
+function CommitRowsLoading() {
+  return <div className="code-loading-commit-list" role="status" aria-busy="true" aria-label="Loading commits">
+    <span className="sr-only">Loading commits…</span>
+    {/* retain the subject and short-sha columns */}
+    {Array.from({ length: 3 }, (_, index) => <div className="code-loading-commit-row" aria-hidden="true" key={index}>
+      <Skeleton className="code-loading-commit-subject" />
+      <Skeleton className="code-loading-commit-sha" />
+    </div>)}
+  </div>;
+}
+
+// the file view shows a scoped source or pane link, filling the
 // panel as a peer of the Comparison. A text file renders through the same diff library (a
 // `{type:'file'}` item) so it gets real syntax highlighting; an image (including the agent `/tmp`
 // screenshot bridge), a binary file, and the over-cap truncation notice are plain non-library views.
@@ -964,12 +1003,12 @@ function FileView({ filePreview, options, style, expanded, onBack, onClose, onOp
   // a text file becomes a single plain-file item; an image or binary file renders without the library
   const items = useMemo<PanelItem[]>(() => state === 'ready' && preview !== undefined && !preview.binary ? [fileItemForContents(path, preview.content)] : [], [state, preview, path]);
   // the header's editor button opens the selected line, else the top; only a path inside the Place
-  // can be opened (a response file may name one elsewhere, such as a `/tmp` screenshot)
+  // can be opened; a pane link may name a host path such as a `/tmp` screenshot
   const [selection, setSelection] = useState<CodeViewLineSelection | null>(null);
-  const backLabel = filePreview.source === 'settings' ? 'Settings' : filePreview.source === 'files' ? 'Files' : 'Changes';
+  const backLabel = filePreview.source === 'settings' ? 'Settings' : filePreview.source === 'files' ? 'Files' : filePreview.source === 'notes' ? 'Note' : 'Changes';
   const renderHeaderMetadata = () => {
-    // keep redacted settings snapshots read only
-    if (filePreview.source === 'settings' || onOpenInEditor === undefined || !isPlaceRelativePath(path)) return null;
+    // keep scoped source snapshots read only
+    if (filePreview.source === 'settings' || filePreview.source === 'notes' || onOpenInEditor === undefined || !isPlaceRelativePath(path)) return null;
     return <EditorJumpButton file={path} line={selection === null ? 1 : Math.min(selection.range.start, selection.range.end)} onOpen={onOpenInEditor} />;
   };
   return (
@@ -983,7 +1022,7 @@ function FileView({ filePreview, options, style, expanded, onBack, onClose, onOp
         close={{ key: 'close', label: 'Close file', title: 'Close', icon: <PanelIcon path={panelIcons.close} />, onSelect: onClose }} />
       <div className="code-pane-main">
         <div className="code-pane-body">
-          {state === 'loading' && <p className="code-pane-status progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading file…</p>}
+          {state === 'loading' && <CodeLoading kind="file" path={path} />}
           {state === 'error' && <p className="code-pane-status" role="alert">Preview unavailable.</p>}
           {state === 'ready' && preview !== undefined && <>
             {/* inline only complete supported images */}

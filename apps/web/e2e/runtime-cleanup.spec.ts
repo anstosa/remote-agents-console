@@ -106,3 +106,31 @@ test('reviews hourly cleanup targets from the alert and glowing cleanup button',
   await expect(dialog).toHaveCount(0);
   await expect(page.locator('.cleanup-toggle')).toHaveCount(0);
 });
+
+// never turn a failed or malformed cleanup read into a trustworthy empty state
+for (const scenario of [
+  { name: 'failed', status: 503, payload: { error: 'cleanup unavailable' } },
+  { name: 'malformed', status: 200, payload: { targets: [{ id: 'unknown', kind: 'future-kind', label: 'Unknown', detail: 'unsupported' }] } },
+]) {
+  test(`stops cleanup skeletons without showing false empty content after a ${scenario.name} read`, async ({ page }) => {
+    await page.route('**/api/**', route => {
+      const request = route.request();
+      const url = new URL(request.url());
+      // restore one controlling browser
+      if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+      // expose one pending cleanup target
+      if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, cleanupPending: 1, agents: [], projects: [] } });
+      if (url.pathname === '/api/cleanup' && request.method() === 'GET') return route.fulfill({ status: scenario.status, json: scenario.payload });
+      if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+      return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+    });
+
+    await page.goto('/#cleanup');
+    const dialog = page.getByRole('dialog', { name: 'Cleanup', exact: true });
+    await expect(dialog.getByRole('alert')).toHaveText('Unable to load cleanup targets.');
+    await expect(dialog.locator('.cleanup-skeleton')).toHaveCount(0);
+    await expect(dialog.locator('.cleanup-empty')).toHaveCount(0);
+    await expect(dialog.getByText('No cleanup targets remain.')).toHaveCount(0);
+    await expect(dialog.locator('.cleanup-actions button')).toBeDisabled();
+  });
+}

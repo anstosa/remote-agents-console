@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 // The streamed terminal component, mounted alone against real xterm 6.0 and driven by
 // a scripted socket (see streamed-terminal-fixture.ts). These assert what crosses the
@@ -38,6 +38,32 @@ const setup = async (page: Page, options: Record<string, unknown> = {}) => {
   await expect(page.locator('#term')).toHaveAttribute('data-ready', 'true');
 };
 
+// measure placeholder coverage inside its output pane
+const measureSkeletonCoverage = async (pane: Locator, skeleton: Locator) => {
+  const [paneBox, skeletonBox, shapes] = await Promise.all([
+    pane.boundingBox(),
+    skeleton.boundingBox(),
+    // serialize every visible placeholder shape for coverage math
+    skeleton.locator('.skeleton:visible').evaluateAll(elements => elements.map(element => {
+      const bounds = element.getBoundingClientRect();
+      return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+    }))
+  ]);
+  // return an empty measurement before geometry exists
+  if (paneBox === null || skeletonBox === null || shapes.length === 0) return { coverage: 0, lastShape: 0, shapes: shapes.length };
+  const paneBottom = paneBox.y + paneBox.height;
+  // exclude shapes fully clipped beyond the output viewport
+  const visibleShapes = shapes.filter(shape => shape.y < paneBottom && shape.y + shape.height > paneBox.y);
+  // return an empty fill when every shape is clipped
+  if (visibleShapes.length === 0) return { coverage: skeletonBox.height / paneBox.height, lastShape: 0, shapes: 0 };
+  const lastBottom = Math.max(...visibleShapes.map(shape => Math.min(shape.y + shape.height, paneBottom)));
+  return {
+    coverage: skeletonBox.height / paneBox.height,
+    lastShape: (lastBottom - paneBox.y) / paneBox.height,
+    shapes: visibleShapes.length
+  };
+};
+
 test('applies the seed then live bytes in order after the first size', async ({ page }) => {
   await setup(page);
   await drive(page, 'pushSize', 40, 10);
@@ -65,16 +91,69 @@ test('restores the prompt cursor after blank seed rows and on reseed', async ({ 
   }
 });
 
-test('masks the terminal with the themed background until the first seed renders', async ({ page }) => {
+test('shows an output skeleton until the first seed renders', async ({ page }) => {
   await setup(page);
-  // Pre-seed: a cover sits over the terminal so the operator never sees an empty grid or
-  // xterm's pre-paint flash before content arrives.
-  await expect(page.locator('#term .streamed-terminal-cover')).toBeVisible();
+  const status = page.locator('#term .streamed-terminal-status');
+  await expect(status).toBeVisible();
+  await expect(status).toHaveAttribute('aria-busy', 'true');
+  await expect(status.locator('.output-skeleton')).toBeVisible();
+  await expect.poll(() => status.locator('.skeleton').count()).toBeGreaterThanOrEqual(6);
+  await expect(status.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
   await drive(page, 'pushSize', 40, 10);
   await drive(page, 'pushBytes', 'SEEDED\r\n');
   await expect.poll(() => drive(page, 'screenText')).toContain('SEEDED');
-  // Once the seed has painted, the cover is removed and never masks the live pane.
+  // remove the skeleton after the fresh seed paints
+  await expect(status).toBeHidden();
   await expect(page.locator('#term .streamed-terminal-cover')).toHaveCount(0);
+});
+
+test('fills the output pane with terminal-shaped skeleton content across resizes', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await setup(page, { width: '100%', height: '1000px' });
+  const pane = page.locator('#term');
+  const status = pane.locator('.streamed-terminal-status');
+  const skeleton = status.locator('.output-skeleton');
+  let phoneShapeCount = 0;
+
+  // verify desktop, phone, and a taller live resize
+  for (const viewport of [
+    { label: 'desktop', width: 1440, height: 1000 },
+    { label: 'phone', width: 320, height: 900 },
+    { label: 'phone-tall', width: 320, height: 1200 }
+  ]) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await pane.evaluate((element, height) => { element.style.height = `${height}px`; }, viewport.height);
+    await expect(status).toBeVisible();
+    await expect.poll(async () => (await measureSkeletonCoverage(pane, skeleton)).coverage).toBeGreaterThanOrEqual(0.9);
+    await expect.poll(async () => (await measureSkeletonCoverage(pane, skeleton)).lastShape).toBeGreaterThanOrEqual(0.9);
+    await expect(skeleton).toHaveClass(/\boutput-skeleton-terminal\b/u);
+    await expect(skeleton.locator('.output-skeleton-command')).not.toHaveCount(0);
+    await expect.poll(() => skeleton.locator('.output-skeleton-output-row').count()).toBeGreaterThanOrEqual(6);
+    await expect(skeleton.locator('.output-skeleton-agent, .output-skeleton-prompt, .output-skeleton-tool')).toHaveCount(0);
+    const shapeCount = (await measureSkeletonCoverage(pane, skeleton)).shapes;
+    // retain the shorter phone count for the resize comparison
+    if (viewport.label === 'phone') phoneShapeCount = shapeCount;
+    // add rows rather than stretching the short placeholder on a taller resize
+    if (viewport.label === 'phone-tall') expect(shapeCount).toBeGreaterThan(phoneShapeCount);
+    // capture the requested terminal references on demand
+    if (process.env.SHOT_DIR && viewport.label !== 'phone-tall') await pane.screenshot({ path: `${process.env.SHOT_DIR}/connection-terminal-${viewport.label}.png` });
+  }
+  const initialFont = await drive<number>(page, 'fontSizePx');
+  const initialShapeCount = (await measureSkeletonCoverage(pane, skeleton)).shapes;
+  await drive(page, 'setFont', initialFont + 4);
+  // larger rows still reach the bottom with fewer repeated groups
+  await expect.poll(async () => (await measureSkeletonCoverage(pane, skeleton)).shapes).toBeLessThan(initialShapeCount);
+  await expect.poll(async () => (await measureSkeletonCoverage(pane, skeleton)).lastShape).toBeGreaterThanOrEqual(0.9);
+  await drive(page, 'setFont', initialFont);
+});
+
+test('clears an initial output skeleton after a valid empty seed', async ({ page }) => {
+  await setup(page);
+  const status = page.locator('#term .streamed-terminal-status');
+  await expect(status.locator('.output-skeleton')).toBeVisible();
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', '');
+  await expect(status).toBeHidden();
 });
 
 test('conforms to the reported size and letterboxes a smaller pane', async ({ page }) => {
@@ -221,10 +300,16 @@ test('paused output overflow refreshes from a new seed after selection ends', as
   expect(await drive(page, 'connectCalls')).toBe(1);
   await drive(page, 'setOutputPaused', false);
   await expect.poll(() => drive(page, 'connectCalls')).toBe(2);
+  const status = page.locator('#term .streamed-terminal-status');
+  await expect(status).toHaveAttribute('aria-busy', 'true');
+  await expect(status).toContainText('Refreshing output…');
+  await expect(status.locator('.output-skeleton')).toBeVisible();
+  await expect(status.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
   await drive(page, 'pushSize', 40, 10);
   // a fresh live snapshot can itself exceed the selection backlog cap
   await drive(page, 'pushBytes', `${' \r'.repeat(150 * 1024)}RECOVERED`);
   await expect.poll(() => drive(page, 'screenText')).toContain('RECOVERED');
+  await expect(status).toBeHidden();
   expect(await drive<string>(page, 'screenText')).not.toContain('ORIGINAL');
   expect(await drive<string>(page, 'screenText')).not.toContain('INCOMPLETE-TAIL');
   expect(await drive(page, 'connectCalls')).toBe(2);
@@ -266,6 +351,11 @@ test('an exit keeps the terminal mounted and shows a status', async ({ page }) =
   await drive(page, 'pushBytes', 'before-exit\r\n');
   await drive(page, 'pushExit', 'pane closed');
   await expect(page.locator('#term')).toHaveAttribute('data-status', 'pane closed');
+  const status = page.locator('#term .streamed-terminal-status');
+  await expect(status.locator('.streamed-terminal-status-message')).toHaveText('pane closed');
+  await expect(status.locator('.streamed-terminal-status-message')).toBeVisible();
+  await expect(status.locator('.output-skeleton')).toBeHidden();
+  await expect(status).not.toHaveAttribute('aria-busy', 'true');
   expect(await drive(page, 'terminalMounted')).toBe(true);
 });
 
@@ -418,50 +508,108 @@ test('a socket loss reconnects and re-seeds without keeping a stale line', async
   await drive(page, 'pushClose', 1006, 'lost');
   await expect.poll(() => drive(page, 'connectCalls')).toBeGreaterThan(1);
   await expect(status).toBeVisible();
-  await expect(status).toHaveText('Reconnecting…');
+  await expect(status).toHaveAttribute('aria-busy', 'true');
+  await expect(status).toContainText('Reconnecting…');
+  await expect(status.locator('.output-skeleton')).toBeVisible();
+  await expect.poll(() => status.locator('.skeleton').count()).toBeGreaterThanOrEqual(6);
+  await expect(status.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
   const message = status.locator('.streamed-terminal-status-message');
-  await expect(message).toBeVisible();
-  await expect(message).toHaveCSS('background-color', 'rgb(249, 226, 175)');
-  await expect(message).toHaveCSS('background-image', 'none');
-  await expect(message).toHaveCSS('color', 'rgb(0, 0, 0)');
+  await expect(message).toHaveClass(/sr-only/u);
   expect(await drive<string>(page, 'screenText')).toContain('STALE-LINE');
   await expect(page.locator('#term .streamed-terminal-cover')).toHaveCount(0);
-  // measure the solid status itself rather than its full-pane cached-output treatment
+  // keep the skeleton inside the pane at each supported width
   for (const viewport of [{ label: 'desktop', width: 1440, height: 900 }, { label: 'phone', width: 320, height: 640 }]) {
     await page.setViewportSize(viewport);
-    const [badgeBounds, paneBounds] = await Promise.all([message.boundingBox(), page.locator('#term').boundingBox()]);
-    // require visible geometry before comparing centers
-    if (badgeBounds === null || paneBounds === null) throw new Error('reconnect badge or output pane is not visible');
-    expect(badgeBounds.x + badgeBounds.width / 2 - paneBounds.x - paneBounds.width / 2).toBeCloseTo(0, 0);
-    expect(badgeBounds.y + badgeBounds.height / 2 - paneBounds.y - paneBounds.height / 2).toBeCloseTo(0, 0);
-    // inspect the retained cached-output border and hatching
+    const [skeletonBounds, paneBounds] = await Promise.all([status.locator('.output-skeleton').boundingBox(), page.locator('#term').boundingBox()]);
+    // require visible geometry before comparing bounds
+    if (skeletonBounds === null || paneBounds === null) throw new Error('reconnect skeleton or output pane is not visible');
+    expect(skeletonBounds.x).toBeGreaterThanOrEqual(paneBounds.x);
+    expect(skeletonBounds.x + skeletonBounds.width).toBeLessThanOrEqual(paneBounds.x + paneBounds.width);
+    expect(skeletonBounds.y).toBeGreaterThanOrEqual(paneBounds.y);
+    expect(skeletonBounds.y + skeletonBounds.height).toBeLessThanOrEqual(paneBounds.y + paneBounds.height);
+    // reject the retired cached-output border and hatching
     const appearance = await status.evaluate(element => {
       const backdrop = getComputedStyle(element, '::before');
       return {
-        backdropFilter: backdrop.backdropFilter,
-        filter: backdrop.filter,
-        background: backdrop.backgroundColor,
         hatching: backdrop.backgroundImage,
         borderWidth: backdrop.borderTopWidth,
-        borderStyle: backdrop.borderTopStyle,
-        borderColor: backdrop.borderTopColor
+        borderStyle: backdrop.borderTopStyle
       };
     });
-    expect(appearance.backdropFilter).toBe('none');
-    expect(appearance.filter).toBe('none');
-    expect(appearance.background).toBe('rgba(0, 0, 0, 0)');
-    expect(appearance.hatching).toContain('repeating-linear-gradient(135deg,');
-    expect(appearance.borderWidth).toBe('2px');
-    expect(appearance.borderStyle).toBe('solid');
-    // tolerate color-mix rounding while checking the yellow palette and opacity
-    expect(appearance.borderColor).toMatch(/color\(srgb 0\.97647\d* 0\.88627\d* 0\.68627\d* \/ 0\.58\)/u);
+    expect(appearance.hatching).toBe('none');
+    expect(appearance.borderWidth).toBe('0px');
+    expect(appearance.borderStyle).toBe('none');
+    // capture the requested reconnect evidence on demand
+    if (process.env.SHOT_DIR) await page.locator('#term').screenshot({ path: `${process.env.SHOT_DIR}/output-reconnecting-${viewport.label}.png` });
     await page.locator('#term').screenshot({ path: test.info().outputPath(`output-reconnecting-${viewport.label}.png`) });
   }
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  expect(await status.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
+  // capture the static phone state on demand
+  if (process.env.SHOT_DIR) await page.locator('#term').screenshot({ path: `${process.env.SHOT_DIR}/output-reconnecting-phone-reduced-motion.png` });
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
   await drive(page, 'pushSize', 40, 10);
   await expect(status).toBeVisible();
   await drive(page, 'pushBytes', 'AFTER-RECONNECT\r\n');
   await expect.poll(() => drive(page, 'screenText')).toContain('AFTER-RECONNECT');
   expect(await drive<string>(page, 'screenText')).not.toContain('STALE-LINE');
+  await expect(status).toBeHidden();
+});
+
+test('blocks cached links and jump controls behind a reconnect skeleton', async ({ page }) => {
+  await setup(page, { captureOpenUrls: true, reconnectDelayMs: 10, scrollback: 500, width: '100%' });
+  await drive(page, 'pushSize', 80, 10);
+  let payload = '';
+  // create cached scrollback with one semantic link
+  for (let line = 1; line <= 60; line += 1) payload += `row-${line}\r\n`;
+  payload += 'see https://example.com/docs';
+  await drive(page, 'pushBytes', payload);
+  const link = page.locator('#term .output-link-overlay');
+  await expect(link).toHaveCount(1);
+  await drive(page, 'scrollUp', 20);
+  const jump = page.getByRole('button', { name: 'Jump to latest' });
+  await expect(jump).toBeVisible();
+
+  await drive(page, 'pushClose', 1006, 'lost');
+  await expect.poll(() => drive(page, 'connectCalls')).toBe(2);
+  await expect(page.locator('#term .output-skeleton')).toBeVisible();
+  await expect(link).toBeHidden();
+  await expect(jump).toBeHidden();
+  await page.evaluate(() => { document.body.tabIndex = -1; document.body.focus(); });
+  await page.keyboard.press('Tab');
+  expect(await page.evaluate(() => document.activeElement?.matches('.output-link-overlay, .streamed-terminal-jump') ?? false)).toBe(false);
+
+  await drive(page, 'pushSize', 80, 10);
+  await drive(page, 'pushBytes', payload);
+  await expect(page.locator('#term .streamed-terminal-status')).toBeHidden();
+  await expect(link).toBeVisible();
+  await drive(page, 'scrollUp', 20);
+  await expect(jump).toBeVisible();
+});
+
+test('keeps the replacement skeleton while a superseded seed parser completes', async ({ page }) => {
+  await setup(page, { reconnectDelayMs: 10 });
+  const status = page.locator('#term .streamed-terminal-status');
+  await drive(page, 'setOutputPaused', true);
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'OLD-SEED'.repeat(20_000));
+  await expect(status).toBeVisible();
+  const stayedVisible = await page.evaluate(async () => {
+    const module = await import('/e2e/streamed-terminal-fixture.ts');
+    module.setOutputPaused(false);
+    const visible = document.querySelector<HTMLElement>('#term .streamed-terminal-status')?.hidden === false;
+    module.pushClose(1006, 'superseded');
+    return visible;
+  });
+  expect(stayedVisible).toBe(true);
+  await expect.poll(() => drive(page, 'connectCalls')).toBe(2);
+  await page.waitForTimeout(100);
+  await expect(status).toBeVisible();
+  await expect(status).toContainText('Reconnecting…');
+  await expect(status.locator('.output-skeleton')).toBeVisible();
+  await drive(page, 'pushSize', 40, 10);
+  await drive(page, 'pushBytes', 'NEW-SEED');
+  await expect.poll(() => drive(page, 'screenText')).toContain('NEW-SEED');
   await expect(status).toBeHidden();
 });
 

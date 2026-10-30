@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 
 const pullRequest = { number: 142, title: 'Retry GitHub queries', status: 'open', url: 'https://github.com/octo/repo/pull/142', checks: 'passed', issues: { unresolvedComments: true }, unresolvedThreads: 2 };
 const worktree = {
@@ -20,7 +20,7 @@ const comments = {
 };
 
 // mount one agent whose worktree branch has an open pull request
-async function mount(page: Page, onComments: () => void = () => {}) {
+async function mount(page: Page, onComments: () => void = () => {}, loadRepository: (route: Route) => Promise<unknown> = route => route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } })) {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
@@ -28,7 +28,7 @@ async function mount(page: Page, onComments: () => void = () => {}) {
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/[^/]+\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/[^/]+\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
-    if (/^\/api\/agents\/[^/]+\/switch-prs$/u.test(url.pathname)) return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
+    if (/^\/api\/worktrees\/[^/]+\/switch-prs$/u.test(url.pathname)) return loadRepository(route);
     if (url.pathname === '/api/worktrees/active/pull-request/comments') {
       onComments();
       return route.fulfill({ json: comments });
@@ -86,6 +86,25 @@ test('adds one unresolved review thread to the prompt from the PR card', async (
     '> @tony: Not intended.'
   ].join('\n'));
   expect(reads).toBe(1);
+});
+
+test('replaces open comments with a retryable repository failure', async ({ page }) => {
+  let finishRepositoryRead!: () => void;
+  // hold the repository read until comments are visible
+  const repositoryReadFinished = new Promise<void>(resolve => { finishRepositoryRead = resolve; });
+  await mount(page, () => {}, async route => {
+    await repositoryReadFinished;
+    return route.fulfill({ status: 502, json: { error: 'GitHub is unavailable' } });
+  });
+
+  const commentsPanel = await openComments(page);
+  finishRepositoryRead();
+
+  await expect(commentsPanel.getByText('PR comments', { exact: true })).toHaveCount(0);
+  const branchFlyout = page.getByRole('region', { name: 'Changed files' });
+  await expect(branchFlyout.getByRole('alert')).toContainText('GitHub is unavailable');
+  await expect(branchFlyout.getByRole('button', { name: 'Retry repository choices' })).toBeVisible();
+  await expect(branchFlyout.getByRole('tab', { name: 'Working', exact: true })).toHaveAttribute('aria-selected', 'true');
 });
 
 test('adds several picked comments as one numbered prompt and shows filtered ones on request', async ({ page }) => {

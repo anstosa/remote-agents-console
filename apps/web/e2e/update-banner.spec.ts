@@ -14,6 +14,163 @@ const openUpstreamUpdate = async (page: Page) => {
 // let React consume one completed mock response and paint its resulting state
 const settleBrowserFrames = (page: Page) => page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 
+// use semantic skeletons for version metadata reads without borrowing mutation rings
+test('skeletonizes agent and server versions while their reads are pending', async ({ page }) => {
+  let releaseAgents!: () => void;
+  let releaseRevision!: () => void;
+  const agentsFinished = new Promise<void>(resolve => { releaseAgents = resolve; });
+  const revisionFinished = new Promise<void>(resolve => { releaseRevision = resolve; });
+  const revisionSha = 'a1b2c3d4e5f6789012345678901234567890abcd';
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    // restore one controlling session and named server
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', server: { name: 'Test server', url: 'https://agents.example.com', remotes: [] } } });
+    // expose one configured agent kind
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } }, agents: [], projects: [], scratchLaunch: { kind: 'codex', origin: 'default' } } });
+    if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
+    if (url.pathname === '/api/codex/accounts') return route.fulfill({ json: { accounts: [] } });
+    // hold the background provider version read
+    if (url.pathname === '/api/agents/updates') {
+      await agentsFinished;
+      return route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '0.153.2', latestVersion: '0.154.0', updateAvailable: true }] } });
+    }
+    // hold the server revision read opened from its selector
+    if (url.pathname === '/api/server/revision') {
+      await revisionFinished;
+      return route.fulfill({ json: { sha: revisionSha, committedAt: '2026-09-06T14:22:31-07:00' } });
+    }
+    if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: false } });
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^(Choose agent|Launch agent)$/u }).click();
+  const menu = page.getByRole('menu', { name: 'Choose agent', exact: true });
+  const codex = menu.getByRole('group', { name: 'Codex agent' });
+  try {
+    await expect(codex.locator('.launch-agent-version-skeleton')).toHaveCount(1);
+    await expect(codex.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
+  } finally {
+    // release the provider read during failed assertions too
+    releaseAgents();
+  }
+  await expect(codex.locator('.launch-agent-version')).toHaveText('v0.153.2 → v0.154.0');
+  await page.keyboard.press('Escape');
+
+  const selector = page.getByRole('button', { name: /^Switch server/u });
+  await selector.click();
+  const server = page.getByRole('group', { name: 'Current server details' });
+  try {
+    await expect(server.getByLabel('Loading server revision')).toBeVisible();
+    await expect(server.locator('.server-menu-revision-skeleton .skeleton')).toHaveCount(2);
+    await expect(server.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    expect(await server.locator('.server-menu-revision-skeleton').evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
+  } finally {
+    // release the revision read during failed assertions too
+    releaseRevision();
+  }
+  await expect(server.getByText(revisionSha.slice(0, 7))).toBeVisible();
+});
+
+// serialize periodic version reads and publish only the newest scheduled result
+test('coalesces agent-version polling without publishing stale or failed snapshots', async ({ page }) => {
+  let releaseFirst!: () => void;
+  let releaseSecond!: () => void;
+  let releaseFailure!: () => void;
+  let updateReads = 0;
+  const firstFinished = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const secondFinished = new Promise<void>(resolve => { releaseSecond = resolve; });
+  const failureFinished = new Promise<void>(resolve => { releaseFailure = resolve; });
+  await page.clock.install({ time: new Date('2026-10-29T12:00:00-07:00') });
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    // restore one controlling session
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // expose one configured agent kind
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } }, agents: [], projects: [], scratchLaunch: { kind: 'codex', origin: 'default' } } });
+    if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
+    if (url.pathname === '/api/codex/accounts') return route.fulfill({ json: { accounts: [] } });
+    if (url.pathname === '/api/agents/updates') {
+      updateReads += 1;
+      // hold each scheduled owner independently
+      if (updateReads === 1) {
+        await firstFinished;
+        return route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '0.150.0', latestVersion: '0.150.0', updateAvailable: false }] } });
+      }
+      if (updateReads === 2) {
+        await secondFinished;
+        return route.fulfill({ json: { agents: [{ kind: 'codex', currentVersion: '0.154.0', latestVersion: '0.155.0', updateAvailable: true }] } });
+      }
+      await failureFinished;
+      return route.fulfill({ status: 503, json: { error: 'version provider unavailable' } });
+    }
+    if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: false } });
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^(Choose agent|Launch agent)$/u }).click();
+  const codex = page.getByRole('menu', { name: 'Choose agent', exact: true }).getByRole('group', { name: 'Codex agent' });
+  await expect.poll(() => updateReads).toBe(1);
+  await expect(codex.locator('.launch-agent-version-skeleton')).toHaveCount(1);
+
+  await page.clock.fastForward(15 * 60 * 1_000);
+  expect(updateReads).toBe(1);
+  releaseFirst();
+  await expect.poll(() => updateReads).toBe(2);
+  await expect(codex.locator('.launch-agent-version-skeleton')).toHaveCount(1);
+  await expect(codex).not.toContainText('v0.150.0');
+  releaseSecond();
+  await expect(codex.locator('.launch-agent-version')).toHaveText('v0.154.0 → v0.155.0');
+  await expect(codex.locator('.launch-agent-version-skeleton')).toHaveCount(0);
+
+  await page.clock.fastForward(15 * 60 * 1_000);
+  await expect.poll(() => updateReads).toBe(3);
+  await expect(codex.locator('.launch-agent-version-skeleton')).toHaveCount(1);
+  releaseFailure();
+  await expect(codex.locator('.launch-agent-version-skeleton')).toHaveCount(0);
+  await expect(codex.locator('.launch-agent-version')).toHaveText('v0.154.0 → v0.155.0');
+});
+
+// reserve commit cards while the reviewed host update range is loading
+test('shows commit skeleton cards while loading an update preview', async ({ page }) => {
+  let releasePreview!: () => void;
+  const previewFinished = new Promise<void>(resolve => { releasePreview = resolve; });
+  const targetSha = '2'.repeat(40);
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    // restore one controlling session and named server
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device', server: { name: 'Test server', url: 'https://agents.example.com', remotes: [] } } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [], projects: [] } });
+    if (url.pathname === '/api/server/update-available') return route.fulfill({ json: { available: true } });
+    if (url.pathname === '/api/server/revision') return route.fulfill({ json: { sha: '1'.repeat(40), committedAt: '2026-09-06T14:22:31-07:00' } });
+    // hold the exact update range read
+    if (url.pathname === '/api/server/update-preview') {
+      await previewFinished;
+      return route.fulfill({ json: { available: true, rebuildRetryAvailable: false, baseSha: '1'.repeat(40), targetSha, fastForwardable: true, commitCount: 1, commits: [{ sha: targetSha, subject: 'Add safer update review', author: 'Ansel', authoredAt: '2026-08-27T12:00:00-07:00' }], commitsTruncated: false, filesTruncated: false, advisory: { required: false, reasons: [] } } });
+    }
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  await openUpstreamUpdate(page);
+  const dialog = page.getByRole('dialog', { name: 'Review update' });
+  try {
+    await expect(dialog.getByRole('status', { name: 'Loading commits' })).toBeVisible();
+    await expect(dialog.locator('.commit-skeleton')).toHaveCount(3);
+    await expect(dialog.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
+  } finally {
+    // release the preview read during failed assertions too
+    releasePreview();
+  }
+  await expect(dialog.getByText('Add safer update review')).toBeVisible();
+  await expect(dialog.locator('.commit-skeleton')).toHaveCount(0);
+});
+
 test('keeps the embedded update advisor out of the main agent tabs', async ({ page }) => {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());

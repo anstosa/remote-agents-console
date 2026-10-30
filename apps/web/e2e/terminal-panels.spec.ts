@@ -197,6 +197,15 @@ test('lists panes with the agent and a claimed window disabled, and opens a colu
   await expect(header.locator(':scope > *').first()).toHaveClass(/\bpane-status\b/u);
   await expect(status).toHaveAttribute('role', 'status');
   await expect(header.locator('.pane-dot, .pane-live')).toHaveCount(0);
+  const outputStatus = column.locator('.streamed-terminal-status');
+  await expect(outputStatus).toBeVisible();
+  await expect(outputStatus).toHaveAttribute('aria-busy', 'true');
+  const terminalSkeleton = outputStatus.locator('.output-skeleton-terminal');
+  await expect(terminalSkeleton).toBeVisible();
+  await expect(terminalSkeleton.locator('.output-skeleton-command')).not.toHaveCount(0);
+  await expect.poll(() => terminalSkeleton.locator('.output-skeleton-output-row').count()).toBeGreaterThanOrEqual(6);
+  await expect.poll(() => terminalSkeleton.locator('.skeleton').count()).toBeGreaterThanOrEqual(6);
+  await expect(outputStatus.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
   // resolve the theme yellow
   const yellow = await page.evaluate(() => {
     const probe = document.createElement('span');
@@ -231,9 +240,15 @@ test('lists panes with the agent and a claimed window disabled, and opens a colu
   const connects = await paneConnectCount(page, '%5');
   await dropPane(page, '%5');
   await expect(status).toHaveText('Reconnecting…');
+  await expect(outputStatus).toBeVisible();
+  await expect(outputStatus).toHaveAttribute('aria-busy', 'true');
+  await expect(outputStatus).toContainText('Reconnecting…');
+  await expect(outputStatus.locator('.output-skeleton-terminal')).toBeVisible();
+  await expect(outputStatus.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
   await expect.poll(() => paneConnectCount(page, '%5'), { timeout: 5000 }).toBeGreaterThan(connects);
   await seedPaneSize(page, '%5', 80, 24);
   await pushBytes(page, '%5', 'shell back\r\n');
+  await expect(outputStatus).toBeHidden();
   await expect(status).toHaveCount(0);
   await expect(page.locator('.log-split.has-terminals')).toBeVisible();
   // a resizer sits between the agent and the new column

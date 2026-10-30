@@ -420,7 +420,15 @@ test('waits for MCP tools and requests a spoken follow-up after tool completion'
   await page.locator('.tab-row-lead').getByRole('button', { name: 'Call Davo' }).click();
   const calling = page.getByRole('button', { name: 'Calling...' });
   await expect(calling).toBeVisible();
+  const chatArea = page.locator('.voice-transcript-shell');
+  await expect(chatArea).toHaveClass(/progress-border/u);
+  await expect(chatArea).toHaveClass(/progress-green/u);
+  await expect(chatArea).toHaveClass(/progress-loading/u);
+  await expect(calling).not.toHaveClass(/progress-/u);
+  await expect(page.locator('.voice-tool-status')).not.toHaveClass(/progress-/u);
   await expect(page.locator('.tab-row-lead .server-switcher-voice')).toBeHidden();
+  // capture the voice-area loading ring on demand
+  if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/voice-desktop.png` });
   // keep Davo at phone width beside the usable desktop UI
   const split = await page.evaluate(() => {
     const voice = document.querySelector<HTMLElement>('.voice-dialog')?.getBoundingClientRect();
@@ -445,6 +453,7 @@ test('waits for MCP tools and requests a spoken follow-up after tool completion'
   expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(false);
   await page.evaluate(() => (window as unknown as { davoChannel: EventTarget }).davoChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'mcp_list_tools.completed' }) })));
   await expect(page.getByRole('button', { name: 'Hang up' })).toBeVisible();
+  await expect(chatArea).not.toHaveClass(/progress-/u);
   await expect(page.locator('audio.voice-ringing')).toHaveCount(0);
   expect(await page.evaluate(() => (window as unknown as { davoTrack: { enabled: boolean } }).davoTrack.enabled)).toBe(true);
   await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string; response?: { instructions?: string; tools?: unknown[] } }).find(value => value.type === 'response.create'))).toMatchObject({ response: { instructions: expect.stringMatching(/caller.*active worktree is Cora/u), tools: [] } });
@@ -536,6 +545,10 @@ test('waits for MCP tools and requests a spoken follow-up after tool completion'
   });
   await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string }).filter(value => value.type === 'response.create').length)).toBe(2);
   await expect(page.locator('.voice-tool-status')).toContainText('concurrent_b');
+  await expect(chatArea).toHaveClass(/progress-border/u);
+  await expect(chatArea).toHaveClass(/progress-peach/u);
+  await expect(chatArea).not.toHaveClass(/progress-loading/u);
+  await expect(page.locator('.voice-tool-status')).not.toHaveClass(/progress-/u);
   await page.evaluate(() => {
     const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;
     data.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.mcp_call.completed', item_id: 'mcp-concurrent-b' }) }));
@@ -543,6 +556,7 @@ test('waits for MCP tools and requests a spoken follow-up after tool completion'
   });
   await expect.poll(() => page.evaluate(() => (window as unknown as { davoChannel: { sent: string[] } }).davoChannel.sent.map(value => JSON.parse(value) as { type: string }).filter(value => value.type === 'response.create').length)).toBe(3);
   await expect(page.locator('.voice-tool-status')).toHaveCount(0);
+  await expect(chatArea).not.toHaveClass(/progress-/u);
   // retain one failed MCP lifecycle with its error detail
   await page.evaluate(() => {
     const data = (window as unknown as { davoChannel: EventTarget }).davoChannel;

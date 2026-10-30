@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useRealtimeVoice, type ToolTranscriptEntry, type TranscriptEntry } from './use-realtime-voice.js';
+import './loading.css';
 
 type Request = (url: string, init?: RequestInit) => Promise<Response>;
 export type VoiceWorktree = { id: string; label: string };
@@ -279,6 +280,11 @@ export function VoiceDialog({ name, open, callRequest, context, request, onClose
   // keep the dialog absent from the accessibility tree while closed
   if (!open) return null;
   const soundwaveStyle = { '--mic-level': voice.inputLevel.toFixed(3), '--davo-level': voice.outputLevel.toFixed(3) } as CSSProperties;
+  // let connection setup win over overlapping tool work
+  const chatProgressClass = voice.state === 'connecting'
+    ? ' progress-border progress-green progress-loading'
+    : voice.state === 'connected' && voice.toolStatus ? ' progress-border progress-peach' : '';
+  const chatBusy = chatProgressClass !== '';
   return <div className="dialog voice-dialog" role="dialog" aria-modal={window.matchMedia('(max-width: 600px)').matches} aria-labelledby="voice-title">
     <div style={soundwaveStyle}>
       <div className="voice-soundwaves" aria-hidden="true"><div className="voice-soundwave davo">{soundwaveBars.map(index => <i key={index} style={{ animationDelay: `${index * -47}ms` }} />)}</div><div className="voice-soundwave mic">{soundwaveBars.map(index => <i key={index} style={{ animationDelay: `${index * -47}ms` }} />)}</div></div>
@@ -288,18 +294,22 @@ export function VoiceDialog({ name, open, callRequest, context, request, onClose
         <div className="voice-context-card voice-context-server"><small>Server / instance</small><strong>{connection.server}</strong>{connection.serverLocation && <span>{connection.serverLocation}</span>}</div>
         <div className="voice-context-card voice-context-open"><small>Other open worktrees</small>{openWorktrees}</div>
       </section>
-      <section ref={transcript} className="voice-transcript" aria-live="polite">
-        <div className="voice-history-toolbar"><strong>History</strong><label className="voice-history-search"><span className="sr-only">Search {assistantName} history</span><input type="search" value={historyQuery} placeholder="Search history" onChange={event => setHistoryQuery(event.target.value)} /></label></div>
-        {history}
-      </section>
-      {voice.toolStatus && <p className={`voice-tool-status progress-border progress-peach${voice.state === 'connecting' ? ' progress-loading' : ''}`} aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />{voice.toolStatus}</p>}
+      <div className={`voice-transcript-shell${chatProgressClass}`} aria-busy={chatBusy || undefined}>
+        {/* keep the border outside the independently scrolling transcript */}
+        {chatBusy && <span className="update-progress-ring" aria-hidden="true" />}
+        <section ref={transcript} className="voice-transcript" aria-live="polite">
+          <div className="voice-history-toolbar"><strong>History</strong><label className="voice-history-search"><span className="sr-only">Search {assistantName} history</span><input type="search" value={historyQuery} placeholder="Search history" onChange={event => setHistoryQuery(event.target.value)} /></label></div>
+          {history}
+        </section>
+      </div>
+      {voice.toolStatus && <p className="voice-tool-status" aria-busy="true">{voice.toolStatus}</p>}
       {voice.error && <p className="auth-error" role="alert">{voice.error}</p>}
       {voice.state === 'connecting' && <audio className="voice-ringing" src="/davo-ring.wav" autoPlay loop aria-hidden="true" />}
       <audio ref={hangupSound} className="voice-hangup-sound" src="/davo-hangup.wav" preload="auto" aria-hidden="true" />
       <footer>
         {voice.state === 'idle' || voice.state === 'error'
           ? <button type="button" className="voice-start" onClick={() => void voice.start()}>Call {assistantName}</button>
-          : <div className="voice-call-actions"><button type="button" className="voice-mute" aria-pressed={voice.muted} disabled={voice.state === 'connecting'} onClick={voice.toggleMute}>{voice.muted ? 'Unmute' : 'Mute'}</button><button type="button" className={`voice-stop${voice.state === 'connecting' ? ' progress-border progress-green progress-loading' : ''}`} aria-busy={voice.state === 'connecting' || undefined} disabled={voice.state === 'connecting'} onClick={voice.stop}>{voice.state === 'connecting' && <span className="update-progress-ring" aria-hidden="true" />}{voice.state === 'connecting' ? 'Calling...' : 'Hang up'}</button></div>}
+          : <div className="voice-call-actions"><button type="button" className="voice-mute" aria-pressed={voice.muted} disabled={voice.state === 'connecting'} onClick={voice.toggleMute}>{voice.muted ? 'Unmute' : 'Mute'}</button><button type="button" className="voice-stop" aria-busy={voice.state === 'connecting' || undefined} disabled={voice.state === 'connecting'} onClick={voice.stop}>{voice.state === 'connecting' ? 'Calling...' : 'Hang up'}</button></div>}
         <small>Hanging up does not cancel agent work.</small>
       </footer>
     </div>

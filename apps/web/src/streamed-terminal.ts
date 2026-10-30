@@ -20,6 +20,8 @@ export interface StreamedTerminalOptions {
   scrollback?: number;
   // prefer ordinary text selection over application mouse gestures in agent output
   preferNativeMouseSelection?: boolean;
+  // mirror transcript or shell geometry while the connection is pending
+  loadingKind?: 'agent' | 'terminal';
   // route codex/omx's app-owned transcript scrolling and return control
   codexScrollControls?: boolean;
   // Route a same-stack URL into the in-app browser; return true when it was handled.
@@ -59,6 +61,51 @@ export interface StreamedTerminalHandle {
 
 const coarsePointer = () => window.matchMedia('(pointer: coarse)').matches;
 
+// build decorative transcript or shell groups without inventing output text
+const createOutputSkeletonGroup = (kind: 'agent' | 'terminal'): HTMLElement => {
+  const group = document.createElement('div');
+  group.className = 'output-skeleton-group';
+  // share the existing skeleton paint across content-shaped segments
+  const bar = (width: string, className = '') => {
+    const segment = document.createElement('span');
+    segment.className = `skeleton output-skeleton-line${className ? ` ${className}` : ''}`;
+    segment.style.width = width;
+    return segment;
+  };
+  // retain distinct prompt and output indentation without real controls
+  const row = (className: string, widths: string[]) => {
+    const line = document.createElement('div');
+    line.className = className;
+    // preserve spaces between prompt fields or output columns
+    for (const width of widths) line.append(bar(width));
+    return line;
+  };
+  // agent output alternates prompts, prose and indented tool activity
+  if (kind === 'agent') {
+    group.append(row('output-skeleton-prompt', ['.65em', '68%']));
+    const paragraph = document.createElement('div');
+    paragraph.className = 'output-skeleton-paragraph';
+    // shape a wrapped assistant paragraph with a shorter final line
+    for (const width of ['92%', '86%', '96%', '61%']) paragraph.append(bar(width));
+    const tool = document.createElement('div');
+    tool.className = 'output-skeleton-tool';
+    tool.append(row('output-skeleton-tool-heading', ['.7em', '28%']));
+    // indent the command and its bounded output beneath the tool heading
+    for (const width of ['66%', '81%', '49%']) tool.append(bar(width));
+    const followup = paragraph.cloneNode(true) as HTMLElement;
+    followup.lastElementChild?.remove();
+    group.append(paragraph, tool, followup);
+  } else {
+    group.append(row('output-skeleton-command', ['19%', '.55em', '42%']));
+    // alternate dense shell lines with short status and listing columns
+    for (const widths of [['9%', '33%', '14%'], ['12%', '41%', '18%'], ['8%', '27%', '12%'], ['76%'], ['91%'], ['67%'], ['11%', '36%', '21%'], ['82%'], ['53%']]) {
+      group.append(row('output-skeleton-output-row', widths));
+    }
+    group.append(row('output-skeleton-command', ['16%', '.55em', '31%']));
+  }
+  return group;
+};
+
 // mount one streamed pane with its local output controls
 export const mountStreamedTerminal = (container: HTMLElement, options: StreamedTerminalOptions): StreamedTerminalHandle => {
   const reconnectDelayMs = options.reconnectDelayMs ?? 1000;
@@ -82,8 +129,32 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   // separate the solid notice from the cached-output treatment
   const statusMessage = document.createElement('span');
   statusMessage.className = 'streamed-terminal-status-message';
-  status.append(statusMessage);
+  // reserve content-shaped geometry without mounting a second renderer
+  const outputSkeleton = document.createElement('div');
+  const loadingKind = options.loadingKind ?? 'terminal';
+  outputSkeleton.className = `output-skeleton output-skeleton-${loadingKind}`;
+  outputSkeleton.setAttribute('aria-hidden', 'true');
+  outputSkeleton.hidden = true;
+  const skeletonGroup = createOutputSkeletonGroup(loadingKind);
+  outputSkeleton.append(skeletonGroup);
+  status.append(statusMessage, outputSkeleton);
   container.append(status);
+
+  // repeat measured content groups through the entire available output height
+  const syncOutputSkeleton = () => {
+    // live output and explicit errors have no pending artwork to resize
+    if (status.hidden || outputSkeleton.hidden) return;
+    outputSkeleton.style.fontSize = `${readTerminalFontSize()}px`;
+    const groupHeight = skeletonGroup.getBoundingClientRect().height;
+    // defer measurement while a minimized or unmounted split has no geometry
+    if (groupHeight <= 0) return;
+    const gap = Number.parseFloat(getComputedStyle(outputSkeleton).rowGap) || 0;
+    const groups = Math.max(1, Math.ceil(outputSkeleton.clientHeight / (groupHeight + gap)) + 1);
+    // extend the content below the clipping edge without leaving a blank footer
+    while (outputSkeleton.childElementCount < groups) outputSkeleton.append(skeletonGroup.cloneNode(true));
+    // discard offscreen groups after the split shrinks or text grows
+    while (outputSkeleton.childElementCount > groups) outputSkeleton.lastElementChild?.remove();
+  };
 
   const jump = document.createElement('button');
   jump.type = 'button';
@@ -302,7 +373,6 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
       terminal.reset();
       overlays.clear();
       awaitingSeed = false;
-      hideStatus();
     }
     writePending = true;
     const source = connection;
@@ -327,8 +397,11 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
         if (disposed) return;
         // acknowledge only the connection that supplied these bytes
         if (connection === source) source?.send({ type: 'ack', bytes: bytes.length });
-        // only the current stream's successfully parsed seed can restore app-owned controls
-        if (wasSeed && connection === source && generation === outputGeneration) parsedSeedGeneration = generation;
+        // only the current parsed seed can reveal output and restore app-owned controls
+        if (wasSeed && connection === source && generation === outputGeneration) {
+          parsedSeedGeneration = generation;
+          hideStatus();
+        }
         scheduleOverlayRender();
         syncFollowState();
         // uncover the first populated frame
@@ -357,15 +430,23 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     scheduleOverlayRender();
   };
 
-  // update the notice without replacing its styled container
+  // skeletonize connection waits while retaining explicit failure notices
   const showStatus = (text: string) => {
+    const pending = text === 'Connecting' || text === 'Reconnecting…' || text === 'Refreshing output…';
+    status.classList.toggle('loading', pending);
+    status.setAttribute('aria-busy', String(pending));
+    statusMessage.classList.toggle('sr-only', pending);
+    outputSkeleton.hidden = !pending;
     statusMessage.textContent = text;
     status.hidden = false;
+    syncOutputSkeleton();
     container.dataset.status = text;
     options.onStatus?.(text);
   };
+  // settle the same notice when a fresh stream seed arrives
   const hideStatus = () => {
     status.hidden = true;
+    status.setAttribute('aria-busy', 'false');
     delete container.dataset.status;
     options.onStatus?.(undefined);
   };
@@ -595,11 +676,13 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
   jump.addEventListener('pointerdown', preserveJumpFocus);
   jump.addEventListener('click', jumpToBottom);
 
+  // refit the terminal and its loading geometry to the same font size
   const unsubscribeFont = subscribeTerminalFontSize(() => {
     if (disposed) return;
     const px = readTerminalFontSize();
     terminal.options.fontSize = px;
     if (terminal.element) terminal.element.style.fontSize = `${px}px`;
+    syncOutputSkeleton();
     scheduleViewport();
     scheduleOverlayRender();
   });
@@ -612,13 +695,17 @@ export const mountStreamedTerminal = (container: HTMLElement, options: StreamedT
     scheduleOverlayRender();
   });
 
+  // share one resize observer for terminal layout and full-height placeholders
   const resizeObserver = new ResizeObserver(() => {
     if (disposed) return;
+    syncOutputSkeleton();
     scheduleViewport();
     scheduleOverlayRender();
   });
   resizeObserver.observe(container);
 
+  // cover initial connection with the same skeleton used by automatic retries
+  showStatus('Connecting');
   subscribe();
 
   return {

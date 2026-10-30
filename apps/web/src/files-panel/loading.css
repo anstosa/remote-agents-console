@@ -1,0 +1,53 @@
+.files-row-skeleton {
+  min-height: 2.1rem;
+  pointer-events: none;
+}
+
+.files-grid .files-row-skeleton:hover {
+  background: transparent;
+}
+
+.files-row-skeleton > span {
+  display: flex;
+  align-items: center;
+}
+
+.files-row-skeleton .files-skeleton-cell {
+  display: block;
+  width: 68%;
+  height: .68rem;
+  border-radius: .3rem;
+}
+
+.files-row-skeleton .files-skeleton-name {
+  width: 76%;
+}
+
+.files-row-skeleton .files-skeleton-owner {
+  width: 58%;
+}
+
+.files-row-skeleton .files-skeleton-permissions {
+  width: 82%;
+}
+
+.files-row-skeleton .files-skeleton-modified {
+  width: 72%;
+}
+
+.files-row-skeleton .files-skeleton-size {
+  width: 54%;
+}
+
+.files-row-skeleton .files-skeleton-actions {
+  width: 1rem;
+  height: 1rem;
+  margin: 0 auto;
+  border-radius: 50%;
+}
+
+@media (max-width: 600px) {
+  .files-grid .files-row-skeleton > span:nth-child(4)::before {
+    content: none;
+  }
+}

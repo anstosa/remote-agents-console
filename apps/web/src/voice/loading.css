@@ -1,0 +1,18 @@
+.voice-transcript-shell {
+  position: relative;
+  isolation: isolate;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+  border-radius: var(--control-radius);
+}
+
+.voice-transcript-shell > .voice-transcript {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.voice-dialog .voice-transcript-shell > .update-progress-ring {
+  inset: 0;
+}

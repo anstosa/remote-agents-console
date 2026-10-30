@@ -7,9 +7,8 @@
 // so the component can be driven by a real WebSocket in the app and by a scripted
 // socket in tests.
 
-// The latest Turn's assistant message and whether it overflowed the capture, for the
-// Agent pane's notes and response-file fly-out. The derive owns the shape; the
-// component only forwards it.
+// the latest assistant response and capture overflow feed notes
+// the derive owns the shape; the component only forwards it
 export interface PaneMetadata {
   message: string;
   overflow: boolean;

@@ -4,10 +4,12 @@ import { FlyoutPortal } from '../flyout-portal.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand, usePhoneLayout } from '../panel-header.js';
 import { useViewportFlyout } from '../viewport-flyout.js';
 import { OpenFolderContext } from '../open-folder.js';
+import { Skeleton } from '../skeleton.js';
 import type { FileSortColumn, FilesController } from './controller.js';
 import { formatFileSize, formatModifiedAt } from './format.js';
 import { FileIcon } from './file-icon.js';
 import type { CollisionDecision, Favorite, FileEntry, FilesError, OperationConflict, OperationResult, PreparedOperation, UploadPreparation } from './contracts.js';
+import './loading.css';
 
 type NameDialog = { kind: 'create-file' | 'create-folder' | 'rename'; title: string; value: string; destinationDirectoryToken: string; entry?: FileEntry };
 type PendingAction = { kind: 'operation'; prepared: PreparedOperation; entries: { name: string }[] } | { kind: 'upload'; prepared: UploadPreparation; files: File[] };
@@ -28,6 +30,22 @@ const isDirectory = (entry: FileEntry): boolean => entry.kind === 'directory' ||
 const isPreviewable = (entry: FileEntry): boolean => entry.kind === 'file' || entry.kind === 'symlink' && entry.symlinkTargetKind === 'file';
 // keep dialog filenames inside the server's leaf contract
 const validLeaf = (value: string): boolean => value.length > 0 && value !== '.' && value !== '..' && !/[\/\x00-\x1f\x7f-\x9f]/u.test(value) && new TextEncoder().encode(value).length <= 255;
+
+// render fixed table geometry without controls or cached values
+function FilesLoadingRows() {
+  const rows = [0, 1, 2, 3];
+  return <>
+    {/* repeat the complete six-column row shape */}
+    {rows.map(row => <div key={row} className="files-row files-row-skeleton" role="row" aria-hidden="true">
+      <span role="gridcell"><Skeleton className="files-skeleton-cell files-skeleton-name" /></span>
+      <span role="gridcell"><Skeleton className="files-skeleton-cell files-skeleton-owner" /></span>
+      <span role="gridcell"><Skeleton className="files-skeleton-cell files-skeleton-permissions" /></span>
+      <span role="gridcell"><Skeleton className="files-skeleton-cell files-skeleton-modified" /></span>
+      <span role="gridcell"><Skeleton className="files-skeleton-cell files-skeleton-size" /></span>
+      <span role="gridcell"><Skeleton className="files-skeleton-cell files-skeleton-actions" /></span>
+    </div>)}
+  </>;
+}
 
 // render one stable operation error or partial result summary
 function resultMessage(result: OperationResult | FilesError): { tone: 'status' | 'alert'; text: string } {
@@ -509,7 +527,7 @@ export function FilesPanel({ controller, onOpenFile }: { controller: FilesContro
     <button ref={favoritesFlyout.anchorRef} className={`panel-header-action files-favorites-action${favoritesOpen ? ' active' : ''}`} type="button" aria-label="Favorites" aria-description={currentFavorite === undefined ? 'Current folder is not favorited.' : 'Current folder is favorited.'} title="Favorites" aria-haspopup="menu" aria-expanded={favoritesOpen} data-current-favorite={currentFavorite !== undefined} data-context-flyout onClick={() => { setNewOpen(false); setRowMenu(undefined); setContextMenu(undefined); setFavoritesOpen(value => !value); }}><PanelIcon path="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z" /><span className="flyout-caret" aria-hidden="true" /></button>
   </>;
   const secondary = [
-    { key: 'refresh', label: 'Refresh files', title: 'Refresh', disabled: controller.loading || busy, ...(controller.loading ? { progress: 'blue' as const, progressKind: 'loading' as const } : {}), icon: <PanelIcon path="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6" />, onSelect: () => { void controller.refresh(); } },
+    { key: 'refresh', label: 'Refresh files', title: 'Refresh', disabled: controller.loading || busy, icon: <PanelIcon path="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6" />, onSelect: () => { void controller.refresh(); } },
     { key: 'home', label: 'Go to Place home', title: 'Home', disabled: controller.loading || busy, icon: <PanelIcon path="m3 11 9-8 9 8M5 10v11h14V10M9 21v-7h6v7" />, onSelect: () => { void controller.navigate(); } }
   ];
 
@@ -517,6 +535,8 @@ export function FilesPanel({ controller, onOpenFile }: { controller: FilesContro
     <PanelHeader panelKey="files" label="files" configuredFilesDirectoryToken={currentToken} titleControl={<form className="panel-header-pill files-address-form" onSubmit={submitLocation}><label className="sr-only" htmlFor="files-address">Absolute path</label><input id="files-address" className="files-address" value={location} spellCheck={false} aria-label="Absolute path" disabled={controller.loading} onChange={event => setLocation(event.target.value)} /></form>} actions={headerActions} secondary={secondary} close={{ key: 'close', label: 'Close files', title: 'Close', className: 'files-close', icon: <PanelIcon path={panelIcons.close} />, onSelect: controller.close }} />
     <input ref={uploadInput} className="attachment-input" aria-label="Upload files" type="file" multiple onChange={event => { /* permit choosing the same files again */ void chooseUploads(event.target.files); event.target.value = ''; }} />
     <div className="files-content" onContextMenu={openDirectoryContext}>
+      {/* announce loading without violating the grid row structure */}
+      {controller.loading && <span className="sr-only" role="status">Loading files…</span>}
       {controller.error && <p className="files-alert" role="alert">{controller.error.message}</p>}
       {notice && <p className={`files-notice ${notice.tone}`} role={notice.tone}>{notice.text}</p>}
       {controller.progress && ['queued', 'running'].includes(controller.progress.state) && <div className="files-progress progress-border progress-peach" role="status" aria-busy="true" aria-live="polite"><span className="update-progress-ring" aria-hidden="true" /><span>{controller.progress.phase || 'Working'}</span><progress value={controller.progress.completedItems} max={Math.max(1, controller.progress.totalItems)} /></div>}
@@ -524,8 +544,8 @@ export function FilesPanel({ controller, onOpenFile }: { controller: FilesContro
       <div className="files-mobile-sort" role="toolbar" aria-label="Sort files">{sortColumns.map(item => <button key={item.column} type="button" aria-label={`Sort by ${item.label}`} aria-pressed={controller.sort.column === item.column} onClick={() => controller.setSort(item.column)}>{item.label}{controller.sort.column === item.column && <span aria-hidden="true">{controller.sort.direction === 'ascending' ? ' ↑' : ' ↓'}</span>}</button>)}</div>
       <div className="files-grid" role="grid" aria-label={`Files in ${controller.listing?.path ?? 'Place home'}`} aria-busy={controller.loading} aria-multiselectable="true">
         <div className="files-grid-head" role="row">{sortColumns.map(item => <SortHeader key={item.column} column={item.column} label={item.label} activeColumn={controller.sort.column} direction={controller.sort.direction} onSort={controller.setSort} />)}<span role="columnheader"><span className="sr-only">Actions</span></span></div>
-        {/* distinguish omitted children from a truly empty folder */}
-        {controller.loading && controller.listing === undefined ? <p className="files-empty progress-border progress-blue progress-loading" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />Loading files…</p> : controller.entries.length === 0 ? <p className="files-empty">{emptyMessage}</p> : controller.entries.map(entry => {
+        {/* hide stale values behind the same table geometry during every read */}
+        {controller.loading ? <FilesLoadingRows /> : controller.entries.length === 0 ? <p className="files-empty">{emptyMessage}</p> : controller.entries.map(entry => {
           const selectedRow = controller.selection.tokens.has(entry.objectToken);
           return <div key={entry.objectToken} className={`files-row ${entry.kind}${selectedRow ? ' selected' : ''}`} role="row" aria-selected={selectedRow} tabIndex={0} title={entry.hostPath} onMouseDownCapture={preventShiftTextSelection} onClick={event => selectRow(entry, event)} onKeyDown={event => rowKey(entry, event)} onContextMenu={event => openEntryContext(entry, event)}>
             <span className="files-name-cell" role="gridcell"><FileIcon entry={entry} /><button className="files-name" type="button" title={entry.hostPath} disabled={!isDirectory(entry) && !isPreviewable(entry)} onClick={event => clickName(entry, event)}>{entry.name}</button>{entry.favorite !== undefined && <span className={`files-favorite-mark ${entry.favorite.state}`} aria-label={`Favorite: ${entry.favorite.state}`}>★</span>}</span>

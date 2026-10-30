@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner, expectSplitProgressBorder } from './progress-border-assertions';
+import { expectClockwiseProgressBorder, expectProgressBorder, expectSplitProgressBorder } from './progress-border-assertions';
 import { installPaneMock, seedPaneSize, pushBytes } from './pane-stream-mock';
 
 // allow the shared host's first dashboard transform before exercising task transport
@@ -58,17 +58,31 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   await page.goto('/');
   const panel = page.locator('.log-output.agent-panel');
   const output = panel.locator(':scope > .agent-output');
-  // connecting belongs to output only, leaving the header and composer outside
-  await expectSplitProgressBorder(output, 'blue');
+  // reserve connecting output without borrowing mutation motion
+  const connection = output.locator('.streamed-terminal-status');
+  await expect(connection).toBeVisible();
+  await expect(connection).toHaveAttribute('aria-busy', 'true');
+  await expect(connection.locator('.output-skeleton')).toBeVisible();
+  await expect.poll(() => connection.locator('.skeleton').count()).toBeGreaterThanOrEqual(6);
+  await expect(output.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
   await expect(panel.locator(':scope > .log-loading')).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
-  await expectSplitProgressBorder(output, 'blue');
-  // reduced motion keeps its compact spinner within the same output surface
+  await expect(connection).toBeVisible();
+  // reduced motion keeps the skeleton static
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expectReducedMotionSpinner(output.locator('.log-loading'), 'blue');
+  expect(await connection.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await expectSplitProgressBorder(output, 'blue');
-  await expectClockwiseProgressBorder(output.locator('.log-loading'));
+  await expect(output.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
+  await page.evaluate(() => {
+    localStorage.setItem('rac.reduced-motion', 'enabled');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', newValue: 'enabled' }));
+  });
+  await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
+  expect(await connection.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
+  await page.evaluate(() => {
+    localStorage.removeItem('rac.reduced-motion');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'rac.reduced-motion', oldValue: 'enabled' }));
+  });
   await page.setViewportSize({ width: 1280, height: 720 });
   // first output clears connecting progress without remounting the split
   await seedPaneSize(page, 'agent-1');
@@ -132,10 +146,13 @@ test('keeps a new-task processing indicator visible until the replacement agent 
   await expect(page.getByRole('tab', { name: 'Cora — Prompt done' })).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 });
   await expect(processing).toHaveCount(0);
   await expect(page.getByRole('status').filter({ hasText: 'New task is ready' })).toContainText('ready for a fresh prompt');
-  // the replacement connects at the same boundary and clears after its first output
-  await expectSplitProgressBorder(output, 'blue');
+  // the replacement uses the same static connection skeleton
+  await expect(connection).toBeVisible();
+  await expect(connection.locator('.output-skeleton')).toBeVisible();
+  await expect(output.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
   await seedPaneSize(page, 'agent-2');
   await pushBytes(page, 'agent-2', 'Replacement ready\r\n');
+  await expect(connection).toBeHidden();
   await expect(panel.locator('.log-loading')).toHaveCount(0);
 });
 

@@ -70,6 +70,108 @@ async function setupAccountSettings(page: Page, initialAccounts: Account[], rena
   return state;
 }
 
+// show account identity and every usage field as skeletons until the provider read settles
+test('skeletonizes account and usage rows during initial and refreshed provider reads', async ({ page }) => {
+  let releaseInitial!: () => void;
+  let releaseRefresh!: () => void;
+  let queries = 0;
+  const initialFinished = new Promise<void>(resolve => { releaseInitial = resolve; });
+  const refreshFinished = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  await mockAccountSocket(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    // restore one controlling browser
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'account-settings-csrf', active: true, deviceName: 'Test device' } });
+    // expose configured Codex without live agents
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } }, agents: [], projects: [], scratchLaunch: { kind: 'codex', origin: 'default' } } });
+    if (path === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
+    if (path === '/api/agents/updates') return route.fulfill({ json: { agents: [] } });
+    // hold each account refresh independently
+    if (path === '/api/codex/accounts' && request.method() === 'GET') {
+      queries += 1;
+      await (queries === 1 ? initialFinished : refreshFinished);
+      return route.fulfill({ json: { accounts: [{ id: 'paid-key', label: 'Production API', authMode: 'apikey', active: true, spend: { status: 'available', todayUsd: 12.35, weekUsd: 80.1, asOf: Math.floor(Date.now() / 1_000) } }] } });
+    }
+    return route.fulfill({ json: {} });
+  });
+
+  await page.goto('/');
+  const toolbar = page.getByRole('region', { name: 'Workspace toolbar' });
+  await toolbar.getByRole('button', { name: /^(Choose agent|Launch agent)$/u }).click();
+  let menu = page.getByRole('menu', { name: 'Choose agent', exact: true });
+  await menu.getByRole('menuitem', { name: 'Codex accounts', exact: true }).click();
+  let accounts = menu.getByRole('group', { name: 'Codex accounts', exact: true });
+  try {
+    await expect(accounts.getByRole('status', { name: 'Loading accounts and usage' })).toBeVisible();
+    await expect(accounts.locator('.account-skeleton')).toHaveCount(3);
+    await expect(accounts.getByRole('radio')).toHaveCount(0);
+    await expect(accounts).not.toContainText('$0.00');
+    await expect(accounts).not.toContainText('Unavailable');
+    await expect(accounts.locator('.progress-border')).toHaveCount(0);
+    // capture the held account loading state on demand
+    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/accounts-desktop.png` });
+  } finally {
+    // release the first provider read during failed assertions too
+    releaseInitial();
+  }
+  await expect(accounts.getByRole('radio').filter({ hasText: 'Production API' })).toContainText('$80.10');
+
+  await page.keyboard.press('Escape');
+  await toolbar.getByRole('button', { name: /^(Choose agent|Launch agent)$/u }).click();
+  menu = page.getByRole('menu', { name: 'Choose agent', exact: true });
+  await menu.getByRole('menuitem', { name: 'Codex accounts', exact: true }).click();
+  accounts = menu.getByRole('group', { name: 'Codex accounts', exact: true });
+  try {
+    await expect.poll(() => queries).toBe(2);
+    await expect(accounts.getByRole('status', { name: 'Loading accounts and usage' })).toBeVisible();
+    await expect(accounts.locator('.account-skeleton')).toHaveCount(3);
+    await expect(accounts).not.toContainText('Production API');
+    await expect(accounts).not.toContainText('$80.10');
+  } finally {
+    // release the refreshed provider read during failed assertions too
+    releaseRefresh();
+  }
+  await expect(accounts.getByRole('radio').filter({ hasText: 'Production API' })).toContainText('$80.10');
+});
+
+// treat a valid empty Claude response as settled rather than permanent loading
+test('clears Claude account skeletons after a valid empty response', async ({ page }) => {
+  let releaseClaude!: () => void;
+  const claudeFinished = new Promise<void>(resolve => { releaseClaude = resolve; });
+  await mockAccountSocket(page);
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    // restore one controlling browser
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'account-settings-csrf', active: true, deviceName: 'Test device' } });
+    // expose both configured providers
+    if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: { codex: { program: '/usr/local/bin/codex', launchable: true, stateSource: 'title', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false }, claude: { program: '/usr/local/bin/claude', launchable: true, stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: true, sandbox: false } }, agents: [], projects: [], scratchLaunch: { kind: 'claude', origin: 'default' } } });
+    if (path === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
+    if (path === '/api/agents/updates') return route.fulfill({ json: { agents: [] } });
+    if (path === '/api/codex/accounts') return route.fulfill({ json: { accounts: [] } });
+    if (path === '/api/claude/accounts') {
+      await claudeFinished;
+      return route.fulfill({ json: { accounts: [] } });
+    }
+    return route.fulfill({ json: {} });
+  });
+
+  await page.goto('/');
+  await page.getByRole('region', { name: 'Workspace toolbar' }).getByRole('button', { name: /^(Choose agent|Launch agent)$/u }).click();
+  const menu = page.getByRole('menu', { name: 'Choose agent', exact: true });
+  await menu.getByRole('menuitem', { name: 'Claude accounts', exact: true }).click();
+  const accounts = menu.getByRole('group', { name: 'Claude accounts', exact: true });
+  try {
+    await expect(accounts.getByRole('status', { name: 'Loading accounts and usage' })).toBeVisible();
+    await expect(accounts.locator('.account-skeleton')).toHaveCount(3);
+  } finally {
+    // release the valid empty read during failed assertions too
+    releaseClaude();
+  }
+  await expect(accounts.locator('.account-skeleton')).toHaveCount(0);
+  await expect(accounts).toContainText('No Claude account information available.');
+});
+
 // cover physical outside presses at both persistent-toolbar layouts
 for (const viewport of [{ label: 'desktop', width: 1280, height: 800 }, { label: 'phone', width: 390, height: 844 }]) {
   test.describe(`${viewport.label} account submenu input`, () => {

@@ -1,5 +1,4 @@
 import { expect, test } from '@playwright/test';
-import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions';
 
 test('keeps attachments and repository choices out of the more menu', async ({ page }) => {
   let finishGithubActions!: () => void;
@@ -40,8 +39,11 @@ test('keeps attachments and repository choices out of the more menu', async ({ p
   await expect(menu.getByText('Pull requests', { exact: true })).toHaveCount(0);
   await expect(menu.getByText('Branches', { exact: true })).toHaveCount(0);
   const loadingActions = menu.getByRole('button', { name: 'GitHub Actions', exact: true });
-  await expectProgressBorder(loadingActions, 'blue');
-  await expect(loadingActions.locator('.more-menu-icon')).toBeVisible();
+  await expect(loadingActions).toBeDisabled();
+  await expect(loadingActions).toHaveAttribute('aria-busy', 'true');
+  await expect(loadingActions.locator('.skeleton')).toHaveCount(1);
+  await expect(loadingActions).not.toHaveClass(/progress-border/u);
+  await expect(loadingActions.locator('.update-progress-ring')).toHaveCount(0);
   finishGithubActions();
   await expect(menu.getByRole('link', { name: 'GitHub Actions', exact: true })).toHaveAttribute('href', 'https://github.com/octo/repo/actions');
   await page.keyboard.press('Escape');
@@ -49,17 +51,19 @@ test('keeps attachments and repository choices out of the more menu', async ({ p
   // new task now waits in the agent power flyout
   await page.getByRole('button', { name: 'Agent power options' }).click();
   const powerMenu = page.getByRole('menu', { name: 'Agent power options' });
-  const loadingNewTask = powerMenu.getByRole('menuitem', { name: 'New Task', exact: true });
-  await expectProgressBorder(loadingNewTask, 'blue', 'loading');
-  await expectClockwiseProgressBorder(loadingNewTask, 'loading');
-  await expect(loadingNewTask.locator('.more-menu-icon')).toBeVisible();
+  const loadingNewTask = powerMenu.getByRole('menuitem', { name: 'Loading New Task availability', exact: true });
+  await expect(loadingNewTask).toBeDisabled();
+  await expect(loadingNewTask).toHaveAttribute('aria-busy', 'true');
+  await expect(loadingNewTask.locator('.skeleton')).toHaveCount(1);
+  await expect(loadingNewTask).not.toHaveClass(/progress-border/u);
+  await expect(powerMenu.locator('.new-task-option .more-menu-reason')).toHaveCount(0);
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expectReducedMotionSpinner(loadingNewTask, 'blue', 'loading');
+  await expect(loadingNewTask.locator('.skeleton')).toHaveCount(1);
+  expect(await loadingNewTask.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await expectProgressBorder(loadingNewTask, 'blue', 'loading');
-  await expectClockwiseProgressBorder(loadingNewTask, 'loading');
   finishNewTask();
-  await expect(powerMenu.locator('.new-task-option .more-menu-reason')).toHaveText('Start a fresh task for this worktree.');
+  await expect(powerMenu.getByRole('menuitem', { name: 'New Task', exact: true })).toBeEnabled();
+  await expect(powerMenu.locator('.new-task-option .more-menu-reason')).toHaveCount(0);
   await page.keyboard.press('Escape');
 
   const fileChooserPromise = page.waitForEvent('filechooser');

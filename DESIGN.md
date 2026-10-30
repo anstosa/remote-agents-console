@@ -106,13 +106,36 @@ Toasts overlap Settings content like other splits; only the wrapped Settings
 toolbar reserves space. Showing or dismissing notices must not move the tab.
 
 ## Interaction states
-Spinner timing distinguishes work from data loading, independently of color.
-User actions and LLM work use two accelerating/decelerating half turns per
-two-second cycle; read-only fetches, connection and account/branch loading use a
-constant-speed two-second turn. Each type shares the document timeline, including
-late mounts and portals. Reduced motion retains compact, synchronized one-second
-linear spinners instead of travelling borders. Do not animate content or status
-dots, or run a continuous JavaScript animation clock.
+Read-only content loads are skeleton-first: reserve the geometry of the rows,
+properties, code, images, usage, or labels being fetched. Skeletons are decorative,
+noninteractive, and owned by one accessible busy container. Successful empty or zero
+results, unavailable data, and failures are settled states, not indefinite loading.
+Refreshes hide stale Files, account/usage, version, and cleanup-candidate values while
+retaining the last good snapshot where rollback is supported. Code's live soft
+refresh is an explicit exception: keep its patch, selection, and scroll until an
+authoritative replacement can swap atomically; hard loads use semantic skeletons.
+User actions and LLM work retain two accelerating/decelerating border half turns per
+two-second cycle. Voice connection and tool work share one non-scrolling chat-area
+border around a nested scrolling transcript; connecting takes precedence, connected
+idle has none. Agent and terminal connections use output-line skeletons for initial
+attachment and automatic reconnects, retaining the mounted terminal underneath.
+Their skeletons fill the entire available output height, adapting to split and font
+resizing. Agent placeholders alternate prompts, paragraphs and indented tool output;
+terminal placeholders use denser shell-command and column-shaped output rows.
+Fresh stream seeds clear the skeleton; explicit failure reasons remain readable.
+Startup/auth and fullscreen connection loaders retain a constant-speed turn.
+Each border type shares the document timeline, including late mounts and portals.
+Reduced motion makes skeletons static and replaces retained travelling borders with
+compact synchronized one-second spinners. Do not animate status dots or run a
+continuous JavaScript animation clock.
+Conversations opens immediately into one flyout with search first and a scrollable
+four-and-a-half-row viewport, clamped to short screens. Rows expose relative activity,
+cwd, and current-conversation editing; historical resume safeguards remain intact.
+File paths and stored Note attachment filenames open the Code split through their
+existing scoped preview routes, not duplicate preview modals. Uploads remain available.
+Cleanup loading rows contain decorative checkbox shapes, never consent inputs or
+target identities. Only settled real controls determine destructive selections;
+actual cleanup submission retains its working feedback and closed-PR opt-in rule.
 While Settings files load or refresh, replace desktop and mobile navigation icons
 and labels with skeleton placeholders and disable every tab and the mobile selector.
 Keep the selected page header and show a loading message in its content area instead

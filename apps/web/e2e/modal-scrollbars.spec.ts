@@ -150,20 +150,6 @@ function settingsFixture() {
   `;
 }
 
-// render the real response-file preview structure
-function previewFixture() {
-  const lines = Array.from({ length: 90 }, (_, index) => `<span class="syntax-line"><span class="syntax-line-number">${index + 1}</span><span class="syntax-line-content">preview_${index + 1} ${'long source text '.repeat(18)}</span></span>`).join('');
-  return `
-    <section class="dialog response-file-dialog" role="dialog" aria-label="Response file preview">
-      <div>
-        <header><strong>large-preview.txt</strong></header>
-        <pre tabindex="0" data-testid="response-preview"><code>${lines}</code></pre>
-        <footer>Preview fixture</footer>
-      </div>
-    </section>
-  `;
-}
-
 // render the fullscreen recovery card and a nested log
 function fullscreenFixture() {
   return `
@@ -224,13 +210,6 @@ for (const viewport of viewports) {
       await expect(page.locator('.settings-source-select')).toBeVisible();
     }
     await page.screenshot({ path: `/tmp/modal-scrollbars-${viewport.name}.png`, fullPage: true });
-
-    await mountFixture(page, previewFixture());
-    const preview = page.getByTestId('response-preview');
-    await expectHiddenScroller(preview);
-    await expectWheelScroll(page, preview);
-    await expectKeyboardScroll(preview);
-    await page.screenshot({ path: `/tmp/modal-preview-scrollbars-${viewport.name}.png`, fullPage: true });
 
     await mountFixture(page, fullscreenFixture());
     const fullscreenCard = page.getByTestId('fullscreen-card');
