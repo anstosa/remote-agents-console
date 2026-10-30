@@ -124,6 +124,16 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('the holder in a W
     expect(await nextLine(late.lines, late.channel)).toBe('line-4');
   });
 
+  it('cuts a line past its cap either way, and passes the next one whole', async () => {
+    const { place, launch } = await workspace();
+    const holder = await launch.openHolderWindow(place, 'agent-5', { ...echo(0), env: { RAC_HOLDER_MAX_LINE: '16' } });
+    const writer = await connect(holder!.socket);
+    writer.channel.send('x'.repeat(40));
+    expect(await nextLine(writer.lines, writer.channel)).toBe('x'.repeat(16));
+    writer.channel.send('after');
+    expect(await nextLine(writer.lines, writer.channel)).toBe('after');
+  });
+
   it('keeps the window after its child exits, with the child\'s stderr, and ends the connection', async () => {
     const { place, launch, socketPath } = await workspace();
     const holder = await launch.openHolderWindow(place, 'agent-2', echo(0));

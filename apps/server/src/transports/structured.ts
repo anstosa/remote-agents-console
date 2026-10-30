@@ -120,10 +120,14 @@ export type ProtocolClient = (channel: LineChannel, emit: (event: StructuredEven
 
 /**
  * Split a byte stream into lines on LF only, dropping a CR before it. JSON may carry U+2028 and
- * U+2029 unescaped, so a generic line reader that also splits on those would corrupt records.
+ * U+2029 unescaped, so a generic line reader that also splits on those would corrupt records. A
+ * line longer than `maxLine` characters (64 Mi) is cut there and the rest of it dropped, so no
+ * line, nor output that never ends one, grows without bound.
  */
-export function lineSplitter(onLine: (line: string) => void): { push(chunk: string): void } {
+export function lineSplitter(onLine: (line: string) => void, maxLine = 64 * 1024 * 1024): { push(chunk: string): void } {
   let partial = '';
+  // while the rest of a line already cut is dropped
+  let cut = false;
   return {
     push(chunk) {
       // only the new chunk can hold the next LF, so a long line is scanned once
@@ -131,9 +135,14 @@ export function lineSplitter(onLine: (line: string) => void): { push(chunk: stri
       if (end !== -1) end += partial.length;
       partial += chunk;
       while (end !== -1) {
-        onLine(partial.slice(0, end).replace(/\r$/u, ''));
+        if (cut) cut = false; else onLine(partial.slice(0, Math.min(end, maxLine)).replace(/\r$/u, ''));
         partial = partial.slice(end + 1);
         end = partial.indexOf('\n');
+      }
+      if (partial.length > maxLine) {
+        if (!cut) onLine(partial.slice(0, maxLine));
+        cut = true;
+        partial = '';
       }
     }
   };

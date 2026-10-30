@@ -5,7 +5,8 @@
  *   node holder.js <socket> -- <program> [args...]
  *
  * The child's output lines are numbered from 0, and the latest `replayBytes` of them are kept
- * (8 MiB, or `RAC_HOLDER_REPLAY_BYTES`).
+ * (8 MiB, or `RAC_HOLDER_REPLAY_BYTES`). A line either way longer than `maxLine` characters (64 Mi,
+ * or `RAC_HOLDER_MAX_LINE`) is cut there, the rest of it dropped.
  * A client's first line says how many it has read, `{"from":<n>}`; the holder answers
  * `{"holder":1,"pid":<child pid>,"from":<m>,"dropped":<m - n>}`, where `m` is the first line it
  * still has, replays every kept line from there, then passes the child's lines on as they come.
@@ -21,6 +22,7 @@ import { chmodSync, rmSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 
 const replayBytes = Number(process.env.RAC_HOLDER_REPLAY_BYTES) > 0 ? Number(process.env.RAC_HOLDER_REPLAY_BYTES) : 8 * 1024 * 1024;
+const maxLine = Number(process.env.RAC_HOLDER_MAX_LINE) > 0 ? Number(process.env.RAC_HOLDER_MAX_LINE) : 64 * 1024 * 1024;
 const [socketPath, separator, program, ...args] = process.argv.slice(2);
 if (socketPath === undefined || separator !== '--' || program === undefined) {
   process.stderr.write('usage: holder <socket> -- <program> [args...]\n');
@@ -35,10 +37,21 @@ let first = 0;
 let keptBytes = 0;
 let paused = false;
 
-// split on LF only: the child's lines are opaque, and may hold U+2028 or U+2029
+// split on LF only: the child's lines are opaque, and may hold U+2028 or U+2029. A line past
+// `maxLine` is cut, and the rest of it dropped (`cut`), so neither memory nor a string outgrows it.
 const splitter = (onLine: (line: string) => void) => {
   let partial = '';
-  return { push(chunk: string) { let end = chunk.indexOf('\n'); if (end !== -1) end += partial.length; partial += chunk; while (end !== -1) { onLine(partial.slice(0, end)); partial = partial.slice(end + 1); end = partial.indexOf('\n'); } }, rest: () => partial };
+  let cut = false;
+  return {
+    push(chunk: string) {
+      let end = chunk.indexOf('\n');
+      if (end !== -1) end += partial.length;
+      partial += chunk;
+      while (end !== -1) { if (cut) cut = false; else onLine(partial.slice(0, Math.min(end, maxLine))); partial = partial.slice(end + 1); end = partial.indexOf('\n'); }
+      if (partial.length > maxLine) { if (!cut) onLine(partial.slice(0, maxLine)); cut = true; partial = ''; }
+    },
+    rest: () => partial
+  };
 };
 
 const resume = (): void => { paused = false; child.stdout.resume(); };
