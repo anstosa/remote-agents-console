@@ -2399,7 +2399,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-ask { display: grid; gap: .5rem; margin: -.15rem .6rem .5rem 1.4rem; padding: .5rem .65rem; border-left: 2px solid color-mix(in srgb, var(--mauve) 55%, var(--surface-2)); background: var(--mantle); color: var(--text); font: 500 var(--diffs-font-size, .76rem)/1.45 var(--font-mono); white-space: normal; }
 .review-ask-turn { display: grid; gap: .3rem; }
 .review-ask-question { margin: 0; color: var(--subtext-0); font-weight: 700; white-space: pre-wrap; overflow-wrap: anywhere; }
-.review-ask-answer { padding: 0; font-size: inherit; overflow-wrap: anywhere; }
+/* not a scroll container, so the wheel over an answer scrolls the diff */
+.review-ask-answer { height: auto; overflow: visible; padding: 0; font-size: inherit; overflow-wrap: anywhere; }
 /* Q and A marks hang in a gutter so wrapped lines and Markdown blocks stay aligned */
 .review-ask-question, .review-ask-answer { position: relative; padding-left: 1.4rem; }
 .review-ask-question::before, .review-ask-answer::before { position: absolute; top: 0; left: 0; color: var(--mauve); font: 700 1em/1.45 var(--font-mono); }

@@ -1532,6 +1532,23 @@ test('asks the guide about diff lines from the gutter, with follow-ups, and copi
   await expect(dialog.getByLabel('Comment on line 12')).toHaveValue('It counts **retries**.\n\nFour is the limit.');
 });
 
+test('scrolls the diff when the wheel turns over an answered question', async ({ page }) => {
+  // a hunk tall enough to scroll, with a stored guide thread under line 12
+  const routePatch = `diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -10,4 +10,105 @@\n const a = 1;\n-const b = 2;\n+const b = 3;\n+const c = 4;\n${Array.from({ length: 100 }, (_, index) => `+const line${index} = ${index};`).join('\n')}\n const d = 5;\n export {};\n`;
+  const thread = { id: 'ask_g1', target: 'guide', kind: 'claude', conversation: 'g-1', anchor: { changeId: 'chg_route0001', file: 'src/route.ts', side: 'additions', startLine: 12, endLine: 12, excerpt: '+const c = 4;' }, turns: [{ id: 'ask-1', question: 'What does c do?', askedAt: '2026-10-04T12:00:00.000Z', answer: 'It counts **retries**.' }] };
+  const tour = { ...triageTour, guide: { agent: 'claude', conversation: 'g-1' }, changes: [{ ...triageTour.changes[0], patch: routePatch }, triageTour.changes[1]] };
+  const { dialog } = await openTriageTour(page, { tour, extra: async (route, url) => {
+    if (url.pathname === '/api/worktrees/owen/review-tour/asks') { await route.fulfill({ json: { status: 'ready', threads: [thread], pending: [] } }); return true; }
+    return false;
+  } });
+  const answer = dialog.locator('.review-ask-answer');
+  await expect(answer).toContainText('It counts retries.');
+  const diffs = dialog.locator('.review-tour-diff-scroll');
+  await answer.hover();
+  await page.mouse.wheel(0, 300);
+  await expect.poll(() => diffs.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+});
+
 test('reads the overview and step write-up at the terminal font size', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('rac.terminal-font-size', '17'));
   const { dialog } = await openTriageTour(page);
