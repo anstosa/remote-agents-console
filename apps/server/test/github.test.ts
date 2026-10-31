@@ -232,7 +232,7 @@ describe('a repository\'s open pull requests and issues', () => {
     await expect(service.repository(octo)).resolves.toEqual({
       own: [{ number: 7, title: 'Draft work', draft: true, url: 'https://github.com/octo/repo/pull/7', branch: 'feature/draft', headSha: sha('c'), headOnOrigin: true, checks: 'failed', issues: { mergeConflicts: true, failingChecks: true, unresolvedComments: true } }],
       others: [{ number: 8, title: 'Other user', draft: false, url: 'https://github.com/octo/repo/pull/8', branch: 'feature/other', headSha: sha('d'), headOnOrigin: false }],
-      issues: [{ number: 3, title: 'Crash on start', url: 'https://github.com/octo/repo/issues/3' }],
+      issues: [{ number: 3, title: 'Crash on start', url: 'https://github.com/octo/repo/issues/3', author: 'someone', updatedAt: '2026-10-30T12:00:00Z' }],
       fetchedAt: 0
     });
     expect(calls).toHaveLength(1);

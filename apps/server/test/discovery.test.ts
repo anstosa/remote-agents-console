@@ -874,7 +874,8 @@ describe('DiscoveryService dashboard', () => {
 
       expect(first).toBe(second);
       expect(third).toBe(first);
-      expect(lookups).toBe(1);
+      // one enrichment: its Worktree's branch and its Project's GitHub repository
+      expect(lookups).toBe(2);
     } finally { clock.mockRestore(); await rm(workspace, { recursive: true, force: true }); }
   });
 

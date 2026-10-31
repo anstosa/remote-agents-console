@@ -64,7 +64,8 @@ import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider
 import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, OpenFolderDialog, type FolderAction, type FolderOpened, type ListedFolder } from './open-folder.js';
 import { installProgressAnimationSync, type ProgressKind } from './progress-animation.js';
 import { Skeleton } from './skeleton.js';
-import { GithubOverview, OverviewButton } from './github-overview.js';
+import { GithubOverview, icons as githubIcons, OverviewButton } from './github-overview.js';
+import { GithubPanel, type GithubFocus } from './github-panel.js';
 import { CodeLoading } from './code-panel/loading.js';
 import { ModelChip, type AgentModel } from './model-picker.js';
 import { WatchesButton, type WatchSummary } from './watches-button.js';
@@ -156,7 +157,7 @@ type Worktree = { id: string; projectId: string; label: string; customLabel?: bo
 // `repository` Project omits `launch` and launches through its worktrees.
 // `implicit` marks an unconfigured repository the console found an agent in or was pinned at:
 // it shows as tabs only, never as a launcher row
-type Project = { id: string; implicit?: true; label: string; mode?: 'repository' | 'directory'; available: boolean; unavailableReason?: string; manageWorktrees?: boolean; manageWorktreesReason?: string; stalePaths?: string[]; setup?: boolean; worktrees: Worktree[]; launch?: LaunchResolution };
+type Project = { id: string; implicit?: true; label: string; mode?: 'repository' | 'directory'; github?: string; available: boolean; unavailableReason?: string; manageWorktrees?: boolean; manageWorktreesReason?: string; stalePaths?: string[]; setup?: boolean; worktrees: Worktree[]; launch?: LaunchResolution };
 // one branch the Add dialog can offer: `ref` is the commit-ish that resolves it and the
 // picker's value, `remote` marks a remote-only ref git will track, and `checkedOut` marks a
 // local branch a Worktree already holds — it can base a new branch but not be checked out
@@ -979,7 +980,7 @@ const EditorConfiguredContext = createContext(false);
 // select an Agent's pane, such as an Ask's interactive run
 const OpenAgentContext = createContext<((agentId: string) => void) | undefined>(undefined);
 // refresh open schedules on dashboard advances and closed badges on queued-note additions
-const DashboardGenerationContext = createContext<{ generation?: number; notesRevision?: number; serverStartedAt?: number }>({});
+const DashboardGenerationContext = createContext<{ generation?: number; notesRevision?: number; githubRevision?: number; serverStartedAt?: number }>({});
 type ServerUpdateState = 'queued' | 'running' | 'complete' | 'failed';
 type ServerUpdateAvailability = { available: boolean; commitCount?: number; targetSha?: string };
 type ServerRevision = { sha: string; committedAt: string };
@@ -4899,6 +4900,45 @@ function useStackPanel(worktreeId: string | undefined) {
   const openOn = (next?: StackSelection) => { select(next); save(true); };
   return { open: open && worktreeId !== undefined, selection, select, openOn, close: () => save(false) };
 }
+// Whether a Place's GitHub panel is open, remembered per Place. An Overview row asks the Place it
+// opens to show the panel focused on its item, which the panel takes once it mounts (the Overview
+// unmounts the Workspace, so it always mounts afresh); the request lapses unshown if it never does.
+const githubPanelKey = (placeId: string) => `rac.github-panel:${placeId}`;
+const savedGithubPanel = (placeId: string) => {
+  try { return localStorage.getItem(githubPanelKey(placeId)) === 'open'; }
+  catch { return false; }
+};
+const saveGithubPanel = (placeId: string, open: boolean) => {
+  try { localStorage.setItem(githubPanelKey(placeId), open ? 'open' : 'closed'); }
+  catch { /* browser storage is optional */ }
+};
+let requestedGithubFocus: { placeId: string; focus: GithubFocus; expires: number } | undefined;
+const requestGithubFocus = (placeId: string, focus: GithubFocus) => {
+  requestedGithubFocus = { placeId, focus, expires: Date.now() + 10_000 };
+  saveGithubPanel(placeId, true);
+  pendingWorkspaceJumps.set(placeItemKey(placeId), 'github');
+};
+function useGithubPanel(placeId: string | undefined) {
+  const [open, setOpen] = useState(() => placeId !== undefined && savedGithubPanel(placeId));
+  const [focus, setFocus] = useState<GithubFocus>();
+  useEffect(() => {
+    const pending = requestedGithubFocus;
+    if (placeId === undefined || pending?.placeId !== placeId) return;
+    requestedGithubFocus = undefined;
+    if (pending.expires > Date.now()) { setFocus(pending.focus); setOpen(true); }
+  }, [placeId]);
+  const save = (value: boolean) => {
+    setOpen(value);
+    // an Overview tap focuses the panel it opened, not a later one
+    if (!value) setFocus(undefined);
+    if (placeId !== undefined) saveGithubPanel(placeId, value);
+  };
+  return { open: open && placeId !== undefined, focus, show: () => save(true), toggle: () => save(!open), close: () => save(false) };
+}
+// what GitHub lists depend on: the server's GitHub data and the Worktrees their rows name
+const githubListsRevision = (serverStartedAt: number | undefined, githubRevision: number | undefined, projects: readonly Project[]) => `${serverStartedAt ?? ''}:${githubRevision ?? ''}:${projects.flatMap(project => project.worktrees.map(worktree => `${worktree.id}@${worktree.branch ?? ''}`)).join(',')}`;
+// the Project a Worktree belongs to, for its GitHub repository
+const projectOfWorktree = (projects: readonly Project[], worktreeId: string | undefined) => worktreeId === undefined ? undefined : projects.find(project => project.worktrees.some(worktree => worktree.id === worktreeId));
 // retain browser state for one worktree
 function useProjectBrowser(homeUrl?: string, worktreeId?: string, projectProxied?: boolean) {
   const proxied = projectProxied !== false;
@@ -5403,7 +5443,7 @@ type TerminalColumn = { key: string; label: string; node: ReactElement<TerminalC
 type SplitSizes = Record<string, number>;
 type SplitStyle = React.CSSProperties & { '--agent-split': string; '--note-split': string; '--browser-split': string; '--split-cols': string };
 type SplitDrag = { pointerId: number; startX: number; left: string; right: string; leftWidth: number; rightWidth: number; sizes: SplitSizes; resized?: SplitSizes };
-type FixedSplitPanelKey = 'agent' | 'note' | 'browser' | 'files' | 'code' | 'preview' | 'review' | 'stack' | 'settings';
+type FixedSplitPanelKey = 'agent' | 'note' | 'browser' | 'files' | 'code' | 'preview' | 'review' | 'stack' | 'github' | 'settings';
 type SplitPanelKind = FixedSplitPanelKey | 'terminal';
 // keep fixed split identity in one typed source of truth
 const fixedSplitPanels: { [Key in FixedSplitPanelKey]: { selector: string; kind: Key; title: string } } = {
@@ -5415,6 +5455,7 @@ const fixedSplitPanels: { [Key in FixedSplitPanelKey]: { selector: string; kind:
   preview: { selector: '.preview-pane', kind: 'preview', title: 'Preview' },
   review: { selector: '.review-pane', kind: 'review', title: 'Guided review' },
   stack: { selector: '.stack-pane', kind: 'stack', title: 'Stack' },
+  github: { selector: '.github-pane', kind: 'github', title: 'GitHub' },
   settings: { selector: '.client-settings-page', kind: 'settings', title: 'Settings' }
 };
 // return fixed metadata without treating terminal ids as object keys
@@ -5504,7 +5545,7 @@ function CodePane({ controller, worktreeId, prAvailable, branch, review, onOpenI
 // `expansion` is the Workspace's expanded panel; a split without a Workspace keeps its own.
 // On a phone the panels sit in a swipe carousel, one per screen; `onCarousel` hears its panels and
 // the one in view, for the toolbar's dots.
-function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, code, preview, previewController: workspacePreview, review, stack, withSettings = false, terminals, terminalSelectionActions, onCarousel, initialPanelsReady, expansion: workspaceExpansion }: { worktreeId?: string; output?: ReactNode; empty?: ReactNode; note?: ReactNode; browser?: ReactNode; files?: ReactNode; code?: ReactNode; preview?: ReactNode; previewController?: FilePreviewController; review?: ReactNode; stack?: ReactNode; withSettings?: boolean; terminals?: TerminalColumn[]; terminalSelectionActions?: TerminalSelectionActions; onCarousel?: (carousel: PanelCarousel) => void; initialPanelsReady?: boolean; expansion?: PanelExpansion }) {
+function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, code, preview, previewController: workspacePreview, review, stack, github, withSettings = false, terminals, terminalSelectionActions, onCarousel, initialPanelsReady, expansion: workspaceExpansion }: { worktreeId?: string; output?: ReactNode; empty?: ReactNode; note?: ReactNode; browser?: ReactNode; files?: ReactNode; code?: ReactNode; preview?: ReactNode; previewController?: FilePreviewController; review?: ReactNode; stack?: ReactNode; github?: ReactNode; withSettings?: boolean; terminals?: TerminalColumn[]; terminalSelectionActions?: TerminalSelectionActions; onCarousel?: (carousel: PanelCarousel) => void; initialPanelsReady?: boolean; expansion?: PanelExpansion }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const settingsState = useContext(ClientSettingsSplitContext);
   const editorConfigured = useContext(EditorConfiguredContext);
@@ -5549,6 +5590,7 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
   const hasPreview = previewPane !== undefined && previewPane !== null;
   const hasReview = review !== undefined && review !== null;
   const hasStack = stack !== undefined && stack !== null;
+  const hasGithub = github !== undefined && github !== null;
   const termCols = terminals ?? [];
   const hasTerminals = termCols.length > 0;
   const hasAgent = output !== undefined && output !== null;
@@ -5563,6 +5605,7 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
     ...(hasPreview ? [{ key: 'preview', node: previewPane }] : []),
     ...(hasReview ? [{ key: 'review', node: review }] : []),
     ...(hasStack ? [{ key: 'stack', node: stack }] : []),
+    ...(hasGithub ? [{ key: 'github', node: github }] : []),
     ...(hasSettings ? [{ key: 'settings', node: settingsPane }] : [])
   ];
   const keys = columns.map(column => column.key);
@@ -5704,7 +5747,7 @@ function ResizableLogSplit({ worktreeId, output, empty, note, browser, files, co
     return index === 0 ? [node] : [resizer(columns[index - 1].key, column.key), node];
   });
   const mobileView = carousel.visibleKey !== undefined ? ` mobile-${splitPanelKind(carousel.visibleKey)}-view` : '';
-  return <PanelExpandContext.Provider value={expansionScope.context}><div ref={containerRef} className={`log-split${hasAgent ? '' : ' no-agent'}${hasNote ? ' has-note' : ''}${hasBrowser ? ' has-browser' : ''}${hasFiles ? ' has-files' : ''}${hasCode ? ' has-code' : ''}${hasPreview ? ' has-preview' : ''}${hasReview ? ' has-review' : ''}${hasStack ? ' has-stack' : ''}${hasSettings ? ' has-settings' : ''}${hasTerminals ? ' has-terminals' : ''}${mobileView}`} style={style} onKeyDown={expansionScope.onKeyDown} onPointerDownCapture={preserveMiddleClickPress} onMouseDownCapture={preserveMiddleClickPress} onPointerDown={startContentSwipe} onPointerUp={contentSwipe.onPointerUp} onPointerCancel={contentSwipe.onPointerCancel} onTouchStart={startContentTouchSwipe} onTouchEnd={contentSwipe.onTouchEnd} onTouchCancel={contentSwipe.onTouchCancel} onClickCapture={contentSwipe.onClickCapture}>{columns.length === 0 ? empty : laidOut}</div></PanelExpandContext.Provider>;
+  return <PanelExpandContext.Provider value={expansionScope.context}><div ref={containerRef} className={`log-split${hasAgent ? '' : ' no-agent'}${hasNote ? ' has-note' : ''}${hasBrowser ? ' has-browser' : ''}${hasFiles ? ' has-files' : ''}${hasCode ? ' has-code' : ''}${hasPreview ? ' has-preview' : ''}${hasReview ? ' has-review' : ''}${hasStack ? ' has-stack' : ''}${hasGithub ? ' has-github' : ''}${hasSettings ? ' has-settings' : ''}${hasTerminals ? ' has-terminals' : ''}${mobileView}`} style={style} onKeyDown={expansionScope.onKeyDown} onPointerDownCapture={preserveMiddleClickPress} onMouseDownCapture={preserveMiddleClickPress} onPointerDown={startContentSwipe} onPointerUp={contentSwipe.onPointerUp} onPointerCancel={contentSwipe.onPointerCancel} onTouchStart={startContentTouchSwipe} onTouchEnd={contentSwipe.onTouchEnd} onTouchCancel={contentSwipe.onTouchCancel} onClickCapture={contentSwipe.onClickCapture}>{columns.length === 0 ? empty : laidOut}</div></PanelExpandContext.Provider>;
 }
 
 // One pane of a Worktree the picker can show as a Terminal (the wire shape of
@@ -5748,6 +5791,7 @@ const forgetOpenPanels = (placeId: string) => {
   saveTerminals(placeId, []);
   saveBrowserSplit(placeId, false);
   saveStackPanel(placeId, false);
+  saveGithubPanel(placeId, false);
   saveFilesOpen(placeId, false);
   clearWorktreeNoteView(placeId);
 };
@@ -6739,6 +6783,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
   const files = useFilesController(place.id, request);
   const preview = useFilePreview(place.id ?? agentId, request);
   const stackPanel = useStackPanel(place.worktreeId);
+  const githubPanel = useGithubPanel(place.id);
   // keep the toolbar dots aligned with the visible phone panel
   const [carousel, setCarousel] = useState<PanelCarousel>();
   const settingsSplit = useContext(ClientSettingsSplitContext);
@@ -6865,6 +6910,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
     // previews close without changing retained comparisons
     else if (panelKey === 'preview') preview.close();
     else if (panelKey === 'stack') stackPanel.close();
+    else if (panelKey === 'github') githubPanel.close();
     // the cached review remains restorable after this action
     else if (panelKey === 'review') minimizePanel(panelKey, () => onCloseReview?.());
     else if (panelKey === 'settings') settingsSplit?.close();
@@ -6899,6 +6945,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
           code.close();
           preview.close();
           stackPanel.close();
+          githubPanel.close();
           onCloseReview?.();
           terminals.closeAll();
           expansion.restore();
@@ -6939,6 +6986,8 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
   const showAgent = () => { pendingWorkspaceJumps.set(key, 'agent'); setAgentSplitHidden(key, false); };
   // open the Stack panel (on `selection`, when given) and bring it into view
   const openStackPanel = (selection?: StackSelection) => { stackPanel.openOn(selection); pendingWorkspaceJumps.set(key, 'stack'); };
+  // open the GitHub panel and bring it into view, or show it when open
+  const openGithubPanel = () => { if (githubPanel.open) carousel?.show('github'); else { githubPanel.show(); pendingWorkspaceJumps.set(key, 'github'); } };
   // share configured-editor terminals between code jumps and files
   const editorConfigured = useContext(EditorConfiguredContext);
   const placeId = place.id;
@@ -6953,7 +7002,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
     if (failure !== undefined) onOperationFeedback?.({ tone: 'error', message: options?.previewFallback ? 'The editor did not open; trying Preview instead' : 'The editor did not open', detail: failure });
     return failure === undefined;
   };
-  return { place, browser, files, code, preview, stackPanel, openStackPanel, terminals, carousel, setCarousel: reportCarousel, conversations, notes: placeNotes, expansion, gitExpanded, setGitExpanded, agentHidden, showAgent, minimizePanel, openInEditor, viewKey: key };
+  return { place, browser, files, code, preview, stackPanel, openStackPanel, githubPanel, openGithubPanel, terminals, carousel, setCarousel: reportCarousel, conversations, notes: placeNotes, expansion, gitExpanded, setGitExpanded, agentHidden, showAgent, minimizePanel, openInEditor, viewKey: key };
 }
 type WorkspaceState = ReturnType<typeof useWorkspace>;
 // The git actions only an Agent offers (push, fixup, guided review); an agentless Workspace passes
@@ -6975,7 +7024,8 @@ function WorkspaceGitStatus({ workspace, actions, onToggle }: { workspace: Works
 // shows `empty` instead. With no agent panel the Workspace is idle.
 // `onOpenWorktreeStack` is a used process's Open in the Stack panel, which switches to its Worktree.
 function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, onOpenWorktreeStack }: { workspace: WorkspaceState; output?: ReactNode; empty?: ReactNode; git?: WorkspaceGitActions; reviewPanel?: ReactNode; onAddToPrompt?: (text: string) => void; onOpenWorktreeStack?: (worktreeId: string) => void }) {
-  const { place, browser, files, code, preview, stackPanel, notes, expansion } = workspace;
+  const { place, browser, files, code, preview, stackPanel, githubPanel, notes, expansion } = workspace;
+  const { githubRevision, serverStartedAt } = useContext(DashboardGenerationContext);
   const fileOpenAction = useFileOpenAction();
   const projects = useContext(ProjectsContext);
   const visibleOutput = workspace.agentHidden ? undefined : output;
@@ -7029,7 +7079,10 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
   const placeId = place.id;
   // the Stack panel shows only for a Worktree whose stack has processes to show
   const stackPane = !stackPanel.open || place.worktreeId === undefined || (place.stack?.processes?.length ?? 0) === 0 ? null : <StackPanel worktreeId={place.worktreeId} title={stackName === undefined ? 'this worktree' : `${stackName.project} / ${stackName.worktree}`} stack={place.stack} selection={stackPanel.selection} onSelect={stackPanel.select} onClose={stackPanel.close} handlers={stackHandlers(place.worktreeId)} onOpenWorktree={onOpenWorktreeStack} onOpenTerminal={placeId === undefined ? undefined : (paneId, name) => { /* on a phone an already-open panel is scrolled to; a new one comes into view as it opens */ workspace.carousel?.show(paneId); requestTerminalFocus(placeId, { paneId, name }); }} readOutput={processOutput} clearOutput={clearProcessOutput} />;
-  return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} preview={previewPane} previewController={preview} review={reviewPanel} stack={stackPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesLoaded} /></div></section></SelectionActionsContext.Provider>;
+  const githubProject = projectOfWorktree(projects, place.worktreeId);
+  const githubWorktree = githubProject?.worktrees.find(worktree => worktree.id === place.worktreeId);
+  const githubPane = githubPanel.open ? <GithubPanel request={request} projectId={githubProject?.github === undefined ? undefined : githubProject.id} repository={githubProject?.github} worktreeId={place.worktreeId} main={githubWorktree?.main ?? true} branch={place.branch} hasPullRequest={place.pullRequest !== undefined} revision={githubListsRevision(serverStartedAt, githubRevision, githubProject === undefined ? [] : [githubProject])} focus={githubPanel.focus} onClose={githubPanel.close} /> : null;
+  return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} preview={previewPane} previewController={preview} review={reviewPanel} stack={stackPane} github={githubPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesLoaded} /></div></section></SelectionActionsContext.Provider>;
 }
 
 type LogProps = { id: string; onTurnOff?: () => void; embedded?: boolean; codexScrollControls?: boolean; onQuestion: (question: ChoiceQuestion | undefined) => void; onMetadata?: (response: string | undefined, overflow: boolean) => void; header?: (connection: string) => ReactNode; composer?: ReactNode; notes?: WorktreeNotes; onAddToPrompt?: (text: string) => void; onOpenUrl?: (url: string) => boolean; onOpenFile?: (path: string) => void; processingLabel?: string; processingDetail?: string };
@@ -8343,11 +8396,13 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
   // dashboard placed nowhere (no Place id) still shows the git status discovery found for it
   const hasGit = worktreeId !== undefined || (place?.id === undefined && (place?.branch !== undefined || place?.gitStatus !== undefined));
   // on a phone the ⋮ opens secondary panels or brings an open one into view
+  const onGithub = projectOfWorktree(projects, worktreeId)?.github !== undefined;
   const menuPanels: PlaceMenuPanel[] = [];
   if (phone && workspace !== undefined) {
     const { browser, files, code, preview, carousel } = workspace;
     if (browser.homeUrl !== undefined) menuPanels.push({ key: 'browser', label: 'Browser', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{browserGlyph}</svg>, title: 'Show the project in the browser panel', onSelect: () => browser.open ? carousel?.show('browser') : browser.toggle() });
     if (place?.id !== undefined) menuPanels.push({ key: 'files', label: 'Files', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{filesGlyph}</svg>, title: 'Show the host Files panel', onSelect: () => files.open ? carousel?.show('files') : files.show() });
+    if (onGithub) menuPanels.push({ key: 'github', label: 'GitHub', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{githubGlyph}</svg>, title: 'Show the GitHub panel', onSelect: workspace.openGithubPanel });
     if (worktreeId !== undefined && (place?.stack?.processes?.length ?? 0) > 0) menuPanels.push({ key: 'stack', label: 'Stack', icon: <StackIcon path={stackGlyphs.panel} className="more-menu-icon" />, title: 'Show the Stack panel', onSelect: () => workspace.openStackPanel() });
     if (worktreeId !== undefined) menuPanels.push({ key: 'code', label: 'Code', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{codeGlyph}</svg>, title: 'Show the working changes in the Code panel', onSelect: () => code.open ? carousel?.show('code') : code.openChanges('working') });
     // expose the transient preview only while it has a file
@@ -8363,6 +8418,7 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
     {workspace !== undefined && !phone && <BrowserToggle browser={workspace.browser} />}
     {workspace !== undefined && !phone && place?.id !== undefined && <FilesToggle files={workspace.files} />}
     {workspace !== undefined && !phone && worktreeId !== undefined && <CodeToggle code={workspace.code} />}
+    {workspace !== undefined && !phone && onGithub && <GithubToggle github={workspace.githubPanel} />}
     <ConfiguredButtonList slot="leftNav" className="configured-left-nav" buttonClassName="toolbar-button" />
     {phone && workspace?.carousel !== undefined && workspace.carousel.panels.length > 1 ? <PanelDots carousel={workspace.carousel} /> : <span className="toolbar-spacer" aria-hidden="true" />}
     <ConfiguredButtonList slot="rightNav" className="configured-right-nav" buttonClassName="toolbar-button" />
@@ -8377,6 +8433,7 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
 const browserGlyph = <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></>;
 const filesGlyph = <><path d="M3 7h7l2 2h9v10H3z" /><path d="M3 7V5h7l2 2" /></>;
 const codeGlyph = <path d="m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16" />;
+const githubGlyph = githubIcons.pull;
 
 // The toolbar's Browser button: it opens and closes the Place's browser panel, tinted while open.
 // A Place with no project URL has nothing to browse, so it shows no button at all.
@@ -8388,6 +8445,12 @@ function BrowserToggle({ browser }: { browser: WorkspaceState['browser'] }) {
 // open the retained host filesystem panel
 function FilesToggle({ files }: { files: WorkspaceState['files'] }) {
   return <button type="button" className={`toolbar-button files-toggle${files.open ? ' panel-open' : ''}`} aria-label="Files" aria-pressed={files.open} title={files.open ? 'Close the Files panel' : 'Open the host Files panel'} onClick={files.toggle}><svg viewBox="0 0 24 24" aria-hidden="true">{filesGlyph}</svg><span className="toolbar-label">Files</span></button>;
+}
+
+// The toolbar's GitHub button: it opens and closes the GitHub panel, with no count (the Overview's
+// badge is the one attention signal). A Place with no github.com origin shows no button.
+function GithubToggle({ github }: { github: WorkspaceState['githubPanel'] }) {
+  return <button type="button" className={`toolbar-button github-toggle${github.open ? ' panel-open' : ''}`} aria-label="GitHub" aria-pressed={github.open} title={github.open ? 'Close the GitHub panel' : 'Open the GitHub panel'} onClick={github.toggle}><svg viewBox="0 0 24 24" aria-hidden="true">{githubGlyph}</svg><span className="toolbar-label">GitHub</span></button>;
 }
 
 // The toolbar's Code button: it opens the Worktree's working changes in the Code panel, or closes it.
@@ -10723,6 +10786,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       if (entry.agents.some(agent => agent.worktreeId !== undefined && reviewSessions[agent.worktreeId]?.minimized === false)) splits.push({ key: 'review', label: 'Guided review' });
       // a Stack panel shows only for a stack with processes
       if (savedStackPanel(placeId) && ((entry.worktree?.stack ?? entry.agents[0]?.stack)?.processes?.length ?? 0) > 0) splits.push({ key: 'stack', label: 'Stack' });
+      if (savedGithubPanel(placeId)) splits.push({ key: 'github', label: 'GitHub' });
     }
     const selectedAgent = currentAgentOf(entry);
     const noteViewId = placeId ?? (selectedAgent === undefined ? undefined : `agent:${selectedAgent.id}`);
@@ -10841,6 +10905,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       code: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{codeGlyph}</svg>,
       preview: <PanelIcon path={panelIcons.eye} />,
       stack: <StackIcon path={stackGlyphs.panel} className="more-menu-icon" />,
+      github: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{githubGlyph}</svg>,
       settings: <PanelIcon path="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 3v2m0 14v2M3 12h2m14 0h2M6 6l1 1m10 10 1 1M6 18l1-1m10-10 1-1" />
     };
     const menu: ContextMenuItem[] = [
@@ -10893,11 +10958,11 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   })}<NotificationControl /><OverviewButton open={overviewOpen} phone={phone} badge={data.githubBadge ?? 0} onToggle={toggleOverview} /><span className="launcher" ref={launcherRef}><button ref={plusRef} className={`new-agent-tab${progressBorder(creatingAgent, 'blue')}`} type="button" disabled={creatingAgent} aria-busy={creatingAgent || undefined} aria-label={creatingAgent ? 'Starting agent' : 'Launch agent'} data-context-flyout aria-expanded={launcherOpen} onClick={() => { /* toggle the launcher */ if (launcherOpen) closeLauncher(); else setLauncherOpen(true); }}><ProgressRing busy={creatingAgent} /><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button></span>{launcherOpen && <FlyoutPortal onDismiss={closeLauncher}><div className="launcher-menu more-menu flyout-menu" ref={launcherMenuRef} style={launcherStyle} role="group" aria-label="Agent launcher"><div className="launcher-row"><span className="launcher-row-label launcher-symbol-label"><LauncherLabelIcon /><span>Scratch</span></span><button type="button" className="launcher-icon launcher-open-folder" aria-label="Other locations" title="Other locations" onClick={() => showOpenFolder()}><FolderIcon /></button>{launcherPlaceControls(scratchPlace)}{launcherPlaceSplit('~ Scratch', scratchPlace, data.scratchLaunch, '/api/agents/launch', choice => void createAgent(choice))}</div>{data.projects.filter(project => project.implicit !== true).map(launcherProject)}</div></FlyoutPortal>}{plusAlone && <span className="tab-spacer" aria-hidden="true" />}{clientSettings && <ClientSettingsTrigger />}</nav>{agent === undefined && item?.worktree === undefined && renderNotifications()}</>;
   const consoleClass = `console${davo.enabled && voiceOpen ? ' voice-visible' : ''}`;
   // the Overview reads its lists again when GitHub's data or the Worktrees (its rows' destinations) change
-  const overviewRevision = `${data.serverStartedAt ?? ''}:${data.githubRevision ?? ''}:${data.projects.flatMap(project => project.worktrees.map(worktree => `${worktree.id}@${worktree.branch ?? ''}`)).join(',')}`;
-  const overviewPane = overviewOpen ? <GithubOverview request={request} revision={overviewRevision} phone={phone} onClose={closeOverview} onOpen={worktreeId => { setOverviewOpen(false); openPlace(worktreeId); }} /> : undefined;
+  const overviewRevision = githubListsRevision(data.serverStartedAt, data.githubRevision, data.projects);
+  const overviewPane = overviewOpen ? <GithubOverview request={request} revision={overviewRevision} phone={phone} onClose={closeOverview} onOpen={(worktreeId, item, column) => { setOverviewOpen(false); requestGithubFocus(worktreeId, { number: item.number, issue: column === 'issues' }); openPlace(worktreeId); }} /> : undefined;
   // preserve editor availability when no workspace can own a terminal yet
-  if (items.length === 0) return withConfiguredButtons(<EditorConfiguredContext.Provider value={data.editor === true}><AdaptersContext.Provider value={data.adapters}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey="dashboard"><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<article className="agent-view cleanup-empty-view">{overviewPane ?? <section className="log-shell"><div className="log inactive-log"><ResizableLogSplit withSettings empty={<div className="empty-workspace"><h2>No sessions</h2></div>} /></div></section>}{tabBar}{overviewPane === undefined && <WorkspaceToolbar cleanupControl={cleanupControl} />}{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</article></main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></AdaptersContext.Provider></EditorConfiguredContext.Provider>);
-  return withConfiguredButtons(<AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><OpenAgentContext.Provider value={setActivateAgentId}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey={activeItemKey ?? 'dashboard'}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{overviewPane !== undefined ? <article className="agent-view">{overviewPane}{tabBar}</article> : <>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onCloseReview={worktreeId => { /* bulk close already owns the guard or deliberate-empty bypass */ minimizeReview(worktreeId, true); }} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNewWorktree={openNewWorktreeFor(agent.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNewWorktree={openNewWorktreeFor(item.worktree.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</>}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></OpenAgentContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>);
+  if (items.length === 0) return withConfiguredButtons(<EditorConfiguredContext.Provider value={data.editor === true}><AdaptersContext.Provider value={data.adapters}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey="dashboard"><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<article className="agent-view cleanup-empty-view">{overviewPane ?? <section className="log-shell"><div className="log inactive-log"><ResizableLogSplit withSettings empty={<div className="empty-workspace"><h2>No sessions</h2></div>} /></div></section>}{tabBar}{overviewPane === undefined && <WorkspaceToolbar cleanupControl={cleanupControl} />}{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</article></main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></AdaptersContext.Provider></EditorConfiguredContext.Provider>);
+  return withConfiguredButtons(<AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><OpenAgentContext.Provider value={setActivateAgentId}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey={activeItemKey ?? 'dashboard'}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{overviewPane !== undefined ? <article className="agent-view">{overviewPane}{tabBar}</article> : <>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onCloseReview={worktreeId => { /* bulk close already owns the guard or deliberate-empty bypass */ minimizeReview(worktreeId, true); }} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNewWorktree={openNewWorktreeFor(agent.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNewWorktree={openNewWorktreeFor(item.worktree.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</>}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></OpenAgentContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>);
 }
 
 // coordinate console session and update lifecycle

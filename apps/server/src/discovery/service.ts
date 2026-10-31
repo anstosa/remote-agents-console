@@ -868,10 +868,12 @@ export class DiscoveryService {
     }));
     const byProject = new Map<string, DashboardWorktree[]>();
     for (const view of worktreeViews) { const list = byProject.get(view.projectId) ?? []; list.push(view); byProject.set(view.projectId, list); }
-    const projects: DashboardProject[] = this.projectsNow().map(project => {
+    const projects: DashboardProject[] = await Promise.all(this.projectsNow().map(async project => {
       const management = worktreeManagementAvailability(project);
-      return { id: project.id, ...(project.implicit === true ? { implicit: true as const } : {}), label: project.label, mode: project.mode, available: project.available, ...(project.unavailableReason === undefined ? {} : { unavailableReason: project.unavailableReason }), manageWorktrees: management.available, ...(management.reason === undefined ? {} : { manageWorktreesReason: management.reason }), stalePaths: this.staleSnapshot.get(project.id) ?? [], ...(project.commands?.setup === undefined ? {} : { setup: true }), worktrees: byProject.get(project.id) ?? [] };
-    });
+      // the GitHub panel shows only where the origin is on github.com
+      const github = project.mode === 'repository' ? await this.github.repositoryAt(project.path).catch(() => undefined) : undefined;
+      return { id: project.id, ...(project.implicit === true ? { implicit: true as const } : {}), label: project.label, mode: project.mode, ...(github === undefined ? {} : { github: `${github.owner}/${github.name}` }), available: project.available, ...(project.unavailableReason === undefined ? {} : { unavailableReason: project.unavailableReason }), manageWorktrees: management.available, ...(management.reason === undefined ? {} : { manageWorktreesReason: management.reason }), stalePaths: this.staleSnapshot.get(project.id) ?? [], ...(project.commands?.setup === undefined ? {} : { setup: true }), worktrees: byProject.get(project.id) ?? [] };
+    }));
     const listed = this.listPlaces(places, [...discovered.flatMap(agent => this.placeOf(agent, places) ?? []), ...shellPlaces, ...await this.pinnedScratchPlaces(places)]);
     this.listedPlaces = new Map(listed.map(place => [place.id, place]));
     // materialize flags only at publication so concurrent replies can invalidate earlier panes

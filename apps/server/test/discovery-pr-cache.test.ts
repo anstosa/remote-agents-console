@@ -138,6 +138,14 @@ describe('DiscoveryService and the GitHub poll', () => {
     // the published branch is in the repository's read; nothing else was asked
     expect(calls.map(call => call.variables)).toEqual([{ o0: 'acme', n0: 'pushed', b0_0: 'feature/cache' }]);
   });
+
+  it('names each Project\'s github.com repository, so the web shows the GitHub panel only there', async () => {
+    const github = new GithubService({ token: async () => undefined, command: async (_binary, args) => ({ code: 0, stdout: args.includes('/workspaces/hub') ? 'git@github.com:acme/Hub.git\n' : 'git@git.home.lan:tony/notes.git\n' }) });
+    const service = new DiscoveryService(socketFinder(), paneLister([]) as never, processInspector(), github, undefined, [testProject({ id: 'hub', path: '/workspaces/hub' }), testProject({ id: 'notes', path: '/workspaces/notes' })], undefined, async path => [worktree(path)]);
+
+    const dashboard = await service.dashboard(false, true);
+    expect(dashboard.projects.map(project => [project.id, project.github])).toEqual([['hub', 'acme/Hub'], ['notes', undefined]]);
+  });
 });
 
 describe('DiscoveryService pull request comparison cache', () => {

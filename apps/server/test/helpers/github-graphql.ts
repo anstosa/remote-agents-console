@@ -122,7 +122,8 @@ export function answer(world: World, call: GraphqlCall): Record<string, unknown>
     const fields = section.split(/(?=\b(?:open|issues|b\d+):?[a-zA-Z]*\()/u);
     const open = fields.find(field => field.startsWith('open:pullRequests('));
     if (open !== undefined) node.open = { nodes: pulls.filter(pull => !open.includes('states:OPEN') || (pull.state ?? 'OPEN') === 'OPEN').map(pull => pullNode(name, pull, open)) };
-    if (fields.some(field => field.startsWith('issues('))) node.issues = { nodes: issues.map(issue => ({ ...issue, url: `https://github.com/${name}/issues/${issue.number}` })) };
+    const issueField = fields.find(field => field.startsWith('issues('));
+    if (issueField !== undefined) node.issues = { nodes: issues.map(issue => issueNode(name, issue, issueField)) };
     for (const field of fields) {
       const match = /^(b\d+):pullRequests?\((headRefName|number):\$(\w+)/u.exec(field);
       if (match === null) continue;

@@ -313,11 +313,11 @@ html.software-keyboard-open .tabs { display: none; }
 .empty-workspace-warning { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: .4rem; margin: 0; padding: .5rem .6rem; border: 1px solid color-mix(in srgb, var(--yellow) 50%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--yellow) 8%, transparent); color: var(--yellow); font-size: .76rem; }
 .empty-workspace-warning button { padding: .2rem .55rem; border: 1px solid var(--yellow); border-radius: var(--control-radius); background: transparent; color: var(--yellow); font: inherit; font-weight: 800; cursor: pointer; }
 /* leave terminal and Code compositions to the generic grid without outranking the phone override */
-.log-split.has-note:not(.has-browser):where(:not(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-settings, .no-agent)), .log-split.has-browser:not(.has-note):where(:not(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-settings, .no-agent)) { grid-template-rows: repeat(2, minmax(8rem, 1fr)); }
-.log-split.has-note.has-browser:where(:not(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-settings, .no-agent)) { grid-template-rows: repeat(3, minmax(8rem, 1fr)); }
+.log-split.has-note:not(.has-browser):where(:not(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-github, .has-settings, .no-agent)), .log-split.has-browser:not(.has-note):where(:not(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-github, .has-settings, .no-agent)) { grid-template-rows: repeat(2, minmax(8rem, 1fr)); }
+.log-split.has-note.has-browser:where(:not(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-github, .has-settings, .no-agent)) { grid-template-rows: repeat(3, minmax(8rem, 1fr)); }
 /* Terminals, Code or no agent panel make the split a list of panels; in a portrait area they stack
    as rows, in a wide area they become columns (below), and on a phone one panel shows at a time. */
-.log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-preview, .log-split.has-review, .log-split.has-stack, .log-split.has-settings, .log-split.no-agent { grid-template: none; grid-template-columns: minmax(0, 1fr); grid-auto-flow: row; grid-auto-rows: minmax(8rem, 1fr); }
+.log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-preview, .log-split.has-review, .log-split.has-stack, .log-split.has-github, .log-split.has-settings, .log-split.no-agent { grid-template: none; grid-template-columns: minmax(0, 1fr); grid-auto-flow: row; grid-auto-rows: minmax(8rem, 1fr); }
 .split-resizer { display: none; }
 .log-output { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .log-output.expanded { width: 100%; height: 100%; }
@@ -473,8 +473,8 @@ button.model-chip:hover, button.model-chip.active, .watches-chip:hover, .watches
 /* let any supplemental split fill the output area without unmounting siblings (a phone expands
    into full screen instead, below; `not` leaves no gap at fractional widths past 768px) */
 @media not all and (max-width: 768px) {
-  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .client-settings-page).expanded) { display: block; }
-  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .client-settings-page).expanded) > :not(.expanded) { display: none; }
+  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .github-pane, .terminal-pane, .client-settings-page).expanded) { display: block; }
+  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .github-pane, .terminal-pane, .client-settings-page).expanded) > :not(.expanded) { display: none; }
 }
 :is(.log-output, .agent-output)::after { position: absolute; inset: 0; z-index: 30; box-sizing: border-box; border: 3px solid transparent; content: ''; pointer-events: none; }
 :is(.log-output.input-active, .agent-panel.input-active > .agent-output)::after { border-color: var(--sky); box-shadow: inset 0 0 1.4rem #00000066, inset 0 0 1.35rem color-mix(in srgb, var(--sky) 34%, transparent); }
@@ -744,6 +744,7 @@ button.conversation-choice:not(:disabled):hover { background: color-mix(in srgb,
 .files-pane { --panel-accent: var(--sky); }
 .code-pane { --panel-accent: var(--mauve); }
 .stack-pane { --panel-accent: var(--teal); }
+.github-pane { --panel-accent: var(--lavender); }
 .terminal-pane { --panel-accent: var(--green); }
 .panel-header { position: absolute; top: .4rem; right: .4rem; left: .4rem; z-index: 7; display: flex; min-width: 0; justify-content: space-between; gap: .4rem; pointer-events: none; }
 .panel-header-pill { display: flex; min-width: 0; min-height: 2.35rem; align-items: center; gap: .25rem; padding: .2rem; border: 1px solid var(--surface-1); border-radius: .55rem; background: color-mix(in srgb, var(--crust) 80%, transparent); box-shadow: 0 .4rem 1.2rem color-mix(in srgb, var(--crust) 70%, transparent); backdrop-filter: blur(8px); pointer-events: auto; }
@@ -1128,28 +1129,29 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 .code-pane-file-collapse[aria-expanded='true'] svg { transform: rotate(90deg); }
 @keyframes note-pane-appear { from { opacity: 0; } to { opacity: 1; } }
 @container output-area (min-aspect-ratio: 1 / 1) {
-  .log-split.has-note:not(.has-browser):not(.has-terminals):not(.has-files):not(.has-code, .has-preview):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)); }
-  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code, .has-preview):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
-  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code, .has-preview):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
+  .log-split.has-note:not(.has-browser):not(.has-terminals):not(.has-files):not(.has-code, .has-preview):not(.has-review):not(.has-stack):not(.has-github):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)); }
+  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code, .has-preview):not(.has-review):not(.has-stack):not(.has-github):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
+  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code, .has-preview):not(.has-review):not(.has-stack):not(.has-github):not(.has-settings):not(.no-agent) { grid-template: minmax(0, 1fr) / minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) .45rem minmax(var(--split-pane-min-width), var(--browser-split)); }
   /* With one or more Terminals, a Code panel or no agent panel the split is a generic list of
      columns (agent, terminals, note, browser, code), each `minmax(390px, <weight>fr)`, built in JS
      as `--split-cols`. */
-  .log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-preview, .log-split.has-review, .log-split.has-stack, .log-split.has-settings, .log-split.no-agent { grid-template: minmax(0, 1fr) / var(--split-cols); }
+  .log-split.has-terminals, .log-split.has-files, .log-split.has-code, .log-split.has-preview, .log-split.has-review, .log-split.has-stack, .log-split.has-github, .log-split.has-settings, .log-split.no-agent { grid-template: minmax(0, 1fr) / var(--split-cols); }
   /* remove the hidden browser divider's track when fixing the mobile preview width */
-  .log-split:is(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-settings, .no-agent):has(> .browser-pane.mobile:not(.expanded)) { --browser-split-cols: var(--split-pane-min-width); }
-  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code):not(.has-preview):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) var(--split-pane-min-width); }
-  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code):not(.has-preview):not(.has-review):not(.has-stack):not(.has-settings):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) var(--split-pane-min-width); }
+  .log-split:is(.has-terminals, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-github, .has-settings, .no-agent):has(> .browser-pane.mobile:not(.expanded)) { --browser-split-cols: var(--split-pane-min-width); }
+  .log-split.has-browser:not(.has-note):not(.has-terminals):not(.has-files):not(.has-code):not(.has-preview):not(.has-review):not(.has-stack):not(.has-github):not(.has-settings):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) var(--split-pane-min-width); }
+  .log-split.has-note.has-browser:not(.has-terminals):not(.has-files):not(.has-code):not(.has-preview):not(.has-review):not(.has-stack):not(.has-github):not(.has-settings):not(.no-agent):has(> .browser-pane.mobile:not(.expanded)) { grid-template-columns: minmax(var(--split-pane-min-width), var(--agent-split)) .45rem minmax(var(--split-pane-min-width), var(--note-split)) var(--split-pane-min-width); }
   .split-resizer { position: relative; z-index: 5; display: block; width: .45rem; min-width: .45rem; height: 100%; cursor: col-resize; touch-action: none; outline: 0; }
   .split-resizer::after { position: absolute; inset: 0 calc(50% - .5px); background: var(--surface-1); content: ''; transition: background .12s ease, box-shadow .12s ease; }
   .split-resizer:is(:hover, :focus-visible)::after { background: var(--blue); box-shadow: 0 0 .5rem color-mix(in srgb, var(--blue) 48%, transparent); }
   .log-split:has(> .browser-pane.mobile:not(.expanded)) > .browser-resizer { display: none; }
-  .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane { border-top: 0; border-left: 1px solid color-mix(in srgb, var(--yellow) 52%, var(--surface-1)); box-shadow: inset 1px 0 color-mix(in srgb, var(--text) 4%, transparent); }
+  .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .github-pane { border-top: 0; border-left: 1px solid color-mix(in srgb, var(--yellow) 52%, var(--surface-1)); box-shadow: inset 1px 0 color-mix(in srgb, var(--text) 4%, transparent); }
   /* editing keeps the note accent on top when the keyboard makes the split wide */
   .note-pane.editing:not(.expanded) { border-top: 1px solid color-mix(in srgb, var(--yellow) 52%, var(--surface-1)); border-left: 0; box-shadow: inset 0 1px color-mix(in srgb, var(--text) 4%, transparent); }
   .browser-pane { border-left-color: color-mix(in srgb, var(--blue) 58%, var(--surface-1)); }
   .files-pane { border-left-color: color-mix(in srgb, var(--sky) 58%, var(--surface-1)); }
   .code-pane { border-left-color: color-mix(in srgb, var(--mauve) 52%, var(--surface-1)); }
   .stack-pane { border-left-color: color-mix(in srgb, var(--teal) 52%, var(--surface-1)); }
+  .github-pane { border-left-color: color-mix(in srgb, var(--lavender) 52%, var(--surface-1)); }
   :is(.note-pane, .browser-pane, .files-pane, .terminal-pane).expanded { border: 0; }
   .terminal-pane { border-left: 1px solid color-mix(in srgb, var(--green) 46%, var(--surface-1)); box-shadow: inset 1px 0 color-mix(in srgb, var(--text) 4%, transparent); }
 }
@@ -1159,11 +1161,11 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
   .browser-frame-shell.desktop iframe { width: var(--browser-desktop-width, 980px); height: var(--browser-desktop-height, 100%); transform: scale(var(--browser-desktop-scale, 1)); transform-origin: top left; }
   /* A phone shows one panel per screen: the split is a horizontal swipe carousel that snaps to
      each panel in turn (the toolbar's dots show where it is). */
-  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .client-settings-page)) { display: flex; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scrollbar-width: none; }
+  .log-split:has(> :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .github-pane, .terminal-pane, .client-settings-page)) { display: flex; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scrollbar-width: none; }
   /* let horizontal swipes over note content reach the panel carousel */
   .note-pane :is(.note-markdown, textarea) { touch-action: pan-y; }
   .log-split::-webkit-scrollbar { display: none; }
-  .log-split > :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .client-settings-page) { flex: 0 0 100%; width: 100%; min-width: 0; height: 100%; scroll-snap-align: start; scroll-snap-stop: always; }
+  .log-split > :is(.log-output, .note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .github-pane, .terminal-pane, .client-settings-page) { flex: 0 0 100%; width: 100%; min-width: 0; height: 100%; scroll-snap-align: start; scroll-snap-stop: always; }
   .log-split > .split-resizer { display: none; }
   /* an expanded panel keeps its own footer while the tab row and toolbar fold away */
   .agent-view:has(.log-split > .expanded) > :is(nav.tabs, section.workspace-toolbar) { display: none; }
@@ -1171,9 +1173,9 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
   .log-split > :is(.log-output, .terminal-pane).expanded > :is(.agent-composer, .mobile-terminal-keys) { padding-bottom: .375rem; }
 }
 /* keyboard focus overrides ordinary split tracks to preserve output width */
-html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-terminals) { grid-template: minmax(0, 1fr) / minmax(0, 1fr) !important; }
-html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-terminals) > :is(.note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .split-resizer) { display: none; }
-html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-terminals) > .log-output { display: grid; }
+html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-github, .has-terminals) { grid-template: minmax(0, 1fr) / minmax(0, 1fr) !important; }
+html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-github, .has-terminals) > :is(.note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .github-pane, .terminal-pane, .split-resizer) { display: none; }
+html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-github, .has-terminals) > .log-output { display: grid; }
 /* keep the entire static bottom bar behind any open software keyboard */
 html.software-keyboard-open .agent-view > .workspace-toolbar { display: none; }
 /* retain the keyboard gutter for split panes and pending session prompts */
@@ -1237,7 +1239,7 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
   .stack-pane-list { max-height: 11rem; border-right: 0; border-bottom: 1px solid var(--surface-1); }
 }
 /* end each split at its content edge so input footers stay below the border */
-.log-split > :is(.note-pane, .browser-pane, .code-pane, .review-pane, .stack-pane),
+.log-split > :is(.note-pane, .browser-pane, .code-pane, .review-pane, .stack-pane, .github-pane),
 .agent-panel > .agent-output,
 .terminal-pane > .terminal-canvas { border-bottom: 1px solid var(--surface-0); }
 .terminal-pane.focused::after, .terminal-pane.selection-active::after { position: absolute; inset: 0; z-index: 6; border: 2px solid var(--sky); border-radius: 2px; content: ''; pointer-events: none; }
@@ -3138,3 +3140,34 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .overview-skeleton { display: grid; gap: .4rem; padding: .7rem .6rem; border: 1px solid var(--surface-0); border-radius: var(--control-radius); }
 .overview-skeleton-title { width: 60%; height: .8rem; }
 .overview-skeleton-meta { width: 35%; }
+
+/* the GitHub panel: one Project's Pull requests and Issues as Overview rows, in groups */
+.github-pane { position: relative; z-index: 1; display: grid; min-width: 0; min-height: 0; grid-template-rows: auto minmax(0, 1fr); padding-top: var(--panel-header-clearance); border-top: 1px solid color-mix(in srgb, var(--lavender) 52%, var(--surface-1)); background: var(--base); container-type: inline-size; animation: note-pane-appear .15s ease-out; }
+.github-pane.expanded { width: 100%; height: 100%; border: 0; }
+.github-pane-title { min-width: 0; overflow: hidden; padding: 0 .35rem; font: 700 .75rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.github-freshness { align-self: center; padding: 0 .3rem; color: var(--overlay-1); font-size: .66rem; white-space: nowrap; }
+.github-pane > .overview-banner { margin: .4rem .55rem 0; }
+.github-pane-body { min-height: 0; overflow: auto; padding: .45rem .55rem 2rem; }
+.github-kind { display: flex; align-items: center; gap: .35rem; margin: .9rem .15rem .2rem; color: var(--subtext-1); font-size: .7rem; font-weight: 800; }
+.github-pane-body > .github-kind:first-child, .github-pinned > .github-kind { margin-top: .2rem; }
+.github-pinned > .github-kind { color: var(--green); font-size: .62rem; letter-spacing: .12em; text-transform: uppercase; }
+.github-pinned > .github-kind .overview-icon { width: .8rem; height: .8rem; }
+.github-group { display: grid; gap: .3rem; margin-top: .2rem; }
+.github-group-head { display: flex; width: 100%; align-items: center; gap: .5rem; padding: .35rem .15rem; border: 0; background: none; color: var(--overlay-2); font-size: .62rem; font-weight: 800; letter-spacing: .12em; text-align: left; text-transform: uppercase; }
+.github-group-head :is(.overview-count, .overview-waits) { letter-spacing: 0; text-transform: none; }
+.github-chevron { margin-left: auto; transition: transform .15s; }
+.github-group-head[aria-expanded='false'] .github-chevron { transform: rotate(-90deg); }
+.github-rows { display: grid; gap: .3rem; }
+.github-row.selected { border-color: var(--blue); background: color-mix(in srgb, var(--blue) 10%, var(--surface-0)); }
+.github-row.focus { border-color: var(--lavender); background: color-mix(in srgb, var(--lavender) 10%, var(--surface-0)); }
+.github-row.focus:not(.new) { box-shadow: inset .2rem 0 var(--lavender); }
+.github-from-overview { color: var(--lavender); }
+.github-here { flex: none; margin-top: .1rem; padding: 0 .4rem; border-radius: 999px; background: var(--green); color: var(--crust); font-size: .66rem; font-weight: 800; }
+.overview-chip.merged { --chip: var(--mauve); }
+.github-create { display: grid; gap: .2rem; padding: .6rem .65rem; border: 1px dashed color-mix(in srgb, var(--green) 45%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--green) 6%, var(--mantle)); color: var(--subtext-0); font-size: .72rem; }
+.github-create b { color: var(--green); }
+.github-overview-link { color: var(--lavender); }
+@container (max-width: 30rem) {
+  .github-pane .overview-row-main { flex-wrap: wrap; }
+  .github-pane .overview-destination { flex-basis: 100%; max-width: none; }
+}

@@ -7,22 +7,22 @@ import { Skeleton } from './skeleton.js';
 
 // the server's `Overview` (src/github/service.ts), which the web cannot import: its module graph
 // reaches Node-only code
-type Request = (url: string, init?: RequestInit) => Promise<Response>;
+export type Request = (url: string, init?: RequestInit) => Promise<Response>;
 type Reason =
   | { kind: 'thread'; id: string; author: string; path: string }
   | { kind: 'checks' }
   | { kind: 'conflicts' }
   | { kind: 'changes'; id: string; author: string }
   | { kind: 'review'; reRequested?: true };
-type Item = {
+export type Item = {
   repository: string; number: number; title: string; url: string; author?: string; updatedAt?: string;
   draft?: true; checks?: 'passed' | 'pending' | 'failed'; reasons: Reason[]; unseen?: string[];
   newCommits?: true; approved?: true; closes?: number[]; linkedPullRequests?: number[]; labels?: string[];
   destination?: { kind: 'worktree' | 'project'; worktreeId: string; label: string };
 };
-type Problem = { kind: 'no-token' | 'rate-limited' | 'failing'; message: string; until?: number };
+export type Problem = { kind: 'no-token' | 'rate-limited' | 'failing'; message: string; until?: number };
 type Overview = { mine: Item[]; reviews: Item[]; issues: Item[]; totals: { mine: number; reviews: number; issues: number }; fetchedAt?: number; problem?: Problem };
-type ColumnKey = 'mine' | 'reviews' | 'issues';
+export type ColumnKey = 'mine' | 'reviews' | 'issues';
 
 const columns: { key: ColumnKey; label: string; tab: string; icon: keyof typeof icons; search: string }[] = [
   { key: 'mine', label: 'My pull requests', tab: 'Mine', icon: 'pull', search: 'is:pr is:open author:@me archived:false' },
@@ -30,7 +30,7 @@ const columns: { key: ColumnKey; label: string; tab: string; icon: keyof typeof 
   { key: 'issues', label: 'Assigned issues', tab: 'Issues', icon: 'issue', search: 'is:issue is:open assignee:@me archived:false' }
 ];
 
-const icons = {
+export const icons = {
   pull: <><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 0 1 2 2v7M6 9v12" /></>,
   review: <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></>,
   issue: <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="1.5" /></>,
@@ -45,10 +45,10 @@ const icons = {
   folder: <path d="M3 7h7l2 2h9v10H3z" />
 };
 
-const Icon = ({ name }: { name: keyof typeof icons }) => <svg className="overview-icon" viewBox="0 0 24 24" aria-hidden="true">{icons[name]}</svg>;
+export const Icon = ({ name }: { name: keyof typeof icons }) => <svg className="overview-icon" viewBox="0 0 24 24" aria-hidden="true">{icons[name]}</svg>;
 
 // how long ago, briefly: 5m, 3h, 2d, 3w, 4mo, 1y
-function age(from: number, now: number): string {
+export function age(from: number, now: number): string {
   const minutes = Math.max(0, Math.floor((now - from) / 60_000));
   if (minutes < 1) return 'now';
   if (minutes < 60) return `${minutes}m`;
@@ -60,8 +60,8 @@ function age(from: number, now: number): string {
   return days < 365 ? `${Math.floor(days / 30)}mo` : `${Math.floor(days / 365)}y`;
 }
 
-const waiting = (item: Item) => item.reasons.length > 0;
-const unseen = (item: Item) => (item.unseen?.length ?? 0) > 0;
+export const waiting = (item: Item) => item.reasons.length > 0;
+export const unseen = (item: Item) => (item.unseen?.length ?? 0) > 0;
 // how long a row is shown before its reasons count as seen
 const seenAfterMs = 700;
 const basename = (path: string) => path.split('/').pop() ?? path;
@@ -95,21 +95,31 @@ function hintChips(item: Item): ReactNode[] {
 
 const checksMark = { passed: ['ok', 'check', 'Checks pass'], failed: ['failing', 'cross', 'Checks failing'], pending: ['pending', 'clock', 'Checks running'] } as const;
 
-function Row({ item, column, now, isNew, onOpen }: { item: Item; column: ColumnKey; now: number; isNew: boolean; onOpen: (worktreeId: string) => void }) {
-  const destination = item.destination;
+/**
+ * A row's copy, the same in the Overview and the GitHub panel: the new dot, number and title; the
+ * author (unless `showAuthor` is off), age and checks mark, then `note`; the reason chips, then
+ * `status`, then the hints.
+ */
+export function RowCopy({ item, now, isNew, showAuthor, status, note }: { item: Item; now: number; isNew: boolean; showAuthor: boolean; status?: ReactNode; note?: ReactNode }) {
   const mark = item.checks === undefined ? undefined : checksMark[item.checks];
-  const chips = [...reasonChips(item), ...hintChips(item)];
+  const chips = [...reasonChips(item), ...(status === undefined ? [] : [status]), ...hintChips(item)];
   const updated = item.updatedAt === undefined ? Number.NaN : Date.parse(item.updatedAt);
-  const content = <>
-    <span className="overview-row-copy">
-      <span className="overview-row-title">{isNew && <i className="overview-new-dot" title="New since you last looked" />}<span className="overview-row-number">#{item.number}</span>{item.title}</span>
-      <span className="overview-row-meta">
-        {column !== 'mine' && item.author !== undefined && <span>@{item.author}</span>}
-        {Number.isFinite(updated) && <span>{age(updated, now)}</span>}
-        {mark !== undefined && <span className={`overview-checks ${mark[0]}`} title={mark[2]} aria-label={mark[2]}><Icon name={mark[1]} />checks</span>}
-      </span>
-      {chips.length > 0 && <span className="overview-chips">{chips}</span>}
+  return <span className="overview-row-copy">
+    <span className="overview-row-title">{isNew && <i className="overview-new-dot" title="New since you last looked" />}<span className="overview-row-number">#{item.number}</span>{item.title}</span>
+    <span className="overview-row-meta">
+      {showAuthor && item.author !== undefined && <span>@{item.author}</span>}
+      {Number.isFinite(updated) && <span>{age(updated, now)}</span>}
+      {mark !== undefined && <span className={`overview-checks ${mark[0]}`} title={mark[2]} aria-label={mark[2]}><Icon name={mark[1]} />checks</span>}
+      {note}
     </span>
+    {chips.length > 0 && <span className="overview-chips">{chips}</span>}
+  </span>;
+}
+
+function Row({ item, column, now, isNew, onOpen }: { item: Item; column: ColumnKey; now: number; isNew: boolean; onOpen: OpenItem }) {
+  const destination = item.destination;
+  const content = <>
+    <RowCopy item={item} now={now} isNew={isNew} showAuthor={column !== 'mine'} />
     {destination === undefined
       ? <span className="overview-destination" title="No Project for this repository: opens on github.com"><Icon name="external" />github.com</span>
       : <span className={`overview-destination ${destination.kind}`} title={destination.kind === 'worktree' ? 'Opens this Worktree\'s Workspace' : 'Opens the Project\'s main worktree'}><Icon name={destination.kind === 'worktree' ? 'branch' : 'folder'} />{destination.label}</span>}
@@ -118,14 +128,14 @@ function Row({ item, column, now, isNew, onOpen }: { item: Item; column: ColumnK
   return <div className={`overview-row${waiting(item) ? ' waiting' : ''}${isNew ? ' new' : ''}`}>
     {destination === undefined
       ? <a className="overview-row-main" href={item.url} target="_blank" rel="noreferrer" aria-label={`${label}, on GitHub`}>{content}</a>
-      : <button className="overview-row-main" type="button" aria-label={`${label}, in ${destination.label}`} onClick={() => onOpen(destination.worktreeId)}>{content}</button>}
+      : <button className="overview-row-main" type="button" aria-label={`${label}, in ${destination.label}`} onClick={() => onOpen(destination.worktreeId, item, column)}>{content}</button>}
     {destination !== undefined && <a className="overview-row-browser" href={item.url} target="_blank" rel="noreferrer" title="Open on GitHub" aria-label={`Open #${item.number} on GitHub`}><Icon name="external" /></a>}
   </div>;
 }
 
 // a column's rows by repository: those holding something new first, then the busiest, then by
 // name; in each, Waiting on me rows first, new ones first among those
-function RepositoryGroups({ items, column, now, isNew, onOpen }: { items: Item[]; column: ColumnKey; now: number; isNew: (item: Item) => boolean; onOpen: (worktreeId: string) => void }) {
+function RepositoryGroups({ items, column, now, isNew, onOpen }: { items: Item[]; column: ColumnKey; now: number; isNew: (item: Item) => boolean; onOpen: OpenItem }) {
   if (items.length === 0) return <p className="overview-none">None.</p>;
   const groups = new Map<string, Item[]>();
   for (const item of items) groups.set(item.repository, [...groups.get(item.repository) ?? [], item]);
@@ -137,31 +147,83 @@ function RepositoryGroups({ items, column, now, isNew, onOpen }: { items: Item[]
     const waits = count(rows);
     return <section key={repository} className="overview-repository" aria-label={repository}>
       <h4 className="overview-repository-head"><span>{owner}/<b>{name}</b></span>{rows.some(row => row.destination !== undefined) && <span className="overview-project" title="Has a Project" aria-label="Has a Project"><Icon name="folder" /></span>}{waits > 0 && <span className="overview-waits" title={`${waits} waiting on me`}>{waits}</span>}</h4>
-      {[...rows.filter(row => waiting(row) && isNew(row)), ...rows.filter(row => waiting(row) && !isNew(row)), ...rows.filter(row => !waiting(row))].map(item => <Row key={item.url} item={item} column={column} now={now} isNew={isNew(item)} onOpen={onOpen} />)}
+      {attentionOrder(rows, isNew).map(item => <Row key={item.url} item={item} column={column} now={now} isNew={isNew(item)} onOpen={onOpen} />)}
     </section>;
   })}</>;
 }
 
+/** Opens a row with a destination in its Worktree's (or Project's) Workspace. */
+export type OpenItem = (worktreeId: string, item: Item, column: ColumnKey) => void;
+
+/** Rows in the order they ask for attention: Waiting on me first, new ones first among those. */
+export function attentionOrder<T extends Item>(rows: readonly T[], isNew: (item: T) => boolean): T[] {
+  return [...rows.filter(row => waiting(row) && isNew(row)), ...rows.filter(row => waiting(row) && !isNew(row)), ...rows.filter(row => !waiting(row))];
+}
+
+/**
+ * Report the unseen reasons of the rows on screen (`shown`, while `active` and the page is
+ * visible) seen once they have shown a moment; the server's badge drops on every device. Returns
+ * whether a row is new this visit: unseen, or shown unseen earlier in it, so its mark stays after
+ * the server counts it seen.
+ */
+export function useSeenRows(request: Request, shown: readonly Item[], active: boolean): (item: Item) => boolean {
+  const [shownNew, setShownNew] = useState<ReadonlySet<string>>(() => new Set());
+  const reported = useRef(new Set<string>());
+  // a hidden page shows nothing, so it marks nothing seen
+  const [visible, setVisible] = useState(() => document.visibilityState === 'visible');
+  useEffect(() => {
+    const update = () => setVisible(document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', update);
+    return () => document.removeEventListener('visibilitychange', update);
+  }, []);
+  const rows = shown.filter(unseen);
+  const pending = [...new Set(rows.flatMap(item => item.unseen ?? []))].filter(key => !reported.current.has(key));
+  const latest = useRef(rows);
+  latest.current = rows;
+  // the keys travel as one string, so the timer restarts only when they change
+  const signature = pending.join('\n');
+  useEffect(() => {
+    if (!active || !visible || signature === '') return;
+    const keys = signature.split('\n');
+    const timer = window.setTimeout(() => {
+      for (const key of keys) reported.current.add(key);
+      setShownNew(previous => new Set([...previous, ...latest.current.map(item => item.url)]));
+      void request('/api/github/overview/seen', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keys }) })
+        .then(response => { if (!response.ok) throw new Error(); })
+        // a report that did not land is sent again with the next lists
+        .catch(() => { for (const key of keys) reported.current.delete(key); });
+    }, seenAfterMs);
+    return () => window.clearTimeout(timer);
+  }, [active, visible, signature, request]);
+  return item => unseen(item) || shownNew.has(item.url);
+}
+
+/** What the yellow banner says when the lists shown are older than they should be; nothing while they are current. */
+export function staleNotice(lists: { fetchedAt?: number; problem?: Problem } | undefined, unreachable: boolean, now: number): string | undefined {
+  const staleSince = lists?.fetchedAt === undefined ? '' : ` Showing what was fetched ${age(lists.fetchedAt, now)} ago.`;
+  const problem = lists?.problem;
+  if (unreachable && lists !== undefined) return `The console could not be reached.${staleSince}`;
+  if (problem === undefined || problem.kind === 'no-token' || lists?.fetchedAt === undefined) return undefined;
+  return `${problem.kind === 'rate-limited' && problem.until !== undefined ? `GitHub's rate limit holds requests until ${new Date(problem.until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` : 'GitHub is unreachable.'}${staleSince}`;
+}
+
+export const NoTokenCard = () => <div className="overview-card"><h3>No GitHub token</h3><p>The server found no GitHub token. Run <code>gh auth login</code> on the host so the token lands in <code>~/.config/gh/hosts.yml</code>, or set <code>RAC_GITHUB_TOKEN</code> and restart the console.</p></div>;
+
 // when GitHub was last read, coarsely
-const freshness = (fetchedAt: number, now: number) => now - fetchedAt < 60_000 ? 'updated just now' : `updated ${age(fetchedAt, now)} ago`;
+export const freshness = (fetchedAt: number, now: number) => now - fetchedAt < 60_000 ? 'updated just now' : `updated ${age(fetchedAt, now)} ago`;
 
 /**
  * The Overview: three columns (tabs on a phone) grouped by repository. `revision` changes when the
  * server's GitHub data or the console's Worktrees change, and the lists are read again then.
  */
-export function GithubOverview({ request, revision, phone, onClose, onOpen }: { request: Request; revision: string; phone: boolean; onClose: () => void; onOpen: (worktreeId: string) => void }) {
+export function GithubOverview({ request, revision, phone, onClose, onOpen }: { request: Request; revision: string; phone: boolean; onClose: () => void; onOpen: OpenItem }) {
   const [overview, setOverview] = useState<Overview>();
   const [unreachable, setUnreachable] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [tab, setTab] = useState<ColumnKey>('mine');
   const [now, setNow] = useState(() => Date.now());
-  // rows shown unseen during this visit keep their mark after the server counts them seen
-  const [shownNew, setShownNew] = useState<ReadonlySet<string>>(() => new Set());
-  const reported = useRef(new Set<string>());
   // a phone opens on the first tab holding something unseen, once the lists first land
   const tabChosen = useRef(false);
-  // a hidden page shows nothing, so it marks nothing seen
-  const [visible, setVisible] = useState(() => document.visibilityState === 'visible');
   const load = useCallback(async (refresh: boolean) => {
     try {
       const response = await request(`/api/github/overview${refresh ? '?refresh=1' : ''}`);
@@ -177,11 +239,6 @@ export function GithubOverview({ request, revision, phone, onClose, onOpen }: { 
     setNow(Date.now());
   }, [request]);
   useEffect(() => { void load(false); }, [load, revision]);
-  useEffect(() => {
-    const update = () => setVisible(document.visibilityState === 'visible');
-    document.addEventListener('visibilitychange', update);
-    return () => document.removeEventListener('visibilitychange', update);
-  }, []);
   // keep "updated … ago" and row ages moving
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -205,38 +262,17 @@ export function GithubOverview({ request, revision, phone, onClose, onOpen }: { 
   };
   // the rows on screen (every column, or a phone's open tab) count as seen once shown a moment
   const listed = overview !== undefined && overview.fetchedAt !== undefined && overview.problem?.kind !== 'no-token';
-  useEffect(() => {
-    if (!listed || overview === undefined || !visible) return;
-    const rows = (phone ? overview[tab] : [...overview.mine, ...overview.reviews]).filter(unseen);
-    const keys = rows.flatMap(item => item.unseen ?? []).filter(key => !reported.current.has(key));
-    if (keys.length === 0) return;
-    const timer = window.setTimeout(() => {
-      for (const key of keys) reported.current.add(key);
-      setShownNew(previous => new Set([...previous, ...rows.map(item => item.url)]));
-      void request('/api/github/overview/seen', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keys }) })
-        .then(response => { if (!response.ok) throw new Error(); })
-        // a report that did not land is sent again with the next lists
-        .catch(() => { for (const key of keys) reported.current.delete(key); });
-    }, seenAfterMs);
-    return () => window.clearTimeout(timer);
-  }, [listed, overview, phone, tab, visible, request]);
-  // new: unseen, or shown unseen earlier in this visit
-  const isNew = (item: Item) => unseen(item) || shownNew.has(item.url);
+  const isNew = useSeenRows(request, overview === undefined ? [] : phone ? overview[tab] : [...overview.mine, ...overview.reviews], listed);
 
   const problem = overview?.problem;
   const items = overview === undefined ? [] : [...overview.mine, ...overview.reviews, ...overview.issues];
   const waits = overview === undefined ? 0 : [...overview.mine, ...overview.reviews].filter(waiting).length;
   const newCount = items.filter(isNew).length;
   const summary = listed ? <span className="overview-summary">{waits > 0 ? <><b>{waits}</b> waiting on me</> : 'Nothing waiting on me'}{newCount > 0 && <> · <b>{newCount}</b> new</>}</span> : null;
-  const staleSince = overview?.fetchedAt === undefined ? '' : ` Showing what was fetched ${age(overview.fetchedAt, now)} ago.`;
-  const banner = unreachable && overview !== undefined
-    ? `The console could not be reached.${staleSince}`
-    : problem !== undefined && problem.kind !== 'no-token' && overview?.fetchedAt !== undefined
-      ? `${problem.kind === 'rate-limited' && problem.until !== undefined ? `GitHub's rate limit holds requests until ${new Date(problem.until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` : 'GitHub is unreachable.'}${staleSince}`
-      : undefined;
+  const banner = staleNotice(overview, unreachable, now);
 
   let body: ReactNode;
-  if (problem?.kind === 'no-token') body = <div className="overview-card"><h3>No GitHub token</h3><p>The server found no GitHub token. Run <code>gh auth login</code> on the host so the token lands in <code>~/.config/gh/hosts.yml</code>, or set <code>RAC_GITHUB_TOKEN</code> and restart the console.</p></div>;
+  if (problem?.kind === 'no-token') body = <NoTokenCard />;
   else if (overview === undefined && unreachable) body = <div className="overview-card"><h3>The console could not be reached</h3><p>The Overview loads once the console answers again.</p><button type="button" onClick={() => void refresh()}>Retry</button></div>;
   else if (overview === undefined || (overview.fetchedAt === undefined && problem === undefined)) body = <div className="overview-skeletons" role="status" aria-label="Loading the Overview" aria-busy="true">{Array.from({ length: 6 }, (_, index) => <div className="overview-skeleton" key={index}><Skeleton className="overview-skeleton-title" /><Skeleton className="overview-skeleton-meta" /></div>)}</div>;
   else if (overview.fetchedAt === undefined) body = <div className="overview-card"><h3>GitHub is unreachable</h3><p>{problem?.message}</p><button type="button" onClick={() => void refresh()}>Retry</button></div>;

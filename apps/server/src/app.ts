@@ -2061,6 +2061,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   app.get('/api/projects/:id/switch-prs', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => { controlled(request); const list = await prSwitch.branchList((request.params as { id: string }).id); return list === undefined ? reply.code(404).send({ error: 'repository branch list unavailable' }) : list; });
   // the Overview's lists from the module's cache; `refresh` (Refresh, Retry) reads GitHub again first
   app.get('/api/github/overview', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async request => { controlled(request); return await github.overview({ fresh: (request.query as { refresh?: unknown }).refresh === '1' }); });
+  // one Project's lists for the GitHub panel, from the module's cache; `refresh` reads GitHub again first
+  app.get('/api/projects/:id/github', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
+    controlled(request);
+    const project = discovery.projectsNow().find(candidate => candidate.id === (request.params as { id: string }).id);
+    const repository = project === undefined ? undefined : await github.projectRepository(project);
+    if (repository === undefined) return reply.code(404).send({ error: 'no github.com repository for this project' });
+    return await github.panel(repository, { fresh: (request.query as { refresh?: unknown }).refresh === '1' });
+  });
   // a browser showed these rows' unseen reasons (their `unseen` keys); the badge drops on every device
   app.post('/api/github/overview/seen', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
     controlled(request, true);

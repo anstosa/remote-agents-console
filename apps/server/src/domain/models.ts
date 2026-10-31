@@ -130,7 +130,9 @@ export type DashboardWorktree = { id: string; projectId: string; label: string; 
 // the confirm lists them by path. Empty when nothing is stale. `setup` is true only when
 // the Project configures a `commands.setup`: the web shows a "running setup" notice while a
 // new Worktree is being created, without ever receiving the (shell) command itself.
-export type DashboardProject = { id: string; implicit?: true; label: string; mode: 'repository' | 'directory'; available: boolean; unavailableReason?: string; manageWorktrees: boolean; manageWorktreesReason?: string; stalePaths: string[]; setup?: boolean; worktrees: DashboardWorktree[] };
+// `github` is the `owner/name` its origin names on github.com, absent elsewhere; the
+// web offers the GitHub panel only where it is set.
+export type DashboardProject = { id: string; implicit?: true; label: string; mode: 'repository' | 'directory'; github?: string; available: boolean; unavailableReason?: string; manageWorktrees: boolean; manageWorktreesReason?: string; stalePaths: string[]; setup?: boolean; worktrees: DashboardWorktree[] };
 // One directory-Project or Scratch Place on the wire, beside the Worktrees `projects[]` already
 // lists (a Worktree is a Place too, with the same id). Lists every available directory Project,
 // the configured Scratch folder, and any other Scratch Place holding an Agent or a Console shell.

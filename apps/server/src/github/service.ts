@@ -7,7 +7,7 @@ import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, g
 export type PullRequestCleanupStatus = 'merged' | 'closed';
 export type PullRequestChoice = { number: number; title: string; branch: string; headSha: string; headOnOrigin: boolean; draft: boolean; url: string; checks?: PullRequestCheckStatus; issues?: PullRequestIssues };
 export type OpenPullRequestChoices = { own: PullRequestChoice[]; others: PullRequestChoice[] };
-export type RepositoryIssue = { number: number; title: string; url: string };
+export type RepositoryIssue = { number: number; title: string; url: string; author?: string; updatedAt?: string };
 /** Why GitHub data may be missing or old: no token, a rate limit holding requests until `until`, or GitHub failing. */
 export type GithubProblem = { kind: 'no-token' | 'rate-limited' | 'failing'; message: string; until?: number };
 /** The last data GitHub gave, when it was fetched (never, while `fetchedAt` is absent), and why a later fetch failed. */
@@ -41,13 +41,22 @@ export type OverviewItem = {
 };
 /** The Overview's three lists, each GitHub's newest first, with how many GitHub found in all. */
 export type Overview = Fetched<{ mine: OverviewItem[]; reviews: OverviewItem[]; issues: OverviewItem[]; totals: { mine: number; reviews: number; issues: number } }>;
+/** A GitHub panel row: an Overview row, or one from the repository's own lists; `state` marks one merged or closed. */
+export type PanelItem = OverviewItem & { state?: 'merged' | 'closed' };
+/**
+ * One repository's lists for the GitHub panel. Mine, Review requested and Assigned to me are the
+ * Overview's rows for the repository; Other open and the other Issues are the rest of its open
+ * lists; Merged or closed are the pull requests of its Worktrees' branches with none open. A row's
+ * `destination` is only ever the Worktree holding it.
+ */
+export type GithubPanel = Fetched<{ mine: PanelItem[]; reviews: PanelItem[]; other: PanelItem[]; done: PanelItem[]; assigned: PanelItem[]; issues: PanelItem[] }>;
 /** Runs the poll; injected so tests turn the clock by hand. */
 export type Timer = { set(run: () => void, ms: number): unknown; clear(handle: unknown): void };
 export type GithubServiceOptions = { request?: Request; command?: Command; now?: () => number; token?: Token; timer?: Timer; projects?: () => readonly Project[]; worktrees?: () => readonly Worktree[]; seenFile?: string };
 
 // one pull request as the module keeps it; `unresolvedThreads` and `closingIssues` are only known
 // from a read that asked for them
-type Pull = { number: number; title: string; url: string; state: 'open' | 'closed' | 'merged'; draft: boolean; baseBranch?: string; branch: string; headSha: string; headOnOrigin: boolean; mine: boolean; conflicts: boolean; checks: PullRequestCheckStatus; unresolvedThreads?: number; closingIssues?: number[] };
+type Pull = { number: number; title: string; url: string; author?: string; updatedAt?: string; state: 'open' | 'closed' | 'merged'; draft: boolean; baseBranch?: string; branch: string; headSha: string; headOnOrigin: boolean; mine: boolean; conflicts: boolean; checks: PullRequestCheckStatus; unresolvedThreads?: number; closingIssues?: number[] };
 type Entry = { fetchedAt?: number; problem?: GithubProblem; refreshing?: Promise<void> };
 type RepositoryEntry = Entry & { repository: GithubRepository; open?: Pull[]; issues?: RepositoryIssue[] };
 // `pulls` are every pull request GitHub has for the branch's head (or its number, for a fork
@@ -106,7 +115,7 @@ const commentsQuery = `query($owner:String!,$repo:String!,$number:Int!){reposito
 }}}`;
 // what every read takes of a pull request; the open lists and a waiting read of one branch also
 // count its threads and the issues it closes
-const pullFields = 'number title url state isDraft baseRefName headRefName headRefOid isCrossRepository viewerDidAuthor mergeable statusCheckRollup{state}';
+const pullFields = 'number title url updatedAt author{login} state isDraft baseRefName headRefName headRefOid isCrossRepository viewerDidAuthor mergeable statusCheckRollup{state}';
 const fullPullFields = `${pullFields} reviewThreads(first:100){nodes{isResolved isOutdated}} closingIssuesReferences(first:10){nodes{number}}`;
 // the Overview's three searches, newest first; review threads and their last speaker are read
 // for my own PRs only, since they cost the most
@@ -128,6 +137,7 @@ function positive(value: unknown): number | undefined {
 }
 
 const repositoryKey = ({ owner, name }: GithubRepository): string => `${owner.toLowerCase()}/${name.toLowerCase()}`;
+const branchKey = (repository: GithubRepository, name: string): string => `${repositoryKey(repository)}:${name}`;
 const apiUrl = (repository: GithubRepository, path: string): string => `https://api.github.com/repos/${repositoryPath(repository)}/${path}`;
 
 // GitHub's own link, only when it points at github.com
@@ -152,11 +162,12 @@ function readPull(value: unknown): Pull | undefined {
   const [number, title, state, branch, headSha] = [positive(at(value, 'number')), at(value, 'title'), at(value, 'state'), at(value, 'headRefName'), at(value, 'headRefOid')];
   const url = githubUrl(at(value, 'url'));
   if (number === undefined || typeof title !== 'string' || url === undefined || (state !== 'OPEN' && state !== 'CLOSED' && state !== 'MERGED') || typeof branch !== 'string' || typeof headSha !== 'string' || !/^[a-f0-9]{40}$/iu.test(headSha)) return undefined;
-  const base = at(value, 'baseRefName');
+  const [base, author, updatedAt] = [at(value, 'baseRefName'), at(value, 'author', 'login'), at(value, 'updatedAt')];
   const threads = at(value, 'reviewThreads', 'nodes');
   const closing = at(value, 'closingIssuesReferences', 'nodes');
   return {
     number, title, url, branch, headSha: headSha.toLowerCase(),
+    ...(typeof author === 'string' ? { author } : {}), ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
     state: state === 'OPEN' ? 'open' : state === 'MERGED' ? 'merged' : 'closed',
     draft: at(value, 'isDraft') === true,
     ...(typeof base === 'string' && base !== '' ? { baseBranch: base } : {}),
@@ -171,8 +182,8 @@ function readPull(value: unknown): Pull | undefined {
 }
 
 function readIssue(value: unknown): RepositoryIssue[] {
-  const [number, title, url] = [positive(at(value, 'number')), at(value, 'title'), githubUrl(at(value, 'url'))];
-  return number === undefined || typeof title !== 'string' || url === undefined ? [] : [{ number, title, url }];
+  const [number, title, url, author, updatedAt] = [positive(at(value, 'number')), at(value, 'title'), githubUrl(at(value, 'url')), at(value, 'author', 'login'), at(value, 'updatedAt')];
+  return number === undefined || typeof title !== 'string' || url === undefined ? [] : [{ number, title, url, ...(typeof author === 'string' ? { author } : {}), ...(typeof updatedAt === 'string' ? { updatedAt } : {}) }];
 }
 
 function pullIssues(pull: Pull): PullRequestIssues {
@@ -210,7 +221,7 @@ function readQuery(plans: readonly Plan[], full: boolean, overview: boolean): { 
     variables[`n${index}`] = plan.repository.name;
     const fields = plan.list ? [
       `open:pullRequests(states:OPEN,first:${openPage},orderBy:{field:UPDATED_AT,direction:DESC}){nodes{${fullPullFields}}}`,
-      `issues(states:OPEN,first:${issuePage},orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number title url}}`
+      `issues(states:OPEN,first:${issuePage},orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number title url updatedAt author{login}}}`
     ] : [];
     plan.branches.forEach((branch, position) => {
       const variable = `b${index}_${position}`;
@@ -491,13 +502,73 @@ export class GithubService {
    * the list) or the repository was never read.
    */
   async repository(repository: GithubRepository, { wait = false }: { wait?: boolean } = {}): Promise<RepositoryPullRequests> {
-    const entry = this.repositoryEntry(repository);
-    if (this.stale(entry)) {
-      const refreshing = this.refreshRepository(repository);
-      if (wait || entry.fetchedAt === undefined) await refreshing; else this.background(refreshing);
-    }
+    const entry = await this.listed(repository, { wait });
     const open = entry.open ?? [];
     return { own: open.filter(pull => pull.mine).map(choice), others: open.filter(pull => !pull.mine).map(choice), issues: entry.issues ?? [], ...fetched(entry) };
+  }
+
+  // one repository's lists as `repository()` reads them; `fresh` (Refresh) reads them again now,
+  // unless the last read is under ten seconds old
+  private async listed(repository: GithubRepository, { wait = false, fresh = false }: { wait?: boolean; fresh?: boolean }): Promise<RepositoryEntry> {
+    const entry = this.repositoryEntry(repository);
+    await this.refreshIfDue(entry, { wait, fresh }, () => this.refreshRepository(repository));
+    return entry;
+  }
+
+  // read `entry` again with `start` when it is over a minute old, or when `fresh` asks and it is ten
+  // seconds old; the caller waits for that when it asked to, when forced, or when nothing was ever read
+  private async refreshIfDue(entry: Entry, { wait = false, fresh = false }: { wait?: boolean; fresh?: boolean }, start: () => Promise<void>): Promise<void> {
+    const forced = fresh && (entry.fetchedAt === undefined || this.now() - entry.fetchedAt >= refreshFloorMs);
+    if (!forced && !this.stale(entry)) return;
+    const reading = start();
+    if (forced || wait || entry.fetchedAt === undefined) await reading; else this.background(reading);
+  }
+
+  /**
+   * One repository's lists for the GitHub panel, the same whichever Worktree asks. Mine, Review
+   * requested and Assigned to me are the Overview's own rows, so the panel and the badge cannot
+   * disagree. Answers from cache as `repository()` and `overview()` do; `fresh` reads both again.
+   */
+  async panel(repository: GithubRepository, { fresh = false }: { fresh?: boolean } = {}): Promise<GithubPanel> {
+    const [entry, overview, destination] = await Promise.all([this.listed(repository, { fresh }), this.overview({ fresh }), this.destinations()]);
+    const key = repositoryKey(repository);
+    const name = `${repository.owner}/${repository.name}`;
+    // a row is labelled only with the Worktree holding it
+    const placed = ({ destination: found, ...item }: PanelItem): PanelItem => found?.kind === 'worktree' ? { ...item, destination: found } : item;
+    const here = (items: OverviewItem[]) => items.filter(item => item.repository.toLowerCase() === key).map(placed);
+    const [mine, reviews, assigned] = [here(overview.mine), here(overview.reviews), here(overview.issues)];
+    const fields = (item: { number: number; title: string; url: string; author?: string; updatedAt?: string }): PanelItem => ({
+      repository: name, number: item.number, title: item.title, url: item.url, reasons: [],
+      ...(item.author === undefined ? {} : { author: item.author }), ...(item.updatedAt === undefined ? {} : { updatedAt: item.updatedAt })
+    });
+    const row = (pull: Pull, holder?: OverviewDestination): PanelItem => {
+      const found = holder ?? destination(name, [{ number: pull.number, branch: pull.branch, onOrigin: pull.headOnOrigin }]);
+      return placed({
+        ...fields(pull), ...(pull.draft ? { draft: true as const } : {}), ...(pull.mine && pull.state === 'open' ? { checks: pull.checks } : {}),
+        ...(pull.state === 'open' ? {} : { state: pull.state }), ...(found === undefined ? {} : { destination: found })
+      });
+    };
+    const open = entry.open ?? [];
+    // an open pull request past the Overview's first page is still mine
+    const fromOverview = new Set([...mine, ...reviews].map(item => item.number));
+    const rest = open.filter(pull => !fromOverview.has(pull.number));
+    // each Worktree whose branch's pull request merged or closed, with none open
+    const projects = new Set((await this.projectRepositories()).filter(found => repositoryKey(found.repository) === key).map(found => found.project.id));
+    const done = this.worktrees().flatMap(worktree => {
+      const branch = worktree.branch === undefined || !projects.has(worktree.projectId) ? undefined : this.branches.get(branchKey(repository, worktree.branch));
+      if (branch === undefined) return [];
+      const held = [...open, ...branch.pulls ?? []].filter(pull => this.holds(branch, pull));
+      // the latest merged before one closed without merging, as the branch's summary picks
+      const last = held.some(pull => pull.state === 'open') ? undefined : held.find(pull => pull.state === 'merged') ?? held[0];
+      return last === undefined ? [] : [row(last, { kind: 'worktree', worktreeId: worktree.id, label: worktree.label })];
+    });
+    const listedIssues = new Set(assigned.map(item => item.number));
+    return {
+      mine: [...mine, ...rest.filter(pull => pull.mine).map(pull => row(pull))], reviews, other: rest.filter(pull => !pull.mine).map(pull => row(pull)), done,
+      assigned, issues: (entry.issues ?? []).filter(issue => !listedIssues.has(issue.number)).map(fields),
+      // as old as the older of the two reads it is made of
+      ...fetched({ fetchedAt: overview.fetchedAt === undefined || entry.fetchedAt === undefined ? entry.fetchedAt ?? overview.fetchedAt : Math.min(entry.fetchedAt, overview.fetchedAt), problem: entry.problem ?? overview.problem })
+    };
   }
 
   /**
@@ -508,11 +579,7 @@ export class GithubService {
    */
   async overview({ fresh = false }: { fresh?: boolean } = {}): Promise<Overview> {
     const entry = this.overviewEntry;
-    const forced = fresh && (entry.fetchedAt === undefined || this.now() - entry.fetchedAt >= refreshFloorMs);
-    if (forced || this.stale(entry)) {
-      const refreshing = entry.refreshing ?? this.read([], false, true);
-      if (forced || entry.fetchedAt === undefined) await refreshing; else this.background(refreshing);
-    }
+    await this.refreshIfDue(entry, { fresh }, () => entry.refreshing ?? this.read([], false, true));
     const destination = await this.destinations();
     const rows = (list: OverviewRow[] | undefined): OverviewItem[] => (list ?? []).map(read => {
       const { heads, instances: _instances, held: _held, ...row } = read;
@@ -544,10 +611,15 @@ export class GithubService {
   private async projectRepositories(): Promise<{ project: Project; repository: GithubRepository }[]> {
     const found: { project: Project; repository: GithubRepository }[] = [];
     for (const project of this.projects()) {
-      const repository = project.mode === 'repository' ? await this.repositoryAt(project.path).catch(() => undefined) : undefined;
+      const repository = await this.projectRepository(project);
       if (repository !== undefined) found.push({ project, repository });
     }
     return found;
+  }
+
+  /** The github.com repository a Project's origin names; none for a directory Project or another host. */
+  async projectRepository(project: Project): Promise<GithubRepository | undefined> {
+    return project.mode === 'repository' ? await this.repositoryAt(project.path).catch(() => undefined) : undefined;
   }
 
   /**
@@ -689,7 +761,7 @@ export class GithubService {
   }
 
   private branchEntry(repository: GithubRepository, name: string): BranchEntry {
-    const key = `${repositoryKey(repository)}:${name}`;
+    const key = branchKey(repository, name);
     const found = this.branches.get(key);
     if (found !== undefined) return found;
     // drop branches nobody read or looked up for ten minutes on each miss
