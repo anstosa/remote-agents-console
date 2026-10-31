@@ -353,6 +353,20 @@ test("saves notification sounds from Interface without changing files", async ({
   await expect(sounds).not.toBeChecked();
 });
 
+// keep the usage pace display off until this browser opts in
+test("saves usage pace from Interface without changing files", async ({ page }) => {
+  const { settings, state } = await setupBrowserDrafts(page, true);
+  const pace = settings.getByRole("switch", { name: "Usage pace", exact: true });
+  await expect(pace).not.toBeChecked();
+  await pace.check();
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.usage-pace"))).toBe("enabled");
+  expect(state.fileSaves).toHaveLength(0);
+  await pace.uncheck();
+  await settings.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("rac.usage-pace"))).toBeNull();
+});
+
 // stage and persist the browser-local file activation default
 test("saves the default file action from Interface", async ({ page }) => {
   const { settings, state } = await setupBrowserDrafts(page, true);

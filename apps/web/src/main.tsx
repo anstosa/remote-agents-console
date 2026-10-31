@@ -35,6 +35,7 @@ import { confirmKey, KeyboardLayer, KeyPicker, keyTarget, shortcutSettingsNaviga
 import type { KeysConfig } from '../../server/src/config/keys.js';
 import { applyColorTheme } from './color-theme.js';
 import { useDynamicWorktrees } from './dynamic-worktrees.js';
+import { useUsagePace } from './usage-pace.js';
 import { applyReducedMotion } from './reduced-motion.js';
 import { useFullscreenAction } from './fullscreen-loader.js';
 import { applyFlyoutMarkers } from './flyout-markers.js';
@@ -1275,11 +1276,20 @@ const codexResetCountdown = (timestamp: number | undefined, now: number): string
   const seconds = totalSeconds % 60;
   return `${days}d ${String(hours).padStart(2, '0')}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
 };
+// percentage points of the limit used beyond an even spend across the window; positive runs out early
+const limitPace = ({ usedPercent, windowDurationMins, resetsAt }: CodexLimitWindow, now: number): number | undefined => {
+  if (resetsAt === undefined || !windowDurationMins) return undefined;
+  const remaining = Math.min(1, Math.max(0, (resetsAt * 1_000 - now) / (windowDurationMins * 60_000)));
+  return Math.round(usedPercent - (1 - remaining) * 100);
+};
 // render one account limit meter
 function CodexLimitUsage({ window, now }: { window: CodexLimitWindow; now: number }) {
+  const showPace = useUsagePace();
   const duration = codexLimitDuration(window.windowDurationMins);
   const countdown = codexResetCountdown(window.resetsAt, now);
-  return <span className={`chatgpt-limit${window.usedPercent >= 100 ? ' at-limit' : ''}`}><span className="chatgpt-limit-heading"><small>{duration} limit</small><small>{window.usedPercent}% consumed</small></span><progress aria-label={`${duration} limit consumed`} max={100} value={window.usedPercent}>{window.usedPercent}%</progress>{countdown !== undefined && <small className="chatgpt-limit-reset">Resets in {countdown}</small>}</span>;
+  const pace = showPace ? limitPace(window, now) : undefined;
+  const paceLabel = pace === undefined ? undefined : `${Math.abs(pace)}% ${pace > 0 ? 'over' : 'under'} an even pace to reset`;
+  return <span className={`chatgpt-limit${window.usedPercent >= 100 ? ' at-limit' : ''}`}><span className="chatgpt-limit-heading"><small>{duration} limit</small><small>{window.usedPercent}% consumed</small></span><progress aria-label={`${duration} limit consumed`} max={100} value={window.usedPercent}>{window.usedPercent}%</progress>{countdown !== undefined && <span className="chatgpt-limit-heading"><small className="chatgpt-limit-reset">Resets in {countdown}</small>{pace !== undefined && <small className={`chatgpt-limit-pace${pace > 0 ? ' over' : ''}`} title={paceLabel}><span aria-hidden="true">{pace > 0 ? '+' : ''}{pace}%</span><span className="sr-only">{paceLabel}</span></small>}</span>}</span>;
 }
 // render one account's name, plan, usage, and error
 function AccountCopy({ account, now }: { account: CodexAccount; now: number }) {

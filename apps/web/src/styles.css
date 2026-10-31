@@ -2058,6 +2058,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .chatgpt-limit.at-limit progress::-webkit-progress-value { background: var(--red); }
 .chatgpt-limit.at-limit progress::-moz-progress-bar { background: var(--red); }
 .chatgpt-account-copy .chatgpt-limit-reset { color: var(--subtext-0); font-variant-numeric: tabular-nums; }
+.chatgpt-limit-heading small.chatgpt-limit-pace { color: var(--green); font-variant-numeric: tabular-nums; }
+.chatgpt-limit-heading small.chatgpt-limit-pace.over { color: var(--peach); }
 /* align account actions under the account details */
 .client-settings-accounts .chatgpt-account-actions { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .25rem 0 0 1.55rem; }
 /* keep account labels editable without changing selection */
