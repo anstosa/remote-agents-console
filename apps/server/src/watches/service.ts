@@ -109,15 +109,20 @@ export class Watches {
 
   /** Re-arm the command Watches (a reboot ended their windows), deliver what waits, and poll GitHub from now on. */
   async start(): Promise<void> {
-    this.timer = setInterval(() => { void this.check(); }, this.options.pollMs ?? 60_000);
-    this.timer.unref();
-    await this.check();
+    // each check a minute after the last one ended, so what GitHub gave the last one is a minute
+    // old, and read again, by the next
+    const next = () => {
+      if (this.closed) return;
+      this.timer = setTimeout(() => { void this.check().finally(next); }, this.options.pollMs ?? 60_000);
+      this.timer.unref();
+    };
+    await this.check().finally(next);
   }
 
   /** Stop polling and reading; the command windows keep running for the next console. */
   close(): void {
     this.closed = true;
-    clearInterval(this.timer);
+    clearTimeout(this.timer);
     for (const id of [...this.runs.keys()]) this.unread(id);
   }
 

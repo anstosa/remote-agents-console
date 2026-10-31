@@ -54,30 +54,6 @@ describe('GitHub token selection', () => {
       if (saved.hosts === undefined) delete process.env.RAC_GH_HOSTS; else process.env.RAC_GH_HOSTS = saved.hosts;
     }
   });
-
-  it('looks the viewer up once per token, and again after GitHub refuses it or the token changes', async () => {
-    let token = 'token-1';
-    let refuse = false;
-    const viewers: string[] = [];
-    const service = github(async (url, init) => {
-      const authorization = new Headers(init?.headers).get('Authorization') ?? '';
-      if (url.endsWith('/user')) { viewers.push(authorization); return reply({ login: authorization.slice(-1) === '1' ? 'me' : 'other' }); }
-      return refuse ? reply({ message: 'Bad credentials' }, 401) : reply([]);
-    }, { token: async () => token });
-
-    await expect(service.viewer()).resolves.toBe('me');
-    await expect(service.viewer()).resolves.toBe('me');
-    expect(viewers).toEqual(['Bearer token-1']);
-    refuse = true;
-    await expect(service.repository(octo)).resolves.toMatchObject({ problem: { kind: 'failing' } });
-    refuse = false;
-    await expect(service.viewer()).resolves.toBe('me');
-    expect(viewers).toEqual(['Bearer token-1', 'Bearer token-1']);
-    // a new login applies at once, though the old token still works
-    token = 'token-2';
-    await expect(service.viewer()).resolves.toBe('other');
-    expect(viewers).toEqual(['Bearer token-1', 'Bearer token-1', 'Bearer token-2']);
-  });
 });
 
 describe('GitHub origins', () => {
@@ -567,23 +543,19 @@ describe('the shared GitHub client', () => {
     await expect(service.branch(octo, 'three', true, { wait: true })).resolves.toEqual({ fetchedAt: 1_100_000 });
   });
 
-  it('holds requests for a minute after a secondary rate limit that names no wait, and keeps the viewer', async () => {
+  it('holds requests for a minute after a secondary rate limit that names no wait', async () => {
     let now = 1_000_000;
     const sent: string[] = [];
     const service = github(async (url, init) => {
       sent.push(url);
-      if (url.endsWith('/user')) return reply({ login: 'me' });
-      return sent.length === 2 ? reply({ message: 'You have exceeded a secondary rate limit.' }, 403) : empty(init);
+      return sent.length === 1 ? reply({ message: 'You have exceeded a secondary rate limit.' }, 403) : empty(init);
     }, { now: () => now });
 
-    await service.viewer();
     await expect(service.branch(octo, 'one', true, { wait: true })).resolves.toMatchObject({ problem: { kind: 'rate-limited', until: 1_060_000 } });
     await expect(service.branch(octo, 'two', true, { wait: true })).resolves.toMatchObject({ problem: { kind: 'rate-limited' } });
     now = 1_060_000;
-    await service.viewer();
     await expect(service.branch(octo, 'three', true, { wait: true })).resolves.toEqual({ fetchedAt: 1_060_000 });
-    expect(sent.filter(url => url.endsWith('/user'))).toHaveLength(1);
-    expect(sent).toHaveLength(3);
+    expect(sent).toHaveLength(2);
   });
 
   it('does not hold back a new token behind a limit reached with another, nor past the hour', async () => {

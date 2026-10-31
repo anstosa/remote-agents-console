@@ -23,7 +23,8 @@ import type { Project } from '../src/domain/models.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject } from './helpers/config.js';
 import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
-import { answer, reply, type GraphqlCall } from './helpers/github-graphql.js';
+import { GithubService } from '../src/github/service.js';
+import { graphqlGithub, sha, type PullFixture } from './helpers/github-graphql.js';
 
 const dirs: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); vi.restoreAllMocks(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -1981,26 +1982,16 @@ describe('the Conductor\'s dispatches', () => {
 });
 
 describe('the Conductor\'s Watches', () => {
-  // GitHub as a test scripts it: one pull request (#7 in octo/repo) and the review requests naming
-  // the token's user `me`, answered to the GraphQL queries Watches send, and #7 as the repository's
-  // one open pull request to the module's reads; over REST, who `me` is (counted)
+  // GitHub as a test scripts it: octo/repo's pull request #7, and the pull requests asking the
+  // token's user for a review (`requests`); every read but a search is kept in `calls`
   function fakeGithub() {
-    const pull = { state: 'OPEN', mergeable: 'MERGEABLE', head: 'a'.repeat(40), rollup: 'PENDING' as string | undefined, threads: [] as Array<{ id: string; resolved: boolean; author: string }> };
-    const requests: Array<{ number: number; events: Array<{ id: string; login: string }> }> = [];
-    const viewers: string[] = [];
-    const request = async (url: string, init?: RequestInit) => {
-      if (url.endsWith('/user')) { viewers.push(url); return { ok: true, status: 200, json: async () => ({ login: 'me' }) }; }
-      if (init?.body === undefined) return { ok: false, status: 404, json: async () => ({ message: 'Not Found' }) };
-      const call = JSON.parse(String(init.body)) as GraphqlCall;
-      const { query } = call;
-      if (query.includes(':repository(')) return reply(answer({ 'octo/repo': { pulls: [{ number: 7, title: 'Watched', branch: 'feature/watched', sha: pull.head, mine: true }] } }, call));
-      const data = query.includes('search(')
-        ? { search: { nodes: requests.map(({ number, events }) => ({ number, url: `https://github.com/octo/repo/pull/${number}`, timelineItems: { nodes: events.map(({ id, login }) => ({ id, requestedReviewer: { login } })) } })) } }
-        : { repository: { pullRequest: { state: pull.state, mergeable: pull.mergeable, url: 'https://github.com/octo/repo/pull/7', headRefOid: pull.head, commits: { nodes: [{ commit: { statusCheckRollup: pull.rollup === undefined ? null : { state: pull.rollup } } }] }, reviewThreads: { nodes: pull.threads.map(({ id, resolved, author }) => ({ id, isResolved: resolved, isOutdated: false, comments: { nodes: [{ author: { login: author } }] } })) } } } };
-      return { ok: true, status: 200, json: async () => ({ data }) };
-    };
-    return { pull, requests, viewers, request };
+    const pull: PullFixture = { number: 7, title: 'Watched', branch: 'feature/watched', mine: true, checks: 'PENDING', threads: [] };
+    const requests: PullFixture[] = [];
+    const scripted = graphqlGithub(() => ({ 'octo/repo': { pulls: [pull, ...requests] } }));
+    return { pull, requests, calls: scripted.calls, request: scripted.request };
   }
+  // a pull request asking for the operator's review, with the request events on its timeline
+  const asking = (number: number, events: PullFixture['requestEvents']): PullFixture => ({ number, branch: `topic-${number}`, requested: true, requestEvents: events });
 
   // command windows as a test scripts them, on a tmux server that outlives each console: each
   // opened window is a pane whose command prints lines and exits when the test says, and every
@@ -2025,11 +2016,14 @@ describe('the Conductor\'s Watches', () => {
   const eventsTo = async (console: { app: Awaited<ReturnType<typeof consoleWith>>['app']; headers: Record<string, string> }, conductor: string, fake: ReturnType<typeof fakeAgent>): Promise<string[]> => [...fake.delivered, ...(await console.app.inject({ method: 'GET', url: `/api/agents/${conductor}/queued-prompts`, headers: console.headers })).json().prompts.map((prompt: { text: string }) => prompt.text)].filter((text: string) => text.startsWith('[RAC event]'));
 
   // a console whose Conductor is live, its Project's Worktree a git checkout of octo/repo with a
-  // `dev` Stack process; `call` runs one of the Conductor's tools
+  // `dev` Stack process; `call` runs one of the Conductor's tools. Each console has a GitHub module
+  // of its own on a clock `later` turns a minute on before its Watches check again.
   async function watching(fake: ReturnType<typeof fakeAgent>, { github = fakeGithub(), windows = fakeWindows(), deps = {} as Record<string, unknown>, conductor: configured = {} as Partial<ConductorConfig> } = {}) {
     await integrationFiles();
     vi.stubEnv('RAC_GITHUB_TOKEN', 'github-token');
-    const console = await consoleWith(fake, { conductor: configured, project: { commands: { processes: { dev: 'pnpm dev' } } }, deps: { githubRequest: github.request, watchCommands: windows.windows, ...deps } });
+    const clock = { now: Date.now() };
+    // a getter, so each console started over these dependencies builds its own module, as a deploy does
+    const console = await consoleWith(fake, { conductor: configured, project: { commands: { processes: { dev: 'pnpm dev' } } }, deps: { githubRequest: github.request, get github() { return new GithubService({ request: github.request, now: () => clock.now }); }, watchCommands: windows.windows, ...deps } });
     const repo = join(console.root, 'repo');
     execFileSync('git', ['init', '-q', repo]);
     execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/octo/repo.git']);
@@ -2047,41 +2041,31 @@ describe('the Conductor\'s Watches', () => {
       await deployed.app.watches.start();
       return { ...deployed, told: () => eventsTo(deployed, conductor, next) };
     };
-    return { ...console, conductor, dashboard, call, worktree, github, windows, repo, deploy, told: () => eventsTo(console, conductor, fake) };
+    const later = async (app = console.app) => { clock.now += 60_000; await app.watches.check(); };
+    return { ...console, conductor, dashboard, call, worktree, github, windows, repo, deploy, later, told: () => eventsTo(console, conductor, fake) };
   }
 
+  // the comparisons themselves are watches-github.test.ts's; these are the tools, the queue and deploys
   it('watches a pull request: settled checks and a new thread are one event, nothing repeats, and merging ends it', async () => {
     const fake = fakeAgent();
-    const { app, call, worktree, told, github, dashboard, conductor } = await watching(fake);
+    const { app, call, worktree, told, github, dashboard, conductor, later } = await watching(fake);
     const set = await call('watch_pull_request', { worktree_id: worktree, number: 7 });
     expect(set).toMatchObject({ ok: true, data: { watch_id: expect.stringMatching(/^watch-/u), state: { checks: 'pending', merge_conflict: false, unresolved_threads: 0 } } });
     const id = set.data.watch_id as string;
     expect((await call('list_watches', {}, false)).data.watches).toEqual([expect.objectContaining({ watch_id: id, kind: 'pull_request', description: 'Pull request octo/repo#7' })]);
     expect((await dashboard()).agents.find((agent: { id: string }) => agent.id === conductor).watches).toEqual([expect.objectContaining({ id, kind: 'pull_request' })]);
 
-    await app.watches.check();
+    await later();
     expect(await told()).toEqual([]);
-    github.pull.rollup = 'FAILURE';
-    github.pull.threads.push({ id: 'T1', resolved: false, author: 'alice' }, { id: 'T0', resolved: true, author: 'bob' });
-    await app.watches.check();
-    await app.watches.check();
+    github.pull.checks = 'FAILURE';
+    github.pull.threads!.push({ id: 'T1', isResolved: false, isOutdated: false, author: 'alice' }, { id: 'T0', isResolved: true, isOutdated: false, author: 'bob' });
+    await later();
+    await later();
     expect(await told()).toEqual([`[RAC event] Watch ${id} #1 "Pull request octo/repo#7": its checks failed on aaaaaaaaaaaa; a new unresolved review thread from alice. https://github.com/octo/repo/pull/7`]);
-    // the checks run again on the same head and fail again
-    github.pull.rollup = 'PENDING';
-    await app.watches.check();
-    github.pull.rollup = 'FAILURE';
-    await app.watches.check();
-    expect((await told())[1]).toBe(`[RAC event] Watch ${id} #2 "Pull request octo/repo#7": its checks failed on aaaaaaaaaaaa. https://github.com/octo/repo/pull/7`);
-    // a conflict, and checks passing on a new head
-    github.pull.mergeable = 'CONFLICTING';
-    github.pull.head = 'b'.repeat(40);
-    github.pull.rollup = 'SUCCESS';
-    await app.watches.check();
-    expect((await told())[2]).toContain('its checks all passed on bbbbbbbbbbbb; a merge conflict appeared');
     github.pull.state = 'MERGED';
-    await app.watches.check();
-    expect((await told())[3]).toContain('it was merged, so this Watch ends');
-    expect(await told()).toHaveLength(4);
+    await later();
+    expect((await told())[1]).toContain('it was merged, so this Watch ends');
+    expect(await told()).toHaveLength(2);
     expect((await call('list_watches', {}, false)).data.watches).toEqual([]);
     // a pull request already merged is not watched
     expect(await call('watch_pull_request', { worktree_id: worktree, number: 7 })).toMatchObject({ ok: false, error: { code: 'conflict' } });
@@ -2090,18 +2074,18 @@ describe('the Conductor\'s Watches', () => {
 
   it('keeps a Watch and the last state it saw across deploys: a change made while the console was down is told once, and nothing is told twice', async () => {
     const fake = fakeAgent();
-    const { call, worktree, github, deploy } = await watching(fake);
+    const { call, worktree, github, deploy, later } = await watching(fake);
     const id = (await call('watch_pull_request', { worktree_id: worktree, number: 7 })).data.watch_id as string;
     // the checks fail while no console looks
-    github.pull.rollup = 'FAILURE';
+    github.pull.checks = 'FAILURE';
     const deployed = await deploy(fakeAgent());
     expect(await deployed.told()).toEqual([expect.stringContaining(`Watch ${id} #1 "Pull request octo/repo#7": its checks failed`)]);
-    await deployed.app.watches.check();
+    await later(deployed.app);
     expect(await deployed.told()).toHaveLength(1);
 
     const redeployed = await deploy(fakeAgent());
-    github.pull.threads.push({ id: 'T9', resolved: false, author: 'carol' });
-    await redeployed.app.watches.check();
+    github.pull.threads!.push({ id: 'T9', isResolved: false, isOutdated: false, author: 'carol' });
+    await later(redeployed.app);
     // the first still waits in its queue (the Conductor has not settled since the deploy), told once
     expect(await redeployed.told()).toEqual([expect.stringContaining(`Watch ${id} #1 `), expect.stringContaining(`Watch ${id} #2 "Pull request octo/repo#7": a new unresolved review thread from carol`)]);
     await redeployed.app.close();
@@ -2109,10 +2093,10 @@ describe('the Conductor\'s Watches', () => {
 
   it('neither repeats nor drops the events a console stopped between recording and queueing', async () => {
     const fake = fakeAgent();
-    const { app, call, worktree, github, told, deploy, root } = await watching(fake);
+    const { call, worktree, github, told, deploy, root, later } = await watching(fake);
     const id = (await call('watch_pull_request', { worktree_id: worktree, number: 7 })).data.watch_id as string;
-    github.pull.rollup = 'FAILURE';
-    await app.watches.check();
+    github.pull.checks = 'FAILURE';
+    await later();
     const [first] = await told();
     expect(first).toContain(`Watch ${id} #1 `);
     // the console stopped after queueing #1 but before taking it off the Watch's outbox, and after recording #2
@@ -2124,53 +2108,38 @@ describe('the Conductor\'s Watches', () => {
     await writeFile(file, JSON.stringify(stored));
     const deployed = await deploy(fakeAgent());
     expect(await deployed.told()).toEqual([second]);
-    await deployed.app.watches.check();
+    await later(deployed.app);
     expect(await deployed.told()).toEqual([second]);
     await deployed.app.close();
   });
 
   // the app's GitHub request reaches the one GitHub module that Watches and the routes share
-  it('reads GitHub for Watches and the pull request routes through one module, finding the viewer once', async () => {
+  it('reads GitHub for Watches and the pull request routes through one module', async () => {
     const fake = fakeAgent();
-    const { app, headers, call, worktree, github } = await watching(fake);
-    github.requests.push({ number: 3, events: [{ id: 'RR1', login: 'me' }] });
-    await expect(call('watch_review_requests', { worktree_id: worktree })).resolves.toMatchObject({ ok: true });
-
-    const listed = await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(worktree)}/switch-prs`, headers });
-    expect(listed.json()).toMatchObject({ pullRequests: [{ number: 7, title: 'Watched' }], pullRequestsSupported: true });
-    expect(github.viewers).toHaveLength(1);
+    // no module given: the app builds its one from the GitHub request
+    const { app, headers, call, worktree, github } = await watching(fake, { deps: { github: undefined } });
+    await expect(call('watch_pull_request', { worktree_id: worktree, number: 7 })).resolves.toMatchObject({ ok: true });
+    // the panel's detail is the read the Watch made
+    const detail = await app.inject({ method: 'GET', url: '/api/projects/proj/github/pulls/7', headers });
+    expect(detail.json()).toMatchObject({ pullRequest: { number: 7, title: 'Watched', headSha: sha('a') } });
+    expect(github.calls.filter(read => read.query.startsWith('query PullRequestDetail'))).toHaveLength(1);
+    await app.close();
   });
 
-  it('watches review requests to the operator: a first request and a re-request are told, another user\'s are not', async () => {
+  it('watches review requests to the operator: a first request and a re-request are told', async () => {
     const fake = fakeAgent();
-    const { app, call, worktree, told, github } = await watching(fake);
-    github.requests.push({ number: 3, events: [{ id: 'RR1', login: 'me' }] });
+    const { app, call, worktree, told, github, later } = await watching(fake);
+    github.requests.push(asking(3, [{ id: 'RR1' }]));
     const set = await call('watch_review_requests', { worktree_id: worktree });
     expect(set).toMatchObject({ ok: true, data: { requested: [{ number: 3, url: 'https://github.com/octo/repo/pull/3' }] } });
     const id = set.data.watch_id as string;
-    await app.watches.check();
+    await later();
     expect(await told()).toEqual([]);
 
-    github.requests.push({ number: 5, events: [{ id: 'RR2', login: 'someone-else' }, { id: 'RR3', login: 'me' }] });
-    await app.watches.check();
-    expect(await told()).toEqual([`[RAC event] Watch ${id} #1 "Review requests in octo/repo": #5 requests your review: https://github.com/octo/repo/pull/5`]);
-    // reviewed (no longer requested), then requested again
-    github.requests.splice(0, 1);
-    await app.watches.check();
-    github.requests.push({ number: 3, events: [{ id: 'RR1', login: 'me' }, { id: 'RR4', login: 'me' }] });
-    await app.watches.check();
-    await app.watches.check();
-    expect(await told()).toEqual([expect.any(String), `[RAC event] Watch ${id} #2 "Review requests in octo/repo": #3 re-requests your review: https://github.com/octo/repo/pull/3`]);
-    // a request GitHub's latest timeline items do not name is told once, and naming it later is no re-request
-    github.requests.push({ number: 9, events: [] });
-    await app.watches.check();
-    github.requests[github.requests.length - 1]!.events.push({ id: 'RR9', login: 'me' });
-    await app.watches.check();
-    expect((await told()).slice(2)).toEqual([`[RAC event] Watch ${id} #3 "Review requests in octo/repo": #9 requests your review: https://github.com/octo/repo/pull/9`]);
-    // a teammate's review requested after the operator's is not a request of the operator's
-    github.requests[github.requests.length - 1]!.events.push({ id: 'RR10', login: 'teammate' });
-    await app.watches.check();
-    expect(await told()).toHaveLength(3);
+    github.requests.push(asking(5, [{ id: 'RR2', viewer: false }, { id: 'RR3' }]));
+    github.requests[0]!.requestEvents!.push({ id: 'RR4' });
+    await later();
+    expect(await told()).toEqual([`[RAC event] Watch ${id} #1 "Review requests in octo/repo": #3 re-requests your review: https://github.com/octo/repo/pull/3; #5 requests your review: https://github.com/octo/repo/pull/5`]);
     await app.close();
   });
 

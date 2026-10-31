@@ -23,15 +23,19 @@ export type PullFixture = {
   mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   // `statusCheckRollup.state`; null for a head with no checks
   checks?: 'SUCCESS' | 'FAILURE' | 'ERROR' | 'PENDING' | 'EXPECTED' | null;
-  // `last` is who wrote the thread's last comment, `viewer` for the viewer, and `lastId` its id
-  threads?: { isResolved: boolean; isOutdated: boolean; id?: string; path?: string; last?: string; lastId?: string }[];
+  // `last` is who wrote the thread's last comment, `viewer` for the viewer, and `lastId` its id;
+  // `author` opened it
+  threads?: { isResolved: boolean; isOutdated: boolean; id?: string; path?: string; last?: string; lastId?: string; author?: string }[];
   closes?: number[];
   url?: string;
   author?: string;
   updatedAt?: string;
   labels?: string[];
-  // the viewer's review is asked for, directly or through a team
+  // the viewer's review is asked for, directly or only through a team (`team`)
   requested?: boolean;
+  team?: boolean;
+  // the review requested events on its timeline, oldest first; `viewer: false` names someone else
+  requestEvents?: { id: string; viewer?: boolean }[];
   // `viewerLatestReviewRequest`'s id, and `viewerLatestReview`
   viewerRequest?: string;
   viewerReview?: { state: string; commit: string };
@@ -48,11 +52,22 @@ export function reply(body: unknown, status = 200, headers: Record<string, strin
   return { ok: status >= 200 && status < 300, status, headers: new Headers(headers), json: async () => body };
 }
 
+function checkRun(state: string) {
+  const running = state === 'PENDING' || state === 'EXPECTED';
+  return { __typename: 'CheckRun', name: 'ci', status: running ? 'IN_PROGRESS' : 'COMPLETED', conclusion: running ? null : state === 'SUCCESS' ? 'SUCCESS' : 'FAILURE', detailsUrl: null };
+}
+
 // one pull request as GitHub's GraphQL API returns it, with only the optional fields the selection
-// asks for; a thread's comments are its opener (`opener`) and then its last speaker
+// asks for; a thread's comments are its last speaker, or its opener (`opener`), whole in a detail read
 export function pullNode(repository: string, pull: PullFixture, selection = 'reviewThreads closingIssuesReferences'): Record<string, unknown> {
   const asked = (field: string, value: () => unknown): Record<string, unknown> => selection.includes(field) ? { [field]: value() } : {};
   const lastComment = selection.includes('comments(last:1)');
+  const detail = selection.includes('diffHunk');
+  const comment = (id: string, login: string) => ({ id, author: { login, __typename: 'User' }, body: 'A comment', createdAt: '2026-10-30T12:00:00Z', url: `https://github.com/${repository}/pull/${pull.number}#discussion_${id}`, viewerDidAuthor: login === 'viewer', diffHunk: '@@ -1 +1 @@' });
+  // a detail read's comments are the opener's and then the last speaker's
+  const opened = (thread: NonNullable<PullFixture['threads']>[number], id: string) => detail
+    ? [comment(`${id}-opener`, thread.author ?? 'opener'), ...(thread.last === undefined ? [] : [comment(thread.lastId ?? `${id}-last`, thread.last)])]
+    : [{ author: { login: thread.author ?? 'opener' }, viewerDidAuthor: false }];
   return {
     number: pull.number,
     title: pull.title ?? `PR ${pull.number}`,
@@ -65,7 +80,8 @@ export function pullNode(repository: string, pull: PullFixture, selection = 'rev
     isCrossRepository: pull.head !== undefined && pull.head !== repository,
     viewerDidAuthor: pull.mine ?? false,
     mergeable: pull.mergeable ?? 'MERGEABLE',
-    statusCheckRollup: pull.checks === null ? null : { state: pull.checks ?? 'SUCCESS' },
+    // a detail read's one check run, settled as the rollup is
+    statusCheckRollup: pull.checks === null ? null : { state: pull.checks ?? 'SUCCESS', ...(selection.includes('contexts') ? { contexts: { nodes: [checkRun(pull.checks ?? 'SUCCESS')] } } : {}) },
     ...asked('updatedAt', () => pull.updatedAt ?? '2026-10-30T12:00:00Z'),
     ...asked('repository', () => ({ nameWithOwner: repository })),
     ...asked('author', () => ({ login: pull.author ?? (pull.mine === true ? 'viewer' : 'someone') })),
@@ -73,7 +89,10 @@ export function pullNode(repository: string, pull: PullFixture, selection = 'rev
     ...asked('viewerLatestReviewRequest', () => pull.viewerRequest === undefined ? null : { id: pull.viewerRequest }),
     ...asked('viewerLatestReview', () => pull.viewerReview === undefined ? null : { state: pull.viewerReview.state, commit: { oid: pull.viewerReview.commit } }),
     ...asked('latestOpinionatedReviews', () => ({ nodes: (pull.reviews ?? []).map((review, index) => ({ id: review.id ?? `review-${index}`, state: review.state, author: { login: review.author }, commit: { oid: review.commit } })) })),
-    ...asked('reviewThreads', () => ({ nodes: (pull.threads ?? []).map((thread, index) => ({ id: thread.id ?? `thread-${index}`, path: thread.path ?? 'src/file.ts', isResolved: thread.isResolved, isOutdated: thread.isOutdated, comments: { nodes: [lastComment ? { id: thread.lastId ?? `comment-${index}`, author: { login: thread.last ?? 'reviewer' }, viewerDidAuthor: thread.last === 'viewer' } : { author: { login: 'opener' }, viewerDidAuthor: false }] } })) })),
+    ...asked('reviewThreads', () => ({ nodes: (pull.threads ?? []).map((thread, index) => ({ id: thread.id ?? `thread-${index}`, path: thread.path ?? 'src/file.ts', isResolved: thread.isResolved, isOutdated: thread.isOutdated, comments: { nodes: lastComment ? [{ id: thread.lastId ?? `comment-${index}`, author: { login: thread.last ?? 'reviewer' }, viewerDidAuthor: thread.last === 'viewer' }] : opened(thread, thread.id ?? `thread-${index}`) } })) })),
+    // the viewer, as a search's selection or a detail's names them
+    ...asked('reviewRequests', () => ({ nodes: pull.requested === true && pull.team !== true ? [{ requestedReviewer: selection.includes('isViewer') ? { isViewer: true } : { __typename: 'User', login: 'viewer' } }] : [] })),
+    ...asked('timelineItems', () => ({ nodes: (pull.requestEvents ?? []).map(event => ({ id: event.id, requestedReviewer: { isViewer: event.viewer !== false } })) })),
     ...asked('closingIssuesReferences', () => ({ nodes: (pull.closes ?? []).map(number => ({ number })) }))
   };
 }
@@ -91,18 +110,20 @@ function issueNode(repository: string, issue: IssueFixture, selection: string): 
   };
 }
 
-// the Overview's searches, each over every repository in `world`, chosen by its search string
+// the searches, each over every repository in `world` (or the one its `repo:` names), chosen by
+// its search string; `user-review-requested` leaves out requests only through a team
 function searches(world: World, { query, variables }: GraphqlCall): Record<string, unknown> {
   const data: Record<string, unknown> = {};
-  const all = Object.entries(world);
-  const pulls = (selection: string, keep: (pull: PullFixture) => boolean) => all.flatMap(([name, { pulls = [] }]) => pulls.filter(pull => (pull.state ?? 'OPEN') === 'OPEN' && keep(pull)).map(pull => pullNode(name, pull, selection)));
-  const listed = (nodes: unknown[]) => ({ issueCount: nodes.length, nodes });
+  const listed = (nodes: unknown[], first: number) => ({ issueCount: nodes.length, nodes: nodes.slice(0, first) });
   for (const section of query.split(/(?=\b\w+:search\()/u).slice(1)) {
-    const [, alias, variable] = /^(\w+):search\([^)]*query:\$(\w+)/u.exec(section)!;
+    const [, alias, first, variable] = /^(\w+):search\([^)]*first:(\d+)[^)]*query:\$(\w+)/u.exec(section)!;
     const search = String(variables[variable!]);
-    if (search.includes('author:@me')) data[alias!] = listed(pulls(section, pull => pull.mine === true));
-    else if (search.includes('review-requested:@me')) data[alias!] = listed(pulls(section, pull => pull.requested === true));
-    else if (search.includes('assignee:@me')) data[alias!] = listed(all.flatMap(([name, { issues = [] }]) => issues.filter(issue => issue.assigned === true).map(issue => issueNode(name, issue, section))));
+    const only = /\brepo:(\S+)/u.exec(search)?.[1]?.toLowerCase();
+    const all = Object.entries(world).filter(([name]) => only === undefined || name.toLowerCase() === only);
+    const pulls = (keep: (pull: PullFixture) => boolean) => listed(all.flatMap(([name, { pulls = [] }]) => pulls.filter(pull => (pull.state ?? 'OPEN') === 'OPEN' && keep(pull)).map(pull => pullNode(name, pull, section))), Number(first));
+    if (search.includes('author:@me')) data[alias!] = pulls(pull => pull.mine === true);
+    else if (search.includes('review-requested:@me')) data[alias!] = pulls(pull => pull.requested === true && !(search.includes('user-review-requested:@me') && pull.team === true));
+    else if (search.includes('assignee:@me')) data[alias!] = listed(all.flatMap(([name, { issues = [] }]) => issues.filter(issue => issue.assigned === true).map(issue => issueNode(name, issue, section))), Number(first));
   }
   return data;
 }

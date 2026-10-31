@@ -1,5 +1,5 @@
-import { at, GithubRequestError, graphqlError, type GithubRepository } from '../github/github.js';
-import { GithubService } from '../github/service.js';
+import type { GithubRepository } from '../github/github.js';
+import { GithubService, problemError } from '../github/service.js';
 
 /** A pull request as a Watch compares it: its state, head commit, settled checks, mergeability and review threads. */
 export type PullRequestState = {
@@ -22,56 +22,31 @@ export interface WatchGithub {
   reviewRequests(repository: GithubRepository): Promise<ReviewRequest[]>;
 }
 
-const pullRequestQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){
-  state mergeable url headRefOid
-  commits(last:1){nodes{commit{statusCheckRollup{state}}}}
-  reviewThreads(last:100){nodes{id isResolved isOutdated comments(first:1){nodes{author{login}}}}}
-}}}`;
-// `user-review-requested` matches a request naming the user, not one of their teams
-const reviewRequestsQuery = `query($q:String!){search(query:$q,type:ISSUE,first:50){nodes{... on PullRequest{
-  number url
-  timelineItems(itemTypes:[REVIEW_REQUESTED_EVENT],last:20){nodes{... on ReviewRequestedEvent{id requestedReviewer{... on User{login}}}}}
-}}}}`;
-const checkStates: Record<string, PullRequestState['checks']> = { SUCCESS: 'passed', FAILURE: 'failed', ERROR: 'failed', PENDING: 'pending', EXPECTED: 'pending' };
-const nodes = (connection: unknown): unknown[] => { const value = at(connection, 'nodes'); return Array.isArray(value) ? value : []; };
-
+/**
+ * Watches' GitHub, read through the console's one GitHub module: data under a minute old answers,
+ * else just the watched pull request or repository is read. A read that failed is never compared,
+ * even beside data kept from before; it throws, as GitHub's own errors did.
+ */
 export class GithubWatchReader implements WatchGithub {
-  constructor(private readonly github: Pick<GithubService, 'client' | 'token' | 'viewer'> = new GithubService()) {}
+  constructor(private readonly github: Pick<GithubService, 'pullRequestDetail' | 'reviewRequests'> = new GithubService()) {}
 
-  async pullRequest({ owner, name }: GithubRepository, number: number): Promise<PullRequestState> {
-    const action = `GitHub could not read pull request #${number}`;
-    const payload = await this.github.client.query(await this.required(), pullRequestQuery, { owner, repo: name, number }, action);
-    const node = at(payload, 'data', 'repository', 'pullRequest');
-    const [state, url, head] = [at(node, 'state'), at(node, 'url'), at(node, 'headRefOid')];
-    if (state !== 'OPEN' && state !== 'CLOSED' && state !== 'MERGED' || typeof url !== 'string' || typeof head !== 'string') throw graphqlError(payload, action);
-    const mergeable = at(node, 'mergeable');
-    const checks = checkStates[String(at(nodes(at(node, 'commits'))[0], 'commit', 'statusCheckRollup', 'state'))];
-    const threads = nodes(at(node, 'reviewThreads')).flatMap(thread => {
-      const id = at(thread, 'id');
-      const author = at(nodes(at(thread, 'comments'))[0], 'author', 'login');
-      return typeof id === 'string' ? [{ id, unresolved: at(thread, 'isResolved') === false && at(thread, 'isOutdated') !== true, ...(typeof author === 'string' ? { author } : {}) }] : [];
-    });
-    return { state, url, head, ...(mergeable === 'CONFLICTING' ? { conflict: true } : mergeable === 'MERGEABLE' ? { conflict: false } : {}), ...(checks === undefined ? {} : { checks }), threads };
+  async pullRequest(repository: GithubRepository, number: number): Promise<PullRequestState> {
+    const { pullRequest: pull, problem } = await this.github.pullRequestDetail(repository, number);
+    if (problem !== undefined || pull === undefined) throw problemError(problem ?? { kind: 'failing', message: `GitHub could not read pull request #${number}.` });
+    return {
+      state: pull.state.toUpperCase() as PullRequestState['state'], url: pull.url, head: pull.headSha,
+      ...(pull.mergeable === 'unknown' ? {} : { conflict: pull.mergeable === 'conflicting' }),
+      // the module counts a head with no checks as passed; a Watch has none to see settle
+      ...(pull.checkRuns.length === 0 ? {} : { checks: pull.checks }),
+      // the thread's opener, by name: the module calls a deleted account GitHub's `ghost`
+      threads: pull.threads.map(({ id, resolved, outdated, comments: [opener] }) => ({ id, unresolved: !resolved && !outdated, ...(opener === undefined || opener.author === 'ghost' ? {} : { author: opener.author }) }))
+    };
   }
 
-  async reviewRequests({ owner, name }: GithubRepository): Promise<ReviewRequest[]> {
-    const action = `GitHub could not read the review requests in ${owner}/${name}`;
-    const payload = await this.github.client.query(await this.required(), reviewRequestsQuery, { q: `repo:${owner}/${name} is:pr is:open user-review-requested:@me` }, action);
-    const found = at(payload, 'data', 'search');
-    if (found === null || typeof found !== 'object') throw graphqlError(payload, action);
-    const viewer = await this.github.viewer();
-    return nodes(found).flatMap(pull => {
-      const [number, url] = [at(pull, 'number'), at(pull, 'url')];
-      if (!Number.isInteger(number) || typeof url !== 'string') return [];
-      // the latest request naming the user; a request GitHub no longer lists still counts once
-      const request = nodes(at(pull, 'timelineItems')).filter(event => at(event, 'requestedReviewer', 'login') === viewer).map(event => at(event, 'id')).filter((id): id is string => typeof id === 'string').at(-1);
-      return [{ number: number as number, url, request: request ?? `${standInRequest}${String(number)}` }];
-    });
-  }
-
-  private async required(): Promise<string> {
-    const token = await this.github.token();
-    if (token === undefined) throw new GithubRequestError('GitHub authentication is not configured: set RAC_GITHUB_TOKEN or log in with gh.', 503);
-    return token;
+  async reviewRequests(repository: GithubRepository): Promise<ReviewRequest[]> {
+    const { requests, problem } = await this.github.reviewRequests(repository);
+    if (problem !== undefined) throw problemError(problem);
+    // a request GitHub no longer lists still counts once
+    return requests.map(({ number, url, request }) => ({ number, url, request: request ?? `${standInRequest}${String(number)}` }));
   }
 }

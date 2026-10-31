@@ -129,6 +129,18 @@ describe('a pull request\'s detail', () => {
     expect(await read(860_000)).toBe(860_000);
   });
 
+  it('reuses a merged pull request\'s detail while the poll\'s branch lookup, which counts no threads, shows it unchanged', async () => {
+    const { service, calls, timers, clock } = polled({ 'octo/repo': { pulls: [{ number: 1, branch: 'feature', state: 'MERGED', threads: [{ isResolved: false, isOutdated: false }] }] } });
+    await service.branch(repo, 'feature', true);
+    service.watch();
+    await timers.fire();
+    await service.pullRequestDetail(repo, 1);
+    clock.now = 300_000;
+    await timers.fire();
+    expect((await service.pullRequestDetail(repo, 1)).fetchedAt).toBe(0);
+    expect(calls.filter(isDetail)).toHaveLength(1);
+  });
+
   it('does not trust a list read since the detail once that list is a minute old', async () => {
     const { service, calls, clock } = polled({ 'octo/repo': { pulls: [{ number: 1, branch: 'feature' }] } });
     await service.pullRequestDetail(repo, 1);
@@ -189,6 +201,16 @@ describe('a pull request\'s detail', () => {
     clock.now = 70_000;
     await service.pullRequestDetail(repo, 2);
     expect(scripted.calls).toHaveLength(asked + 1);
+
+    // a failed read is tried again ten seconds on, even while a list since shows the pull request unchanged
+    failing = true;
+    clock.now = 180_000;
+    expect((await service.pullRequestDetail(repo, 1)).problem).toMatchObject({ kind: 'failing' });
+    failing = false;
+    clock.now = 185_000;
+    await service.repository(repo, { wait: true });
+    clock.now = 190_000;
+    expect(await service.pullRequestDetail(repo, 1)).toEqual({ pullRequest: expect.objectContaining({ number: 1 }), fetchedAt: 190_000 });
 
     const unauthenticated = polled({ 'octo/repo': { pulls: [{ number: 1, branch: 'feature' }] } }, { token: async () => undefined });
     expect(await unauthenticated.service.pullRequestDetail(repo, 1)).toEqual({ problem: { kind: 'no-token', message: expect.any(String) } });

@@ -111,11 +111,10 @@ export function graphqlError(payload: GraphqlPayload, action: string): GithubReq
   return new GithubRequestError(first === undefined ? `${action}.` : `${action}: ${first}`, 502, undefined, kind);
 }
 
-type ClientOptions = { timeoutMs?: number; now?: () => number; refused?: () => void };
+type ClientOptions = { timeoutMs?: number; now?: () => number };
 
 // Every request the console sends goes through one client, as GitHub asks: one at a time, slower
-// while any budget runs low, and none while a rate limit holds them back. `refused` hears of a 401,
-// or a 403 that is not a rate limit, so the token and viewer are looked up again.
+// while any budget runs low, and none while a rate limit holds them back.
 export class GithubClient {
   private queue: Promise<unknown> = Promise.resolve();
   // when each token's rate limit lets requests through again ('' for none)
@@ -185,7 +184,6 @@ export class GithubClient {
       const status = Number.isInteger(response.status) ? ` (${response.status})` : '';
       // a secondary rate limit may name no wait; GitHub asks for at least a minute
       const until = sent.until ?? ((response.status === 403 || response.status === 429) && /rate limit/iu.test(detail ?? '') ? this.hold(token, this.now() + defaultRateLimitWaitMs) : undefined);
-      if (response.status === 401 || response.status === 403 && until === undefined) this.options.refused?.();
       failure = new GithubRequestError(detail === undefined ? `${action}${status}.` : `${action}${status}: ${detail}`, 502, response.status, until === undefined ? failureKind(response.status, detail) : 'transient', until);
       // a permanent failure is not retried
       if (!retryableStatuses.has(response.status ?? 0)) break;

@@ -71,6 +71,11 @@ export type PullRequestDetail = PullRequestComments & {
   destination?: OverviewDestination;
 };
 export type LinkedPullRequest = { number: number; title: string; url: string; state: 'open' | 'merged' | 'closed'; draft: boolean };
+/**
+ * An open pull request asking the viewer for a review directly, not only through a team, with the
+ * newest review requested event naming them (`request`), when GitHub's latest timeline items hold one.
+ */
+export type ViewerReviewRequest = { number: number; url: string; request?: string };
 /** One Issue: its header, labels and body, the pull requests in its repository linked to close it, and the Worktree holding one. */
 export type IssueDetail = { repository: string; number: number; title: string; url: string; state: 'open' | 'closed'; author?: string; updatedAt?: string; body: string; labels: string[]; linkedPullRequests: LinkedPullRequest[]; destination?: OverviewDestination };
 /** Runs the poll; injected so tests turn the clock by hand. */
@@ -94,9 +99,12 @@ type OriginEntry = { expiresAt?: number; pending: Promise<GithubRepository | und
 // PRs'), the seen-record keys of its reasons (`instances`), and those kept while GitHub has not
 // decided whether a reason still holds (`held`)
 type OverviewRow = Omit<OverviewItem, 'destination' | 'unseen'> & { heads: { number: number; branch: string; onOrigin: boolean }[]; instances: string[]; held: string[] };
-type OverviewEntry = Entry & { mine?: OverviewRow[]; reviews?: OverviewRow[]; issues?: OverviewRow[]; totals?: Overview['totals'] };
-// one pull request's or Issue's detail as last read, with what it was read at (`version`)
-type DetailEntry<T> = Entry & { data?: T; version?: string; failedAt?: number };
+// `requests` are the viewer's own review requests, kept only when GitHub gave the whole list
+type OverviewEntry = Entry & { mine?: OverviewRow[]; reviews?: OverviewRow[]; issues?: OverviewRow[]; totals?: Overview['totals']; requests?: RepositoryReviewRequest[] };
+type RepositoryReviewRequest = ViewerReviewRequest & { repository: string };
+// one pull request's or Issue's detail as last read, with each version a list read may show it at
+// (`versions`): a pull request's with its thread count, and without, as a branch lookup reads it
+type DetailEntry<T> = Entry & { data?: T; versions?: string[]; failedAt?: number };
 // what a list or branch lookup read of a pull request or Issue, and when
 type Known = { version: string; fetchedAt: number };
 
@@ -116,6 +124,7 @@ const missingToken = 'GitHub authentication is not configured for pull request l
 const readAction = 'GitHub could not read pull requests';
 const detailAction = 'GitHub could not read the pull request';
 const issueAction = 'GitHub could not read the Issue';
+const requestsAction = 'GitHub could not read the review requests';
 // bound the final heads one branch's ancestry check compares against, and the comparisons kept
 const maxAncestorCompares = 3;
 const maxCompares = 1_000;
@@ -159,12 +168,16 @@ const issueQuery = `query IssueDetail($owner:String!,$name:String!,$number:Int!)
   number title url state updatedAt author{login} body labels(first:20){nodes{name}}
   closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number title url state isDraft headRefName isCrossRepository repository{nameWithOwner}}}
 }}}`;
+// whether a review is asked of the viewer directly, and the newest request events naming them
+const viewerRequestFields = 'reviewRequests(first:100){nodes{requestedReviewer{...on User{isViewer}}}} timelineItems(itemTypes:[REVIEW_REQUESTED_EVENT],last:20){nodes{...on ReviewRequestedEvent{id requestedReviewer{...on User{isViewer}}}}}';
+// one repository's pull requests asking the viewer directly for a review
+const reviewRequestsQuery = `query ReviewRequests($q:String!){requests:search(type:ISSUE,first:50,query:$q){nodes{...on PullRequest{number url repository{nameWithOwner} ${viewerRequestFields}}}}}`;
 // the Overview's three searches, newest first; review threads and their last speaker are read
 // for my own PRs only, since they cost the most
 const overviewPullFields = 'number title url state isDraft updatedAt repository{nameWithOwner} author{login} headRefName headRefOid isCrossRepository mergeable statusCheckRollup{state} labels(first:5){nodes{name}}';
 const overviewSearches = {
   mine: { query: 'is:pr is:open author:@me archived:false sort:updated-desc', first: 20, fields: `...on PullRequest{${overviewPullFields} latestOpinionatedReviews(first:10){nodes{id state author{login} commit{oid}}} reviewThreads(last:50){nodes{id isResolved isOutdated path comments(last:1){nodes{id author{login} viewerDidAuthor}}}} closingIssuesReferences(first:5){nodes{number}}}` },
-  reviews: { query: 'is:pr is:open review-requested:@me archived:false sort:updated-desc', first: 30, fields: `...on PullRequest{${overviewPullFields} viewerLatestReviewRequest{id} viewerLatestReview{state commit{oid}}}` },
+  reviews: { query: 'is:pr is:open review-requested:@me archived:false sort:updated-desc', first: 30, fields: `...on PullRequest{${overviewPullFields} viewerLatestReviewRequest{id} viewerLatestReview{state commit{oid}} ${viewerRequestFields}}` },
   assigned: { query: 'is:issue is:open assignee:@me archived:false sort:updated-desc', first: 50, fields: '...on Issue{number title url state updatedAt repository{nameWithOwner} author{login} labels(first:5){nodes{name}} closedByPullRequestsReferences(first:5){nodes{number headRefName isCrossRepository repository{nameWithOwner}}}}' }
 } as const;
 
@@ -368,6 +381,17 @@ function issueRow(value: unknown): OverviewRow[] {
   return [{ ...row, heads, ...(heads.length === 0 ? {} : { linkedPullRequests: heads.map(head => head.number) }) }];
 }
 
+// the search results asking the viewer directly for a review, each with the newest request event
+// naming them
+function viewerRequests(results: unknown[]): RepositoryReviewRequest[] {
+  return results.flatMap(pull => {
+    const [number, url, repository] = [positive(at(pull, 'number')), githubUrl(at(pull, 'url')), at(pull, 'repository', 'nameWithOwner')];
+    if (number === undefined || url === undefined || typeof repository !== 'string' || !nodes(at(pull, 'reviewRequests')).some(asked => at(asked, 'requestedReviewer', 'isViewer') === true)) return [];
+    const request = nodes(at(pull, 'timelineItems')).filter(event => at(event, 'requestedReviewer', 'isViewer') === true).map(event => at(event, 'id')).filter((id): id is string => typeof id === 'string').at(-1);
+    return [{ repository, number, url, ...(request === undefined ? {} : { request }) }];
+  });
+}
+
 // a branch's pull requests as one alias gave them
 function readBranch(value: unknown, fork: boolean): { pulls: Pull[]; complete: boolean } {
   // a fork checkout's pull request by number: none at all is a complete answer
@@ -422,7 +446,6 @@ export class GithubService {
   private readonly overviewEntry: OverviewEntry = {};
   private readonly seen: SeenRecord;
   private readonly details = new Map<string, DetailEntry<unknown>>();
-  private viewerMemo?: { token: string; login: Promise<string> };
   private viewers = 0;
   private scheduled?: unknown;
   private lastPollAt?: number;
@@ -436,7 +459,7 @@ export class GithubService {
     this.projects = projects;
     this.worktrees = worktrees;
     this.seen = new SeenRecord(seenFile);
-    this.client = new GithubClient(request, { now, refused: () => { this.viewerMemo = undefined; } });
+    this.client = new GithubClient(request, { now });
   }
 
   /** Moves whenever the data the module serves changes, so views know to read it again. */
@@ -493,21 +516,6 @@ export class GithubService {
   /** The console's token, read on every call (an environment variable or a small file) so a new login applies at once. */
   async token(): Promise<string | undefined> {
     return await this.readToken().catch(() => undefined);
-  }
-
-  /** The login the token belongs to, looked up once per token and again after GitHub refuses it. */
-  async viewer(): Promise<string> {
-    const token = await this.token();
-    if (token === undefined) throw new GithubRequestError(missingToken, 503);
-    if (this.viewerMemo?.token !== token) this.viewerMemo = { token, login: this.viewerLogin(token) };
-    const memo = this.viewerMemo;
-    try {
-      return await memo.login;
-    } catch (error) {
-      // a failed lookup is not kept
-      if (this.viewerMemo === memo) this.viewerMemo = undefined;
-      throw error;
-    }
   }
 
   /** The GitHub repository a checkout's origin names, remembered for 30s unless `fresh`. */
@@ -721,6 +729,26 @@ export class GithubService {
     return { issue: { ...issue, ...(destination === undefined ? {} : { destination }) }, ...fetched(entry) };
   }
 
+  /**
+   * One repository's open pull requests asking the viewer directly for a review, for a Watch. The
+   * poll's Review requests answer while they are under a minute old, whole, and newer than this
+   * repository's own read; otherwise just this repository's are read, once a minute old.
+   */
+  async reviewRequests(repository: GithubRepository): Promise<Fetched<{ requests: ViewerReviewRequest[] }>> {
+    const key = repositoryKey(repository);
+    const unnamed = ({ repository: _repository, ...request }: RepositoryReviewRequest): ViewerReviewRequest => request;
+    const { requests: polled, problem, fetchedAt: polledAt } = this.overviewEntry;
+    const targetedAt = this.details.get(`requests:${key}`)?.fetchedAt;
+    if (polled !== undefined && problem === undefined && polledAt !== undefined && !this.stale(this.overviewEntry) && polledAt >= (targetedAt ?? -Infinity)) return { requests: polled.filter(request => request.repository.toLowerCase() === key).map(unnamed), fetchedAt: polledAt };
+    const entry = await this.detail(`requests:${key}`, undefined, false, async (token) => {
+      const payload = await this.client.query(token, reviewRequestsQuery, { q: `repo:${repository.owner}/${repository.name} is:pr is:open user-review-requested:@me` }, requestsAction);
+      const found = at(payload, 'data', 'requests');
+      return found !== null && typeof found === 'object' ? { data: viewerRequests(nodes(found)), versions: [] } : { kind: 'failing', message: graphqlError(payload, requestsAction).message };
+    });
+    // the search's `repo:` already chose them, under whatever name GitHub now gives the repository
+    return { requests: (entry.data ?? []).map(unnamed), ...fetched(entry) };
+  }
+
   // the Worktree holding one of these heads of a repository, if any
   private async holder(repository: GithubRepository, heads: OverviewRow['heads']): Promise<OverviewDestination | undefined> {
     const found = (await this.destinations())(`${repository.owner}/${repository.name}`, heads);
@@ -740,10 +768,10 @@ export class GithubService {
     return known;
   }
 
-  // one detail, read again when it is missing, when Refresh asks, when a list read since (and under
-  // a minute old) shows another `version`, or, when none has, once it is a minute old; readers
-  // asking together share a read
-  private async detail<T>(key: string, known: Known | undefined, fresh: boolean, read: (token: string) => Promise<{ data: T; version: string } | GithubProblem>): Promise<DetailEntry<T>> {
+  // one detail, read again when it is missing, when its last read failed, when Refresh asks, when a
+  // list read since (and under a minute old) shows another version, or, when none has, once it is
+  // a minute old; readers asking together share a read
+  private async detail<T>(key: string, known: Known | undefined, fresh: boolean, read: (token: string) => Promise<{ data: T; versions: string[] } | GithubProblem>): Promise<DetailEntry<T>> {
     const entry = (this.details.get(key) ?? {}) as DetailEntry<T>;
     // the least recently read is dropped first
     this.details.delete(key);
@@ -761,14 +789,14 @@ export class GithubService {
     const now = this.now();
     // asking again straight after a failure does not ask GitHub again
     if (entry.failedAt !== undefined && now - entry.failedAt < refreshFloorMs) return entry;
-    const due = fetchedAt === undefined
+    const due = fetchedAt === undefined || entry.problem !== undefined
       || (fresh && now - fetchedAt >= refreshFloorMs)
-      || (known !== undefined && known.fetchedAt > fetchedAt && !this.stale(known) ? known.version !== entry.version : this.stale(entry));
+      || (known !== undefined && known.fetchedAt > fetchedAt && !this.stale(known) ? !(entry.versions ?? []).includes(known.version) : this.stale(entry));
     if (due) await (entry.refreshing ??= this.readDetail(entry, read));
     return entry;
   }
 
-  private async readDetail<T>(entry: DetailEntry<T>, read: (token: string) => Promise<{ data: T; version: string } | GithubProblem>): Promise<void> {
+  private async readDetail<T>(entry: DetailEntry<T>, read: (token: string) => Promise<{ data: T; versions: string[] } | GithubProblem>): Promise<void> {
     const started = this.now();
     try {
       const token = await this.token();
@@ -948,7 +976,9 @@ export class GithubService {
       else {
         // the badge counts against the seen record, so it is read before the lists land
         await this.seen.load();
-        this.store(this.overviewEntry, started, { mine: nodes(mine).flatMap(myPullRow), reviews: nodes(reviews).flatMap(reviewRow), issues: nodes(assigned).flatMap(issueRow), totals: { mine: total(mine), reviews: total(reviews), issues: total(assigned) } });
+        // a list cut at its page may miss a repository's requests, which a Watch then reads itself
+        const complete = nodes(reviews).length >= total(reviews);
+        this.store(this.overviewEntry, started, { mine: nodes(mine).flatMap(myPullRow), reviews: nodes(reviews).flatMap(reviewRow), issues: nodes(assigned).flatMap(issueRow), totals: { mine: total(mine), reviews: total(reviews), issues: total(assigned) }, requests: complete ? viewerRequests(nodes(reviews)) : undefined });
         await this.pruneSeen();
       }
     }
@@ -1043,15 +1073,6 @@ export class GithubService {
     const remote = await this.command('/usr/bin/git', [...repositoryArgs(path), 'remote', 'get-url', 'origin']);
     return remote.code === 0 ? githubRepository(remote.stdout) : undefined;
   }
-
-  // identify the authenticated GitHub user
-  private async viewerLogin(token: string): Promise<string> {
-    const response = await this.client.get('https://api.github.com/user', token, 'GitHub could not identify the authenticated user');
-    const value = await response.json().catch(() => undefined);
-    // require the authenticated login
-    if (value === null || typeof value !== 'object' || typeof (value as { login?: unknown }).login !== 'string') throw new GithubRequestError('GitHub returned invalid authenticated user data.');
-    return (value as { login: string }).login;
-  }
 }
 
 // one well-formed comment; a deleted account reads as GitHub's own `ghost`; `mine` marks the viewer's
@@ -1110,7 +1131,7 @@ function readReviewers(node: unknown, head: string): PullRequestReviewer[] {
 }
 
 // one pull request's detail as GitHub gave it; undefined for none, or one that is not well formed
-function readDetail(repository: GithubRepository, node: unknown): { data: PullRequestDetail; version: string } | undefined {
+function readDetail(repository: GithubRepository, node: unknown): { data: PullRequestDetail; versions: string[] } | undefined {
   const pull = readPull(node);
   if (pull === undefined) return undefined;
   const threads = nodes(at(node, 'reviewThreads')).flatMap((thread): PullRequestReviewThread[] => {
@@ -1144,13 +1165,13 @@ function readDetail(repository: GithubRepository, node: unknown): { data: PullRe
       mergeable: mergeable === 'CONFLICTING' ? 'conflicting' : mergeable === 'MERGEABLE' ? 'mergeable' : 'unknown',
       checkRuns: nodes(at(node, 'statusCheckRollup', 'contexts')).flatMap(readCheck), reviewers: readReviewers(node, pull.headSha), linkedIssues
     },
-    version: pullVersion(pull)
+    versions: [pullVersion(pull), pullVersion({ ...pull, unresolvedThreads: undefined })]
   };
 }
 
 // one Issue's detail as GitHub gave it, with the heads of its own repository's linked pull
 // requests, which find its Worktree
-function readIssueDetail(repository: GithubRepository, node: unknown): { data: IssueDetail & { heads: OverviewRow['heads'] }; version: string } | undefined {
+function readIssueDetail(repository: GithubRepository, node: unknown): { data: IssueDetail & { heads: OverviewRow['heads'] }; versions: string[] } | undefined {
   const [issue] = readIssue(node);
   const state = at(node, 'state');
   if (issue === undefined || (state !== 'OPEN' && state !== 'CLOSED')) return undefined;
@@ -1164,6 +1185,6 @@ function readIssueDetail(repository: GithubRepository, node: unknown): { data: I
   });
   return {
     data: { ...issue, repository: name, state: state === 'OPEN' ? 'open' : 'closed', body: typeof body === 'string' ? body : '', labels, linkedPullRequests: linked.map(({ pull }) => pull), heads: linked.flatMap(({ heads }) => heads) },
-    version: issue.updatedAt ?? ''
+    versions: [issue.updatedAt ?? '']
   };
 }
