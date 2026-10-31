@@ -1,7 +1,7 @@
 # Design
 
 ## Source of truth
-Status: Active. Updated: 2026-10-30. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls, workspace toolbar decorators, public homepage and policies, independent file previews.
+Status: Active. Updated: 2026-10-30. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls, workspace toolbar decorators, public homepage and policies, independent file previews, conversation browsing.
 Evidence: existing Settings forms and split confirmation, `compose.yaml`, the
 host settings queue/applier, and Cloudflare's official Tunnel setup documentation.
 Toolbar evidence: `apps/web/src/styles.css`, browser layout regressions, and the
@@ -129,8 +129,39 @@ Reduced motion makes skeletons static and replaces retained travelling borders w
 compact synchronized one-second spinners. Do not animate status dots or run a
 continuous JavaScript animation clock.
 Conversations opens immediately into one flyout with search first and a scrollable
-four-and-a-half-row viewport, clamped to short screens. Rows expose relative activity,
-cwd, and current-conversation editing; historical resume safeguards remain intact.
+four-and-a-half-row maximum viewport, clamped to short screens. Size short lists
+to their content instead of reserving empty rows. A starter list with fewer than
+five confirmed renames fits all its visible rows, including an extra unnamed
+current conversation; longer lists keep the clipped fifth-row scroll cue.
+Keep a cwd/all switch beside
+search: cwd defaults to the current workspace folder; all includes configured
+worktree folders across every project, plus the current scratch folder when applicable.
+Request that broader catalog explicitly from the server, keeping unknown paths outside
+the scan boundary. Show directories only in all mode, and use
+compact two-line rows in cwd mode. Use the server's worktree identity to scope cwd
+across host/container path mappings; use the current conversation directory for
+scratch contexts. Shared or canonical-equivalent host roots remain visible without a resumable
+worktree identity; direct switches also reject ambiguous ownership.
+Directory search remains available in both modes. Initially show
+non-review console-named conversations plus the current conversation. RAC-generated
+review labels stay behind search or expansion even when recorded as console-named;
+the current row remains visible regardless of title provenance or review-run status.
+Keep non-review console renames first and
+newest activity within each group. Other generated, provider-only and
+unknown-provenance titles remain behind search or explicit expansion. Keep current
+naming available when the validated catalog has no current row.
+Show all conversations expands the same list to automatic and review entries
+without changing folder scope; Show fewer conversations restores the short
+list. Search includes all conversations within the selected scope and keeps confirmed
+console renames first. Remove the separate row action area and trash controls.
+Place the current conversation's Edit icon immediately after its name, within the
+title line. Keep it keyboard-accessible and independent of any resume button:
+the current row is noninteractive content containing Edit; historical rows remain
+full-width resume buttons. Preserve the current badge and truncate long titles
+without clipping the edit icon. Its inline form uses accessible check/X icon buttons.
+Keep historical resume safeguards, current naming eligibility, mutation errors and
+redaction boundaries intact. Removing row controls does not delete stored rename
+records or transcripts. Reset scope and expansion when reopening the flyout.
 File paths and stored Note attachment filenames open a dedicated Preview split through
 the existing scoped preview routes, independently of Code comparisons. Reuse highlighted
 source and bounded raster rendering with loading, failure, binary and truncation states.

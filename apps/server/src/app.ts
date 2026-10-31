@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import websocket from '@fastify/websocket';
 import staticPlugin from '@fastify/static';
 import { fileURLToPath } from 'node:url';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import type { ValidatedConfig } from './config/schema.js';
 import { registerHealthRoute } from './settings/health-proof.js';
@@ -1594,14 +1594,31 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const targetWorktree = target === undefined ? undefined : configuredWorktreeForWorkspace(discovery.worktreesNow(), target.agent.home);
     return targetWorktree?.id === worktreeId ? discovery.conversationId(agentId) : undefined;
   };
-  // a Project's current Worktree directories mapped to their Worktree id: the host-visible
-  // checkout root each Conversation is started in (the cwd an Adapter's `list` scans and
-  // reports on each row), so a listed row's directory resolves back to its Worktree
-  const projectConversationScope = (projectId: string): Map<string, string> => {
-    const scope = new Map<string, string>();
-    for (const worktree of discovery.worktreesNow()) if (worktree.projectId === projectId) scope.set(worktreeHostRoot(worktree), worktree.id);
+  // map configured host roots to worktree identities, optionally restricted to one project
+  const conversationWorktreeScope = async (projectId?: string): Promise<Map<string, string | undefined>> => {
+    // match the adapter's best-effort canonical cwd lookup, retaining bridge-only paths
+    const roots = await Promise.all(discovery.worktreesNow().map(async worktree => {
+      const directory = worktreeHostRoot(worktree);
+      return { worktree, directory, canonical: await realpath(directory).catch(() => directory) };
+    }));
+    const owners = new Map<string, string | undefined>();
+    // ambiguous roots remain scan targets without granting resume authority
+    for (const { worktree, canonical } of roots) {
+      owners.set(canonical, owners.has(canonical) ? undefined : worktree.id);
+    }
+    const scope = new Map<string, string | undefined>();
+    // retain project filtering without hiding ownership conflicts from other projects
+    for (const { worktree, directory, canonical } of roots) {
+      // only configured roots enter the adapter scan allowlist
+      if (projectId === undefined || worktree.projectId === projectId) {
+        scope.set(directory, owners.get(canonical));
+      }
+    }
     return scope;
   };
+  // union confirmed rename records without letting one unreadable group hide the catalog
+  const conversationRecords = async (saveKeys: readonly string[]): Promise<ConsoleNamedConversation[]> =>
+    (await Promise.all([...new Set(saveKeys)].map(async saveKey => await consoleNamed.list(saveKey).catch(() => undefined) ?? []))).flat();
   // list the Named conversations under these directories, resolve each row's Worktree, whether it
   // is the current one, and whether the console named it, and order the union newest-active first.
   // Codex and OMX share one rollout reader (ADR 0005), so the union emits a single codex-family row
@@ -1619,7 +1636,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // Conversation the agent no longer lists disappears with it (codex-family matched by id, ADR 0005)
   const rowConsoleNamed = (records: readonly ConsoleNamedConversation[], row: { kind: AgentKind; id: string }): boolean =>
     records.some(record => sameConversation(record, row));
-  const listConversations = async (directories: readonly string[], scope: Map<string, string>, currentId: string | undefined, consoleNamedRecords: readonly ConsoleNamedConversation[]): Promise<ConversationRow[]> => {
+  const listConversations = async (directories: readonly string[], scope: Map<string, string | undefined>, currentId: string | undefined, consoleNamedRecords: readonly ConsoleNamedConversation[]): Promise<ConversationRow[]> => {
     const listed = await discovery.conversations(directories);
     // read remembered kinds once, only when a codex-family row needs attributing
     const remembered = listed.some(row => codexFamily(row.kind))
@@ -1647,43 +1664,47 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     rows.sort((left, right) => right.lastActiveAt - left.lastActiveAt);
     return rows;
   };
-  // the scan scope and directories for one live agent: its whole Project's Worktree host roots,
-  // or just its own directory for a Scratch agent that has no Worktree to resume into
-  const agentConversationScope = (persistence: NonNullable<Awaited<ReturnType<typeof agentPersistence>>>): { scope: Map<string, string>; directories: string[] } => {
-    const scope = persistence.worktree === undefined ? new Map<string, string>() : projectConversationScope(persistence.worktree.projectId);
-    return { scope, directories: persistence.worktree === undefined ? [persistence.agent.home] : [...scope.keys()] };
+  // all mode adds configured worktrees while preserving the live scratch directory
+  const agentConversationScope = async (persistence: NonNullable<Awaited<ReturnType<typeof agentPersistence>>>, all = false): Promise<{ scope: Map<string, string | undefined>; directories: string[] }> => {
+    const scope = all ? await conversationWorktreeScope() : persistence.worktree === undefined ? new Map<string, string>() : await conversationWorktreeScope(persistence.worktree.projectId);
+    const directories = persistence.worktree === undefined ? [persistence.agent.home, ...scope.keys()] : [...scope.keys()];
+    return { scope, directories: [...new Set(directories)] };
   };
-  // list one Worktree's Project-wide Named conversations (every kind, every Worktree of the
-  // Project); an optional live agent open on this Worktree marks the current row
+  // list project conversations, explicitly opting into all configured worktrees when requested
+  // an optional live agent marks current only on this worktree
   app.get('/api/worktrees/:id/conversations', async (request, reply) => {
     controlled(request);
     const id = (request.params as { id: string }).id;
-    const agentId = (request.query as { agentId?: unknown }).agentId;
+    const { agentId, scope: requestedScope } = request.query as { agentId?: unknown; scope?: unknown };
     const worktree = configuredWorktree(id);
     // require one configured Worktree
     if (worktree === undefined) return await nonWorktreeReply(id, reply);
     // reject malformed agent context
     if (agentId !== undefined && (typeof agentId !== 'string' || !agentId)) return reply.code(400).send({ error: 'invalid agent' });
-    const scope = projectConversationScope(worktree.projectId);
+    // only the explicit all scope broadens the configured-root allowlist
+    if (requestedScope !== undefined && requestedScope !== 'all') return reply.code(400).send({ error: 'invalid conversation scope' });
+    const all = requestedScope === 'all';
+    const scope = await conversationWorktreeScope(all ? undefined : worktree.projectId);
     // resolve the current Conversation only for a live agent open on this very Worktree
     const currentId = typeof agentId === 'string' ? await currentConversationOnWorktree(id, agentId) : undefined;
-    // a failed record read degrades to "nothing console-named" rather than dropping the list
-    const records = await consoleNamed.list(worktree.projectId).catch(() => undefined) ?? [];
+    const records = await conversationRecords(all ? discovery.worktreesNow().map(row => row.projectId) : [worktree.projectId]);
     const conversations = await listConversations([...scope.keys()], scope, currentId, records);
     return { conversations, canResume: launch.canResumeConversation(id) };
   });
-  // list one live agent's Named conversations: its whole Project when it belongs to a
-  // Worktree, or just its own directory for a Scratch agent (no Worktree to resume into)
+  // list one live agent's conversations, optionally adding all configured worktree paths
   app.get('/api/agents/:id/conversations', async (request, reply) => {
     controlled(request);
     const id = (request.params as { id: string }).id;
     const persistence = await agentPersistence(id);
     // require one current agent target
     if (persistence === undefined) return reply.code(404).send({ error: 'agent unavailable' });
-    const { scope, directories } = agentConversationScope(persistence);
+    const requestedScope = (request.query as { scope?: unknown }).scope;
+    // retain the agent authority check before broadening its read scope
+    if (requestedScope !== undefined && requestedScope !== 'all') return reply.code(400).send({ error: 'invalid conversation scope' });
+    const all = requestedScope === 'all';
+    const { scope, directories } = await agentConversationScope(persistence, all);
     const currentId = await discovery.conversationId(id);
-    // a failed record read degrades to "nothing console-named" rather than dropping the list
-    const records = await consoleNamed.list(persistence.saveKey).catch(() => undefined) ?? [];
+    const records = await conversationRecords(all ? [persistence.saveKey, ...discovery.worktreesNow().map(row => row.projectId)] : [persistence.saveKey]);
     const conversations = await listConversations(directories, scope, currentId, records);
     return { conversations, canResume: persistence.worktree !== undefined && launch.canResumeConversation(persistence.worktree.id) };
   });
@@ -1759,7 +1780,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       // must not 500 the request — the row simply won't be console-named until the next successful name
       await consoleNamed.record(persistence.saveKey, { kind: persistence.agent.kind, id: conversationId }).catch(() => undefined);
       // return the freshly-listed row for the named Conversation (now console-named and current)
-      const { scope, directories } = agentConversationScope(persistence);
+      const { scope, directories } = await agentConversationScope(persistence);
       const stored = await consoleNamed.list(persistence.saveKey).catch(() => undefined) ?? [];
       const rows = await listConversations(directories, scope, conversationId, stored);
       const row = rows.find(candidate => sameConversation(candidate, { kind: persistence.agent.kind, id: conversationId }));
@@ -2979,6 +3000,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // require the Conversation to be homed in this Worktree: a scan of only this Worktree's
     // directory lists it exactly when the agent's own picker would resume it here
     const homeDirectory = worktreeHostRoot(worktree);
+    // reject ambiguous roots before a direct request can trigger a destructive handoff
+    if ((await conversationWorktreeScope()).get(homeDirectory) !== worktree.id) return reply.code(409).send({ error: 'This conversation has no unique worktree to resume into.' });
     const homed = (await discovery.conversations([homeDirectory])).some(row => sameConversation(row, { kind: rowKind, id: conversationId }));
     if (!homed) return reply.code(409).send({ error: 'This conversation does not belong to this worktree.' });
     // fail before any destructive handoff

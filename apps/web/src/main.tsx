@@ -3158,8 +3158,7 @@ const notePreview = (text: string) => {
 };
 const appendTextBlock = (current: string, text: string) => `${current}${current ? current.endsWith('\n\n') ? '' : current.endsWith('\n') ? '\n' : '\n\n' : ''}${text}`;
 
-// one Named conversation the server lists (a row of GET …/conversations); `reviewRun` marks
-// one a Tour or Review run named, which the list shows only to a search
+// one server-listed conversation; review runs appear through search or explicit expansion
 type ListedConversation = { kind: AgentKind; id: string; name: string; automatic?: boolean; lastActiveAt: number; directory: string; worktreeId?: string; consoleNamed: boolean; reviewRun: boolean; current: boolean };
 // validate one listed conversation
 const isListedConversation = (value: unknown): value is ListedConversation => value !== null
@@ -3199,13 +3198,15 @@ function persistenceResourceBase(worktreeId?: string, agentId?: string): string 
 
 // keep search and conversation actions in one immediately opening flyout
 // provider recency and resume authority remain on the existing scoped endpoints
-function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?: { onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?: { directory?: string; onNavigateWorktree?: (worktreeId: string) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
   const adapters = useContext(AdaptersContext);
   const [conversations, setConversations] = useState<ListedConversation[]>();
   // list authority is separate from recoverable mutation errors
   const [validatedListContext, setValidatedListContext] = useState<string>();
   const [menuOpen, setMenuOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [scope, setScope] = useState<'cwd' | 'all'>('cwd');
+  const [showAll, setShowAll] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [resumingKey, setResumingKey] = useState<string>();
@@ -3213,7 +3214,6 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
   const [editingKey, setEditingKey] = useState<string>();
   const searchRef = useRef<HTMLInputElement>(null);
   const [naming, setNaming] = useState(false);
-  const [removingKey, setRemovingKey] = useState<string>();
   const loadGeneration = useRef(0);
   const resourceBase = persistenceResourceBase(worktreeId, agentId);
   const { anchorRef, flyoutRef, style: flyoutStyle } = useViewportFlyout<HTMLDivElement>(menuOpen);
@@ -3248,13 +3248,14 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
     setValidatedListContext(undefined);
     setMenuOpen(false);
     setQuery('');
+    setScope('cwd');
+    setShowAll(false);
     setLoading(false);
     setError('');
     setResumingKey(undefined);
     setNameDraft('');
     setEditingKey(undefined);
     setNaming(false);
-    setRemovingKey(undefined);
   }, [agentId, worktreeId]);
 
   // compute one Project's conversation list on request
@@ -3266,9 +3267,11 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
     setValidatedListContext(undefined);
     setError('');
     try {
-      // pass the live agent only when listing a worktree it is open on, so `current` resolves
-      const query = worktreeId === undefined || agentId === undefined ? '' : `?agentId=${encodeURIComponent(agentId)}`;
-      const response = await request(`${resourceBase}/conversations${query}`);
+      // load the configured cross-project catalog once for both folder filters
+      const query = new URLSearchParams({ scope: 'all' });
+      // resolve current only against the worktree carrying the live agent
+      if (worktreeId !== undefined && agentId !== undefined) query.set('agentId', agentId);
+      const response = await request(`${resourceBase}/conversations?${query}`);
       // require a successful list response
       if (!response.ok) throw new Error('conversation list unavailable');
       const payload: unknown = await response.json();
@@ -3298,6 +3301,8 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
     // a second click dismisses the current surface
     if (menuOpen) { closeMenu(); return; }
     setQuery('');
+    setScope('cwd');
+    setShowAll(false);
     setEditingKey(undefined);
     setMenuOpen(true);
     void load();
@@ -3387,61 +3392,55 @@ function useWorktreeConversations(worktreeId?: string, agentId?: string, resume?
     }
   };
 
-  // forget the console's record of one Conversation. The transcript and its name survive, so the
-  // row drops out of the quick list but stays under All named; the flag is cleared in place.
-  const doRemove = async (conversation: ListedConversation) => {
-    const key = `${conversation.kind}:${conversation.id}`;
-    // remove one record at a time
-    if (removingKey !== undefined || resourceBase === undefined) return;
-    setRemovingKey(key);
-    setError('');
-    try {
-      const response = await request(`${resourceBase}/conversations/${encodeURIComponent(conversation.kind)}/${encodeURIComponent(conversation.id)}`, { method: 'DELETE' });
-      // a 404 means the record was already gone; either way it is no longer console-named
-      if (!response.ok && response.status !== 404) throw new Error('remove failed');
-      setConversations(current => current?.map(row => row.kind === conversation.kind && row.id === conversation.id ? { ...row, consoleNamed: false } : row));
-    } catch {
-      setError('Unable to remove this conversation from the list');
-    } finally {
-      setRemovingKey(undefined);
-    }
-  };
-
   // hide conversations without any persistence context
   if (resourceBase === undefined) return { control: null, currentName: undefined };
   const ownRows = (conversations ?? []).filter(conversation => !conversation.reviewRun);
   const consoleNamedCount = ownRows.filter(conversation => conversation.consoleNamed).length;
-  const currentName = conversations?.find(conversation => conversation.current)?.name;
+  const currentConversation = conversations?.find(conversation => conversation.current);
+  const currentName = currentConversation?.name;
   const label = `Conversations (${consoleNamedCount})`;
   const needle = query.trim().toLocaleLowerCase();
-  // retain provider recency order and reveal review runs only to an explicit search
-  const matches = (needle === '' ? ownRows : conversations ?? []).filter(conversation => needle === '' || `${conversation.name} ${agentKindLabel[conversation.kind]} ${conversation.directory}`.toLocaleLowerCase().includes(needle));
+  const directory = conversations?.find(conversation => conversation.current)?.directory ?? resume?.directory;
+  // only confirmed console records count as renames
+  const renamed = (conversation: ListedConversation) => !conversation.reviewRun && conversation.consoleNamed;
+  // keep current even when its path lacks a worktree mapping
+  const scopedRows = (conversations ?? []).filter(conversation => conversation.current || scope === 'all' || (worktreeId === undefined ? conversation.directory === directory : conversation.worktreeId === worktreeId));
+  const hasHiddenRows = scopedRows.some(conversation => !renamed(conversation) && !conversation.current);
+  // current joins the starter list without promoting other generated titles
+  const matches = scopedRows.filter(conversation => needle !== '' || showAll || renamed(conversation) || conversation.current)
+    .filter(conversation => needle === '' || `${conversation.name} ${agentKindLabel[conversation.kind]} ${conversation.directory}`.toLocaleLowerCase().includes(needle))
+    .sort((left, right) => Number(renamed(right)) - Number(renamed(left)) || right.lastActiveAt - left.lastActiveAt);
+  // fit up to four renames plus an extra current row without clipping it
+  const shortStarter = !loading && !showAll && needle === '' && scopedRows.filter(renamed).length < 5;
+  const emptyLabel = showAll ? `No conversations ${scope === 'cwd' ? 'in this folder' : 'in configured folders'} yet.` : `No named conversations ${scope === 'cwd' ? 'in this folder' : 'in configured folders'} yet.`;
   // inline naming never resumes a historical conversation
   const nameForm = <form className="conversation-name" onSubmit={event => { event.preventDefault(); void submitName(); }} onKeyDown={event => {
     // escape cancels this edit before the portal handles dismissal
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelName(); }
-  }}><input type="text" autoFocus value={nameDraft} maxLength={120} aria-label="Name this conversation" placeholder="Name this conversation" disabled={naming} onChange={event => setNameDraft(event.target.value)} /><button type="submit" className={naming ? 'progress-border progress-blue' : undefined} aria-busy={naming || undefined} aria-label="Name conversation" disabled={naming || !nameDraft.trim()}><ProgressRing busy={naming} />Save</button><button type="button" aria-label="Cancel conversation rename" disabled={naming} onClick={cancelName}>Cancel</button></form>;
-  // render each conversation in one stable-height row with independent actions
+  }}><input type="text" autoFocus value={nameDraft} maxLength={120} aria-label="Name this conversation" placeholder="Name this conversation" disabled={naming} onChange={event => setNameDraft(event.target.value)} /><button type="submit" className={naming ? 'progress-border progress-blue' : undefined} aria-busy={naming || undefined} aria-label="Name conversation" title="Save conversation name" disabled={naming || !nameDraft.trim()}><ProgressRing busy={naming} /><PanelIcon path={panelIcons.check} /></button><button type="button" aria-label="Cancel conversation rename" title="Cancel rename" disabled={naming} onClick={cancelName}><PanelIcon path={panelIcons.close} /></button></form>;
+  // render one full-width conversation row
   const row = (conversation: ListedConversation) => {
     const key = `${conversation.kind}:${conversation.id}`;
     const blockedReason = resumeBlockedReason(conversation);
     const resuming = resumingKey === key;
-    const removing = removingKey === key;
     const editable = conversation.current && agentId !== undefined;
     const metadata = `${agentKindLabel[conversation.kind]} · ${relativeAge(conversation.lastActiveAt)}${conversation.automatic ? ' · automatic' : conversation.consoleNamed ? ' · named here' : ''}${conversation.reviewRun ? ' · review run' : ''}`;
+    // share title and metadata without nesting interactive controls
+    const content = <><ProgressRing busy={resuming} /><span className={`conversation-mark launch-kind-${conversation.kind}`} aria-hidden="true">{agentKindGlyph[conversation.kind]}</span><span className="conversation-copy"><span className="conversation-title"><strong title={conversation.name}>{conversation.name}</strong>{editable && <button type="button" className="conversation-edit" aria-label={`Edit ${conversation.name}`} title="Rename current conversation" disabled={naming || resumingKey !== undefined} onClick={() => { /* edit only the active agent's conversation */ setEditingKey(key); setNameDraft(conversation.name); }}><PanelIcon path={panelIcons.editor} /></button>}</span><small title={metadata}>{metadata}</small>{scope === 'all' && <small className="conversation-cwd" title={conversation.directory}>{conversation.directory}</small>}</span>{conversation.current && <em className="conversation-pill">CURRENT</em>}</>;
     return <li key={key} className={`conversation-row${conversation.automatic ? ' automatic' : ''}${conversation.current ? ' current' : ''}`} aria-current={conversation.current ? 'true' : undefined}>
-      {editingKey === key ? nameForm : <><button className={`conversation-choice${progressBorder(resuming, 'blue')}`} type="button" aria-busy={resuming || undefined} disabled={blockedReason !== undefined || resumingKey !== undefined || naming} title={blockedReason ?? `Resume ${conversation.name}`} onClick={() => void doResume(conversation)}><ProgressRing busy={resuming} /><span className={`conversation-mark launch-kind-${conversation.kind}`} aria-hidden="true">{agentKindGlyph[conversation.kind]}</span><span className="conversation-copy"><strong title={conversation.name}>{conversation.name}</strong><small title={metadata}>{metadata}</small><small className="conversation-cwd" title={conversation.directory}>{conversation.directory}</small></span>{conversation.current && <em className="conversation-pill">CURRENT</em>}</button>
-      <button type="button" className="conversation-edit" aria-label={`Edit ${conversation.name}`} title={editable ? 'Rename current conversation' : 'Only the active conversation can be renamed'} disabled={!editable || naming || resumingKey !== undefined} onClick={() => { setEditingKey(key); setNameDraft(conversation.name); }}><PanelIcon path="m14 4 6 6M4 20l5-1L20 8a2 2 0 0 0-4-4L5 15Z" /></button>
-      {conversation.consoleNamed && <button className={`conversation-remove${progressBorder(removing, 'red')}`} type="button" aria-busy={removing || undefined} disabled={removingKey !== undefined || naming} aria-label={`Remove ${conversation.name} from this list`} title="Forget the console record; keep the named conversation" onClick={() => void doRemove(conversation)}><ProgressRing busy={removing} /><PanelIcon path={actionIconPaths.trash} /></button>}</>}
+      {/* current content can contain edit, but historical resume buttons cannot */}
+      {editingKey === key ? nameForm : conversation.current ? <div className="conversation-choice" title={blockedReason}>{content}</div> : <button className={`conversation-choice${progressBorder(resuming, 'blue')}`} type="button" aria-busy={resuming || undefined} disabled={blockedReason !== undefined || resumingKey !== undefined || naming} title={blockedReason ?? `Resume ${conversation.name}`} onClick={() => void doResume(conversation)}>{content}</button>}
     </li>;
   };
   const control = <div className="conversations-control" ref={anchorRef}><button className={`log-control page-arrow conversations-toggle${menuOpen ? ' active' : ''}`} type="button" aria-label={label} title={label} data-context-flyout aria-expanded={menuOpen} onPointerDown={event => event.preventDefault()} onClick={toggle}><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h11a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7l-5 4V5a2 2 0 0 1 2-2Z" /><path d="M20 8a2 2 0 0 1 2 2v11l-4-3h-7a2 2 0 0 1-2-2" /></svg>{consoleNamedCount > 0 && <span className="saved-prompts-count conversations-count" aria-hidden="true">{consoleNamedCount}</span>}</button>
-    {menuOpen && <FlyoutPortal onDismiss={closeMenu}><div ref={flyoutRef} className="conversations-menu" style={flyoutStyle} role="region" aria-label="Conversations">
-      <label className="conversations-search"><span className="sr-only">Search conversations</span><input ref={searchRef} type="search" value={query} placeholder="Search conversations" onChange={event => setQuery(event.target.value)} /></label>
+    {menuOpen && <FlyoutPortal onDismiss={closeMenu}><div ref={flyoutRef} className={`conversations-menu${scope === 'all' ? ' all-conversations' : ''}`} style={flyoutStyle} role="region" aria-label="Conversations">
+      <div className="conversations-search-row"><label className="conversations-search"><span className="sr-only">Search conversations</span><input ref={searchRef} type="search" value={query} placeholder="Search conversations" onChange={event => setQuery(event.target.value)} /></label><div className="conversations-scope" role="group" aria-label="Conversation scope">{/* keep folder scope independent from list expansion */}{(['cwd', 'all'] as const).map(value => <button key={value} type="button" aria-pressed={scope === value} title={value === 'cwd' ? 'Conversations in the current folder' : 'Conversations in all configured worktree folders'} disabled={naming || resumingKey !== undefined} onClick={() => { /* filter the already-authorized catalog without another request */ setScope(value); }}>{value}</button>)}</div></div>
       {error && <p className="conversations-error" role="alert">{error}{conversations === undefined && <button type="button" onClick={() => void load()}>Retry</button>}</p>}
-      <div className="conversations-list" aria-busy={loading || undefined}>{loading ? <div role="status" aria-label="Loading conversations"><span className="sr-only">Loading conversations</span><div className="conversation-rows">{/* the clipped fifth row communicates scrolling */}{Array.from({ length: 5 }, (_, index) => <div key={index} className="conversation-row conversation-row-skeleton" aria-hidden="true"><Skeleton /><span><Skeleton /><Skeleton /><Skeleton /></span><Skeleton /></div>)}</div></div> : matches.length === 0 ? error ? null : <p className="conversations-empty">{needle ? 'No matches.' : 'No named conversations in this project yet.'}</p> : <ul className="conversation-rows">{matches.map(row)}</ul>}</div>
-      {/* only a validated list can establish current naming eligibility */}
-      {!loading && validatedListContext === contextIdentity && agentId !== undefined && currentName === undefined && (editingKey === 'current' ? nameForm : <button type="button" className="conversation-name-current" onClick={() => { setNameDraft(''); setEditingKey('current'); }}>Name current conversation</button>)}
+      <div className={`conversations-list${shortStarter ? ' short-starter' : ''}`} aria-busy={loading || undefined}>{loading ? <div role="status" aria-label="Loading conversations"><span className="sr-only">Loading conversations</span><div className="conversation-rows">{/* the clipped fifth row communicates scrolling */}{Array.from({ length: 5 }, (_, index) => <div key={index} className="conversation-row conversation-row-skeleton" aria-hidden="true"><Skeleton /><span><Skeleton /><Skeleton />{scope === 'all' && <Skeleton />}</span></div>)}</div></div> : matches.length === 0 ? error ? null : <p className="conversations-empty">{needle ? 'No matches.' : emptyLabel}</p> : <ul className="conversation-rows">{matches.map(row)}</ul>}</div>
+      {/* only a missing current row needs a separate naming action */}
+      {!loading && validatedListContext === contextIdentity && agentId !== undefined && currentConversation === undefined && (editingKey === 'current' ? nameForm : <button type="button" className="conversation-name-current" onClick={() => { /* start a confirmed rename independently of a generated title */ setNameDraft(''); setEditingKey('current'); }}>Name current conversation</button>)}
+      {/* expand in place without opening another conversation surface */}
+      {!loading && validatedListContext === contextIdentity && (hasHiddenRows || showAll) && <button type="button" className="conversations-show-all" aria-expanded={showAll} disabled={naming || resumingKey !== undefined} onClick={() => { /* keep the scope and search while changing the list breadth */ setShowAll(value => !value); }}>{showAll ? 'Show fewer conversations' : 'Show all conversations'}</button>}
     </div></FlyoutPortal>}
   </div>;
   return { control, currentName };
@@ -6646,7 +6645,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, noteOptions: notes, onNa
   // keep the toolbar dots aligned with the visible phone panel
   const [carousel, setCarousel] = useState<PanelCarousel>();
   const settingsSplit = useContext(ClientSettingsSplitContext);
-  const conversations = useWorktreeConversations(place.worktreeId, agentId, { onNavigateWorktree, onOperationFeedback });
+  const conversations = useWorktreeConversations(place.worktreeId, agentId, { directory: place.path, onNavigateWorktree, onOperationFeedback });
   // the panel filling the Workspace; the notes restore theirs, so they share it
   const expansion = usePanelExpansion();
   const terminalPlaceId = place.id;

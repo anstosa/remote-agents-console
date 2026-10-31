@@ -597,7 +597,7 @@ html.software-keyboard-open .tabs { display: none; }
 @media (max-width: 360px) {
   .notes-menu .note-capture-actions .log-control { padding-inline: .15rem; font-size: .62rem; }
 }
-/* conversations control: a fly-out with an "All conversations" entry that opens a full-screen searchable dialog */
+/* conversations control and its inline searchable catalog */
 .conversations-control { position: relative; z-index: 4; }
 .conversations-toggle.active { border-color: var(--sky); color: var(--sky); }
 .conversations-toggle > svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
@@ -612,19 +612,15 @@ html.software-keyboard-open .tabs { display: none; }
 .conversation-rows { display: grid; gap: .35rem; margin: 0; padding: 0; list-style: none; }
 .conversation-row { display: flex; align-items: stretch; overflow: hidden; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: color-mix(in srgb, var(--surface-0) 52%, transparent); }
 .conversation-row.current { border-color: color-mix(in srgb, var(--sky) 72%, var(--surface-1)); background: color-mix(in srgb, var(--sky) 12%, var(--surface-0)); box-shadow: inset .18rem 0 var(--sky); }
-.conversation-choice { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; flex: 1; min-width: 0; align-items: center; gap: .55rem; border: 0; border-radius: 0; padding: .5rem .6rem; background: transparent; text-align: left; color: inherit; cursor: pointer; }
-/* a muted Remove that forgets the console's record without touching the transcript */
-.conversation-remove { display: flex; flex-shrink: 0; align-items: center; justify-content: center; border: 0; border-left: 1px solid var(--surface-1); border-radius: 0; padding: 0 .7rem; background: transparent; color: var(--subtext-0); cursor: pointer; }
-.conversation-remove-icon { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
-.conversation-remove:not(:disabled):hover { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
-.conversation-remove:disabled { cursor: default; opacity: .5; }
+.conversation-choice { display: grid; grid-template-columns: auto minmax(0, 1fr); flex: 1; min-width: 0; align-items: center; gap: .55rem; border: 0; border-radius: 0; padding: .5rem .6rem; background: transparent; text-align: left; color: inherit; cursor: pointer; box-shadow: none; }
 /* inline naming uses the current agent's own rename command */
 .conversations-menu .conversation-name { display: flex; align-items: stretch; gap: .35rem; }
 .conversations-menu .conversation-name input { flex: 1; min-width: 12rem; border: 1px solid var(--surface-2); border-radius: var(--control-radius); padding: .45rem .55rem; background: color-mix(in srgb, var(--surface-0) 82%, transparent); color: var(--text); font-size: .78rem; }
 .conversations-menu .conversation-name button { min-width: 3.4rem; justify-content: center; border-color: color-mix(in srgb, var(--sky) 68%, var(--surface-1)); color: var(--sky); }
-.conversation-choice:not(:disabled):hover { background: color-mix(in srgb, var(--surface-1) 45%, transparent); }
+button.conversation-choice:not(:disabled):hover { background: color-mix(in srgb, var(--surface-1) 45%, transparent); }
 .conversation-choice:disabled { cursor: default; opacity: .5; }
-.conversation-row.current .conversation-choice:disabled { opacity: 1; }
+/* current content is inert except for its inline edit control */
+.conversation-row.current .conversation-choice { grid-template-columns: auto minmax(0, 1fr) auto; cursor: default; }
 .conversation-mark { font-size: .9rem; }
 .conversation-copy { display: grid; min-width: 0; gap: .2rem; }
 .conversation-copy strong { overflow: hidden; color: var(--text); font-size: .74rem; line-height: 1.35; overflow-wrap: anywhere; }
@@ -2834,27 +2830,43 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .server-menu-revision-skeleton .skeleton:first-child { width: 45%; }
 .launch-agent-version-skeleton { width: 5.5rem; height: .65rem; }
 /* one flyout owns search and a partially visible fifth conversation */
-.conversations-menu { --conversation-row-height: 5rem; --conversation-row-gap: .3rem; display: flex; flex-direction: column; gap: .4rem; width: min(31rem, calc(100vw - 1rem)); max-width: calc(100vw - 1rem); max-height: var(--flyout-available-height, calc(100dvh - 1rem)); padding: .5rem; overflow: hidden; }
-.conversations-search { display: block; flex: none; }
+.conversations-menu { --conversation-row-height: 4rem; --conversation-row-gap: .3rem; display: flex; flex-direction: column; gap: .4rem; width: min(31rem, calc(100vw - 1rem)); max-width: calc(100vw - 1rem); max-height: var(--flyout-available-height, calc(100dvh - 1rem)); padding: .5rem; overflow: hidden; }
+/* directory metadata occupies a third line only in all mode */
+.conversations-menu.all-conversations { --conversation-row-height: 5rem; }
+.conversations-search-row { display: flex; flex: none; min-width: 0; gap: .4rem; align-items: stretch; }
+.conversations-search { display: block; flex: 1 1 0; min-width: 0; }
 .conversations-search input { box-sizing: border-box; width: 100%; min-width: 0; padding: .55rem .65rem; border: 1px solid var(--surface-2); border-radius: var(--control-radius); background: var(--crust); color: var(--text); }
-.conversations-list { min-height: 0; height: calc(var(--conversation-row-height) * 4.5 + var(--conversation-row-gap) * 4); flex: 0 1 auto; overflow-y: auto; overscroll-behavior: contain; padding: 0; }
+.conversations-scope { display: inline-flex; flex: none; overflow: hidden; border: 1px solid var(--surface-2); border-radius: var(--control-radius); }
+.conversations-scope button { min-width: 2.3rem; padding: .35rem .5rem; border: 0; border-left: 1px solid var(--surface-2); border-radius: 0; background: transparent; color: var(--subtext-0); font: 650 .7rem var(--font-mono); box-shadow: none; }
+.conversations-scope button:first-child { border-left: 0; }
+.conversations-scope button[aria-pressed='true'] { color: var(--text); background: color-mix(in srgb, var(--sky) 20%, transparent); }
+/* secondary controls avoid low-contrast text on the primary gradient */
+.conversations-show-all { flex: none; justify-content: center; width: 100%; padding: .4rem .6rem; border-color: var(--surface-2); background: var(--surface-0); color: var(--text); font: 650 .7rem var(--font-mono); box-shadow: none; }
+/* natural height removes empty slots while longer lists retain the scroll cue */
+.conversations-list { min-height: 0; max-height: calc(var(--conversation-row-height) * 4.5 + var(--conversation-row-gap) * 4); flex: 0 1 auto; overflow-y: auto; overscroll-behavior: contain; padding: 0; }
+/* four renames can fit an additional current row in full */
+.conversations-list.short-starter { max-height: calc(var(--conversation-row-height) * 5 + var(--conversation-row-gap) * 4); }
 .conversations-menu .conversation-rows { display: grid; gap: var(--conversation-row-gap); padding: 0; margin: 0; list-style: none; }
-.conversations-menu .conversation-row { display: flex; align-items: stretch; min-height: var(--conversation-row-height); height: var(--conversation-row-height); box-sizing: border-box; gap: .3rem; }
+.conversations-menu .conversation-row { display: flex; align-items: stretch; min-height: var(--conversation-row-height); height: var(--conversation-row-height); box-sizing: border-box; }
 .conversations-menu .conversation-choice { min-width: 0; flex: 1 1 0; padding: .45rem; }
 .conversations-menu .conversation-copy { display: grid; min-width: 0; gap: .2rem; }
 .conversations-menu .conversation-copy :is(strong, small) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversations-menu .conversation-copy small { font-size: .65rem; }
 .conversations-menu .conversation-pill { flex: none; font-size: .5rem; }
-.conversation-edit, .conversations-menu .conversation-remove { flex: 0 0 1.8rem; width: 1.8rem; min-width: 0; padding: .3rem; align-self: center; }
+/* keep edit immediately after the title, even when the name truncates */
+.conversation-title { display: flex; align-items: center; min-width: 0; gap: .2rem; }
+.conversation-title > strong { flex: 0 1 auto; min-width: 0; }
+.conversation-edit { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 1.5rem; height: 1.5rem; min-width: 0; padding: .15rem; border: 0; background: transparent; color: var(--subtext-0); box-shadow: none; }
+.conversation-edit:not(:disabled):hover { color: var(--text); }
 .conversation-edit svg { width: .85rem; height: .85rem; }
 .conversation-name { display: flex; gap: .3rem; width: 100%; align-items: center; }
 .conversations-menu .conversation-name input { width: 0; min-width: 0; flex: 1 1 0; }
-.conversations-menu .conversation-name button { min-width: 0; width: auto; padding: .35rem; }
-.conversation-row-skeleton { display: grid !important; grid-template-columns: 1.25rem minmax(0, 1fr) 1.8rem; align-items: center; padding: .55rem; gap: .6rem !important; }
+.conversations-menu .conversation-name button { display: inline-grid; place-items: center; flex: 0 0 1.9rem; min-width: 0; width: 1.9rem; height: 2rem; padding: .35rem; background: var(--surface-0); color: var(--text); box-shadow: none; }
+.conversation-row-skeleton { display: grid !important; grid-template-columns: 1.25rem minmax(0, 1fr); align-items: center; padding: .55rem; gap: .6rem !important; }
 .conversation-row-skeleton > span:nth-child(2) { display: grid; gap: .5rem; }
 .conversation-row-skeleton .skeleton:first-child { width: 75%; }
 .conversation-row-skeleton > .skeleton { width: 1.2rem; height: 1.2rem; }
-.conversations-menu .conversations-empty { display: grid; min-height: 8rem; place-items: center; text-align: center; }
+.conversations-menu .conversations-empty { display: grid; min-height: var(--conversation-row-height); margin: 0; place-items: center; text-align: center; }
 /* empty repository views reserve actual body space instead of header-only feedback */
 .git-status-repository-empty { display: grid; place-items: center; min-height: min(12rem, 35dvh); padding: 1rem; text-align: center; color: var(--overlay-1); }
 .git-status-repository-error { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: .6rem; min-height: min(8rem, 25dvh); padding: .75rem; text-align: center; color: var(--red); }

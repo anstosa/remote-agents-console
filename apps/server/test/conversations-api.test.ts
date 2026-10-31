@@ -1,11 +1,12 @@
 import argon2 from 'argon2';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AuthService } from '../src/auth/service.js';
 import { buildApp } from '../src/app.js';
 import { ConsoleNamedConversationService } from '../src/conversations/console-named-service.js';
+import { folderNoteKey } from '../src/places/places.js';
 import { stated } from './helpers/agent.js';
 import { testConfig, testWorktree } from './helpers/config.js';
 
@@ -135,6 +136,98 @@ describe('conversations listing API', () => {
     }
   }, 15_000);
 
+  // prove global browsing stays opt-in and keeps the original Worktree authority
+  it('opts a Worktree listing into every configured Project without weakening ownership or authentication', async () => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const cora = testWorktree({ id: 'potato:/wt/cora', projectId: 'potato', label: 'Cora', path: '/wt/cora', identity: '/wt/cora', hostPath: '/host/cora' });
+    const eric = testWorktree({ id: 'tomato:/wt/eric', projectId: 'tomato', label: 'Eric', path: '/wt/eric', identity: '/wt/eric', hostPath: '/host/eric' });
+    const coraId = 'aaaaaaaa-2222-4333-8444-555555555555';
+    const ericId = 'bbbbbbbb-2222-4333-8444-555555555555';
+    const agent = stated({ id: 'agent-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/host/cora', projectId: 'potato', worktreeId: cora.id, title: 'Ready' });
+    const available = [
+      { kind: 'claude', id: coraId, name: 'cora named here', automatic: false, lastActiveAt: 200, directory: '/host/cora' },
+      { kind: 'claude', id: ericId, name: 'eric named here', automatic: false, lastActiveAt: 300, directory: '/host/eric' },
+    ] as const;
+    const scanned: string[][] = [];
+    const discovery = {
+      // resolve only the original Worktree's live agent
+      target: async (id: string) => id === agent.id ? { agent, socket } : undefined,
+      // identify the original agent's current conversation
+      conversationId: async () => coraId,
+      // expose both configured projects to the global catalog
+      worktreesNow: () => [cora, eric],
+      // model adapter filtering against the requested directory allowlist
+      conversations: async (directories: readonly string[]) => {
+        scanned.push([...directories]);
+        return available.filter(row => directories.includes(row.directory));
+      },
+    };
+    const directory = await mkdtemp(join(tmpdir(), 'rac-conv-all-projects-')); dirs.push(directory);
+    const consoleNamed = new ConsoleNamedConversationService({ file: join(directory, 'records.json') });
+    await consoleNamed.record('potato', { kind: 'claude', id: coraId });
+    await consoleNamed.record('tomato', { kind: 'claude', id: ericId });
+    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 48).toString('base64url')), discovery: discovery as never, launch: { canResumeConversation: () => true } as never, consoleNamed });
+    try {
+      const headers = await authenticatedHeaders(app);
+      const base = `/api/worktrees/${encodeURIComponent(cora.id)}/conversations?agentId=agent-1`;
+      const project = await app.inject({ method: 'GET', url: base, headers: { host: headers.host, cookie: headers.cookie } });
+      expect(project.json().conversations).toEqual([
+        { kind: 'claude', id: coraId, name: 'cora named here', automatic: false, lastActiveAt: 200, directory: '/host/cora', worktreeId: cora.id, consoleNamed: true, reviewRun: false, current: true },
+      ]);
+
+      const all = await app.inject({ method: 'GET', url: `${base}&scope=all`, headers: { host: headers.host, cookie: headers.cookie } });
+      expect(all.json().conversations).toEqual([
+        { kind: 'claude', id: ericId, name: 'eric named here', automatic: false, lastActiveAt: 300, directory: '/host/eric', worktreeId: eric.id, consoleNamed: true, reviewRun: false, current: false },
+        { kind: 'claude', id: coraId, name: 'cora named here', automatic: false, lastActiveAt: 200, directory: '/host/cora', worktreeId: cora.id, consoleNamed: true, reviewRun: false, current: true },
+      ]);
+      expect(scanned).toEqual([['/host/cora'], ['/host/cora', '/host/eric']]);
+
+      const unknownScope = await app.inject({ method: 'GET', url: `${base}&scope=everywhere`, headers: { host: headers.host, cookie: headers.cookie } });
+      expect(unknownScope.statusCode).toBe(400);
+      const unauthenticated = await app.inject({ method: 'GET', url: `${base}&scope=all`, headers: { host: headers.host } });
+      expect(unauthenticated.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  }, 15_000);
+
+  // ambiguous host roots remain visible without granting a resume target
+  it.each(['duplicate', 'symlink'])('keeps %s host roots without attributing them to a configured Worktree', async mode => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const root = await mkdtemp(join(tmpdir(), 'rac-conv-root-')); dirs.push(root);
+    const shared = mode === 'symlink' ? root : '/host/shared';
+    const alias = mode === 'symlink' ? join(root, 'alias') : shared;
+    // use a real alias to exercise the adapter's canonical directory equivalence
+    if (mode === 'symlink') await symlink(shared, alias, 'dir');
+    const cora = testWorktree({ id: 'potato:/wt/cora', projectId: 'potato', path: '/wt/cora', identity: '/wt/cora', hostPath: shared });
+    const owen = testWorktree({ id: 'tomato:/wt/owen', projectId: 'tomato', path: '/wt/owen', identity: '/wt/owen', hostPath: alias });
+    const eric = testWorktree({ id: 'pepper:/wt/eric', projectId: 'pepper', path: '/wt/eric', identity: '/wt/eric', hostPath: alias });
+    const scanned: string[][] = [];
+    const discovery = {
+      // expose three owners so a later duplicate cannot restore an arbitrary mapping
+      worktreesNow: () => [cora, owen, eric],
+      // retain one row at the ambiguous scan root
+      conversations: async (directories: readonly string[]) => {
+        scanned.push([...directories]);
+        return [{ kind: 'claude', id: 'aaaaaaaa-2222-4333-8444-555555555555', name: 'shared chat', automatic: false, lastActiveAt: 100, directory: directories[0]! }];
+      },
+    };
+    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 50).toString('base64url')), discovery: discovery as never, launch: { canResumeConversation: () => true } as never });
+    try {
+      const headers = await authenticatedHeaders(app);
+      // ambiguity must fail closed in default and all-project listings
+      for (const query of ['', '?scope=all']) {
+        const listed = await app.inject({ method: 'GET', url: `/api/worktrees/${encodeURIComponent(cora.id)}/conversations${query}`, headers: { host: headers.host, cookie: headers.cookie } });
+        expect(listed.statusCode).toBe(200);
+        expect(listed.json().conversations).toHaveLength(1);
+        expect(listed.json().conversations[0]).not.toHaveProperty('worktreeId');
+      }
+      expect(scanned).toEqual([[shared], [...new Set([shared, alias])]]);
+    } finally {
+      await app.close();
+    }
+  }, 15_000);
+
   it('attributes each shared Codex row to the Worktree\'s remembered kind: OMX when it last launched OMX, else Codex', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const cora = testWorktree({ id: 'potato:/wt/cora', projectId: 'potato', label: 'Cora', path: '/wt/cora', identity: '/wt/cora', hostPath: '/host/cora' });
@@ -204,14 +297,76 @@ describe('conversations listing API', () => {
     }
   }, 15_000);
 
+  // prove scratch joins the global catalog without losing its own scope
+  it('opts a Scratch listing into configured Worktrees while retaining its own records and current row', async () => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const cora = testWorktree({ id: 'potato:/wt/cora', projectId: 'potato', label: 'Cora', path: '/wt/cora', identity: '/wt/cora', hostPath: '/host/cora' });
+    const eric = testWorktree({ id: 'tomato:/wt/eric', projectId: 'tomato', label: 'Eric', path: '/wt/eric', identity: '/wt/eric', hostPath: '/host/eric' });
+    const scratchId = 'dddddddd-2222-4333-8444-555555555555';
+    const coraId = 'eeeeeeee-2222-4333-8444-555555555555';
+    const ericId = 'ffffffff-2222-4333-8444-555555555555';
+    const agent = stated({ id: 'scratch-1', paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket', home: '/home/me/scratch', title: 'Scratch' });
+    const available = [
+      { kind: 'claude', id: scratchId, name: 'scratch named here', automatic: false, lastActiveAt: 100, directory: '/home/me/scratch' },
+      { kind: 'claude', id: coraId, name: 'cora named here', automatic: false, lastActiveAt: 200, directory: '/host/cora' },
+      { kind: 'claude', id: ericId, name: 'eric named here', automatic: false, lastActiveAt: 300, directory: '/host/eric' },
+    ] as const;
+    const scanned: string[][] = [];
+    const discovery = {
+      // retain exact live-agent authority for the scratch route
+      target: async (id: string) => id === agent.id ? { agent, socket } : undefined,
+      // identify the scratch agent's current conversation
+      conversationId: async () => scratchId,
+      // expose configured worktrees beside scratch
+      worktreesNow: () => [cora, eric],
+      // model adapter filtering against the requested directory allowlist
+      conversations: async (directories: readonly string[]) => {
+        scanned.push([...directories]);
+        return available.filter(row => directories.includes(row.directory));
+      },
+    };
+    const directory = await mkdtemp(join(tmpdir(), 'rac-conv-all-scratch-')); dirs.push(directory);
+    const consoleNamed = new ConsoleNamedConversationService({ file: join(directory, 'records.json') });
+    await consoleNamed.record(folderNoteKey(agent.home), { kind: 'claude', id: scratchId });
+    await consoleNamed.record('potato', { kind: 'claude', id: coraId });
+    await consoleNamed.record('tomato', { kind: 'claude', id: ericId });
+    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 49).toString('base64url')), discovery: discovery as never, launch: { canResumeConversation: () => true } as never, consoleNamed });
+    try {
+      const headers = await authenticatedHeaders(app);
+      const project = await app.inject({ method: 'GET', url: '/api/agents/scratch-1/conversations', headers: { host: headers.host, cookie: headers.cookie } });
+      expect(project.json()).toEqual({
+        canResume: false,
+        conversations: [
+          { kind: 'claude', id: scratchId, name: 'scratch named here', automatic: false, lastActiveAt: 100, directory: '/home/me/scratch', consoleNamed: true, reviewRun: false, current: true },
+        ],
+      });
+
+      const all = await app.inject({ method: 'GET', url: '/api/agents/scratch-1/conversations?scope=all', headers: { host: headers.host, cookie: headers.cookie } });
+      expect(all.json()).toEqual({
+        canResume: false,
+        conversations: [
+          { kind: 'claude', id: ericId, name: 'eric named here', automatic: false, lastActiveAt: 300, directory: '/host/eric', worktreeId: eric.id, consoleNamed: true, reviewRun: false, current: false },
+          { kind: 'claude', id: coraId, name: 'cora named here', automatic: false, lastActiveAt: 200, directory: '/host/cora', worktreeId: cora.id, consoleNamed: true, reviewRun: false, current: false },
+          { kind: 'claude', id: scratchId, name: 'scratch named here', automatic: false, lastActiveAt: 100, directory: '/home/me/scratch', consoleNamed: true, reviewRun: false, current: true },
+        ],
+      });
+      expect(scanned).toEqual([['/home/me/scratch'], ['/home/me/scratch', '/host/cora', '/host/eric']]);
+
+      const unknownScope = await app.inject({ method: 'GET', url: '/api/agents/scratch-1/conversations?scope=everywhere', headers: { host: headers.host, cookie: headers.cookie } });
+      expect(unknownScope.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  }, 15_000);
+
   it('404s an unknown worktree or agent', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const discovery = { target: async () => undefined, worktreesNow: () => [], place: async () => undefined, conversations: async () => [] };
     const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 43).toString('base64url')), discovery: discovery as never });
     try {
       const headers = await authenticatedHeaders(app);
-      const worktree = await app.inject({ method: 'GET', url: '/api/worktrees/nope/conversations', headers: { host: headers.host, cookie: headers.cookie } });
-      const agent = await app.inject({ method: 'GET', url: '/api/agents/nope/conversations', headers: { host: headers.host, cookie: headers.cookie } });
+      const worktree = await app.inject({ method: 'GET', url: '/api/worktrees/nope/conversations?scope=all', headers: { host: headers.host, cookie: headers.cookie } });
+      const agent = await app.inject({ method: 'GET', url: '/api/agents/nope/conversations?scope=all', headers: { host: headers.host, cookie: headers.cookie } });
       expect(worktree.statusCode).toBe(404);
       expect(agent.statusCode).toBe(404);
     } finally {

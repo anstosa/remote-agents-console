@@ -1,5 +1,8 @@
 import argon2 from 'argon2';
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { AuthService } from '../src/auth/service.js';
 import { buildApp } from '../src/app.js';
 import { stated } from './helpers/agent.js';
@@ -43,6 +46,41 @@ describe('conversations switch API', () => {
       expect(launched).toBe(true);
     } finally {
       await app.close();
+    }
+  }, 15_000);
+
+  // direct requests must not bypass ambiguous listing ownership
+  it.each(['duplicate', 'symlink'])('refuses %s host roots before scanning or launching either configured Worktree', async mode => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const root = await mkdtemp(join(tmpdir(), 'rac-switch-root-'));
+    const shared = mode === 'symlink' ? root : '/host/shared';
+    const alias = mode === 'symlink' ? join(root, 'alias') : shared;
+    // exercise real filesystem aliases before any lifecycle side effects
+    if (mode === 'symlink') await symlink(shared, alias, 'dir');
+    const cora = testWorktree({ id: 'potato:/wt/cora', projectId: 'potato', path: '/wt/cora', identity: '/wt/cora', hostPath: shared });
+    const owen = testWorktree({ id: 'tomato:/wt/owen', projectId: 'tomato', path: '/wt/owen', identity: '/wt/owen', hostPath: alias });
+    const events: string[] = [];
+    const discovery = {
+      // expose overlapping configured host roots
+      worktreesNow: () => [cora, owen],
+      // detect any attempt to trust the shared store as ownership proof
+      conversations: async () => { events.push('scan'); return [{ kind: 'claude', id: conversationId, name: 'shared chat', lastActiveAt: 100, directory: shared }]; },
+      // detect progress toward a destructive handoff
+      dashboard: async () => { events.push('dashboard'); return { generation: 1, places: [], adapters: {}, agents: [], projects: [] }; },
+    };
+    const launch = { canResumeConversation: () => true, resumeConversation: async () => { events.push('resume'); return false; } };
+    const app = await buildApp(testConfig(), { auth: new AuthService(hash, Buffer.alloc(32, 60).toString('base64url')), discovery: discovery as never, launch: launch as never });
+    try {
+      const headers = await authenticatedHeaders(app);
+      // neither owner may claim the ambiguous conversation
+      for (const worktree of [cora, owen]) {
+        const switched = await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree.id)}/conversations/switch`, headers, payload: { kind: 'claude', id: conversationId } });
+        expect(switched.statusCode).toBe(409);
+      }
+      expect(events).toEqual([]);
+    } finally {
+      await app.close();
+      await rm(root, { recursive: true, force: true });
     }
   }, 15_000);
 
