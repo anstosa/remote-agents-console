@@ -19,7 +19,10 @@ async function fixture(audit?: { record: (event: AuditEvent) => Promise<void> },
   let queued = 0;
   const stackActions: unknown[] = [];
   const scopes: unknown[] = [];
+  const githubCalls: unknown[] = [];
   const orchestration = {
+    githubOverview: async (input: unknown) => { githubCalls.push(['overview', input]); return { ok: true as const, version: 'v1' as const, value: {} }; },
+    githubPullRequest: async (input: unknown) => { githubCalls.push(['pull', input]); return { ok: true as const, version: 'v1' as const, value: {} }; },
     scoped: (admits: unknown) => { scopes.push(admits); return orchestration; },
     hasAgent: async () => true,
     listWorktrees: async () => ({ ok: true as const, version: 'v1' as const, value: [] }),
@@ -41,10 +44,43 @@ async function fixture(audit?: { record: (event: AuditEvent) => Promise<void> },
     control,
     forward: async (instanceId, _principal, name, _args, voiceAuthorized) => { forwarded.push({ instanceId, name, voiceAuthorized }); return { content: [{ type: 'text', text: '{"ok":true}' }], structuredContent: { ok: true, remote: true } }; }
   });
-  return { root, gateway, control, queued: () => queued, forwarded, stackActions, scopes };
+  return { root, gateway, control, queued: () => queued, forwarded, stackActions, scopes, githubCalls };
 }
 
 describe('IntegrationGateway', () => {
+  // GitHub reads are the Conductor's alone, and only with the scope the operator names
+  it('offers the GitHub reads only to a Conductor holding github:read, scoped to its Places', async () => {
+    const { root, gateway, githubCalls, scopes } = await fixture();
+    try {
+      const github = ['get_github_overview', 'get_github_pull_request'];
+      const listed = (who: IntegrationPrincipal) => gateway.listTools(who).map(tool => tool.name).filter(name => github.includes(name));
+      const conductor: IntegrationPrincipal = { authentication: 'conductor', subjectId: 'conductor-1', clientId: 'conductor', audience: principal.audience, scopes: ['status:read', 'logs:read'], places: () => true };
+      expect(listed(conductor)).toEqual([]);
+      await expect(gateway.call(conductor, 'get_github_overview', {})).resolves.toMatchObject({ structuredContent: { error: { code: 'insufficient_scope' } } });
+      // never to the operator's own integrations, whatever their scopes
+      const oauth = { ...principal, scopes: [...principal.scopes, 'github:read' as const] };
+      expect(listed(oauth)).toEqual([]);
+      await expect(gateway.call(oauth, 'get_github_overview', {})).resolves.toMatchObject({ structuredContent: { error: { code: 'tool_disabled' } } });
+
+      const reader = { ...conductor, scopes: [...conductor.scopes, 'github:read' as const] };
+      expect(gateway.listTools(reader).filter(tool => github.includes(tool.name)).map(tool => [tool.name, tool.annotations.readOnlyHint])).toEqual([['get_github_overview', true], ['get_github_pull_request', true]]);
+      await expect(gateway.call(reader, 'get_github_overview', { lists: ['reviews'], waiting_only: true, limit: 5, refresh: 'cached' })).resolves.toMatchObject({ structuredContent: { ok: true } });
+      await expect(gateway.call(reader, 'get_github_pull_request', { repository: 'octo/repo', number: 7, sections: ['discussion'], threads: 'all', include_outdated: true, max_body_chars: 300, max_entries: 4, max_thread_comments: 2, cursor: 'abc', refresh: 'now' })).resolves.toMatchObject({ structuredContent: { ok: true } });
+      expect(githubCalls).toEqual([
+        ['overview', { lists: ['reviews'], waitingOnly: true, limit: 5, refresh: 'cached' }],
+        ['pull', { repository: 'octo/repo', number: 7, sections: ['discussion'], threads: 'all', includeOutdated: true, maxBodyChars: 300, maxEntries: 4, maxThreadComments: 2, cursor: 'abc', refresh: 'now' }]
+      ]);
+      // each ran through the Conductor's Places
+      expect(scopes).toHaveLength(2);
+      // a malformed repository or an unknown refresh never reaches GitHub
+      for (const bad of [{ repository: 'octo', number: 1 }, { repository: 'octo/repo', number: 0 }, { repository: 'octo/repo', number: 1, refresh: 'always' }, { repository: 'octo/repo', number: 1, max_body_chars: 9_000 }]) {
+        await expect(gateway.call(reader, 'get_github_pull_request', bad)).resolves.toMatchObject({ structuredContent: { error: { code: 'invalid_request' } } });
+      }
+      expect(githubCalls).toHaveLength(2);
+      await expect(gateway.call(reader, 'get_github_overview', { instance_id: 'https://peer.example.com' })).resolves.toMatchObject({ structuredContent: { error: { code: 'instance_unavailable' } } });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   // `process` narrows the action to one Stack process; without it the call is as it always was
   it('passes an optional Stack process name through to a stack action', async () => {
     const { root, gateway, stackActions } = await fixture();

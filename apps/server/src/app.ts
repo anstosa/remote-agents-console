@@ -600,6 +600,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       workspaceFiles,
       pullRequests: prSwitch,
       newTasks: newTask,
+      github,
       loadInstances: async () => {
         await refreshRemoteServers();
         return [{ id: server.url, name: server.name, url: server.url, local: true, ...(server.icon === undefined ? {} : { icon: server.icon }) }, ...server.remotes.map(remote => ({ id: remote.url, name: remote.name, url: remote.url, local: false, ...(remote.icon === undefined ? {} : { icon: remote.icon }) }))];

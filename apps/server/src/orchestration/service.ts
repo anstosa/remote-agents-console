@@ -19,11 +19,17 @@ import { processActions, type StackState, type WorktreeCommandService } from '..
 import { declaredProcesses } from '../domain/stack-processes.js';
 import { GithubRequestError, originRepository, type GithubRepository } from '../github/github.js';
 import type { WatchRefusal, Watches } from '../watches/service.js';
+import type { GithubService } from '../github/service.js';
+import { githubFreshness, githubOverview, githubPullRequest, readCursor, type GithubScope } from './github.js';
 import type {
   AgentStatusV1,
   AnswerQuestionInputV1,
   AttentionSummaryV1,
   FilePreviewV1,
+  GithubOverviewInputV1,
+  GithubOverviewV1,
+  GithubPullRequestInputV1,
+  GithubPullRequestV1,
   InstanceV1,
   LatestResponseV1,
   LogTailV1,
@@ -101,6 +107,10 @@ export type OrchestrationDependencies = {
   notes?: NoteFacade;
   /** The Watches the Conductor sets (ADR 0019). */
   watches?: Pick<Watches, 'watchPullRequest' | 'watchProcess' | 'watchReviewRequests' | 'watchCommand' | 'list' | 'remove'>;
+  /** The console's GitHub module, whose cache the Conductor's GitHub reads answer from. */
+  github?: Pick<GithubService, 'queue' | 'pullRequestSnapshot' | 'projectRepository'>;
+  /** The clock the GitHub reads judge freshness by. */
+  now?: () => number;
 };
 type NoteFacade = {
   key: (placeId: string) => Promise<string | undefined>;
@@ -452,6 +462,67 @@ export class OrchestrationService {
       });
     });
   }
+
+  /**
+   * The operator's GitHub Overview held to this scope (`githubScope`): their pull requests, review
+   * requests and assigned Issues with why each may need them, refreshed first only as `refresh`
+   * asks (`if_stale` by default). Reading never marks anything seen for the operator.
+   */
+  async githubOverview(input: GithubOverviewInputV1): Promise<OrchestrationResult<GithubOverviewV1>> {
+    const github = this.dependencies.github;
+    if (github === undefined) return failure('unavailable', 'GitHub is not available on this console.');
+    return await this.operation(async () => {
+      const scope = await this.githubScope(github);
+      // with nothing in scope there is nothing to read GitHub for
+      const queue = await github.queue(scope.repositories.size === 0 ? 'cached' : input.refresh ?? 'if_stale');
+      return success(githubOverview(queue, scope, input, this.now()));
+    });
+  }
+
+  /**
+   * One pull request in a repository this scope admits, with the sections asked for. A repository it
+   * does not admit answers as one with no such pull request. A page after the first answers from the
+   * cache unless `refresh` says otherwise, so the snapshot it pages through holds still.
+   */
+  async githubPullRequest(input: GithubPullRequestInputV1): Promise<OrchestrationResult<GithubPullRequestV1>> {
+    const github = this.dependencies.github;
+    if (github === undefined) return failure('unavailable', 'GitHub is not available on this console.');
+    const cursor = input.cursor === undefined ? undefined : readCursor(input.cursor);
+    if (input.cursor !== undefined && cursor === undefined) return failure('invalid_request', 'The cursor is not one this tool gave.');
+    return await this.operation(async () => {
+      const scope = await this.githubScope(github);
+      const found = scope.repositories.get(input.repository.toLowerCase());
+      if (found === undefined) return failure('not_found', 'Pull request not found.');
+      const snapshot = await github.pullRequestSnapshot(found.repository, input.number, input.refresh ?? (cursor === undefined ? 'if_stale' : 'cached'));
+      // GitHub has no such pull request: as one outside the scope
+      if (snapshot.pullRequest === undefined && snapshot.missing === true) return failure('not_found', 'Pull request not found.');
+      const view = githubPullRequest(snapshot, scope, input, cursor);
+      if (view === 'invalid') return failure('invalid_request', 'The cursor was given for other thread filters.');
+      if (view === 'expired') return failure('conflict', 'The pull request was read again since that page; read the discussion again without a cursor.');
+      return success({ freshness: githubFreshness(snapshot, this.now()), repository: found.name, number: input.number, pullRequest: view });
+    });
+  }
+
+  // what this scope may see of GitHub: the repositories of the configured Projects it admits a
+  // Worktree of, and the Worktrees it admits as destinations. `config.projects` holds configured
+  // Projects only; an Implicit Project is refused besides, as its repository must never be listed.
+  private async githubScope(github: Pick<GithubService, 'projectRepository'>): Promise<GithubScope> {
+    const worktrees = this.dependencies.discovery.worktreesNow();
+    const admittedProjects = new Set(worktrees.map(worktree => worktree.projectId));
+    const repositories = new Map<string, { name: string; repository: GithubRepository }>();
+    const projects = new Set<string>();
+    for (const project of this.dependencies.config.projects) {
+      if (project.implicit === true || !admittedProjects.has(project.id)) continue;
+      const repository = await github.projectRepository(project);
+      if (repository === undefined) continue;
+      projects.add(project.id);
+      const name = `${repository.owner}/${repository.name}`;
+      repositories.set(name.toLowerCase(), { name, repository });
+    }
+    return { repositories, projects, admitted: new Set(worktrees.map(worktree => worktree.id)) };
+  }
+
+  private now(): number { return (this.dependencies.now ?? Date.now)(); }
 
   // report current-branch review metadata
   async reviewStatus(worktreeId: string): Promise<OrchestrationResult<ReviewStatusV1>> {

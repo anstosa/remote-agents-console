@@ -26,7 +26,8 @@ export type PullFixture = {
   // `last` is who wrote the thread's last comment, `viewer` for the viewer, and `lastId` its id;
   // `author` opened it
   threads?: { isResolved: boolean; isOutdated: boolean; id?: string; path?: string; last?: string; lastId?: string; author?: string }[];
-  closes?: number[];
+  // the Issues it closes: a number is in its own repository, else the repository is named
+  closes?: (number | { number: number; repository: string })[];
   url?: string;
   author?: string;
   updatedAt?: string;
@@ -93,7 +94,7 @@ export function pullNode(repository: string, pull: PullFixture, selection = 'rev
     // the viewer, as a search's selection or a detail's names them
     ...asked('reviewRequests', () => ({ nodes: pull.requested === true && pull.team !== true ? [{ requestedReviewer: selection.includes('isViewer') ? { isViewer: true } : { __typename: 'User', login: 'viewer' } }] : [] })),
     ...asked('timelineItems', () => ({ nodes: (pull.requestEvents ?? []).map(event => ({ id: event.id, requestedReviewer: { isViewer: event.viewer !== false } })) })),
-    ...asked('closingIssuesReferences', () => ({ nodes: (pull.closes ?? []).map(number => ({ number })) }))
+    ...asked('closingIssuesReferences', () => ({ nodes: (pull.closes ?? []).map(issue => typeof issue === 'number' ? { number: issue, repository: { nameWithOwner: repository } } : { number: issue.number, repository: { nameWithOwner: issue.repository } }) }))
   };
 }
 
@@ -143,6 +144,7 @@ export function answer(world: World, call: GraphqlCall): Record<string, unknown>
     return issue === undefined ? { data: { repository: { issue: null } }, errors: [{ type: 'NOT_FOUND', message: 'Could not resolve to an Issue.' }] } : { data: { repository: { issue: issueNode(name, issue, query) } } };
   }
   const data: Record<string, unknown> = searches(world, call);
+  if (/\bviewer\{login\}/u.test(query)) data.viewer = { login: 'viewer' };
   // each repository alias and the text of its selection
   for (const section of query.split(/(?=\br\d+:repository\()/u).slice(1)) {
     const index = /^r(\d+):/u.exec(section)![1]!;

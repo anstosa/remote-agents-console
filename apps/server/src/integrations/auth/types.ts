@@ -11,8 +11,10 @@ export const supportedIntegrationScopes = [
 
 export const SUPPORTED_INTEGRATION_SCOPES = supportedIntegrationScopes;
 
-/** The Conductor's scopes (ADR 0018): the integrations' own, and two only it can hold. */
-export const conductorScopes = [...supportedIntegrationScopes, 'agents:spawn', 'notes:write'] as const;
+/** The Conductor's scopes (ADR 0018): the integrations' own, and three only it can hold. */
+export const conductorScopes = [...supportedIntegrationScopes, 'agents:spawn', 'notes:write', 'github:read'] as const;
+/** What a Conductor configured without `scopes` gets: everything but these, which the operator must name. */
+export const conductorOptInScopes: readonly IntegrationScope[] = ['admin:dangerous', 'github:read'];
 
 export type IntegrationScope = typeof conductorScopes[number];
 

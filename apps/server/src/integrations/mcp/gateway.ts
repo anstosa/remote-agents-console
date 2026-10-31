@@ -158,6 +158,19 @@ export class IntegrationGateway {
       case 'schedule_note': return await orchestration.scheduleNote({ worktreeId: input.worktree_id as string, noteId: input.note_id as string, cron: input.cron as string, enabled: input.enabled as boolean });
       case 'get_pull_request_status': return await orchestration.pullRequestStatus(input.agent_id as string);
       case 'get_review_status': return await orchestration.reviewStatus(input.worktree_id as string);
+      case 'get_github_overview': return await orchestration.githubOverview({
+        ...(input.lists === undefined ? {} : { lists: input.lists as ('mine' | 'reviews' | 'issues')[] }), ...(input.waiting_only === undefined ? {} : { waitingOnly: input.waiting_only as boolean }),
+        ...(input.repository === undefined ? {} : { repository: input.repository as string }), ...(input.limit === undefined ? {} : { limit: input.limit as number }),
+        ...(input.refresh === undefined ? {} : { refresh: input.refresh as 'cached' | 'if_stale' | 'now' })
+      });
+      case 'get_github_pull_request': return await orchestration.githubPullRequest({
+        repository: input.repository as string, number: input.number as number,
+        ...(input.sections === undefined ? {} : { sections: input.sections as ('summary' | 'checks' | 'reviewers' | 'discussion')[] }), ...(input.threads === undefined ? {} : { threads: input.threads as 'unresolved' | 'all' | 'none' }),
+        ...(input.include_outdated === undefined ? {} : { includeOutdated: input.include_outdated as boolean }), ...(input.include_diff_hunks === undefined ? {} : { includeDiffHunks: input.include_diff_hunks as boolean }),
+        ...(input.max_body_chars === undefined ? {} : { maxBodyChars: input.max_body_chars as number }), ...(input.max_entries === undefined ? {} : { maxEntries: input.max_entries as number }),
+        ...(input.max_thread_comments === undefined ? {} : { maxThreadComments: input.max_thread_comments as number }), ...(input.cursor === undefined ? {} : { cursor: input.cursor as string }),
+        ...(input.refresh === undefined ? {} : { refresh: input.refresh as 'cached' | 'if_stale' | 'now' })
+      });
       case 'summarize_workspace': return await orchestration.workspaceSummary();
       case 'summarize_attention_items': return await orchestration.attentionSummary();
       case 'queue_prompt': return await orchestration.queuePrompt({ agentId: input.agent_id as string, prompt: input.prompt as string });
@@ -213,7 +226,7 @@ function replayResult(state: 'completed' | 'failed' | 'unknown_outcome', stored:
 // describe one canonical audit target
 function auditTarget(instanceId: unknown, input: Record<string, unknown> | undefined): string {
   const instance = typeof instanceId === 'string' ? instanceId : 'local';
-  const target = input?.agent_id ?? input?.worktree_id ?? 'instance';
+  const target = input?.agent_id ?? input?.worktree_id ?? input?.repository ?? 'instance';
   const detail = input?.number === undefined ? input?.action === undefined ? '' : `:action=${String(input.action)}${input.process === undefined ? '' : `:process=${String(input.process)}`}` : `:pr=${String(input.number)}`;
   return `${instance}:${String(target)}${detail}`.slice(0, 256);
 }

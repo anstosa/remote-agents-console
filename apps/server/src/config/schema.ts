@@ -13,7 +13,7 @@ import { agentKinds, type AdapterConfigs, type AdapterLaunchConfig, type AgentKi
 import { instanceIconNames, type InstanceIcon } from '../instance-icon.js';
 import { isIP } from 'node:net';
 import { defaultDavoContext, defaultDavoName } from '../integrations/realtime/settings.js';
-import { conductorScopes, type IntegrationScope } from '../integrations/auth/types.js';
+import { conductorOptInScopes, conductorScopes, type IntegrationScope } from '../integrations/auth/types.js';
 import { resolveReviewConfig, reviewConfigSchema, type ResolvedReviewConfig } from '../review-runs/config.js';
 import { agentModel } from '../launch/agent-choice.js';
 import { piEfforts } from '../transports/pi.js';
@@ -84,7 +84,7 @@ const serverName = z.string().trim().min(1).max(80).refine(value => !value.inclu
 const adapterProgram = z.string().min(1).max(4096).startsWith('/', 'adapter program must be an absolute path').refine(value => !value.includes('\0'), 'NUL is forbidden');
 const adapterArgument = z.string().max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden');
 // the Conductor runs Pi, which must be enabled, on an Allowed model, in a directory Project; by
-// default it gets every scope but `admin:dangerous`
+// default it gets every scope but `admin:dangerous` and `github:read`, which the operator names
 function conductorConfig({ project, scopes, ...conductor }: z.output<typeof conductorSchema>, projects: readonly Project[], adapters: AdapterConfigs): ConductorConfig {
   const adapter = adapters[conductor.kind];
   if (adapter?.launchable !== true) throw new Error(`conductor: adapters.${conductor.kind} must be configured and launchable${adapter?.unavailableReason === undefined ? '' : ` (${adapter.unavailableReason})`}`);
@@ -93,7 +93,7 @@ function conductorConfig({ project, scopes, ...conductor }: z.output<typeof cond
   // a Project whose folder is missing leaves the Conductor off, with a notice, rather than stopping the console
   const unavailable = named?.available === false ? { unavailable: named.unavailableReason ?? `${project} is unavailable` } : {};
   if (named === undefined || named.available && named.mode !== 'directory') throw new Error(`conductor: ${project} must name a directory Project`);
-  return { ...conductor, projectId: project, ...unavailable, scopes: scopes ?? conductorScopes.filter(scope => scope !== 'admin:dangerous') };
+  return { ...conductor, projectId: project, ...unavailable, scopes: scopes ?? conductorScopes.filter(scope => !conductorOptInScopes.includes(scope)) };
 }
 const adapterEnvName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u, 'invalid environment variable name');
 // reject whitespace-only update commands without normalizing meaningful bytes

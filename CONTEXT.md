@@ -294,5 +294,5 @@ A Pull request whose next move is the operator's. A Review request is Waiting on
 _Avoid_: Needs attention (an Agent's Attention state), action required
 
 **Seen record**:
-The console's record of which Waiting on me reasons the operator has been shown, on any device. A reason is **new** until a view shows its row, and new again when it recurs (a new comment from someone else on the thread, checks failing on a new head, a new Review request or changes-requested review, conflicts returning after clearing). The Overview button's badge counts the Pull requests holding something new.
+The console's record of which Waiting on me reasons the operator has been shown, on any device. A reason is **new** until a view shows its row, and new again when it recurs (a new comment from someone else on the thread, checks failing on a new head, a new Review request or changes-requested review, conflicts returning after clearing). The Overview button's badge counts the Pull requests holding something new. Only a view showing a row records it; the Conductor's GitHub reads show it whether a reason is new but never record anything.
 _Avoid_: Read/unread (an Agent's completion state), notifications
