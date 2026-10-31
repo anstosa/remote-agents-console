@@ -19,11 +19,12 @@ type HookEntry = { matcher?: string; hooks: CommandHandler[] };
 // One reporter invocation for a state: the tmux binary baked in (omitted under the
 // bridge, where the host's PATH tmux is used) and the script named by its host path.
 // `--payload` (AskUserQuestion only) carries the hook's stdin as the reported
-// Inline question the console renders (ADR 0006).
-function report(context: AdapterFileContext, state: AttentionState, payload = false, lifecycle?: 'start' | 'question' | 'terminal'): CommandHandler {
+// Inline question the console renders (ADR 0006). `--main-only` drops a report fired
+// inside a subagent, which outlives the main agent's Stop when run in the background.
+function report(context: AdapterFileContext, state: AttentionState, payload = false, lifecycle?: 'start' | 'question' | 'terminal', mainOnly = false): CommandHandler {
   const prefix = context.tmuxBin === undefined ? '' : `RAC_TMUX_BIN=${context.tmuxBin} `;
   const lifecyclePrefix = lifecycle === undefined ? '' : `RAC_CALENDAR_LIFECYCLE_SPOOL=${context.repoRoot}/.data/google-calendar-claude-lifecycle.jsonl `;
-  return { type: 'command', timeout: 5, command: `${prefix}${lifecyclePrefix}${context.repoRoot}/scripts/hooks/rac-attention ${state}${payload ? ' --payload' : ''}${lifecycle === undefined ? '' : ` --lifecycle ${lifecycle}`}` };
+  return { type: 'command', timeout: 5, command: `${prefix}${lifecyclePrefix}${context.repoRoot}/scripts/hooks/rac-attention ${state}${payload ? ' --payload' : ''}${mainOnly ? ' --main-only' : ''}${lifecycle === undefined ? '' : ` --lifecycle ${lifecycle}`}` };
 }
 
 // The event → state mapping (ADR 0001). `SessionStart` also registers the session
@@ -31,8 +32,9 @@ function report(context: AdapterFileContext, state: AttentionState, payload = fa
 // deliberately reports nothing (Claude fires it on `/clear` and `/resume`).
 // `PreToolUse` splits by tool (ADR 0006): AskUserQuestion sends its payload so the
 // question renders as an Inline question, while ExitPlanMode only reports the state.
+// The tool-driven `working` reports also fire inside subagents, so they are main-only.
 export function claudeHooksSettings(context: AdapterFileContext): { hooks: Record<string, HookEntry[]> } {
-  const working = [{ hooks: [report(context, 'working')] }];
+  const working = [{ hooks: [report(context, 'working', false, undefined, true)] }];
   const finished = [{ hooks: [report(context, 'finished')] }];
   const question = [{ hooks: [report(context, 'question')] }];
   return {

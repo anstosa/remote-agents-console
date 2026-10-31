@@ -11,7 +11,7 @@
 # start. It never blocks the agent: it exits 0 in every case, doing nothing unless
 # it is running inside a tmux pane and a tmux binary resolves.
 #
-# Usage: rac-attention <working|finished|question> [--session <id>] [--payload] [ignored...]
+# Usage: rac-attention <working|finished|question> [--session <id>] [--payload] [--main-only] [ignored...]
 #
 # The session defaults to $CLAUDE_CODE_SESSION_ID. With --payload, the hook's stdin
 # (a PreToolUse JSON body) is base64-encoded into @rac_question so the console can
@@ -22,6 +22,12 @@
 # A payload over 64 KiB is dropped (the state is still reported). Extra arguments are
 # ignored, so a hook that appends its own JSON argv (as Codex does) is harmless. tmux
 # is resolved from $RAC_TMUX_BIN, else the first `tmux` on PATH.
+#
+# With --main-only, a report whose hook stdin comes from a Claude subagent (its
+# top-level fields carry `agent_id`) is dropped unless the pane shows a question:
+# a background subagent keeps running tools after the main agent's Stop, and its
+# PostToolUse must not flip a finished pane back to working. Not combined with
+# --payload or --lifecycle, which read stdin themselves.
 
 state=$1
 [ -n "$state" ] || exit 0
@@ -34,12 +40,14 @@ shift 2>/dev/null || true
 session=${CLAUDE_CODE_SESSION_ID:-}
 payload_flag=
 lifecycle_event=
+main_only=
 # read an explicit --session <id> and the --payload flag; ignore every other extra argument
 while [ "$#" -gt 0 ]; do
   case $1 in
     --session) session=${2:-}; shift 2 2>/dev/null || shift ;;
     --session=*) session=${1#--session=}; shift ;;
     --payload) payload_flag=1; shift ;;
+    --main-only) main_only=1; shift ;;
     --lifecycle) lifecycle_event=${2:-}; shift 2 2>/dev/null || shift ;;
     *) shift ;;
   esac
@@ -55,6 +63,17 @@ else
   tmux_bin=$(command -v tmux 2>/dev/null) || exit 0
 fi
 [ -n "$tmux_bin" ] || exit 0
+
+# the common hook fields (agent_id among them) precede hook_event_name; drain the
+# rest of stdin so Claude never writes into a closed pipe
+if [ -n "$main_only" ]; then
+  head_json=$(head -c 4096)
+  cat >/dev/null
+  case ${head_json%%\"hook_event_name\"*} in
+    *[{,]'"agent_id":'*)
+      [ "$("$tmux_bin" display-message -p -t "$TMUX_PANE" '#{@rac_attention}')" = question ] || exit 0 ;;
+  esac
+fi
 
 # @rac_question carries the reported payload (base64, newlines stripped so the
 # list-panes line stays tab-safe), empty unless --payload supplied a small-enough

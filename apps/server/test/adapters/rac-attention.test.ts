@@ -12,13 +12,14 @@ const script = fileURLToPath(new URL('../../../../scripts/hooks/rac-attention', 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
 
-// a stub tmux that records each invocation's arguments, one line per call
-async function stubTmux(): Promise<{ bin: string; calls: () => Promise<string[]> }> {
+// a stub tmux that records each invocation's arguments, one line per call, and
+// answers `display-message` with the given current Attention state
+async function stubTmux(current = 'finished'): Promise<{ bin: string; calls: () => Promise<string[]> }> {
   const dir = await mkdtemp(join(tmpdir(), 'rac-tmux-'));
   dirs.push(dir);
   const record = join(dir, 'calls.log');
   const bin = join(dir, 'tmux');
-  await writeFile(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${record}'\n`, { mode: 0o755 });
+  await writeFile(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${record}'\n[ "$1" != display-message ] || echo ${current}\n`, { mode: 0o755 });
   return { bin, calls: async () => (await readFile(record, 'utf8').catch(() => '')).split('\n').filter(line => line !== '') };
 }
 
@@ -101,6 +102,32 @@ describe('rac-attention', () => {
     expect(calls[0]).toContain('@rac_attention question');
     // the oversize body never reaches @rac_question
     expect(calls[0]).not.toMatch(/@rac_question\s+[A-Za-z0-9+/=]/u);
+  });
+
+  it('drops a --main-only report fired inside a subagent', async () => {
+    const tmux = await stubTmux('finished');
+    const body = '{"session_id":"sid","cwd":"/repo","agent_id":"a1b2","agent_type":"general-purpose","hook_event_name":"PostToolUse","tool_name":"Bash"}';
+    await attentionWithStdin(['working', '--main-only'], { RAC_TMUX_BIN: tmux.bin, TMUX_PANE: '%3' }, body);
+    // only the read of the current state, no set-option
+    expect(await tmux.calls()).toEqual(['display-message -p -t %3 #{@rac_attention}']);
+  });
+
+  it('lets a subagent --main-only report move the pane off a question', async () => {
+    const tmux = await stubTmux('question');
+    const body = '{"session_id":"sid","agent_id":"a1b2","hook_event_name":"PostToolUse"}';
+    await attentionWithStdin(['working', '--main-only'], { RAC_TMUX_BIN: tmux.bin, TMUX_PANE: '%3' }, body);
+    const calls = await tmux.calls();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain('@rac_attention working');
+  });
+
+  it('reports a --main-only report from the main agent even when its tool input names agent_id', async () => {
+    const tmux = await stubTmux();
+    const body = '{"session_id":"sid","cwd":"/repo","hook_event_name":"PostToolUse","tool_name":"SendMessage","tool_input":{"agent_id":"a1b2"}}';
+    await attentionWithStdin(['working', '--main-only'], { RAC_TMUX_BIN: tmux.bin, TMUX_PANE: '%3' }, body);
+    const calls = await tmux.calls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('@rac_attention working');
   });
 
   it('does nothing outside a tmux pane', async () => {

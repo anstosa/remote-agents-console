@@ -33,9 +33,10 @@ describe('claude hooks settings', () => {
     ]);
     expect(state(hooks.Elicitation[0]!)).toBe('question');
     expect(state(hooks.PermissionRequest[0]!)).toBe('question');
-    expect(state(hooks.PostToolUse[0]!)).toBe('working');
-    expect(state(hooks.PermissionDenied[0]!)).toBe('working');
-    expect(state(hooks.ElicitationResult[0]!)).toBe('working');
+    // tool-driven working reports also fire inside a background subagent, so they are main-only
+    expect(hooks.PostToolUse[0]!.hooks[0]!.command).toMatch(/ working --main-only$/u);
+    expect(hooks.PermissionDenied[0]!.hooks[0]!.command).toMatch(/ working --main-only$/u);
+    expect(hooks.ElicitationResult[0]!.hooks[0]!.command).toMatch(/ working --main-only$/u);
     expect(hooks.Stop[0]!.hooks[0]!.command).toContain('finished --lifecycle terminal');
     expect(hooks.StopFailure[0]!.hooks[0]!.command).toContain('finished --lifecycle terminal');
     // Notification splits on notification_type: the prompt is a question, going idle is finished

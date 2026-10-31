@@ -72,7 +72,7 @@
           {
             "type": "command",
             "timeout": 5,
-            "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention working"
+            "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention working --main-only"
           }
         ]
       }
@@ -83,7 +83,7 @@
           {
             "type": "command",
             "timeout": 5,
-            "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention working"
+            "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention working --main-only"
           }
         ]
       }
@@ -94,7 +94,7 @@
           {
             "type": "command",
             "timeout": 5,
-            "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention working"
+            "command": "RAC_TMUX_BIN=/usr/bin/tmux /srv/remoteagents/scripts/hooks/rac-attention working --main-only"
           }
         ]
       }
