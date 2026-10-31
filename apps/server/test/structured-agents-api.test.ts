@@ -2154,7 +2154,8 @@ describe('the Conductor\'s Watches', () => {
     vi.stubEnv('RAC_TMUX_BIN', tmux);
     const fake = fakeAgent();
     const { call, worktree, told, repo, dashboard, deploy } = await watching(fake);
-    const pane = (dead: boolean, status = '') => writeFile(panes, `$1\t@1\t%5\t${dead ? 1 : 0}\t${status}\t\tprocess\tdev\t${repo}\n`);
+    // session, window, pane, dead, status, signal, Place, role, process, worktree
+    const pane = (dead: boolean, status = '') => writeFile(panes, `$1\t@1\t%5\t${dead ? 1 : 0}\t${status}\t\t\tprocess\tdev\t${repo}\n`);
     // where a Start writes its log
     await mkdir(join(repo, '.git', 'rac', 'processes'), { recursive: true });
     await pane(false);
