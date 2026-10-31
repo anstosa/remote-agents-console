@@ -155,7 +155,7 @@ test('lists a Project\'s Pull requests and Issues in groups, with This Worktree\
   await expect(toggle).toHaveAttribute('aria-pressed', 'false');
 });
 
-test('pins a Push and create PR placeholder for a branch with no pull request, and nothing in the main worktree', async ({ page }) => {
+test('pins a Push and create PR card for a branch with no pull request, and nothing in the main worktree', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   const quiet = { ...lists, mine: lists.mine.slice(1) };
   await mount(page, [quiet]);
@@ -615,4 +615,80 @@ test('replies inline, resolves and re-requests on a phone', async ({ page }) => 
   expect(writes[0]!.body).toEqual({ body: 'On a phone.' });
   // nothing that appeared runs off the side of the screen either
   expect(await panel.locator('.github-pane-body').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+});
+
+// stub a Worktree's new pull request: its prefill (`draft`), and each create's body into `created`,
+// answered in turn by `answers` (the last repeats)
+async function stubCreate(page: Page, draft: unknown, created: unknown[], answers: { status: number; json: unknown }[]) {
+  await page.route('**/api/worktrees/*/github/pull-request', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: draft });
+    created.push(route.request().postDataJSON());
+    const { status, json } = answers.length > 1 ? answers.shift()! : answers[0]!;
+    return route.fulfill({ status, json });
+  });
+}
+
+test('pushes and creates a pull request from This Worktree\'s card, keeping what was typed through a failure', async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const github = { revision: 1 };
+  const panels: unknown[] = [{ ...lists, mine: lists.mine.slice(1) }];
+  await mount(page, panels, [], [], github);
+  const created: unknown[] = [];
+  await stubCreate(page, { branch: 'feature', base: 'main', title: 'Serve lists from one poll', issue: 201 }, created, [
+    { status: 409, json: { error: 'The push failed: ! [rejected] feature -> feature (fetch first)' } },
+    { status: 201, json: { number: 240, url: 'https://github.com/octo/repo/pull/240' } }
+  ]);
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^feature/u }).click();
+  await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+  const pinned = page.getByRole('region', { name: 'GitHub', exact: true }).getByRole('region', { name: 'This Worktree' });
+  await pinned.getByRole('button', { name: 'Push and create PR…' }).click();
+
+  // prefilled from the branch's first commit, origin's default and the Worktree's Issue
+  const form = pinned.getByRole('region', { name: 'Push and create a pull request' });
+  await expect(form.getByRole('textbox', { name: 'Title' })).toHaveValue('Serve lists from one poll');
+  await expect(form.getByRole('textbox', { name: 'Into' })).toHaveValue('main');
+  await expect(form.getByRole('textbox', { name: 'Description' })).toHaveValue('Closes #201');
+  await expect(form.getByRole('checkbox', { name: 'Create as draft' })).not.toBeChecked();
+  await form.getByRole('textbox', { name: 'Title' }).fill('');
+  await expect(form.getByRole('button', { name: 'Push feature and create PR' })).toBeDisabled();
+  await form.getByRole('textbox', { name: 'Title' }).fill('One poll for every list');
+  await form.getByRole('checkbox', { name: 'Create as draft' }).check();
+
+  // a failure shows in the form, which keeps what was typed
+  await form.getByRole('button', { name: 'Push feature and create PR' }).click();
+  await expect(form.getByRole('alert')).toHaveText('The push failed: ! [rejected] feature -> feature (fetch first)');
+  await expect(form.getByRole('textbox', { name: 'Title' })).toHaveValue('One poll for every list');
+  await expect(form.getByRole('checkbox', { name: 'Create as draft' })).toBeChecked();
+
+  await form.getByRole('button', { name: 'Push feature and create PR' }).click();
+  await expect(pinned.getByRole('status')).toHaveText('featurePushed, and opened #240.');
+  expect(created).toEqual([1, 2].map(() => ({ title: 'One poll for every list', body: 'Closes #201', base: 'main', draft: true })));
+
+  // the new pull request takes the spot once GitHub's data moves, with no Refresh
+  panels[0] = { ...lists, mine: [pull(240, 'One poll for every list', { draft: true, checks: 'pending', destination: feature }), ...lists.mine.slice(1)] };
+  github.revision = 2;
+  await expect(pinned.getByRole('button', { name: /^Pull request #240 One poll for every list/u })).toBeVisible({ timeout: 20_000 });
+});
+
+test('pushes and creates a pull request on a phone', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mount(page, [{ ...lists, mine: lists.mine.slice(1) }]);
+  const created: unknown[] = [];
+  await stubCreate(page, { branch: 'feature', base: 'main', title: '' }, created, [{ status: 201, json: { number: 240, url: 'https://github.com/octo/repo/pull/240' } }]);
+  await page.goto('/#tab=feature');
+  await toolbar(page).getByRole('button', { name: 'More options' }).click();
+  await page.locator('.place-menu').getByRole('button', { name: 'GitHub', exact: true }).click();
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  await panel.getByRole('button', { name: 'Push and create PR…' }).click();
+  const form = panel.getByRole('region', { name: 'Push and create a pull request' });
+  // no Issue, so no "Closes #N"
+  await expect(form.getByRole('textbox', { name: 'Description' })).toHaveValue('');
+  await form.getByRole('textbox', { name: 'Title' }).fill('From a phone');
+  await expect(form.getByRole('button', { name: 'Push feature and create PR' })).toBeInViewport();
+  expect(await panel.locator('.github-pane-body').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await form.getByRole('button', { name: 'Push feature and create PR' }).click();
+  await expect(panel.getByRole('status')).toContainText('opened #240');
+  expect(created).toEqual([{ title: 'From a phone', body: '', base: 'main', draft: false }]);
 });

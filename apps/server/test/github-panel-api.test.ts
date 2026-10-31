@@ -131,4 +131,46 @@ describe('GitHub panel API', () => {
     for (const url of ['/api/projects/missing/github/pulls/9/threads/PRRT_1/resolve', '/api/projects/proj/github/pulls/9/threads/a%20b/resolve']) expect((await post(url)).statusCode, url).toBe(404);
     expect(mutations).toHaveLength(4);
   }, 15_000);
+
+  it('prefills a new pull request for a Worktree, and pushes its branch and creates it through the module', async () => {
+    process.env.RAC_GITHUB_TOKEN = 'token';
+    const github = await checkout('git@github.com:octo/repo.git');
+    const bare = `${github}-origin.git`;
+    const linked = `${github}-fix`;
+    const git = (path: string, ...args: string[]) => execFileSync('git', ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', ...args]);
+    execFileSync('git', ['init', '-q', '--bare', bare]);
+    git(github, 'config', 'remote.origin.pushurl', bare);
+    git(github, 'commit', '-q', '--allow-empty', '-m', 'Initial');
+    git(github, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git(github, 'worktree', 'add', '-q', '-b', 'fix', linked);
+    git(linked, 'commit', '-q', '--allow-empty', '-m', 'Fix the thing');
+    const projects = [testProject({ id: 'proj', label: 'Repo', path: github })];
+    const worktrees = [testWorktree({ id: 'main', projectId: 'proj', path: github, main: true }), testWorktree({ id: 'fix', projectId: 'proj', path: linked, branch: 'fix', main: false, issue: 3 })];
+    const mutations: GraphqlCall[] = [];
+    const request: Request = async (_url, init) => {
+      const call = JSON.parse(String(init?.body)) as GraphqlCall;
+      if (call.query.startsWith('query PullRequestRepository')) return reply({ data: { repository: { id: 'R_1' } } });
+      if (!call.query.startsWith('mutation')) return reply({ data: {} });
+      mutations.push(call);
+      return reply({ data: { createPullRequest: { pullRequest: { number: 12, url: 'https://github.com/octo/repo/pull/12' } } } });
+    };
+    const discovery = { worktreesNow: () => worktrees, projectsNow: () => projects, dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [] }) };
+    app = await buildApp(testConfig(), { auth: await testAuthService(), discovery: discovery as never, githubRequest: request });
+    const headers = await authenticatedHeaders(app);
+    const url = (id: string) => `/api/worktrees/${encodeURIComponent(id)}/github/pull-request`;
+
+    const draft = await app.inject({ method: 'GET', url: url('fix'), headers });
+    expect([draft.statusCode, draft.json()]).toEqual([200, { branch: 'fix', base: 'main', title: 'Fix the thing', issue: 3 }]);
+    const created = await app.inject({ method: 'POST', url: url('fix'), headers, payload: { title: 'Fix the thing', body: 'Closes #3', base: 'main', draft: false } });
+    expect([created.statusCode, created.json()]).toEqual([201, { number: 12, url: 'https://github.com/octo/repo/pull/12' }]);
+    expect(mutations.map(call => call.variables.input)).toEqual([{ repositoryId: 'R_1', baseRefName: 'main', headRefName: 'fix', title: 'Fix the thing', body: 'Closes #3', draft: false }]);
+    expect(execFileSync('git', ['--git-dir', bare, 'rev-parse', 'refs/heads/fix'], { encoding: 'utf8' })).toBe(execFileSync('git', ['-C', linked, 'rev-parse', 'HEAD'], { encoding: 'utf8' }));
+    // malformed requests, the main worktree and an unknown one never reach GitHub
+    for (const payload of [{ title: 'x', body: '', base: 'main' }, { title: 7, body: '', base: 'main', draft: false }, {}]) {
+      expect((await app.inject({ method: 'POST', url: url('fix'), headers, payload })).statusCode).toBe(400);
+    }
+    expect((await app.inject({ method: 'POST', url: url('main'), headers, payload: { title: 'x', body: '', base: 'main', draft: false } })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'GET', url: url('gone'), headers })).statusCode).toBe(404);
+    expect(mutations).toHaveLength(1);
+  }, 15_000);
 });

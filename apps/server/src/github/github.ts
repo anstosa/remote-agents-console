@@ -8,7 +8,7 @@ import { run } from '../tmux/command.js';
 // query) is retried on a gateway failure; a mutation is sent once, since a lost response may still
 // have been applied.
 
-export type Command = (binary: string, args: string[]) => Promise<{ code: number; stdout: string }>;
+export type Command = (binary: string, args: string[], input?: string, timeoutMs?: number) => Promise<{ code: number; stdout: string; stderr?: string }>;
 export type ResponseLike = { ok: boolean; status?: number; headers?: { get(name: string): string | null }; json(): Promise<unknown> };
 export type Request = (input: string, init?: RequestInit) => Promise<ResponseLike>;
 export type Token = () => Promise<string | undefined>;

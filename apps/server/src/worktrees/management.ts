@@ -4,7 +4,7 @@ import type { Project, Worktree } from '../domain/models.js';
 import { GithubService, forkCheckoutNumber, type PullRequestCleanupStatus } from '../github/service.js';
 import type { PullRequestSwitchService } from '../pull-requests/switch-service.js';
 import { run } from '../tmux/command.js';
-import { repositoryArgs } from '../git/worktrees.js';
+import { checkoutBranch, originDefaultBranch, repositoryArgs, repositoryDefaultBranch, type GitRun } from '../git/worktrees.js';
 
 /**
  * The git subprocess seam for Worktree management, always spawning `/usr/bin/git`.
@@ -173,24 +173,10 @@ export class WorktreeManagementService {
     return fetched.code === 0 ? undefined : fetched.stderr.trim() || 'git fetch origin failed';
   }
 
-  // the branch `origin/HEAD` names, when the remote publishes one
-  private async originDefault(path: string): Promise<string | undefined> {
-    const origin = await this.git([...repositoryArgs(path), 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
-    const ref = origin.code === 0 ? origin.stdout.trim() : '';
-    const slash = ref.indexOf('/');
-    return ref === '' ? undefined : slash === -1 ? ref : ref.slice(slash + 1);
-  }
-
-  // `origin/HEAD` when the remote publishes one, else the checkout's own HEAD branch
-  private async defaultBranch(path: string): Promise<string | undefined> {
-    return await this.originDefault(path) ?? await this.headBranch(path);
-  }
-
-  // the branch the checkout itself has checked out
-  private async headBranch(path: string): Promise<string | undefined> {
-    const head = await this.git([...repositoryArgs(path), 'symbolic-ref', '--short', 'HEAD']);
-    return head.code === 0 && head.stdout.trim() !== '' ? head.stdout.trim() : undefined;
-  }
+  private readonly gitRun: GitRun = async (_binary, args) => await this.git(args);
+  private async originDefault(path: string): Promise<string | undefined> { return await originDefaultBranch(path, this.gitRun); }
+  private async defaultBranch(path: string): Promise<string | undefined> { return await repositoryDefaultBranch(path, this.gitRun); }
+  private async headBranch(path: string): Promise<string | undefined> { return await checkoutBranch(path, this.gitRun); }
 
   // create a Worktree for a new or existing branch, or an open pull request, returning its
   // realpath'd root. A malformed input is a 400; every other refusal is a 409, raised before

@@ -54,7 +54,7 @@ export const paneEnv = (source: NodeJS.ProcessEnv = process.env): NodeJS.Process
 };
 type RunResult = { code: number; stdout: string; stderr: string; timedOut?: true };
 // git subcommands that change a checkout, its branches or its stashes
-const gitWrites = new Set(['add', 'apply', 'branch', 'checkout', 'cherry-pick', 'clean', 'commit', 'fetch', 'merge', 'mv', 'pull', 'rebase', 'reset', 'restore', 'rm', 'stash', 'submodule', 'switch', 'update-ref', 'worktree']);
+const gitWrites = new Set(['add', 'apply', 'branch', 'checkout', 'cherry-pick', 'clean', 'commit', 'fetch', 'merge', 'mv', 'pull', 'push', 'rebase', 'reset', 'restore', 'rm', 'stash', 'submodule', 'switch', 'update-ref', 'worktree']);
 // the `-C` checkout and subcommand of a git argv; a `--git-dir` call names its repository outright
 function gitTarget(args: string[]): { path: string; subcommand: string } | undefined {
   let path: string | undefined;

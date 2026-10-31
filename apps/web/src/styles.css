@@ -3180,6 +3180,15 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .overview-chip.merged { --chip: var(--mauve); }
 .github-create { display: grid; gap: .2rem; padding: .6rem .65rem; border: 1px dashed color-mix(in srgb, var(--green) 45%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--green) 6%, var(--mantle)); color: var(--subtext-0); font-size: .72rem; }
 .github-create b { color: var(--green); }
+.github-create .github-actions { margin-top: .3rem; }
+.github-create-form { gap: .45rem; border-style: solid; }
+.github-create-form > b { color: var(--text); }
+.github-create-form label { display: grid; gap: .2rem; color: var(--overlay-2); font-size: .64rem; font-weight: 700; }
+.github-create-form input[type=text], .github-create-form textarea { width: 100%; padding: .4rem .5rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--crust); color: var(--text); font: inherit; font-size: .74rem; }
+.github-create-form textarea { min-height: 6rem; resize: vertical; }
+.github-create-form :is(input, textarea):focus { border-color: var(--blue); outline: none; }
+.github-create-form .github-create-check { display: flex; align-items: center; gap: .4rem; color: var(--subtext-1); font-size: .72rem; font-weight: 400; }
+.github-create .github-create-error { margin: 0; color: var(--red); }
 .github-overview-link { color: var(--lavender); }
 /* list + detail side by side, each scrolling; a panel too narrow for both drills down instead (github-panel.tsx).
    The list column is its rows' container, so they wrap by its width. */

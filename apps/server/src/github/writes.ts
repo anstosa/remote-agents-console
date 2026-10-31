@@ -23,6 +23,11 @@ export type BatchOutcome = { ambiguous: false; outcomes: ThreadOutcome[] } | { a
 const draftTargetQuery = 'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){id number url state headRefName headRefOid headRepositoryOwner{login} reviews(states:[PENDING],first:1){nodes{id body commit{oid}}}}}}';
 const draftContentQuery = 'query($id:ID!,$after:String){node(id:$id){...on PullRequestReview{id body comments(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{body subjectType}}}}}';
 
+// a mutation's lost answer (not a rate limit's hold, which sent nothing) may hide a write that applied
+function mayHaveApplied(error: unknown, note: string): unknown {
+  return error instanceof GithubRequestError && error.kind === 'transient' && error.until === undefined ? new GithubRequestError(`${error.message} ${note}`, error.statusCode, error.githubStatus, error.kind) : error;
+}
+
 /**
  * A reply to a Review thread. It names no review, so GitHub publishes it at once rather than adding
  * it to a Draft review; `pending` says GitHub held it in one anyway.
@@ -33,9 +38,7 @@ export async function replyToThread(client: GithubClient, token: string, threadI
   try {
     payload = await client.mutate(token, 'mutation($input:AddPullRequestReviewThreadReplyInput!){addPullRequestReviewThreadReply(input:$input){comment{id url state}}}', { input: { pullRequestReviewThreadId: threadId, body } }, action, timeoutMs);
   } catch (error) {
-    // a lost answer (not a rate limit's hold, which sent nothing) may hide a posted reply
-    if (error instanceof GithubRequestError && error.kind === 'transient' && error.until === undefined) throw new GithubRequestError(`${error.message} It may have posted anyway; check the thread before sending it again.`, error.statusCode, error.githubStatus, error.kind);
-    throw error;
+    throw mayHaveApplied(error, 'It may have posted anyway; check the thread before sending it again.');
   }
   const comment = at(payload.data, 'addPullRequestReviewThreadReply', 'comment');
   const [id, url] = [at(comment, 'id'), at(comment, 'url')];
@@ -54,6 +57,24 @@ export async function rerequestReviews(client: GithubClient, token: string, pull
   const action = 'GitHub could not re-request the review';
   const payload = await client.mutate(token, 'mutation($input:RerequestReviewsInput!){rerequestReviews(input:$input){pullRequest{id}}}', { input: { pullRequestId, ...reviewers } }, action, timeoutMs);
   if (typeof at(payload.data, 'rerequestReviews', 'pullRequest', 'id') !== 'string') throw graphqlError(payload, action);
+}
+
+/** Open a pull request from `head`, a branch already pushed to the repository itself. */
+export async function createPullRequest(client: GithubClient, token: string, repository: GithubRepository, input: { base: string; head: string; title: string; body: string; draft: boolean }): Promise<{ number: number; url: string }> {
+  const action = 'GitHub could not create the pull request';
+  const found = await client.query(token, 'query PullRequestRepository($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}', { owner: repository.owner, name: repository.name }, action, timeoutMs);
+  const repositoryId = at(found.data, 'repository', 'id');
+  if (typeof repositoryId !== 'string') throw graphqlError(found, action);
+  let payload: GraphqlPayload;
+  try {
+    payload = await client.mutate(token, 'mutation($input:CreatePullRequestInput!){createPullRequest(input:$input){pullRequest{number url}}}', { input: { repositoryId, baseRefName: input.base, headRefName: input.head, title: input.title, body: input.body, draft: input.draft } }, action, timeoutMs);
+  } catch (error) {
+    throw mayHaveApplied(error, 'It may have been created anyway; refresh the panel before trying again.');
+  }
+  const pull = at(payload.data, 'createPullRequest', 'pullRequest');
+  const [number, url] = [at(pull, 'number'), at(pull, 'url')];
+  if (!Number.isInteger(number) || typeof url !== 'string') throw graphqlError(payload, action);
+  return { number: number as number, url };
 }
 
 /** A pull request's head and the viewer's Draft review on it; undefined when it has none by that number. */

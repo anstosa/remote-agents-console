@@ -1,8 +1,8 @@
 import { run } from '../tmux/command.js';
-import { repositoryArgs } from '../git/worktrees.js';
+import { checkoutBranch, repositoryArgs, repositoryDefaultBranch } from '../git/worktrees.js';
 import type { Project, PullRequestCheckStatus, PullRequestComment, PullRequestComments, PullRequestIssues, PullRequestReviewThread, PullRequestSummary, Worktree } from '../domain/models.js';
 import { SeenRecord } from './seen.js';
-import { replyToThread, rerequestReviews, resolveThread } from './writes.js';
+import { createPullRequest, replyToThread, rerequestReviews, resolveThread } from './writes.js';
 import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, githubToken, repositoryPath, type Command, type GithubRepository, type GraphqlPayload, type Request, type Token } from './github.js';
 
 export type PullRequestCleanupStatus = 'merged' | 'closed';
@@ -78,6 +78,8 @@ export type LinkedPullRequest = { number: number; title: string; url: string; st
  * newest review requested event naming them (`request`), when GitHub's latest timeline items hold one.
  */
 export type ViewerReviewRequest = { number: number; url: string; request?: string };
+/** A new pull request's prefill: the Worktree's branch, the base it goes into, a title, and the Issue the Worktree was made for. */
+export type PullRequestDraft = { branch: string; base: string; title: string; issue?: number };
 /** One Issue: its header, labels and body, the pull requests in its repository linked to close it, and the Worktree holding one. */
 export type IssueDetail = { repository: string; number: number; title: string; url: string; state: 'open' | 'closed'; author?: string; updatedAt?: string; body: string; labels: string[]; linkedPullRequests: LinkedPullRequest[]; destination?: OverviewDestination };
 /** Runs the poll; injected so tests turn the clock by hand. */
@@ -137,8 +139,11 @@ const maxDetails = 100;
 const refreshFloorMs = 10_000;
 // how long GitHub's search takes to show the console's own writes
 const searchLagMs = 10_000;
-// the longest comment GitHub takes
+// the longest comment GitHub takes, and the longest pull request title
 const maxCommentLength = 65_536;
+const maxTitleLength = 256;
+// a push goes over the network to origin
+const pushTimeoutMs = 60_000;
 
 const realTimer: Timer = {
   set: (run, ms) => setTimeout(run, ms).unref(),
@@ -444,6 +449,8 @@ export class GithubService {
   // GitHub's comparison of a closed pull request's final head with a checkout, which never changes
   private readonly compares = new Map<string, unknown>();
   private readonly command: Command;
+  // git through `command`; a git that could not run answers as one that failed
+  private readonly git = async (binary: string, args: string[]) => await this.command(binary, args).catch(() => ({ code: -1, stdout: '' }));
   private readonly now: () => number;
   private readonly readToken: Token;
   private readonly timer: Timer;
@@ -856,6 +863,65 @@ export class GithubService {
     await this.write(repository, number, async token => await rerequestReviews(this.client, token, pull.id, found.bot ? { botIds: ids } : { userIds: ids }));
   }
 
+  /**
+   * What a new pull request from a Worktree's branch starts as: into the repository's default branch
+   * (as the New worktree dialog finds it), titled after the branch's first commit past it, and the
+   * Issue the Worktree was made for.
+   */
+  async pullRequestDraft(worktreeId: string): Promise<PullRequestDraft> {
+    const { worktree, branch, base } = await this.pullRequestSource(worktreeId);
+    const commits = await this.git('/usr/bin/git', [...repositoryArgs(worktree.identity), 'log', '--reverse', '--format=%s', `refs/remotes/origin/${base}..refs/heads/${branch}`, '--']);
+    const title = commits.code === 0 ? commits.stdout.split('\n')[0]!.trim() : '';
+    return { branch, base, title, ...(worktree.issue === undefined ? {} : { issue: worktree.issue }) };
+  }
+
+  /**
+   * Push a Worktree's branch to origin with an upstream, then open its pull request. The push is
+   * refused as git refuses it (nothing is forced); a creation that failed may still have applied,
+   * so the repository is read again either way.
+   */
+  async createPullRequest(worktreeId: string, input: { title: string; body: string; base: string; draft: boolean }): Promise<{ number: number; url: string }> {
+    const title = input.title.trim();
+    if (title === '' || title.length > maxTitleLength) throw new GithubRequestError(`A title must hold 1 to ${maxTitleLength} characters.`, 400);
+    if (input.body.length > maxCommentLength) throw new GithubRequestError(`A description must hold at most ${maxCommentLength} characters.`, 400);
+    const base = input.base.trim();
+    // a plain branch name: no leading `-`, `.` or `/`, no `..`
+    if (!/^(?![-./])(?!.*\.\.)[\w./-]{1,255}$/u.test(base)) throw new GithubRequestError('The base must be a branch name.', 400);
+    const { worktree, branch, repository } = await this.pullRequestSource(worktreeId);
+    if (branch === base) throw new GithubRequestError(`A pull request from ${branch} cannot go into ${branch} itself.`, 409);
+    const token = await this.token();
+    if (token === undefined) throw new GithubRequestError(missingToken, 503);
+    const pushed = await this.command('/usr/bin/git', [...repositoryArgs(worktree.identity), 'push', '--set-upstream', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], undefined, pushTimeoutMs)
+      .catch((error: unknown) => ({ code: -1, stdout: '', stderr: error instanceof Error ? error.message : String(error) }));
+    if (pushed.code !== 0) {
+      // git's own lines say why (a rejected ref, a refused login), its hints how to go on
+      const why = (pushed.stderr ?? '').split('\n').map(line => line.trim()).filter(line => line !== '' && !line.startsWith('hint:')).join(' ').slice(0, 500);
+      throw new GithubRequestError(`The push failed: ${why || `git exited ${pushed.code}`}`, 409);
+    }
+    let created: { number: number; url: string } | undefined;
+    try {
+      created = await createPullRequest(this.client, token, repository, { base, head: branch, title, body: input.body, draft: input.draft });
+      return created;
+    } finally {
+      this.changed(repository, created?.number);
+    }
+  }
+
+  // a linked Worktree's branch on a github.com origin, which a pull request can be opened from: the
+  // one git has checked out now, never a fork checkout or the repository's default branch (`base`)
+  private async pullRequestSource(worktreeId: string): Promise<{ worktree: Worktree; branch: string; repository: GithubRepository; base: string }> {
+    const worktree = this.worktrees().find(candidate => candidate.id === worktreeId);
+    const project = worktree === undefined ? undefined : this.projects().find(candidate => candidate.id === worktree.projectId);
+    const repository = project === undefined ? undefined : await this.projectRepository(project);
+    if (worktree === undefined || project === undefined || repository === undefined) throw new GithubRequestError('No Worktree with a github.com origin by that id.', 404);
+    if (worktree.main) throw new GithubRequestError('A pull request is opened from a linked Worktree, not the main one.', 409);
+    const branch = await checkoutBranch(worktree.identity, this.git);
+    if (branch === undefined || forkCheckoutNumber(branch) !== undefined) throw new GithubRequestError('This Worktree has no branch of its own to open a pull request from.', 409);
+    const base = await repositoryDefaultBranch(project.path, this.git) ?? '';
+    if (branch === base) throw new GithubRequestError(`${branch} is the repository's default branch; a pull request is opened from a branch of its own.`, 409);
+    return { worktree, branch, repository, base };
+  }
+
   // the pull request as its detail shows it, which a write must find its target in
   private async writable(repository: GithubRepository, number: number): Promise<PullRequestDetail> {
     const { pullRequest, problem } = await this.pullRequestDetail(repository, number);
@@ -880,12 +946,13 @@ export class GithubService {
   }
 
   /**
-   * The console wrote to a pull request (here, or Review tour posting): its detail and repository
-   * are read again now (the revision moves, so every view showing it asks again), and while a
-   * browser watches, the Overview's searches once GitHub's search index has caught up.
+   * The console wrote to a pull request (here, or Review tour posting), or tried to create one
+   * (`number` unknown when that failed): its detail and repository are read again now (the
+   * revision moves, so every view showing it asks again), and while a browser watches, the
+   * Overview's searches once GitHub's search index has caught up.
    */
-  changed(repository: GithubRepository, number: number): void {
-    this.details.delete(`pull:${repositoryKey(repository)}#${number}`);
+  changed(repository: GithubRepository, number?: number): void {
+    if (number !== undefined) this.details.delete(`pull:${repositoryKey(repository)}#${number}`);
     this.changes += 1;
     this.background(this.refreshRepository(repository));
     // one later read covers writes in quick succession

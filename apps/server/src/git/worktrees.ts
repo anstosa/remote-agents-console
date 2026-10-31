@@ -34,6 +34,25 @@ const defaultRun: GitRun = (command, args) => run(command, args);
  */
 export const repositoryArgs = (path: string): string[] => basename(path).endsWith('.git') && !existsSync(join(path, '.git')) ? ['--git-dir', path] : ['-C', path];
 
+/** The branch `origin/HEAD` names, when the remote publishes one. */
+export async function originDefaultBranch(path: string, command: GitRun = defaultRun): Promise<string | undefined> {
+  const origin = await command('/usr/bin/git', [...repositoryArgs(path), 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+  const ref = origin.code === 0 ? origin.stdout.trim() : '';
+  const slash = ref.indexOf('/');
+  return ref === '' ? undefined : slash === -1 ? ref : ref.slice(slash + 1);
+}
+
+/** The branch a checkout has checked out; none while its HEAD is detached. */
+export async function checkoutBranch(path: string, command: GitRun = defaultRun): Promise<string | undefined> {
+  const head = await command('/usr/bin/git', [...repositoryArgs(path), 'symbolic-ref', '--short', 'HEAD']);
+  return head.code === 0 && head.stdout.trim() !== '' ? head.stdout.trim() : undefined;
+}
+
+/** A repository's default branch: the one `origin/HEAD` names, else what its main checkout `path` has checked out. */
+export async function repositoryDefaultBranch(path: string, command: GitRun = defaultRun): Promise<string | undefined> {
+  return await originDefaultBranch(path, command) ?? await checkoutBranch(path, command);
+}
+
 // strip a `refs/heads/` prefix to the short branch name git prints elsewhere
 function shortBranch(ref: string): string {
   return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;

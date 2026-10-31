@@ -2090,17 +2090,22 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   // the operator's writes to a pull request from the GitHub panel: a reply to or resolve of one of
   // its Review threads, and re-requesting a reviewer's review; a refusal carries its message
-  const githubWrite = async (request: FastifyRequest, reply: FastifyReply, write: (repository: GithubRepository, number: number) => Promise<unknown>) => {
-    controlled(request, true);
-    const item = await githubItem(request, reply);
-    if (item === undefined) return reply;
+  const githubRefusal = async (reply: FastifyReply, act: () => Promise<unknown>) => {
     try {
-      const result = await write(item.repository, item.number);
-      return result === undefined ? reply.code(204).send() : result;
+      return await act();
     } catch (error) {
       if (error instanceof GithubRequestError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
+  };
+  const githubWrite = async (request: FastifyRequest, reply: FastifyReply, write: (repository: GithubRepository, number: number) => Promise<unknown>) => {
+    controlled(request, true);
+    const item = await githubItem(request, reply);
+    if (item === undefined) return reply;
+    return await githubRefusal(reply, async () => {
+      const result = await write(item.repository, item.number);
+      return result === undefined ? reply.code(204).send() : result;
+    });
   };
   const threadParam = (request: FastifyRequest) => (request.params as { thread: string }).thread;
   const bodyField = (request: FastifyRequest, name: string): unknown => (request.body as Record<string, unknown> | null | undefined)?.[name];
@@ -2115,6 +2120,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (typeof login !== 'string') throw new GithubRequestError('invalid reviewer', 400);
     await github.rerequestReview(repository, number, login);
   }));
+  app.get('/api/worktrees/:id/github/pull-request', githubItemLimit, async (request, reply) => {
+    controlled(request);
+    return await githubRefusal(reply, async () => await github.pullRequestDraft((request.params as { id: string }).id));
+  });
+  app.post('/api/worktrees/:id/github/pull-request', githubItemLimit, async (request, reply) => {
+    controlled(request, true);
+    const { title, body, base, draft } = (request.body ?? {}) as Record<string, unknown>;
+    if (typeof title !== 'string' || typeof body !== 'string' || typeof base !== 'string' || typeof draft !== 'boolean') return reply.code(400).send({ error: 'invalid pull request' });
+    return await githubRefusal(reply, async () => reply.code(201).send(await github.createPullRequest((request.params as { id: string }).id, { title, body, base, draft })));
+  });
   // a browser showed these rows' unseen reasons (their `unseen` keys); the badge drops on every device
   app.post('/api/github/overview/seen', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
     controlled(request, true);

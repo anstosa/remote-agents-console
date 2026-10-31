@@ -118,6 +118,11 @@ const external = (href: string, label: string) => <a key={label} className="gith
 type DetailProps = { now: number; worktreeId?: string; closed: Record<string, boolean>; onToggle: (section: string) => void; onSelect: (selection: Selection) => void; onGoTo?: (worktreeId: string) => void; onNewWorktree?: NewWorktreeFor };
 /** Send one write to the shown pull request (a path under it, and a JSON body); its result or why it failed. */
 type Write = (path: string, body?: unknown) => Promise<{ result?: unknown; error?: string }>;
+// why the console did not do what was asked: the server's own message, else its status
+const refusal = async (response: Response, action: string) => {
+  const error = (await response.json().catch(() => undefined) as { error?: unknown } | undefined)?.error;
+  return typeof error === 'string' ? error : `The console could not ${action} (${response.status}).`;
+};
 // the strip's buttons opening the New worktree dialog for the item shown
 const newWorktreeActions = (item: Item, actions: NewWorktreeAction[], onNewWorktree?: NewWorktreeFor) => onNewWorktree === undefined ? undefined
   : actions.map(action => <button key={action} type="button" className={`github-button ${action === 'tour' ? 'tour' : 'go'}`} onClick={() => onNewWorktree(item, action)}><Icon name={newWorktreeChoices[action].icon} />{newWorktreeChoices[action].label}</button>);
@@ -282,8 +287,8 @@ function Detail({ request, projectId, selection, item, revision, refreshes, focu
   const write = useCallback<Write>(async (path, body) => {
     try {
       const response = await request(`/api/projects/${encodeURIComponent(projectId)}/github/${key}/${path}`, { method: 'POST', ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) });
-      const result = response.status === 204 ? undefined : await response.json().catch(() => undefined) as { error?: unknown } | undefined;
-      return response.ok ? { result } : { error: typeof result?.error === 'string' ? result.error : `The console could not send it (${response.status}).` };
+      if (!response.ok) return { error: await refusal(response, 'send it') };
+      return { result: response.status === 204 ? undefined : await response.json().catch(() => undefined) };
     } catch {
       return { error: 'The console could not be reached.' };
     } finally {
@@ -311,6 +316,66 @@ function Detail({ request, projectId, selection, item, revision, refreshes, focu
     {found !== undefined && detail?.problem !== undefined && <p className="github-detail-problem" role="status">{detail.problem.message}</p>}
     {body}
   </article>;
+}
+
+// the server's `PullRequestDraft`
+type PullRequestDraft = { branch: string; base: string; title: string; issue?: number };
+type PullRequestForm = { title: string; body: string; base: string; draft: boolean };
+
+/**
+ * This Worktree's branch with no pull request. Push and create PR… opens an inline form, prefilled
+ * from the branch (its first commit's title, origin's default base, "Closes #N" for the Worktree's
+ * Issue); submitting pushes the branch with an upstream and opens the pull request, which then
+ * takes this spot once the lists show it. A failure keeps what was typed.
+ */
+function CreatePullRequest({ request, worktreeId, branch }: { request: Request; worktreeId: string; branch?: string }) {
+  const [form, setForm] = useState<PullRequestForm>();
+  const [busy, setBusy] = useState<'open' | 'create'>();
+  const [error, setError] = useState<string>();
+  const [created, setCreated] = useState<{ number: number; url: string }>();
+  const url = `/api/worktrees/${encodeURIComponent(worktreeId)}/github/pull-request`;
+  const open = async () => {
+    setBusy('open');
+    setError(undefined);
+    try {
+      const response = await request(url);
+      if (response.ok) {
+        const draft = await response.json() as PullRequestDraft;
+        setForm({ title: draft.title, body: draft.issue === undefined ? '' : `Closes #${draft.issue}`, base: draft.base, draft: false });
+      } else setError(await refusal(response, 'read the branch'));
+    } catch { setError('The console could not be reached.'); }
+    setBusy(undefined);
+  };
+  const create = async (values: PullRequestForm) => {
+    setBusy('create');
+    setError(undefined);
+    try {
+      const response = await request(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(values) });
+      if (response.ok) setCreated(await response.json() as { number: number; url: string }); else setError(await refusal(response, 'create the pull request'));
+    } catch { setError('The console could not be reached.'); }
+    setBusy(undefined);
+  };
+  const name = branch ?? 'This branch';
+  if (created !== undefined) return <div className="github-create" role="status"><b>{name}</b><span>Pushed, and opened <a href={created.url} target="_blank" rel="noreferrer">#{created.number}</a>.</span></div>;
+  if (form === undefined) return <div className="github-create">
+    <b>{name}</b><span>No pull request yet.</span>
+    {branch !== undefined && <div className="github-actions"><WriteButton busy={busy === 'open'} className="go" disabled={busy !== undefined} onClick={() => void open()}><Icon name="pull" />Push and create PR…</WriteButton></div>}
+    {error !== undefined && <p className="github-create-error" role="alert">{error}</p>}
+  </div>;
+  const set = (change: Partial<PullRequestForm>) => setForm({ ...form, ...change });
+  return <section className="github-create github-create-form" aria-label="Push and create a pull request">
+    <b>Push and create a pull request</b>
+    <label>Title<input type="text" value={form.title} onChange={event => set({ title: event.target.value })} /></label>
+    <label>Into<input type="text" value={form.base} onChange={event => set({ base: event.target.value })} /></label>
+    <label>Description<textarea value={form.body} onChange={event => set({ body: event.target.value })} /></label>
+    <label className="github-create-check"><input type="checkbox" checked={form.draft} onChange={event => set({ draft: event.target.checked })} />Create as draft</label>
+    {error !== undefined && <p className="github-create-error" role="alert">{error}</p>}
+    <div className="github-actions">
+      <WriteButton busy={busy === 'create'} className="go" disabled={busy !== undefined || form.title.trim() === '' || form.base.trim() === ''} onClick={() => void create(form)}><Icon name="pull" />Push {name} and create PR</WriteButton>
+      <button type="button" className="github-button" disabled={busy !== undefined} onClick={() => { setForm(undefined); setError(undefined); }}>Cancel</button>
+    </div>
+    <span>Pushes {name} to origin with an upstream, then opens the pull request on GitHub.</span>
+  </section>;
 }
 
 /**
@@ -445,8 +510,7 @@ export function GithubPanel({ request, projectId, repository, worktreeId, main, 
         <h4 className="github-kind"><Icon name="branch" />This Worktree</h4>
         {pinned !== undefined
           ? row(pinned.item, pinned.group)
-          // Push and create PR takes this spot
-          : <div className="github-create"><b>{branch ?? 'This branch'}</b><span>No pull request yet.</span></div>}
+          : <CreatePullRequest key={`${worktreeId}:${branch ?? ''}`}request={request} worktreeId={worktreeId} branch={branch} />}
       </section>}
       <h4 className="github-kind">Pull requests</h4>
       {pulls.length > 0 ? pulls : <p className="overview-none">No open pull requests.</p>}
