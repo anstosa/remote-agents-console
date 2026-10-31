@@ -889,7 +889,7 @@ describe('LaunchService', () => {
     const worktree = cora();
     const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
     const store = { launchProfiles: async () => ({}), rememberLaunchProfile: async () => {} };
-    const config = { adapters: { codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true, setup: 'rm -f .omx/state/session.json' } }, projects: [{ id: 'proj', hostPath: '/home/ubuntu/cora' }] };
+    const config = { adapters: { codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true, setup: 'rm -f .omx/state/session.json' } }, projects: [] };
     const service = new LaunchService(config as never, { find: async () => [socket] }, panes as never, undefined, store as never, () => [worktree]);
 
     await expect(service.launch('cora')).resolves.toBe(true);
@@ -911,7 +911,7 @@ describe('LaunchService', () => {
     const panes = { listPanes: async () => [{ paneId: '%4', sessionId: '$1', pid: 123, path: worktree.hostPath!, command: 'zsh', title: '', placeMark: worktree.id, socket }], pastePrompt: vi.fn(async () => true), enter: vi.fn(async () => true) };
     const store = { launchProfiles: async () => ({}), rememberLaunchProfile: async () => {} };
     // the OMX-on-ZFS configuration: plain Codex stays on adapters.codex, OMX carries the pointer cleanup
-    const config = { adapters: { codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true }, omx: { program: '/abs/omx', args: [], env: {}, launchable: true, setup: 'rm -f .omx/state/session.json' } }, projects: [{ id: 'proj', hostPath: '/home/ubuntu/cora' }] };
+    const config = { adapters: { codex: { program: '/usr/local/bin/codex', args: [], env: {}, launchable: true }, omx: { program: '/abs/omx', args: [], env: {}, launchable: true, setup: 'rm -f .omx/state/session.json' } }, projects: [] };
     const service = new LaunchService(config as never, { find: async () => [socket] }, panes as never, undefined, store as never, () => [worktree]);
 
     // with both configured and nothing remembered, Codex stays the default: OMX must be asked for
