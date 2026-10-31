@@ -27,6 +27,8 @@ export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'>
   notesRevision?: number;
   // moves when the GitHub data views read over HTTP changes, so they read it again
   githubRevision?: number;
+  // how many Pull requests hold a reason the operator has not been shown: the Overview's badge
+  githubBadge?: number;
   scratchLaunch?: LaunchResolution;
   reviewTour: ReviewTourCapability;
   // every Review preset the Code review offers, each with its agent's runnable state
@@ -40,7 +42,7 @@ export type DashboardPayload = Omit<Dashboard, 'agents' | 'projects' | 'places'>
 };
 
 // fingerprint every dashboard field that drives browser refreshes
-export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.notesRevision, dashboard.githubRevision, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews, dashboard.buttons]);
+export const dashboardFingerprint = (dashboard: DashboardPayload): string => JSON.stringify([dashboard.agents, dashboard.projects, dashboard.places, dashboard.cleanupPending, dashboard.notesRevision, dashboard.githubRevision, dashboard.githubBadge, dashboard.scratchLaunch, dashboard.reviewTour, dashboard.codeReview, dashboard.reviews, dashboard.buttons]);
 
 export class DashboardUpdates<T = DashboardPayload> {
   private loader?: () => Promise<T>;

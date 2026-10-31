@@ -292,3 +292,7 @@ _Avoid_: PR panel, Pull requests panel
 **Waiting on me**:
 A Pull request whose next move is the operator's. A Review request is Waiting on me while it is open, not a draft, and still asks for their review. One of their own Pull requests is, unless a draft, while someone else spoke last on an unresolved, current Review thread, its checks fail, it has merge conflicts, or a reviewer requested changes and nothing has been pushed since. Derived from GitHub alone; the operator never marks it done. Issues are never Waiting on me.
 _Avoid_: Needs attention (an Agent's Attention state), action required
+
+**Seen record**:
+The console's record of which Waiting on me reasons the operator has been shown, on any device. A reason is **new** until a view shows its row, and new again when it recurs (a new comment from someone else on the thread, checks failing on a new head, a new Review request or changes-requested review, conflicts returning after clearing). The Overview button's badge counts the Pull requests holding something new.
+_Avoid_: Read/unread (an Agent's completion state), notifications

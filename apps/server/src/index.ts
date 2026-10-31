@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { acquireConfig, migrationErrorLines } from './migrations/boot.js';
 import { retireBookmarks } from './conversations/retire-bookmarks.js';
 import { formatSavedPromptsToNotes, migrateSavedPromptsToNotes } from './migrations/saved-prompts-to-notes.js';
@@ -17,6 +18,7 @@ import { WorktreeLaunchStore } from './worktrees/store.js';
 import { WorktreeManagementService } from './worktrees/management.js';
 import { PullRequestSwitchService } from './pull-requests/switch-service.js';
 import { GithubService } from './github/service.js';
+import { serverCheckout } from './workspaces/server-checkout.js';
 import type { Project } from './domain/models.js';
 import { attestBoot, bootInstallation } from './settings/boot.js';
 import type { ConfigSourceMigration } from './migrations/runner.js';
@@ -40,7 +42,7 @@ const config = await acquireConfig(process.env, undefined, (content, migration) 
 // (Conversations replace bookmarks; ADR 0007). A missing file is a no-op, so this fires once.
 await retireBookmarks();
 // dashboard commands share a quiet connection independently of browser viewers
-const tmux = new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = new WorktreeLaunchStore(); const github: GithubService = new GithubService({ projects: (): readonly Project[] => discovery.projectsNow(), worktrees: () => discovery.worktreesNow() }); const discovery = new DiscoveryService(undefined, tmux, undefined, github, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const push = new PushService(); const prSwitch = new PullRequestSwitchService(config, discovery, github); const worktreeManagement = new WorktreeManagementService(() => discovery.projectsNow(), undefined, github, prSwitch); const cleanup = new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement);
+const tmux = new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = new WorktreeLaunchStore(); const github: GithubService = new GithubService({ projects: (): readonly Project[] => discovery.projectsNow(), worktrees: () => discovery.worktreesNow(), seenFile: join(serverCheckout(), '.data/github-seen.json') }); const discovery = new DiscoveryService(undefined, tmux, undefined, github, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const push = new PushService(); const prSwitch = new PullRequestSwitchService(config, discovery, github); const worktreeManagement = new WorktreeManagementService(() => discovery.projectsNow(), undefined, github, prSwitch); const cleanup = new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement);
 // generate or import the durable push identity without blocking console recovery
 await push.initialize().catch(() => { process.stderr.write('[push] VAPID storage unavailable; push alerts disabled until storage is writable and valid.\n'); });
 const dashboardPollMs = config.pollIntervalMs;

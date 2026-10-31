@@ -1,6 +1,7 @@
 import { run } from '../tmux/command.js';
 import { repositoryArgs } from '../git/worktrees.js';
 import type { Project, PullRequestCheckStatus, PullRequestComment, PullRequestComments, PullRequestIssues, PullRequestReviewThread, PullRequestSummary, Worktree } from '../domain/models.js';
+import { SeenRecord } from './seen.js';
 import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, githubToken, repositoryPath, type Command, type GithubRepository, type GraphqlPayload, type Request, type Token } from './github.js';
 
 export type PullRequestCleanupStatus = 'merged' | 'closed';
@@ -27,13 +28,14 @@ export type OverviewReason =
 /** Where tapping an Overview row goes: the Worktree holding the item, or else its Project's main worktree. */
 export type OverviewDestination = { kind: 'worktree' | 'project'; worktreeId: string; label: string };
 /**
- * One row of the Overview. `reasons` is empty unless it is Waiting on me; the rest are hints:
+ * One row of the Overview. `reasons` is empty unless it is Waiting on me; `unseen` names the
+ * reason instances the operator has not been shown yet, for `markSeen`. The rest are hints:
  * commits pushed since my review, an approval, a draft, the Issues a PR closes, the PRs linked to
  * an Issue, labels. `checks` is set on my own PRs only.
  */
 export type OverviewItem = {
   repository: string; number: number; title: string; url: string; author?: string; updatedAt?: string;
-  draft?: true; checks?: PullRequestCheckStatus; reasons: OverviewReason[];
+  draft?: true; checks?: PullRequestCheckStatus; reasons: OverviewReason[]; unseen?: string[];
   newCommits?: true; approved?: true; closes?: number[]; linkedPullRequests?: number[]; labels?: string[];
   destination?: OverviewDestination;
 };
@@ -41,7 +43,7 @@ export type OverviewItem = {
 export type Overview = Fetched<{ mine: OverviewItem[]; reviews: OverviewItem[]; issues: OverviewItem[]; totals: { mine: number; reviews: number; issues: number } }>;
 /** Runs the poll; injected so tests turn the clock by hand. */
 export type Timer = { set(run: () => void, ms: number): unknown; clear(handle: unknown): void };
-export type GithubServiceOptions = { request?: Request; command?: Command; now?: () => number; token?: Token; timer?: Timer; projects?: () => readonly Project[]; worktrees?: () => readonly Worktree[] };
+export type GithubServiceOptions = { request?: Request; command?: Command; now?: () => number; token?: Token; timer?: Timer; projects?: () => readonly Project[]; worktrees?: () => readonly Worktree[]; seenFile?: string };
 
 // one pull request as the module keeps it; `unresolvedThreads` and `closingIssues` are only known
 // from a read that asked for them
@@ -56,8 +58,10 @@ type BranchEntry = Entry & { repository: GithubRepository; name: string; publish
 // one repository in one GraphQL read: its lists, and the branches to look up
 type Plan = { repository: GithubRepository; list: boolean; branches: BranchEntry[] };
 type OriginEntry = { expiresAt?: number; pending: Promise<GithubRepository | undefined> };
-// an Overview row as read, with the heads that find its Worktree: a PR's own, an Issue's linked PRs'
-type OverviewRow = Omit<OverviewItem, 'destination'> & { heads: { number: number; branch: string; onOrigin: boolean }[] };
+// an Overview row as read, with the heads that find its Worktree (a PR's own, an Issue's linked
+// PRs'), the seen-record keys of its reasons (`instances`), and those kept while GitHub has not
+// decided whether a reason still holds (`held`)
+type OverviewRow = Omit<OverviewItem, 'destination' | 'unseen'> & { heads: { number: number; branch: string; onOrigin: boolean }[]; instances: string[]; held: string[] };
 type OverviewEntry = Entry & { mine?: OverviewRow[]; reviews?: OverviewRow[]; issues?: OverviewRow[]; totals?: Overview['totals'] };
 
 // how often the poll runs while watched, and how old data may be before a read refreshes it
@@ -108,7 +112,7 @@ const fullPullFields = `${pullFields} reviewThreads(first:100){nodes{isResolved 
 // for my own PRs only, since they cost the most
 const overviewPullFields = 'number title url state isDraft updatedAt repository{nameWithOwner} author{login} headRefName headRefOid isCrossRepository mergeable statusCheckRollup{state} labels(first:5){nodes{name}}';
 const overviewSearches = {
-  mine: { query: 'is:pr is:open author:@me archived:false sort:updated-desc', first: 20, fields: `...on PullRequest{${overviewPullFields} latestOpinionatedReviews(first:10){nodes{id state author{login} commit{oid}}} reviewThreads(last:50){nodes{id isResolved isOutdated path comments(last:1){nodes{author{login} viewerDidAuthor}}}} closingIssuesReferences(first:5){nodes{number}}}` },
+  mine: { query: 'is:pr is:open author:@me archived:false sort:updated-desc', first: 20, fields: `...on PullRequest{${overviewPullFields} latestOpinionatedReviews(first:10){nodes{id state author{login} commit{oid}}} reviewThreads(last:50){nodes{id isResolved isOutdated path comments(last:1){nodes{id author{login} viewerDidAuthor}}}} closingIssuesReferences(first:5){nodes{number}}}` },
   reviews: { query: 'is:pr is:open review-requested:@me archived:false sort:updated-desc', first: 30, fields: `...on PullRequest{${overviewPullFields} viewerLatestReviewRequest{id} viewerLatestReview{state commit{oid}}}` },
   assigned: { query: 'is:issue is:open assignee:@me archived:false sort:updated-desc', first: 50, fields: '...on Issue{number title url state updatedAt repository{nameWithOwner} author{login} labels(first:5){nodes{name}} closedByPullRequestsReferences(first:5){nodes{number headRefName isCrossRepository repository{nameWithOwner}}}}' }
 } as const;
@@ -229,8 +233,11 @@ function overviewRow(value: unknown): OverviewRow | undefined {
   if (number === undefined || typeof title !== 'string' || url === undefined || typeof repository !== 'string' || !repository.includes('/') || state !== 'OPEN') return undefined;
   const [author, updatedAt] = [at(value, 'author', 'login'), at(value, 'updatedAt')];
   const labels = nodes(at(value, 'labels')).map(label => at(label, 'name')).filter((name): name is string => typeof name === 'string');
-  return { repository, number, title, url, ...(typeof author === 'string' ? { author } : {}), ...(typeof updatedAt === 'string' ? { updatedAt } : {}), reasons: [], ...(labels.length === 0 ? {} : { labels }), heads: [] };
+  return { repository, number, title, url, ...(typeof author === 'string' ? { author } : {}), ...(typeof updatedAt === 'string' ? { updatedAt } : {}), reasons: [], ...(labels.length === 0 ? {} : { labels }), heads: [], instances: [], held: [] };
 }
+
+// a reason instance's key in the seen record: the pull request and what makes the reason new again
+const seenKey = (row: Pick<OverviewRow, 'repository' | 'number'>, instance: string): string => `${row.repository.toLowerCase()}#${row.number}:${instance}`;
 
 // a pull request's own head, which finds the Worktree holding it
 function pullHead(value: unknown, number: number): OverviewRow['heads'] {
@@ -248,21 +255,31 @@ function myPullRow(value: unknown): OverviewRow[] {
   const draft = at(value, 'isDraft') === true;
   const checks = checkStatus(at(value, 'statusCheckRollup'));
   const reviews = nodes(at(value, 'latestOpinionatedReviews'));
-  const threads = nodes(at(value, 'reviewThreads')).flatMap((thread): OverviewReason[] => {
+  const head = at(value, 'headRefOid');
+  // each reason with the instance that makes it new again: a thread's newest comment, the head
+  // that failed, a changes-requested review; conflicts are new again once they cleared
+  type Found = { reason: OverviewReason; instance: string };
+  const [checksFailed, conflicted] = [`checks:${String(head)}`, 'conflicts'];
+  const threads = nodes(at(value, 'reviewThreads')).flatMap((thread): Found[] => {
     const [id, path, last] = [at(thread, 'id'), at(thread, 'path'), nodes(at(thread, 'comments'))[0]];
     if (typeof id !== 'string' || typeof path !== 'string' || last === undefined || at(thread, 'isResolved') !== false || at(thread, 'isOutdated') !== false || at(last, 'viewerDidAuthor') !== false) return [];
-    const author = at(last, 'author', 'login');
-    return [{ kind: 'thread', id, path, author: typeof author === 'string' ? author : 'ghost' }];
+    const [author, comment] = [at(last, 'author', 'login'), at(last, 'id')];
+    return [{ reason: { kind: 'thread', id, path, author: typeof author === 'string' ? author : 'ghost' }, instance: `thread:${id}:${typeof comment === 'string' ? comment : ''}` }];
   });
-  const changes = reviews.flatMap((review): OverviewReason[] => {
+  const changes = reviews.flatMap((review): Found[] => {
     const [id, author] = [at(review, 'id'), at(review, 'author', 'login')];
-    return at(review, 'state') === 'CHANGES_REQUESTED' && typeof id === 'string' && at(review, 'commit', 'oid') === at(value, 'headRefOid') ? [{ kind: 'changes', id, author: typeof author === 'string' ? author : 'ghost' }] : [];
+    return at(review, 'state') === 'CHANGES_REQUESTED' && typeof id === 'string' && at(review, 'commit', 'oid') === head ? [{ reason: { kind: 'changes', id, author: typeof author === 'string' ? author : 'ghost' }, instance: `changes:${id}` }] : [];
   });
-  const reasons: OverviewReason[] = draft ? [] : [...threads, ...(checks === 'failed' ? [{ kind: 'checks' as const }] : []), ...(at(value, 'mergeable') === 'CONFLICTING' ? [{ kind: 'conflicts' as const }] : []), ...changes];
+  const mergeable = at(value, 'mergeable');
+  const found: Found[] = draft ? [] : [...threads, ...(checks === 'failed' ? [{ reason: { kind: 'checks' as const }, instance: checksFailed }] : []), ...(mergeable === 'CONFLICTING' ? [{ reason: { kind: 'conflicts' as const }, instance: conflicted }] : []), ...changes];
+  // while checks run again on the same head, or GitHub is still working out mergeability, a
+  // failure or conflict seen before is not new when it comes back
+  const held = draft ? [] : [...(checks === 'pending' ? [checksFailed] : []), ...(mergeable === 'UNKNOWN' ? [conflicted] : [])];
   const states = reviews.map(review => at(review, 'state'));
   const closes = nodes(at(value, 'closingIssuesReferences')).map(issue => positive(at(issue, 'number'))).filter((issue): issue is number => issue !== undefined);
   return [{
-    ...row, heads: pullHead(value, row.number), checks, reasons,
+    ...row, heads: pullHead(value, row.number), checks, reasons: found.map(({ reason }) => reason),
+    instances: found.map(({ instance }) => seenKey(row, instance)), held: held.map(instance => seenKey(row, instance)),
     ...(draft ? { draft: true as const } : {}),
     ...(states.includes('APPROVED') && changes.length === 0 ? { approved: true as const } : {}),
     ...(closes.length === 0 ? {} : { closes })
@@ -278,11 +295,13 @@ function reviewRow(value: unknown): OverviewRow[] {
   const draft = at(value, 'isDraft') === true;
   const review = at(value, 'viewerLatestReview');
   const reviewed = review !== null && typeof review === 'object' && at(review, 'state') !== 'PENDING';
-  const reRequested = reviewed && at(value, 'viewerLatestReviewRequest', 'id') !== undefined;
+  const request = at(value, 'viewerLatestReviewRequest', 'id');
+  const reRequested = reviewed && request !== undefined;
   const reviewedAt = reviewed ? at(review, 'commit', 'oid') : undefined;
+  // each request is new; a team's request names none of mine, but leaves the search once I review
   return [{
     ...row, heads: pullHead(value, row.number),
-    ...(draft ? { draft: true as const } : { reasons: [reRequested ? { kind: 'review', reRequested: true } : { kind: 'review' }] }),
+    ...(draft ? { draft: true as const } : { reasons: [reRequested ? { kind: 'review', reRequested: true } : { kind: 'review' }], instances: [seenKey(row, `review:${typeof request === 'string' ? request : ''}`)] }),
     ...(typeof reviewedAt === 'string' && reviewedAt !== at(value, 'headRefOid') ? { newCommits: true as const } : {})
   }];
 }
@@ -348,24 +367,61 @@ export class GithubService {
   private readonly projects: () => readonly Project[];
   private readonly worktrees: () => readonly Worktree[];
   private readonly overviewEntry: OverviewEntry = {};
+  private readonly seen: SeenRecord;
   private viewerMemo?: { token: string; login: Promise<string> };
   private viewers = 0;
   private scheduled?: unknown;
   private lastPollAt?: number;
   private changes = 0;
 
-  constructor({ request = fetch, command = run, now = () => Date.now(), token = githubToken, timer = realTimer, projects = () => [], worktrees = () => [] }: GithubServiceOptions = {}) {
+  constructor({ request = fetch, command = run, now = () => Date.now(), token = githubToken, timer = realTimer, projects = () => [], worktrees = () => [], seenFile }: GithubServiceOptions = {}) {
     this.command = command;
     this.now = now;
     this.readToken = token;
     this.timer = timer;
     this.projects = projects;
     this.worktrees = worktrees;
+    this.seen = new SeenRecord(seenFile);
     this.client = new GithubClient(request, { now, refused: () => { this.viewerMemo = undefined; } });
   }
 
   /** Moves whenever the data the module serves changes, so views know to read it again. */
   get revision(): number { return this.changes; }
+
+  /** How many of the Overview's Pull requests hold a reason the operator has not been shown. */
+  get badge(): number {
+    // Issues have no reasons, so only Pull requests count
+    return this.overviewRows().filter(row => this.unseen(row).length > 0).length;
+  }
+
+  /**
+   * The operator was shown these reason instances (an Overview row's `unseen`), on any device.
+   * Only reasons that hold now are recorded.
+   */
+  async markSeen(keys: readonly string[]): Promise<void> {
+    await this.seen.load();
+    const live = new Set(this.overviewRows().flatMap(row => row.instances));
+    if (await this.seen.add(keys.filter(key => live.has(key)))) this.changes += 1;
+  }
+
+  private overviewRows(): OverviewRow[] {
+    return [...this.overviewEntry.mine ?? [], ...this.overviewEntry.reviews ?? [], ...this.overviewEntry.issues ?? []];
+  }
+
+  // a reason that stopped holding is new when it comes back; a Pull request missing from a list
+  // GitHub cut short may only have been pushed off its page, so what was seen of it stays
+  private async pruneSeen(): Promise<void> {
+    const { mine = [], reviews = [], totals } = this.overviewEntry;
+    const rows = this.overviewRows();
+    const live = new Set(rows.flatMap(row => [...row.instances, ...row.held]));
+    const listed = new Set(rows.map(row => seenKey(row, '')));
+    const complete = totals !== undefined && mine.length >= totals.mine && reviews.length >= totals.reviews;
+    await this.seen.retain(key => live.has(key) || (!complete && !listed.has(key.slice(0, key.indexOf(':') + 1)))).catch(() => undefined);
+  }
+
+  private unseen(row: OverviewRow): string[] {
+    return row.instances.filter(key => !this.seen.has(key));
+  }
 
   /** A browser showing the console: while any handle is held, the poll runs every minute. Call the result to let go. */
   watch(): () => void {
@@ -458,9 +514,10 @@ export class GithubService {
       if (forced || entry.fetchedAt === undefined) await refreshing; else this.background(refreshing);
     }
     const destination = await this.destinations();
-    const rows = (list: OverviewRow[] | undefined): OverviewItem[] => (list ?? []).map(({ heads, ...row }) => {
-      const found = destination(row.repository, heads);
-      return found === undefined ? row : { ...row, destination: found };
+    const rows = (list: OverviewRow[] | undefined): OverviewItem[] => (list ?? []).map(read => {
+      const { heads, instances: _instances, held: _held, ...row } = read;
+      const [found, unseen] = [destination(row.repository, heads), this.unseen(read)];
+      return { ...row, ...(unseen.length === 0 ? {} : { unseen }), ...(found === undefined ? {} : { destination: found }) };
     });
     return { mine: rows(entry.mine), reviews: rows(entry.reviews), issues: rows(entry.issues), totals: entry.totals ?? { mine: 0, reviews: 0, issues: 0 }, ...fetched(entry) };
   }
@@ -699,7 +756,12 @@ export class GithubService {
       const total = (search: unknown): number => positive(at(search, 'issueCount')) ?? 0;
       // a search GitHub withheld (named in `errors`) is not an empty one
       if ([mine, reviews, assigned].some(search => search === null || typeof search !== 'object')) this.failed([], { kind: 'failing', message: graphqlError(payload, readAction).message }, searched);
-      else this.store(this.overviewEntry, started, { mine: nodes(mine).flatMap(myPullRow), reviews: nodes(reviews).flatMap(reviewRow), issues: nodes(assigned).flatMap(issueRow), totals: { mine: total(mine), reviews: total(reviews), issues: total(assigned) } });
+      else {
+        // the badge counts against the seen record, so it is read before the lists land
+        await this.seen.load();
+        this.store(this.overviewEntry, started, { mine: nodes(mine).flatMap(myPullRow), reviews: nodes(reviews).flatMap(reviewRow), issues: nodes(assigned).flatMap(issueRow), totals: { mine: total(mine), reviews: total(reviews), issues: total(assigned) } });
+        await this.pruneSeen();
+      }
     }
     plans.forEach((plan, index) => {
       const node = at(payload, 'data', `r${index}`);

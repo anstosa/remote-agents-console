@@ -1227,6 +1227,10 @@ pull request. The console reads GitHub once a minute while a browser shows it,
 and not at all while every browser is hidden; a pull request status asked for
 by an Agent, the cleanup scan and the launcher read just what they need when
 the data is over a minute old. The
+Overview button's badge counts the pull requests holding something you have not
+been shown yet on any device; what you have been shown is kept in
+`.data/github-seen.json` under the console's checkout, the only GitHub data
+the console writes to disk. The
 same credentials let a guided review of an All PR tour post its notes and
 comments to that pull request as your draft review (GitHub shows it as
 Pending), which you then finish on GitHub; that needs a token allowed to write

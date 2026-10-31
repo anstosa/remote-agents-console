@@ -23,8 +23,8 @@ export type PullFixture = {
   mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   // `statusCheckRollup.state`; null for a head with no checks
   checks?: 'SUCCESS' | 'FAILURE' | 'ERROR' | 'PENDING' | 'EXPECTED' | null;
-  // `last` is who wrote the thread's last comment, `viewer` for the viewer
-  threads?: { isResolved: boolean; isOutdated: boolean; id?: string; path?: string; last?: string }[];
+  // `last` is who wrote the thread's last comment, `viewer` for the viewer, and `lastId` its id
+  threads?: { isResolved: boolean; isOutdated: boolean; id?: string; path?: string; last?: string; lastId?: string }[];
   closes?: number[];
   url?: string;
   author?: string;
@@ -73,7 +73,7 @@ export function pullNode(repository: string, pull: PullFixture, selection = 'rev
     ...asked('viewerLatestReviewRequest', () => pull.viewerRequest === undefined ? null : { id: pull.viewerRequest }),
     ...asked('viewerLatestReview', () => pull.viewerReview === undefined ? null : { state: pull.viewerReview.state, commit: { oid: pull.viewerReview.commit } }),
     ...asked('latestOpinionatedReviews', () => ({ nodes: (pull.reviews ?? []).map((review, index) => ({ id: review.id ?? `review-${index}`, state: review.state, author: { login: review.author }, commit: { oid: review.commit } })) })),
-    ...asked('reviewThreads', () => ({ nodes: (pull.threads ?? []).map((thread, index) => ({ id: thread.id ?? `thread-${index}`, path: thread.path ?? 'src/file.ts', isResolved: thread.isResolved, isOutdated: thread.isOutdated, comments: { nodes: [lastComment ? { author: { login: thread.last ?? 'reviewer' }, viewerDidAuthor: thread.last === 'viewer' } : { author: { login: 'opener' }, viewerDidAuthor: false }] } })) })),
+    ...asked('reviewThreads', () => ({ nodes: (pull.threads ?? []).map((thread, index) => ({ id: thread.id ?? `thread-${index}`, path: thread.path ?? 'src/file.ts', isResolved: thread.isResolved, isOutdated: thread.isOutdated, comments: { nodes: [lastComment ? { id: thread.lastId ?? `comment-${index}`, author: { login: thread.last ?? 'reviewer' }, viewerDidAuthor: thread.last === 'viewer' } : { author: { login: 'opener' }, viewerDidAuthor: false }] } })) })),
     ...asked('closingIssuesReferences', () => ({ nodes: (pull.closes ?? []).map(number => ({ number })) }))
   };
 }

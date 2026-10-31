@@ -43,4 +43,25 @@ describe('Overview API', () => {
     } finally { vi.useRealTimers(); }
     expect(scripted.searches).toHaveLength(2);
   }, 15_000);
+
+  it('marks the reasons of rows a browser showed as seen, and carries the badge on the dashboard frame', async () => {
+    process.env.RAC_GITHUB_TOKEN = 'token';
+    const scripted = graphqlGithub({ 'octo/repo': { pulls: [{ number: 1, branch: 'fix', mine: true, checks: 'FAILURE' }, { number: 2, branch: 'theirs', requested: true, viewerRequest: 'request-2' }] } });
+    const discovery = { worktreesNow: () => [], projectsNow: () => [], dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [] }) };
+    app = await buildApp(testConfig(), { auth: await testAuthService(), discovery: discovery as never, githubRequest: scripted.request });
+    const headers = await authenticatedHeaders(app);
+    const read = { host: headers.host, cookie: headers.cookie };
+
+    const overview = (await app.inject({ method: 'GET', url: '/api/github/overview', headers: read })).json();
+    expect(overview.mine[0].unseen).toEqual(['octo/repo#1:checks:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']);
+    expect((await app.inject({ method: 'GET', url: '/api/dashboard', headers: read })).json().githubBadge).toBe(2);
+
+    const seen = await app.inject({ method: 'POST', url: '/api/github/overview/seen', headers, payload: { keys: overview.mine[0].unseen } });
+    expect(seen.statusCode).toBe(204);
+    expect((await app.inject({ method: 'GET', url: '/api/dashboard', headers: read })).json().githubBadge).toBe(1);
+
+    for (const payload of [{}, { keys: 'octo/repo#2' }, { keys: [2] }, { keys: Array.from({ length: 1_001 }, () => 'x') }]) {
+      expect((await app.inject({ method: 'POST', url: '/api/github/overview/seen', headers, payload })).statusCode).toBe(400);
+    }
+  }, 15_000);
 });

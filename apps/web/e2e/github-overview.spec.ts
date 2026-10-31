@@ -39,13 +39,17 @@ const busy = {
 };
 
 // stub the console; `overviews` answer each Overview read in turn (the last repeats), and the
-// dashboard reports `github.revision`
-async function mount(page: Page, overviews: unknown[], reads: string[] = [], github = { revision: 1 }) {
+// dashboard reports `github.revision` and `github.badge`; each mark-seen report lands in `seen`
+async function mount(page: Page, overviews: unknown[], reads: string[] = [], github: { revision: number; badge?: number; seen?: string[][] } = { revision: 1 }) {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     const path = decodeURIComponent(url.pathname);
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (path === '/api/dashboard') return route.fulfill({ json: { ...dashboard, githubRevision: github.revision } });
+    if (path === '/api/dashboard') return route.fulfill({ json: { ...dashboard, githubRevision: github.revision, githubBadge: github.badge } });
+    if (path === '/api/github/overview/seen') {
+      github.seen?.push((route.request().postDataJSON() as { keys: string[] }).keys);
+      return route.fulfill({ status: 204 });
+    }
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     if (path === '/api/github/overview') {
       reads.push(url.search);
@@ -143,7 +147,7 @@ test('closes with Esc or ✕ back to the last Workspace, and reopens from its ad
   await expect(page.getByRole('tab', { name: /^feature/u })).toHaveAttribute('aria-selected', 'true');
 });
 
-test('shows the columns as tabs on a phone, each with its waiting count or its total', async ({ page }) => {
+test('shows the columns as tabs on a phone, each with its total and how many are waiting on me', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await mount(page, [busy]);
   await page.goto('/');
@@ -152,7 +156,10 @@ test('shows the columns as tabs on a phone, each with its waiting count or its t
   await button.click();
   const overview = page.getByRole('region', { name: 'Overview' });
   const tabs = overview.getByRole('tablist', { name: 'Overview lists' }).getByRole('tab');
-  await expect(tabs).toHaveText(['Mine3', 'Reviews2', 'Issues1']);
+  await expect(tabs.locator('.overview-count')).toHaveText(['4', '3', '1']);
+  await expect(tabs.locator('.overview-waits')).toHaveText(['3', '2']);
+  await expect(tabs.first()).toHaveAccessibleName('Mine, 4, 3 waiting on me');
+  await expect(tabs.nth(2)).toHaveAccessibleName('Issues, 1');
   await expect(tabs.first()).toHaveAttribute('aria-selected', 'true');
   await expect(overview.locator('.overview-row-number')).toHaveText(['#214', '#220', '#199', '#1412']);
   await tabs.nth(1).click();
@@ -205,4 +212,99 @@ test('shows skeleton rows until the first read lands', async ({ page }) => {
   await mount(page, ['pending']);
   await page.goto('/#overview');
   await expect(page.getByRole('status', { name: 'Loading the Overview' })).toBeVisible();
+});
+
+// the busy lists with `unseen` reason instances on some rows
+const unseenRows = (overview: typeof busy, unseen: Record<number, string[]>) => ({
+  ...overview,
+  mine: overview.mine.map(item => unseen[item.number] === undefined ? item : { ...item, unseen: unseen[item.number] }),
+  reviews: overview.reviews.map(item => unseen[item.number] === undefined ? item : { ...item, unseen: unseen[item.number] })
+});
+const fresh = unseenRows(busy, { 220: ['octo/repo#220:conflicts'], 90: ['octo/repo#90:review:q'] });
+
+test('badges the Pull requests with something new, which drops as their rows show while their dots stay for the visit', async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const github = { revision: 1, badge: 2, seen: [] as string[][] };
+  await mount(page, [fresh, busy], [], github);
+  await page.goto('/');
+  const button = page.getByRole('button', { name: /^Overview/u });
+  await expect(button).toHaveAccessibleName('Overview, 2 new');
+  await expect(button).toHaveText('Overview2');
+
+  await button.click();
+  const overview = page.getByRole('region', { name: 'Overview' });
+  await expect(overview.locator('.overview-summary')).toHaveText('5 waiting on me · 2 new');
+  const mine = overview.getByRole('region', { name: 'My pull requests' });
+  // new rows first among Waiting on me; repositories holding something new first
+  await expect(mine.locator('.overview-row-number')).toHaveText(['#220', '#214', '#199', '#1412']);
+  await expect(overview.getByRole('region', { name: 'Review requests' }).locator('.overview-repository-head')).toHaveText(['octo/repo1', 'acme/web1']);
+  await expect(overview.locator('.overview-row.new .overview-row-number')).toHaveText(['#220', '#90']);
+
+  // shown rows are reported seen; the server's badge drops, and the dots stay for the visit
+  await expect.poll(() => github.seen.flat().sort()).toEqual(['octo/repo#220:conflicts', 'octo/repo#90:review:q']);
+  github.badge = 0;
+  github.revision = 2;
+  await expect(button).toHaveAccessibleName('Overview', { timeout: 20_000 });
+  await expect(button).toHaveText('Overview');
+  await expect(overview.locator('.overview-row.new .overview-row-number')).toHaveText(['#220', '#90']);
+  await expect(overview.locator('.overview-summary')).toHaveText('5 waiting on me · 2 new');
+  expect(github.seen).toHaveLength(1);
+
+  // a new visit starts without them
+  await overview.getByRole('button', { name: 'Close Overview' }).click();
+  await button.click();
+  await expect(overview.locator('.overview-summary')).toHaveText('5 waiting on me');
+  await expect(overview.locator('.overview-row.new')).toHaveCount(0);
+});
+
+test('opens a phone on the first tab holding something new, and reports only the rows of tabs opened', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const github = { revision: 1, badge: 1, seen: [] as string[][] };
+  await mount(page, [unseenRows(busy, { 90: ['octo/repo#90:review:q'] })], [], github);
+  await page.goto('/');
+  const button = page.getByRole('button', { name: /^Overview/u });
+  await expect(button).toHaveText('1');
+  await expect(button.locator('.overview-badge.corner')).toBeVisible();
+  // the corner badge sits inside the tab row, not clipped away
+  const [badge, row] = await Promise.all([button.locator('.overview-badge').boundingBox(), page.locator('.tabs').boundingBox()]);
+  expect(badge!.y).toBeGreaterThanOrEqual(row!.y);
+
+  await button.click();
+  const overview = page.getByRole('region', { name: 'Overview' });
+  const tabs = overview.getByRole('tablist', { name: 'Overview lists' }).getByRole('tab');
+  await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect(overview.locator('.overview-row.new .overview-row-number')).toHaveText(['#90']);
+  await expect.poll(() => github.seen).toEqual([['octo/repo#90:review:q']]);
+});
+
+test('leaves rows on a phone tab not yet opened unseen', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const github = { revision: 1, badge: 2, seen: [] as string[][] };
+  await mount(page, [unseenRows(busy, { 220: ['octo/repo#220:conflicts'], 90: ['octo/repo#90:review:q'] })], [], github);
+  await page.goto('/#overview');
+  const overview = page.getByRole('region', { name: 'Overview' });
+  const tabs = overview.getByRole('tablist', { name: 'Overview lists' }).getByRole('tab');
+  await expect(tabs.first()).toHaveAttribute('aria-selected', 'true');
+  await expect(tabs.nth(1).getByRole('img', { name: 'Holds something new' })).toBeVisible();
+  await expect(tabs.nth(2).getByRole('img', { name: 'Holds something new' })).toHaveCount(0);
+  await expect.poll(() => github.seen).toEqual([['octo/repo#220:conflicts']]);
+  await page.waitForTimeout(1_000);
+  expect(github.seen).toEqual([['octo/repo#220:conflicts']]);
+  await tabs.nth(1).click();
+  await expect.poll(() => github.seen).toEqual([['octo/repo#220:conflicts'], ['octo/repo#90:review:q']]);
+});
+
+test('marks nothing seen while the page is hidden', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const github = { revision: 1, badge: 1, seen: [] as string[][] };
+  await page.addInitScript(() => { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (window as { shown?: boolean }).shown === true ? 'visible' : 'hidden' }); });
+  await mount(page, [fresh], [], github);
+  await page.goto('/#overview');
+  const overview = page.getByRole('region', { name: 'Overview' });
+  await expect(overview.getByRole('button', { name: '#220 Bottom status bar, new, in Repo' })).toBeVisible();
+  await page.waitForTimeout(1_500);
+  expect(github.seen).toEqual([]);
+  await page.evaluate(() => { (window as { shown?: boolean }).shown = true; document.dispatchEvent(new Event('visibilitychange')); });
+  await expect.poll(() => github.seen.flat().sort()).toEqual(['octo/repo#220:conflicts', 'octo/repo#90:review:q']);
 });

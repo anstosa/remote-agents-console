@@ -3049,7 +3049,9 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .streamed-terminal:has(> .streamed-terminal-status.loading:not([hidden])) > :is(.output-link-overlay, .streamed-terminal-jump) { visibility: hidden; }
 
 /* The Overview: replaces the Workspace (panels, composer, toolbar) above the tab row */
-.tabs .overview-button { flex: 0 0 auto; display: inline-flex; align-items: center; gap: .45rem; }
+.tabs .overview-button { position: relative; flex: 0 0 auto; display: inline-flex; align-items: center; gap: .45rem; }
+.overview-badge { display: inline-grid; min-width: 1.15rem; height: 1.15rem; place-items: center; padding: 0 .25rem; border-radius: 999px; background: var(--red); color: var(--crust); font-size: .65rem; font-weight: 800; line-height: 1; }
+.overview-badge.corner { position: absolute; top: -.42rem; right: -.42rem; min-width: 1.2rem; height: 1.2rem; box-shadow: 0 0 0 2px var(--crust); }
 .tabs .overview-button.active { border-color: var(--lavender); color: var(--lavender); background: color-mix(in srgb, var(--lavender) 14%, var(--mantle)); }
 .overview-icon { width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .overview { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); min-width: 0; min-height: 0; margin: .375rem .375rem 0; border: 1px solid color-mix(in srgb, var(--lavender) 40%, var(--surface-0)); border-radius: var(--control-radius); background: var(--base); overflow: hidden; }
@@ -3088,6 +3090,8 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .overview-repository-head .overview-waits { margin-left: auto; }
 .overview-row { display: flex; align-items: stretch; overflow: hidden; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: color-mix(in srgb, var(--surface-0) 45%, transparent); }
 .overview-row.waiting { border-color: color-mix(in srgb, var(--red) 30%, var(--surface-1)); }
+.overview-row.new { box-shadow: inset .2rem 0 var(--red); }
+.overview-new-dot { display: inline-block; width: .45rem; height: .45rem; margin-right: .35rem; border-radius: 50%; background: var(--red); vertical-align: middle; }
 .overview-row-main { display: flex; flex: 1 1 auto; min-width: 0; align-items: flex-start; gap: .55rem; margin: 0; padding: .5rem .6rem; border: 0; border-radius: 0; background: none; color: inherit; font: inherit; text-align: left; text-decoration: none; cursor: pointer; }
 .overview-row-main:hover { background: color-mix(in srgb, var(--surface-0) 70%, transparent); }
 .overview-row-copy { display: grid; flex: 1 1 auto; min-width: 0; gap: .2rem; }
@@ -3119,9 +3123,11 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .overview.phone .overview-row-main { flex-wrap: wrap; }
 .overview.phone .overview-destination { flex-basis: 100%; max-width: none; }
 .overview-tabs { position: sticky; top: -.5rem; z-index: 2; display: flex; gap: .3rem; margin-bottom: .5rem; padding: .3rem 0; background: var(--base); }
-.overview-tabs button { display: inline-flex; flex: 1 1 0; align-items: center; justify-content: center; gap: .35rem; height: 2.4rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); color: var(--subtext-0); font-size: .74rem; font-weight: 700; }
+.overview-tabs button { position: relative; display: inline-flex; flex: 1 1 0; align-items: center; justify-content: center; gap: .35rem; height: 2.4rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); color: var(--subtext-0); font-size: .74rem; font-weight: 700; }
 .overview-tabs button.active { border-color: var(--lavender); color: var(--lavender); background: color-mix(in srgb, var(--lavender) 14%, var(--surface-0)); }
 .overview-tabs :is(.overview-waits, .overview-count) { font-size: .74rem; }
+.overview-tabs .overview-waits { padding: 0 .35rem; border-radius: 999px; background: color-mix(in srgb, var(--red) 18%, transparent); }
+.overview-tab-dot { position: absolute; top: .3rem; right: .35rem; width: .45rem; height: .45rem; border-radius: 50%; background: var(--red); }
 .overview-none { margin: 0; padding: .6rem .7rem; border: 1px dashed var(--surface-1); border-radius: var(--control-radius); color: var(--subtext-0); font-size: .74rem; }
 .overview-more { padding: .3rem .2rem; color: var(--blue); font-size: .7rem; }
 .overview-card { max-width: 34rem; margin: 2rem auto; padding: 1rem 1.1rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--mantle); color: var(--subtext-1); line-height: 1.5; }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Skeleton } from './skeleton.js';
 
 // The Overview (CONTEXT.md): the operator's Pull requests, Review requests and assigned Issues
@@ -16,7 +16,7 @@ type Reason =
   | { kind: 'review'; reRequested?: true };
 type Item = {
   repository: string; number: number; title: string; url: string; author?: string; updatedAt?: string;
-  draft?: true; checks?: 'passed' | 'pending' | 'failed'; reasons: Reason[];
+  draft?: true; checks?: 'passed' | 'pending' | 'failed'; reasons: Reason[]; unseen?: string[];
   newCommits?: true; approved?: true; closes?: number[]; linkedPullRequests?: number[]; labels?: string[];
   destination?: { kind: 'worktree' | 'project'; worktreeId: string; label: string };
 };
@@ -61,6 +61,9 @@ function age(from: number, now: number): string {
 }
 
 const waiting = (item: Item) => item.reasons.length > 0;
+const unseen = (item: Item) => (item.unseen?.length ?? 0) > 0;
+// how long a row is shown before its reasons count as seen
+const seenAfterMs = 700;
 const basename = (path: string) => path.split('/').pop() ?? path;
 
 // one chip per reason, except threads, which share one
@@ -92,14 +95,14 @@ function hintChips(item: Item): ReactNode[] {
 
 const checksMark = { passed: ['ok', 'check', 'Checks pass'], failed: ['failing', 'cross', 'Checks failing'], pending: ['pending', 'clock', 'Checks running'] } as const;
 
-function Row({ item, column, now, onOpen }: { item: Item; column: ColumnKey; now: number; onOpen: (worktreeId: string) => void }) {
+function Row({ item, column, now, isNew, onOpen }: { item: Item; column: ColumnKey; now: number; isNew: boolean; onOpen: (worktreeId: string) => void }) {
   const destination = item.destination;
   const mark = item.checks === undefined ? undefined : checksMark[item.checks];
   const chips = [...reasonChips(item), ...hintChips(item)];
   const updated = item.updatedAt === undefined ? Number.NaN : Date.parse(item.updatedAt);
   const content = <>
     <span className="overview-row-copy">
-      <span className="overview-row-title"><span className="overview-row-number">#{item.number}</span>{item.title}</span>
+      <span className="overview-row-title">{isNew && <i className="overview-new-dot" title="New since you last looked" />}<span className="overview-row-number">#{item.number}</span>{item.title}</span>
       <span className="overview-row-meta">
         {column !== 'mine' && item.author !== undefined && <span>@{item.author}</span>}
         {Number.isFinite(updated) && <span>{age(updated, now)}</span>}
@@ -111,8 +114,8 @@ function Row({ item, column, now, onOpen }: { item: Item; column: ColumnKey; now
       ? <span className="overview-destination" title="No Project for this repository: opens on github.com"><Icon name="external" />github.com</span>
       : <span className={`overview-destination ${destination.kind}`} title={destination.kind === 'worktree' ? 'Opens this Worktree\'s Workspace' : 'Opens the Project\'s main worktree'}><Icon name={destination.kind === 'worktree' ? 'branch' : 'folder'} />{destination.label}</span>}
   </>;
-  const label = `#${item.number} ${item.title}`;
-  return <div className={`overview-row${waiting(item) ? ' waiting' : ''}`}>
+  const label = `#${item.number} ${item.title}${isNew ? ', new' : ''}`;
+  return <div className={`overview-row${waiting(item) ? ' waiting' : ''}${isNew ? ' new' : ''}`}>
     {destination === undefined
       ? <a className="overview-row-main" href={item.url} target="_blank" rel="noreferrer" aria-label={`${label}, on GitHub`}>{content}</a>
       : <button className="overview-row-main" type="button" aria-label={`${label}, in ${destination.label}`} onClick={() => onOpen(destination.worktreeId)}>{content}</button>}
@@ -120,19 +123,21 @@ function Row({ item, column, now, onOpen }: { item: Item; column: ColumnKey; now
   </div>;
 }
 
-// a column's rows by repository: the busiest first, then by name; Waiting on me rows first in each
-function RepositoryGroups({ items, column, now, onOpen }: { items: Item[]; column: ColumnKey; now: number; onOpen: (worktreeId: string) => void }) {
+// a column's rows by repository: those holding something new first, then the busiest, then by
+// name; in each, Waiting on me rows first, new ones first among those
+function RepositoryGroups({ items, column, now, isNew, onOpen }: { items: Item[]; column: ColumnKey; now: number; isNew: (item: Item) => boolean; onOpen: (worktreeId: string) => void }) {
   if (items.length === 0) return <p className="overview-none">None.</p>;
   const groups = new Map<string, Item[]>();
   for (const item of items) groups.set(item.repository, [...groups.get(item.repository) ?? [], item]);
   const count = (rows: Item[]) => rows.filter(waiting).length;
-  const sorted = [...groups].sort(([left, a], [right, b]) => count(b) - count(a) || left.localeCompare(right));
+  const holdsNew = (rows: Item[]) => rows.some(isNew) ? 1 : 0;
+  const sorted = [...groups].sort(([left, a], [right, b]) => holdsNew(b) - holdsNew(a) || count(b) - count(a) || left.localeCompare(right));
   return <>{sorted.map(([repository, rows]) => {
     const [owner, name] = repository.split('/');
     const waits = count(rows);
     return <section key={repository} className="overview-repository" aria-label={repository}>
       <h4 className="overview-repository-head"><span>{owner}/<b>{name}</b></span>{rows.some(row => row.destination !== undefined) && <span className="overview-project" title="Has a Project" aria-label="Has a Project"><Icon name="folder" /></span>}{waits > 0 && <span className="overview-waits" title={`${waits} waiting on me`}>{waits}</span>}</h4>
-      {[...rows.filter(waiting), ...rows.filter(row => !waiting(row))].map(item => <Row key={item.url} item={item} column={column} now={now} onOpen={onOpen} />)}
+      {[...rows.filter(row => waiting(row) && isNew(row)), ...rows.filter(row => waiting(row) && !isNew(row)), ...rows.filter(row => !waiting(row))].map(item => <Row key={item.url} item={item} column={column} now={now} isNew={isNew(item)} onOpen={onOpen} />)}
     </section>;
   })}</>;
 }
@@ -150,16 +155,33 @@ export function GithubOverview({ request, revision, phone, onClose, onOpen }: { 
   const [refreshing, setRefreshing] = useState(false);
   const [tab, setTab] = useState<ColumnKey>('mine');
   const [now, setNow] = useState(() => Date.now());
+  // rows shown unseen during this visit keep their mark after the server counts them seen
+  const [shownNew, setShownNew] = useState<ReadonlySet<string>>(() => new Set());
+  const reported = useRef(new Set<string>());
+  // a phone opens on the first tab holding something unseen, once the lists first land
+  const tabChosen = useRef(false);
+  // a hidden page shows nothing, so it marks nothing seen
+  const [visible, setVisible] = useState(() => document.visibilityState === 'visible');
   const load = useCallback(async (refresh: boolean) => {
     try {
       const response = await request(`/api/github/overview${refresh ? '?refresh=1' : ''}`);
       if (!response.ok) throw new Error();
-      setOverview(await response.json() as Overview);
+      const next = await response.json() as Overview;
+      setOverview(next);
+      if (!tabChosen.current && next.fetchedAt !== undefined) {
+        tabChosen.current = true;
+        setTab(columns.find(({ key }) => next[key].some(unseen))?.key ?? 'mine');
+      }
       setUnreachable(false);
     } catch { setUnreachable(true); }
     setNow(Date.now());
   }, [request]);
   useEffect(() => { void load(false); }, [load, revision]);
+  useEffect(() => {
+    const update = () => setVisible(document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', update);
+    return () => document.removeEventListener('visibilitychange', update);
+  }, []);
   // keep "updated … ago" and row ages moving
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -181,12 +203,31 @@ export function GithubOverview({ request, revision, phone, onClose, onOpen }: { 
     await load(true);
     setRefreshing(false);
   };
+  // the rows on screen (every column, or a phone's open tab) count as seen once shown a moment
+  const listed = overview !== undefined && overview.fetchedAt !== undefined && overview.problem?.kind !== 'no-token';
+  useEffect(() => {
+    if (!listed || overview === undefined || !visible) return;
+    const rows = (phone ? overview[tab] : [...overview.mine, ...overview.reviews]).filter(unseen);
+    const keys = rows.flatMap(item => item.unseen ?? []).filter(key => !reported.current.has(key));
+    if (keys.length === 0) return;
+    const timer = window.setTimeout(() => {
+      for (const key of keys) reported.current.add(key);
+      setShownNew(previous => new Set([...previous, ...rows.map(item => item.url)]));
+      void request('/api/github/overview/seen', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keys }) })
+        .then(response => { if (!response.ok) throw new Error(); })
+        // a report that did not land is sent again with the next lists
+        .catch(() => { for (const key of keys) reported.current.delete(key); });
+    }, seenAfterMs);
+    return () => window.clearTimeout(timer);
+  }, [listed, overview, phone, tab, visible, request]);
+  // new: unseen, or shown unseen earlier in this visit
+  const isNew = (item: Item) => unseen(item) || shownNew.has(item.url);
 
   const problem = overview?.problem;
   const items = overview === undefined ? [] : [...overview.mine, ...overview.reviews, ...overview.issues];
   const waits = overview === undefined ? 0 : [...overview.mine, ...overview.reviews].filter(waiting).length;
-  const shown = overview !== undefined && problem?.kind !== 'no-token' && overview.fetchedAt !== undefined;
-  const summary = shown ? <span className="overview-summary">{waits > 0 ? <><b>{waits}</b> waiting on me</> : 'Nothing waiting on me'}</span> : null;
+  const newCount = items.filter(isNew).length;
+  const summary = listed ? <span className="overview-summary">{waits > 0 ? <><b>{waits}</b> waiting on me</> : 'Nothing waiting on me'}{newCount > 0 && <> · <b>{newCount}</b> new</>}</span> : null;
   const staleSince = overview?.fetchedAt === undefined ? '' : ` Showing what was fetched ${age(overview.fetchedAt, now)} ago.`;
   const banner = unreachable && overview !== undefined
     ? `The console could not be reached.${staleSince}`
@@ -209,15 +250,15 @@ export function GithubOverview({ request, revision, phone, onClose, onOpen }: { 
       return <section key={key} className="overview-column" aria-label={label}>
         {!phone && <header className="overview-column-head"><Icon name={icon} /><h3>{label}</h3><span className="overview-count">{overview.totals[key]}</span>{waits > 0 && <span className="overview-waits">{waits} waiting on me</span>}</header>}
         <div className="overview-column-body">
-          <RepositoryGroups items={rows} column={key} now={now} onOpen={onOpen} />
+          <RepositoryGroups items={rows} column={key} now={now} isNew={isNew} onOpen={onOpen} />
           {more > 0 && <a className="overview-more" href={`https://github.com/search?type=issues&q=${encodeURIComponent(search)}`} target="_blank" rel="noreferrer">{more} more on github.com</a>}
         </div>
       </section>;
     };
     body = phone
       ? <><div className="overview-tabs" role="tablist" aria-label="Overview lists">{columns.map(({ key, tab: name }) => {
-        const waits = overview[key].filter(waiting).length;
-        return <button key={key} type="button" role="tab" aria-selected={tab === key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{name}<span className={waits > 0 ? 'overview-waits' : 'overview-count'}>{waits > 0 ? waits : overview.totals[key]}</span></button>;
+        const [waits, total] = [overview[key].filter(waiting).length, overview.totals[key]];
+        return <button key={key} type="button" role="tab" aria-selected={tab === key} aria-label={`${name}, ${total}${waits > 0 ? `, ${waits} waiting on me` : ''}`} className={tab === key ? 'active' : ''} onClick={() => { tabChosen.current = true; setTab(key); }}>{name}<span className="overview-count">{total}</span>{waits > 0 && <span className="overview-waits" title="Waiting on me">{waits}</span>}{overview[key].some(unseen) && <i className="overview-tab-dot" role="img" aria-label="Holds something new" />}</button>;
       })}</div>{column(tab)}</>
       : <div className="overview-columns">{columns.map(({ key }) => column(key))}</div>;
   }
@@ -227,7 +268,7 @@ export function GithubOverview({ request, revision, phone, onClose, onOpen }: { 
       <div className="overview-title"><small>GITHUB</small><h2>Overview</h2></div>
       {!phone && summary}
       <span className="overview-grow" />
-      {shown && <span className="overview-freshness">{freshness(overview.fetchedAt!, now)}</span>}
+      {listed && <span className="overview-freshness">{freshness(overview.fetchedAt!, now)}</span>}
       <button type="button" className="overview-action" aria-label="Refresh" title="Refresh now" disabled={refreshing} aria-busy={refreshing || undefined} onClick={() => void refresh()}><Icon name="refresh" /></button>
       <button type="button" className="overview-action" aria-label="Close Overview" title="Back to the Workspace (Esc)" onClick={onClose}><Icon name="cross" /></button>
     </header>
@@ -237,7 +278,11 @@ export function GithubOverview({ request, revision, phone, onClose, onOpen }: { 
   </section>;
 }
 
-/** The tab row's Overview button: it toggles the Overview, and shows active while it is open. */
-export function OverviewButton({ open, phone, onToggle }: { open: boolean; phone: boolean; onToggle: () => void }) {
-  return <button type="button" className={`overview-button${open ? ' active' : ''}`} aria-pressed={open} aria-label="Overview" title="Overview: pull requests, review requests and issues" onClick={onToggle}><Icon name="pull" />{!phone && <span>Overview</span>}</button>;
+/**
+ * The tab row's Overview button: it toggles the Overview, shows active while it is open, and
+ * counts the Pull requests holding something the operator has not been shown (a corner badge on a
+ * phone).
+ */
+export function OverviewButton({ open, phone, badge, onToggle }: { open: boolean; phone: boolean; badge: number; onToggle: () => void }) {
+  return <button type="button" className={`overview-button${open ? ' active' : ''}`} aria-pressed={open} aria-label={badge > 0 ? `Overview, ${badge} new` : 'Overview'} title={`Overview: pull requests, review requests and issues${badge > 0 ? ` (${badge} new)` : ''}`} onClick={onToggle}><Icon name="pull" />{!phone && <span>Overview</span>}{badge > 0 && <span className={`overview-badge${phone ? ' corner' : ''}`}>{badge}</span>}</button>;
 }
