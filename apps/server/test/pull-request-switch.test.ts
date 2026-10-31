@@ -1067,7 +1067,6 @@ describe('pull request switching', () => {
 
 describe('pull request switching over the GitHub module', () => {
   const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [] }) };
-  const pulled = (state: 'OPEN' | 'MERGED'): World => ({ 'octo/repo': { pulls: [{ number: 9, title: 'Retries', branch: state === 'OPEN' ? 'feature/retries' : 'feature/merged', state }] } });
   // the real module over a scripted GitHub, for a checkout whose origin is octo/repo; `world` null
   // has GitHub refuse every read
   const switching = (world: World | null, token: string | null = 'token') => new PullRequestSwitchService(config, discovery as never, new GithubService({
@@ -1078,13 +1077,6 @@ describe('pull request switching over the GitHub module', () => {
       return reply(answer(world, JSON.parse(String(init?.body)) as GraphqlCall));
     }
   }), cleanCommand);
-
-  it('reads the comments of the branch\'s open pull request, and refuses a branch without one', async () => {
-    await expect(switching(pulled('OPEN')).commentsAt('/worktrees/cora', 'feature/retries')).resolves.toMatchObject({ number: 9, url: 'https://github.com/octo/repo/pull/9', threads: [], reviews: [], comments: [] });
-    await expect(switching({ 'octo/repo': {} }).commentsAt('/worktrees/cora', 'feature/none')).rejects.toMatchObject({ statusCode: 404 });
-    await expect(switching(pulled('MERGED')).commentsAt('/worktrees/cora', 'feature/merged')).rejects.toMatchObject({ statusCode: 404 });
-    await expect(switching(pulled('OPEN'), null).commentsAt('/worktrees/cora', 'feature/retries')).rejects.toMatchObject({ statusCode: 503 });
-  });
 
   it('reads a branch\'s pull request again when it is over a minute old, as an Agent waiting on CI needs', async () => {
     let now = 0;

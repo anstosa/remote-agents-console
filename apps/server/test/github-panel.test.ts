@@ -106,6 +106,27 @@ describe('the GitHub panel\'s lists', () => {
     expect((await service.issueDetail(repo, 10, { project: 'second' })).issue?.destination).toBeUndefined();
   });
 
+  it('puts a merged or closed pull request in its Worktree only while that is the branch\'s finished one, at the Worktree\'s exact head', async () => {
+    const worktrees = [
+      testWorktree({ id: 'shipped', projectId: 'octo-repo', label: 'shipped-wt', path: '/src/octo/repo-shipped', branch: 'shipped', sha: sha('b'), main: false }),
+      testWorktree({ id: 'reused', projectId: 'octo-repo', label: 'reused-wt', path: '/src/octo/repo-reused', branch: 'reused', sha: sha('c'), main: false })
+    ];
+    const { service } = polled({ 'octo/repo': { pulls: [
+      { number: 4, branch: 'shipped', state: 'MERGED', sha: sha('b') },
+      // closed before the merge stood: the branch finished with #4
+      { number: 8, branch: 'shipped', state: 'CLOSED', sha: sha('b') },
+      // the branch carries a new, open pull request since #5 merged
+      { number: 5, branch: 'reused', state: 'MERGED', sha: sha('c') },
+      { number: 9, branch: 'reused', sha: sha('c') }
+    ] } }, { worktrees: () => worktrees });
+    for (const branch of ['shipped', 'reused']) await service.branch(repo, branch, true, { wait: true });
+    const holder = async (number: number) => (await service.pullRequestDetail(repo, number)).pullRequest?.destination?.worktreeId;
+    expect([await holder(4), await holder(8), await holder(5), await holder(9)]).toEqual(['shipped', undefined, undefined, 'reused']);
+    // commits since the merge: the Worktree no longer sits at the merged head
+    worktrees[0] = { ...worktrees[0]!, sha: sha('e') };
+    expect(await holder(4)).toBeUndefined();
+  });
+
   it('reads the repository and the searches again on Refresh', async () => {
     let title = 'Mine';
     const { service, calls, searches, clock } = polled(() => ({ 'octo/repo': { pulls: [{ number: 1, branch: 'feature', title, mine: true }, { number: 2, branch: 'other', title: `Other ${title}` }] } }));

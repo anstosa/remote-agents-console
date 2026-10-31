@@ -26,7 +26,7 @@ import type { CodePanelReview } from './code-panel/code-panel.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
 import { savedCodeOpen, saveCodeOpen, supportingChange, useCodePanel, type CodePanelCommit, type CodePanelController, type CodePanelMode } from './code-panel/comparison.js';
 import { PullRequestCard, PullRequestIndicators, type PullRequestSummary } from './pull-request-card.js';
-import { hunkClass, PullRequestCommentsPanel, unresolvedThreadCount, type PullRequestComments } from './pull-request-comments.js';
+import { hunkClass } from './pull-request-comments.js';
 import { isStackOperationLog, isStackProcessOutput, type StackAction, type StackOperationLog, type StackProcessOutput, type StackProcessState, type StackSelection, type StartableNoticeTarget } from './stack-operations.js';
 import { StackPanel } from './stack-panel.js';
 import { StackIcon, stackGlyphs, type ProcessAction, type StackHandlers } from './stack-controls.js';
@@ -65,7 +65,7 @@ import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, Op
 import { installProgressAnimationSync, type ProgressKind } from './progress-animation.js';
 import { Skeleton } from './skeleton.js';
 import { GithubOverview, icons as githubIcons, issueBranch, OverviewButton, type NewWorktreeFor } from './github-overview.js';
-import { GithubPanel, type GithubFocus, type OpenWorktree } from './github-panel.js';
+import { GithubPanel, type GithubFocus, type OpenWorktree, type StripActions } from './github-panel.js';
 import { CodeLoading } from './code-panel/loading.js';
 import { ModelChip, type AgentModel } from './model-picker.js';
 import { WatchesButton, type WatchSummary } from './watches-button.js';
@@ -762,16 +762,6 @@ const request = async (url: string, init: RequestInit = {}, observeReachability 
 };
 // keep background monitor failures from declaring the whole console unavailable
 const monitorRequest = (url: string, init?: RequestInit) => request(url, init, false);
-// read a Worktree branch's pull request comments fresh from GitHub
-const loadPullRequestComments = async (worktreeId: string): Promise<PullRequestComments> => {
-  const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/pull-request/comments`);
-  const payload: unknown = await response.json().catch(() => undefined);
-  const error = payload !== null && typeof payload === 'object' ? (payload as { error?: unknown }).error : undefined;
-  if (!response.ok) throw new Error(typeof error === 'string' ? error : 'Could not load the pull request comments.');
-  const value = payload as Partial<PullRequestComments> | undefined;
-  if (!Array.isArray(value?.threads) || !Array.isArray(value.reviews) || !Array.isArray(value.comments) || typeof value.number !== 'number') throw new Error('The console returned invalid pull request comments.');
-  return value as PullRequestComments;
-};
 // preserve explicit json framing for otherwise bodyless mutations
 const emptyJsonMutation = (method: 'POST' | 'DELETE'): RequestInit => ({ method, headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
 // load the newest retained stack output
@@ -979,6 +969,8 @@ const ProjectsContext = createContext<readonly Project[]>([]);
 const EditorConfiguredContext = createContext(false);
 // select an Agent's pane, such as an Ask's interactive run
 const OpenAgentContext = createContext<((agentId: string) => void) | undefined>(undefined);
+// open the Remove worktree dialog for a Worktree, as the GitHub panel's cleanup strip does
+const RemoveWorktreeContext = createContext<((worktreeId: string) => void) | undefined>(undefined);
 // refresh open schedules on dashboard advances and closed badges on queued-note additions
 const DashboardGenerationContext = createContext<{ generation?: number; notesRevision?: number; githubRevision?: number; serverStartedAt?: number }>({});
 type ServerUpdateState = 'queued' | 'running' | 'complete' | 'failed';
@@ -6400,11 +6392,11 @@ function GitCommitSections({ log, error, uncommitted, collapsed, onToggle, messa
   </>;
 }
 // render working changes, current pr controls, and repository switchers
-function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddToPrompt, expanded = false, onToggle, onOpenFile, onViewChanges, onViewCommit, onReview, onReviewCommit, review, reviewUnavailable, onSelectTarget, onNewWorktree, onOperationFeedback }: { worktreeId?: string; branch?: string; summary?: GitStatusSummary; prSummary?: GitComparisonSummary; pullRequest?: PullRequestSummary; onAddToPrompt?: (text: string) => void; expanded?: boolean; onToggle?: () => void; onOpenFile: (path: string, mode: CodePanelMode) => void; onViewChanges?: (mode: CodePanelMode) => void; onViewCommit?: (commit: CodePanelCommit) => void; onReview?: (scope: ReviewScope) => void; onReviewCommit?: (commit: CodePanelCommit) => void; review?: ReviewTourIndicator; reviewUnavailable?: string; onSelectTarget?: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, expanded = false, onToggle, onOpenFile, onViewChanges, onViewCommit, onReview, onReviewCommit, review, reviewUnavailable, onSelectTarget, onNewWorktree, onOperationFeedback }: { worktreeId?: string; branch?: string; summary?: GitStatusSummary; prSummary?: GitComparisonSummary; pullRequest?: PullRequestSummary; expanded?: boolean; onToggle?: () => void; onOpenFile: (path: string, mode: CodePanelMode) => void; onViewChanges?: (mode: CodePanelMode) => void; onViewCommit?: (commit: CodePanelCommit) => void; onReview?: (scope: ReviewScope) => void; onReviewCommit?: (commit: CodePanelCommit) => void; review?: ReviewTourIndicator; reviewUnavailable?: string; onSelectTarget?: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
   const wrapRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
-  const [tab, setTab] = useState<'working' | 'prs' | 'branches'>('working');
+  const [tab, setTab] = useState<'working' | 'branches'>('working');
   const [mode, setMode] = useState<'working' | 'pr'>(prSummary === undefined ? 'working' : 'pr');
   const [removingBranch, setRemovingBranch] = useState<SwitchableBranch>();
   const cachedPrSwitch = worktreeId === undefined ? undefined : pullRequestSwitchCache.get(worktreeId);
@@ -6418,8 +6410,6 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddT
   const loadingPrSwitch = expanded && worktreeId !== undefined && !prSwitchLoaded;
   // failures expose working and retry in the same render as the error
   const visibleTab = prSwitchError === undefined ? tab : 'working';
-  const [switchingPr, setSwitchingPr] = useState<number>();
-  const [movingPr, setMovingPr] = useState<number>();
   const [switchingBranch, setSwitchingBranch] = useState<string>();
   const [movingBranch, setMovingBranch] = useState<string>();
   const [grouping, setGrouping] = useState<GitChangeGrouping>(savedGitChangeGrouping);
@@ -6428,16 +6418,9 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddT
   // sections the user opened or closed; the rest keep their default (a merge starts collapsed)
   const [sectionOverrides, setSectionOverrides] = useState<ReadonlyMap<string, boolean>>(new Map());
   const [openMessages, setOpenMessages] = useState<ReadonlySet<string>>(new Set());
-  const [commentsOpen, setCommentsOpen] = useState(false);
   const configuredPullRequestActions = useConfiguredButtons('pullRequest');
   const configuredPullRequestBusy = useConfiguredButtonsBusy('pullRequest');
   const configuredPullRequestColor = configuredPullRequestActions.find(action => action.busy)?.color;
-  // the unresolved count of the last read, fresher than the dashboard's cached pull request
-  const [unresolvedThreads, setUnresolvedThreads] = useState<number>();
-  const loadComments = useCallback(async () => await loadPullRequestComments(worktreeId!), [worktreeId]);
-  const commentsLoaded = useCallback((comments: PullRequestComments) => setUnresolvedThreads(unresolvedThreadCount(comments)), []);
-  // reopening the flyout shows its files again
-  useEffect(() => { if (!expanded) setCommentsOpen(false); }, [expanded]);
   const repositoryTabVisible = expanded && visibleTab !== 'working';
   const byCommit = mode === 'pr' && grouping === 'commit' && worktreeId !== undefined;
   // default new branches to all pr changes
@@ -6447,8 +6430,6 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddT
     setCommitLog(undefined);
     setSectionOverrides(new Map());
     setOpenMessages(new Set());
-    setCommentsOpen(false);
-    setUnresolvedThreads(undefined);
   }, [branch]);
   // load the commit log while By commit shows, and again whenever the git status moves
   useEffect(() => {
@@ -6528,11 +6509,7 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddT
   }, [repositoryScope, worktreeId, expanded]);
   // failed repository reads cannot strand the user on an unloaded disabled tab
   useEffect(() => {
-    // working recovery takes precedence over repository comments
-    if (prSwitchError !== undefined) {
-      setTab('working');
-      setCommentsOpen(false);
-    }
+    if (prSwitchError !== undefined) setTab('working');
   }, [prSwitchError]);
   // fit the popup above the toolbar
   useLayoutEffect(() => {
@@ -6621,8 +6598,7 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddT
   const disabledReviewReason = review !== undefined ? undefined : reviewUnavailable ?? (activeSummary === undefined ? 'Selected changes unavailable' : undefined);
   // a generating review stays readable while its border reports progress
   const reviewLabel = review?.generating ? 'Generating…' : review !== undefined ? 'Open Review' : 'Review';
-  const mutationInFlight = switchingPr !== undefined || movingPr !== undefined || switchingBranch !== undefined || movingBranch !== undefined;
-  const pullRequestReason = pullRequestStatusReason(loadingPrSwitch, prSwitchError, prSwitchLoaded, prSwitch);
+  const mutationInFlight = switchingBranch !== undefined || movingBranch !== undefined;
   const branchReason = branchStatusReason(loadingPrSwitch, prSwitchError, prSwitchLoaded, prSwitch);
   // close the branch panel before navigating worktrees
   const selectWorktree = (target: DashboardTarget) => {
@@ -6633,49 +6609,6 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddT
   const openNewWorktree = onNewWorktree === undefined ? undefined : (initial: NewWorktreeSelection) => {
     onToggle?.();
     onNewWorktree(initial);
-  };
-  // check out one pull request branch
-  const switchPullRequest = async (number: number) => {
-    // prevent duplicate checkout transactions
-    if (worktreeId === undefined || mutationInFlight) return;
-    setSwitchingPr(number);
-    try {
-      const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/switch-pr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ number }) });
-      // surface a rejected server transaction
-      if (!response.ok) {
-        onOperationFeedback?.({ tone: 'error', message: 'Pull request could not be checked out', detail: await launchError(response), worktreeId });
-        return;
-      }
-      // discard stale checkout ownership after success
-      if (worktreeId !== undefined) pullRequestSwitchCache.delete(worktreeId);
-      onToggle?.();
-    } catch {
-      onOperationFeedback?.({ tone: 'error', message: 'Pull request could not be checked out', detail: 'The console could not be reached. Check the worktree before trying again.', worktreeId });
-    } finally {
-      setSwitchingPr(undefined);
-    }
-  };
-  // move one occupied pull request into this worktree
-  const movePullRequest = async (number: number) => {
-    // prevent duplicate move transactions
-    if (worktreeId === undefined || mutationInFlight) return;
-    setMovingPr(number);
-    try {
-      const response = await request(`/api/worktrees/${encodeURIComponent(worktreeId)}/move-pr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ number }) });
-      // surface a rejected server transaction
-      if (!response.ok) {
-        onOperationFeedback?.({ tone: 'error', message: 'Pull request could not be moved', detail: await launchError(response), worktreeId });
-        return;
-      }
-      // discard stale checkout ownership after success
-      if (worktreeId !== undefined) pullRequestSwitchCache.delete(worktreeId);
-      onToggle?.();
-      onOperationFeedback?.({ tone: 'success', message: 'Pull request moved here', detail: 'The source worktree was detached and its uncommitted changes were restored here.', worktreeId });
-    } catch {
-      onOperationFeedback?.({ tone: 'error', message: 'Pull request could not be moved', detail: 'The console could not be reached. Check both worktrees before trying again.', worktreeId });
-    } finally {
-      setMovingPr(undefined);
-    }
   };
   // check out one local branch
   const switchBranch = async (nextBranch: string) => {
@@ -6741,18 +6674,12 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, onAddT
   const repositoryError = prSwitchError === undefined ? null : <div className="git-status-repository-error" role="alert"><span>{prSwitchError}</span><button type="button" aria-label="Retry repository choices" onClick={() => setRepositoryRetry(current => current + 1)}>Retry</button></div>;
   const repositorySkeleton = <div className="repository-rows-skeleton" role="status" aria-label="Loading repository choices" aria-busy="true">{/* list loading remains decorative */}{Array.from({ length: 3 }, (_, index) => <Skeleton key={index} />)}</div>;
   const groupingToolbar = mode === 'pr' && worktreeId !== undefined && <span className="git-status-grouping">{byCommit && <span className="git-status-grouping-actions"><button type="button" onClick={() => setAllSections(true)}>Collapse all</button><button type="button" onClick={() => setAllSections(false)}>Expand all</button></span>}<span className="git-status-mode" role="group" aria-label="Group files by"><button type="button" aria-pressed={grouping === 'kind'} onClick={() => chooseGrouping('kind')}>By kind</button><button type="button" aria-pressed={grouping === 'commit'} onClick={() => chooseGrouping('commit')}>By commit</button></span></span>;
-  const commentsToggle = worktreeId === undefined ? undefined : { open: commentsOpen, unresolved: unresolvedThreads ?? pullRequest?.unresolvedThreads ?? 0, onToggle: () => setCommentsOpen(open => !open) };
-  const commentsPanel = commentsOpen && prSwitchError === undefined && worktreeId !== undefined && pullRequest !== undefined && pullRequest.status !== 'merged' ? <PullRequestCommentsPanel load={loadComments} onLoaded={commentsLoaded} onAddToPrompt={onAddToPrompt} /> : undefined;
-  // keep repository recovery visible while review comments are open
-  const workingPanel = <>{commentsPanel ?? <><span className="git-status-panel-header"><strong>{mode === 'working' ? 'Working changes' : 'PR changes'}</strong>{panelDetails.length > 0 && <small className="git-status-details">{panelDetails.join(' · ')}</small>}</span><div className="git-status-working-body">{repositoryError}{byCommit ? <span className="git-status-files">{groupingToolbar}<GitCommitSections log={commitLog} error={commitLogError} uncommitted={summary?.changes ?? []} collapsed={sectionCollapsed} onToggle={toggleSection} messages={openMessages} onToggleMessage={toggleMessage} onViewCommit={onViewCommit} onReviewCommit={onReviewCommit} reviewCommitDisabledReason={review === undefined ? undefined : 'Dismiss the current guided review to start another'} onOpenFile={onOpenFile} /></span> : changedFiles !== undefined && changedFiles.length > 0 ? <span className="git-status-files">{groupingToolbar}<GitChangeGroup label="Implementation" changes={implementationChanges} onOpenFile={path => onOpenFile(path, mode)} /><GitChangeGroup label="TESTS & DOCS" changes={supportingChanges} onOpenFile={path => onOpenFile(path, mode)} /></span> : <span className="git-status-empty">{emptyLabel}</span>}</div></>}<span className="git-status-panel-footer"><span className="git-status-actions">{onViewChanges !== undefined && <button className="git-status-view-changes" type="button" disabled={changedFiles === undefined || changedFiles.length === 0} title={`View all ${mode === 'working' ? 'Working' : 'All PR'} changes in the Code panel`} onClick={() => onViewChanges(mode)}>View changes</button>}<button className={`git-status-review${progressBorder(review?.generating === true, 'peach')}`} type="button" aria-busy={review?.generating || undefined} disabled={onReview === undefined || disabledReviewReason !== undefined} title={disabledReviewReason ?? (review?.generating ? 'Generating the guided review — open it to watch progress or cancel' : review !== undefined ? 'Open the current guided review' : `Start guided review of ${mode === 'working' ? 'Working' : 'All PR'} changes`)} onClick={() => onReview?.(mode)}><ProgressRing busy={review?.generating === true} />{reviewLabel}</button>{/* dismiss after dispatch without waiting for the action to finish */}<ConfiguredButtonList slot="pullRequest" className="configured-pull-request-actions" onSelect={onToggle} /></span>{/* keep the current pr between actions and view modes */}<PullRequestCard pullRequest={pullRequest} comments={commentsToggle} /><span className="git-status-mode" role="group" aria-label="Git change view"><button type="button" aria-pressed={mode === 'working'} onClick={() => setMode('working')}>Working</button><button type="button" aria-pressed={mode === 'pr'} disabled={prSummary === undefined} title={prSummary === undefined ? 'Merge target unavailable' : `Compare with ${prBaseLabel}`} onClick={() => setMode('pr')}>All PR</button></span></span></>;
-  const pullRequestPanel = <><span className="git-status-panel-header"><strong>Pull requests</strong></span>{repositoryPending ? repositorySkeleton : prSwitch === undefined || !prSwitch.pullRequestsSupported || prSwitch.pullRequests.length + prSwitch.otherPullRequests.length === 0 ? <div className="git-status-repository-empty" role="status">{pullRequestReason}</div> : <div className="git-status-repository-body">{pullRequestReason && <p className="git-status-repository-note">{pullRequestReason}</p>}<PullRequestChoiceList list={prSwitch} currentWorktreeId={worktreeId} pending={switchingPr !== undefined || movingPr !== undefined} onSelectTarget={selectWorktree} actions={(choice, here) => <>{openNewWorktree !== undefined && !choice.checkedOut && <NewWorktreeFromButton source={`#${choice.number}`} disabled={mutationInFlight} onClick={() => openNewWorktree({ mode: 'pull-request', number: choice.number })} />}<PullRequestCheckoutButton pullRequest={choice} here={here} enabled={prSwitch?.enabled ?? false} loading={loadingPrSwitch} refreshFailed={prSwitchError !== undefined} switchingPr={switchingPr} movingPr={movingPr} onSwitch={switchPullRequest} onMove={movePullRequest} /></>} /></div>}</>;
+  const workingPanel = <><span className="git-status-panel-header"><strong>{mode === 'working' ? 'Working changes' : 'PR changes'}</strong>{panelDetails.length > 0 && <small className="git-status-details">{panelDetails.join(' · ')}</small>}</span><div className="git-status-working-body">{repositoryError}{byCommit ? <span className="git-status-files">{groupingToolbar}<GitCommitSections log={commitLog} error={commitLogError} uncommitted={summary?.changes ?? []} collapsed={sectionCollapsed} onToggle={toggleSection} messages={openMessages} onToggleMessage={toggleMessage} onViewCommit={onViewCommit} onReviewCommit={onReviewCommit} reviewCommitDisabledReason={review === undefined ? undefined : 'Dismiss the current guided review to start another'} onOpenFile={onOpenFile} /></span> : changedFiles !== undefined && changedFiles.length > 0 ? <span className="git-status-files">{groupingToolbar}<GitChangeGroup label="Implementation" changes={implementationChanges} onOpenFile={path => onOpenFile(path, mode)} /><GitChangeGroup label="TESTS & DOCS" changes={supportingChanges} onOpenFile={path => onOpenFile(path, mode)} /></span> : <span className="git-status-empty">{emptyLabel}</span>}</div><span className="git-status-panel-footer"><span className="git-status-actions">{onViewChanges !== undefined && <button className="git-status-view-changes" type="button" disabled={changedFiles === undefined || changedFiles.length === 0} title={`View all ${mode === 'working' ? 'Working' : 'All PR'} changes in the Code panel`} onClick={() => onViewChanges(mode)}>View changes</button>}<button className={`git-status-review${progressBorder(review?.generating === true, 'peach')}`} type="button" aria-busy={review?.generating || undefined} disabled={onReview === undefined || disabledReviewReason !== undefined} title={disabledReviewReason ?? (review?.generating ? 'Generating the guided review — open it to watch progress or cancel' : review !== undefined ? 'Open the current guided review' : `Start guided review of ${mode === 'working' ? 'Working' : 'All PR'} changes`)} onClick={() => onReview?.(mode)}><ProgressRing busy={review?.generating === true} />{reviewLabel}</button>{/* dismiss after dispatch without waiting for the action to finish */}<ConfiguredButtonList slot="pullRequest" className="configured-pull-request-actions" onSelect={onToggle} /></span>{/* keep the current pr between actions and view modes */}<PullRequestCard pullRequest={pullRequest} /><span className="git-status-mode" role="group" aria-label="Git change view"><button type="button" aria-pressed={mode === 'working'} onClick={() => setMode('working')}>Working</button><button type="button" aria-pressed={mode === 'pr'} disabled={prSummary === undefined} title={prSummary === undefined ? 'Merge target unavailable' : `Compare with ${prBaseLabel}`} onClick={() => setMode('pr')}>All PR</button></span></span></>;
   const branchPanel = <><span className="git-status-panel-header"><strong>Branches</strong></span>{repositoryPending ? repositorySkeleton : (prSwitch?.branches.length ?? 0) === 0 ? <div className="git-status-repository-empty" role="status">{branchReason}</div> : <BranchChoiceList branches={prSwitch?.branches} pending={switchingBranch !== undefined || movingBranch !== undefined} onSelectTarget={selectWorktree} actions={candidate => <>{openNewWorktree !== undefined && !candidate.checkedOut && <NewWorktreeFromButton source={candidate.branch} disabled={mutationInFlight} onClick={() => openNewWorktree({ mode: 'existing', branch: candidate.branch })} />}<BranchCheckoutActions branch={candidate} enabled={prSwitch?.enabled ?? false} loading={loadingPrSwitch} refreshFailed={prSwitchError !== undefined} switchingBranch={switchingBranch} movingBranch={movingBranch} onSwitch={switchBranch} onMove={moveBranch} onDelete={worktreeId === undefined ? undefined : reviewBranchRemoval} /></>} />}</>;
   let activePanel = workingPanel;
-  // show pull request choices
-  if (visibleTab === 'prs') activePanel = pullRequestPanel;
   // show local branch choices
   if (visibleTab === 'branches') activePanel = branchPanel;
-  return <span ref={wrapRef} className={`git-status-wrap${expanded ? ' expanded' : ''}`}><button className={`git-status-summary ${state}${pullRequest === undefined ? '' : ` has-pull-request status-${pullRequest.status}`}${review !== undefined ? ' review-ready' : ''}${review?.generating ? ' review-generating progress-border progress-peach' : configuredPullRequestBusy && configuredPullRequestColor !== undefined ? ` progress-border progress-${configuredPullRequestColor}` : ''}${review?.stale ? ' review-stale' : ''}`} type="button" aria-label={label} aria-busy={review?.generating || configuredPullRequestBusy || undefined} data-context-flyout aria-expanded={expanded} title={label} onClick={onToggle}><ProgressRing busy={review?.generating === true || configuredPullRequestBusy} /><span className="flyout-caret" aria-hidden="true" /><svg className="git-branch-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.5" /><circle cx="6" cy="19" r="2.5" /><circle cx="18" cy="7" r="2.5" /><path d="M6 7.5v9M18 9.5v1a6 6 0 0 1-6 6H6" /></svg><span className="git-status-dot" aria-hidden="true" /><span className="git-branch">{branch}</span><span className="git-status-separator" aria-hidden="true">·</span><span className="git-worktree-state">{stateLabel}</span>{/* retain compact pr indicators beside the prompt */}{pullRequest !== undefined && <PullRequestIndicators checks={pullRequest.checks} issues={pullRequest.issues} />}</button>{expanded && <FlyoutPortal onDismiss={() => onToggle?.()}><div ref={panelRef} className="git-status-panel" role="region" aria-label="Changed files" aria-busy={repositoryTabVisible && loadingPrSwitch} style={panelStyle}>{activePanel}<span className="git-status-tabs" role="tablist" aria-label="Branch views"><button type="button" role="tab" aria-selected={visibleTab === 'working'} onClick={() => setTab('working')}>Working</button><button type="button" role="tab" aria-label="PRs" aria-selected={visibleTab === 'prs'} aria-busy={repositoryPending || undefined} disabled={worktreeId === undefined || !repositoryReady} title={worktreeId === undefined ? 'Pull requests are listed for worktrees only' : undefined} onClick={() => { /* keep preloading while changing views */ setTab('prs'); }}>{repositoryPending ? <Skeleton className="git-tab-skeleton" /> : 'PRs'}</button><button type="button" role="tab" aria-label="Branches" aria-selected={visibleTab === 'branches'} aria-busy={repositoryPending || undefined} disabled={worktreeId === undefined || !repositoryReady} title={worktreeId === undefined ? 'Branches are listed for worktrees only' : undefined} onClick={() => { /* keep preloading while changing views */ setTab('branches'); }}>{repositoryPending ? <Skeleton className="git-tab-skeleton" /> : 'Branches'}</button></span></div></FlyoutPortal>}{removingBranch !== undefined && worktreeId !== undefined && <RemoveBranchDialog worktreeId={worktreeId} branch={removingBranch} onClose={() => setRemovingBranch(undefined)} onDeleted={branchRemoved} />}</span>;
+  return <span ref={wrapRef} className={`git-status-wrap${expanded ? ' expanded' : ''}`}><button className={`git-status-summary ${state}${pullRequest === undefined ? '' : ` has-pull-request status-${pullRequest.status}`}${review !== undefined ? ' review-ready' : ''}${review?.generating ? ' review-generating progress-border progress-peach' : configuredPullRequestBusy && configuredPullRequestColor !== undefined ? ` progress-border progress-${configuredPullRequestColor}` : ''}${review?.stale ? ' review-stale' : ''}`} type="button" aria-label={label} aria-busy={review?.generating || configuredPullRequestBusy || undefined} data-context-flyout aria-expanded={expanded} title={label} onClick={onToggle}><ProgressRing busy={review?.generating === true || configuredPullRequestBusy} /><span className="flyout-caret" aria-hidden="true" /><svg className="git-branch-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.5" /><circle cx="6" cy="19" r="2.5" /><circle cx="18" cy="7" r="2.5" /><path d="M6 7.5v9M18 9.5v1a6 6 0 0 1-6 6H6" /></svg><span className="git-status-dot" aria-hidden="true" /><span className="git-branch">{branch}</span><span className="git-status-separator" aria-hidden="true">·</span><span className="git-worktree-state">{stateLabel}</span>{/* retain compact pr indicators beside the prompt */}{pullRequest !== undefined && <PullRequestIndicators checks={pullRequest.checks} issues={pullRequest.issues} />}</button>{expanded && <FlyoutPortal onDismiss={() => onToggle?.()}><div ref={panelRef} className="git-status-panel" role="region" aria-label="Changed files" aria-busy={repositoryTabVisible && loadingPrSwitch} style={panelStyle}>{activePanel}<span className="git-status-tabs" role="tablist" aria-label="Branch views"><button type="button" role="tab" aria-selected={visibleTab === 'working'} onClick={() => setTab('working')}>Working</button><button type="button" role="tab" aria-label="Branches" aria-selected={visibleTab === 'branches'} aria-busy={repositoryPending || undefined} disabled={worktreeId === undefined || !repositoryReady} title={worktreeId === undefined ? 'Branches are listed for worktrees only' : undefined} onClick={() => { /* keep preloading while changing views */ setTab('branches'); }}>{repositoryPending ? <Skeleton className="git-tab-skeleton" /> : 'Branches'}</button></span></div></FlyoutPortal>}{removingBranch !== undefined && worktreeId !== undefined && <RemoveBranchDialog worktreeId={worktreeId} branch={removingBranch} onClose={() => setRemovingBranch(undefined)} onDeleted={branchRemoved} />}</span>;
 }
 
 // The Place a Workspace shows: the fields it reads from a Worktree, a directory-Project or Scratch
@@ -7015,8 +6942,7 @@ function WorkspaceGitStatus({ workspace, actions, onToggle }: { workspace: Works
   const { place, code, setGitExpanded } = workspace;
   const onReview = actions?.onReview;
   const onReviewCommit = actions?.onReviewCommit;
-  const onAddToPrompt = actions?.onAddToPrompt;
-  return <GitStatus {...actions} onAddToPrompt={onAddToPrompt === undefined ? undefined : text => { setGitExpanded(false); workspace.expansion.restore(); onAddToPrompt(text); workspace.carousel?.show('agent'); }} worktreeId={place.worktreeId} branch={place.branch} summary={place.gitStatus} prSummary={place.gitPrStatus} pullRequest={place.pullRequest} expanded={workspace.gitExpanded} onToggle={() => { onToggle?.(); setGitExpanded(value => !value); }} onOpenFile={(path, mode) => { setGitExpanded(false); code.openChanges(mode, path); }} onViewChanges={mode => { setGitExpanded(false); code.openChanges(mode); }} onViewCommit={commit => { setGitExpanded(false); code.openCommit(commit); }} onReview={onReview === undefined ? undefined : scope => { setGitExpanded(false); onReview(scope); }} onReviewCommit={onReviewCommit === undefined ? undefined : commit => { setGitExpanded(false); onReviewCommit(commit); }} />;
+  return <GitStatus {...actions} worktreeId={place.worktreeId} branch={place.branch} summary={place.gitStatus} prSummary={place.gitPrStatus} pullRequest={place.pullRequest} expanded={workspace.gitExpanded} onToggle={() => { onToggle?.(); setGitExpanded(value => !value); }} onOpenFile={(path, mode) => { setGitExpanded(false); code.openChanges(mode, path); }} onViewChanges={mode => { setGitExpanded(false); code.openChanges(mode); }} onViewCommit={commit => { setGitExpanded(false); code.openCommit(commit); }} onReview={onReview === undefined ? undefined : scope => { setGitExpanded(false); onReview(scope); }} onReviewCommit={onReviewCommit === undefined ? undefined : commit => { setGitExpanded(false); onReviewCommit(commit); }} />;
 }
 
 // Render one Place's panels in the resizable split: the agent panel first (while an Agent runs or
@@ -7082,7 +7008,15 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
   const stackPane = !stackPanel.open || place.worktreeId === undefined || (place.stack?.processes?.length ?? 0) === 0 ? null : <StackPanel worktreeId={place.worktreeId} title={stackName === undefined ? 'this worktree' : `${stackName.project} / ${stackName.worktree}`} stack={place.stack} selection={stackPanel.selection} onSelect={stackPanel.select} onClose={stackPanel.close} handlers={stackHandlers(place.worktreeId)} onOpenWorktree={onOpenWorktreeStack} onOpenTerminal={placeId === undefined ? undefined : (paneId, name) => { /* on a phone an already-open panel is scrolled to; a new one comes into view as it opens */ workspace.carousel?.show(paneId); requestTerminalFocus(placeId, { paneId, name }); }} readOutput={processOutput} clearOutput={clearProcessOutput} />;
   const githubProject = projectOfWorktree(projects, place.worktreeId);
   const githubWorktree = githubProject?.worktrees.find(worktree => worktree.id === place.worktreeId);
-  const githubPane = githubPanel.open ? <GithubPanel request={request} projectId={githubProject?.github === undefined ? undefined : githubProject.id} repository={githubProject?.github} worktreeId={place.worktreeId} main={githubWorktree?.main ?? true} branch={place.branch} hasPullRequest={place.pullRequest !== undefined} revision={githubListsRevision(serverStartedAt, githubRevision, githubProject === undefined ? [] : [githubProject])} focus={githubPanel.focus} onClose={githubPanel.close} onOpenWorktree={onOpenGithub} onNewWorktree={githubNewWorktree(git?.onNewWorktree)} onAddToPrompt={selectionActions.addToPrompt} /> : null;
+  // the Worktree strip's checkout readiness is the branch switch's own: a clean working tree
+  const removeWorktree = useContext(RemoveWorktreeContext);
+  const githubActions: StripActions | undefined = place.worktreeId === undefined ? undefined : {
+    notReady: place.gitStatus === undefined ? 'Git status unavailable' : place.gitStatus.files > 0 ? 'Commit or stash uncommitted changes first' : undefined,
+    review: review === undefined ? undefined : { open: review.open, generating: review.generating, onReview: review.onReview === undefined ? undefined : () => review.onReview?.('pr'), unavailable: review.unavailable ?? (place.gitPrStatus === undefined ? 'PR changes unavailable' : undefined) },
+    onRemove: removeWorktree,
+    onFeedback: feedback => git?.onOperationFeedback?.({ ...feedback, worktreeId: place.worktreeId })
+  };
+  const githubPane = githubPanel.open ? <GithubPanel request={request} projectId={githubProject?.github === undefined ? undefined : githubProject.id} repository={githubProject?.github} worktreeId={place.worktreeId} main={githubWorktree?.main ?? true} branch={place.branch} hasPullRequest={place.pullRequest !== undefined} revision={githubListsRevision(serverStartedAt, githubRevision, githubProject === undefined ? [] : [githubProject])} focus={githubPanel.focus} actions={githubActions} onClose={githubPanel.close} onOpenWorktree={onOpenGithub} onNewWorktree={githubNewWorktree(git?.onNewWorktree)} onAddToPrompt={selectionActions.addToPrompt} /> : null;
   return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} preview={previewPane} previewController={preview} review={reviewPanel} stack={stackPane} github={githubPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesLoaded} /></div></section></SelectionActionsContext.Provider>;
 }
 
@@ -7455,19 +7389,6 @@ function switchableBranches(values: unknown[]): SwitchableBranch[] {
     });
 }
 
-// explain one unavailable switch target
-function pullRequestCheckoutReason(pullRequest: SwitchablePullRequest, enabled: boolean, refreshFailed: boolean, checkedOutHere: boolean): string {
-  // prioritize stale remote data
-  if (refreshFailed) return 'Pull request list could not be refreshed';
-  // identify the current checkout
-  if (checkedOutHere) return 'Already checked out here';
-  // reject an unresolvable checkout owner
-  if (pullRequest.checkedOut && pullRequest.openIn === undefined) return 'Already open in another worktree';
-  // protect a dirty working copy
-  if (!enabled) return 'Commit or stash uncommitted changes first';
-  return pullRequest.checkedOut ? `Move PR #${pullRequest.number} here` : `Checkout PR #${pullRequest.number}`;
-}
-
 // name the worktree that already holds a switch target: a link that focuses it, or a static note when it is here or unresolved
 function SwitchOpenInLine({ openIn, here, operationPending, onSelectTarget }: { openIn?: PullRequestWorktree; here: boolean; operationPending: boolean; onSelectTarget: (target: DashboardTarget) => void }) {
   // the current worktree already holds it — nothing to switch to
@@ -7498,22 +7419,6 @@ function PullRequestChoiceRow({ pullRequest, here, pending, onSelectTarget, chil
 // the git flyout's secondary action that opens the New worktree dialog on one PR or branch row
 function NewWorktreeFromButton({ source, disabled, onClick }: { source: string; disabled: boolean; onClick: () => void }) {
   return <button className="switch-pr-action switch-pr-new-worktree icon-button outline-button" type="button" disabled={disabled} aria-label={`New worktree from ${source}`} title={`New worktree from ${source}…`} onClick={onClick}><svg className="more-menu-icon action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.add} /></svg></button>;
-}
-
-// the git flyout's checkout action for one pull request: switch to it, or move it here when held elsewhere
-function PullRequestCheckoutButton({ pullRequest, here, enabled, loading, refreshFailed, switchingPr, movingPr, onSwitch, onMove }: { pullRequest: SwitchablePullRequest; here: boolean; enabled: boolean; loading: boolean; refreshFailed: boolean; switchingPr?: number; movingPr?: number; onSwitch: (number: number) => void | Promise<void>; onMove: (number: number) => void | Promise<void> }) {
-  const operationPending = switchingPr !== undefined || movingPr !== undefined;
-  const busy = movingPr === pullRequest.number || switchingPr === pullRequest.number;
-  const checkoutReason = pullRequestCheckoutReason(pullRequest, enabled, refreshFailed, here);
-  // run one checkout transaction
-  const checkout = () => {
-    // ignore the current branch defensively
-    if (here) return;
-    // transfer occupied branches
-    if (pullRequest.checkedOut) return void onMove(pullRequest.number);
-    void onSwitch(pullRequest.number);
-  };
-  return <button className={`switch-pr-action switch-pr-checkout outline-button${progressBorder(busy, 'blue')}`} aria-busy={busy || undefined} disabled={loading || refreshFailed || operationPending || !enabled || pullRequest.checkedOut && (pullRequest.openIn === undefined || here)} title={checkoutReason} onClick={checkout}><ProgressRing busy={busy} />{movingPr === pullRequest.number ? 'Moving…' : switchingPr === pullRequest.number ? 'Checking out…' : 'Checkout'}</button>;
 }
 
 // explain one unavailable branch switch target
@@ -7570,21 +7475,6 @@ function BranchCheckoutActions({ branch, enabled, loading, refreshFailed, switch
     void onSwitch(branch.branch);
   };
   return <>{onDelete !== undefined && <button className="switch-pr-action switch-branch-delete icon-button outline-button" disabled={loading || operationPending} aria-label={`Delete ${branch.branch}`} title={`Review deletion safeguards for ${branch.branch}`} onClick={() => onDelete(branch)}><svg className="more-menu-icon action-icon-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={actionIconPaths.trash} /></svg></button>}<button className={`switch-pr-action switch-pr-checkout outline-button${progressBorder(busy, 'blue')}`} aria-busy={busy || undefined} disabled={loading || refreshFailed || operationPending || !enabled || (branch.checkedOut && branch.openIn === undefined)} title={checkoutReason} onClick={checkout}><ProgressRing busy={busy} />{movingBranch === branch.branch ? 'Moving…' : switchingBranch === branch.branch ? 'Checking out…' : 'Checkout'}</button></>;
-}
-
-// explain pull request availability
-function pullRequestStatusReason(loading: boolean, error: string | undefined, loaded: boolean, availability: RepositoryBranchList | undefined): string | undefined {
-  // show loading in the tab instead of repeating it in the header
-  if (loading) return undefined;
-  // preserve one actionable error
-  if (error !== undefined) return error;
-  // distinguish an unavailable endpoint
-  if (loaded && availability === undefined) return 'Pull requests unavailable.';
-  // report a repository without a GitHub origin
-  if (availability !== undefined && !availability.pullRequestsSupported) return 'Pull requests unavailable.';
-  // explain an empty owned list
-  if (availability?.pullRequests.length === 0) return availability.otherPullRequests.length > 0 ? 'No open pull requests by you.' : 'No open pull requests.';
-  return undefined;
 }
 
 // explain local branch availability
@@ -7790,7 +7680,7 @@ function AgentPlaceCard({ agent, agents, onSelectAgent, active, tabBar, renderNo
   // reserve Remote Agents repository updates for the reviewed host update flow
   const upstreamRebase = agent.projectId === 'remoteagents' ? null : <UpstreamRebaseNotification key={upstreamNotificationKey} notificationKey={upstreamNotificationKey} summary={agent.gitUpstream} onRebase={queueRebase} />;
   // the Agent's push, fixup and guided-review actions on the git status
-  const gitActions: WorkspaceGitActions = { worktreeId: agent.worktreeId, onAddToPrompt: text => addToPrompt(text), onReview: agent.worktreeId === undefined || reviewAgent === undefined ? undefined : review === undefined ? scope => onReview({ agentId: reviewAgent.id, worktreeId: agent.worktreeId!, scope }) : () => { pendingWorkspaceJumps.set(workspace.viewKey, 'review'); review.onOpen(); }, onReviewCommit: agent.worktreeId === undefined || reviewAgent === undefined ? undefined : commit => onReview({ agentId: reviewAgent.id, worktreeId: agent.worktreeId!, scope: 'commit', commit: commit.sha, commitSubject: commit.subject }), review, reviewUnavailable: review === undefined || reviewAgent === undefined ? reviewUnavailable : undefined, onSelectTarget, onNewWorktree, onOperationFeedback };
+  const gitActions: WorkspaceGitActions = { worktreeId: agent.worktreeId, onReview: agent.worktreeId === undefined || reviewAgent === undefined ? undefined : review === undefined ? scope => onReview({ agentId: reviewAgent.id, worktreeId: agent.worktreeId!, scope }) : () => { pendingWorkspaceJumps.set(workspace.viewKey, 'review'); review.onOpen(); }, onReviewCommit: agent.worktreeId === undefined || reviewAgent === undefined ? undefined : commit => onReview({ agentId: reviewAgent.id, worktreeId: agent.worktreeId!, scope: 'commit', commit: commit.sha, commitSubject: commit.subject }), review, reviewUnavailable: review === undefined || reviewAgent === undefined ? reviewUnavailable : undefined, onSelectTarget, onNewWorktree, onOperationFeedback };
   // selected output and Terminal text append to the current Agent's draft without queueing it
   const addToPrompt = (text: string) => setPromptDraft(agent.id, current => appendTextBlock(current, text));
   // the panel is keyed by Agent, so a switch swaps its output, draft, queue and pending actions
@@ -8617,7 +8507,7 @@ function WorktreeCard({ worktree, tabBar, renderNotifications, cleanupControl, t
     }
   };
   // guided review needs an Agent
-  const gitActions: WorkspaceGitActions = { reviewUnavailable: 'Launch agent to review', onAddToPrompt: text => addToPrompt(text), onSelectTarget: target => onNavigateWorktree(target.worktreeId), onNewWorktree, onOperationFeedback };
+  const gitActions: WorkspaceGitActions = { reviewUnavailable: 'Launch agent to review', onSelectTarget: target => onNavigateWorktree(target.worktreeId), onNewWorktree, onOperationFeedback };
   // a starting Agent (or a draft typed before launch) gets the agent panel; with none, the
   // Workspace shows only its other panels
   const starting = launching || restarting || startingNewTask;
@@ -10748,9 +10638,10 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   // each review renders only into the slot of the Worktree in view; the rest stay mounted, hidden
   const reviewPanel = Object.values(reviewSessions).map(({ launch, start, initialTour, initialCodeReview }) => {
     const { worktreeId } = launch;
+    const reviewProject = projectOfWorktree(data.projects, worktreeId);
     // the reviewed branch's open or draft pull request, which an All PR tour can post its feedback to
     const pullRequest = [data.agents.find(candidate => candidate.id === launch.agentId)?.pullRequest, worktrees.find(candidate => candidate.id === worktreeId)?.pullRequest].find(candidate => candidate !== undefined && candidate.status !== 'merged');
-    return <ReviewTourPanel key={`${worktreeId}:${initialTour?.fingerprint ?? `start-${start}`}`} launch={launch} request={request} {...(worktreeId === agent?.worktreeId ? { slot: reviewSlot } : {})} initialTour={initialTour} tourAgent={data.reviewTour?.agent} {...(initialTour === undefined ? {} : { initialCodeReview: initialCodeReview.review, initialCodeReviewJob: initialCodeReview.job })} codeReviewCapability={codeReviewCapability(data.codeReview)} pullRequest={pullRequest} onMinimize={() => minimizeReview(worktreeId)} onDismiss={() => dismissReview(worktreeId)} onIndicatorChange={indicator => setReviewIndicator(worktreeId, indicator)} onReady={() => notifyReviewReady(launch)} onOpenAgent={setActivateAgentId} onError={(message, detail) => showOperationFeedback({ tone: 'error', message, detail, worktreeId })} {...(data.editor === true ? { onOpenInEditor: (target: EditorTarget) => void openEditorAt(worktreeId, target) } : {})} />;
+    return <ReviewTourPanel key={`${worktreeId}:${initialTour?.fingerprint ?? `start-${start}`}`} launch={launch} request={request} {...(worktreeId === agent?.worktreeId ? { slot: reviewSlot } : {})} initialTour={initialTour} tourAgent={data.reviewTour?.agent} {...(initialTour === undefined ? {} : { initialCodeReview: initialCodeReview.review, initialCodeReviewJob: initialCodeReview.job })} codeReviewCapability={codeReviewCapability(data.codeReview)} pullRequest={pullRequest} projectId={reviewProject?.github === undefined ? undefined : reviewProject.id} onMinimize={() => minimizeReview(worktreeId)} onDismiss={() => dismissReview(worktreeId)} onIndicatorChange={indicator => setReviewIndicator(worktreeId, indicator)} onReady={() => notifyReviewReady(launch)} onOpenAgent={setActivateAgentId} onError={(message, detail) => showOperationFeedback({ tone: 'error', message, detail, worktreeId })} {...(data.editor === true ? { onOpenInEditor: (target: EditorTarget) => void openEditorAt(worktreeId, target) } : {})} />;
   });
   const reviewStartSheet = reviewStart === undefined ? null : <ReviewStartSheet target={reviewStart} prBase={data.agents.find(candidate => candidate.id === reviewStart.agentId)?.gitPrStatus?.base} request={request} tour={data.reviewTour} codeReview={codeReviewCapability(data.codeReview)} onStart={launchReview} onCancel={cancelReviewStart} />;
   const storedReview = agent?.worktreeId === undefined ? undefined : data.reviews?.find(review => review.worktreeId === agent.worktreeId);
@@ -11004,7 +10895,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const overviewPane = overviewOpen ? <GithubOverview request={request} revision={overviewRevision} phone={phone} onClose={closeOverview} onOpen={(worktreeId, item, column) => { setOverviewOpen(false); openGithubItem(worktreeId, { number: item.number, issue: column === 'issues', overview: true }); }} newWorktree={worktreeId => githubNewWorktree(openNewWorktreeFor(projectOfWorktree(data.projects, worktreeId)?.id))} /> : undefined;
   // preserve editor availability when no workspace can own a terminal yet
   if (items.length === 0) return withConfiguredButtons(<EditorConfiguredContext.Provider value={data.editor === true}><AdaptersContext.Provider value={data.adapters}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey="dashboard"><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<article className="agent-view cleanup-empty-view">{overviewPane ?? <section className="log-shell"><div className="log inactive-log"><ResizableLogSplit withSettings empty={<div className="empty-workspace"><h2>No sessions</h2></div>} /></div></section>}{tabBar}{overviewPane === undefined && <WorkspaceToolbar cleanupControl={cleanupControl} />}{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</article></main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></AdaptersContext.Provider></EditorConfiguredContext.Provider>);
-  return withConfiguredButtons(<AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><OpenAgentContext.Provider value={setActivateAgentId}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey={activeItemKey ?? 'dashboard'}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{overviewPane !== undefined ? <article className="agent-view">{overviewPane}{tabBar}</article> : <>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onCloseReview={worktreeId => { /* bulk close already owns the guard or deliberate-empty bypass */ minimizeReview(worktreeId, true); }} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNewWorktree={openNewWorktreeFor(agent.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onOpenGithub={openGithubItem} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNewWorktree={openNewWorktreeFor(item.worktree.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onOpenGithub={openGithubItem} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</>}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></OpenAgentContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>);
+  return withConfiguredButtons(<AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><OpenAgentContext.Provider value={setActivateAgentId}><RemoveWorktreeContext.Provider value={setRemoveWorktreeId}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey={activeItemKey ?? 'dashboard'}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{overviewPane !== undefined ? <article className="agent-view">{overviewPane}{tabBar}</article> : <>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onCloseReview={worktreeId => { /* bulk close already owns the guard or deliberate-empty bypass */ minimizeReview(worktreeId, true); }} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNewWorktree={openNewWorktreeFor(agent.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onOpenGithub={openGithubItem} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNewWorktree={openNewWorktreeFor(item.worktree.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onOpenGithub={openGithubItem} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</>}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></RemoveWorktreeContext.Provider></OpenAgentContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>);
 }
 
 // coordinate console session and update lifecycle

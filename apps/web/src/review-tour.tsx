@@ -409,9 +409,10 @@ export function ReviewPanelColumn({ onSlot }: { onSlot: (slot: ReviewPanelSlot |
 // (`initialCodeReviewJob`); `codeReviewCapability` lists the presets "Add AI review" offers, and
 // `tourAgent` names the agent that narrates the tour in its failures. `onOpenAgent` selects an
 // interactive Review run's Agent in the console, for its "Open pane" link. `pullRequest`, the reviewed
-// branch's open or draft pull request, lets an All PR tour's summary post its feedback there as a draft review.
+// branch's open or draft pull request, lets an All PR tour's summary post its feedback there as a draft review;
+// `projectId`, the reviewed Worktree's github.com Project, is where the overview reads its description.
 // `onError` raises a failure the panel has no place to show, such as a diff's lines not expanding.
-export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent, initialCodeReview, initialCodeReviewJob, codeReviewCapability, pullRequest, onMinimize, onDismiss, onIndicatorChange, onReady, onOpenInEditor, onOpenAgent, onError }: { launch: ReviewLaunch; request: ReviewRequest; slot?: ReviewPanelSlot; initialTour?: ReviewTour; tourAgent?: ReviewAgentKind; initialCodeReview?: CodeReview; initialCodeReviewJob?: ReviewJob; codeReviewCapability?: CodeReviewCapability; pullRequest?: ReviewPullRequest; onMinimize: () => void; onDismiss: () => Promise<boolean>; onIndicatorChange: (indicator: ReviewTourIndicator) => void; onReady: (tour: ReviewTour) => void; onOpenInEditor?: (target: EditorTarget) => void; onOpenAgent?: (agentId: string) => void; onError?: (message: string, detail: string) => void }) {
+export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent, initialCodeReview, initialCodeReviewJob, codeReviewCapability, pullRequest, projectId, onMinimize, onDismiss, onIndicatorChange, onReady, onOpenInEditor, onOpenAgent, onError }: { launch: ReviewLaunch; request: ReviewRequest; slot?: ReviewPanelSlot; initialTour?: ReviewTour; tourAgent?: ReviewAgentKind; initialCodeReview?: CodeReview; initialCodeReviewJob?: ReviewJob; codeReviewCapability?: CodeReviewCapability; pullRequest?: ReviewPullRequest; projectId?: string; onMinimize: () => void; onDismiss: () => Promise<boolean>; onIndicatorChange: (indicator: ReviewTourIndicator) => void; onReady: (tour: ReviewTour) => void; onOpenInEditor?: (target: EditorTarget) => void; onOpenAgent?: (agentId: string) => void; onError?: (message: string, detail: string) => void }) {
   // the tour's prose reads at the terminal font size, as its diffs do
   const fontSize = useTerminalFontSize();
   // the Comparison is fixed for the review's lifetime: changing it means starting again
@@ -488,20 +489,21 @@ export function ReviewTourPanel({ launch, request, slot, initialTour, tourAgent,
   // retain the latest notification callback
   useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
 
-  // read the pull request's description from GitHub; without one the overview is only the tour's
+  // read the pull request's description from the GitHub module's detail of it; without one the
+  // overview is only the tour's
   useEffect(() => {
-    if (pullRequestNumber === undefined) return;
+    if (pullRequestNumber === undefined || projectId === undefined) return;
     let active = true;
     void (async () => {
-      const response = await request(`/api/worktrees/${encodeURIComponent(launch.worktreeId)}/pull-request/comments`, undefined, false);
-      const description = (await responseBody(response)).description as { author?: unknown; body?: unknown; url?: unknown } | undefined;
+      const response = await request(`/api/projects/${encodeURIComponent(projectId)}/github/pulls/${pullRequestNumber}`, undefined, false);
+      const description = ((await responseBody(response)).pullRequest as { description?: { author?: unknown; body?: unknown; url?: unknown } } | undefined)?.description;
       if (!active || !response.ok || typeof description?.author !== 'string' || typeof description.body !== 'string' || typeof description.url !== 'string') return;
       // a pull request template's HTML comments are hidden on GitHub too
       const body = description.body.replace(/<!--[\s\S]*?-->/gu, '').trim();
       if (body !== '') setPullRequestDescription({ author: description.author, body, url: description.url });
     })();
     return () => { active = false; };
-  }, [launch.worktreeId, pullRequestNumber, request]);
+  }, [projectId, pullRequestNumber, request]);
 
   // fold the step's notes into the drawer by the panel's own width; a hidden panel keeps its layout
   useLayoutEffect(() => {

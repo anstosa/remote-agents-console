@@ -213,14 +213,10 @@ test('keeps branch and agent connection skeletons free of loading borders', asyn
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole('button', { name: /^Git status:/u }).click();
   const branchPanel = page.getByRole('region', { name: 'Changed files' });
-  const pullRequests = branchPanel.getByRole('tab', { name: 'PRs', exact: true });
   const branches = branchPanel.getByRole('tab', { name: 'Branches', exact: true });
   try {
-    await expect(pullRequests).toBeDisabled();
     await expect(branches).toBeDisabled();
-    await expect(pullRequests).toHaveAttribute('aria-busy', 'true');
     await expect(branches).toHaveAttribute('aria-busy', 'true');
-    await expect(pullRequests.locator('.git-tab-skeleton')).toHaveCount(1);
     await expect(branches.locator('.git-tab-skeleton')).toHaveCount(1);
     await expect(branchPanel.locator('.progress-border, .update-progress-ring')).toHaveCount(0);
     await expect(page.locator('.progress-loading:has(> .update-progress-ring)')).toHaveCount(0);
@@ -232,7 +228,6 @@ test('keeps branch and agent connection skeletons free of loading borders', asyn
     // release repository choices during failed assertions too
     branchesGate.release();
   }
-  await expect(pullRequests.locator(':scope > .update-progress-ring')).toHaveCount(0);
   await expect(branches.locator(':scope > .update-progress-ring')).toHaveCount(0);
   await expect(connection).toBeVisible();
   await page.emulateMedia({ reducedMotion: 'no-preference' });

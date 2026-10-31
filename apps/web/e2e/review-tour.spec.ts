@@ -1769,9 +1769,10 @@ const postEnvelope = { scope: 'pr', includeTests: false, includeDocs: false, fin
 
 // Restore the post tour on a Worktree with a pull request (or, with null, none), with `stored`
 // beside it in the stored review (a Code review, say); `respond` answers each post. The returned `comparison` is the Worktree's current one: moving its fingerprint makes the
-// tour stale, and Regenerate builds the tour again with it. `comments` answers the pull request's
-// comments (its description among them), and `start: false` leaves the tour on its overview.
-async function openPostTour(page: Page, { scope = 'pr', pullRequest = openPullRequest as Record<string, unknown> | null, stored = {}, comments, start = true, respond = (_post: PrReviewPost, route: Route) => route.fulfill({ status: 500, json: { status: 'error', error: { code: 'post_failed', retryable: false } } }) }: { scope?: 'pr' | 'working'; pullRequest?: Record<string, unknown> | null; stored?: Record<string, unknown>; comments?: Record<string, unknown>; start?: boolean; respond?: (post: PrReviewPost, route: Route) => Promise<void> } = {}): Promise<{ dialog: ReturnType<Page['getByRole']>; posts: PrReviewPost[]; prompts: string[]; comparison: { fingerprint: string } }> {
+// tour stale, and Regenerate builds the tour again with it. `detail` answers the GitHub panel's read
+// of the pull request (its description among it), with the Worktree in a github.com Project, and
+// `start: false` leaves the tour on its overview.
+async function openPostTour(page: Page, { scope = 'pr', pullRequest = openPullRequest as Record<string, unknown> | null, stored = {}, detail, start = true, respond = (_post: PrReviewPost, route: Route) => route.fulfill({ status: 500, json: { status: 'error', error: { code: 'post_failed', retryable: false } } }) }: { scope?: 'pr' | 'working'; pullRequest?: Record<string, unknown> | null; stored?: Record<string, unknown>; detail?: Record<string, unknown>; start?: boolean; respond?: (post: PrReviewPost, route: Route) => Promise<void> } = {}): Promise<{ dialog: ReturnType<Page['getByRole']>; posts: PrReviewPost[]; prompts: string[]; comparison: { fingerprint: string } }> {
   const posts: PrReviewPost[] = [];
   const prompts: string[] = [];
   const tour = { ...postTour, scope, base: scope === 'pr' ? 'origin/main' : 'HEAD' };
@@ -1783,7 +1784,7 @@ async function openPostTour(page: Page, { scope = 'pr', pullRequest = openPullRe
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, ...(pullRequest === null ? {} : { pullRequest }) }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, ...(pullRequest === null ? {} : { pullRequest }) }], projects: detail === undefined ? [] : [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour, ...stored } } });
     if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope, base: tour.base, includeTests: false, includeDocs: false, fingerprint: comparison.fingerprint } } });
@@ -1791,7 +1792,7 @@ async function openPostTour(page: Page, { scope = 'pr', pullRequest = openPullRe
     if (url.pathname === '/api/review-tour/jobs/job-regen') return request.method() === 'DELETE' ? route.fulfill({ status: 204 }) : route.fulfill({ json: { status: 'ready', tour: { ...tour, fingerprint: comparison.fingerprint } } });
     if (url.pathname === '/api/agents/agent-1/review-tour/pr-review' && request.method() === 'POST') { const post = request.postDataJSON() as PrReviewPost; posts.push(post); return respond(post, route); }
     if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') { prompts.push((request.postDataJSON() as { prompt: string }).prompt); return route.fulfill({ status: 204 }); }
-    if (url.pathname === '/api/worktrees/owen/pull-request/comments' && comments !== undefined) return route.fulfill({ json: comments });
+    if (url.pathname === '/api/projects/repo/github/pulls/123' && detail !== undefined) return route.fulfill({ json: detail });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
   await page.goto('/');
@@ -1889,8 +1890,9 @@ test('keeps one review per Worktree while another generates', async ({ page }) =
 });
 
 test('shows the pull request description on an All PR tour overview', async ({ page }) => {
-  const comments = { number: 123, url: openPullRequest.url, threads: [], reviews: [], comments: [], description: { id: 'PR1', author: 'octocat', bot: false, body: '<!-- template hint -->\nRetry with **backoff**.', createdAt: '2026-10-01T00:00:00Z', url: openPullRequest.url } };
-  const { dialog } = await openPostTour(page, { comments, start: false });
+  // the GitHub module's detail of the pull request
+  const detail = { fetchedAt: Date.now(), pullRequest: { number: 123, url: openPullRequest.url, threads: [], reviews: [], comments: [], description: { id: 'PR1', author: 'octocat', bot: false, body: '<!-- template hint -->\nRetry with **backoff**.', createdAt: '2026-10-01T00:00:00Z', url: openPullRequest.url } } };
+  const { dialog } = await openPostTour(page, { detail, start: false });
   const description = dialog.locator('.review-tour-pr-description');
   await expect(description.getByText('by @octocat')).toBeVisible();
   await expect(description.locator('strong', { hasText: 'backoff' })).toBeVisible();
@@ -1899,7 +1901,7 @@ test('shows the pull request description on an All PR tour overview', async ({ p
 
   // a Working tour leaves the pull request out of its overview
   await page.unrouteAll({ behavior: 'ignoreErrors' });
-  const working = await openPostTour(page, { scope: 'working', comments, start: false });
+  const working = await openPostTour(page, { scope: 'working', detail, start: false });
   await expect(working.dialog.getByRole('button', { name: 'Start tour' })).toBeVisible();
   await expect(working.dialog.locator('.review-tour-pr-description')).toHaveCount(0);
 });

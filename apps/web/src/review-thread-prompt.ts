@@ -6,7 +6,7 @@ import type { PullRequestReviewThread } from './pull-request-comments.js';
 export const hunkLines = 10;
 
 export const threadLines = (thread: PullRequestReviewThread): string => thread.line === undefined ? '' : thread.startLine === undefined ? `${thread.line}` : `${thread.startLine}-${thread.line}`;
-export const quote = (text: string): string => text.split('\n').map(line => line === '' ? '>' : `> ${line}`).join('\n');
+const quote = (text: string): string => text.split('\n').map(line => line === '' ? '>' : `> ${line}`).join('\n');
 // a fence longer than any backtick run inside, so a hunk that itself holds ``` stays one block
 const fence = (text: string): string => '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/gu)].map(match => match[0].length + 1)));
 

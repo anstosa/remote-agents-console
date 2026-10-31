@@ -264,7 +264,7 @@ The operator's unsubmitted GitHub review on a Pull request, which a Review tour'
 _Avoid_: Pending review, review draft, submitted review
 
 **Review thread**:
-Comments on a Pull request anchored to lines of one file, with their replies. The git flyout's PR comments list shows the unresolved ones, alongside review summaries and conversation comments, and adds the ones the operator picks to the composer. From the GitHub panel the operator replies to one, published at once rather than added to their Draft review, or resolves it; for the Pull request checked out in the current Worktree, they can also hand picked ones to its Agent, in the composer or after a configured prompt button's prompt.
+Comments on a Pull request anchored to lines of one file, with their replies. The GitHub panel's PR detail shows the unresolved, current ones, alongside review summaries and conversation comments. From the GitHub panel the operator replies to one, published at once rather than added to their Draft review, or resolves it; for the Pull request checked out in the current Worktree, they can also hand picked ones to its Agent, in the composer or after a configured prompt button's prompt.
 _Avoid_: Inline comment (a Review tour's own), PR comment (for a thread)
 
 ### GitHub

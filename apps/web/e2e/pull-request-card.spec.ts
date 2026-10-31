@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-test('renders linked pull request cards with draft, open, and merged status colors', async ({ page }) => {
+test('renders each pull request card as its status icon and number, linking to GitHub', async ({ page }) => {
   await page.goto('/');
   await page.setContent('<link rel="stylesheet" href="/src/styles.css"><div id="root"></div>');
   await page.evaluate(async () => {
@@ -13,14 +13,14 @@ test('renders linked pull request cards with draft, open, and merged status colo
   const open = cards.getByRole('link', { name: 'Open pull request #8: Open card' });
   const merged = cards.getByRole('link', { name: 'Merged pull request #9: Merged card' });
   await expect(draft).toHaveAttribute('href', 'https://github.com/octo/repo/pull/7');
-  await expect(open).toContainText('#8Open card');
-  await expect(merged).toContainText('#9Merged card');
+  await expect(open).toHaveText('#8');
+  await expect(merged).toHaveText('#9');
   await page.mouse.move(1000, 1000);
   await expect(draft).toHaveCSS('color', 'rgb(147, 153, 178)');
   await expect(open).toHaveCSS('color', 'rgb(166, 227, 161)');
   await expect(merged).toHaveCSS('color', 'rgb(203, 166, 247)');
 
-  const verticalCenters = await open.locator('.pull-request-card-icon, strong, span').evaluateAll(elements => {
+  const verticalCenters = await open.locator('.pull-request-card-icon, strong').evaluateAll(elements => {
     const card = elements[0].closest('.pull-request-card')!.getBoundingClientRect();
     const cardCenter = card.top + card.height / 2;
     return elements.map(element => {
@@ -45,10 +45,6 @@ test('renders linked pull request cards with draft, open, and merged status colo
   await expect(cards.getByRole('img', { name: 'CI checks running' })).toHaveCSS('color', 'rgb(250, 179, 135)');
   await expect(cards.getByRole('img', { name: 'CI checks failed' })).toHaveCSS('color', 'rgb(243, 139, 168)');
   await expect(cards.getByRole('img', { name: 'Unresolved review comments' })).toBeVisible();
-  const fixup = cards.getByRole('button', { name: 'Queue $fixup' });
-  // keep action controls outside pr links
-  await expect(cards.locator('.pull-request-card button')).toHaveCount(0);
-  await expect(fixup).toBeVisible();
-  await fixup.click();
-  await expect(fixup).toContainText('Queued');
+  // the cards hold no indicators or actions of their own
+  await expect(cards.locator('.pull-request-card :is(button, .pull-request-issues)')).toHaveCount(0);
 });

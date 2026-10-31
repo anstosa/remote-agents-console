@@ -302,7 +302,7 @@ test('shows This Worktree\'s pull request beside the list on a desktop, in full'
   await expect(pull.getByRole('link', { name: 'Open on GitHub' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/214');
   await expect(pull.locator('.github-detail-meta')).toHaveText(/^open@tonyfeature → mainupdated 10m ago$/u);
   await expect(pull.locator('.overview-chips').first()).toHaveText('@mira on service.ts');
-  await expect(pull.locator('.github-strip')).toHaveText('Checked out here, in feature.');
+  await expect(pull.locator('.github-strip > span')).toHaveText('Checked out here, in feature.');
   await expect(pull.getByRole('link', { name: 'Merge' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/214');
   // every section starts open
   for (const name of ['Review threads', 'Checks', 'Reviewers', 'Linked issues', 'Description', 'Review summaries', 'Conversation']) await expect(pull.getByRole('button', { name: new RegExp(`^${name}`, 'u') })).toHaveAttribute('aria-expanded', 'true');
@@ -382,10 +382,10 @@ test('goes to the Worktree holding a pull request, keeping the panel on it', asy
   // the main worktree pins nothing, so nothing is picked yet
   await expect(panel.getByText('Pick a pull request or issue.')).toBeVisible();
   await panel.getByRole('button', { name: /^Pull request #214/u }).click();
-  await expect(detail(page).locator('.github-strip')).toHaveText('Checked out in feature.Go to Worktree');
+  await expect(detail(page).locator('.github-strip > span')).toHaveText('Checked out in feature.');
   await detail(page).getByRole('button', { name: 'Go to Worktree' }).click();
   await expect(page.getByRole('tab', { name: /^feature/u })).toHaveAttribute('aria-selected', 'true');
-  await expect(detail(page).locator('.github-strip')).toHaveText('Checked out here, in feature.');
+  await expect(detail(page).locator('.github-strip > span')).toHaveText('Checked out here, in feature.');
   // not an Overview arrival
   await expect(panel.locator('.overview-row.focus')).toHaveCount(0);
 });

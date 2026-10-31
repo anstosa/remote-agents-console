@@ -128,6 +128,10 @@ test('keeps the current pull request in the Working footer and queues one active
   const mode = footer.getByRole('group', { name: 'Git change view' });
   await expect(footer.locator(':scope > .git-status-actions + .pull-request-card + .git-status-mode')).toHaveCount(1);
   await expect(card.getByRole('link', { name: `Open pull request #812: ${longTitle}` })).toHaveAttribute('href', activePullRequest.url);
+  // only the status icon and number: the summary button above carries the indicators
+  await expect(card).toHaveText('#812');
+  await expect(card.locator('.pull-request-card-icon')).toBeVisible();
+  await expect(card.locator('.pull-request-issues')).toHaveCount(0);
   const [footerBox, actionsBox, cardBox, modeBox, reviewBox, pushBox, allPrBox] = await Promise.all([
     renderedBox(footer), renderedBox(actions), renderedBox(card), renderedBox(mode), renderedBox(actions.getByRole('button', { name: 'Review', exact: true })), renderedBox(actions.getByRole('button', { name: 'Finish and PR', exact: true })), renderedBox(mode.getByRole('button', { name: 'All PR' }))
   ]);
@@ -141,8 +145,6 @@ test('keeps the current pull request in the Working footer and queues one active
   expect(Math.abs(allPrBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);
   expect(cardBox.x).toBeGreaterThanOrEqual(footerBox.x);
   expect(cardBox.x + cardBox.width).toBeLessThanOrEqual(footerBox.x + footerBox.width);
-  const titleOverflow = await card.locator('.pull-request-card-main > span').evaluate(element => { /* measure the long title */ return { clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }; });
-  expect(titleOverflow.scrollWidth).toBeGreaterThan(titleOverflow.clientWidth);
 
   const working = mode.getByRole('button', { name: 'Working' });
   const allPr = mode.getByRole('button', { name: 'All PR' });
@@ -150,7 +152,9 @@ test('keeps the current pull request in the Working footer and queues one active
   await expect(card).toBeVisible();
   await allPr.click();
   await expect(card).toBeVisible();
-  await panel.getByRole('tab', { name: 'PRs', exact: true }).click();
+  // pull requests are the GitHub panel's: no tab lists them here
+  await expect(panel.getByRole('tab')).toHaveText(['Working', 'Branches']);
+  await panel.getByRole('tab', { name: 'Branches', exact: true }).click();
   await expect(panel.locator('.pull-request-card')).toHaveCount(0);
   await panel.getByRole('tab', { name: 'Working', exact: true }).click();
   await expect(card).toBeVisible();
@@ -158,8 +162,8 @@ test('keeps the current pull request in the Working footer and queues one active
   // keep the standalone fixup immediately after push
   const fixup = actions.getByRole('button', { name: '$fixup', exact: true });
   await expect(actions.locator('.configured-pull-request-actions .configured-button')).toHaveCount(2);
-  await expect(card.getByRole('button')).toHaveCount(1);
-  await expect(card.getByRole('button', { name: 'Show PR comments' })).toBeVisible();
+  // no comments toggle: the GitHub panel shows the threads
+  await expect(card.getByRole('button')).toHaveCount(0);
   await fixup.click();
   await expect.poll(() => promptRequests).toBe(1);
   await expect(panel).toHaveCount(0);
@@ -253,23 +257,6 @@ test('floats compact branch indicators from the same corners at every width', as
       pageWidth
     };
   };
-  // keep card indicators alongside their main content at every breakpoint
-  const expectCardIndicatorsInline = async (card: Locator) => {
-    const issues = card.locator(':scope > .pull-request-issues');
-    const [cardBox, mainBox, issuesBox] = await Promise.all([
-      renderedBox(card), renderedBox(card.locator(':scope > .pull-request-card-main')), renderedBox(card.locator(':scope > .pull-request-issues'))
-    ]);
-    const indicatorBoxes = await Promise.all((await issues.locator(':scope > i').all()).map(indicator => { /* measure one card status */ return renderedBox(indicator); }));
-    const glyphBoxes = await Promise.all((await issues.locator(':scope > i > svg').all()).map(glyph => { /* measure one card glyph */ return renderedBox(glyph); }));
-    expect(mainBox.x + mainBox.width).toBeLessThanOrEqual(issuesBox.x + 1);
-    expect(Math.abs(mainBox.y + mainBox.height / 2 - issuesBox.y - issuesBox.height / 2)).toBeLessThanOrEqual(1);
-    expect(issuesBox.x).toBeGreaterThanOrEqual(cardBox.x);
-    expect(issuesBox.x + issuesBox.width).toBeLessThanOrEqual(cardBox.x + cardBox.width + 1);
-    expect(issuesBox.y).toBeGreaterThanOrEqual(cardBox.y);
-    expect(issuesBox.y + issuesBox.height).toBeLessThanOrEqual(cardBox.y + cardBox.height + 1);
-    expect(indicatorBoxes.every(box => { /* retain normal card status controls */ return box.width > 16 && box.height > 16; })).toBe(true);
-    expect(glyphBoxes.every(box => { /* retain normal card status glyphs */ return box.width >= 15 && box.height >= 15; })).toBe(true);
-  };
   // switch through the phone sheet or the labelled desktop tabs
   const switchWorkspace = async (label: RegExp) => {
     const phone = await page.evaluate(() => { /* use the app's phone breakpoint */ return innerWidth <= 768; });
@@ -329,8 +316,8 @@ test('floats compact branch indicators from the same corners at every width', as
     const panel = page.getByRole('region', { name: 'Changed files' });
     const card = panel.locator('.git-status-panel-footer > .pull-request-card');
     await expect(panel).toBeVisible();
-    await expect(card.locator(':scope > .pull-request-issues')).toBeVisible();
-    await expectCardIndicatorsInline(card);
+    await expect(card).toHaveText('#812');
+    await expect(card.locator('.pull-request-issues')).toHaveCount(0);
     // keep card evidence beside the requested toolbar artifacts
     if (width === 390 || width === 1440) await page.screenshot({ path: testInfo.outputPath(`branch-card-${width}.png`), fullPage: true });
     await page.mouse.click(4, 4);
@@ -378,7 +365,7 @@ test('keeps fixup pending across popup and tab roundtrips', async ({ page }) => 
   await branch.click();
   await expect(fixup).toBeDisabled();
   await fixup.evaluate(button => { /* attempt a native duplicate submission */ button.click(); });
-  await panel.getByRole('tab', { name: 'PRs', exact: true }).click();
+  await panel.getByRole('tab', { name: 'Branches', exact: true }).click();
   await panel.getByRole('tab', { name: 'Working', exact: true }).click();
   await expect(fixup).toBeDisabled();
   await fixup.evaluate(button => { /* attempt another native duplicate submission */ button.click(); });
@@ -441,8 +428,7 @@ test('stacks standard-height Working footer controls at 375px without growing th
   ]);
   expect(actionsBox.y + actionsBox.height).toBeLessThanOrEqual(cardBox.y + 1);
   expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(modeBox.y + 1);
-  expect(Math.abs(actionsBox.width - cardBox.width)).toBeLessThanOrEqual(1);
-  expect(Math.abs(modeBox.width - cardBox.width)).toBeLessThanOrEqual(1);
+  expect(Math.abs(modeBox.width - actionsBox.width)).toBeLessThanOrEqual(1);
   // retain standard action heights on narrow screens
   expect(Math.abs(reviewBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);
   expect(Math.abs(workingBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);
@@ -452,23 +438,15 @@ test('stacks standard-height Working footer controls at 375px without growing th
   expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(375);
   expect(await page.evaluate(() => { /* measure page overflow */ return document.documentElement.scrollWidth; })).toBeLessThanOrEqual(375);
 
-  const cardMain = await renderedBox(card.locator('.pull-request-card-main'));
-  const cardIndicators = await renderedBox(card.locator(':scope > .pull-request-issues'));
   const fixup = await renderedBox(actions.getByRole('button', { name: '$fixup', exact: true }));
   const push = await renderedBox(actions.getByRole('button', { name: 'Finish and PR', exact: true }));
-  // keep pr content on one row while fixes stay beside push
+  // keep the pr on one standard-height row while fixes stay beside push
   expect(Math.abs(cardBox.height - attachmentBox.height)).toBeLessThanOrEqual(1);
-  expect(cardMain.y + cardMain.height / 2).toBeCloseTo(cardIndicators.y + cardIndicators.height / 2, 0);
   expect(fixup.y).toBeCloseTo(push.y, 0);
   expect(fixup.x).toBeGreaterThanOrEqual(push.x + push.width);
   expect(fixup.height).toBeCloseTo(attachmentBox.height, 0);
-  await expect(card.getByRole('button')).toHaveCount(1);
-  await expect(card.locator('.pull-request-card-main > span')).toHaveCount(1);
-  await expect(card.locator('.pull-request-card-main > span')).toHaveCSS('text-overflow', 'ellipsis');
-  // verify truncation instead of a wrapped title
-  const title = await card.locator('.pull-request-card-main > span').evaluate(element => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
-  expect(title.clientWidth).toBeGreaterThan(0);
-  expect(title.scrollWidth).toBeGreaterThan(title.clientWidth);
+  await expect(card.getByRole('button')).toHaveCount(0);
+  await expect(card).toHaveText('#812');
 
   await page.setViewportSize({ width: 667, height: 320 });
   await expect(panel).toHaveCSS('overflow-y', 'auto');

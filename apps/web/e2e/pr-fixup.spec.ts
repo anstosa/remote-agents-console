@@ -37,9 +37,11 @@ test('dispatches a configured $fixup beside a pull request with detected issues'
   });
 
   await page.goto('/');
-  await page.getByRole('button', { name: /^Git status:/u }).click();
+  const summary = page.getByRole('button', { name: /^Git status:/u });
+  await expect(summary.getByRole('img', { name: 'CI checks failed' })).toBeVisible();
+  await summary.click();
   const panel = page.getByRole('region', { name: 'Changed files' });
-  await expect(panel.getByRole('img', { name: 'CI checks failed' })).toBeVisible();
+  await expect(panel.getByRole('link', { name: 'Open pull request #42: Repair this PR' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/42');
   const fixup = panel.getByRole('button', { name: '$fixup', exact: true });
   await expect(fixup).toBeVisible();
   await expect(panel.getByRole('button', { name: 'Queue $fixup' })).toHaveCount(0);

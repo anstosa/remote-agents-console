@@ -618,16 +618,7 @@ export class GithubService {
     // an open pull request past the Overview's first page is still mine
     const fromOverview = new Set([...mine, ...reviews].map(item => item.number));
     const rest = open.filter(pull => !fromOverview.has(pull.number));
-    // each Worktree whose branch's pull request merged or closed, with none open
-    const projects = new Set((await this.projectRepositories()).filter(found => repositoryKey(found.repository) === key).map(found => found.project.id));
-    const done = this.worktrees().flatMap(worktree => {
-      const branch = worktree.branch === undefined || !projects.has(worktree.projectId) ? undefined : this.branches.get(branchKey(repository, worktree.branch));
-      if (branch === undefined) return [];
-      const held = [...open, ...branch.pulls ?? []].filter(pull => this.holds(branch, pull));
-      // the latest merged before one closed without merging, as the branch's summary picks
-      const last = held.some(pull => pull.state === 'open') ? undefined : held.find(pull => pull.state === 'merged') ?? held[0];
-      return last === undefined ? [] : [row(last, { kind: 'worktree', worktreeId: worktree.id, label: worktree.label })];
-    });
+    const done = (await this.finished(repository)).map(({ worktree, pull }) => row(pull, { kind: 'worktree', worktreeId: worktree.id, label: worktree.label }));
     const listedIssues = new Set(assigned.map(item => item.number));
     return {
       mine: [...mine, ...rest.filter(pull => pull.mine).map(pull => row(pull))], reviews, other: rest.filter(pull => !pull.mine).map(pull => row(pull)), done,
@@ -639,6 +630,22 @@ export class GithubService {
       // as old as the older of the two reads it is made of
       ...fetched({ fetchedAt: overview.fetchedAt === undefined || entry.fetchedAt === undefined ? entry.fetchedAt ?? overview.fetchedAt : Math.min(entry.fetchedAt, overview.fetchedAt), problem: entry.problem ?? overview.problem })
     };
+  }
+
+  // each of the repository's Worktrees whose branch's pull requests merged or closed, with none
+  // open, and the one it finished with: the latest merged before one closed without merging, as
+  // the branch's summary picks
+  private async finished(repository: GithubRepository): Promise<{ worktree: Worktree; pull: Pull }[]> {
+    const key = repositoryKey(repository);
+    const projects = new Set((await this.projectRepositories()).filter(found => repositoryKey(found.repository) === key).map(found => found.project.id));
+    const open = this.repositories.get(key)?.open ?? [];
+    return this.worktrees().flatMap(worktree => {
+      const branch = worktree.branch === undefined || !projects.has(worktree.projectId) ? undefined : this.branches.get(branchKey(repository, worktree.branch));
+      if (branch === undefined) return [];
+      const held = [...open, ...branch.pulls ?? []].filter(pull => this.holds(branch, pull));
+      const last = held.some(pull => pull.state === 'open') ? undefined : held.find(pull => pull.state === 'merged') ?? held[0];
+      return last === undefined ? [] : [{ worktree, pull: last }];
+    });
   }
 
   /**
@@ -737,7 +744,14 @@ export class GithubService {
       return readDetail(repository, at(payload, 'data', 'repository', 'pullRequest')) ?? { kind: 'failing', message: graphqlError(payload, detailAction).message };
     });
     const pull = entry.data;
-    const destination = pull === undefined ? undefined : await this.holder(repository, [{ number, branch: pull.branch, onOrigin: pull.headOnOrigin }], undefined, project);
+    let destination: OverviewDestination | undefined;
+    if (pull?.state === 'open') destination = await this.holder(repository, [{ number, branch: pull.branch, onOrigin: pull.headOnOrigin }], undefined, project);
+    else if (pull !== undefined) {
+      // a merged or closed one only in a Worktree whose branch finished with it, at its final head
+      const finished = (await this.finished(repository)).filter(found => found.pull.number === number && found.worktree.sha?.toLowerCase() === pull.headSha).map(found => found.worktree);
+      const holder = finished.find(worktree => worktree.projectId === project) ?? finished[0];
+      if (holder !== undefined) destination = { kind: 'worktree', worktreeId: holder.id, label: holder.label };
+    }
     return { ...(pull === undefined ? {} : { pullRequest: { ...pull, ...(destination === undefined ? {} : { destination }) } }), ...fetched(entry) };
   }
 

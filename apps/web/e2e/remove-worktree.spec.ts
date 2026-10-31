@@ -154,6 +154,9 @@ test('offers a closed pull request worktree for removal through the Remove dialo
   const merged = launcher.getByRole('button', { name: 'PR merged · Remove Repo · feat', exact: true });
   await expect(merged).toHaveText('PR merged · Remove');
   await expect(merged).toBeEnabled();
+  // orange, as the GitHub panel's Remove Worktree…
+  await page.mouse.move(0, 0);
+  await expect(merged).toHaveCSS('background-color', 'rgb(250, 179, 135)');
   const closed = launcher.getByRole('button', { name: 'PR closed · Remove Repo · held', exact: true });
   await expect(closed).toBeDisabled();
   await expect(closed).toHaveAttribute('title', 'Locked worktrees cannot be removed');
