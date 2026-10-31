@@ -57,13 +57,13 @@ const details: Record<string, unknown> = {
       { id: 't3', path: 'src/app.ts', line: 3, resolved: true, outdated: false, diffHunk: '', comments: [comment('c5', 'kai', 'Done.')] }
     ],
     checkRuns: [{ name: 'build', status: 'passed', url: 'https://github.com/octo/repo/actions/runs/1' }, { name: 'test', status: 'failed', url: 'https://github.com/octo/repo/actions/runs/2' }, { name: 'lint', status: 'pending' }],
-    reviewers: [{ login: 'mira', state: 'changes' }, { login: 'kai', state: 'approved', newCommits: true }, { login: 'core', team: true, requested: true }],
+    reviewers: [{ login: 'mira', id: 'U_mira', state: 'changes' }, { login: 'kai', id: 'U_kai', state: 'approved', newCommits: true }, { login: 'core', team: true, requested: true }],
     linkedIssues: [{ number: 201, title: 'GitHub PR dashboard', url: 'https://github.com/octo/repo/issues/201', state: 'open' }],
     reviews: [{ ...comment('r1', 'mira', 'A few notes inline.'), state: 'CHANGES_REQUESTED' }],
     comments: [comment('i1', 'codecov', 'Coverage 91%', { bot: true })]
   }) },
   'pulls/231': { fetchedAt: Date.now(), pullRequest: pullDetail(231, 'Needs a rebase', { mergeable: 'conflicting', draft: true }) },
-  'pulls/90': { fetchedAt: Date.now(), pullRequest: pullDetail(90, 'Handle redacted events', { author: 'kai', mine: false }) },
+  'pulls/90': { fetchedAt: Date.now(), pullRequest: pullDetail(90, 'Handle redacted events', { author: 'kai', mine: false, reviewers: [{ login: 'mira', id: 'U_mira', state: 'commented', newCommits: true }] }) },
   'issues/201': { fetchedAt: Date.now(), issue: { repository: 'octo/repo', number: 201, title: 'GitHub PR dashboard', url: 'https://github.com/octo/repo/issues/201', state: 'open', author: 'jo', updatedAt: minutesAgo(60), body: 'One place for every PR.', labels: ['feature'], linkedPullRequests: [{ number: 214, title: 'Serve GitHub lists from one cached poll', url: 'https://github.com/octo/repo/pull/214', state: 'open', draft: false }], destination: feature } },
   'issues/11': { fetchedAt: Date.now(), issue: { repository: 'octo/repo', number: 11, title: 'Launcher search ignores Notes', url: 'https://github.com/octo/repo/issues/11', state: 'open', author: 'jo', body: '', labels: [], linkedPullRequests: [] } }
 };
@@ -288,7 +288,7 @@ test('shows skeleton rows, the Overview\'s no-token card, and a stale banner wit
 
 const detail = (page: Page) => page.getByRole('region', { name: 'GitHub', exact: true }).locator('.github-detail');
 
-test('shows This Worktree\'s pull request beside the list on a desktop, read-only and in full', async ({ page }) => {
+test('shows This Worktree\'s pull request beside the list on a desktop, in full', async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 1000 });
   const detailReads: string[] = [];
   await mount(page, [lists], [], [], { revision: 1 }, detailReads);
@@ -310,18 +310,18 @@ test('shows This Worktree\'s pull request beside the list on a desktop, read-onl
   // unresolved, current threads by file, each with its hunk and who spoke last; bots like anyone else
   const threads = pull.getByRole('region', { name: 'Review threads' });
   await expect(threads.locator('.github-thread-file')).toHaveText(['src/github/github.ts', 'src/github/service.ts']);
-  await expect(threads.locator('.github-thread-bar')).toHaveText(['waiting on you · @coderabbit spoke last', 'waiting on you · @mira spoke last']);
+  await expect(threads.locator('.github-thread-who')).toHaveText(['waiting on you · @coderabbit spoke last', 'waiting on you · @mira spoke last']);
   await expect(threads.getByRole('article', { name: 'Review thread on src/github/github.ts' }).locator('.github-bot')).toHaveText('bot');
   await expect(threads.locator('.github-hunk').last()).toContainText('+  poll()');
   await threads.getByRole('button', { name: 'Resolved 1' }).click();
-  await expect(threads.locator('.github-thread-bar')).toHaveText(['resolved', 'waiting on you · @coderabbit spoke last', 'waiting on you · @mira spoke last']);
+  await expect(threads.locator('.github-thread-who')).toHaveText(['resolved', 'waiting on you · @coderabbit spoke last', 'waiting on you · @mira spoke last']);
 
   // checks failing first, each linking to its run
   const checks = pull.getByRole('region', { name: 'Checks' });
   await expect(checks.getByRole('button', { name: /^Checks/u })).toContainText('1 failing');
   await expect(checks.locator('.github-list-name')).toHaveText(['test', 'lint', 'build']);
   await expect(checks.getByRole('link', { name: /test/u })).toHaveAttribute('href', 'https://github.com/octo/repo/actions/runs/2');
-  await expect(pull.getByRole('region', { name: 'Reviewers' }).locator('.github-list-row')).toHaveText(['@mirarequested changes', '@kaiapprovednew commits since', 'corereview pending']);
+  await expect(pull.getByRole('region', { name: 'Reviewers' }).locator('.github-list-row')).toHaveText(['@mirarequested changes', '@kaiapprovednew commits sinceRe-request', 'corereview pending']);
   await expect(pull.getByRole('region', { name: 'Description' })).toContainText('One poll for every list.');
   await expect(pull.getByRole('region', { name: 'Review summaries' })).toContainText('A few notes inline.');
   await expect(pull.getByRole('region', { name: 'Conversation' })).toContainText('@codecovbot');
@@ -359,6 +359,9 @@ test('links out to GitHub for review and merge decisions, and points merge confl
   await expect(detail(page).locator('.github-strip')).toHaveText('Not checked out.');
   await expect(detail(page).getByRole('link', { name: 'Submit review' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/90/files');
   await expect(detail(page).getByRole('link', { name: 'Merge' })).toHaveCount(0);
+  // re-requesting a review is the author's
+  await expect(detail(page).getByRole('region', { name: 'Reviewers' })).toContainText('new commits since');
+  await expect(detail(page).getByRole('button', { name: /Re-request/u })).toHaveCount(0);
   // my draft, conflicting with its base
   await panel.getByRole('button', { name: /^Pull request #231/u }).click();
   await expect(detail(page).getByRole('link', { name: 'Ready for review' })).toBeVisible();
@@ -487,4 +490,129 @@ test('drills down from the list on a phone, the open detail counting as shown', 
   await expect(detail(page)).toHaveCount(0);
   await panel.getByRole('button', { name: /^Issue #201/u }).click();
   await expect(detail(page).getByRole('heading')).toHaveText('#201GitHub PR dashboard');
+});
+
+// answer the panel's writes to pull request #214: each lands in `writes` as its path and body, and
+// `answer` gives the reply
+async function stubWrites(page: Page, writes: { path: string; body: unknown }[], answer: (path: string) => { status: number; json?: unknown } | Promise<{ status: number; json?: unknown }>) {
+  await page.route('**/api/projects/repo/github/pulls/214/**', async route => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const path = new URL(route.request().url()).pathname.replace('/api/projects/repo/github/pulls/214/', '');
+    writes.push({ path, body: route.request().postDataJSON() });
+    const { status, json } = await answer(path);
+    return status === 204 ? route.fulfill({ status }) : route.fulfill({ status, json });
+  });
+}
+
+test('replies to and resolves a Review thread, and re-requests a review, from the PR\'s detail', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  const saved = structuredClone(details['pulls/214']);
+  const writes: { path: string; body: unknown }[] = [];
+  const detailReads: string[] = [];
+  await mount(page, [lists], [], [], { revision: 1 }, detailReads);
+  let refuse = false;
+  // the re-request waits until the test lets it answer
+  let answerRerequest = () => {};
+  const rerequested = new Promise<void>(resolve => { answerRerequest = resolve; });
+  // each write changes what the next detail read returns, as GitHub would
+  await stubWrites(page, writes, async path => {
+    const pull = (details['pulls/214'] as { pullRequest: { threads: { resolved: boolean; comments: unknown[] }[]; reviewers: { requested?: true }[] } }).pullRequest;
+    if (refuse) return { status: 502, json: { error: 'GitHub could not resolve the thread: Must have push access to this repository.' } };
+    if (path === 'threads/t1/reply') pull.threads[0]!.comments.push(comment('c9', 'tony', 'Renamed it.', { mine: true }));
+    if (path === 'threads/t2/resolve') pull.threads[1]!.resolved = true;
+    if (path === 'rerequest') {
+      await rerequested;
+      pull.reviewers[1]!.requested = true;
+    }
+    return path.endsWith('/reply') ? { status: 200, json: { id: 'c9', pending: false } } : { status: 204 };
+  });
+  try {
+    await page.goto('/');
+    await page.getByRole('tab', { name: /^feature/u }).click();
+    await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+    const threads = detail(page).getByRole('region', { name: 'Review threads' });
+    const thread = threads.getByRole('article', { name: 'Review thread on src/github/service.ts' });
+
+    // the reply box opens inside the thread card; the composer stays the Agent's
+    await thread.getByRole('button', { name: 'Reply', exact: true }).click();
+    const box = thread.getByRole('textbox', { name: 'Reply to @mira' });
+    await expect(box).toBeFocused();
+    await thread.getByRole('button', { name: 'Cancel' }).click();
+    await expect(box).toHaveCount(0);
+    await thread.getByRole('button', { name: 'Reply', exact: true }).click();
+    await expect(thread.getByRole('button', { name: 'Send reply' })).toBeDisabled();
+    await box.fill('Renamed it.');
+    const reads = detailReads.length;
+    await thread.getByRole('button', { name: 'Send reply' }).click();
+    await expect(box).toHaveCount(0);
+    expect(writes).toEqual([{ path: 'threads/t1/reply', body: { body: 'Renamed it.' } }]);
+    // the detail is read again and shows the reply
+    await expect(thread.locator('.github-thread-bar')).toContainText('you spoke last');
+    expect(detailReads.length).toBeGreaterThan(reads);
+
+    await threads.getByRole('article', { name: 'Review thread on src/github/github.ts' }).getByRole('button', { name: 'Resolve' }).click();
+    await expect(threads.getByRole('article')).toHaveCount(1);
+    expect(writes.at(-1)).toEqual({ path: 'threads/t2/resolve', body: null });
+
+    // Re-request only on my pull request, for a reviewer with commits since their review
+    const reviewers = detail(page).getByRole('region', { name: 'Reviewers' });
+    await expect(reviewers.getByRole('button', { name: /Re-request/u })).toHaveCount(1);
+    const rerequest = reviewers.getByRole('button', { name: 'Re-request review from @kai' });
+    await rerequest.click();
+    // its border travels while GitHub answers
+    await expect(rerequest).toHaveAttribute('aria-busy', 'true');
+    await expect(rerequest).toBeDisabled();
+    answerRerequest();
+    await expect(reviewers.getByRole('button', { name: /Re-request/u })).toHaveCount(0);
+    expect(writes.at(-1)).toEqual({ path: 'rerequest', body: { login: 'kai' } });
+    await expect(reviewers.locator('.github-list-row').nth(1)).toContainText('review requested');
+
+    // GitHub's refusal shows in the thread card
+    refuse = true;
+    await thread.getByRole('button', { name: 'Resolve' }).click();
+    await expect(thread.getByRole('alert')).toHaveText('GitHub could not resolve the thread: Must have push access to this repository.');
+  } finally { details['pulls/214'] = saved; }
+});
+
+test('says when GitHub held a reply in the operator\'s Draft review', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await mount(page, [lists]);
+  await stubWrites(page, [], () => ({ status: 200, json: { id: 'c9', pending: true } }));
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^feature/u }).click();
+  await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+  const thread = detail(page).getByRole('article', { name: 'Review thread on src/github/service.ts' });
+  await thread.getByRole('button', { name: 'Reply', exact: true }).click();
+  await thread.getByRole('textbox', { name: 'Reply to @mira' }).fill('Renamed it.');
+  await thread.getByRole('button', { name: 'Send reply' }).click();
+  await expect(thread.getByRole('status')).toHaveText('GitHub added your reply to your Draft review, so others see it only once you submit that review.Submit review');
+  await expect(thread.getByRole('link', { name: 'Submit review' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/214/files');
+});
+
+test('replies inline, resolves and re-requests on a phone', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const writes: { path: string; body: unknown }[] = [];
+  await mount(page, [lists]);
+  await stubWrites(page, writes, path => path.endsWith('/reply') ? { status: 200, json: { id: 'c9', pending: false } } : { status: 502, json: { error: 'GitHub could not resolve the thread: Must have push access to this repository.' } });
+  await page.goto('/#tab=feature');
+  await toolbar(page).getByRole('button', { name: 'More options' }).click();
+  await page.locator('.place-menu').getByRole('button', { name: 'GitHub', exact: true }).click();
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  await panel.getByRole('region', { name: 'This Worktree' }).getByRole('button', { name: /^Pull request #214/u }).click();
+  const thread = detail(page).getByRole('article', { name: 'Review thread on src/github/service.ts' });
+  await thread.getByRole('button', { name: 'Reply', exact: true }).click();
+  const box = thread.getByRole('textbox', { name: 'Reply to @mira' });
+  await expect(box).toBeInViewport();
+  // nothing in the detail runs off the side of the screen
+  expect(await panel.locator('.github-pane-body').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await box.fill('On a phone.');
+  await thread.getByRole('button', { name: 'Send reply' }).click();
+  await expect(box).toHaveCount(0);
+  await thread.getByRole('button', { name: 'Resolve' }).click();
+  await expect(thread.getByRole('alert')).toContainText('Must have push access');
+  await detail(page).getByRole('button', { name: 'Re-request review from @kai' }).click();
+  await expect.poll(() => writes.map(write => write.path)).toEqual(['threads/t1/reply', 'threads/t1/resolve', 'rerequest']);
+  expect(writes[0]!.body).toEqual({ body: 'On a phone.' });
+  // nothing that appeared runs off the side of the screen either
+  expect(await panel.locator('.github-pane-body').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
 });

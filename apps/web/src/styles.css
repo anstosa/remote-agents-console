@@ -3224,8 +3224,18 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .github-detail-who b.mine { color: var(--green); }
 .github-bot { margin-left: .3rem; padding: 0 .3rem; border: 1px solid var(--surface-2); border-radius: 999px; color: var(--overlay-1); font-size: .56rem; font-weight: 400; }
 .github-detail-who .github-bot { margin-left: 0; }
-.github-thread-bar { padding: .35rem .55rem; border-top: 1px solid var(--surface-0); background: color-mix(in srgb, var(--surface-0) 35%, transparent); color: var(--overlay-1); font-size: .64rem; }
-.github-thread-bar.you { color: var(--blue); font-weight: 700; }
+.github-thread-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; padding: .35rem .55rem; border-top: 1px solid var(--surface-0); background: color-mix(in srgb, var(--surface-0) 35%, transparent); color: var(--overlay-1); font-size: .64rem; }
+.github-thread-bar.you .github-thread-who { color: var(--blue); font-weight: 700; }
+.github-thread-who { flex: 1 1 8rem; min-width: 0; }
+.github-thread-bar .github-button, .github-list-row .github-button { min-height: 1.6rem; padding: 0 .5rem; font-size: .66rem; }
+.github-list-row .github-button { white-space: nowrap; }
+.github-button:disabled { opacity: .5; cursor: default; }
+.github-reply { display: grid; gap: .35rem; padding: .45rem .55rem; border-top: 1px solid var(--surface-0); }
+.github-reply textarea { width: 100%; min-height: 4.2rem; padding: .4rem .5rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: var(--crust); color: var(--text); font: inherit; font-size: .74rem; resize: vertical; }
+.github-reply textarea:focus { border-color: var(--blue); outline: none; }
+.github-reply .github-actions { justify-content: flex-end; }
+.github-thread-note { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: 0; padding: .4rem .55rem; border-top: 1px solid var(--surface-0); color: var(--yellow); font-size: .68rem; }
+.github-thread-note.error { color: var(--red); }
 .github-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: .2rem; }
 .github-list-row { display: flex; width: 100%; min-height: 1.9rem; align-items: center; gap: .5rem; padding: .15rem .4rem; border: 0; border-radius: var(--control-radius); background: none; color: var(--text); font-size: .74rem; text-align: left; text-decoration: none; }
 a.github-list-row:hover, button.github-list-row:hover { background: var(--surface-0); }

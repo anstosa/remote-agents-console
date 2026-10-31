@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
 import { age, attentionOrder, freshness, Icon, NoTokenCard, reasonChips, RowCopy, staleNotice, unseen, useSeenRows, waiting, type Item, type Problem, type Request } from './github-overview.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand, usePhoneLayout } from './panel-header.js';
 import { hunkClass, hunkLines, threadLines, unresolvedThreadCount, type PullRequestComment, type PullRequestComments, type PullRequestReviewThread } from './pull-request-comments.js';
@@ -21,7 +21,7 @@ type PullDetail = PullRequestComments & {
   repository: string; title: string; state: 'open' | 'merged' | 'closed'; draft: boolean; author?: string; mine: boolean; updatedAt?: string;
   branch: string; baseBranch?: string; mergeable: 'mergeable' | 'conflicting' | 'unknown';
   checkRuns: { name: string; status: 'passed' | 'failed' | 'pending' | 'skipped'; url?: string }[];
-  reviewers: { login: string; bot?: true; team?: true; state?: 'approved' | 'changes' | 'commented' | 'dismissed'; requested?: true; newCommits?: true }[];
+  reviewers: { login: string; id?: string; bot?: true; team?: true; state?: 'approved' | 'changes' | 'commented' | 'dismissed'; requested?: true; newCommits?: true }[];
   linkedIssues: { number: number; title: string; url: string; state: 'open' | 'closed' }[];
   destination?: Destination;
 };
@@ -113,8 +113,53 @@ const summaryState: Record<string, keyof typeof reviewerState> = { APPROVED: 'ap
 const external = (href: string, label: string) => <a key={label} className="github-button" href={href} target="_blank" rel="noreferrer">{label}<Icon name="external" /></a>;
 
 type DetailProps = { now: number; worktreeId?: string; closed: Record<string, boolean>; onToggle: (section: string) => void; onSelect: (selection: Selection) => void; onGoTo?: (worktreeId: string) => void };
+/** Send one write to the shown pull request (a path under it, and a JSON body); its result or why it failed. */
+type Write = (path: string, body?: unknown) => Promise<{ result?: unknown; error?: string }>;
 
-function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSelect, onGoTo }: DetailProps & { pull: PullDetail; item?: Item }) {
+// a write's button, its border travelling while the write is in flight
+const WriteButton = ({ busy, className, children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { busy: boolean }) => <button type="button" className={`github-button${className === undefined ? '' : ` ${className}`}${busy ? ' progress-border progress-blue' : ''}`} aria-busy={busy || undefined} {...props}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{children}</button>;
+
+// a thread's foot: who spoke last, Reply (a box inside the card) and Resolve, and how the last write went
+function ThreadFoot({ thread, label, you, pullUrl, write }: { thread: PullRequestReviewThread; label: string; you: boolean; pullUrl: string; write: Write }) {
+  const [replying, setReplying] = useState(false);
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState<'reply' | 'resolve'>();
+  const [error, setError] = useState<string>();
+  // GitHub put the reply in the operator's Draft review instead of publishing it
+  const [held, setHeld] = useState(false);
+  const last = thread.comments.at(-1)!;
+  const send = async (path: 'reply' | 'resolve', body?: unknown) => {
+    setBusy(path);
+    setError(undefined);
+    const { result, error: failed } = await write(`threads/${encodeURIComponent(thread.id)}/${path}`, body);
+    setBusy(undefined);
+    if (failed !== undefined) { setError(failed); return false; }
+    setHeld((result as { pending?: unknown } | undefined)?.pending === true);
+    return true;
+  };
+  return <>
+    {replying && <div className="github-reply">
+      <textarea aria-label={`Reply to @${last.author}`} placeholder={`Reply to @${last.author}…`} value={text} autoFocus onChange={event => setText(event.target.value)} />
+      <div className="github-actions">
+        <button type="button" className="github-button" onClick={() => { setReplying(false); setError(undefined); }}>Cancel</button>
+        <WriteButton busy={busy === 'reply'} className="go" aria-label="Send reply" disabled={busy !== undefined || text.trim() === ''} onClick={() => void send('reply', { body: text }).then(sent => { if (sent) { setReplying(false); setText(''); } })}><Icon name="thread" />Reply</WriteButton>
+      </div>
+    </div>}
+    {held && <p className="github-thread-note" role="status">GitHub added your reply to your Draft review, so others see it only once you submit that review.{external(`${pullUrl}/files`, 'Submit review')}</p>}
+    {error !== undefined && <p className="github-thread-note error" role="alert">{error}</p>}
+    <div className={`github-thread-bar${you ? ' you' : ''}`}>
+      <span className="github-thread-who">{label}</span>
+      {!thread.resolved && <>
+        {!replying && <button type="button" className="github-button" disabled={busy !== undefined} onClick={() => { setReplying(true); setHeld(false); }}><Icon name="thread" />Reply</button>}
+        <WriteButton busy={busy === 'resolve'} disabled={busy !== undefined} onClick={() => void send('resolve')}><Icon name="check" />Resolve</WriteButton>
+      </>}
+    </div>
+  </>;
+}
+
+function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSelect, onGoTo, write }: DetailProps & { pull: PullDetail; item?: Item; write: Write }) {
+  const [rerequesting, setRerequesting] = useState<string>();
+  const [rerequestError, setRerequestError] = useState<string>();
   const [showResolved, setShowResolved] = useState(false);
   const open = pull.state === 'open';
   const here = pull.destination !== undefined && pull.destination.worktreeId === worktreeId;
@@ -154,7 +199,7 @@ function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSele
           <article className={`github-thread${onYou ? ' waiting' : ''}${current(thread) ? '' : ' settled'}`} aria-label={`Review thread on ${thread.path}`}>
             {hunk.some(text => text.trim() !== '') && <pre className="github-hunk">{hunk.map((text, index) => <span key={index} className={hunkClass(text)}>{text}{'\n'}</span>)}</pre>}
             {thread.comments.map(comment => <Comment key={comment.id} comment={comment} now={now} extra={line} />)}
-            <div className={`github-thread-bar${onYou ? ' you' : ''}`}>{thread.resolved ? 'resolved' : thread.outdated ? `outdated · @${last.author} spoke last` : last.mine ? 'you spoke last' : onYou ? `waiting on you · @${last.author} spoke last` : `@${last.author} spoke last`}</div>
+            <ThreadFoot thread={thread} you={onYou} pullUrl={pull.url} write={write} label={thread.resolved ? 'resolved' : thread.outdated ? `outdated · @${last.author} spoke last` : last.mine ? 'you spoke last' : onYou ? `waiting on you · @${last.author} spoke last` : `@${last.author} spoke last`} />
           </article>
         </div>;
       })}
@@ -169,7 +214,12 @@ function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSele
       <span className={`github-review ${reviewer.state ?? 'pending'}`}>{reviewer.state === undefined ? 'review pending' : reviewerState[reviewer.state]}</span>
       {reviewer.state !== undefined && reviewer.requested && <small>review requested</small>}
       {reviewer.newCommits && <small>new commits since</small>}
-    </span>)}</div>, { count: pull.reviewers.length })}
+      {open && pull.mine && reviewer.id !== undefined && !reviewer.team && reviewer.state !== undefined && reviewer.newCommits && !reviewer.requested && <WriteButton busy={rerequesting === reviewer.login} aria-label={`Re-request review from @${reviewer.login}`} disabled={rerequesting !== undefined} onClick={() => {
+        setRerequesting(reviewer.login);
+        setRerequestError(undefined);
+        void write('rerequest', { login: reviewer.login }).then(({ error }) => { setRerequesting(undefined); setRerequestError(error); });
+      }}><Icon name="refresh" />Re-request</WriteButton>}
+    </span>)}{rerequestError !== undefined && <p className="github-thread-note error" role="alert">{rerequestError}</p>}</div>, { count: pull.reviewers.length })}
     {pull.linkedIssues.length > 0 && section('issues', 'Linked issues', <div className="github-list">{pull.linkedIssues.map(issue => <button key={issue.number} type="button" className="github-list-row" onClick={() => onSelect({ issue: true, number: issue.number })}>
       <Icon name="issue" /><span className="github-list-name">#{issue.number} {issue.title}</span><small>{issue.state === 'open' ? 'closes' : 'closed'}</small>
     </button>)}</div>, { count: pull.linkedIssues.length })}
@@ -209,6 +259,8 @@ function Detail({ request, projectId, selection, item, revision, refreshes, focu
   const key = `${selection.issue ? 'issues' : 'pulls'}/${selection.number}`;
   // the panel keys this by item, so what it read is always the item's
   const [read, setRead] = useState<{ detail?: DetailRead; unreachable?: true }>();
+  // each write reads the detail again, which the server read from GitHub anew after it
+  const [writes, setWrites] = useState(0);
   const lastRefresh = useRef(refreshes);
   useEffect(() => {
     let current = true;
@@ -218,7 +270,19 @@ function Detail({ request, projectId, selection, item, revision, refreshes, focu
       .then(async response => { if (!response.ok) throw new Error(); return await response.json() as DetailRead; })
       .then(detail => { if (current) setRead({ detail }); }, () => { if (current) setRead(previous => ({ ...previous, unreachable: true })); });
     return () => { current = false; };
-  }, [request, projectId, key, revision, refreshes]);
+  }, [request, projectId, key, revision, refreshes, writes]);
+  const write = useCallback<Write>(async (path, body) => {
+    try {
+      const response = await request(`/api/projects/${encodeURIComponent(projectId)}/github/${key}/${path}`, { method: 'POST', ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) });
+      const result = response.status === 204 ? undefined : await response.json().catch(() => undefined) as { error?: unknown } | undefined;
+      return response.ok ? { result } : { error: typeof result?.error === 'string' ? result.error : `The console could not send it (${response.status}).` };
+    } catch {
+      return { error: 'The console could not be reached.' };
+    } finally {
+      // a write that failed may still have reached GitHub
+      setWrites(count => count + 1);
+    }
+  }, [request, projectId, key]);
   const detail = read?.detail;
   const found = detail?.pullRequest ?? detail?.issue;
   const kind = selection.issue ? 'Issue' : 'Pull request';
@@ -226,7 +290,7 @@ function Detail({ request, projectId, selection, item, revision, refreshes, focu
   if (found === undefined && detail?.problem?.kind === 'no-token') body = <NoTokenCard />;
   else if (found === undefined && (detail?.problem !== undefined || read?.unreachable)) body = <div className="overview-card"><h3>{kind} #{selection.number} could not be read</h3><p>{detail?.problem?.message ?? 'The console could not be reached.'}</p></div>;
   else if (found === undefined) body = <div className="github-detail-loading" role="status" aria-label={`Loading ${kind} #${selection.number}`} aria-busy="true"><Skeleton className="overview-skeleton-title" /><Skeleton className="overview-skeleton-meta" /><Skeleton className="overview-skeleton-meta" /></div>;
-  else body = detail?.pullRequest !== undefined ? <PullRequestView pull={detail.pullRequest} item={item} {...props} {...sections} /> : <IssueView issue={detail!.issue!} {...props} {...sections} />;
+  else body = detail?.pullRequest !== undefined ? <PullRequestView pull={detail.pullRequest} item={item} write={write} {...props} {...sections} /> : <IssueView issue={detail!.issue!} {...props} {...sections} />;
   return <article className="github-detail" aria-label={`${kind} #${selection.number}`}>
     {(back !== undefined || focused) && <div className="github-detail-crumbs">
       {back !== undefined && <button type="button" className="github-button" onClick={back}>‹ All</button>}

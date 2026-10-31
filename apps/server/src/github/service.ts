@@ -2,6 +2,7 @@ import { run } from '../tmux/command.js';
 import { repositoryArgs } from '../git/worktrees.js';
 import type { Project, PullRequestCheckStatus, PullRequestComment, PullRequestComments, PullRequestIssues, PullRequestReviewThread, PullRequestSummary, Worktree } from '../domain/models.js';
 import { SeenRecord } from './seen.js';
+import { replyToThread, rerequestReviews, resolveThread } from './writes.js';
 import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, githubToken, repositoryPath, type Command, type GithubRepository, type GraphqlPayload, type Request, type Token } from './github.js';
 
 export type PullRequestCleanupStatus = 'merged' | 'closed';
@@ -54,9 +55,10 @@ export type GithubPanel = Fetched<{ mine: PanelItem[]; reviews: PanelItem[]; oth
 export type PullRequestCheck = { name: string; status: 'passed' | 'failed' | 'pending' | 'skipped'; url?: string };
 /**
  * A reviewer of a pull request: their latest submitted review (none while only asked), whether a
- * review is asked of them now (`requested`), and whether the head moved since they reviewed.
+ * review is asked of them now (`requested`), and whether the head moved since they reviewed. `id`,
+ * their node id, is what re-requesting their review names.
  */
-export type PullRequestReviewer = { login: string; bot?: true; team?: true; state?: 'approved' | 'changes' | 'commented' | 'dismissed'; requested?: true; newCommits?: true };
+export type PullRequestReviewer = { login: string; id?: string; bot?: true; team?: true; state?: 'approved' | 'changes' | 'commented' | 'dismissed'; requested?: true; newCommits?: true };
 export type LinkedIssue = { number: number; title: string; url: string; state: 'open' | 'closed' };
 /**
  * Everything the GitHub panel shows of one pull request, for any repository: its state, head and
@@ -133,6 +135,10 @@ const maxRemoteHeads = 8;
 const maxDetails = 100;
 // a Refresh this soon after the last read answers from it, so repeated clicks cannot drain the budget
 const refreshFloorMs = 10_000;
+// how long GitHub's search takes to show the console's own writes
+const searchLagMs = 10_000;
+// the longest comment GitHub takes
+const maxCommentLength = 65_536;
 
 const realTimer: Timer = {
   set: (run, ms) => setTimeout(run, ms).unref(),
@@ -157,8 +163,8 @@ const commentFields = 'id author{login __typename} body createdAt url viewerDidA
 const detailQuery = `query PullRequestDetail($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){
   ${pullFields} id author{__typename} body createdAt
   statusCheckRollup{contexts(first:100){nodes{__typename ...on CheckRun{name status conclusion detailsUrl} ...on StatusContext{context state targetUrl}}}}
-  reviewRequests(first:20){nodes{requestedReviewer{__typename ...on User{login} ...on Bot{login} ...on Mannequin{login} ...on Team{slug}}}}
-  latestReviews(first:20){nodes{author{login __typename} state commit{oid}}}
+  reviewRequests(first:20){nodes{requestedReviewer{__typename ...on User{login id} ...on Bot{login id} ...on Mannequin{login} ...on Team{slug id}}}}
+  latestReviews(first:20){nodes{author{login __typename ...on User{id} ...on Bot{id}} state commit{oid}}}
   closingIssuesReferences(first:10){nodes{number title url state repository{nameWithOwner}}}
   reviewThreads(last:100){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine comments(last:50){nodes{${commentFields} diffHunk}}}}
   reviews(last:100){nodes{id author{login __typename} state body submittedAt url viewerDidAuthor}}
@@ -448,6 +454,7 @@ export class GithubService {
   private readonly details = new Map<string, DetailEntry<unknown>>();
   private viewers = 0;
   private scheduled?: unknown;
+  private searchLag?: unknown;
   private lastPollAt?: number;
   private changes = 0;
 
@@ -816,10 +823,65 @@ export class GithubService {
     }
   }
 
-  /** An outside writer (Review tour posting) changed a pull request: its repository and detail are read again. */
+  /** Reply to one of the pull request's Review threads, published at once (see `writes.replyToThread`). */
+  async replyToThread(repository: GithubRepository, number: number, threadId: string, body: string): Promise<{ id: string; url?: string; pending: boolean }> {
+    if (body.trim() === '' || body.length > maxCommentLength) throw new GithubRequestError(`A reply must hold 1 to ${maxCommentLength} characters.`, 400);
+    await this.thread(repository, number, threadId);
+    return await this.write(repository, number, async token => await replyToThread(this.client, token, threadId, body));
+  }
+
+  async resolveThread(repository: GithubRepository, number: number, threadId: string): Promise<void> {
+    await this.thread(repository, number, threadId);
+    await this.write(repository, number, async token => await resolveThread(this.client, token, threadId));
+  }
+
+  /** Ask one of the pull request's reviewers, a user or bot who reviewed it, for another review. */
+  async rerequestReview(repository: GithubRepository, number: number, login: string): Promise<void> {
+    const pull = await this.writable(repository, number);
+    const found = pull.reviewers.find(candidate => candidate.login === login && candidate.team !== true);
+    if (found?.id === undefined) throw new GithubRequestError(`@${login} is not a reviewer of pull request #${number}.`, 404);
+    const ids = [found.id];
+    await this.write(repository, number, async token => await rerequestReviews(this.client, token, pull.id, found.bot ? { botIds: ids } : { userIds: ids }));
+  }
+
+  // the pull request as its detail shows it, which a write must find its target in
+  private async writable(repository: GithubRepository, number: number): Promise<PullRequestDetail> {
+    const { pullRequest, problem } = await this.pullRequestDetail(repository, number);
+    if (pullRequest === undefined) throw problemError(problem ?? { kind: 'failing', message: `${detailAction}.` });
+    return pullRequest;
+  }
+
+  private async thread(repository: GithubRepository, number: number, threadId: string): Promise<void> {
+    if (!(await this.writable(repository, number)).threads.some(thread => thread.id === threadId)) throw new GithubRequestError(`Pull request #${number} has no such Review thread.`, 404);
+  }
+
+  // one write to a pull request, after which what the console shows of it is read again
+  private async write<T>(repository: GithubRepository, number: number, send: (token: string) => Promise<T>): Promise<T> {
+    const token = await this.token();
+    if (token === undefined) throw new GithubRequestError(missingToken, 503);
+    try {
+      return await send(token);
+    } finally {
+      // even a failed write may have been applied
+      this.changed(repository, number);
+    }
+  }
+
+  /**
+   * The console wrote to a pull request (here, or Review tour posting): its detail and repository
+   * are read again now (the revision moves, so every view showing it asks again), and while a
+   * browser watches, the Overview's searches once GitHub's search index has caught up.
+   */
   changed(repository: GithubRepository, number: number): void {
     this.details.delete(`pull:${repositoryKey(repository)}#${number}`);
+    this.changes += 1;
     this.background(this.refreshRepository(repository));
+    // one later read covers writes in quick succession
+    if (this.searchLag !== undefined) this.timer.clear(this.searchLag);
+    this.searchLag = this.viewers === 0 ? undefined : this.timer.set(() => {
+      this.searchLag = undefined;
+      this.background(this.overviewEntry.refreshing ?? this.read([], false, true));
+    }, searchLagMs);
   }
 
   /**
@@ -1116,8 +1178,8 @@ function readReviewers(node: unknown, head: string): PullRequestReviewer[] {
   for (const review of nodes(at(node, 'latestReviews'))) {
     const [login, state] = [at(review, 'author', 'login'), reviewStates[at(review, 'state') as keyof typeof reviewStates]];
     if (typeof login !== 'string' || state === undefined) continue;
-    const commit = at(review, 'commit', 'oid');
-    reviewers.set(login, { login, ...(at(review, 'author', '__typename') === 'Bot' ? { bot: true as const } : {}), state, ...(typeof commit === 'string' && commit.toLowerCase() !== head ? { newCommits: true as const } : {}) });
+    const [commit, id] = [at(review, 'commit', 'oid'), at(review, 'author', 'id')];
+    reviewers.set(login, { login, ...(typeof id === 'string' ? { id } : {}), ...(at(review, 'author', '__typename') === 'Bot' ? { bot: true as const } : {}), state, ...(typeof commit === 'string' && commit.toLowerCase() !== head ? { newCommits: true as const } : {}) });
   }
   for (const request of nodes(at(node, 'reviewRequests'))) {
     const reviewer = at(request, 'requestedReviewer');
@@ -1125,7 +1187,8 @@ function readReviewers(node: unknown, head: string): PullRequestReviewer[] {
     const login = at(reviewer, team ? 'slug' : 'login');
     if (typeof login !== 'string') continue;
     const key = team ? `team:${login}` : login;
-    reviewers.set(key, { ...reviewers.get(key) ?? { login, ...(team ? { team: true as const } : at(reviewer, '__typename') === 'Bot' ? { bot: true as const } : {}) }, requested: true });
+    const id = at(reviewer, 'id');
+    reviewers.set(key, { ...reviewers.get(key) ?? { login, ...(typeof id === 'string' ? { id } : {}), ...(team ? { team: true as const } : at(reviewer, '__typename') === 'Bot' ? { bot: true as const } : {}) }, requested: true });
   }
   return [...reviewers.values()];
 }

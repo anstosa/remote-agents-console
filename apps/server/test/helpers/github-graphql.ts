@@ -176,8 +176,33 @@ export function answer(world: World, call: GraphqlCall): Record<string, unknown>
   return { data };
 }
 
+// why GitHub's parser would refuse a document, or undefined: outside strings and comments, every
+// bracket closes in order and one operation's selection set ends the document
+export function graphqlSyntaxError(query: string): string | undefined {
+  const closers: Record<string, string> = { '{': '}', '(': ')', '[': ']' };
+  const open: string[] = [];
+  let ended = false;
+  for (let index = 0; index < query.length; index += 1) {
+    const character = query[index]!;
+    if (/\s|,/u.test(character)) continue;
+    if (ended) return `unexpected ${character} after the operation at ${index}`;
+    if (character === '#') { index = query.indexOf('\n', index) < 0 ? query.length : query.indexOf('\n', index); continue; }
+    if (character === '"') {
+      for (index += 1; index < query.length && query[index] !== '"'; index += query[index] === '\\' ? 2 : 1);
+      continue;
+    }
+    if (closers[character] !== undefined) open.push(closers[character]);
+    else if ('})]'.includes(character)) {
+      if (open.pop() !== character) return `unexpected ${character} at ${index}`;
+      ended = open.length === 0 && character === '}';
+    }
+  }
+  return ended ? undefined : open.length > 0 ? `expected ${open.at(-1)} at the end` : 'no selection set';
+}
+
 // a request function over `world` that records every GraphQL call: the Overview's searches in
-// `searches`, every other read (repositories and branches) in `calls`; anything else is refused
+// `searches`, every other read (repositories and branches) in `calls`; anything else is refused,
+// and a document GitHub could not parse gets GitHub's parse error
 export function graphqlGithub(world: World | (() => World)): { request: Request; calls: GraphqlCall[]; searches: GraphqlCall[] } {
   const calls: GraphqlCall[] = [];
   const searches: GraphqlCall[] = [];
@@ -185,6 +210,8 @@ export function graphqlGithub(world: World | (() => World)): { request: Request;
     if (!url.endsWith('/graphql')) return reply({ message: 'Not Found' }, 404);
     const call = JSON.parse(String(init?.body)) as GraphqlCall;
     (/\bsearch\(/u.test(call.query) ? searches : calls).push(call);
+    const malformed = graphqlSyntaxError(call.query);
+    if (malformed !== undefined) return reply({ errors: [{ message: `Parse error: ${malformed}` }] });
     return reply(answer(typeof world === 'function' ? world() : world, call));
   };
   return { request, calls, searches };
@@ -233,4 +260,23 @@ export function polled(world: World | (() => World), options: GithubServiceOptio
     ...options
   });
   return { service, calls: scripted.calls, searches: scripted.searches, timers, clock };
+}
+
+// octo/repo#9 as the detail read answers it: the viewer's, with one open thread (PRRT_1) and
+// reviewers (a user, a bot, a team) with node ids, whose reviews are older than its head
+export function detailNode() {
+  const comment = { id: 'C1', author: { login: 'mona', __typename: 'User' }, body: 'Back off first', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_r1', diffHunk: '@@ -1 +1 @@\n+retry', viewerDidAuthor: false };
+  return {
+    id: 'PR_9', number: 9, title: 'Retry', url: 'https://github.com/octo/repo/pull/9', state: 'OPEN', isDraft: false, author: { login: 'viewer', __typename: 'User' }, viewerDidAuthor: true,
+    body: '', createdAt: '2026-09-30T00:00:00Z', updatedAt: '2026-10-01T04:00:00Z', baseRefName: 'main', headRefName: 'retries', headRefOid: sha('a'), isCrossRepository: false, mergeable: 'MERGEABLE',
+    statusCheckRollup: { state: 'SUCCESS', contexts: { nodes: [] } },
+    reviewRequests: { nodes: [{ requestedReviewer: { __typename: 'Team', slug: 'core', id: 'T_core' } }] },
+    latestReviews: { nodes: [
+      { author: { login: 'mona', __typename: 'User', id: 'U_mona' }, state: 'CHANGES_REQUESTED', commit: { oid: sha('b') } },
+      { author: { login: 'coderabbit', __typename: 'Bot', id: 'B_rabbit' }, state: 'COMMENTED', commit: { oid: sha('b') } }
+    ] },
+    closingIssuesReferences: { nodes: [] },
+    reviewThreads: { nodes: [{ id: 'PRRT_1', isResolved: false, isOutdated: false, path: 'src/a.ts', line: 3, comments: { nodes: [comment] } }] },
+    reviews: { nodes: [] }, comments: { nodes: [] }
+  };
 }

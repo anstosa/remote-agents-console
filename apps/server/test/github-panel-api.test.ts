@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject, testWorktree } from './helpers/config.js';
-import { graphqlGithub } from './helpers/github-graphql.js';
+import type { Request } from '../src/github/github.js';
+import { detailNode, graphqlGithub, reply, type GraphqlCall } from './helpers/github-graphql.js';
 
 // a git checkout whose origin is `origin`
 async function checkout(origin: string): Promise<string> {
@@ -88,5 +89,46 @@ describe('GitHub panel API', () => {
     for (const url of ['/api/projects/folder/github/pulls/1', '/api/projects/missing/github/issues/3', '/api/projects/proj/github/commits/1']) {
       expect((await get(url)).statusCode, url).toBe(404);
     }
+  }, 15_000);
+
+  it('replies to and resolves a Review thread and re-requests a review through the module', async () => {
+    process.env.RAC_GITHUB_TOKEN = 'token';
+    const github = await checkout('git@github.com:octo/repo.git');
+    const projects = [testProject({ id: 'proj', label: 'Repo', path: github })];
+    const mutations: GraphqlCall[] = [];
+    const answers: Record<string, unknown> = {
+      addPullRequestReviewThreadReply: { comment: { id: 'C9', url: 'https://github.com/octo/repo/pull/9#discussion_r9', state: 'SUBMITTED' } },
+      resolveReviewThread: { thread: { id: 'PRRT_1', isResolved: true } },
+      rerequestReviews: { pullRequest: { id: 'PR_9' } }
+    };
+    const request: Request = async (_url, init) => {
+      const call = JSON.parse(String(init?.body)) as GraphqlCall;
+      if (call.query.startsWith('query PullRequestDetail')) return reply({ data: { repository: { pullRequest: detailNode() } } });
+      if (!call.query.startsWith('mutation')) return reply({ data: {} });
+      mutations.push(call);
+      const name = Object.keys(answers).find(key => call.query.includes(`${key}(`))!;
+      return name === 'resolveReviewThread' && mutations.length > 2 ? reply({ data: { resolveReviewThread: null }, errors: [{ type: 'FORBIDDEN', message: 'Must have push access' }] }) : reply({ data: { [name]: answers[name] } });
+    };
+    const discovery = { worktreesNow: () => [], projectsNow: () => projects, dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [] }) };
+    app = await buildApp(testConfig(), { auth: await testAuthService(), discovery: discovery as never, githubRequest: request });
+    const headers = await authenticatedHeaders(app);
+    const post = async (url: string, payload?: unknown) => await app!.inject({ method: 'POST', url, headers, ...(payload === undefined ? {} : { payload: payload as Record<string, unknown> }) });
+
+    const replied = await post('/api/projects/proj/github/pulls/9/threads/PRRT_1/reply', { body: 'On it.' });
+    expect([replied.statusCode, replied.json()]).toEqual([200, { id: 'C9', url: 'https://github.com/octo/repo/pull/9#discussion_r9', pending: false }]);
+    expect((await post('/api/projects/proj/github/pulls/9/threads/PRRT_1/resolve')).statusCode).toBe(204);
+    expect((await post('/api/projects/proj/github/pulls/9/rerequest', { login: 'mona' })).statusCode).toBe(204);
+    expect(mutations.map(call => call.variables.input)).toEqual([{ pullRequestReviewThreadId: 'PRRT_1', body: 'On it.' }, { threadId: 'PRRT_1' }, { pullRequestId: 'PR_9', userIds: ['U_mona'] }]);
+    // GitHub's refusal carries its message
+    const refused = await post('/api/projects/proj/github/pulls/9/threads/PRRT_1/resolve');
+    expect([refused.statusCode, refused.json().error]).toEqual([502, expect.stringContaining('Must have push access')]);
+    // what is not on the pull request, and malformed requests, never reach GitHub
+    expect((await post('/api/projects/proj/github/pulls/9/threads/PRRT_2/resolve')).statusCode).toBe(404);
+    expect((await post('/api/projects/proj/github/pulls/9/rerequest', { login: 'kai' })).statusCode).toBe(404);
+    for (const [url, payload] of [['/api/projects/proj/github/pulls/9/threads/PRRT_1/reply', { body: '' }], ['/api/projects/proj/github/pulls/9/threads/PRRT_1/reply', {}], ['/api/projects/proj/github/pulls/9/rerequest', { login: 7 }], ['/api/projects/proj/github/pulls/0/threads/PRRT_1/resolve', undefined]] as const) {
+      expect((await post(url, payload)).statusCode, url).toBe(400);
+    }
+    for (const url of ['/api/projects/missing/github/pulls/9/threads/PRRT_1/resolve', '/api/projects/proj/github/pulls/9/threads/a%20b/resolve']) expect((await post(url)).statusCode, url).toBe(404);
+    expect(mutations).toHaveLength(4);
   }, 15_000);
 });

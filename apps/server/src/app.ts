@@ -45,7 +45,7 @@ import { WorktreeManagementService } from './worktrees/management.js';
 import { agentAttentionState, AgentNotificationCoordinator, pushNotifications, type AgentNotificationContext } from './notifications.js';
 import { ConsoleEvents } from './events.js';
 import { Watches, type CommandWindows } from './watches/service.js';
-import { GithubRequestError, type Request as GithubRequest } from './github/github.js';
+import { GithubRequestError, type GithubRepository, type Request as GithubRequest } from './github/github.js';
 import { GithubWatchReader } from './watches/github.js';
 import { commandWindows } from './watches/commands.js';
 import { isReviewRun, paneTmuxSession, stackActions, worktreeAgents, type Agent, type Pane, type Project, type SocketRef, type StackAction, type TmuxAgent, type Worktree } from './domain/models.js';
@@ -2069,18 +2069,52 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (repository === undefined) return reply.code(404).send({ error: 'no github.com repository for this project' });
     return await github.panel(repository, { fresh: (request.query as { refresh?: unknown }).refresh === '1' });
   });
-  // one pull request's or Issue's detail in a Project's repository, kept while it is unchanged; `refresh` reads GitHub again first
-  app.get('/api/projects/:id/github/:kind(^pulls|issues$)/:number', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
-    controlled(request);
-    const { id, kind, number } = request.params as { id: string; kind: 'pulls' | 'issues'; number: string };
+  // the Project's github.com repository and the number a GitHub route names, or the reply refusing them
+  const githubItem = async (request: FastifyRequest, reply: FastifyReply): Promise<{ repository: GithubRepository; number: number } | undefined> => {
+    const { id, number } = request.params as { id: string; number: string };
     // GitHub's numbers are GraphQL Ints
-    if (!/^[1-9]\d{0,9}$/u.test(number) || Number(number) > 2_147_483_647) return reply.code(400).send({ error: 'invalid number' });
+    if (!/^[1-9]\d{0,9}$/u.test(number) || Number(number) > 2_147_483_647) { await reply.code(400).send({ error: 'invalid number' }); return undefined; }
     const project = discovery.projectsNow().find(candidate => candidate.id === id);
     const repository = project === undefined ? undefined : await github.projectRepository(project);
-    if (repository === undefined) return reply.code(404).send({ error: 'no github.com repository for this project' });
+    if (repository === undefined) { await reply.code(404).send({ error: 'no github.com repository for this project' }); return undefined; }
+    return { repository, number: Number(number) };
+  };
+  const githubItemLimit = { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } };
+  // one pull request's or Issue's detail in a Project's repository, kept while it is unchanged; `refresh` reads GitHub again first
+  app.get('/api/projects/:id/github/:kind(^pulls|issues$)/:number', githubItemLimit, async (request, reply) => {
+    controlled(request);
+    const item = await githubItem(request, reply);
+    if (item === undefined) return reply;
     const options = { fresh: (request.query as { refresh?: unknown }).refresh === '1' };
-    return kind === 'pulls' ? await github.pullRequestDetail(repository, Number(number), options) : await github.issueDetail(repository, Number(number), options);
+    return (request.params as { kind: 'pulls' | 'issues' }).kind === 'pulls' ? await github.pullRequestDetail(item.repository, item.number, options) : await github.issueDetail(item.repository, item.number, options);
   });
+  // the operator's writes to a pull request from the GitHub panel: a reply to or resolve of one of
+  // its Review threads, and re-requesting a reviewer's review; a refusal carries its message
+  const githubWrite = async (request: FastifyRequest, reply: FastifyReply, write: (repository: GithubRepository, number: number) => Promise<unknown>) => {
+    controlled(request, true);
+    const item = await githubItem(request, reply);
+    if (item === undefined) return reply;
+    try {
+      const result = await write(item.repository, item.number);
+      return result === undefined ? reply.code(204).send() : result;
+    } catch (error) {
+      if (error instanceof GithubRequestError) return reply.code(error.statusCode).send({ error: error.message });
+      throw error;
+    }
+  };
+  const threadParam = (request: FastifyRequest) => (request.params as { thread: string }).thread;
+  const bodyField = (request: FastifyRequest, name: string): unknown => (request.body as Record<string, unknown> | null | undefined)?.[name];
+  app.post('/api/projects/:id/github/pulls/:number/threads/:thread(^[A-Za-z0-9_=-]{1,100}$)/reply', githubItemLimit, async (request, reply) => await githubWrite(request, reply, async (repository, number) => {
+    const body = bodyField(request, 'body');
+    if (typeof body !== 'string') throw new GithubRequestError('invalid reply', 400);
+    return await github.replyToThread(repository, number, threadParam(request), body);
+  }));
+  app.post('/api/projects/:id/github/pulls/:number/threads/:thread(^[A-Za-z0-9_=-]{1,100}$)/resolve', githubItemLimit, async (request, reply) => await githubWrite(request, reply, async (repository, number) => { await github.resolveThread(repository, number, threadParam(request)); }));
+  app.post('/api/projects/:id/github/pulls/:number/rerequest', githubItemLimit, async (request, reply) => await githubWrite(request, reply, async (repository, number) => {
+    const login = bodyField(request, 'login');
+    if (typeof login !== 'string') throw new GithubRequestError('invalid reviewer', 400);
+    await github.rerequestReview(repository, number, login);
+  }));
   // a browser showed these rows' unseen reasons (their `unseen` keys); the badge drops on every device
   app.post('/api/github/overview/seen', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
     controlled(request, true);
