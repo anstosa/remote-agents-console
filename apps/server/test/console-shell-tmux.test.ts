@@ -147,16 +147,17 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('Console shells (r
     // created beside the fixture session, it is a login shell in the Worktree, marked and named
     const pane = await launch.createConsoleShell(worktreePlace(worktree), 'build');
     expect(pane).toMatch(/^%\d+$/);
-    // wait for the pre-exec color probe to hand control to the login shell
-    await vi.waitFor(async () => expect((await launch.placeConsoleShells(worktree))[0]?.command).toBe(interactiveShellName(loginShell!)));
-    const shells = await launch.placeConsoleShells(worktree);
+    // classify the same idle observation while login startup may spawn foreground commands
+    const shells = await vi.waitFor(async () => {
+      const observed = await launch.placeConsoleShells(worktree);
+      expect(observed[0]?.command).toBe(interactiveShellName(loginShell!));
+      expect(launch.consoleShellBusy(observed[0]!)).toBe(false);
+      return observed;
+    });
     expect(shells).toHaveLength(1);
     expect(shells[0]!.paneId).toBe(pane);
     expect(shells[0]!.role).toBe('shell');
     expect(shells[0]!.paneName).toBe('build');
-    // an idle login shell is not busy
-    expect(launch.consoleShellBusy(shells[0]!)).toBe(false);
-
     // a rename writes the option and a fresh listing reflects it; an empty name clears it
     expect(await new TmuxAdapter().renamePaneName(fixture.socket, pane!, 'tests')).toBe(true);
     expect((await launch.placeConsoleShells(worktree))[0]!.paneName).toBe('tests');

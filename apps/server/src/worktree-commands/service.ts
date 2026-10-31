@@ -46,7 +46,7 @@ const stackProcesses = (worktree: Worktree): StackProcess[] => declaredProcesses
 // one pane on the stack socket, as `list-panes -a` reports it: its session, the Place its
 // session is the Workspace of, its console role, and the Stack process tags on its window
 // (empty when untagged)
-type ListedPane = { sessionId: string; windowId: string; paneId: string; place: string; role: string; name: string; worktree: string; dead: boolean; exitCode?: number };
+type ListedPane = { sessionId: string; windowId: string; paneId: string; place: string; role: string; name: string; worktree: string; dead: boolean; exitCode?: number; exitSignal?: string };
 type DashboardPaneListing = { status: 'available'; panes: ListedPane[] } | { status: 'unavailable' };
 // a listed process pane's state: live, or dead with the exit status tmux kept (absent after a signal)
 const processStateOf = (pane: ListedPane, name: string): StackProcessState => pane.dead ? { name, state: 'exited', ...(pane.exitCode === undefined ? {} : { exitCode: pane.exitCode }) } : { name, state: 'running' };
@@ -383,7 +383,7 @@ export class WorktreeCommandService {
     // a known failed read suppresses a duplicate display listing
     if (snapshot?.status === 'unavailable') return { status: 'unavailable' };
     // absent or incomplete snapshots fall back to the stack's fresh listing
-    if (snapshot?.status !== 'available' || snapshot.panes.some(pane => pane.socket.path !== path || !pane.windowId || pane.dead === undefined || (pane.role === processPaneRole && (!pane.processName || pane.processWorktree === undefined)))) return undefined;
+    if (snapshot?.status !== 'available' || snapshot.panes.some(pane => pane.socket.path !== path || !pane.windowId || pane.dead === undefined || (pane.role === processPaneRole && (!pane.processName || pane.processWorktree === undefined || (pane.dead && pane.exitCode === undefined))))) return undefined;
     return { status: 'available', panes: snapshot.panes.map(pane => ({ sessionId: pane.sessionId, windowId: pane.windowId!, paneId: pane.paneId, place: pane.placeMark ?? '', role: pane.role ?? '', name: pane.processName ?? '', worktree: pane.processWorktree ?? '', dead: pane.dead!, ...(pane.exitCode === undefined ? {} : { exitCode: pane.exitCode }) })) };
   }
 
@@ -804,15 +804,26 @@ export class WorktreeCommandService {
   // could not run, or its socket refused us).
   private stackPanes(fresh = false): Promise<ListedPane[] | undefined> {
     // run one uncached pane listing
-    const list = async (): Promise<ListedPane[] | undefined> => {
-      const listed = await this.tmux(['list-panes', '-a', '-F', `#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_place}\t#{@rac_role}\t#{${processNameOption}}\t#{${processWorktreeOption}}`]);
+    const list = async (allowRecovery = true): Promise<ListedPane[] | undefined> => {
+      const listed = await this.tmux(['list-panes', '-a', '-F', `#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{@rac_place}\t#{@rac_role}\t#{${processNameOption}}\t#{${processWorktreeOption}}`]);
       if (listed.code !== 0) return listed.code === 1 && (listed.stderr === undefined || /no server running/u.test(listed.stderr)) ? [] : undefined;
-      return listed.stdout.split('\n').flatMap(line => {
-        const [sessionId, windowId, paneId, dead, status, place, role, name, ...path] = line.split('\t');
+      const panes = listed.stdout.split('\n').flatMap(line => {
+        const [sessionId, windowId, paneId, dead, status, signal, place, role, name, ...path] = line.split('\t');
         if (sessionId === undefined || windowId === undefined || paneId === undefined || name === undefined || paneId === '') return [];
         const exitCode = status === undefined || status === '' ? undefined : Number(status);
-        return [{ sessionId, windowId, paneId, place: place ?? '', role: role ?? '', name, worktree: path.join('\t'), dead: dead === '1', ...(exitCode === undefined || Number.isNaN(exitCode) ? {} : { exitCode }) }];
+        const exitSignal = signal === undefined || signal === '' ? undefined : signal;
+        return [{ sessionId, windowId, paneId, place: place ?? '', role: role ?? '', name, worktree: path.join('\t'), dead: dead === '1', ...(exitCode === undefined || Number.isNaN(exitCode) ? {} : { exitCode }), ...(exitSignal === undefined ? {} : { exitSignal }) }];
       });
+      // identify only tagged process exits with neither native result
+      const missed = panes.some(pane => pane.dead && pane.role === processPaneRole && pane.name !== '' && pane.worktree !== '' && pane.exitCode === undefined && pane.exitSignal === undefined);
+      // wake one child after libutempter swallows a sigchld notification, then re-list once
+      if (allowRecovery && missed) {
+        const woken = await this.tmux(['run-shell', ':']);
+        // preserve the first observation when tmux cannot create the reaper child
+        if (woken.code !== 0) return panes;
+        return await list(false);
+      }
+      return panes;
     };
     // lifecycle callers never join an older read
     if (fresh) return list();

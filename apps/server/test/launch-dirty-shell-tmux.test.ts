@@ -71,6 +71,8 @@ async function fixture(scope: 'scratch' | 'worktree', viewed: boolean): Promise<
   const worktreeRoot = join(accountHome, 'weather');
   await mkdir(scratchRoot, { recursive: true });
   await mkdir(worktreeRoot, { recursive: true });
+  // isolate shell startup from the host completion-directory trust prompt
+  await writeFile(join(accountHome, '.zshenv'), 'skip_global_compinit=1\n');
   // keep the launched interactive zsh out of its first-run wizard
   await writeFile(join(accountHome, '.zshrc'), '');
 

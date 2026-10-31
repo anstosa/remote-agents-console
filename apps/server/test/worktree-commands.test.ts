@@ -385,7 +385,7 @@ describe('worktree stack commands', () => {
 // closes it, as in tmux. `fail` makes every call fail as tmux does when it cannot run. Git runs
 // for real in a checkout that exists, so a real repository answers `rev-parse`; its calls are
 // kept apart in `gitCalls`.
-type FakeWindow = { id: string; paneId: string; session: string; options: Map<string, string>; paneOptions: Map<string, string>; dead: boolean; status?: number; command: string[]; cwd?: string; ignoresInterrupt?: boolean; inMode?: boolean; output?: string; pipe?: string; runs?: string[][] };
+type FakeWindow = { id: string; paneId: string; session: string; options: Map<string, string>; paneOptions: Map<string, string>; dead: boolean; status?: number; signal?: string; pendingStatus?: number; command: string[]; cwd?: string; ignoresInterrupt?: boolean; inMode?: boolean; output?: string; pipe?: string; runs?: string[][] };
 function fakeTmux() {
   const sessions = new Map<string, Map<string, string>>();
   // tmux's stable `$N` session ids, by name
@@ -397,7 +397,7 @@ function fakeTmux() {
   const calls: string[][] = [];
   const events: string[] = [];
   let nextWindow = 1;
-  const state = { fail: false };
+  const state = { fail: false, failReaperWake: false };
   const formatCommands: string[] = [];
   // `##` collapses to `#`; an undoubled `#(` is a shell command the tmux server would run
   const expand = (value: string | undefined) => {
@@ -412,7 +412,7 @@ function fakeTmux() {
   const missing = (session: string) => ({ code: 1, stdout: '', stderr: `can't find session: ${session}` });
   const format = (template: string, entry: FakeWindow) => template.replace(/#\{([^}]+)\}/gu, (_match, key: string) => {
     if (key.startsWith('@')) return entry.paneOptions.get(key) ?? entry.options.get(key) ?? sessions.get(entry.session)?.get(key) ?? '';
-    const fields: Record<string, string> = { session_id: idOf(entry.session), window_id: entry.id, pane_id: entry.paneId, session_name: entry.session, pane_dead: entry.dead ? '1' : '0', pane_dead_status: entry.dead ? String(entry.status ?? 0) : '' };
+    const fields: Record<string, string> = { session_id: idOf(entry.session), window_id: entry.id, pane_id: entry.paneId, session_name: entry.session, pane_dead: entry.dead ? '1' : '0', pane_dead_status: entry.dead && entry.status !== undefined ? String(entry.status) : '', pane_dead_signal: entry.dead && entry.signal !== undefined ? String(entry.signal) : '' };
     return fields[key] ?? '';
   });
   // the trailing shell command of a tmux command, after its flags
@@ -428,6 +428,14 @@ function fakeTmux() {
       return { code: 0, stdout: args.includes('-P') ? `${format(value(args, '-F') ?? '', entry)}\n` : '' };
     }
     if (verb === 'list-sessions') return { code: 0, stdout: [...sessions.keys()].map(name => `${name}\n`).join('') };
+    if (verb === 'run-shell') {
+      events.push('reaper-wake');
+      // preserve the missed metadata when the wake itself fails
+      if (state.failReaperWake) return { code: 1, stdout: '', stderr: 'run-shell failed' };
+      // publish only native results the fake marked as pending
+      for (const entry of windows) if (entry.pendingStatus !== undefined) { entry.status = entry.pendingStatus; delete entry.pendingStatus; }
+      return { code: 0, stdout: '' };
+    }
     if (verb === 'set-option') {
       const target = value(args, '-t')!;
       const [name, setting] = args.slice(-2) as [string, string];
@@ -691,6 +699,87 @@ describe('worktree Stack process', () => {
     await expect(service.state(erin)).resolves.toEqual({ running: false, processes: [{ name: 'web', state: 'stopped' }] });
     // reading state never opens a window: no status probe runs for a process Worktree
     expect(tmux.calls.every(args => args[0] === 'list-panes')).toBe(true);
+  });
+
+  // recover the exact native result without changing sockets
+  it('recovers one missed native exit status through the selected tmux socket', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    const tmux = fakeTmux();
+    const crashed = tmux.seedProcess('cora', '/worktrees/cora', 'dev', true);
+    crashed.pendingStatus = 3;
+    crashed.output = 'missing binary\n';
+    const service = processService(tmux);
+
+    await expect(service.processOutput(cora.id, 'dev')).resolves.toEqual({ name: 'dev', state: 'exited', exitCode: 3, output: 'missing binary' });
+    // isolate recovery calls from ordinary pane reads
+    expect(tmux.calls.filter(args => args.includes('run-shell'))).toEqual([['-S', '/host-tmux/default', 'run-shell', ':']]);
+    expect(tmux.calls.filter(args => args.includes('list-panes'))).toHaveLength(2);
+  });
+
+  // refresh incomplete shared evidence through the bounded native path
+  it('refreshes an incomplete dashboard snapshot before recovering its exit status', async () => {
+    const tmux = fakeTmux();
+    const crashed = tmux.seedProcess('cora', '/worktrees/cora', 'dev', true);
+    crashed.pendingStatus = 3;
+    const path = `/tmp/tmux-${process.getuid?.() ?? 0}/default`;
+    const snapshots = new Map([[path, { status: 'available' as const, panes: [{ paneId: crashed.paneId, sessionId: '$1', windowId: crashed.id, pid: 1, path: '', title: '', command: 'bash', role: 'process', processName: 'dev', processWorktree: cora.path, dead: true, socket: { fingerprint: 'fixture', path, device: 0, inode: 0 } }] }]]);
+
+    await expect(processService(tmux).state(cora, snapshots)).resolves.toEqual({ running: false, processes: [{ name: 'dev', state: 'exited', exitCode: 3 }] });
+    // require one recovery and its one fresh listing
+    expect(tmux.events.filter(event => event === 'reaper-wake')).toHaveLength(1);
+    expect(tmux.calls.filter(args => args.includes('list-panes'))).toHaveLength(2);
+  });
+
+  // leave complete signal and non-process observations untouched
+  it('does not wake for a signalled process, a live process, or an unmanaged dead pane', async () => {
+    const tmux = fakeTmux();
+    const signalled = tmux.seedProcess('cora', '/worktrees/cora', 'dev', true);
+    signalled.signal = 'INT';
+    tmux.seedProcess('dana', '/worktrees/dana', 'dev');
+    const unmanaged = tmux.seedProcess('erin', '/worktrees/erin', 'web', true);
+    unmanaged.paneOptions.delete('@rac_role');
+    unmanaged.pendingStatus = 4;
+    const service = processService(tmux);
+
+    await expect(service.state(cora)).resolves.toEqual({ running: false, processes: [{ name: 'dev', state: 'exited' }] });
+    await expect(service.state(dana)).resolves.toEqual({ running: true, processes: [{ name: 'dev', state: 'running' }] });
+    await expect(service.state(erin)).resolves.toEqual({ running: false, processes: [{ name: 'web', state: 'stopped' }] });
+    expect(tmux.events).not.toContain('reaper-wake');
+  });
+
+  // refresh a signal-only snapshot without attempting recovery
+  it('refreshes a signal-only dashboard snapshot without waking the reaper', async () => {
+    const tmux = fakeTmux();
+    const signalled = tmux.seedProcess('cora', '/worktrees/cora', 'dev', true);
+    signalled.signal = '15';
+    const path = `/tmp/tmux-${process.getuid?.() ?? 0}/default`;
+    const snapshots = new Map([[path, { status: 'available' as const, panes: [{ paneId: signalled.paneId, sessionId: '$1', windowId: signalled.id, pid: 1, path: '', title: '', command: 'bash', role: 'process', processName: 'dev', processWorktree: cora.path, dead: true, socket: { fingerprint: 'fixture', path, device: 0, inode: 0 } }] }]]);
+
+    await expect(processService(tmux).state(cora, snapshots)).resolves.toEqual({ running: false, processes: [{ name: 'dev', state: 'exited' }] });
+    // require only the fallback listing
+    expect(tmux.calls.filter(args => args.includes('list-panes'))).toHaveLength(1);
+    expect(tmux.events).not.toContain('reaper-wake');
+  });
+
+  // fail closed and cap the successful recovery path at one refresh
+  it('preserves missing status when the wake fails and bounds a still-pending refresh', async () => {
+    const tmux = fakeTmux();
+    tmux.seedProcess('cora', '/worktrees/cora', 'dev', true);
+    const service = processService(tmux);
+
+    tmux.state.failReaperWake = true;
+    await expect(service.state(cora)).resolves.toEqual({ running: false, processes: [{ name: 'dev', state: 'exited' }] });
+    // require one read and one failed wake
+    expect(tmux.calls.filter(args => args.includes('list-panes'))).toHaveLength(1);
+    expect(tmux.events.filter(event => event === 'reaper-wake')).toHaveLength(1);
+
+    tmux.calls.length = 0;
+    tmux.events.length = 0;
+    tmux.state.failReaperWake = false;
+    await expect(service.state(cora)).resolves.toEqual({ running: false, processes: [{ name: 'dev', state: 'exited' }] });
+    // require one retry without a second wake
+    expect(tmux.calls.filter(args => args.includes('list-panes'))).toHaveLength(2);
+    expect(tmux.events.filter(event => event === 'reaper-wake')).toHaveLength(1);
   });
 
   it('reports a process stopped when no tmux server is running, and starts none by reading', async () => {
@@ -1086,8 +1175,8 @@ describe('worktree Stack process', () => {
       if (args[0] !== 'list-panes' || result.code !== 0) return result;
       const own = result.stdout.split('\n').find(line => line.includes(`\t${dev.paneId}\t`));
       if (own === undefined) return result;
-      const [sessionId, windowId, , , , place, , name, ...path] = own.split('\t');
-      return { ...result, stdout: `${result.stdout}${[sessionId, windowId, '%99', '0', '', place, '', name, ...path].join('\t')}\n` };
+      const [sessionId, windowId, , , , , place, , name, ...path] = own.split('\t');
+      return { ...result, stdout: `${result.stdout}${[sessionId, windowId, '%99', '0', '', '', place, '', name, ...path].join('\t')}\n` };
     };
     const service = new WorktreeCommandService(config, { worktreesNow: () => [cora] } as never, withSplit, undefined, undefined, undefined, { timeoutMs: 5_000, pollMs: 5 });
     await expect(service.state(cora)).resolves.toEqual({ running: false, processes: [{ name: 'dev', state: 'exited', exitCode: 1 }] });
@@ -1330,7 +1419,7 @@ describe('worktree with several Stack processes', () => {
     await expect(service.state(fern)).resolves.toEqual({ processes: [{ name: 'sync', state: 'running' }, { name: 'api', state: 'exited', exitCode: 1 }, { name: 'web', state: 'stopped' }] });
 
     tmux.seedProcess('fern', '/worktrees/fern', 'web', true, 2);
-    tmux.windows.find(entry => entry.options.get('@rac_process') === 'sync')!.dead = true;
+    Object.assign(tmux.windows.find(entry => entry.options.get('@rac_process') === 'sync')!, { dead: true, status: 0 });
     await expect(service.state(fern)).resolves.toEqual({ running: false, processes: [{ name: 'sync', state: 'exited', exitCode: 0 }, { name: 'api', state: 'exited', exitCode: 1 }, { name: 'web', state: 'exited', exitCode: 2 }] });
   });
 

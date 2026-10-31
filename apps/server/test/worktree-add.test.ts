@@ -215,7 +215,8 @@ describe('WorktreeManagementService.add — from a pull request', () => {
   // an origin holding a head-on-origin branch and a fork PR head reachable only as refs/pull/8/head,
   // cloned as the Project's main checkout
   async function pullRequestRepository() {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-add-pr-')));
+    // exercise names that resemble a requested worktree in the parent path
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-add-pr-8-pr-9-')));
     dirs.push(root);
     const origin = join(root, 'origin');
     const checkout = join(root, 'repo');
@@ -312,7 +313,8 @@ describe('WorktreeManagementService.add — from a pull request', () => {
     await git(origin, 'update-ref', 'refs/pull/9/head', draftSha);
     expect(await management.add('proj', { mode: 'pull-request', number: 9 })).toEqual({ ok: false, status: 409, error: 'Pull request #9 changed on GitHub after it was listed. Reopen the list and try again.' });
     expect(await management.add('proj', { mode: 'pull-request', number: 10 })).toEqual({ ok: false, status: 409, error: 'Pull request #10 is no longer open.' });
-    expect(await git(checkout, 'worktree', 'list', '--porcelain')).not.toContain('pr-9');
+    // match the requested checkout rather than a random parent name
+    expect((await git(checkout, 'worktree', 'list', '--porcelain')).split('\n')).not.toContain(`worktree ${join(project.worktreesDirectory, 'pr-9')}`);
   });
 
   it('refuses a fork pull request asked to open an agent, before fetching or adding anything', async () => {
@@ -320,7 +322,8 @@ describe('WorktreeManagementService.add — from a pull request', () => {
     const result = await service(project, [{ number: 8, branch: 'main', headSha: forkSha, headOnOrigin: false }]).add('proj', { mode: 'pull-request', number: 8, openAgent: true });
     expect(result).toEqual({ ok: false, status: 409, error: 'Fork pull requests open without setup or an agent. Choose Terminal or Nothing.' });
     expect((await run('/usr/bin/git', ['-C', checkout, 'rev-parse', '--verify', '--quiet', 'refs/rac/pull/8'])).code).not.toBe(0);
-    expect(await git(checkout, 'worktree', 'list', '--porcelain')).not.toContain('pr-8');
+    // match the requested checkout rather than a random parent name
+    expect((await git(checkout, 'worktree', 'list', '--porcelain')).split('\n')).not.toContain(`worktree ${join(project.worktreesDirectory, 'pr-8')}`);
   });
 
   it('refuses a pull request a worktree holds at an earlier fork head, read live from git rather than the dashboard', async () => {
@@ -332,6 +335,7 @@ describe('WorktreeManagementService.add — from a pull request', () => {
     await git(checkout, 'worktree', 'add', '-q', '-b', `rac/pr/8/${base.slice(0, 12)}`, older, base);
     const result = await service(project, [{ number: 8, branch: 'main', headSha: forkSha, headOnOrigin: false }]).add('proj', { mode: 'pull-request', number: 8 });
     expect(result).toEqual({ ok: false, status: 409, error: `Pull request #8 is already checked out at ${older}.` });
-    expect(await git(checkout, 'worktree', 'list', '--porcelain')).not.toContain('pr-8');
+    // match the requested checkout rather than a random parent name
+    expect((await git(checkout, 'worktree', 'list', '--porcelain')).split('\n')).not.toContain(`worktree ${join(project.worktreesDirectory, 'pr-8')}`);
   });
 });
