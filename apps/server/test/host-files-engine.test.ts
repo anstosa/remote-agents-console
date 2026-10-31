@@ -130,7 +130,8 @@ describe('host Files mutation engine', () => {
   it('rejects a changed recursive source manifest', async () => {
     const f = await fixture(); const source = join(f.source, 'file'); await writeFile(source, 'old');
     const command = await copyCommand(f.engine, source, join(f.destination, 'copy'));
-    await writeFile(source, 'new');
+    // another length, so the edit shows even when it lands in the same timestamp tick (coarse on tmpfs)
+    await writeFile(source, 'newer');
     await expect(f.engine.request(command)).rejects.toMatchObject({ code: 'stale_object' });
     expect(await readdir(f.destination)).toEqual([]);
   });
