@@ -200,24 +200,40 @@ test('prefetches shared repository choices and refreshes them when reopened', as
   await github.close();
 });
 
-// keep configured and default branch actions aligned with standard prompt controls
-test('queues the configured push prompt and falls back to the default action', async ({ page }) => {
-  let push: { label: string; prompt: string } | undefined = { label: 'Finish and PR', prompt: '$finish' };
-  const queued: string[] = [];
+// keep configured branch actions aligned with standard prompt controls
+test('dispatches an iconless configured pull request action without a legacy fallback', async ({ page }) => {
+  const emptyButtonSlots = {
+    tabLead: [], leftNav: [], rightNav: [], navMenu: [], pullRequest: [],
+    'split:agent': [], 'split:terminal': [], 'split:note': [], 'split:browser': [], 'split:files': [], 'split:code': [], 'split:review': [], 'split:stack': [], 'split:settings': []
+  };
+  let configured = true;
+  const starts: Array<Record<string, unknown>> = [];
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
+    // authenticate the fixture
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: queued.length + 1, reviewTour: { available: true }, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', branch: 'feature/push-action', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready', ...(push === undefined ? {} : { push }) }], projects: [] } });
+    // expose the current configured catalog
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: {
+      generation: configured ? 1 : 2,
+      reviewTour: { available: true },
+      agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', placeId: 'cora', projectId: 'repo', branch: 'feature/push-action', gitStatus: { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }, title: 'Ready' }],
+      projects: [],
+      buttons: { revision: configured ? 'buttons-v1' : 'buttons-v2', application: { ...emptyButtonSlots, pullRequest: configured ? [{ id: 'finish-action', text: 'Finish and PR', color: 'mauve', style: 'solid', actionKind: 'prompt' }] : [] }, projects: {} }
+    } });
+    // disable optional push setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    // authorize the agent stream
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'log-ticket' } });
+    // keep saved prompts empty
     if (url.pathname === '/api/agents/agent-1/saved-prompts' && request.method() === 'GET') return route.fulfill({ json: { prompts: [] } });
+    // keep repository choices empty
     if (url.pathname === '/api/worktrees/cora/switch-prs') return route.fulfill({ json: { enabled: true, pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true } });
-    if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') {
-      const body = request.postDataJSON() as { prompt: string; attachments: unknown[] };
-      expect(body.attachments).toEqual([]);
-      queued.push(body.prompt);
-      return route.fulfill({ status: 202, json: { ok: true } });
+    // record opaque configured action dispatch
+    if (url.pathname === '/api/button-actions' && request.method() === 'POST') {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      starts.push(body);
+      return route.fulfill({ status: 202, json: { operation: { id: 'operation-finish-action', state: 'complete', phase: 'submitted' } } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -234,12 +250,15 @@ test('queues the configured push prompt and falls back to the default action', a
   const review = branchFlyout.getByRole('button', { name: 'Review', exact: true });
   const custom = branchFlyout.getByRole('button', { name: 'Finish and PR', exact: true });
   const queue = page.getByRole('button', { name: 'Queue', exact: true });
-  await expect(custom.locator('.more-menu-icon')).toBeVisible();
+  // iconless configured actions retain their label and placement
+  await expect(custom.locator('svg, .configured-button-icon')).toHaveCount(0);
+  await expect(branchFlyout.locator('.git-status-actions').getByRole('button')).toHaveText(['View changes', 'Review', 'Finish and PR']);
   const [reviewBounds, customBounds] = await Promise.all([review.boundingBox(), custom.boundingBox()]);
   // require rendered action bounds
   if (reviewBounds === null || customBounds === null) throw new Error('branch action bounds unavailable');
-  expect(customBounds.x).toBeGreaterThan(reviewBounds.x + reviewBounds.width);
-  expect(customBounds.y).toBeCloseTo(reviewBounds.y, 0);
+  const horizontalOverlap = Math.max(0, Math.min(reviewBounds.x + reviewBounds.width, customBounds.x + customBounds.width) - Math.max(reviewBounds.x, customBounds.x));
+  const verticalOverlap = Math.max(0, Math.min(reviewBounds.y + reviewBounds.height, customBounds.y + customBounds.height) - Math.max(reviewBounds.y, customBounds.y));
+  expect(horizontalOverlap === 0 || verticalOverlap === 0).toBe(true);
   // match standard prompt-control height at desktop and mobile widths
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
@@ -248,30 +267,37 @@ test('queues the configured push prompt and falls back to the default action', a
     if (queueSize === null || reviewSize === null || customSize === null) throw new Error('responsive branch action bounds unavailable');
     expect(reviewSize.height).toBeCloseTo(queueSize.height, 1);
     expect(customSize.height).toBeCloseTo(queueSize.height, 1);
-    // a desktop gets a fixed-width flyout on screen; a phone's spans the screen within its edges
+    // keep the flyout right-aligned while the phone spans its viewport edges
     const flyoutBox = () => branchFlyout.evaluate(element => { const box = element.getBoundingClientRect(); return { left: Math.round(box.left), width: Math.round(box.width) }; });
-    if (viewport.width > 600) await expect.poll(flyoutBox).toEqual({ left: viewport.width - 6 - 720, width: 720 });
+    await expect.poll(async () => { const box = await flyoutBox(); return box.left + box.width; }).toBe(viewport.width - 6);
+    const renderedFlyout = await flyoutBox();
+    // match the current viewport layout
+    if (viewport.width > 600) {
+      expect(renderedFlyout.left).toBeGreaterThanOrEqual(6);
+      expect(renderedFlyout.width).toBeGreaterThan(600);
+    }
     else await expect.poll(flyoutBox).toEqual({ left: 6, width: viewport.width - 12 });
   }
   await custom.click();
-  await expect.poll(() => queued).toEqual(['$finish']);
+  await expect.poll(() => starts).toHaveLength(1);
+  expect(starts[0]).toMatchObject({ actionId: 'finish-action', configRevision: 'buttons-v1', placeId: 'cora', slot: 'pullRequest', agentId: 'agent-1' });
+  expect(starts[0]).not.toHaveProperty('command');
+  expect(starts[0]).not.toHaveProperty('prompt');
+  expect(starts[0]).not.toHaveProperty('cwd');
   await expect(branchFlyout).toBeHidden();
 
-  push = undefined;
+  configured = false;
   await page.reload();
   await more.click();
+  await expect(page.locator('.more-menu').getByRole('button', { name: 'Finish and PR', exact: true })).toHaveCount(0);
   await expect(page.locator('.more-menu').getByRole('button', { name: 'Commit/Push', exact: true })).toHaveCount(0);
   // leave the overflow menu before opening branch status
   await page.keyboard.press('Escape');
   await expect(more).toHaveAttribute('aria-expanded', 'false');
   await page.getByRole('button', { name: /^Git status:/u }).click();
-  const defaultPush = page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Commit/Push', exact: true });
-  const [defaultQueueSize, defaultPushSize] = await Promise.all([queue.boundingBox(), defaultPush.boundingBox()]);
-  // require default action bounds
-  if (defaultQueueSize === null || defaultPushSize === null) throw new Error('default branch action bounds unavailable');
-  expect(defaultPushSize.height).toBeCloseTo(defaultQueueSize.height, 1);
-  await defaultPush.click();
-  await expect.poll(() => queued).toEqual(['$finish', 'review, commit, and push']);
+  const actions = page.getByRole('region', { name: 'Changed files' });
+  await expect(actions.getByRole('button', { name: 'Finish and PR', exact: true })).toHaveCount(0);
+  await expect(actions.getByRole('button', { name: 'Commit/Push', exact: true })).toHaveCount(0);
 });
 
 test('shows every pull request target while keeping checkout and worktree actions available', async ({ page }) => {

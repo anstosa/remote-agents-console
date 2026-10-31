@@ -1175,7 +1175,7 @@ test('on a phone the carousel gains a dot for the Terminal', async ({ page }) =>
   await expect(column).toBeInViewport({ ratio: 0.99 });
 });
 
-test('an agentless Worktree tab can open a Terminal', async ({ page }) => {
+test('an agentless Worktree tab restores its existing Terminal', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 900 });
   await installPaneMock(page);
   const panes: Pane[] = [{ paneId: '%5', session: '$1', window: '@1', role: 'shell', name: 'build', command: 'zsh', path: '/worktrees/cora', title: '', agent: false, busy: false }];
@@ -1197,8 +1197,8 @@ test('an agentless Worktree tab can open a Terminal', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('tab', { name: /Cora/u }).click();
 
-  await openPicker(page);
-  await page.getByRole('menuitem', { name: /build/u }).click();
+  // an otherwise empty workspace restores its existing managed shell
+  await expect(page.locator('.terminal-pane[data-panel-key="%5"]')).toBeVisible();
   await seedPaneSize(page, '%5', 80, 24);
   await pushBytes(page, '%5', 'shell in an agentless worktree\r\n');
   await expect(page.locator('.terminal-pane[data-panel-key="%5"]')).toBeVisible();
@@ -1227,8 +1227,8 @@ test('on a phone an agentless Workspace keeps its toolbar below the Terminal hel
 
   const workspaceToolbar = page.getByRole('region', { name: 'Workspace toolbar' });
   await expect(workspaceToolbar.getByRole('button', { name: 'Open a terminal' })).toBeVisible();
-  await openPicker(page);
-  await page.getByRole('menuitem', { name: /build/u }).click();
+  // an otherwise empty workspace restores its existing managed shell
+  await expect(page.locator('.terminal-pane[data-panel-key="%5"]')).toBeVisible();
   await seedPaneSize(page, '%5', 80, 24);
   await expect(page.locator('.terminal-pane[data-panel-key="%5"]')).toBeInViewport({ ratio: 0.99 });
 
@@ -1278,8 +1278,8 @@ test('an agentless Worktree Terminal can create a note and prepare its prompt', 
   });
   await page.goto('/');
   await page.getByRole('tab', { name: /Cora/u }).click();
-  await openPicker(page);
-  await page.getByRole('menuitem', { name: /build/u }).click();
+  // an otherwise empty workspace restores its existing managed shell
+  await expect(page.locator('.terminal-pane[data-panel-key="%5"]')).toBeVisible();
   await seedPaneSize(page, '%5', 80, 24);
   await pushBytes(page, '%5', `${'\r\n'.repeat(8)}Agentless terminal selection`);
 
@@ -2134,8 +2134,8 @@ test('a directory-Project Place with a Console shell keeps a tab after its Agent
   await expect(page.getByRole('tab', { name: /^Notes/u })).toHaveCount(1);
 
   // the agentless tab opens the Place's Console shell as a Terminal
-  await openPicker(page);
-  await page.getByRole('menuitem', { name: /build/u }).click();
+  // an otherwise empty workspace restores its existing managed shell
+  await expect(page.locator('.terminal-pane[data-panel-key="%5"]')).toBeVisible();
   await seedPaneSize(page, '%5', 80, 24);
   await pushBytes(page, '%5', 'shell in an agentless place\r\n');
   await expect(page.locator('.terminal-pane[data-panel-key="%5"]')).toBeVisible();

@@ -203,6 +203,38 @@ async function setupShellSettings(page: Page) {
           restartAvailable: true,
         },
       });
+    // keep background tunnel monitoring inside the fixture
+    if (
+      path === "/api/settings/cloudflare/health" &&
+      request.method() === "GET"
+    )
+      return route.fulfill({
+        json: {
+          state: "disabled",
+          failures: 0,
+          reconnecting: false,
+          canReconnect: false,
+        },
+      });
+    // keep background calendar status inside the fixture
+    if (path === "/api/settings/google-calendar" && request.method() === "GET")
+      return route.fulfill({
+        json: {
+          enabled: false,
+          available: false,
+          connected: false,
+          status: "disabled",
+          calendars: [],
+          setup: {
+            clientId: false,
+            clientSecret: false,
+            tokenKey: false,
+            redirectUri:
+              "http://127.0.0.1:4173/api/settings/google-calendar/callback",
+          },
+          counts: { pending: 0, delivered: 0, failed: 0, suppressed: 0 },
+        },
+      });
     if (path === "/api/settings/cloudflare" && request.method() === "GET")
       return route.fulfill({
         json: {
@@ -337,7 +369,7 @@ test("edits only executable application values as shell code", async ({
     await expectShellEditor(settings, path);
   await expectPlainInput(settings, "adapters.codex.program");
   const args = settings.locator('[data-settings-path="adapters.codex.args"]');
-  await args.locator(".settings-collection-edit").first().click();
+  await expect(args.locator(".settings-collection-edit")).toHaveCount(0);
   await expectPlainInput(settings, "adapters.codex.args.0");
   await expectPlainInput(settings, "adapters.codex.env.CODEX_HOME");
 

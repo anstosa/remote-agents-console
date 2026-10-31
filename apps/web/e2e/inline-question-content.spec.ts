@@ -31,6 +31,8 @@ const routeApi = async (page: Page) => {
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     // disable unrelated push setup
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    // disable cloudflare health preload
+    if (url.pathname === '/api/settings/cloudflare/health') return route.fulfill({ json: { state: 'disabled', failures: 0, reconnecting: false, canReconnect: false } });
     // mint the mocked pane connection
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     // keep saved prompt data empty

@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { instanceIconSvg } from '../../server/src/instance-icon.js';
 import { installPaneMock, pushBytes, seedPaneSize } from './pane-stream-mock.js';
+import { expectClockwiseProgressBorder, expectProgressBorder, expectReducedMotionSpinner } from './progress-border-assertions.js';
 
 test('keeps the active tab, output, and prompt controls inside a narrow viewport', async ({ page }) => {
   // opt in for marker geometry checks
@@ -366,8 +367,8 @@ test('the phone workspace switcher renames a worktree without selecting it', asy
   await expect(sheet.getByRole('button', { name: /^Renamed Cora\b/u })).toBeVisible();
 });
 
-// keep phone working motion behind steady content
-test('the phone workspace flyout moves only a working row background and borders its active row', async ({ page }) => {
+// keep phone working motion around steady content
+test('the phone workspace flyout moves only a working row progress border', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.route('**/api/**', route => {
@@ -386,23 +387,21 @@ test('the phone workspace flyout moves only a working row background and borders
   await page.goto('/');
   const dropdown = page.getByRole('tab', { selected: true });
   await expect(dropdown).toBeVisible();
-  // restrict dropdown motion to its background layer
-  const dropdownMotion = await dropdown.evaluate(element => element.getAnimations({ subtree: true }).map(animation => {
-    const effect = animation.effect as KeyframeEffect;
-    return effect.target === element && effect.pseudoElement === '::before' ? 'background' : 'content-or-dot';
-  }));
-  expect(dropdownMotion).toEqual(['background']);
+  await expectProgressBorder(dropdown, 'peach', 'working');
+  await expectClockwiseProgressBorder(dropdown, 'working');
   await dropdown.click();
   const row = page.getByRole('dialog', { name: 'Workspaces' }).locator('.workspace-sheet-row.status-working');
   await expect(row.getByRole('button', { name: /^Build\s*2 Agents · 2 shells · Working$/u })).toBeVisible();
+  await expectProgressBorder(row, 'peach', 'working');
+  await expectClockwiseProgressBorder(row, 'working');
   const paint = await row.evaluate(element => {
     const entry = element.querySelector('.workspace-sheet-entry')!;
     const label = entry.querySelector('strong')!;
     // keep only status-related movement from this row
     const movingParts = element.getAnimations({ subtree: true }).flatMap(animation => {
       const effect = animation.effect as KeyframeEffect;
-      // retain the working background sweep
-      if (effect.target === element && effect.pseudoElement === '::before') return ['background'];
+      // retain the working border orbit
+      if ((effect.target as Element | null)?.classList.contains('update-progress-ring')) return ['border'];
       // surface accidental label motion
       if (effect.target === label) return ['label'];
       // surface accidental dot motion
@@ -416,16 +415,18 @@ test('the phone workspace flyout moves only a working row background and borders
   const dropdownPaint = await page.getByRole('tab', { selected: true }).evaluate(element => ({ border: getComputedStyle(element).borderColor, shadow: getComputedStyle(element).boxShadow }));
   expect(dropdownPaint.border).toBe(paint.dot);
   expect(dropdownPaint.shadow).not.toContain('inset');
-  expect(paint.movingParts).toEqual(['background']);
+  expect(paint.movingParts).toEqual(['border']);
   expect(paint.dotMotion).toBe('none');
   expect([paint.dotWidth, paint.dotHeight]).toEqual(['6px', '6px']);
   expect(paint.labelMotion).toBe('none');
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  // wait for the browser to apply the changed media preference
+  await expectReducedMotionSpinner(dropdown, 'peach', 'working');
+  await expectReducedMotionSpinner(row, 'peach', 'working');
+  // keep status content stationary in reduced motion
   await expect.poll(() => row.evaluate(element => {
     const entry = element.querySelector('.workspace-sheet-entry')!;
-    return { animations: element.getAnimations({ subtree: true }).length, dotMotion: getComputedStyle(entry, '::after').animationName, labelMotion: getComputedStyle(entry.querySelector('strong')!).animationName };
-  })).toEqual({ animations: 0, dotMotion: 'none', labelMotion: 'none' });
+    return { dotMotion: getComputedStyle(entry, '::after').animationName, labelMotion: getComputedStyle(entry.querySelector('strong')!).animationName };
+  })).toEqual({ dotMotion: 'none', labelMotion: 'none' });
 });
 
 test('a phone shows only the current Workspace, as a dropdown over a sheet of every Workspace', async ({ page }) => {
@@ -515,7 +516,7 @@ test('a phone shows only the current Workspace, as a dropdown over a sheet of ev
   expect(statusPaint[2].rowMotion).toBe('none');
   expect([statusPaint[2].dotWidth, statusPaint[2].dotHeight]).toEqual(['6px', '6px']);
   expect(statusPaint[2].dotMotion).toBe('none');
-  expect(statusPaint[2].labelMotion).not.toBe('none');
+  expect(statusPaint[2].labelMotion).toBe('none');
   expect(statusPaint[3].dotMotion).toBe('none');
   expect(statusPaint[3].labelMotion).toBe('none');
   // disable completion motion without changing workspace state

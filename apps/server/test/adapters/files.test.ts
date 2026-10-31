@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { adapterFileContext, hostVisibleRepoRoot, renderAdapterFiles } from '../../src/adapters/files.js';
+import { adapterFileContext, consoleRepositoryRoot, hostVisibleRepoRoot, renderAdapterFiles } from '../../src/adapters/files.js';
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
@@ -64,7 +64,7 @@ describe('adapter file rendering', () => {
 
   it('off the bridge falls back to the console checkout and the local tmux', () => {
     const resolved = adapterFileContext({} as NodeJS.ProcessEnv);
-    expect(resolved?.context.repoRoot).toMatch(/remoteagents$/);
+    expect(resolved?.context.repoRoot).toBe(consoleRepositoryRoot());
     expect(resolved?.context.tmuxBin).toBe('/usr/bin/tmux');
   });
 });

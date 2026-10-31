@@ -315,12 +315,15 @@ test.describe('mobile Fn input', () => {
     await alt.tap();
 
     // preserve non-digits, multi-character input and xterm escape sequences
-    await page.keyboard.type('a');
-    await insertImeText('12');
-    await page.keyboard.press('ArrowUp');
     const escape = '\x1b';
     const functionKeys = `${escape}OP${escape}OQ${escape}OR${escape}OS${escape}[15~${escape}[17~${escape}[18~${escape}[19~${escape}[20~${escape}[21~`;
-    await expect.poll(() => paneInputText(page, 'agent-1')).toBe(`${escape}[15~1${functionKeys}0${escape}[1;5P${escape}[15;2~${escape}[21;8~a12${escape}[A`);
+    const beforeIme = `${escape}[15~1${functionKeys}0${escape}[1;5P${escape}[15;2~${escape}[21;8~a`;
+    await page.keyboard.type('a');
+    await expect.poll(() => paneInputText(page, 'agent-1')).toBe(beforeIme);
+    await insertImeText('12');
+    await expect.poll(() => paneInputText(page, 'agent-1')).toBe(`${beforeIme}12`);
+    await page.keyboard.press('ArrowUp');
+    await expect.poll(() => paneInputText(page, 'agent-1')).toBe(`${beforeIme}12${escape}[A`);
 
     const [keyBounds, modifierBounds, fnBounds, shiftBounds, altBounds] = await Promise.all([
       keys.boundingBox(),

@@ -255,6 +255,8 @@ test('keeps multiple menu deletion undos and five-second dismiss timers independ
   await expect(beta).toBeVisible();
   await expect(alpha.locator('.toast-timer-bar')).toHaveCount(1);
   await expect(beta.locator('.toast-timer-bar')).toHaveCount(1);
+  // dismiss the notes flyout above the toasts
+  await page.keyboard.press('Escape');
 
   // each Undo restores only its own note and leaves the other action intact
   await alpha.getByRole('button', { name: 'Undo', exact: true }).click();
@@ -266,6 +268,7 @@ test('keeps multiple menu deletion undos and five-second dismiss timers independ
   await expect(beta).toHaveCount(0);
 
   // stagger two later deletions to prove each gets its own five-second timer
+  await page.getByRole('button', { name: 'Notes (2)' }).click();
   await menu.getByRole('button', { name: 'Delete note: Alpha note' }).click();
   await expect(alpha).toBeVisible();
   await expect(alpha.locator('.toast-timer-bar')).toHaveCount(1);
@@ -308,6 +311,8 @@ test('preserves notes after delete and undo failures and allows retry', async ({
   const toast = deletionToast(page, 'Retry note');
   await expect(toast).toBeVisible();
   await expect(toast.locator('.toast-timer-bar')).toHaveCount(1);
+  // dismiss the notes flyout above the toast
+  await page.keyboard.press('Escape');
   let releaseUndo = () => { /* expose the restore response gate */ };
   api.undoGate = new Promise<void>(resolve => { releaseUndo = resolve; });
   api.failUndo = true;

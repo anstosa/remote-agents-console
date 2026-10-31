@@ -52,8 +52,9 @@ test('the agent output is a panel with a floating header and the composer at its
   const power = actions.getByRole('button', { name: 'Agent power options' });
   await power.click();
   const menu = page.getByRole('menu', { name: 'Agent power options' });
-  await expect(menu.getByRole('menuitem')).toHaveText(['Restart', 'Clear', 'New Task', 'Turn off']);
-  await expect(menu.getByRole('menuitem', { name: 'New Task' })).toBeDisabled();
+  // hide project actions that have no configured command
+  await expect(menu.getByRole('menuitem')).toHaveText(['Restart', 'Clear', 'Turn off']);
+  await expect(menu.getByRole('menuitem', { name: 'New Task' })).toHaveCount(0);
   await page.keyboard.press('Escape');
   await page.mouse.click(5, 400);
   await expect(menu).toHaveCount(0);

@@ -897,7 +897,8 @@ describe('LaunchService', () => {
     // the setup runs first in the same pane; its non-zero exit would stop the program
     const window = run.mock.calls.find(call => (call[1] as string[]).includes('new-window'))?.[1] as string[];
     const command = "eval 'rm -f .omx/state/session.json' && /usr/local/bin/codex";
-    expect(window.at(-1)).toBe(interactiveShellBootstrap(hostCommand(expandHomeCommand(command, worktree.hostPath!), '/home/ubuntu'), '/home/ubuntu', '/usr/bin/zsh'));
+    const home = process.env.HOME ?? '/';
+    expect(window.at(-1)).toBe(interactiveShellBootstrap(hostCommand(expandHomeCommand(command, worktree.hostPath!), home), home, '/usr/bin/zsh'));
     expect(panes.pastePrompt).not.toHaveBeenCalled();
     expect(panes.enter).not.toHaveBeenCalled();
   });
@@ -921,7 +922,8 @@ describe('LaunchService', () => {
 
     const bootstraps = run.mock.calls.filter(call => (call[1] as string[]).includes('new-window')).map(call => (call[1] as string[]).at(-1));
     // build the exact host bootstrap
-    const bootstrap = (command: string) => interactiveShellBootstrap(hostCommand(expandHomeCommand(command, worktree.hostPath!), '/home/ubuntu'), '/home/ubuntu', '/usr/bin/zsh');
+    const home = process.env.HOME ?? '/';
+    const bootstrap = (command: string) => interactiveShellBootstrap(hostCommand(expandHomeCommand(command, worktree.hostPath!), home), home, '/usr/bin/zsh');
     expect(bootstraps).toEqual([
       bootstrap("eval 'rm -f .omx/state/session.json' && /abs/omx --direct"),
       bootstrap("eval 'rm -f .omx/state/session.json' && /abs/omx --direct resume --last"),

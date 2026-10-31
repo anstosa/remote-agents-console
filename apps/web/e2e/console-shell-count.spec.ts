@@ -52,7 +52,7 @@ test('a directory-Project and a Scratch Place show their shell count and pin, an
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') {
-      return route.fulfill({ json: { generation: 1, agents: [], projects: [{ id: 'notes', label: 'Notes', mode: 'directory', available: true, manageWorktrees: false, stalePaths: [], worktrees: [], launch: { kind: 'codex', origin: 'project' } }], adapters: { codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } }, places: [
+      return route.fulfill({ json: { generation: 1, agents: [], projects: [{ id: 'notes', label: 'Notes', mode: 'directory', available: true, manageWorktrees: false, stalePaths: [], worktrees: [], launch: { kind: 'codex', origin: 'project' } }], adapters: { codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } }, scratchLaunch: { kind: 'codex', origin: 'scratch' }, places: [
         { id: 'notes:/data/notes', kind: 'directory', projectId: 'notes', label: 'Notes', home: '/data/notes', pinned: pinned.has('notes:/data/notes'), consoleShells: 2 },
         { id: 'scratch:/home/me/scratch', kind: 'scratch', projectId: 'scratch', label: '~ Scratch', home: '/home/me/scratch', pinned: pinned.has('scratch:/home/me/scratch') },
         // a pinned ad-hoc folder with nothing running keeps its tab too
@@ -100,7 +100,9 @@ test('a directory-Project and a Scratch Place show their shell count and pin, an
   await prompt.getByRole('button', { name: 'More options' }).click();
   await expect(placeMenu.getByRole('button', { name: 'Unpin folder' })).toHaveAttribute('aria-pressed', 'true');
   await page.keyboard.press('Escape');
-  await expect(prompt.getByRole('button', { name: /^Launch/u })).toHaveCount(0);
+  // fall back to the global scratch launch
+  await expect(prompt.getByRole('button', { name: 'Launch Codex' })).toBeEnabled();
+  await expect(prompt.getByRole('button', { name: 'Launch Codex' })).toHaveAttribute('title', 'Codex — last used for scratch');
 
   await page.locator('.new-agent-tab').click();
   const launcher = page.getByRole('group', { name: 'Agent launcher' });

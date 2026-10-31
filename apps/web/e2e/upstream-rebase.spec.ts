@@ -87,10 +87,11 @@ test('persists an unchanged dismissal across tabs and reloads, then offers a cha
 
   // phone layout keeps the notification out of workspace flow and against the safe side insets
   await page.setViewportSize({ width: 390, height: 844 });
-  const phoneBounds = await notification.boundingBox();
-  expect(phoneBounds).not.toBeNull();
-  expect(phoneBounds!.x).toBe(8);
-  expect(phoneBounds!.x + phoneBounds!.width).toBe(382);
+  // measure safe insets after the notification entry animation settles
+  await expect.poll(async () => {
+    const bounds = await notification.boundingBox();
+    return bounds === null ? null : { left: bounds.x, right: bounds.x + bounds.width };
+  }).toEqual({ left: 8, right: 382 });
 
   // restore desktop tabs before exercising the tab roundtrip
   await page.setViewportSize({ width: 1440, height: 900 });

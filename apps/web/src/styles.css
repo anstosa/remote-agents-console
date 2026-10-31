@@ -1065,8 +1065,8 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
   /* retain the outer gutter when no tab row follows the expanded footer */
   .log-split > :is(.log-output, .terminal-pane).expanded > :is(.agent-composer, .mobile-terminal-keys) { padding-bottom: .375rem; }
 }
-/* preserve output width above software keyboards */
-html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-terminals) { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+/* keyboard focus overrides ordinary split tracks to preserve output width */
+html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-terminals) { grid-template: minmax(0, 1fr) / minmax(0, 1fr) !important; }
 html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-terminals) > :is(.note-pane, .browser-pane, .files-pane, .code-pane, .review-pane, .stack-pane, .terminal-pane, .split-resizer) { display: none; }
 html.software-keyboard-open .agent-view:has(:is(.agent-composer, .question-prompt):focus-within) .log-split:is(.has-note, .has-browser, .has-files, .has-code, .has-preview, .has-review, .has-stack, .has-terminals) > .log-output { display: grid; }
 /* keep the entire static bottom bar behind any open software keyboard */
@@ -2903,8 +2903,8 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
   .git-status-panel-footer > .git-status-mode { grid-column: 3; grid-row: 1; }
 }
 
-/* connection waits reserve output lines instead of framing the entire pane */
-.streamed-terminal-status.loading { padding: 0; align-content: normal; background: inherit; text-align: left; pointer-events: auto; }
+/* connection waits reserve output lines without intercepting terminal input */
+.streamed-terminal-status.loading { padding: 0; align-content: normal; background: inherit; text-align: left; }
 /* never override the stream-owned hidden state */
 .streamed-terminal-status.loading:not([hidden]) { display: block; }
 .streamed-terminal-status.loading::before { content: none; border: 0; background: none; box-shadow: none; }

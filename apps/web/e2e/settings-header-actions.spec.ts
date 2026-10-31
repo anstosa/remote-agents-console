@@ -61,11 +61,11 @@ const routedIssuePageLabels = [
   "Keyboard shortcuts",
   "Application",
   "Interface",
-  "Agents",
   "Projects",
   "Reviews",
   "TMUX",
   "Storage",
+  "Agents",
   "Environment & keys",
 ];
 
@@ -770,8 +770,11 @@ for (const width of [320, 390, 1440]) {
     await expect(actions.refresh).toHaveText("");
     await expect(
       settings.getByRole("textbox", { name: "Service title", exact: true }),
-    ).toBeDisabled();
-    await expect(closeItem).toBeDisabled();
+    ).toHaveCount(0);
+    await expect(
+      settings.getByText("Loading installation files…", { exact: true }),
+    ).toBeVisible();
+    await expect(closeItem).toHaveCount(0);
     await expect(
       credential.getByRole("textbox", { name: "Credential", exact: true }),
     ).toHaveCount(0);
@@ -780,7 +783,7 @@ for (const width of [320, 390, 1440]) {
         name: "Reveal Credential",
         exact: true,
       }),
-    ).toBeVisible();
+    ).toHaveCount(0);
     await actions.refresh.evaluate((button) => {
       (button as HTMLButtonElement).click();
     });
@@ -791,6 +794,15 @@ for (const width of [320, 390, 1440]) {
     state.getGate = undefined;
     await expect(actions.refresh).not.toHaveAttribute("aria-busy");
     await expect(settings).toBeFocused();
+    await expect(
+      settings.getByRole("textbox", { name: "Service title", exact: true }),
+    ).toHaveValue("Alpha service");
+    await expect(
+      credential.getByRole("button", {
+        name: "Reveal Credential",
+        exact: true,
+      }),
+    ).toBeVisible();
     await expect(
       item.getByRole("button", { name: "Edit Item 1", exact: true }),
     ).toBeVisible();
@@ -1011,7 +1023,7 @@ test("keeps global header actions across sections and discard clears every draft
   });
   await confirmSettingsDiscard(page);
   await expectNoFileActions(settings);
-  await expect(settings).not.toBeFocused();
+  await expect(settings).toBeFocused();
   await selectSection(settings, "app", "Application configuration");
   await expect(
     settings.getByRole("textbox", { name: "Service title", exact: true }),

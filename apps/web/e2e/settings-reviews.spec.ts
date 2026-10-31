@@ -552,11 +552,13 @@ test("adds, reorders, and removes expanded Review preset rows in the shared appl
   await fieldAt(presets, "review.presets.1.label")
     .getByRole("textbox")
     .fill("Correctness");
-  await chooseFieldOption(
-    fieldAt(presets, "review.presets.1.agent"),
-    "Agent",
-    "claude",
-  );
+  // select claude through the binary agent control
+  const agent = fieldAt(presets, "review.presets.1.agent").getByRole("switch", {
+    name: "Agent",
+    exact: true,
+  });
+  await agent.click();
+  await expect(agent).toBeChecked();
   await fieldAt(presets, "review.presets.1.prompt")
     .getByRole("textbox")
     .fill("Review functional correctness.");

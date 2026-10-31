@@ -396,9 +396,9 @@ test('a pending scratch session keeps the mobile keyboard gutter', async ({ page
   await page.getByRole('group', { name: 'Agent launcher' }).locator('.launcher-row').filter({ hasText: 'Scratch' }).getByRole('button', { name: 'Launch ~ Scratch' }).click();
   await expect.poll(harness.launchRequests).toBe(1);
 
-  const pendingPanel = page.locator('.log > .log-output');
+  const pendingPanel = page.locator('.log > .log-split > .log-output');
   await expect(pendingPanel).toBeVisible();
-  await expect(page.locator('.log > .log-split')).toHaveCount(0);
+  await expect(page.locator('.log > .log-split')).toHaveCount(1);
   await expect(pendingPanel.getByRole('region', { name: 'Prompt composer' })).toBeVisible();
   // keep the direct pending output border above its composer
   const borderPlacement = await pendingPanel.evaluate(element => {
@@ -415,7 +415,7 @@ test('a pending scratch session keeps the mobile keyboard gutter', async ({ page
   expect(borderPlacement).toEqual({ outputBorder: '1px', panelBorder: '0px', gap: 0 });
   await page.evaluate(() => document.documentElement.classList.add('software-keyboard-open'));
   const layout = await page.evaluate(() => {
-    const controls = [...document.querySelectorAll<HTMLElement>('.log > .log-output .agent-composer textarea, .log > .log-output .agent-composer button')].map(element => element.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0);
+    const controls = [...document.querySelectorAll<HTMLElement>('.log > .log-split > .log-output .agent-composer textarea, .log > .log-split > .log-output .agent-composer button')].map(element => element.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0);
     // require the pending composer controls
     if (controls.length === 0) throw new Error('pending session prompt controls are missing');
     return {

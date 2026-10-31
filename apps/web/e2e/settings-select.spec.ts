@@ -523,7 +523,7 @@ test("closes mobile navigation without selection when resize hides its trigger",
   await expect(sections).toHaveAttribute("data-value", "browser");
   await sections.click();
   const popup = page.getByRole("listbox", { name: "Settings section options" });
-  await expect(popup.getByRole("group")).toHaveCount(4);
+  await expect(popup.getByRole("group")).toHaveCount(5);
   await expect(popup).toHaveAttribute("data-has-icons", "true");
   await sections.press("End");
   await expect(sections).toHaveAttribute("data-value", "browser");

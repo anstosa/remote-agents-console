@@ -71,6 +71,8 @@ async function fixture(scope: 'scratch' | 'worktree', viewed: boolean): Promise<
   const worktreeRoot = join(accountHome, 'weather');
   await mkdir(scratchRoot, { recursive: true });
   await mkdir(worktreeRoot, { recursive: true });
+  // keep the launched interactive zsh out of its first-run wizard
+  await writeFile(join(accountHome, '.zshrc'), '');
 
   const fakeAgent = join(root, 'fake-agent');
   const readyFile = join(root, `${scope}-ready`);

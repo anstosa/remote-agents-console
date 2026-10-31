@@ -344,6 +344,38 @@ async function setupCompactLists(page: Page, options: FixtureOptions = {}) {
           restartAvailable: true,
         },
       });
+    // keep background tunnel monitoring inside the fixture
+    if (
+      path === "/api/settings/cloudflare/health" &&
+      request.method() === "GET"
+    )
+      return route.fulfill({
+        json: {
+          state: "disabled",
+          failures: 0,
+          reconnecting: false,
+          canReconnect: false,
+        },
+      });
+    // keep background calendar status inside the fixture
+    if (path === "/api/settings/google-calendar" && request.method() === "GET")
+      return route.fulfill({
+        json: {
+          enabled: false,
+          available: false,
+          connected: false,
+          status: "disabled",
+          calendars: [],
+          setup: {
+            clientId: false,
+            clientSecret: false,
+            tokenKey: false,
+            redirectUri:
+              "http://127.0.0.1:4173/api/settings/google-calendar/callback",
+          },
+          counts: { pending: 0, delivered: 0, failed: 0, suppressed: 0 },
+        },
+      });
     // keep tunnel metadata inside the synthetic fixture
     if (path === "/api/settings/cloudflare" && request.method() === "GET")
       return route.fulfill({

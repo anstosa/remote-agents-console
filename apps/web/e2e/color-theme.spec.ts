@@ -177,5 +177,5 @@ test('the pre-paint head script flavours the document before the app mounts', as
   expect(await metaThemeColor(page)).toBe('#eff1f5');
   // Guard the isolation: the entry module was blocked, so React never mounted and
   // the flavour above can only have come from the head script — not the store.
-  expect(await page.evaluate(() => document.getElementById('root')?.childElementCount)).toBe(0);
+  expect(await page.locator('#root > :not(noscript)').count()).toBe(0);
 });

@@ -3301,11 +3301,11 @@ test("moves structured TMUX settings into one Application tab and saves original
   expect(labels.indexOf("Interface")).toBe(
     labels.indexOf("Application") + 1,
   );
-  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Interface") + 1);
-  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Agents") + 1);
+  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Interface") + 1);
   expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
   expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Reviews") + 1);
   expect(labels.indexOf("Storage")).toBe(labels.indexOf("TMUX") + 1);
+  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Storage") + 1);
   await expect(
     nav.getByRole("button", { name: "Installation wrapper", exact: true }),
   ).toHaveCount(0);
@@ -4046,8 +4046,8 @@ test("moves adapter settings into Agents and saves both backing sources together
   expect(labels.indexOf("Interface")).toBe(
     labels.indexOf("Application") + 1,
   );
-  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Interface") + 1);
-  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Agents") + 1);
+  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Interface") + 1);
+  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Storage") + 1);
 
   await selectSettingsSection(settings, "app", "Application config");
   await expect(settings.locator('[data-settings-path="adapters"]')).toHaveCount(
@@ -4829,11 +4829,11 @@ test("moves Projects into its own Application section on desktop and mobile", as
   expect(labels.indexOf("Interface")).toBe(
     labels.indexOf("Application") + 1,
   );
-  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Interface") + 1);
-  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Agents") + 1);
+  expect(labels.indexOf("Projects")).toBe(labels.indexOf("Interface") + 1);
   expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
   expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Reviews") + 1);
   expect(labels.indexOf("Storage")).toBe(labels.indexOf("TMUX") + 1);
+  expect(labels.indexOf("Agents")).toBe(labels.indexOf("Storage") + 1);
 
   await selectSettingsSection(settings, "app", "Application config");
   await expect(settings.locator('[data-settings-path="projects"]')).toHaveCount(
@@ -8720,8 +8720,8 @@ for (const width of [320, 390, 1440, 2560]) {
       });
       return { grid, width: bounds.width, terminalWidth: terminal.width, rows };
     });
-    // include notification sounds alongside the four appearance controls
-    expect(metrics.rows).toHaveLength(5);
+    // include notification controls alongside the four appearance controls
+    expect(metrics.rows).toHaveLength(6);
     // prove right alignment and centering for every interface preference
     for (const row of metrics.rows) {
       expect(row.separation).toBeGreaterThanOrEqual(0);
@@ -10325,7 +10325,7 @@ test("edits and previews icon files beside their use with image-bearing custom d
     name: "Settings section options",
     exact: true,
   });
-  await expect(menu.getByRole("option")).toHaveCount(14);
+  await expect(menu.getByRole("option")).toHaveCount(15);
   await expect(
     menu.getByRole("option", { name: /Heart icon|Potato icon/u }),
   ).toHaveCount(0);
@@ -10508,7 +10508,7 @@ for (const width of [390, 780]) {
     await expect(
       settings.getByRole("navigation", { name: "Settings sources" }),
     ).toHaveCount(0);
-    await expectSettingsOptions(selector, 14, 5);
+    await expectSettingsOptions(selector, 15, 6);
     // keep virtual Application sections together in the mobile group
     await selector.click();
     const application = page
@@ -10517,7 +10517,7 @@ for (const width of [390, 780]) {
         exact: true,
       })
       .getByRole("group", { name: "Application", exact: true });
-    await expect(application.getByRole("option")).toHaveCount(7);
+    await expect(application.getByRole("option")).toHaveCount(6);
     await expect(
       application.getByRole("option", {
         name: "Application",
@@ -10526,9 +10526,6 @@ for (const width of [390, 780]) {
     ).toBeVisible();
     await expect(
       application.getByRole("option", { name: "Interface", exact: true }),
-    ).toBeVisible();
-    await expect(
-      application.getByRole("option", { name: "Agents", exact: true }),
     ).toBeVisible();
     await expect(
       application.getByRole("option", { name: "Projects", exact: true }),
@@ -10541,6 +10538,23 @@ for (const width of [390, 780]) {
     ).toBeVisible();
     await expect(
       application.getByRole("option", { name: "Storage", exact: true }),
+    ).toBeVisible();
+    // keep external services in their dedicated integration group
+    const integrations = page
+      .getByRole("listbox", {
+        name: "Settings section options",
+        exact: true,
+      })
+      .getByRole("group", { name: "Integrations", exact: true });
+    await expect(integrations.getByRole("option")).toHaveCount(2);
+    await expect(
+      integrations.getByRole("option", { name: "Agents", exact: true }),
+    ).toBeVisible();
+    await expect(
+      integrations.getByRole("option", {
+        name: "Google Calendar",
+        exact: true,
+      }),
     ).toBeVisible();
     await page.keyboard.press("Escape");
     await chooseSettingsOption(selector, "tmux");
@@ -10612,7 +10626,7 @@ test("preserves mobile section selection, drafts and remasking through search an
     selector.locator(".settings-select-current-label"),
   ).toContainText("Application · Unsaved changes");
   await search.press("Escape");
-  await expectSettingsOptions(selector, 14);
+  await expectSettingsOptions(selector, 15);
   await search.fill("no-matching-section");
   await expect(selector).toHaveAttribute("data-value", "app");
   await expect(
@@ -10622,9 +10636,9 @@ test("preserves mobile section selection, drafts and remasking through search an
   ).toHaveCount(0);
   await expect(settings.getByLabel("Server name")).toHaveValue("Mobile draft");
   await search.press("Escape");
-  await expectSettingsOptions(selector, 14);
+  await expectSettingsOptions(selector, 15);
   await search.fill("");
-  await expectSettingsOptions(selector, 14);
+  await expectSettingsOptions(selector, 15);
 
   // crossing the breakpoint changes only the navigation presentation
   await page.setViewportSize({ width: 781, height: 844 });
@@ -10888,7 +10902,7 @@ test("keeps browser preferences and voice settings available when the file catal
     exact: true,
   });
   await expect(selector).toHaveAttribute("data-value", "voice");
-  await expectSettingsOptions(selector, 14);
+  await expectSettingsOptions(selector, 15);
   await selector.click();
   const options = page.getByRole("listbox", {
     name: "Settings section options",
@@ -11492,7 +11506,7 @@ test("shows every settings section and keyboard shortcuts on mobile", async ({
     exact: true,
   });
   const panel = center.locator(".settings-source-panel");
-  await expectSettingsOptions(selector, 14);
+  await expectSettingsOptions(selector, 15);
   await expect(
     panel.getByRole("group", { name: "Keyboard shortcuts", exact: true }),
   ).toHaveCount(0);
@@ -11533,7 +11547,7 @@ test("shows every settings section and keyboard shortcuts on mobile", async ({
   await center
     .getByRole("searchbox", { name: "Search settings" })
     .press("Escape");
-  await expectSettingsOptions(selector, 14);
+  await expectSettingsOptions(selector, 15);
   await expect(selector.locator(".settings-select-current-label")).toHaveText(
     "Keyboard shortcuts",
   );

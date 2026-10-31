@@ -131,7 +131,7 @@ test('saves the current prompt from the notes flyout with independent empty and 
 
 // keep retained drafts saveable without mounting the agent panel
 test('saves the minimized agent draft and its attachments from Notes', async ({ page }) => {
-  const notes: Array<{ id: string; text: string; title?: string }> = [];
+  const notes: Array<{ id: string; text: string; title?: string }> = [{ id: 'note-identifier-000', title: 'Reference note', text: 'Keep one companion split open.' }];
   let submitted: NoteCreatePayload | undefined;
   await mockComposerNoteSave(page, route => {
     submitted = route.request().postDataJSON() as NoteCreatePayload;
@@ -140,6 +140,8 @@ test('saves the minimized agent draft and its attachments from Notes', async ({ 
     return route.fulfill({ status: 201, json: note });
   }, { notes });
   await page.goto('/');
+  await page.getByRole('button', { name: 'Notes (1)' }).click();
+  await page.getByRole('button', { name: 'Reference note', exact: true }).click();
   const composer = page.getByRole('textbox', { name: 'Prompt', exact: true });
   await composer.fill('Save this minimized draft');
   await page.locator('.prompt input[type="file"]').setInputFiles({ name: 'context.txt', mimeType: 'text/plain', buffer: Buffer.from('retained context') });

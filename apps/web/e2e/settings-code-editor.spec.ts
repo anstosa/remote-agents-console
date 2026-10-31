@@ -210,6 +210,10 @@ async function setupCodeEditors(
     if (path === '/api/server/update-available') return route.fulfill({ json: { available: false } });
     // report stable runtime settings
     if (path === '/api/settings/status') return route.fulfill({ json: { pending: false, targets: [], effective: 'known', restartAvailable: true } });
+    // keep background tunnel monitoring inside the fixture
+    if (path === '/api/settings/cloudflare/health' && request.method() === 'GET') return route.fulfill({ json: { state: 'disabled', failures: 0, reconnecting: false, canReconnect: false } });
+    // keep background calendar status inside the fixture
+    if (path === '/api/settings/google-calendar' && request.method() === 'GET') return route.fulfill({ json: { enabled: false, available: false, connected: false, status: 'disabled', calendars: [], setup: { clientId: false, clientSecret: false, tokenKey: false, redirectUri: 'http://127.0.0.1:4173/api/settings/google-calendar/callback' }, counts: { pending: 0, delivered: 0, failed: 0, suppressed: 0 } } });
     // expose the file-managed tunnel without opening its setup guide
     if (path === '/api/settings/cloudflare' && request.method() === 'GET') return route.fulfill({ json: { supported: true, mode: 'local', enabled: true, connected: true, tokenPresent: false, endpoint: 'https://console.example.test', hostname: 'console.example.test', serviceUrl: 'http://127.0.0.1:9876' } });
     // publish the editor sources
@@ -958,7 +962,7 @@ test('does not apply a delayed shell formatter after a newer edit and source nav
   const wasmGate = new Promise<void>(resolve => { releaseWasm = resolve; });
   const wasmRequest = new Promise<void>(resolve => { reportWasmRequest = resolve; });
   // hold the local parser asset so the editor can change while formatting is pending
-  await page.route(/main\.wasm(?:\?.*)?$/, async route => {
+  await page.route(/main(?:-[\w-]+)?\.wasm(?:\?.*)?$/u, async route => {
     reportWasmRequest();
     await wasmGate;
     await route.continue();
@@ -1001,7 +1005,7 @@ test('cancels pending formatting on pagehide and permits a fresh request', async
   const wasmGate = new Promise<void>(resolve => { releaseWasm = resolve; });
   const wasmRequest = new Promise<void>(resolve => { reportWasmRequest = resolve; });
   // pause local runtime initialization until the security boundary has changed
-  await page.route(/main\.wasm(?:\?.*)?$/, async route => {
+  await page.route(/main(?:-[\w-]+)?\.wasm(?:\?.*)?$/u, async route => {
     reportWasmRequest();
     await wasmGate;
     await route.continue();

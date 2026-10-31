@@ -243,7 +243,8 @@ test('turns off an idle agent and keeps the tab of its pinned worktree', async (
   const harness = await mountTurnOff(page, true);
   await page.getByRole('button', { name: 'Agent power options' }).click();
   const powerMenu = page.getByRole('menu', { name: 'Agent power options' });
-  await expect(powerMenu.getByRole('menuitem')).toHaveText(['Restart', 'Clear', 'New Task', 'Turn off']);
+  // keep unconfigured project actions out of the power menu
+  await expect(powerMenu.getByRole('menuitem')).toHaveText(['Restart', 'Clear', 'Turn off']);
   await powerMenu.getByRole('menuitem', { name: 'Turn off' }).click();
 
   await expect.poll(harness.turnOffRequests).toBe(1);

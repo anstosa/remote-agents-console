@@ -25,7 +25,7 @@ async function setup(page: Page, overrides: Partial<CloudflareStatus> = {}, obse
     const request = route.request();
     const path = new URL(request.url()).pathname;
     // expose only a synthetic authenticated control identity
-    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'cloudflare-csrf', active: state.active, deviceName: 'Cloudflare fixture', server: { name: 'Fixture', url: 'https://fixture.example.test', remotes: [] }, davo: { enabled: false, available: true, name: 'Davo', context: '' } } });
+    if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'cloudflare-csrf', active: state.active, deviceName: 'Cloudflare fixture', ...(state.active ? {} : { controllingDeviceName: 'Another device' }), server: { name: 'Fixture', url: 'https://fixture.example.test', remotes: [] }, davo: { enabled: false, available: true, name: 'Davo', context: '' } } });
     // keep the surrounding dashboard empty
     if (path === '/api/dashboard') return route.fulfill({ json: { generation: 1, adapters: {}, agents: [], projects: [], cleanupPending: 0, reviews: [], reviewTour: { available: false, reason: 'generator_unavailable' } } });
     if (path === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'cloudflare-ticket' } });
