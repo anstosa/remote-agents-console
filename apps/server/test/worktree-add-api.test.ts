@@ -42,13 +42,13 @@ async function app(deps: Record<string, unknown>) {
 }
 
 describe('GET /api/projects/:id/branches', () => {
-  it('returns the offerable branches and the default', async () => {
-    const worktreeManagement = { branches: async () => ({ ok: true, branches: [{ name: 'feature', ref: 'feature', remote: false, checkedOut: false }, { name: 'hotfix', ref: 'origin/hotfix', remote: true, checkedOut: false }], defaultBranch: 'main' }) } as never;
+  it('returns the offerable branches and the base to pre-select, and nothing else', async () => {
+    const worktreeManagement = { branches: async () => ({ ok: true, branches: [{ name: 'feature', ref: 'feature', remote: false, checkedOut: false }, { name: 'hotfix', ref: 'origin/hotfix', remote: true, checkedOut: false }], base: 'origin/main', fetchError: 'not a field of this answer' }) } as never;
     const server = await app({ discovery: discoveryStub(), worktreeManagement, worktreeStore: await store() });
     try {
       const response = await server.inject({ method: 'GET', url: '/api/projects/proj/branches', headers: readHeaders });
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ branches: [{ name: 'feature', ref: 'feature', remote: false, checkedOut: false }, { name: 'hotfix', ref: 'origin/hotfix', remote: true, checkedOut: false }], defaultBranch: 'main' });
+      expect(response.json()).toEqual({ branches: [{ name: 'feature', ref: 'feature', remote: false, checkedOut: false }, { name: 'hotfix', ref: 'origin/hotfix', remote: true, checkedOut: false }], base: 'origin/main' });
     } finally { await server.close(); }
   });
 
@@ -112,6 +112,37 @@ describe('POST /api/projects/:id/worktrees', () => {
       // the pin alone keeps its tab
       expect(events).toEqual(['setup']);
       expect(await worktreeStore.pins()).toEqual({ 'proj:/repo/wts/feat': true });
+    } finally { await server.close(); }
+  });
+
+  it('records the Issue a new branch was created for in the Worktree\'s record, and says why origin could not be fetched', async () => {
+    const worktreeStore = await store();
+    let refused = true;
+    const worktreeManagement = { add: async () => refused ? { ok: false, status: 409, error: 'branch `12-fix-login` already exists' } : { ok: true, path: '/repo/wts/feat', fetchError: 'fatal: unable to access' } } as never;
+    const server = await app({ discovery: discoveryStub(), worktreeManagement, launch: { startWorktreeShell: async () => true, launch: async () => true } as never, worktreeStore });
+    try {
+      const payload = { mode: 'new', branch: '12-fix-login', base: 'origin/main', issue: 12, open: 'empty' };
+      // a refused creation records nothing
+      expect((await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload })).statusCode).toBe(409);
+      expect(await worktreeStore.issues()).toEqual({});
+      refused = false;
+      const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload });
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toEqual({ worktreeId: 'proj:/repo/wts/feat', fetchError: 'fatal: unable to access' });
+      expect(await worktreeStore.issues()).toEqual({ 'proj:/repo/wts/feat': 12 });
+    } finally { await server.close(); }
+  });
+
+  it('rejects an Issue that is not a number, or beside a pull request, before adding', async () => {
+    const added: unknown[] = [];
+    const worktreeManagement = { add: async (_id: string, input: unknown) => { added.push(input); return { ok: true, path: '/repo/wts/feat' }; } } as never;
+    const server = await app({ discovery: discoveryStub(), worktreeManagement, launch: { startWorktreeShell: async () => true, launch: async () => true } as never, worktreeStore: await store() });
+    try {
+      for (const payload of [{ mode: 'new', branch: 'feat', issue: '12' }, { mode: 'new', branch: 'feat', issue: 0 }, { mode: 'new', branch: 'feat', issue: 1.5 }, { mode: 'pull-request', number: 7, issue: 12 }]) {
+        const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload });
+        expect(response.statusCode).toBe(400);
+      }
+      expect(added).toEqual([]);
     } finally { await server.close(); }
   });
 

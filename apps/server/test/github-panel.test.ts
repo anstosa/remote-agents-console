@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GithubPanel, OverviewItem } from '../src/github/service.js';
-import { testWorktree } from './helpers/config.js';
+import { testProject, testWorktree } from './helpers/config.js';
 import { graphqlGithub, polled, reply, sha } from './helpers/github-graphql.js';
 
 const repo = { owner: 'octo', name: 'repo' };
@@ -55,6 +55,55 @@ describe('the GitHub panel\'s lists', () => {
     ]);
     expect(panel.issues).toEqual([{ repository: 'octo/repo', number: 11, title: 'Backlog', url: 'https://github.com/octo/repo/issues/11', author: 'jo', updatedAt: '2026-10-28T08:00:00Z', reasons: [] }]);
     expect(panel.fetchedAt).toBe(0);
+  });
+
+  it('sends an Issue to the Worktree the console recorded it for, in the Overview, the panel and its detail', async () => {
+    const worktrees = [
+      testWorktree({ id: 'main', projectId: 'octo-repo', label: 'repo', path: '/src/octo/repo', branch: 'main', main: true }),
+      testWorktree({ id: 'assigned', projectId: 'octo-repo', label: '10-assigned', path: '/src/octo/repo-10', branch: '10-assigned', main: false, issue: 10 }),
+      testWorktree({ id: 'backlog', projectId: 'octo-repo', label: '11-backlog', path: '/src/octo/repo-11', branch: '11-backlog', main: false, issue: 11 }),
+      // holds a pull request that closes Issue 13
+      testWorktree({ id: 'closer', projectId: 'octo-repo', label: 'closer-wt', path: '/src/octo/repo-closer', branch: 'closer', main: false }),
+      // another Project's record of the same number is not this repository's Issue
+      testWorktree({ id: 'elsewhere', projectId: 'acme-web', label: '12-elsewhere', path: '/src/acme/web-12', branch: '12-elsewhere', main: false, issue: 12 })
+    ];
+    const { service } = polled({
+      'octo/repo': {
+        pulls: [{ number: 20, branch: 'closer', title: 'Close it', author: 'kai', closes: [13] }],
+        issues: [{ number: 10, title: 'Assigned', assigned: true }, { number: 11, title: 'Backlog' }, { number: 12, title: 'Unstarted' }, { number: 13, title: 'Being closed' }]
+      },
+      'acme/web': {}
+    }, { worktrees: () => worktrees });
+    const assigned = { kind: 'worktree', worktreeId: 'assigned', label: '10-assigned' };
+    const backlog = { kind: 'worktree', worktreeId: 'backlog', label: '11-backlog' };
+    expect((await service.overview()).issues.map(item => item.destination)).toEqual([assigned]);
+    const panel = await service.panel(repo);
+    expect(panel.assigned.map(item => item.destination)).toEqual([assigned]);
+    // an Issue an open pull request closes goes to the Worktree holding that pull request
+    expect(panel.issues.map(item => [item.number, item.destination])).toEqual([[11, backlog], [12, undefined], [13, { kind: 'worktree', worktreeId: 'closer', label: 'closer-wt' }]]);
+    expect((await service.issueDetail(repo, 11)).issue?.destination).toEqual(backlog);
+    expect((await service.issueDetail(repo, 12)).issue).not.toHaveProperty('destination');
+  });
+
+  it('finds the Worktree holding an item in any Project of the repository, the asking Project\'s main worktree else', async () => {
+    // two Projects are checkouts of octo/repo; the second holds the pull request's branch
+    const projects = [testProject({ id: 'first', label: 'first', path: '/src/octo/repo' }), testProject({ id: 'second', label: 'second', path: '/src/octo/repo' })];
+    const worktrees = [
+      testWorktree({ id: 'first-main', projectId: 'first', label: 'first', path: '/src/octo/repo', branch: 'main', main: true }),
+      testWorktree({ id: 'second-main', projectId: 'second', label: 'second', path: '/src/octo/repo-2', branch: 'main', main: true }),
+      testWorktree({ id: 'feature', projectId: 'second', label: 'feature-wt', path: '/src/octo/repo-2-feature', branch: 'feature', main: false })
+    ];
+    const { service } = polled({ 'octo/repo': { pulls: [{ number: 1, branch: 'feature', mine: true }], issues: [{ number: 10, title: 'Assigned', assigned: true }] } }, { projects: () => projects, worktrees: () => worktrees });
+    expect((await service.panel(repo, { project: 'first' })).mine).toMatchObject([{ number: 1, destination: { worktreeId: 'feature' } }]);
+    expect((await service.pullRequestDetail(repo, 1, { project: 'first' })).pullRequest?.destination).toMatchObject({ worktreeId: 'feature' });
+    const overview = await service.overview();
+    expect(overview.mine[0]?.destination).toMatchObject({ kind: 'worktree', worktreeId: 'feature' });
+    expect(overview.issues[0]?.destination).toMatchObject({ kind: 'project', worktreeId: 'first-main' });
+    // a clone in each Project holds it: the asking Project's
+    worktrees.push(testWorktree({ id: 'feature-first', projectId: 'first', label: 'feature-wt', path: '/src/octo/repo-feature', branch: 'feature', main: false }));
+    expect((await service.panel(repo, { project: 'first' })).mine[0]?.destination).toMatchObject({ worktreeId: 'feature-first' });
+    expect((await service.panel(repo, { project: 'second' })).mine[0]?.destination).toMatchObject({ worktreeId: 'feature' });
+    expect((await service.issueDetail(repo, 10, { project: 'second' })).issue?.destination).toBeUndefined();
   });
 
   it('reads the repository and the searches again on Refresh', async () => {

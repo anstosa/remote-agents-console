@@ -17,6 +17,8 @@ const defaultGit: GitExec = (args, timeoutMs) => run('/usr/bin/git', args, undef
 
 // git `worktree add` may clone a large tree; the shared executor's default 5s is not enough
 const addTimeoutMs = 120_000;
+// fetching origin's default branch before a new branch starts from it; the creation waits on it
+const fetchTimeoutMs = 30_000;
 
 /**
  * One branch the Add dialog can offer. `ref` is the commit-ish that resolves it (a
@@ -25,11 +27,13 @@ const addTimeoutMs = 120_000;
  * new one but cannot itself be checked out again.
  */
 export type BranchOption = { name: string; ref: string; remote: boolean; checkedOut: boolean };
-export type BranchesResult = { ok: true; branches: BranchOption[]; defaultBranch?: string } | { ok: false; status: number; error: string };
+// `base` is what a new branch starts from unless the operator picks another (see `defaultBase`)
+export type BranchesResult = { ok: true; branches: BranchOption[]; base?: string } | { ok: false; status: number; error: string };
 // `openAgent` asks for an Agent in the new checkout, which a fork pull request refuses
 export type AddInput = { mode: 'new' | 'existing'; branch: string; base?: string } | { mode: 'pull-request'; number: number; openAgent?: boolean };
-// `fork` marks a checkout of a fork pull request's code, in which no setup or Agent runs
-export type AddResult = { ok: true; path: string; fork?: true } | { ok: false; status: number; error: string };
+// `fork` marks a checkout of a fork pull request's code, in which no setup or Agent runs; `fetchError`
+// says why origin's default could not be fetched, so a new branch started from it as last fetched
+export type AddResult = { ok: true; path: string; fork?: true; fetchError?: string } | { ok: false; status: number; error: string };
 
 /**
  * The fresh facts the Remove dialog decides with (ADR 0003): the structural flags from
@@ -117,7 +121,7 @@ export class WorktreeManagementService {
   }
 
   // every branch the Add dialog can offer (local, marked when a Worktree holds it, plus
-  // remote-only) and the resolved default branch (`origin/HEAD`, else the checkout's HEAD)
+  // remote-only) and the base a new branch starts from unless the operator picks another
   async branches(projectId: string): Promise<BranchesResult> {
     const project = this.project(projectId);
     if (project === undefined) return { ok: false, status: 404, error: 'project unavailable' };
@@ -147,14 +151,43 @@ export class WorktreeManagementService {
       }
     }
     const branches = [...local, ...[...remoteOnly.values()].filter(option => !localNames.has(option.name))];
-    const defaultBranch = await this.defaultBranch(project.path);
-    return { ok: true, branches, ...(defaultBranch === undefined ? {} : { defaultBranch }) };
+    const base = await this.defaultBase(project.path);
+    return { ok: true, branches, ...(base === undefined ? {} : { base }) };
+  }
+
+  // A new branch starts from `origin/<default>` unless the operator picks another; with no
+  // `origin/HEAD` (no origin, or one that publishes no default) from the local default.
+  private async defaultBase(path: string): Promise<string | undefined> {
+    const branch = await this.originDefault(path);
+    if (branch === undefined) return await this.headBranch(path);
+    const remote = `origin/${branch}`;
+    return await this.commitResolves(path, remote) ? remote : branch;
+  }
+
+  // Fetch origin's default just before a new branch starts from it, so it is never stale. A failed
+  // fetch leaves the ref as last fetched, and its error says why; any other base is not fetched.
+  private async fetchBase(path: string, base: string): Promise<string | undefined> {
+    const branch = await this.originDefault(path);
+    if (branch === undefined || base !== `origin/${branch}`) return undefined;
+    const fetched = await this.git([...repositoryArgs(path), 'fetch', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], fetchTimeoutMs);
+    return fetched.code === 0 ? undefined : fetched.stderr.trim() || 'git fetch origin failed';
+  }
+
+  // the branch `origin/HEAD` names, when the remote publishes one
+  private async originDefault(path: string): Promise<string | undefined> {
+    const origin = await this.git([...repositoryArgs(path), 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    const ref = origin.code === 0 ? origin.stdout.trim() : '';
+    const slash = ref.indexOf('/');
+    return ref === '' ? undefined : slash === -1 ? ref : ref.slice(slash + 1);
   }
 
   // `origin/HEAD` when the remote publishes one, else the checkout's own HEAD branch
   private async defaultBranch(path: string): Promise<string | undefined> {
-    const origin = await this.git([...repositoryArgs(path), 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
-    if (origin.code === 0) { const ref = origin.stdout.trim(); const slash = ref.indexOf('/'); if (ref !== '') return slash === -1 ? ref : ref.slice(slash + 1); }
+    return await this.originDefault(path) ?? await this.headBranch(path);
+  }
+
+  // the branch the checkout itself has checked out
+  private async headBranch(path: string): Promise<string | undefined> {
     const head = await this.git([...repositoryArgs(path), 'symbolic-ref', '--short', 'HEAD']);
     return head.code === 0 && head.stdout.trim() !== '' ? head.stdout.trim() : undefined;
   }
@@ -219,15 +252,18 @@ export class WorktreeManagementService {
       return { ok: false, status: 409, error: `branch \`${input.branch}\` is already checked out` };
     }
     let base: string | undefined;
+    let fetchError: string | undefined;
     if (input.mode === 'new') {
-      base = input.base ?? await this.defaultBranch(project.path);
+      base = input.base ?? await this.defaultBase(project.path);
       if (base === undefined || base.trim() === '') return { ok: false, status: 409, error: 'a base branch or commit is required' };
       // a leading `-` is never a valid commit-ish and would let git read the base as a flag
       if (base.startsWith('-')) return { ok: false, status: 409, error: `base \`${base}\` is not valid` };
+      fetchError = await this.fetchBase(project.path, base);
       if (!await this.commitResolves(project.path, base)) return { ok: false, status: 409, error: `base \`${base}\` does not resolve to a commit` };
     }
     if (await this.pathExists(path)) return { ok: false, status: 409, error: 'the target worktree path already exists' };
-    return await this.addCheckout(project, path, input.mode === 'new' ? ['--no-track', '-b', input.branch, path, base!] : [path, input.branch]);
+    const added = await this.addCheckout(project, path, input.mode === 'new' ? ['--no-track', '-b', input.branch, path, base!] : [path, input.branch]);
+    return added.ok && fetchError !== undefined ? { ...added, fetchError } : added;
   }
 
   // the fresh Remove-dialog facts for one discovered Worktree: its structural flags plus

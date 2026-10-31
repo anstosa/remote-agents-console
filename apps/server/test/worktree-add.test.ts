@@ -54,8 +54,9 @@ describe('WorktreeManagementService.add — flag composition', () => {
     });
     const result = await new WorktreeManagementService(() => [project], git).add('proj', { mode: 'new', branch: 'feat' });
     expect(result.ok).toBe(true);
-    // the omitted base resolves to the default branch and reaches worktree add as the base
-    expect(calls.some(args => has(args, 'worktree', 'add', '--no-track', '-b', 'feat', join(project.worktreesDirectory, 'feat'), 'main'))).toBe(true);
+    // the omitted base resolves to origin's default, fetched first, and reaches worktree add as the base
+    expect(calls.some(args => has(args, 'fetch', 'origin', '+refs/heads/main:refs/remotes/origin/main'))).toBe(true);
+    expect(calls.some(args => has(args, 'worktree', 'add', '--no-track', '-b', 'feat', join(project.worktreesDirectory, 'feat'), 'origin/main'))).toBe(true);
   });
 
   it('creates an existing-branch worktree without -b', async () => {
@@ -137,7 +138,7 @@ describe('WorktreeManagementService.branches', () => {
       return undefined;
     }).git;
     const result = await new WorktreeManagementService(() => [project], git).branches('proj');
-    expect(result).toEqual({ ok: true, defaultBranch: 'main', branches: [
+    expect(result).toEqual({ ok: true, base: 'origin/main', branches: [
       { name: 'main', ref: 'main', remote: false, checkedOut: true },
       { name: 'feature', ref: 'feature', remote: false, checkedOut: false },
       { name: 'hotfix', ref: 'origin/hotfix', remote: true, checkedOut: false }
@@ -152,8 +153,58 @@ describe('WorktreeManagementService.branches', () => {
       if (has(args, 'symbolic-ref', 'HEAD')) return ok('trunk\n');
       return undefined;
     }).git;
-    expect(await new WorktreeManagementService(() => [project], git).branches('proj')).toEqual({ ok: true, defaultBranch: 'trunk', branches: [{ name: 'trunk', ref: 'trunk', remote: false, checkedOut: false }] });
+    expect(await new WorktreeManagementService(() => [project], git).branches('proj')).toEqual({ ok: true, base: 'trunk', branches: [{ name: 'trunk', ref: 'trunk', remote: false, checkedOut: false }] });
     expect(await new WorktreeManagementService(() => [], git).branches('nope')).toMatchObject({ ok: false, status: 404 });
+  });
+});
+
+// every new branch starts from a freshly fetched origin default, against real repositories
+describe('WorktreeManagementService — the fresh base of a new branch', () => {
+  const git = async (cwd: string, ...args: string[]) => { const r = await run('/usr/bin/git', ['-C', cwd, ...args]); if (r.code !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
+  async function commit(cwd: string, message: string) {
+    await git(cwd, '-c', 'user.email=test@example.com', '-c', 'user.name=Test', 'commit', '-q', '--allow-empty', '-m', message);
+    return await git(cwd, 'rev-parse', 'HEAD');
+  }
+  // an origin and the Project's checkout cloned from it, so origin/HEAD names main
+  async function cloned() {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-base-')));
+    dirs.push(root);
+    const [origin, checkout] = [join(root, 'origin'), join(root, 'checkout')];
+    await mkdir(origin);
+    await git(origin, 'init', '-q', '-b', 'main');
+    await commit(origin, 'initial');
+    await git(root, 'clone', '-q', origin, checkout);
+    const project = testProject({ id: 'proj', path: checkout, identity: join(checkout, '.git'), worktreesDirectory: join(root, 'wts'), available: true });
+    return { origin, checkout, project, service: new WorktreeManagementService(() => [project]) };
+  }
+
+  it('offers origin/<default> as the base and fetches it when the branch is created, past what the checkout last fetched', async () => {
+    const { origin, project, service } = await cloned();
+    const newest = await commit(origin, 'landed after the clone');
+    // listing branches reads only what is here
+    expect(await service.branches('proj')).toMatchObject({ ok: true, base: 'origin/main' });
+    // offered base or none, the new branch starts from origin's newest default
+    for (const [branch, base] of [['offered', 'origin/main'], ['unnamed', undefined]] as const) {
+      const created = await service.add('proj', { mode: 'new', branch, ...(base === undefined ? {} : { base }) });
+      expect(created).toEqual({ ok: true, path: join(project.worktreesDirectory, branch) });
+      expect(await git(join(project.worktreesDirectory, branch), 'rev-parse', 'HEAD')).toBe(newest);
+    }
+  });
+
+  it('creates from origin/<default> as last fetched and says why when the fetch fails', async () => {
+    const { checkout, project, service } = await cloned();
+    const fetched = await git(checkout, 'rev-parse', 'origin/main');
+    await git(checkout, 'remote', 'set-url', 'origin', join(checkout, 'no-such-origin'));
+    expect(await service.add('proj', { mode: 'new', branch: 'offline', base: 'origin/main' })).toEqual({ ok: true, path: join(project.worktreesDirectory, 'offline'), fetchError: expect.stringContaining('no-such-origin') });
+    expect(await git(join(project.worktreesDirectory, 'offline'), 'rev-parse', 'HEAD')).toBe(fetched);
+  });
+
+  it('falls back to the local default when origin publishes no HEAD, without fetching', async () => {
+    const { checkout, project, service } = await cloned();
+    await git(checkout, 'remote', 'set-head', 'origin', '--delete');
+    await git(checkout, 'remote', 'set-url', 'origin', join(checkout, 'no-such-origin'));
+    expect(await service.branches('proj')).toEqual(expect.objectContaining({ ok: true, base: 'main' }));
+    expect(await service.add('proj', { mode: 'new', branch: 'local', base: 'main' })).toEqual({ ok: true, path: join(project.worktreesDirectory, 'local') });
   });
 });
 

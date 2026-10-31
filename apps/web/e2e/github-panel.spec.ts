@@ -195,7 +195,7 @@ test('lands on the panel focused on the item an Overview row names, opening its 
   const row = panel.getByRole('region', { name: 'Issues: Other open' }).locator('.overview-row');
   await expect(row).toHaveClass(/focus/u);
   await expect(row).toContainText('from the Overview');
-  await expect(row.getByRole('button')).toHaveAttribute('aria-current', 'true');
+  await expect(row.getByRole('button', { name: /^Issue #11/u })).toHaveAttribute('aria-current', 'true');
   await expect(toolbar(page).getByRole('button', { name: 'GitHub', exact: true })).toHaveAttribute('aria-pressed', 'true');
 
   // picking another row ends the Overview's outline
@@ -356,7 +356,7 @@ test('links out to GitHub for review and merge decisions, and points merge confl
   // someone else's pull request, not checked out anywhere
   await panel.getByRole('button', { name: /^Pull request #90/u }).click();
   await expect(detail(page).getByRole('heading')).toHaveText('#90Handle redacted events');
-  await expect(detail(page).locator('.github-strip')).toHaveText('Not checked out.');
+  await expect(detail(page).locator('.github-strip > span')).toHaveText('Not checked out.');
   await expect(detail(page).getByRole('link', { name: 'Submit review' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/90/files');
   await expect(detail(page).getByRole('link', { name: 'Merge' })).toHaveCount(0);
   // re-requesting a review is the author's

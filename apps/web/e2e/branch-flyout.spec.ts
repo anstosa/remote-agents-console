@@ -1110,7 +1110,7 @@ async function stubNewWorktreeFromFlyout(page: Page, { agents, worktreeId, list,
       { name: 'main', ref: 'main', remote: false, checkedOut: true },
       { name: 'feature/aaa', ref: 'feature/aaa', remote: false, checkedOut: false },
       { name: 'feature/solo', ref: 'feature/solo', remote: false, checkedOut: false }
-    ], defaultBranch: 'main' } });
+    ], base: 'main' } });
     if (url.pathname === '/api/projects/repo/worktrees' && request.method() === 'POST') { onCreate(request.postDataJSON()); return route.fulfill({ status: 201, json: { worktreeId: 'created' } }); }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });

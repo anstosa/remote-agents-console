@@ -9,9 +9,10 @@ import { serverCheckout } from '../workspaces/server-checkout.js';
  * `label` and last-used `launchProfile`, by `<projectId>` for a Project's last-used
  * profile, and by the reserved `scratch` key for the Scratch group. `pinned` is an
  * explicit operator override; its absence means the default (a Main worktree pinned,
- * a Linked worktree not), which discovery applies. Sandboxed is never stored.
+ * a Linked worktree not), which discovery applies. Sandboxed is never stored. `issue` is the
+ * number of the GitHub Issue (in the Project's repository) a Worktree was created for.
  */
-export type WorktreeRecord = { pinned?: boolean; launchProfile?: AgentKind; label?: string };
+export type WorktreeRecord = { pinned?: boolean; launchProfile?: AgentKind; label?: string; issue?: number };
 type StoredRecords = Record<string, WorktreeRecord>;
 
 // the reserved key for the single Scratch launch group
@@ -26,14 +27,16 @@ const validKey = (value: string) => value.length >= 1 && value.length <= 4096 &&
 // labels are stored normalized and safe for one-line controls
 const validLabel = (value: string) => value.length >= 1 && value.length <= 120 && value === value.trim() && !/[\0-\x1f\x7f]/u.test(value);
 const isKind = (value: unknown): value is AgentKind => (agentKinds as readonly string[]).includes(value as string);
+export const validIssue = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 
 // validate one persisted record
 function isRecord(value: unknown): value is WorktreeRecord {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const record = value as { pinned?: unknown; launchProfile?: unknown; label?: unknown };
+  const record = value as { pinned?: unknown; launchProfile?: unknown; label?: unknown; issue?: unknown };
   return (record.pinned === undefined || typeof record.pinned === 'boolean')
     && (record.launchProfile === undefined || isKind(record.launchProfile))
-    && (record.label === undefined || typeof record.label === 'string' && validLabel(record.label));
+    && (record.label === undefined || typeof record.label === 'string' && validLabel(record.label))
+    && (record.issue === undefined || validIssue(record.issue));
 }
 
 export class WorktreeLaunchStore {
@@ -76,6 +79,24 @@ export class WorktreeLaunchStore {
     const labels: Record<string, string> = {};
     for (const [key, record] of Object.entries(stored)) if (record.label !== undefined) labels[key] = record.label;
     return labels;
+  }
+
+  // every Worktree's Issue, read once so discovery folds them into one worktree scan
+  async issues(): Promise<Record<string, number>> {
+    await this.mutation;
+    const stored = await this.read();
+    const issues: Record<string, number> = {};
+    for (const [key, record] of Object.entries(stored)) if (record.issue !== undefined) issues[key] = record.issue;
+    return issues;
+  }
+
+  // record the Issue a new Worktree was created for
+  async setIssue(key: string, issue: number): Promise<void> {
+    if (!validKey(key) || !validIssue(issue)) return;
+    await this.mutate(stored => {
+      if (stored[key] === undefined && Object.keys(stored).length >= maxKeys) return;
+      stored[key] = { ...stored[key], issue };
+    });
   }
 
   // record the kind a launch or restart used so it resolves first next time

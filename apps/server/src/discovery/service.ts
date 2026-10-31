@@ -200,7 +200,7 @@ export class DiscoveryService {
   private static readonly refreshCacheMs = 2_000;
   private static readonly gitMetadataCacheMs = 30_000;
   // take only the GitHub reads discovery needs
-  constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly github: BranchLookup = new GithubService(), private readonly adapters: AdapterConfigs = {}, private readonly configuredProjects: readonly Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string) {}
+  constructor(private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly tmux = new TmuxAdapter(), private readonly processes: ProcessInspector = new ProcInspector(), private readonly github: BranchLookup = new GithubService(), private readonly adapters: AdapterConfigs = {}, private readonly configuredProjects: readonly Project[] = [], private readonly pinStore?: Pick<WorktreeLaunchStore, 'pins'> & Partial<Pick<WorktreeLaunchStore, 'keys' | 'labels' | 'issues'>>, private readonly listWorktreesImpl: (path: string) => Promise<WorktreeEntry[] | undefined> = listWorktrees, private readonly scratchDirectory?: string) {}
   // list the structured Agents on the dashboard beside the panes' Agents, fresh on every change
   useStructuredAgents(source: { agents(): Promise<readonly Agent[]>; onChange(listener: () => void): void; turns: { latestAnswer(agentId: string): Promise<string | undefined> } }): void {
     this.structuredAgents = () => source.agents();
@@ -609,6 +609,7 @@ export class DiscoveryService {
   private async discoverWorktrees(): Promise<{ worktrees: Worktree[]; stale: Map<string, string[]>; pins: Record<string, boolean>; projects: readonly Project[] | undefined }> {
     const pins = (await this.pinStore?.pins()) ?? {};
     const labels = (await this.pinStore?.labels?.()) ?? {};
+    const issues = (await this.pinStore?.issues?.()) ?? {};
     // every stored key, so a worktree key git lists nowhere counts as an orphaned record
     const storeKeys = (await this.pinStore?.keys?.()) ?? [];
     const projects = await this.resolveImplicitProjects([...this.sessionMarks.values(), ...Object.keys(pins).filter(id => pins[id] === true), ...this.openedWorktreeIds]);
@@ -646,7 +647,7 @@ export class DiscoveryService {
         // use exact checkout settings without leaking defaults into disabled stacks
         const stack = project.worktreeOverrides?.find(override => override.path === path) ?? project;
         usable.push({
-          id, projectId: project.id, label, ...(customLabel === undefined ? {} : { customLabel: true }), path, identity: path,
+          id, projectId: project.id, label, ...(customLabel === undefined ? {} : { customLabel: true }), ...(issues[id] === undefined ? {} : { issue: issues[id] }), path, identity: path,
           ...(main && project.hostPath !== undefined ? { hostPath: project.hostPath } : {}),
           // an implicit Project's Main worktree starts unpinned, so a repository an agent once ran in keeps no tab
           available: true, pinned: pins[id] ?? (main && project.implicit !== true), main, detached: entry.detached, locked: entry.locked,

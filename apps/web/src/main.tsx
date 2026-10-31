@@ -64,7 +64,7 @@ import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider
 import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, OpenFolderDialog, type FolderAction, type FolderOpened, type ListedFolder } from './open-folder.js';
 import { installProgressAnimationSync, type ProgressKind } from './progress-animation.js';
 import { Skeleton } from './skeleton.js';
-import { GithubOverview, icons as githubIcons, OverviewButton } from './github-overview.js';
+import { GithubOverview, icons as githubIcons, issueBranch, OverviewButton, type NewWorktreeFor } from './github-overview.js';
 import { GithubPanel, type GithubFocus, type OpenWorktree } from './github-panel.js';
 import { CodeLoading } from './code-panel/loading.js';
 import { ModelChip, type AgentModel } from './model-picker.js';
@@ -7082,7 +7082,7 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
   const stackPane = !stackPanel.open || place.worktreeId === undefined || (place.stack?.processes?.length ?? 0) === 0 ? null : <StackPanel worktreeId={place.worktreeId} title={stackName === undefined ? 'this worktree' : `${stackName.project} / ${stackName.worktree}`} stack={place.stack} selection={stackPanel.selection} onSelect={stackPanel.select} onClose={stackPanel.close} handlers={stackHandlers(place.worktreeId)} onOpenWorktree={onOpenWorktreeStack} onOpenTerminal={placeId === undefined ? undefined : (paneId, name) => { /* on a phone an already-open panel is scrolled to; a new one comes into view as it opens */ workspace.carousel?.show(paneId); requestTerminalFocus(placeId, { paneId, name }); }} readOutput={processOutput} clearOutput={clearProcessOutput} />;
   const githubProject = projectOfWorktree(projects, place.worktreeId);
   const githubWorktree = githubProject?.worktrees.find(worktree => worktree.id === place.worktreeId);
-  const githubPane = githubPanel.open ? <GithubPanel request={request} projectId={githubProject?.github === undefined ? undefined : githubProject.id} repository={githubProject?.github} worktreeId={place.worktreeId} main={githubWorktree?.main ?? true} branch={place.branch} hasPullRequest={place.pullRequest !== undefined} revision={githubListsRevision(serverStartedAt, githubRevision, githubProject === undefined ? [] : [githubProject])} focus={githubPanel.focus} onClose={githubPanel.close} onOpenWorktree={onOpenGithub} /> : null;
+  const githubPane = githubPanel.open ? <GithubPanel request={request} projectId={githubProject?.github === undefined ? undefined : githubProject.id} repository={githubProject?.github} worktreeId={place.worktreeId} main={githubWorktree?.main ?? true} branch={place.branch} hasPullRequest={place.pullRequest !== undefined} revision={githubListsRevision(serverStartedAt, githubRevision, githubProject === undefined ? [] : [githubProject])} focus={githubPanel.focus} onClose={githubPanel.close} onOpenWorktree={onOpenGithub} onNewWorktree={githubNewWorktree(git?.onNewWorktree)} /> : null;
   return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} preview={previewPane} previewController={preview} review={reviewPanel} stack={stackPane} github={githubPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesLoaded} /></div></section></SelectionActionsContext.Provider>;
 }
 
@@ -8977,10 +8977,20 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
 
 // whether a Project offers New worktree, from the launcher and the git flyout's rows alike
 const offersNewWorktree = (project: Project, dynamicWorktrees: boolean): boolean => dynamicWorktrees && project.manageWorktrees !== false;
-// the source and preselected PR or branch the New worktree dialog can open on
-type NewWorktreeSelection = { mode: 'pull-request'; number: number } | { mode: 'existing'; branch: string };
+// the source and preselected PR or branch the New worktree dialog can open on: `review` ticks Start a
+// Review tour, and an Issue opens a new branch named for it
+type NewWorktreeSelection = { mode: 'pull-request'; number: number; review?: true } | { mode: 'existing'; branch: string } | { mode: 'issue'; number: number; title: string; url: string };
+// a GitHub row's or detail's new-Worktree choice as the dialog's selection
+const githubNewWorktree = (open: ((initial: NewWorktreeSelection) => void) | undefined): NewWorktreeFor | undefined => open === undefined ? undefined
+  : (item, action) => open(action === 'issue' ? { mode: 'issue', number: item.number, title: item.title, url: item.url } : { mode: 'pull-request', number: item.number, ...(action === 'tour' ? { review: true as const } : {}) });
 // what a successful worktree creation hands back to the launcher
-type WorktreeCreated = { worktreeId: string; agentId?: string; launchError?: string; setupError?: string };
+// `fetchError` says why origin could not be fetched, so a new branch started from its default as last fetched
+type WorktreeCreated = { worktreeId: string; agentId?: string; launchError?: string; setupError?: string; fetchError?: string };
+// what follows a creation: the pull request it checked out (its GitHub panel opens on it, and
+// `review` starts a Review tour), or the Issue draft its composer opens with
+type WorktreeFollowUp = { pullRequest?: number; review?: boolean; draft?: string };
+// an Issue's Worktree starts with its title, link and description in the composer
+const issueDraft = (issue: { number: number; title: string; url: string }, body?: string) => `Issue #${issue.number}: ${issue.title}\n${issue.url}${body?.trim() ? `\n\n${body.trim()}` : ''}`;
 
 // What opens in a new Worktree: an Open folder action, or Review. A guided review is bound to a
 // live Agent, so Review asks the server for an Agent and the client then opens the review start
@@ -9080,16 +9090,22 @@ function BranchSelect({ label, options, value, failed, empty, onChange }: { labe
 // from the Project's branches, pre-selected to its default), an existing local /
 // remote-only branch, or one of the Project's open pull requests, and choose what opens in
 // it: the Project's last choice, else an Agent of its last-used kind. One dialog from branch
-// to prompting. `initial` opens it on a source with one PR or branch preselected;
-// `reviewUnavailable` disables Review with its reason; `onSelectTarget` follows a PR's
-// "Open in" link to the worktree that already holds it.
-function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClose, onCreated, onSelectTarget }: { project: Project; request: (url: string, init?: RequestInit) => Promise<Response>; initial?: NewWorktreeSelection; reviewUnavailable?: string; onClose: () => void; onCreated: (result: WorktreeCreated, opened: WorktreeOpenChoice) => void; onSelectTarget: (target: DashboardTarget) => void }) {
-  const [mode, setMode] = useState<NewWorktreeSelection['mode'] | 'new'>(initial?.mode ?? 'new');
+// to prompting. `initial` opens it on a source with one PR or branch preselected, or on a new
+// branch for an Issue (recorded as the Worktree's, its title, URL and body drafted into the
+// composer); `reviewUnavailable` disables Review and Start a Review tour with its reason;
+// `onSelectTarget` follows a PR's "Open in" link to the worktree that already holds it. A new
+// branch's base is `origin/<default>`, which the server fetches as it creates the branch.
+function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClose, onCreated, onSelectTarget }: { project: Project; request: (url: string, init?: RequestInit) => Promise<Response>; initial?: NewWorktreeSelection; reviewUnavailable?: string; onClose: () => void; onCreated: (result: WorktreeCreated, opened: WorktreeOpenChoice, follow: WorktreeFollowUp) => void; onSelectTarget: (target: DashboardTarget) => void }) {
+  const issue = initial?.mode === 'issue' ? initial : undefined;
+  const [mode, setMode] = useState<'new' | 'existing' | 'pull-request'>(initial === undefined || initial.mode === 'issue' ? 'new' : initial.mode);
   const [branches, setBranches] = useState<BranchOption[] | undefined>(undefined);
   const [branchesFailed, setBranchesFailed] = useState(false);
-  const [newBranch, setNewBranch] = useState('');
+  const [newBranch, setNewBranch] = useState(() => issue === undefined ? '' : issueBranch(issue.number, issue.title));
   // both pickers hold the selected option's ref, not its branch name
   const [base, setBase] = useState('');
+  // the Issue's body for the composer draft, read as the dialog opens; the draft goes without it if it cannot be read
+  const issueBody = useRef<Promise<string | undefined>>(undefined);
+  const [review, setReview] = useState(initial?.mode === 'pull-request' && initial.review === true);
   const [existingRef, setExistingRef] = useState('');
   // the Project's pull requests: undefined while loading, 'unsupported' without a GitHub origin
   const [pullRequests, setPullRequests] = useState<RepositoryBranchList | 'unsupported' | 'failed'>();
@@ -9107,13 +9123,11 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
       const response = await request(`/api/projects/${encodeURIComponent(project.id)}/branches`).catch(() => undefined);
       if (cancelled) return;
       if (response === undefined || !response.ok) return setBranchesFailed(true);
-      const payload = await response.json().catch(() => undefined) as { branches?: BranchOption[]; defaultBranch?: string } | undefined;
+      const payload = await response.json().catch(() => undefined) as { branches?: BranchOption[]; base?: string } | undefined;
       const offered = payload?.branches ?? [];
       setBranches(offered);
-      // pre-select the default branch by the ref that resolves it, keeping the plain name
-      // when git named a branch it did not list
-      const fallback = typeof payload?.defaultBranch === 'string' ? offered.find(option => option.name === payload.defaultBranch)?.ref ?? payload.defaultBranch : undefined;
-      if (fallback !== undefined && fallback !== '') setBase(current => current === '' ? fallback : current);
+      // pre-select the base by its ref; an unlisted one (`origin/main` beside a local `main`) is added
+      if (typeof payload?.base === 'string' && payload.base !== '') setBase(current => current === '' ? payload.base! : current);
       // an initial branch wins over the first one free to check out, and says so when it is no longer free
       const wanted = initial?.mode === 'existing' ? offered.find(option => !option.checkedOut && option.name === initial.branch) : undefined;
       if (initial?.mode === 'existing' && wanted === undefined) setError(`${initial.branch} is no longer free to check out; choose another branch.`);
@@ -9126,6 +9140,11 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
       if (cancelled) return;
       // a 404 is a Project with no GitHub repository to list; any other failure may pass
       setPullRequests(response?.status === 404 || list?.pullRequestsSupported === false ? 'unsupported' : list ?? 'failed');
+    })();
+    if (issue !== undefined) issueBody.current = (async () => {
+      const response = await request(`/api/projects/${encodeURIComponent(project.id)}/github/issues/${issue.number}`).catch(() => undefined);
+      const payload = response?.ok ? await response.json().catch(() => undefined) as { issue?: { body?: unknown } } | undefined : undefined;
+      return typeof payload?.issue?.body === 'string' ? payload.issue.body : undefined;
     })();
     return () => { cancelled = true; };
   }, [project.id]);
@@ -9146,7 +9165,10 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
   // a fork pull request opens only a Terminal or Nothing; the operator's own choice returns with another source
   const forkSelected = mode === 'pull-request' && selectedPullRequest?.headOnOrigin === false;
   const agentOpen = (choice: WorktreeOpenChoice) => choice.value === 'agent' || choice.value === 'review';
-  const opened = forkSelected && agentOpen(openChoice) ? worktreeOpenChoices.find(choice => choice.value === 'terminal')! : openChoice;
+  // Start a Review tour, unless it cannot run here; the tour runs beside an Agent, so it opens one
+  const reviewBlocked = forkSelected ? forkOpenReason : reviewUnavailable;
+  const touring = mode === 'pull-request' && review && reviewBlocked === undefined;
+  const opened = touring ? worktreeOpenChoices.find(choice => choice.value === 'agent')! : forkSelected && agentOpen(openChoice) ? worktreeOpenChoices.find(choice => choice.value === 'terminal')! : openChoice;
   const initialNotice = initial?.mode === 'pull-request' && pullRequestNumber === initial.number && pullRequestList !== undefined && selectedPullRequest === undefined
     ? initialPullRequest === undefined ? `Pull request #${initial.number} is no longer open.` : `Pull request #${initial.number} is already open in ${initialPullRequest.openIn?.worktreeName ?? 'another worktree'}.`
     : undefined;
@@ -9162,10 +9184,12 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
     const branch = mode === 'new' ? newBranch.trim() : existingOptions?.find(option => option.ref === existingRef)?.name ?? '';
     if (mode === 'pull-request' ? selectedPullRequest === undefined : branch === '') return setError(mode === 'new' ? 'Enter a branch name.' : mode === 'existing' ? 'Choose a branch to check out.' : 'Choose a pull request.');
     // a pull request is named by number alone; the server resolves its branch
-    const source = mode === 'pull-request' ? { mode, number: selectedPullRequest!.number } : { mode, branch, ...(mode === 'new' && base !== '' ? { base } : {}) };
+    // an Issue's branch may already exist (its last Worktree removed), so Existing branch keeps the Issue too
+    const source = mode === 'pull-request' ? { mode, number: selectedPullRequest!.number } : { mode, branch, ...(mode === 'new' && base !== '' ? { base } : {}), ...(issue === undefined ? {} : { issue: issue.number }) };
     setPending(true);
     try {
-      // an empty base falls to the Project's default branch on the server
+      const follow: WorktreeFollowUp = mode === 'pull-request' ? { pullRequest: selectedPullRequest!.number, review: touring } : issue === undefined ? {} : { draft: issueDraft(issue, await issueBody.current) };
+      // an empty base falls to origin's default (else the local one) on the server
       const response = await request(`/api/projects/${encodeURIComponent(project.id)}/worktrees`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...source, open: opened.value === 'review' ? 'agent' : opened.value }) }).catch(() => undefined);
       if (response === undefined) return setError('Unable to reach the console.');
       if (!response.ok) {
@@ -9174,7 +9198,7 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
       }
       const payload = await response.json() as WorktreeCreated;
       saveWorktreeOpen(project.id, openChoice.value);
-      onCreated(payload, opened);
+      onCreated(payload, opened, follow);
     } finally { setPending(false); }
   };
   const noExisting = existingOptions !== undefined && existingOptions.length === 0;
@@ -9183,6 +9207,7 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
     <div className="new-worktree-modes" role="tablist" aria-label="Branch source" aria-busy={pullRequests === undefined}>
       {sources.map(source => <button key={source.mode} type="button" role="tab" aria-selected={mode === source.mode} className={mode === source.mode ? 'active' : ''} onClick={() => setMode(source.mode)}>{source.label}</button>)}
     </div>
+    {issue !== undefined && mode !== 'pull-request' && <p className="new-worktree-note" role="status">The new Worktree's composer opens with Issue #{issue.number}, unsent: {issue.title}</p>}
     {mode === 'new'
       ? <div className="new-worktree-fields"><label>Branch name<input aria-label="Branch name" type="text" name="worktree-branch-name" value={newBranch} onChange={event => setNewBranch(event.target.value)} placeholder="feature/dark-mode" autoFocus {...noAutofill} /></label><BranchSelect label="Base" options={baseOptions} value={base} failed={branchesFailed} empty="No branches are available as a base." onChange={setBase} /></div>
       : mode === 'existing'
@@ -9190,9 +9215,10 @@ function NewWorktreeDialog({ project, request, initial, reviewUnavailable, onClo
         : pullRequests === undefined ? <p className="new-worktree-loading progress-border progress-loading progress-blue" role="status" aria-busy="true"><ProgressRing busy />Loading pull requests…</p>
         : pullRequests === 'unsupported' ? <p className="new-worktree-empty">Pull requests are unavailable for this Project.</p>
         : pullRequestList === undefined ? <p className="new-worktree-error" role="alert">Could not load pull requests.</p>
-        : <>{initialNotice !== undefined && <p className="new-worktree-empty" role="status">{initialNotice}</p>}{allPullRequests.length === 0 ? <p className="new-worktree-empty">This Project has no open pull requests.</p> : <div className="new-worktree-prs"><PullRequestChoiceList list={pullRequestList} pending={pending} othersOpen={initial?.mode === 'pull-request' && pullRequestList.otherPullRequests.some(candidate => candidate.number === initial.number)} onSelectTarget={onSelectTarget} actions={candidate => candidate.checkedOut ? null : <label className="switch-pr-select"><input type="radio" name="new-worktree-pull-request" aria-label={`Select #${candidate.number}`} checked={candidate === selectedPullRequest} disabled={pending} onChange={() => setPullRequestNumber(candidate.number)} /></label>} /></div>}</>}
+        : <>{initialNotice !== undefined && <p className="new-worktree-empty" role="status">{initialNotice}</p>}{allPullRequests.length === 0 ? <p className="new-worktree-empty">This Project has no open pull requests.</p> : <div className="new-worktree-prs"><PullRequestChoiceList list={pullRequestList} pending={pending} othersOpen={initial?.mode === 'pull-request' && pullRequestList.otherPullRequests.some(candidate => candidate.number === initial.number)} onSelectTarget={onSelectTarget} actions={candidate => candidate.checkedOut ? null : <label className="switch-pr-select"><input type="radio" name="new-worktree-pull-request" aria-label={`Select #${candidate.number}`} checked={candidate === selectedPullRequest} disabled={pending} onChange={() => setPullRequestNumber(candidate.number)} /></label>} /></div>}
+          <label className="new-worktree-check" title={reviewBlocked}><input type="checkbox" checked={touring} disabled={pending || reviewBlocked !== undefined} onChange={event => setReview(event.target.checked)} />Start a Review tour</label></>}
     <div className="new-worktree-open" role="radiogroup" aria-label="Open in the new worktree"><span aria-hidden="true">Open</span>{worktreeOpenChoices.map(choice => {
-      const reason = forkSelected && agentOpen(choice) ? forkOpenReason : choice.value === 'review' ? reviewUnavailable : undefined;
+      const reason = touring && choice !== opened ? 'A Review tour runs beside an Agent' : forkSelected && agentOpen(choice) ? forkOpenReason : choice.value === 'review' ? reviewUnavailable : undefined;
       return <label key={choice.value} title={reason}><input type="radio" name="new-worktree-open" value={choice.value} checked={opened === choice} disabled={reason !== undefined} onChange={() => setOpenChoice(choice)} />{choice.label}</label>;
     })}</div>
     {forkSelected && <p className="new-worktree-empty" role="status">{forkOpenReason}.</p>}
@@ -10481,19 +10507,29 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   // a worktree just created from the launcher: close everything, refresh, and select its
   // new tab (its agent when one launched, its shell as a Terminal panel when Terminal was
   // chosen, else the worktree), then open the review start sheet when Review was chosen and
-  // its agent is up
-  const worktreeCreated = async (result: WorktreeCreated, opened: WorktreeOpenChoice) => {
+  // its agent is up. A pull request's Worktree opens its GitHub panel on it and may start its
+  // Review tour at once; an Issue's starts with the Issue drafted in its composer, unsent.
+  const worktreeCreated = async (result: WorktreeCreated, opened: WorktreeOpenChoice, follow: WorktreeFollowUp = {}) => {
     setNewWorktree(undefined);
     closeLauncher();
+    // the draft waits for the Worktree's Agent through the usual handoff when it is not up yet
+    if (follow.draft !== undefined) setPromptDraft(result.agentId ?? worktreePromptId(result.worktreeId), current => appendTextBlock(current, follow.draft!));
+    if (follow.pullRequest !== undefined) requestGithubFocus(result.worktreeId, { number: follow.pullRequest, issue: false });
     await refresh();
     if (result.agentId !== undefined) setActivateAgentId(result.agentId);
     else if (opened.value === 'terminal' && result.launchError === undefined) void openTerminalAt(result.worktreeId, 'the new worktree');
     else setActivateWorktreeId(result.worktreeId);
     if (opened.value === 'review' && result.agentId !== undefined) setReviewStart({ agentId: result.agentId, worktreeId: result.worktreeId, scope: 'pr' });
+    if (follow.review === true && result.agentId !== undefined) launchReview({ agentId: result.agentId, worktreeId: result.worktreeId, scope: 'pr', includeTests: false, includeDocs: false });
     // a failed setup gates the agent, so it is the reason none started — report it first
     if (result.setupError !== undefined) showOperationFeedback({ tone: 'error', message: 'Worktree created, setup failed', detail: result.setupError });
     else if (result.launchError !== undefined) showOperationFeedback({ tone: 'error', message: opened.failed, detail: result.launchError });
-    else showOperationFeedback({ tone: 'success', message: 'Worktree created', detail: opened.ready(result.agentId) });
+    // the Worktree stands on origin's default as last fetched; say so without blocking
+    else if (result.fetchError !== undefined) showOperationFeedback({ tone: 'error', message: 'Worktree created from origin as last fetched', detail: `Could not fetch origin: ${result.fetchError}` });
+    else {
+      const tour = result.agentId === undefined ? 'Its agent is still starting; start the Review tour from its git status once it is up.' : 'Its Review tour is being prepared.';
+      showOperationFeedback({ tone: 'success', message: 'Worktree created', detail: follow.review === true ? tour : opened.ready(result.agentId) });
+    }
   };
   // a worktree just removed from a tab or the launcher: close everything and refresh
   const worktreeRemoved = async (message: string) => {
@@ -10658,7 +10694,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const project = data.projects.find(candidate => candidate.id === projectId);
     return project === undefined || !offersNewWorktree(project, dynamicWorktrees) ? undefined : (initial: NewWorktreeSelection) => setNewWorktree({ projectId: project.id, initial });
   };
-  const newWorktreeDialog = newWorktreeProject === undefined ? null : <NewWorktreeDialog project={newWorktreeProject} request={request} initial={newWorktree?.initial} reviewUnavailable={reviewTourUnavailableText(data.reviewTour)} onClose={() => setNewWorktree(undefined)} onCreated={(result, opened) => void worktreeCreated(result, opened)} onSelectTarget={target => { setNewWorktree(undefined); closeLauncher(); selectTarget(target); }} />;
+  const newWorktreeDialog = newWorktreeProject === undefined ? null : <NewWorktreeDialog project={newWorktreeProject} request={request} initial={newWorktree?.initial} reviewUnavailable={reviewTourUnavailableText(data.reviewTour)} onClose={() => setNewWorktree(undefined)} onCreated={(result, opened, follow) => void worktreeCreated(result, opened, follow)} onSelectTarget={target => { setNewWorktree(undefined); closeLauncher(); selectTarget(target); }} />;
   const removeWorktreeTarget = removeWorktreeId === undefined ? undefined : allWorktrees(data).find(worktree => worktree.id === removeWorktreeId);
   const removeWorktreeDialog = removeWorktreeTarget === undefined ? null : <RemoveWorktreeDialog worktree={removeWorktreeTarget} request={request} onClose={() => setRemoveWorktreeId(undefined)} onRemoved={message => void worktreeRemoved(message)} />;
   const renameWorktreeTarget = renameWorktreeId === undefined ? undefined : allWorktrees(data).find(worktree => worktree.id === renameWorktreeId);
@@ -10965,7 +11001,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const consoleClass = `console${davo.enabled && voiceOpen ? ' voice-visible' : ''}`;
   // the Overview reads its lists again when GitHub's data or the Worktrees (its rows' destinations) change
   const overviewRevision = githubListsRevision(data.serverStartedAt, data.githubRevision, data.projects);
-  const overviewPane = overviewOpen ? <GithubOverview request={request} revision={overviewRevision} phone={phone} onClose={closeOverview} onOpen={(worktreeId, item, column) => { setOverviewOpen(false); openGithubItem(worktreeId, { number: item.number, issue: column === 'issues', overview: true }); }} /> : undefined;
+  const overviewPane = overviewOpen ? <GithubOverview request={request} revision={overviewRevision} phone={phone} onClose={closeOverview} onOpen={(worktreeId, item, column) => { setOverviewOpen(false); openGithubItem(worktreeId, { number: item.number, issue: column === 'issues', overview: true }); }} newWorktree={worktreeId => githubNewWorktree(openNewWorktreeFor(projectOfWorktree(data.projects, worktreeId)?.id))} /> : undefined;
   // preserve editor availability when no workspace can own a terminal yet
   if (items.length === 0) return withConfiguredButtons(<EditorConfiguredContext.Provider value={data.editor === true}><AdaptersContext.Provider value={data.adapters}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey="dashboard"><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<article className="agent-view cleanup-empty-view">{overviewPane ?? <section className="log-shell"><div className="log inactive-log"><ResizableLogSplit withSettings empty={<div className="empty-workspace"><h2>No sessions</h2></div>} /></div></section>}{tabBar}{overviewPane === undefined && <WorkspaceToolbar cleanupControl={cleanupControl} />}{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</article></main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></AdaptersContext.Provider></EditorConfiguredContext.Provider>);
   return withConfiguredButtons(<AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><OpenAgentContext.Provider value={setActivateAgentId}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey={activeItemKey ?? 'dashboard'}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{overviewPane !== undefined ? <article className="agent-view">{overviewPane}{tabBar}</article> : <>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onCloseReview={worktreeId => { /* bulk close already owns the guard or deliberate-empty bypass */ minimizeReview(worktreeId, true); }} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNewWorktree={openNewWorktreeFor(agent.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onOpenGithub={openGithubItem} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNewWorktree={openNewWorktreeFor(item.worktree.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onOpenGithub={openGithubItem} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</>}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></OpenAgentContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>);

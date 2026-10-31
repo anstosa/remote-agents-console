@@ -900,7 +900,9 @@ describe('DiscoveryService dashboard', () => {
     // an explicit pin override on the detached checkout; the Main worktree pins by default
     const pins = {
       pins: async () => ({ 'app:/repo/wt-detached': true }),
-      labels: async () => ({ 'app:/repo': 'App', 'app:/repo/wt-feature': '🥔 Dave' })
+      labels: async () => ({ 'app:/repo': 'App', 'app:/repo/wt-feature': '🥔 Dave' }),
+      // the Issue the console created the feature checkout for
+      issues: async () => ({ 'app:/repo/wt-feature': 12 })
     };
     const service = new DiscoveryService(finder, tmux as never, processes, undefined, undefined, [project], pins, listImpl({ '/repo': [
       entry('/repo', 'main'),
@@ -920,6 +922,7 @@ describe('DiscoveryService dashboard', () => {
       { id: 'app:/repo/held', label: 'App · held', customLabel: false, main: false, detached: false, locked: true, pinned: false, order: 2 },
       { id: 'app:/repo/wt-detached', label: 'App · abcdef1', customLabel: false, main: false, detached: true, locked: false, pinned: true, order: 3 }
     ]);
+    expect(service.worktreesNow().map(worktree => worktree.issue)).toEqual([undefined, 12, undefined, undefined]);
   });
 
   it('labels a linked pr-<number> checkout by its folder, whatever branch it holds, under the current Project label', async () => {

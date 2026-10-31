@@ -383,7 +383,7 @@ describe('a bare repository Project', () => {
     const project = testProject({ id: 'bare', label: 'Bare', path: bare, identity: bare, worktreesDirectory: `${bare}-worktrees`, available: true });
     const service = new WorktreeManagementService(() => [project]);
 
-    await expect(service.branches('bare')).resolves.toMatchObject({ ok: true, defaultBranch: 'main' });
+    await expect(service.branches('bare')).resolves.toMatchObject({ ok: true, base: 'main' });
     await expect(service.cleanupBranches()).resolves.toEqual([{ projectId: 'bare', projectLabel: 'Bare', branch: 'done', reason: 'merged' }]);
   });
 });

@@ -41,7 +41,7 @@ async function stub(page: import('@playwright/test').Page, onCreate: (body: unkn
       { name: 'main', ref: 'main', remote: false, checkedOut: true },
       { name: 'feature', ref: 'feature', remote: false, checkedOut: false },
       { name: 'hotfix', ref: 'origin/hotfix', remote: true, checkedOut: false }
-    ], defaultBranch: 'main' } });
+    ], base: 'main' } });
     if (url.pathname === '/api/projects/repo/switch-prs') return route.fulfill({ json: switchPrs });
     if (url.pathname === '/api/projects/repo/worktrees' && request.method() === 'POST') {
       onCreate(request.postDataJSON());

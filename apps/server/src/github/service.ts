@@ -586,9 +586,10 @@ export class GithubService {
    * One repository's lists for the GitHub panel, the same whichever Worktree asks. Mine, Review
    * requested and Assigned to me are the Overview's own rows, so the panel and the badge cannot
    * disagree. Answers from cache as `repository()` and `overview()` do; `fresh` reads both again.
+   * `project` is the asking Project, whose Worktrees are preferred where several hold an item.
    */
-  async panel(repository: GithubRepository, { fresh = false }: { fresh?: boolean } = {}): Promise<GithubPanel> {
-    const [entry, overview, destination] = await Promise.all([this.listed(repository, { fresh }), this.overview({ fresh }), this.destinations()]);
+  async panel(repository: GithubRepository, { fresh = false, project }: { fresh?: boolean; project?: string } = {}): Promise<GithubPanel> {
+    const [entry, overview, destination] = await Promise.all([this.listed(repository, { fresh }), this.overview({ fresh, project }), this.destinations(project)]);
     const key = repositoryKey(repository);
     const name = `${repository.owner}/${repository.name}`;
     // a row is labelled only with the Worktree holding it
@@ -623,7 +624,11 @@ export class GithubService {
     const listedIssues = new Set(assigned.map(item => item.number));
     return {
       mine: [...mine, ...rest.filter(pull => pull.mine).map(pull => row(pull))], reviews, other: rest.filter(pull => !pull.mine).map(pull => row(pull)), done,
-      assigned, issues: (entry.issues ?? []).filter(issue => !listedIssues.has(issue.number)).map(fields),
+      assigned, issues: (entry.issues ?? []).filter(issue => !listedIssues.has(issue.number)).map(issue => {
+        const closers = open.filter(pull => pull.closingIssues?.includes(issue.number)).map(pull => ({ number: pull.number, branch: pull.branch, onOrigin: pull.headOnOrigin }));
+        const found = destination(name, closers, issue.number);
+        return placed({ ...fields(issue), ...(found === undefined ? {} : { destination: found }) });
+      }),
       // as old as the older of the two reads it is made of
       ...fetched({ fetchedAt: overview.fetchedAt === undefined || entry.fetchedAt === undefined ? entry.fetchedAt ?? overview.fetchedAt : Math.min(entry.fetchedAt, overview.fetchedAt), problem: entry.problem ?? overview.problem })
     };
@@ -635,33 +640,40 @@ export class GithubService {
    * poll read; data older than a minute is refreshed behind the answer, unless it was never read,
    * or `fresh` asks for it read again now (Refresh, Retry), which data under ten seconds old answers.
    */
-  async overview({ fresh = false }: { fresh?: boolean } = {}): Promise<Overview> {
+  async overview({ fresh = false, project }: { fresh?: boolean; project?: string } = {}): Promise<Overview> {
     const entry = this.overviewEntry;
     await this.refreshIfDue(entry, { fresh }, () => entry.refreshing ?? this.read([], false, true));
-    const destination = await this.destinations();
-    const rows = (list: OverviewRow[] | undefined): OverviewItem[] => (list ?? []).map(read => {
+    const destination = await this.destinations(project);
+    const rows = (list: OverviewRow[] | undefined, issues = false): OverviewItem[] => (list ?? []).map(read => {
       const { heads, instances: _instances, held: _held, ...row } = read;
-      const [found, unseen] = [destination(row.repository, heads), this.unseen(read)];
+      const [found, unseen] = [destination(row.repository, heads, issues ? row.number : undefined), this.unseen(read)];
       return { ...row, ...(unseen.length === 0 ? {} : { unseen }), ...(found === undefined ? {} : { destination: found }) };
     });
-    return { mine: rows(entry.mine), reviews: rows(entry.reviews), issues: rows(entry.issues), totals: entry.totals ?? { mine: 0, reviews: 0, issues: 0 }, ...fetched(entry) };
+    return { mine: rows(entry.mine), reviews: rows(entry.reviews), issues: rows(entry.issues, true), totals: entry.totals ?? { mine: 0, reviews: 0, issues: 0 }, ...fetched(entry) };
   }
 
-  // where an Overview row in a repository goes: the Worktree holding one of its heads, else its
-  // Project's main worktree; nowhere in the console for a repository with no Project
-  private async destinations(): Promise<(repository: string, heads: OverviewRow['heads']) => OverviewDestination | undefined> {
-    const projects = new Map<string, Project>();
-    for (const { project, repository } of await this.projectRepositories()) if (!projects.has(repositoryKey(repository))) projects.set(repositoryKey(repository), project);
+  // where an Overview row in a repository goes: the Worktree holding one of its heads (or, for an
+  // Issue, the one the console created for it) in any of the repository's Projects, the asking
+  // Project's (`asking`) first; else the main worktree of that Project, or of the first; nowhere in
+  // the console for a repository with no Project
+  private async destinations(asking?: string): Promise<(repository: string, heads: OverviewRow['heads'], issue?: number) => OverviewDestination | undefined> {
+    const projects = new Map<string, Project[]>();
+    for (const { project, repository } of await this.projectRepositories()) {
+      const found = projects.get(repositoryKey(repository)) ?? [];
+      if (project.id === asking) found.unshift(project); else found.push(project);
+      projects.set(repositoryKey(repository), found);
+    }
     const worktrees = this.worktrees();
-    return (repository, heads) => {
+    return (repository, heads, issue) => {
       // GitHub's `owner/name`, keyed as `repositoryKey` keys it
-      const project = projects.get(repository.toLowerCase());
-      if (project === undefined) return undefined;
-      const own = worktrees.filter(worktree => worktree.projectId === project.id);
-      const holder = own.find(worktree => worktree.branch !== undefined && heads.some(head => forkCheckoutNumber(worktree.branch!) === head.number || (head.onOrigin && worktree.branch === head.branch)));
+      const candidates = projects.get(repository.toLowerCase()) ?? [];
+      const own = candidates.flatMap(project => worktrees.filter(worktree => worktree.projectId === project.id));
+      const holder = own.find(worktree => worktree.branch !== undefined && heads.some(head => forkCheckoutNumber(worktree.branch!) === head.number || (head.onOrigin && worktree.branch === head.branch)))
+        ?? (issue === undefined ? undefined : own.find(worktree => worktree.issue === issue));
       if (holder !== undefined) return { kind: 'worktree', worktreeId: holder.id, label: holder.label };
-      const main = own.find(worktree => worktree.main);
-      return main === undefined ? undefined : { kind: 'project', worktreeId: main.id, label: project.label };
+      const [project] = candidates;
+      const main = own.find(worktree => worktree.main && worktree.projectId === project?.id);
+      return main === undefined ? undefined : { kind: 'project', worktreeId: main.id, label: project!.label };
     };
   }
 
@@ -707,7 +719,7 @@ export class GithubService {
    * `fresh` (Refresh) reads it again unless the last read is under ten seconds old; a failed read is
    * not tried again for ten seconds either.
    */
-  async pullRequestDetail(repository: GithubRepository, number: number, { fresh = false }: { fresh?: boolean } = {}): Promise<Fetched<{ pullRequest?: PullRequestDetail }>> {
+  async pullRequestDetail(repository: GithubRepository, number: number, { fresh = false, project }: { fresh?: boolean; project?: string } = {}): Promise<Fetched<{ pullRequest?: PullRequestDetail }>> {
     const key = `pull:${repositoryKey(repository)}#${number}`;
     const kept = this.details.get(key)?.data as PullRequestDetail | undefined;
     // while checks run or GitHub works out mergeability, a check run or the merge state may move
@@ -718,12 +730,12 @@ export class GithubService {
       return readDetail(repository, at(payload, 'data', 'repository', 'pullRequest')) ?? { kind: 'failing', message: graphqlError(payload, detailAction).message };
     });
     const pull = entry.data;
-    const destination = pull === undefined ? undefined : await this.holder(repository, [{ number, branch: pull.branch, onOrigin: pull.headOnOrigin }]);
+    const destination = pull === undefined ? undefined : await this.holder(repository, [{ number, branch: pull.branch, onOrigin: pull.headOnOrigin }], undefined, project);
     return { ...(pull === undefined ? {} : { pullRequest: { ...pull, ...(destination === undefined ? {} : { destination }) } }), ...fetched(entry) };
   }
 
   /** One Issue's detail, kept as a pull request's is while the repository's issue list shows it unchanged. */
-  async issueDetail(repository: GithubRepository, number: number, { fresh = false }: { fresh?: boolean } = {}): Promise<Fetched<{ issue?: IssueDetail }>> {
+  async issueDetail(repository: GithubRepository, number: number, { fresh = false, project }: { fresh?: boolean; project?: string } = {}): Promise<Fetched<{ issue?: IssueDetail }>> {
     const listed = this.repositories.get(repositoryKey(repository));
     const known = listed?.fetchedAt === undefined ? undefined : listed.issues?.find(issue => issue.number === number);
     const entry = await this.detail(`issue:${repositoryKey(repository)}#${number}`, known === undefined ? undefined : { version: known.updatedAt ?? '', fetchedAt: listed!.fetchedAt! }, fresh, async (token) => {
@@ -732,7 +744,7 @@ export class GithubService {
     });
     if (entry.data === undefined) return fetched(entry);
     const { heads, ...issue } = entry.data;
-    const destination = await this.holder(repository, heads);
+    const destination = await this.holder(repository, heads, number, project);
     return { issue: { ...issue, ...(destination === undefined ? {} : { destination }) }, ...fetched(entry) };
   }
 
@@ -756,9 +768,9 @@ export class GithubService {
     return { requests: (entry.data ?? []).map(unnamed), ...fetched(entry) };
   }
 
-  // the Worktree holding one of these heads of a repository, if any
-  private async holder(repository: GithubRepository, heads: OverviewRow['heads']): Promise<OverviewDestination | undefined> {
-    const found = (await this.destinations())(`${repository.owner}/${repository.name}`, heads);
+  // the Worktree holding one of these heads of a repository, or created for this Issue, if any
+  private async holder(repository: GithubRepository, heads: OverviewRow['heads'], issue?: number, project?: string): Promise<OverviewDestination | undefined> {
+    const found = (await this.destinations(project))(`${repository.owner}/${repository.name}`, heads, issue);
     return found?.kind === 'worktree' ? found : undefined;
   }
 

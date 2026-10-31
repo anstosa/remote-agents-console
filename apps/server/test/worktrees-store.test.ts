@@ -130,9 +130,22 @@ describe('WorktreeLaunchStore', () => {
     expect(await worktrees.keys()).toEqual(['proj:/worktrees/dana']);
   });
 
+  it('records the Issue a Worktree was created for beside its other state, refusing anything but a positive integer', async () => {
+    const { file, store: worktrees } = await store();
+    await worktrees.setPinned(cora, true);
+    for (const bad of [0, -3, 1.5, Number.NaN]) await worktrees.setIssue(cora, bad);
+    await worktrees.setIssue('has\nnewline', 7);
+    expect(await worktrees.issues()).toEqual({});
+    await worktrees.setIssue(cora, 12);
+    expect(await worktrees.issues()).toEqual({ [cora]: 12 });
+    expect(JSON.parse(await readFile(file, 'utf8'))[cora]).toEqual({ pinned: true, issue: 12 });
+  });
+
   it('rejects a structurally invalid storage file', async () => {
     const { file, store: worktrees } = await store();
     await writeFile(file, JSON.stringify({ [cora]: { launchProfile: 'nope' } }));
     await expect(worktrees.launchProfile(cora)).rejects.toThrow('invalid worktrees file');
+    await writeFile(file, JSON.stringify({ [cora]: { issue: '12' } }));
+    await expect(worktrees.issues()).rejects.toThrow('invalid worktrees file');
   });
 });

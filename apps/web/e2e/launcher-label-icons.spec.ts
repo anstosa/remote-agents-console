@@ -24,7 +24,7 @@ async function stubLauncher(page: import('@playwright/test').Page) {
     // omit push enrollment
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     // return branch choices
-    if (url.pathname === '/api/projects/potato/branches') return route.fulfill({ json: { branches: [{ name: 'main', ref: 'main', remote: false, checkedOut: true }], defaultBranch: 'main' } });
+    if (url.pathname === '/api/projects/potato/branches') return route.fulfill({ json: { branches: [{ name: 'main', ref: 'main', remote: false, checkedOut: true }], base: 'main' } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 }

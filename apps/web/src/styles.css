@@ -2709,6 +2709,9 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .new-worktree-loading, .new-worktree-empty { display: flex; align-items: center; gap: .4rem; color: var(--subtext-0); font-size: .76rem; }
 .new-worktree-error { margin: 0; color: var(--red); font-size: .74rem; }
 .new-worktree-status { display: flex; align-items: center; gap: .4rem; margin: 0; color: var(--subtext-0); font-size: .74rem; }
+.new-worktree-note { margin: 0; color: var(--subtext-0); font-size: .72rem; }
+.new-worktree-check { display: flex; align-items: center; gap: .45rem; color: var(--text); font-size: .76rem; }
+.new-worktree-check:has(input:disabled) { opacity: .45; }
 .new-worktree-actions { display: flex; justify-content: flex-end; gap: .5rem; }
 
 /* the launcher's per-Project Prune control */
@@ -3122,6 +3125,17 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .overview-destination .overview-icon { width: .8rem; height: .8rem; }
 .overview-row-browser { display: grid; flex: none; place-items: center; width: 2.6rem; border-left: 1px solid var(--surface-1); color: var(--subtext-0); }
 .overview-row-browser:hover { background: var(--surface-0); color: var(--text); }
+/* a row no Worktree holds offers one: the green branch+ and the menu it opens under the row */
+.overview-row-new { display: grid; flex: none; place-items: center; width: 2.6rem; margin: 0; padding: 0; border: 0; border-left: 1px solid var(--surface-1); border-radius: 0; background: none; color: var(--green); }
+.overview-row-new:hover { background: var(--surface-0); }
+.overview-row-new[aria-expanded="true"] { background: var(--green); color: var(--crust); }
+.overview-row-menu { display: grid; gap: .3rem; margin: -.15rem 0 .15rem 1.2rem; padding: .45rem; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--surface-1)); border-top: 0; border-radius: 0 0 var(--control-radius) var(--control-radius); background: var(--mantle); }
+.overview-row-menu button { display: flex; align-items: center; gap: .55rem; min-height: 2.5rem; padding: .35rem .6rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: color-mix(in srgb, var(--surface-0) 50%, transparent); color: var(--text); font-size: .76rem; text-align: left; }
+.overview-row-menu button:hover { border-color: color-mix(in srgb, var(--green) 60%, var(--surface-1)); }
+.overview-row-menu button > span { display: grid; gap: .1rem; }
+.overview-row-menu small { color: var(--overlay-1); font-size: .64rem; }
+.overview-row-menu .overview-icon { flex: none; color: var(--green); }
+.overview-row-menu .tour .overview-icon { color: var(--mauve); }
 .overview.phone .overview-row-main { flex-wrap: wrap; }
 .overview.phone .overview-destination { flex-basis: 100%; max-width: none; }
 .overview-tabs { position: sticky; top: -.5rem; z-index: 2; display: flex; gap: .3rem; margin-bottom: .5rem; padding: .3rem 0; background: var(--base); }
@@ -3198,6 +3212,7 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .github-button { display: inline-flex; align-items: center; gap: .35rem; min-height: 2rem; padding: 0 .6rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: none; color: var(--subtext-0); font-size: .72rem; text-decoration: none; }
 .github-button:hover { border-color: var(--overlay-0); color: var(--text); }
 .github-button.go { border-color: color-mix(in srgb, var(--green) 60%, var(--surface-1)); background: color-mix(in srgb, var(--green) 10%, var(--surface-0)); color: var(--green); }
+.github-button.tour { border-color: color-mix(in srgb, var(--mauve) 55%, var(--surface-1)); background: color-mix(in srgb, var(--mauve) 9%, var(--surface-0)); color: var(--mauve); }
 .github-button .overview-icon { width: .8rem; height: .8rem; }
 .github-detail-section { border-top: 1px solid var(--surface-0); padding-top: .2rem; }
 .github-detail-section > .github-group-head { padding-left: 0; }

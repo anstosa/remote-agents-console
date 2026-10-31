@@ -32,7 +32,7 @@ import { QueuedPromptService, type QueuedPrompt, type QueuedPromptOrigin } from 
 import { LaunchService, type TmuxSession } from './launch/service.js';
 import { launchFresh, managedRunProgress, type FreshLaunchFailure, type ReadinessOutcome } from './launch/managed-run.js';
 import { atPlace, createAgentWaiter, inWorktree, reviewRunAgent, launchPollAttempts, launchPollDelay as defaultLaunchPollDelay, launchPollIntervalMs, launchReadyTimeoutSeconds } from './launch/wait.js';
-import { scratchLaunchKey, WorktreeLaunchStore } from './worktrees/store.js';
+import { scratchLaunchKey, validIssue, WorktreeLaunchStore } from './worktrees/store.js';
 import { OpenedFolderStore, resolveFolderPath } from './places/opened-folders.js';
 import { folderNoteKey, placeLaunchScope, placeNoteKey, worktreePlace, type Place } from './places/places.js';
 import { safeEnv } from './tmux/command.js';
@@ -2067,7 +2067,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const project = discovery.projectsNow().find(candidate => candidate.id === (request.params as { id: string }).id);
     const repository = project === undefined ? undefined : await github.projectRepository(project);
     if (repository === undefined) return reply.code(404).send({ error: 'no github.com repository for this project' });
-    return await github.panel(repository, { fresh: (request.query as { refresh?: unknown }).refresh === '1' });
+    return await github.panel(repository, { fresh: (request.query as { refresh?: unknown }).refresh === '1', project: project!.id });
   });
   // the Project's github.com repository and the number a GitHub route names, or the reply refusing them
   const githubItem = async (request: FastifyRequest, reply: FastifyReply): Promise<{ repository: GithubRepository; number: number } | undefined> => {
@@ -2085,7 +2085,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     controlled(request);
     const item = await githubItem(request, reply);
     if (item === undefined) return reply;
-    const options = { fresh: (request.query as { refresh?: unknown }).refresh === '1' };
+    const options = { fresh: (request.query as { refresh?: unknown }).refresh === '1', project: (request.params as { id: string }).id };
     return (request.params as { kind: 'pulls' | 'issues' }).kind === 'pulls' ? await github.pullRequestDetail(item.repository, item.number, options) : await github.issueDetail(item.repository, item.number, options);
   });
   // the operator's writes to a pull request from the GitHub panel: a reply to or resolve of one of
@@ -3445,24 +3445,25 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   });
   // the branches the Add dialog offers — local branches (flagged when a Worktree already
   // holds one, which the checkout picker hides but the base picker keeps) plus remote-only
-  // branches — and the resolved default branch to pre-select the base
+  // branches — and the base to pre-select (`origin/<default>`, fetched when the branch is created)
   app.get('/api/projects/:id/branches', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
     controlled(request);
     const result = await worktreeManagement.branches((request.params as { id: string }).id);
     if (!result.ok) return reply.code(result.status).send({ error: result.error });
-    return { branches: result.branches, ...(result.defaultBranch === undefined ? {} : { defaultBranch: result.defaultBranch }) };
+    return { branches: result.branches, ...(result.base === undefined ? {} : { base: result.base }) };
   });
   // create a Worktree for a new or existing branch, pin it, run the Project's configured
   // `commands.setup` to prepare the fresh checkout, give it an idle shell, and — unless the
   // operator opted out — launch the Project's last-used kind in it. The created Worktree
   // stands even when setup or the agent launch fails, so the response is a 201 carrying the
-  // new Worktree id plus the started agent, a launch error, and/or a setup error, never a 504.
+  // new Worktree id plus the started agent, a launch error, a setup error, and/or why origin could
+  // not be fetched for a new branch (it started from origin's default as last fetched), never a 504.
   app.post('/api/projects/:id/worktrees', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
     controlled(request, true);
     const projectId = (request.params as { id: string }).id;
     const requestBody = body(request);
     // a stale client's `launch: false` predates the open choice and meant the idle shell alone
-    const { mode, branch, base, number, open = requestBody.launch === false ? 'terminal' : 'agent' } = requestBody;
+    const { mode, branch, base, number, issue, open = requestBody.launch === false ? 'terminal' : 'agent' } = requestBody;
     // hand-validate the body before any git runs
     // structural validation only; the service owns branch-name legality (a 409)
     if (mode !== 'new' && mode !== 'existing' && mode !== 'pull-request') return reply.code(400).send({ error: 'invalid worktree mode' });
@@ -3471,6 +3472,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (mode !== 'pull-request' && (typeof branch !== 'string' || branch.length === 0)) return reply.code(400).send({ error: 'invalid branch name' });
     if (base !== undefined && (typeof base !== 'string' || base.length > 255)) return reply.code(400).send({ error: 'invalid base' });
     if (open !== 'agent' && open !== 'terminal' && open !== 'empty') return reply.code(400).send({ error: 'invalid open choice' });
+    // the Issue a branch is created for; a pull request's checkout is for the pull request
+    if (issue !== undefined && (mode === 'pull-request' || !validIssue(issue))) return reply.code(400).send({ error: 'invalid issue' });
     // the service refuses an Agent for a fork pull request, which it resolves from its own list
     const outcome = await worktreeManagement.add(projectId, mode === 'pull-request' ? { mode, number: number as number, openAgent: open === 'agent' } : { mode, branch: branch as string, ...(typeof base === 'string' ? { base } : {}) });
     if (!outcome.ok) return reply.code(outcome.status).send({ error: outcome.error });
@@ -3480,6 +3483,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const worktreeId = worktree?.id ?? worktreeWireId(projectId, outcome.path);
     // a created checkout keeps its tab from the start
     await worktreeStore.setPinned(worktreeId, true).catch(() => {});
+    // the GitHub views offer Go to Worktree on the Issue from now on; GitHub itself is untouched
+    if (issue !== undefined) await worktreeStore.setIssue(worktreeId, issue).catch(() => {});
     // Prepare the fresh checkout, then open what the operator chose: `terminal` gives it its idle
     // shell, `agent` adds the Project's last-used kind (the launch path adopts that idle shell
     // once it is up, else starts the agent's own session), and `empty` opens nothing — the pin
@@ -3514,7 +3519,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     }
     discovery.invalidateWorktrees();
     await dashboardUpdates.refresh().catch(() => undefined);
-    return reply.code(201).send({ worktreeId, ...(agentId === undefined ? {} : { agentId }), ...(launchError === undefined ? {} : { launchError }), ...(setupError === undefined ? {} : { setupError }) });
+    return reply.code(201).send({ worktreeId, ...(agentId === undefined ? {} : { agentId }), ...(launchError === undefined ? {} : { launchError }), ...(setupError === undefined ? {} : { setupError }), ...(outcome.fetchError === undefined ? {} : { fetchError: outcome.fetchError }) });
   });
   // the session + socket of a Place's live Agent, so a new Console shell or Agent opens beside it
   // (an Agent adopted into the operator's own session lives wherever, so it is resolved from

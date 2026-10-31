@@ -42,6 +42,7 @@ export const icons = {
   refresh: <><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></>,
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   branch: <><circle cx="6" cy="6" r="2" /><circle cx="6" cy="18" r="2" /><circle cx="18" cy="8" r="2" /><path d="M6 8v8M18 10c0 4-6 3-10 6" /></>,
+  worktree: <><circle cx="6" cy="6" r="2" /><circle cx="6" cy="18" r="2" /><path d="M6 8v8M6 16c0-4 3-5 7-5M18 8v8M14 12h8" /></>,
   folder: <path d="M3 7h7l2 2h9v10H3z" />
 };
 
@@ -116,8 +117,46 @@ export function RowCopy({ item, now, isNew, showAuthor, status, note }: { item: 
   </span>;
 }
 
-function Row({ item, column, now, isNew, onOpen }: { item: Item; column: ColumnKey; now: number; isNew: boolean; onOpen: OpenItem }) {
+/** A row's new-Worktree choices: check a pull request out, or with a Review tour started; an Issue's own branch. */
+export type NewWorktreeAction = 'checkout' | 'tour' | 'issue';
+/** Opens the New worktree dialog for a row's item. */
+export type NewWorktreeFor = (item: Item, action: NewWorktreeAction) => void;
+
+/** An Issue's branch as `gh issue develop` and GitHub name it: `<number>-<title slug>`, the slug cut to 40 characters. */
+export function issueBranch(number: number, title: string): string {
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-+/u, '').slice(0, 40).replace(/-+$/u, '');
+  return slug === '' ? `${number}` : `${number}-${slug}`;
+}
+
+/** Each new-Worktree action's wording and icon, wherever it is offered. */
+export const newWorktreeChoices: Record<NewWorktreeAction, { label: string; icon: keyof typeof icons }> = {
+  checkout: { label: 'Check out in a new Worktree', icon: 'worktree' },
+  tour: { label: 'New Worktree and start a Review tour', icon: 'review' },
+  issue: { label: 'New Worktree for this Issue…', icon: 'worktree' }
+};
+
+/**
+ * A row's green branch+ and the menu it opens under the row: a pull request checked out in a new
+ * Worktree, with or without a Review tour, or an Issue's own branch, in the Project `where` names.
+ * Returns the button, for the row, and the menu, for after it; neither without `newWorktree`.
+ */
+export function useNewWorktreeMenu(item: Item, issue: boolean, newWorktree?: NewWorktreeFor, where?: string): [ReactNode, ReactNode] {
+  const [open, setOpen] = useState(false);
+  if (newWorktree === undefined) return [null, null];
+  const name = `New Worktree for #${item.number}`;
+  const note = (action: NewWorktreeAction) => action === 'issue' ? `branch ${issueBranch(item.number, item.title)}` : `pr-${item.number}${action === 'tour' ? ' · the tour/review agent from settings' : ''}`;
+  const actions: NewWorktreeAction[] = issue ? ['issue'] : ['checkout', 'tour'];
+  return [
+    <button type="button" className="overview-row-new" aria-expanded={open} title={name} aria-label={name} onClick={() => setOpen(value => !value)}><Icon name="worktree" /></button>,
+    open && <div className="overview-row-menu" role="group" aria-label={name}>{actions.map(action => <button key={action} type="button" className={action} onClick={() => { setOpen(false); newWorktree(item, action); }}>
+      <Icon name={newWorktreeChoices[action].icon} /><span>{newWorktreeChoices[action].label}<small>{where === undefined ? '' : `${where} · `}{note(action)}</small></span>
+    </button>)}</div>
+  ];
+}
+
+function Row({ item, column, now, isNew, onOpen, newWorktree }: { item: Item; column: ColumnKey; now: number; isNew: boolean; onOpen: OpenItem; newWorktree?: NewWorktreeFor }) {
   const destination = item.destination;
+  const [branchPlus, menu] = useNewWorktreeMenu(item, column === 'issues', newWorktree, destination?.label);
   const content = <>
     <RowCopy item={item} now={now} isNew={isNew} showAuthor={column !== 'mine'} />
     {destination === undefined
@@ -125,17 +164,22 @@ function Row({ item, column, now, isNew, onOpen }: { item: Item; column: ColumnK
       : <span className={`overview-destination ${destination.kind}`} title={destination.kind === 'worktree' ? 'Opens this Worktree\'s Workspace' : 'Opens the Project\'s main worktree'}><Icon name={destination.kind === 'worktree' ? 'branch' : 'folder'} />{destination.label}</span>}
   </>;
   const label = `#${item.number} ${item.title}${isNew ? ', new' : ''}`;
-  return <div className={`overview-row${waiting(item) ? ' waiting' : ''}${isNew ? ' new' : ''}`}>
-    {destination === undefined
-      ? <a className="overview-row-main" href={item.url} target="_blank" rel="noreferrer" aria-label={`${label}, on GitHub`}>{content}</a>
-      : <button className="overview-row-main" type="button" aria-label={`${label}, in ${destination.label}`} onClick={() => onOpen(destination.worktreeId, item, column)}>{content}</button>}
-    {destination !== undefined && <a className="overview-row-browser" href={item.url} target="_blank" rel="noreferrer" title="Open on GitHub" aria-label={`Open #${item.number} on GitHub`}><Icon name="external" /></a>}
-  </div>;
+  return <>
+    <div className={`overview-row${waiting(item) ? ' waiting' : ''}${isNew ? ' new' : ''}`}>
+      {destination === undefined
+        ? <a className="overview-row-main" href={item.url} target="_blank" rel="noreferrer" aria-label={`${label}, on GitHub`}>{content}</a>
+        : <button className="overview-row-main" type="button" aria-label={`${label}, in ${destination.label}`} onClick={() => onOpen(destination.worktreeId, item, column)}>{content}</button>}
+      {branchPlus}
+      {destination !== undefined && <a className="overview-row-browser" href={item.url} target="_blank" rel="noreferrer" title="Open on GitHub" aria-label={`Open #${item.number} on GitHub`}><Icon name="external" /></a>}
+    </div>
+    {menu}
+  </>;
 }
 
 // a column's rows by repository: those holding something new first, then the busiest, then by
-// name; in each, Waiting on me rows first, new ones first among those
-function RepositoryGroups({ items, column, now, isNew, onOpen }: { items: Item[]; column: ColumnKey; now: number; isNew: (item: Item) => boolean; onOpen: OpenItem }) {
+// name; in each, Waiting on me rows first, new ones first among those. A row whose repository has a
+// Project and which no Worktree holds yet offers `newWorktree`.
+function RepositoryGroups({ items, column, now, isNew, onOpen, newWorktree }: { items: Item[]; column: ColumnKey; now: number; isNew: (item: Item) => boolean; onOpen: OpenItem; newWorktree?: ProjectNewWorktree }) {
   if (items.length === 0) return <p className="overview-none">None.</p>;
   const groups = new Map<string, Item[]>();
   for (const item of items) groups.set(item.repository, [...groups.get(item.repository) ?? [], item]);
@@ -147,13 +191,15 @@ function RepositoryGroups({ items, column, now, isNew, onOpen }: { items: Item[]
     const waits = count(rows);
     return <section key={repository} className="overview-repository" aria-label={repository}>
       <h4 className="overview-repository-head"><span>{owner}/<b>{name}</b></span>{rows.some(row => row.destination !== undefined) && <span className="overview-project" title="Has a Project" aria-label="Has a Project"><Icon name="folder" /></span>}{waits > 0 && <span className="overview-waits" title={`${waits} waiting on me`}>{waits}</span>}</h4>
-      {attentionOrder(rows, isNew).map(item => <Row key={item.url} item={item} column={column} now={now} isNew={isNew(item)} onOpen={onOpen} />)}
+      {attentionOrder(rows, isNew).map(item => <Row key={item.url} item={item} column={column} now={now} isNew={isNew(item)} onOpen={onOpen} newWorktree={item.destination?.kind === 'project' ? newWorktree?.(item.destination.worktreeId) : undefined} />)}
     </section>;
   })}</>;
 }
 
 /** Opens a row with a destination in its Worktree's (or Project's) Workspace. */
 export type OpenItem = (worktreeId: string, item: Item, column: ColumnKey) => void;
+/** The new-Worktree action of the Project whose main worktree is `worktreeId`, when it can make Worktrees. */
+export type ProjectNewWorktree = (worktreeId: string) => NewWorktreeFor | undefined;
 
 /** Rows in the order they ask for attention: Waiting on me first, new ones first among those. */
 export function attentionOrder<T extends Item>(rows: readonly T[], isNew: (item: T) => boolean): T[] {
@@ -215,8 +261,9 @@ export const freshness = (fetchedAt: number, now: number) => now - fetchedAt < 6
 /**
  * The Overview: three columns (tabs on a phone) grouped by repository. `revision` changes when the
  * server's GitHub data or the console's Worktrees change, and the lists are read again then.
+ * `newWorktree` offers a row no Worktree holds a new one in its Project.
  */
-export function GithubOverview({ request, revision, phone, onClose, onOpen }: { request: Request; revision: string; phone: boolean; onClose: () => void; onOpen: OpenItem }) {
+export function GithubOverview({ request, revision, phone, onClose, onOpen, newWorktree }: { request: Request; revision: string; phone: boolean; onClose: () => void; onOpen: OpenItem; newWorktree?: ProjectNewWorktree }) {
   const [overview, setOverview] = useState<Overview>();
   const [unreachable, setUnreachable] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -286,7 +333,7 @@ export function GithubOverview({ request, revision, phone, onClose, onOpen }: { 
       return <section key={key} className="overview-column" aria-label={label}>
         {!phone && <header className="overview-column-head"><Icon name={icon} /><h3>{label}</h3><span className="overview-count">{overview.totals[key]}</span>{waits > 0 && <span className="overview-waits">{waits} waiting on me</span>}</header>}
         <div className="overview-column-body">
-          <RepositoryGroups items={rows} column={key} now={now} isNew={isNew} onOpen={onOpen} />
+          <RepositoryGroups items={rows} column={key} now={now} isNew={isNew} onOpen={onOpen} newWorktree={newWorktree} />
           {more > 0 && <a className="overview-more" href={`https://github.com/search?type=issues&q=${encodeURIComponent(search)}`} target="_blank" rel="noreferrer">{more} more on github.com</a>}
         </div>
       </section>;

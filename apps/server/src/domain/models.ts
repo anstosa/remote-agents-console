@@ -106,11 +106,12 @@ export type Project = { id: string; implicit?: true; label: string; defaultBranc
  * (this Worktree's own git toplevel) and is what an Agent's home matches; a
  * Docker main Worktree also matches its `hostPath`. `main`/`detached`/`locked` come
  * from git; a Stale worktree (git's `prunable`) is excluded by discovery, never carried
- * here. `pinned` and `customLabel` identify the operator's per-Worktree choices from
+ * here. `pinned` and `customLabel` identify the operator's per-Worktree choices, and `issue` the
+ * GitHub Issue the console created it for, from
  * `.data`. resolved stack commands and preview settings, plus project-wide newTask/push,
  * are copied on so worktree-scoped services keep reading them from the worktree.
  */
-export type Worktree = { id: string; projectId: string; defaultBranch?: string; label: string; customLabel?: boolean; path: string; identity: string; hostPath?: string; available: boolean; pinned: boolean; main: boolean; detached: boolean; locked: boolean; lockedReason?: string; branch?: string; sha?: string; commands?: StackCommands; newTask?: string; push?: PromptAction; projectUrl?: string; projectPort?: number };
+export type Worktree = { id: string; projectId: string; defaultBranch?: string; label: string; customLabel?: boolean; issue?: number; path: string; identity: string; hostPath?: string; available: boolean; pinned: boolean; main: boolean; detached: boolean; locked: boolean; lockedReason?: string; branch?: string; sha?: string; commands?: StackCommands; newTask?: string; push?: PromptAction; projectUrl?: string; projectPort?: number };
 export type CleanupTargetKind = 'orphan-worker' | 'stale-agent' | 'hud-pane' | 'hud-process' | 'merged-branch' | 'closed-pr-branch';
 export type CleanupTarget = { id: string; kind: CleanupTargetKind; label: string; detail: string };
 /**

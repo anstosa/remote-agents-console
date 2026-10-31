@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
-import { age, attentionOrder, freshness, Icon, NoTokenCard, reasonChips, RowCopy, staleNotice, unseen, useSeenRows, waiting, type Item, type Problem, type Request } from './github-overview.js';
+import { age, attentionOrder, freshness, Icon, newWorktreeChoices, NoTokenCard, reasonChips, RowCopy, staleNotice, unseen, useNewWorktreeMenu, useSeenRows, waiting, type Item, type NewWorktreeAction, type NewWorktreeFor, type Problem, type Request } from './github-overview.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand, usePhoneLayout } from './panel-header.js';
 import { hunkClass, hunkLines, threadLines, unresolvedThreadCount, type PullRequestComment, type PullRequestComments, type PullRequestReviewThread } from './pull-request-comments.js';
 import { Skeleton } from './skeleton.js';
@@ -60,20 +60,23 @@ function useInView(ref: React.RefObject<HTMLElement | null>): boolean {
   return inView;
 }
 
-function PanelRow({ item, issue, showAuthor, now, isNew, here, selected, focused, onSelect }: { item: PanelItem; issue: boolean; showAuthor: boolean; now: number; isNew: boolean; here: boolean; selected: boolean; focused: boolean; onSelect: () => void }) {
+function PanelRow({ item, issue, showAuthor, now, isNew, here, selected, focused, onSelect, newWorktree }: { item: PanelItem; issue: boolean; showAuthor: boolean; now: number; isNew: boolean; here: boolean; selected: boolean; focused: boolean; onSelect: () => void; newWorktree?: NewWorktreeFor }) {
+  const [branchPlus, menu] = useNewWorktreeMenu(item, issue, newWorktree);
   const updated = item.updatedAt === undefined ? Number.NaN : Date.parse(item.updatedAt);
   const status = item.state === undefined ? undefined : <span key="state" className={`overview-chip ${item.state === 'merged' ? 'merged' : 'failing'}`}>{item.state}{Number.isFinite(updated) && ` ${age(updated, now)} ago`}</span>;
   const worktree = item.destination?.label;
   const label = `${issue ? 'Issue' : 'Pull request'} #${item.number} ${item.title}${isNew ? ', new' : ''}${here ? ', here' : worktree === undefined ? '' : `, in ${worktree}`}`;
-  return <div className={`overview-row github-row${waiting(item) ? ' waiting' : ''}${isNew ? ' new' : ''}${selected ? ' selected' : ''}${focused ? ' focus' : ''}`} data-row={rowId(issue, item.number)}>
+  return <><div className={`overview-row github-row${waiting(item) ? ' waiting' : ''}${isNew ? ' new' : ''}${selected ? ' selected' : ''}${focused ? ' focus' : ''}`} data-row={rowId(issue, item.number)}>
     <button type="button" className="overview-row-main" aria-label={label} aria-current={selected || undefined} onClick={onSelect}>
       <RowCopy item={item} now={now} isNew={isNew} showAuthor={showAuthor} status={status} note={focused && <span className="github-from-overview">from the Overview</span>} />
       {here
         ? <span className="github-here" title="This Worktree">here</span>
         : worktree !== undefined && <span className="overview-destination worktree" title="Its Worktree"><Icon name="branch" />{worktree}</span>}
     </button>
+    {branchPlus}
     <a className="overview-row-browser" href={item.url} target="_blank" rel="noreferrer" title="Open on GitHub" aria-label={`Open #${item.number} on GitHub`}><Icon name="external" /></a>
-  </div>;
+  </div>
+  {menu}</>;
 }
 
 const ago = (iso: string | undefined, now: number) => {
@@ -97,11 +100,11 @@ function Section({ title, count, extra, closed, onToggle, children }: { title: s
   </section>;
 }
 
-// where the item is checked out: here, in another Worktree to go to, or nowhere
-function WorktreeStrip({ destination, worktreeId, none, onGoTo }: { destination?: Destination; worktreeId?: string; none?: string; onGoTo?: (worktreeId: string) => void }) {
+// where the item is checked out: here, in another Worktree to go to, or nowhere (with `actions` to make one)
+function WorktreeStrip({ destination, worktreeId, none, actions, onGoTo }: { destination?: Destination; worktreeId?: string; none?: string; actions?: ReactNode; onGoTo?: (worktreeId: string) => void }) {
   if (destination !== undefined && destination.worktreeId === worktreeId) return <div className="github-strip"><Icon name="branch" /><span>Checked out <b>here</b>, in {destination.label}.</span></div>;
   if (destination !== undefined) return <div className="github-strip"><Icon name="branch" /><span>Checked out in <b>{destination.label}</b>.</span>{onGoTo !== undefined && <button type="button" className="github-button go" onClick={() => onGoTo(destination.worktreeId)}>Go to Worktree</button>}</div>;
-  return none === undefined ? null : <div className="github-strip none"><Icon name="branch" /><span>{none}</span></div>;
+  return none === undefined ? null : <div className="github-strip none"><Icon name="branch" /><span>{none}</span>{actions !== undefined && <div className="github-actions">{actions}</div>}</div>;
 }
 
 const checkOrder = { failed: 0, pending: 1, passed: 2, skipped: 3 } as const;
@@ -112,9 +115,14 @@ const reviewerState = { approved: 'approved', changes: 'requested changes', comm
 const summaryState: Record<string, keyof typeof reviewerState> = { APPROVED: 'approved', CHANGES_REQUESTED: 'changes', COMMENTED: 'commented', DISMISSED: 'dismissed' };
 const external = (href: string, label: string) => <a key={label} className="github-button" href={href} target="_blank" rel="noreferrer">{label}<Icon name="external" /></a>;
 
-type DetailProps = { now: number; worktreeId?: string; closed: Record<string, boolean>; onToggle: (section: string) => void; onSelect: (selection: Selection) => void; onGoTo?: (worktreeId: string) => void };
+type DetailProps = { now: number; worktreeId?: string; closed: Record<string, boolean>; onToggle: (section: string) => void; onSelect: (selection: Selection) => void; onGoTo?: (worktreeId: string) => void; onNewWorktree?: NewWorktreeFor };
 /** Send one write to the shown pull request (a path under it, and a JSON body); its result or why it failed. */
 type Write = (path: string, body?: unknown) => Promise<{ result?: unknown; error?: string }>;
+// the strip's buttons opening the New worktree dialog for the item shown
+const newWorktreeActions = (item: Item, actions: NewWorktreeAction[], onNewWorktree?: NewWorktreeFor) => onNewWorktree === undefined ? undefined
+  : actions.map(action => <button key={action} type="button" className={`github-button ${action === 'tour' ? 'tour' : 'go'}`} onClick={() => onNewWorktree(item, action)}><Icon name={newWorktreeChoices[action].icon} />{newWorktreeChoices[action].label}</button>);
+// a detail as the row it would be listed as, for the New worktree dialog
+const asItem = ({ repository, number, title, url }: { repository: string; number: number; title: string; url: string }): Item => ({ repository, number, title, url, reasons: [] });
 
 // a write's button, its border travelling while the write is in flight
 const WriteButton = ({ busy, className, children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { busy: boolean }) => <button type="button" className={`github-button${className === undefined ? '' : ` ${className}`}${busy ? ' progress-border progress-blue' : ''}`} aria-busy={busy || undefined} {...props}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{children}</button>;
@@ -157,7 +165,7 @@ function ThreadFoot({ thread, label, you, pullUrl, write }: { thread: PullReques
   </>;
 }
 
-function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSelect, onGoTo, write }: DetailProps & { pull: PullDetail; item?: Item; write: Write }) {
+function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSelect, onGoTo, onNewWorktree, write }: DetailProps & { pull: PullDetail; item?: Item; write: Write }) {
   const [rerequesting, setRerequesting] = useState<string>();
   const [rerequestError, setRerequestError] = useState<string>();
   const [showResolved, setShowResolved] = useState(false);
@@ -181,7 +189,7 @@ function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSele
       {ago(pull.updatedAt, now) !== undefined && <span>updated {ago(pull.updatedAt, now)} ago</span>}
     </div>
     {item !== undefined && item.reasons.length > 0 && <span className="overview-chips">{reasonChips(item)}</span>}
-    <WorktreeStrip destination={pull.destination} worktreeId={worktreeId} none={open ? 'Not checked out.' : undefined} onGoTo={onGoTo} />
+    <WorktreeStrip destination={pull.destination} worktreeId={worktreeId} none={open ? 'Not checked out.' : undefined} actions={newWorktreeActions(asItem(pull), ['checkout', 'tour'], onNewWorktree)} onGoTo={onGoTo} />
     {links.length > 0 && <div className="github-actions">{links}</div>}
     {open && pull.mergeable === 'conflicting' && <div className="github-strip conflict"><Icon name="conflict" /><span>Merge conflicts with {pull.baseBranch ?? 'the base branch'}. {pull.destination === undefined ? 'Check it out in a Worktree to rebase it.' : <>Rebase {here ? 'here' : <>in <b>{pull.destination.label}</b></>}, or let {here ? 'this Worktree\'s' : 'its'} Agent do it with <code>$fixup</code>.</>}</span></div>}
     {section('threads', 'Review threads', <>
@@ -229,7 +237,7 @@ function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSele
   </>;
 }
 
-function IssueView({ issue, now, worktreeId, closed, onToggle, onSelect, onGoTo }: DetailProps & { issue: IssueDetail }) {
+function IssueView({ issue, now, worktreeId, closed, onToggle, onSelect, onGoTo, onNewWorktree }: DetailProps & { issue: IssueDetail }) {
   const section = (key: string, title: string, body: ReactNode, count?: number) => <Section title={title} count={count} closed={closed[key] === true} onToggle={() => onToggle(key)}>{body}</Section>;
   return <>
     <div className="github-detail-meta">
@@ -238,7 +246,7 @@ function IssueView({ issue, now, worktreeId, closed, onToggle, onSelect, onGoTo 
       {ago(issue.updatedAt, now) !== undefined && <span>updated {ago(issue.updatedAt, now)} ago</span>}
     </div>
     {issue.labels.length > 0 && <span className="overview-chips">{issue.labels.map(label => <span key={label} className="overview-chip label">{label}</span>)}</span>}
-    <WorktreeStrip destination={issue.destination} worktreeId={worktreeId} none="No Worktree for this Issue." onGoTo={onGoTo} />
+    <WorktreeStrip destination={issue.destination} worktreeId={worktreeId} none="No Worktree for this Issue." actions={issue.state === 'open' ? newWorktreeActions(asItem(issue), ['issue'], onNewWorktree) : undefined} onGoTo={onGoTo} />
     {section('description', 'Description', issue.body.trim() === '' ? <Empty>No description.</Empty> : <p className="github-detail-text">{issue.body}</p>)}
     {section('linked', issue.linkedPullRequests.length > 1 ? 'Linked pull requests' : 'Linked pull request', issue.linkedPullRequests.length === 0 ? <Empty>None yet.</Empty> : <div className="github-list">{issue.linkedPullRequests.map(pull => <button key={pull.number} type="button" className="github-list-row" onClick={() => onSelect({ issue: false, number: pull.number })}>
       <Icon name="pull" /><span className="github-list-name">#{pull.number} {pull.title}</span><small>{pull.draft && pull.state === 'open' ? 'draft' : pull.state}</small>
@@ -311,9 +319,9 @@ function Detail({ request, projectId, selection, item, revision, refreshes, focu
  * own Worktree, whose pull request is pinned on top unless it is the `main` worktree, and shown
  * when nothing is picked in a wide panel. `revision` changes when GitHub's data or the Worktrees
  * change, and the lists and detail are read again then. `focus` is an item to select;
- * `onOpenWorktree` is Go to Worktree.
+ * `onOpenWorktree` is Go to Worktree; `onNewWorktree` offers an item no Worktree holds a new one.
  */
-export function GithubPanel({ request, projectId, repository, worktreeId, main, branch, hasPullRequest, revision, focus, onClose, onOpenWorktree }: { request: Request; projectId?: string; repository?: string; worktreeId?: string; main: boolean; branch?: string; hasPullRequest: boolean; revision: string; focus?: GithubFocus; onClose: () => void; onOpenWorktree?: OpenWorktree }) {
+export function GithubPanel({ request, projectId, repository, worktreeId, main, branch, hasPullRequest, revision, focus, onClose, onOpenWorktree, onNewWorktree }: { request: Request; projectId?: string; repository?: string; worktreeId?: string; main: boolean; branch?: string; hasPullRequest: boolean; revision: string; focus?: GithubFocus; onClose: () => void; onOpenWorktree?: OpenWorktree; onNewWorktree?: NewWorktreeFor }) {
   const ref = useRef<HTMLElement | null>(null);
   const [narrow, setNarrow] = useState(false);
   // a phone, or a panel too narrow for the list and the detail side by side, drills down from one to the other
@@ -403,7 +411,7 @@ export function GithubPanel({ request, projectId, repository, worktreeId, main, 
   const row = (item: PanelItem, group: (typeof groups)[number]) => {
     const id = rowId(group.issue, item.number);
     const isSelected = shownSelection !== undefined && rowId(shownSelection.issue, shownSelection.number) === id;
-    return <PanelRow key={id} item={item} issue={group.issue} showAuthor={group.key !== 'mine'} now={now} isNew={isNew(item)} here={worktreeId !== undefined && item.destination?.worktreeId === worktreeId} selected={isSelected} focused={focused === id} onSelect={() => select({ issue: group.issue, number: item.number })} />;
+    return <PanelRow key={id} item={item} issue={group.issue} showAuthor={group.key !== 'mine'} now={now} isNew={isNew(item)} here={worktreeId !== undefined && item.destination?.worktreeId === worktreeId} selected={isSelected} focused={focused === id} onSelect={() => select({ issue: group.issue, number: item.number })} newWorktree={item.destination === undefined && item.state === undefined ? onNewWorktree : undefined} />;
   };
   const section = (group: (typeof groups)[number]) => {
     const rows = (lists?.[group.key] ?? []).filter(item => pinned === undefined || group.issue || item !== pinned.item);
@@ -445,7 +453,7 @@ export function GithubPanel({ request, projectId, repository, worktreeId, main, 
       <h4 className="github-kind">Issues</h4>
       {issues.length > 0 ? issues : <p className="overview-none">No open issues.</p>}
     </>;
-    const detail = shownSelection === undefined ? undefined : <Detail key={rowId(shownSelection.issue, shownSelection.number)} request={request} projectId={projectId} selection={shownSelection} item={shownItem} revision={revision} refreshes={refreshes} focused={focused === rowId(shownSelection.issue, shownSelection.number)} now={now} worktreeId={worktreeId} onSelect={select} onGoTo={onOpenWorktree === undefined ? undefined : target => onOpenWorktree(target, shownSelection)} {...(phone ? { back: () => { setSelected(undefined); setFocused(undefined); } } : {})} />;
+    const detail = shownSelection === undefined ? undefined : <Detail key={rowId(shownSelection.issue, shownSelection.number)} request={request} projectId={projectId} selection={shownSelection} item={shownItem} revision={revision} refreshes={refreshes} focused={focused === rowId(shownSelection.issue, shownSelection.number)} now={now} worktreeId={worktreeId} onSelect={select} onNewWorktree={onNewWorktree} onGoTo={onOpenWorktree === undefined ? undefined : target => onOpenWorktree(target, shownSelection)} {...(phone ? { back: () => { setSelected(undefined); setFocused(undefined); } } : {})} />;
     split = !phone;
     body = phone
       ? detail ?? list
