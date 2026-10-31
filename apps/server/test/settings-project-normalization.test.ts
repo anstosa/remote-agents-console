@@ -148,6 +148,15 @@ describe('authored Project patch normalization', () => {
     expect(value).toEqual({ projects: [{ id: 'one', path: '/tmp/one' }] });
   });
 
+  // the GitHub panel's slots are Project overrides like the others
+  it('keeps a Project\'s Review request, Issue and GitHub panel buttons', () => {
+    const ask = (text: string) => ({ text, color: 'mauve', style: 'outline', action: { agentPrompt: text } });
+    let value: unknown = { projects: [{ id: 'one', path: '/tmp/one' }] };
+    const blankIcon = (text: string) => ({ ...ask(text), icon: '' });
+    value = applyAuthoredProjectPatch(value, { op: 'set', path: ['projects', '0', 'buttons'], value: { reviewRequest: [blankIcon('$review')], issue: [blankIcon('$plan')], splits: { github: [blankIcon('$triage')] } } });
+    expect(value).toEqual({ projects: [{ id: 'one', path: '/tmp/one', buttons: { reviewRequest: [ask('$review')], issue: [ask('$plan')], splits: { github: [ask('$triage')] } } }] });
+  });
+
   // keep the optional comparison fallback editable without persisting blanks
   it('omits a blank default branch while preserving and replacing explicit values', () => {
     const baseline = { projects: [{ id: 'one', path: '/tmp/one', defaultBranch: 'release/stable' }] };

@@ -5,8 +5,8 @@ export const buttonColors = [
   'yellow', 'green', 'teal', 'sky', 'sapphire', 'blue', 'lavender'
 ] as const;
 
-export const buttonSplitNames = ['agent', 'terminal', 'note', 'browser', 'files', 'code', 'review', 'stack', 'settings'] as const;
-export const buttonSlotNames = ['tabLead', 'leftNav', 'rightNav', 'navMenu', 'pullRequest', ...buttonSplitNames.map(name => `split:${name}` as const)] as const;
+export const buttonSplitNames = ['agent', 'terminal', 'note', 'browser', 'files', 'code', 'review', 'stack', 'github', 'settings'] as const;
+export const buttonSlotNames = ['tabLead', 'leftNav', 'rightNav', 'navMenu', 'pullRequest', 'reviewRequest', 'issue', ...buttonSplitNames.map(name => `split:${name}` as const)] as const;
 
 export type ButtonColor = typeof buttonColors[number];
 export type ButtonSplit = typeof buttonSplitNames[number];
@@ -25,6 +25,8 @@ export type ButtonSlots = {
   rightNav: ConfiguredButton[];
   navMenu: ConfiguredButton[];
   pullRequest: ConfiguredButton[];
+  reviewRequest: ConfiguredButton[];
+  issue: ConfiguredButton[];
   splits: Record<ButtonSplit, ConfiguredButton[]>;
 };
 export type ProjectButtons = Partial<Omit<ButtonSlots, 'splits'>> & { splits?: Partial<Record<ButtonSplit, ConfiguredButton[]>> };
@@ -40,7 +42,9 @@ export const defaultButtons: ButtonSlots = {
     { text: 'Commit/Push', icon: pushButtonIcon, color: 'mauve', style: 'solid', action: { agentPrompt: 'review, commit, and push' } },
     { text: '$fixup', color: 'mauve', style: 'outline', action: { agentPrompt: '$fixup' } }
   ],
-  splits: { agent: [], terminal: [], note: [], browser: [], files: [], code: [], review: [], stack: [], settings: [] }
+  reviewRequest: [],
+  issue: [],
+  splits: { agent: [], terminal: [], note: [], browser: [], files: [], code: [], review: [], stack: [], github: [], settings: [] }
 };
 
 const preservedAction = z.string().max(32_000).refine(value => Buffer.byteLength(value, 'utf8') <= 32_000, 'action must be at most 32000 UTF-8 bytes').refine(value => !value.includes('\0'), 'NUL is forbidden').refine(value => value.trim().length > 0, 'action cannot be blank');
@@ -77,6 +81,8 @@ export const applicationButtonsSchema = z.object({
   rightNav: buttonList.default([]),
   navMenu: buttonList.default([]),
   pullRequest: buttonList.default(defaultButtons.pullRequest),
+  reviewRequest: buttonList.default([]),
+  issue: buttonList.default([]),
   splits: applicationSplitsSchema
 }).strict().default(defaultButtons);
 
@@ -86,6 +92,8 @@ export const projectButtonsSchema = z.object({
   rightNav: buttonList.optional(),
   navMenu: buttonList.optional(),
   pullRequest: buttonList.optional(),
+  reviewRequest: buttonList.optional(),
+  issue: buttonList.optional(),
   splits: projectSplitsSchema.optional()
 }).strict();
 
@@ -113,6 +121,8 @@ export function effectiveButtons(application: ButtonSlots, project?: ProjectButt
     rightNav: mergeButtonList(application.rightNav, project?.rightNav),
     navMenu: mergeButtonList(application.navMenu, project?.navMenu),
     pullRequest: mergeButtonList(application.pullRequest, project?.pullRequest),
+    reviewRequest: mergeButtonList(application.reviewRequest, project?.reviewRequest),
+    issue: mergeButtonList(application.issue, project?.issue),
     splits
   };
 }

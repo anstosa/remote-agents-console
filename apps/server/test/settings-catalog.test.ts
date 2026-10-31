@@ -402,12 +402,13 @@ describe('settings schema metadata', () => {
     expect(buttons).toMatchObject({ label: 'Button overrides', default: {}, description: expect.stringContaining('same text') });
     expect(buttons?.properties?.pullRequest).toMatchObject({ label: 'Pull request', default: [] });
     expect(buttons?.properties?.pullRequest?.description).toBeUndefined();
+    for (const schema of [buttons, applicationSettingsSchema().properties?.buttons]) expect(Object.keys(schema?.properties ?? {}).map(key => schema?.properties?.[key]?.label)).toEqual(['Left of tabs', 'Left navigation', 'Right navigation', 'Navigation menu', 'Pull request', 'Review request', 'Issue', 'Panel buttons']);
     expect(JSON.stringify(applicationSettingsSchema())).not.toContain('Buttons appear in this order.');
     expect(button?.properties?.text?.label).toBe('Button text');
     expect(button?.properties?.icon?.description).toContain('SVG path data');
     expect(button?.properties?.icon).toMatchObject({ optional: true, placeholder: 'No icon' });
     // keep the split group context out of individual slot labels
-    const splitLabels = ['Agent', 'Terminal', 'Note', 'Browser', 'Files', 'Code', 'Review', 'Stack', 'Settings'];
+    const splitLabels = ['Agent', 'Terminal', 'Note', 'Browser', 'Files', 'Code', 'Review', 'Stack', 'GitHub', 'Settings'];
     expect(Object.values(buttons?.properties?.splits?.properties ?? {}).map(slot => slot.label)).toEqual(splitLabels);
     expect(Object.values(applicationSettingsSchema().properties?.buttons?.properties?.splits?.properties ?? {}).map(slot => slot.label)).toEqual(splitLabels);
     expect(button?.properties?.action?.variants?.map(variant => variant.label)).toEqual(['Shell command', 'Agent prompt']);

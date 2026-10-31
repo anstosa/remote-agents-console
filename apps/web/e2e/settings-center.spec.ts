@@ -4985,6 +4985,10 @@ test("keeps global and project split previews ordered through row controls", asy
     { ...structuredClone(defaultButtons.pullRequest[0]!), text: "Agent first" },
     { ...structuredClone(defaultButtons.pullRequest[1]!), text: "Agent second" },
   ];
+  // the GitHub panel's slots edit like the others
+  buttons.reviewRequest = [{ ...structuredClone(defaultButtons.pullRequest[1]!), text: "$review" }];
+  buttons.issue = [{ ...structuredClone(defaultButtons.pullRequest[1]!), text: "$plan" }];
+  buttons.splits.github = [{ ...structuredClone(defaultButtons.pullRequest[1]!), text: "gh status" }];
   const projects = (
     application.value?.projects as Array<Record<string, unknown>>
   ).map((project, index) =>
@@ -5039,6 +5043,9 @@ test("keeps global and project split previews ordered through row controls", asy
     .getByRole("button", { name: "Remove Agent 1", exact: true })
     .click();
   await expect(agentLabels).toHaveText(["Agent first"]);
+  for (const [path, label] of [["buttons.reviewRequest", "$review"], ["buttons.issue", "$plan"], ["buttons.splits.github", "gh status"]]) {
+    await expect(settings.locator(`[data-settings-path="${path}"] [data-settings-entry-index]`).getByRole("group", { name: "Button preview" }).locator(".configured-button-label")).toHaveText([label]);
+  }
 
   await selectSettingsSection(settings, "projects", "Projects");
   const project = settings

@@ -202,7 +202,7 @@ export function PanelHeader({ panelKey, label, title, titleControl, actions, sec
   const [folded, setFolded] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(moreOpen);
-  const automaticSlot = ['agent', 'note', 'browser', 'files', 'code', 'review', 'stack', 'settings'].includes(panelKey) ? `split:${panelKey}` as ButtonSlot : undefined;
+  const automaticSlot = ['agent', 'note', 'browser', 'files', 'code', 'review', 'stack', 'github', 'settings'].includes(panelKey) ? `split:${panelKey}` as ButtonSlot : undefined;
   const configured = useConfiguredButtons(configuredSlot ?? automaticSlot, configuredFilesDirectoryToken);
   const configuredActions: PanelAction[] = configured.map(action => ({
     key: `configured-${action.id}`,
@@ -214,7 +214,7 @@ export function PanelHeader({ panelKey, label, title, titleControl, actions, sec
     disabled: action.disabled,
     progress: action.busy ? action.color : undefined,
     showLabel: true,
-    onSelect: action.run,
+    onSelect: () => action.run(),
     // preserve the exact originating terminal when its header owns the action
     onContextMenu: event => openConfiguredButtonMenu(event, action, closeMore, panelKey)
   }));

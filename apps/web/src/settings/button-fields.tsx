@@ -9,8 +9,8 @@ export function isConfiguredButtonPath(path: readonly string[]): boolean {
   const parts = path[0] === 'projects' && /^\d+$/u.test(path[1] ?? '') ? path.slice(2) : path;
   const slot = parts[1];
   return parts[0] === 'buttons' && /^\d+$/u.test(parts.at(-1) ?? '') && (
-    parts.length === 3 && ['tabLead', 'leftNav', 'rightNav', 'navMenu', 'pullRequest'].includes(slot ?? '')
-    || parts.length === 4 && slot === 'splits' && ['agent', 'terminal', 'note', 'browser', 'files', 'code', 'review', 'stack', 'settings'].includes(parts[2] ?? '')
+    parts.length === 3 && ['tabLead', 'leftNav', 'rightNav', 'navMenu', 'pullRequest', 'reviewRequest', 'issue'].includes(slot ?? '')
+    || parts.length === 4 && slot === 'splits' && ['agent', 'terminal', 'note', 'browser', 'files', 'code', 'review', 'stack', 'github', 'settings'].includes(parts[2] ?? '')
   );
 }
 

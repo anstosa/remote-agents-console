@@ -105,6 +105,14 @@ describe('button action API boundary', () => {
     expect(started.json()).toEqual({ operation });
     expect(start).toHaveBeenCalledTimes(1);
 
+    // a prompt's appended Review threads may fill a whole prompt, even of characters JSON escapes to six bytes
+    const append = '\u0001'.repeat(32_000);
+    const appended = await app.inject({ method: 'POST', url: '/api/button-actions', headers: first.headers, payload: { ...request, requestId: 'request_append', append } });
+    expect(appended.statusCode).toBe(202);
+    expect(start).toHaveBeenLastCalledWith(expect.any(String), { ...request, requestId: 'request_append', append });
+    const appendedDraft = await app.inject({ method: 'POST', url: '/api/button-actions/draft', headers: first.headers, payload: { ...draftRequest, append } });
+    expect(appendedDraft.statusCode).toBe(200);
+
     const read = await app.inject({ method: 'GET', url: `/api/button-actions/${operation.id}`, headers: { host: 'agents.example.com', cookie: first.cookie } });
     expect(read.statusCode).toBe(200);
     expect(read.json()).toEqual({ operation });
@@ -120,11 +128,11 @@ describe('button action API boundary', () => {
 
     const nonController = await app.inject({ method: 'POST', url: '/api/button-actions', headers: second.headers, payload: { ...request, requestId: 'request_second' } });
     expect(nonController.statusCode).toBe(423);
-    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(2);
     const nonControllerDraft = await app.inject({ method: 'POST', url: '/api/button-actions/draft', headers: second.headers, payload: draftRequest });
     expect(nonControllerDraft.statusCode).toBe(423);
     expect(nonControllerDraft.headers['cache-control']).toBe('no-store');
-    expect(draft).toHaveBeenCalledTimes(1);
+    expect(draft).toHaveBeenCalledTimes(2);
   }, 20_000);
 
   // expose only bounded service errors

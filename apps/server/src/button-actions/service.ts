@@ -4,6 +4,7 @@ import { buttonSlotNames, type ButtonSlot, type ConfiguredButton } from '../conf
 import { isReviewRun, type Agent } from '../domain/models.js';
 import { placeHostRoot, type Place } from '../places/places.js';
 import type { PromptService } from '../prompts/service.js';
+import { validPrompt } from '../prompts/validation.js';
 import { ConfiguredButtonCatalog } from './catalog.js';
 import { guardedDirectoryCommand, type DirectoryExecutionLease, type HostCommandInput, type ShellActionResult } from './host-command-runner.js';
 
@@ -14,7 +15,9 @@ const buttonActionLocatorShape = {
   placeId: z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden'),
   slot: z.enum(buttonSlotNames),
   agentId: z.string().min(1).max(4096).optional(),
-  filesDirectoryToken: z.string().min(1).max(16_384).optional()
+  filesDirectoryToken: z.string().min(1).max(16_384).optional(),
+  // text a prompt button sends after its own prompt (the GitHub panel's picked Review threads)
+  append: z.string().min(1).max(32_000).refine(value => !value.includes('\0'), 'NUL is forbidden').optional()
 };
 export const buttonActionInputSchema = z.object({
   requestId: z.string().regex(/^[A-Za-z0-9_-]{12,128}$/u),
@@ -25,7 +28,7 @@ export type ButtonActionInput = z.infer<typeof buttonActionInputSchema>;
 export type ButtonActionDraftInput = z.infer<typeof buttonActionDraftInputSchema>;
 export type ButtonActionDraft = { kind: 'prompt'; text: string; placeId: string; agentId: string } | { kind: 'shell'; text: string; placeId: string };
 export type ButtonOperation = { id: string; state: 'queued' | 'launching' | 'running' | 'complete' | 'failed' | 'interrupted'; phase?: string; error?: string; exitCode?: number; agentId?: string };
-type StoredOperation = { operation: ButtonOperation; sessionId: string; guard: string; touchedAt: number; promptRequestId?: string; agentKind?: Agent['kind'] };
+type StoredOperation = { operation: ButtonOperation; sessionId: string; guard: string; touchedAt: number; append?: string; promptRequestId?: string; agentKind?: Agent['kind'] };
 type StartRecord = { fingerprint: string; promise: Promise<ButtonOperation>; operationId?: string; createdAt: number };
 type ButtonActionDependencies = {
   resolvePlace(id: string): Promise<Place | undefined>;
@@ -47,6 +50,17 @@ export class ButtonActionError extends Error {
 
 // distinguish active work from retained terminal summaries
 const busy = (operation: ButtonOperation): boolean => ['queued', 'launching', 'running'].includes(operation.state);
+// a prompt button's prompt, then any text the browser asked to follow it
+function promptOf(definition: ConfiguredButton, append: string | undefined): string | undefined {
+  if (!('agentPrompt' in definition.action)) {
+    if (append !== undefined) throw new ButtonActionError('unexpected_prompt_text', 400);
+    return undefined;
+  }
+  const prompt = append === undefined ? definition.action.agentPrompt : `${definition.action.agentPrompt}\n\n${append}`;
+  if (!validPrompt(prompt)) throw new ButtonActionError('prompt_too_long', 400);
+  return prompt;
+}
+
 // bind an Agent to its exact Place without selecting Review workers
 const belongs = (agent: Agent, place: Place): boolean => !isReviewRun(agent) && (agent.placeId === place.id || agent.worktreeId === place.id);
 
@@ -112,6 +126,7 @@ export class ButtonActionService {
     // a locator must belong to this exact effective list
     if (definition === undefined) throw new ButtonActionError('button_unavailable', 404);
     const shell = 'shellCommand' in definition.action;
+    const prompt = promptOf(definition, input.append);
     // Files authority applies only to Files shell buttons
     if (input.filesDirectoryToken !== undefined && (!shell || input.slot !== 'split:files')) throw new ButtonActionError('unexpected_files_context', 400);
     // a Files shell requires fresh directory authority even though the command is not executed
@@ -142,7 +157,7 @@ export class ButtonActionService {
     if (!belongs(selected, place)) throw new ButtonActionError('agent_launch_mismatch');
     // support only registered interactive prompt behaviors
     if (selected.kind !== 'codex' && selected.kind !== 'omx' && selected.kind !== 'claude') throw new ButtonActionError('agent_kind_unavailable');
-    return { kind: 'prompt', text: definition.action.agentPrompt, placeId: place.id, agentId: selected.id };
+    return { kind: 'prompt', text: prompt!, placeId: place.id, agentId: selected.id };
   }
 
   // read only this browser session's exact operation and delegate prompt observations
@@ -211,6 +226,7 @@ export class ButtonActionService {
     // a locator must belong to this exact effective list
     if (definition === undefined) throw new ButtonActionError('button_unavailable', 404);
     const shell = 'shellCommand' in definition.action;
+    const prompt = promptOf(definition, input.append);
     // Files authority applies only to Files shell buttons
     if (input.filesDirectoryToken !== undefined && (!shell || input.slot !== 'split:files')) throw new ButtonActionError('unexpected_files_context', 400);
     // a Files shell never falls back to the Workspace directory
@@ -234,21 +250,23 @@ export class ButtonActionService {
       const previous = this.operations.get(existing);
       // a controller change cannot duplicate or inspect the other browser's active action
       if (previous?.sessionId !== sessionId) throw new ButtonActionError('action_in_progress');
+      // a repeat click joins the running prompt only when it would send the same text
+      if (previous.append !== input.append) throw new ButtonActionError('action_in_progress');
       return this.retainedStatus(sessionId, existing);
     }
     // bound active and retained records without throwing work away
     if (this.operations.size >= 512 || this.active.size >= 128) throw new ButtonActionError('button_action_limit', 429);
     const operation: ButtonOperation = { id: randomBytes(24).toString('base64url'), state: 'queued' };
-    const stored: StoredOperation = { operation, sessionId, guard, touchedAt: this.now() };
+    const stored: StoredOperation = { operation, sessionId, guard, touchedAt: this.now(), ...(input.append === undefined ? {} : { append: input.append }) };
     this.operations.set(operation.id, stored);
     this.active.set(guard, operation.id);
     // execute only the captured definition and context after registration
-    void this.execute(stored, definition, place, selected, lease).catch(() => this.finish(stored, { state: 'failed', error: 'button_action_failed' }));
+    void this.execute(stored, definition, prompt, place, selected, lease).catch(() => this.finish(stored, { state: 'failed', error: 'button_action_failed' }));
     return { ...operation };
   }
 
   // delegate each action to its authoritative execution engine
-  private async execute(stored: StoredOperation, definition: ConfiguredButton, place: Place, selected: Agent | undefined, lease: DirectoryExecutionLease | undefined): Promise<void> {
+  private async execute(stored: StoredOperation, definition: ConfiguredButton, prompt: string | undefined, place: Place, selected: Agent | undefined, lease: DirectoryExecutionLease | undefined): Promise<void> {
     // asynchronous preparation must not start work after shutdown
     if (this.closed) { this.finish(stored, { state: 'interrupted', error: 'server_stopped' }); return; }
     // shell input never comes from the browser
@@ -274,7 +292,7 @@ export class ButtonActionService {
     if (agent.kind !== 'codex' && agent.kind !== 'omx' && agent.kind !== 'claude') { this.finish(stored, { state: 'failed', error: 'agent_kind_unavailable' }); return; }
     stored.operation.agentId = agent.id;
     stored.agentKind = agent.kind;
-    const submitted = await this.deps.prompts.submitTracked(agent.id, definition.action.agentPrompt);
+    const submitted = await this.deps.prompts.submitTracked(agent.id, prompt!);
     // a late submission result cannot revive a shutdown operation
     if (this.closed || !busy(stored.operation)) return;
     // queue persistence or target failure never reports success

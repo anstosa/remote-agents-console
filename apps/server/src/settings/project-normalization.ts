@@ -78,6 +78,7 @@ const splitButtons: ProjectField = {
     code: buttonList,
     review: buttonList,
     stack: buttonList,
+    github: buttonList,
     settings: buttonList
   }
 };
@@ -91,6 +92,8 @@ const projectButtons: ProjectField = {
     rightNav: buttonList,
     navMenu: buttonList,
     pullRequest: buttonList,
+    reviewRequest: buttonList,
+    issue: buttonList,
     splits: splitButtons
   }
 };

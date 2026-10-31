@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { ConfiguredButtonList, type ButtonSlot } from './configured-buttons.js';
 import { age, attentionOrder, freshness, Icon, newWorktreeChoices, NoTokenCard, reasonChips, RowCopy, staleNotice, unseen, useNewWorktreeMenu, useSeenRows, waiting, type Item, type NewWorktreeAction, type NewWorktreeFor, type Problem, type Request } from './github-overview.js';
 import { PanelHeader, PanelIcon, panelIcons, usePanelExpand, usePhoneLayout } from './panel-header.js';
-import { hunkClass, hunkLines, threadLines, unresolvedThreadCount, type PullRequestComment, type PullRequestComments, type PullRequestReviewThread } from './pull-request-comments.js';
+import { hunkClass, unresolvedThreadCount, type PullRequestComment, type PullRequestComments, type PullRequestReviewThread } from './pull-request-comments.js';
+import { feedbackPrompt, hunkLines, reviewThreadBlock, threadLines } from './review-thread-prompt.js';
 import { Skeleton } from './skeleton.js';
 
 // The GitHub panel (CONTEXT.md): one Project's Pull requests and Issues beside its Worktrees, the
@@ -115,7 +117,7 @@ const reviewerState = { approved: 'approved', changes: 'requested changes', comm
 const summaryState: Record<string, keyof typeof reviewerState> = { APPROVED: 'approved', CHANGES_REQUESTED: 'changes', COMMENTED: 'commented', DISMISSED: 'dismissed' };
 const external = (href: string, label: string) => <a key={label} className="github-button" href={href} target="_blank" rel="noreferrer">{label}<Icon name="external" /></a>;
 
-type DetailProps = { now: number; worktreeId?: string; closed: Record<string, boolean>; onToggle: (section: string) => void; onSelect: (selection: Selection) => void; onGoTo?: (worktreeId: string) => void; onNewWorktree?: NewWorktreeFor };
+type DetailProps = { now: number; worktreeId?: string; closed: Record<string, boolean>; onToggle: (section: string) => void; onSelect: (selection: Selection) => void; onGoTo?: (worktreeId: string) => void; onNewWorktree?: NewWorktreeFor; onAddToPrompt?: (text: string) => void };
 /** Send one write to the shown pull request (a path under it, and a JSON body); its result or why it failed. */
 type Write = (path: string, body?: unknown) => Promise<{ result?: unknown; error?: string }>;
 // why the console did not do what was asked: the server's own message, else its status
@@ -132,10 +134,9 @@ const asItem = ({ repository, number, title, url }: { repository: string; number
 // a write's button, its border travelling while the write is in flight
 const WriteButton = ({ busy, className, children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { busy: boolean }) => <button type="button" className={`github-button${className === undefined ? '' : ` ${className}`}${busy ? ' progress-border progress-blue' : ''}`} aria-busy={busy || undefined} {...props}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{children}</button>;
 
-// a thread's foot: who spoke last, Reply (a box inside the card) and Resolve, and how the last write went
-function ThreadFoot({ thread, label, you, pullUrl, write }: { thread: PullRequestReviewThread; label: string; you: boolean; pullUrl: string; write: Write }) {
-  const [replying, setReplying] = useState(false);
-  const [text, setText] = useState('');
+// a thread's foot: who spoke last, Reply (a box inside the card, open while `draft` is set) and
+// Resolve, and how the last write went
+function ThreadFoot({ thread, label, you, pullUrl, write, pick, draft, onDraft }: { thread: PullRequestReviewThread; label: string; you: boolean; pullUrl: string; write: Write; pick?: { picked: boolean; onChange: (picked: boolean) => void }; draft?: string; onDraft: (text?: string) => void }) {
   const [busy, setBusy] = useState<'reply' | 'resolve'>();
   const [error, setError] = useState<string>();
   // GitHub put the reply in the operator's Draft review instead of publishing it
@@ -151,11 +152,11 @@ function ThreadFoot({ thread, label, you, pullUrl, write }: { thread: PullReques
     return true;
   };
   return <>
-    {replying && <div className="github-reply">
-      <textarea aria-label={`Reply to @${last.author}`} placeholder={`Reply to @${last.author}…`} value={text} autoFocus onChange={event => setText(event.target.value)} />
+    {draft !== undefined && <div className="github-reply">
+      <textarea aria-label={`Reply to @${last.author}`} placeholder={`Reply to @${last.author}…`} value={draft} autoFocus onChange={event => onDraft(event.target.value)} />
       <div className="github-actions">
-        <button type="button" className="github-button" onClick={() => { setReplying(false); setError(undefined); }}>Cancel</button>
-        <WriteButton busy={busy === 'reply'} className="go" aria-label="Send reply" disabled={busy !== undefined || text.trim() === ''} onClick={() => void send('reply', { body: text }).then(sent => { if (sent) { setReplying(false); setText(''); } })}><Icon name="thread" />Reply</WriteButton>
+        <button type="button" className="github-button" onClick={() => { onDraft(undefined); setError(undefined); }}>Cancel</button>
+        <WriteButton busy={busy === 'reply'} className="go" aria-label="Send reply" disabled={busy !== undefined || draft.trim() === ''} onClick={() => void send('reply', { body: draft }).then(sent => { if (sent) onDraft(undefined); })}><Icon name="thread" />Reply</WriteButton>
       </div>
     </div>}
     {held && <p className="github-thread-note" role="status">GitHub added your reply to your Draft review, so others see it only once you submit that review.{external(`${pullUrl}/files`, 'Submit review')}</p>}
@@ -163,21 +164,31 @@ function ThreadFoot({ thread, label, you, pullUrl, write }: { thread: PullReques
     <div className={`github-thread-bar${you ? ' you' : ''}`}>
       <span className="github-thread-who">{label}</span>
       {!thread.resolved && <>
-        {!replying && <button type="button" className="github-button" disabled={busy !== undefined} onClick={() => { setReplying(true); setHeld(false); }}><Icon name="thread" />Reply</button>}
+        {pick !== undefined && <label className="github-pick"><input type="checkbox" aria-label={`Select the thread on ${thread.path}`} checked={pick.picked} onChange={event => pick.onChange(event.target.checked)} />select</label>}
+        {draft === undefined && <button type="button" className="github-button" disabled={busy !== undefined} onClick={() => { onDraft(''); setHeld(false); }}><Icon name="thread" />Reply</button>}
         <WriteButton busy={busy === 'resolve'} disabled={busy !== undefined} onClick={() => void send('resolve')}><Icon name="check" />Resolve</WriteButton>
       </>}
     </div>
   </>;
 }
 
-function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSelect, onGoTo, onNewWorktree, write }: DetailProps & { pull: PullDetail; item?: Item; write: Write }) {
+function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSelect, onGoTo, onNewWorktree, onAddToPrompt, write }: DetailProps & { pull: PullDetail; item?: Item; write: Write }) {
   const [rerequesting, setRerequesting] = useState<string>();
   const [rerequestError, setRerequestError] = useState<string>();
   const [showResolved, setShowResolved] = useState(false);
+  const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
+  // each open reply box's text by thread, kept through a read that resolves or outdates its thread
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const open = pull.state === 'open';
   const here = pull.destination !== undefined && pull.destination.worktreeId === worktreeId;
+  // prompt actions go to the Agent of the Worktree holding the pull request, so only there
+  const slot: ButtonSlot | undefined = open && here ? pull.mine ? 'pullRequest' : 'reviewRequest' : undefined;
   const current = (thread: PullRequestReviewThread) => !thread.resolved && !thread.outdated;
-  const threads = pull.threads.filter(thread => showResolved || current(thread)).sort((left, right) => left.path.localeCompare(right.path) || (left.line ?? 0) - (right.line ?? 0));
+  const threads = pull.threads.filter(thread => showResolved || current(thread) || drafts[thread.id] !== undefined).sort((left, right) => left.path.localeCompare(right.path) || (left.line ?? 0) - (right.line ?? 0));
+  // only what is on screen goes: a filter can hide a picked outdated thread
+  const chosen = slot === undefined ? [] : threads.filter(thread => picked.has(thread.id) && !thread.resolved);
+  const chosenText = chosen.length === 0 ? '' : feedbackPrompt(pull.number, chosen.map(reviewThreadBlock));
+  const pick = (thread: PullRequestReviewThread) => slot === undefined ? undefined : { picked: picked.has(thread.id), onChange: (on: boolean) => setPicked(set => { const next = new Set(set); if (on) next.add(thread.id); else next.delete(thread.id); return next; }) };
   const settled = pull.threads.filter(thread => !current(thread)).length;
   const checks = [...pull.checkRuns].sort((left, right) => checkOrder[left.status] - checkOrder[right.status]);
   const failing = checks.filter(check => check.status === 'failed').length;
@@ -195,10 +206,11 @@ function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSele
     </div>
     {item !== undefined && item.reasons.length > 0 && <span className="overview-chips">{reasonChips(item)}</span>}
     <WorktreeStrip destination={pull.destination} worktreeId={worktreeId} none={open ? 'Not checked out.' : undefined} actions={newWorktreeActions(asItem(pull), ['checkout', 'tour'], onNewWorktree)} onGoTo={onGoTo} />
-    {links.length > 0 && <div className="github-actions">{links}</div>}
+    {(links.length > 0 || slot !== undefined) && <div className="github-actions" role="group" aria-label="Pull request actions">{slot !== undefined && <ConfiguredButtonList slot={slot} />}{links}</div>}
     {open && pull.mergeable === 'conflicting' && <div className="github-strip conflict"><Icon name="conflict" /><span>Merge conflicts with {pull.baseBranch ?? 'the base branch'}. {pull.destination === undefined ? 'Check it out in a Worktree to rebase it.' : <>Rebase {here ? 'here' : <>in <b>{pull.destination.label}</b></>}, or let {here ? 'this Worktree\'s' : 'its'} Agent do it with <code>$fixup</code>.</>}</span></div>}
     {section('threads', 'Review threads', <>
       <div className="github-filters">Show <button type="button" className="github-filter" aria-pressed={showResolved} onClick={() => setShowResolved(value => !value)}>Resolved{settled > 0 && ` ${settled}`}</button></div>
+      {open && !here && pull.threads.some(thread => !thread.resolved) && <p className="github-prompt-elsewhere">Selecting threads for a prompt, and this pull request's buttons, are in {pull.destination === undefined ? 'a Worktree for it' : <b>{pull.destination.label}</b>}, so its Agent gets them.</p>}
       {threads.length === 0 ? <Empty>No unresolved threads.</Empty> : threads.map(thread => {
         const last = thread.comments.at(-1)!;
         // the server's Waiting on me rule: someone else spoke last on a current thread of my non-draft PR
@@ -212,10 +224,16 @@ function PullRequestView({ pull, item, now, worktreeId, closed, onToggle, onSele
           <article className={`github-thread${onYou ? ' waiting' : ''}${current(thread) ? '' : ' settled'}`} aria-label={`Review thread on ${thread.path}`}>
             {hunk.some(text => text.trim() !== '') && <pre className="github-hunk">{hunk.map((text, index) => <span key={index} className={hunkClass(text)}>{text}{'\n'}</span>)}</pre>}
             {thread.comments.map(comment => <Comment key={comment.id} comment={comment} now={now} extra={line} />)}
-            <ThreadFoot thread={thread} you={onYou} pullUrl={pull.url} write={write} label={thread.resolved ? 'resolved' : thread.outdated ? `outdated · @${last.author} spoke last` : last.mine ? 'you spoke last' : onYou ? `waiting on you · @${last.author} spoke last` : `@${last.author} spoke last`} />
+            <ThreadFoot thread={thread} you={onYou} pullUrl={pull.url} write={write} pick={pick(thread)} draft={drafts[thread.id]} onDraft={text => setDrafts(({ [thread.id]: _closed, ...open }) => text === undefined ? open : { ...open, [thread.id]: text })} label={thread.resolved ? 'resolved' : thread.outdated ? `outdated · @${last.author} spoke last` : last.mine ? 'you spoke last' : onYou ? `waiting on you · @${last.author} spoke last` : `@${last.author} spoke last`} />
           </article>
         </div>;
       })}
+      {slot !== undefined && chosen.length > 0 && <div className="github-selection" role="group" aria-label="Selected threads">
+        <span>{chosen.length} selected</span>
+        <button type="button" className="github-button" onClick={() => setPicked(new Set())}>Clear</button>
+        <button type="button" className="github-button go" disabled={onAddToPrompt === undefined} title={onAddToPrompt === undefined ? 'No composer is open here' : undefined} onClick={() => { onAddToPrompt?.(chosenText); setPicked(new Set()); }}>Add {chosen.length} to prompt</button>
+        <ConfiguredButtonList slot={slot} append={{ text: chosenText, count: chosen.length }} onSelect={() => setPicked(new Set())} />
+      </div>}
     </>, { count: unresolvedThreadCount(pull) })}
     {section('checks', 'Checks', checks.length === 0 ? <Empty>No checks.</Empty> : <div className="github-list">{checks.map((check, index) => {
       const [kind, icon, label] = checkMark[check.status];
@@ -256,7 +274,7 @@ function IssueView({ issue, now, worktreeId, closed, onToggle, onSelect, onGoTo,
     {section('linked', issue.linkedPullRequests.length > 1 ? 'Linked pull requests' : 'Linked pull request', issue.linkedPullRequests.length === 0 ? <Empty>None yet.</Empty> : <div className="github-list">{issue.linkedPullRequests.map(pull => <button key={pull.number} type="button" className="github-list-row" onClick={() => onSelect({ issue: false, number: pull.number })}>
       <Icon name="pull" /><span className="github-list-name">#{pull.number} {pull.title}</span><small>{pull.draft && pull.state === 'open' ? 'draft' : pull.state}</small>
     </button>)}</div>, issue.linkedPullRequests.length)}
-    <div className="github-actions">{external(issue.url, 'Assign / label')}</div>
+    <div className="github-actions" role="group" aria-label="Issue actions">{worktreeId !== undefined && issue.destination?.worktreeId === worktreeId && <ConfiguredButtonList slot="issue" />}{external(issue.url, 'Assign / label')}</div>
   </>;
 }
 
@@ -386,7 +404,7 @@ function CreatePullRequest({ request, worktreeId, branch }: { request: Request; 
  * change, and the lists and detail are read again then. `focus` is an item to select;
  * `onOpenWorktree` is Go to Worktree; `onNewWorktree` offers an item no Worktree holds a new one.
  */
-export function GithubPanel({ request, projectId, repository, worktreeId, main, branch, hasPullRequest, revision, focus, onClose, onOpenWorktree, onNewWorktree }: { request: Request; projectId?: string; repository?: string; worktreeId?: string; main: boolean; branch?: string; hasPullRequest: boolean; revision: string; focus?: GithubFocus; onClose: () => void; onOpenWorktree?: OpenWorktree; onNewWorktree?: NewWorktreeFor }) {
+export function GithubPanel({ request, projectId, repository, worktreeId, main, branch, hasPullRequest, revision, focus, onClose, onOpenWorktree, onNewWorktree, onAddToPrompt }: { request: Request; projectId?: string; repository?: string; worktreeId?: string; main: boolean; branch?: string; hasPullRequest: boolean; revision: string; focus?: GithubFocus; onClose: () => void; onOpenWorktree?: OpenWorktree; onNewWorktree?: NewWorktreeFor; onAddToPrompt?: (text: string) => void }) {
   const ref = useRef<HTMLElement | null>(null);
   const [narrow, setNarrow] = useState(false);
   // a phone, or a panel too narrow for the list and the detail side by side, drills down from one to the other
@@ -517,7 +535,7 @@ export function GithubPanel({ request, projectId, repository, worktreeId, main, 
       <h4 className="github-kind">Issues</h4>
       {issues.length > 0 ? issues : <p className="overview-none">No open issues.</p>}
     </>;
-    const detail = shownSelection === undefined ? undefined : <Detail key={rowId(shownSelection.issue, shownSelection.number)} request={request} projectId={projectId} selection={shownSelection} item={shownItem} revision={revision} refreshes={refreshes} focused={focused === rowId(shownSelection.issue, shownSelection.number)} now={now} worktreeId={worktreeId} onSelect={select} onNewWorktree={onNewWorktree} onGoTo={onOpenWorktree === undefined ? undefined : target => onOpenWorktree(target, shownSelection)} {...(phone ? { back: () => { setSelected(undefined); setFocused(undefined); } } : {})} />;
+    const detail = shownSelection === undefined ? undefined : <Detail key={rowId(shownSelection.issue, shownSelection.number)} request={request} projectId={projectId} selection={shownSelection} item={shownItem} revision={revision} refreshes={refreshes} focused={focused === rowId(shownSelection.issue, shownSelection.number)} now={now} worktreeId={worktreeId} onSelect={select} onNewWorktree={onNewWorktree} onAddToPrompt={onAddToPrompt} onGoTo={onOpenWorktree === undefined ? undefined : target => onOpenWorktree(target, shownSelection)} {...(phone ? { back: () => { setSelected(undefined); setFocused(undefined); } } : {})} />;
     split = !phone;
     body = phone
       ? detail ?? list

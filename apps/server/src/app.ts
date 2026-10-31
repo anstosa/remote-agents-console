@@ -1066,8 +1066,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (error instanceof ButtonActionError) return reply.code(error.statusCode).send({ error: error.code });
     return reply.code(503).send({ error: 'button_action_unavailable' });
   };
+  // a prompt's appended text (32,000 characters) JSON-escaped at up to six bytes each
+  const buttonActionBodyLimit = 256_000;
   // resolve one trusted action into an editable draft without executing it
-  app.post('/api/button-actions/draft', { bodyLimit: 32_768, config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
+  app.post('/api/button-actions/draft', { bodyLimit: buttonActionBodyLimit, config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
     reply.header('cache-control', 'no-store');
     const current = controlled(request, true);
     const parsed = buttonActionDraftInputSchema.safeParse(request.body);
@@ -1077,7 +1079,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     catch (error) { return buttonActionFailure(reply, error); }
   });
   // start only server-resolved definitions under the current controller and CSRF boundary
-  app.post('/api/button-actions', { bodyLimit: 32_768, config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
+  app.post('/api/button-actions', { bodyLimit: buttonActionBodyLimit, config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
     const current = controlled(request, true);
     const parsed = buttonActionInputSchema.safeParse(request.body);
     // raw commands, prompts and cwd values are never accepted here

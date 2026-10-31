@@ -89,6 +89,18 @@ describe('configured button schema', () => {
     const config = await validateConfig({ publicOrigin: 'https://agents.example.com' }, { checkExecutables: false });
     expect(config.buttons).toEqual(defaultButtons);
   });
+
+  it('has empty GitHub panel slots beside the Pull request slot', () => {
+    const parsed = applicationButtonsSchema.parse(undefined);
+    expect(buttonSlotNames).toEqual(expect.arrayContaining(['pullRequest', 'reviewRequest', 'issue', 'split:github']));
+    expect(parsed.reviewRequest).toEqual([]);
+    expect(parsed.issue).toEqual([]);
+    expect(parsed.splits.github).toEqual([]);
+    const authored = applicationButtonsSchema.parse({ reviewRequest: [promptButton('$review')], issue: [promptButton('$plan')], splits: { github: [shellButton('gh')] } });
+    expect(buttonsForSlot(authored, 'reviewRequest').map(button => button.text)).toEqual(['$review']);
+    expect(buttonsForSlot(authored, 'issue').map(button => button.text)).toEqual(['$plan']);
+    expect(buttonsForSlot(authored, 'split:github').map(button => button.text)).toEqual(['gh']);
+  });
 });
 
 describe('project button merging', () => {
@@ -106,5 +118,14 @@ describe('project button merging', () => {
     expect(effective.tabLead).toEqual(application.tabLead);
     expect(effective.splits.files[0]!.action).toEqual({ agentPrompt: 'replace' });
     expect(application.splits.files[0]!.action).toEqual({ shellCommand: "printf '%s' Files" });
+  });
+
+  it('merges a Project\'s GitHub panel buttons over the application\'s', () => {
+    const application = applicationButtonsSchema.parse({ reviewRequest: [promptButton('$review')] });
+    const project = projectButtonsSchema.parse({ reviewRequest: [promptButton('$review', 'project review')], issue: [promptButton('$plan')], splits: { github: [shellButton('gh')] } });
+    const effective = effectiveButtons(application, project);
+    expect(effective.reviewRequest.map(button => button.action)).toEqual([{ agentPrompt: 'project review' }]);
+    expect(effective.issue.map(button => button.text)).toEqual(['$plan']);
+    expect(effective.splits.github.map(button => button.text)).toEqual(['gh']);
   });
 });

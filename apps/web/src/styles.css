@@ -3260,6 +3260,14 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .github-reply .github-actions { justify-content: flex-end; }
 .github-thread-note { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: 0; padding: .4rem .55rem; border-top: 1px solid var(--surface-0); color: var(--yellow); font-size: .68rem; }
 .github-thread-note.error { color: var(--red); }
+.github-pick { display: inline-flex; align-items: center; gap: .3rem; min-height: 1.6rem; color: var(--subtext-0); cursor: pointer; }
+.github-pick input { margin: 0; accent-color: var(--blue); }
+/* picked Review threads: stays in view at the foot of the scrolling detail while the threads show */
+.github-selection { position: sticky; bottom: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin-top: .4rem; padding: .45rem .5rem; border: 1px solid var(--blue); border-radius: var(--control-radius); background: var(--surface-0); color: var(--text); font-size: .72rem; }
+.github-selection > span:first-child { flex: 1 1 auto; }
+.github-actions .configured-button-list, .github-selection .configured-button-list { flex-wrap: wrap; }
+.github-prompt-elsewhere { margin: 0; color: var(--overlay-1); font-size: .7rem; }
+.github-prompt-elsewhere b { color: var(--text); }
 .github-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: .2rem; }
 .github-list-row { display: flex; width: 100%; min-height: 1.9rem; align-items: center; gap: .5rem; padding: .15rem .4rem; border: 0; border-radius: var(--control-radius); background: none; color: var(--text); font-size: .74rem; text-align: left; text-decoration: none; }
 a.github-list-row:hover, button.github-list-row:hover { background: var(--surface-0); }

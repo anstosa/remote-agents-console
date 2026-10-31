@@ -416,6 +416,27 @@ describe('button action service', () => {
     expect(fixture.submitTracked).not.toHaveBeenCalled();
   });
 
+  // the GitHub panel's picked Review threads follow a prompt button's own prompt
+  it('sends a prompt button\'s prompt followed by appended text, and refuses it for a shell command', async () => {
+    const fixture = serviceFixture();
+    const threads = 'Address this feedback on PR #7:\n\n> @mira: name it';
+    await fixture.service.start('session', input(fixture.buttons, 'Ask', 'leftNav', { append: threads }));
+    await flush();
+    expect(fixture.submitTracked).toHaveBeenCalledWith('agent-1', `ask exactly\n\n${threads}`);
+    await expect(fixture.service.draft('session', draftInput(fixture.buttons, 'Other', 'leftNav', { append: threads }))).resolves.toMatchObject({ kind: 'prompt', text: `other exactly\n\n${threads}` });
+
+    await expectActionError(fixture.service.start('session', input(fixture.buttons, 'Build', 'leftNav', { requestId: 'request_shell', append: threads })), 'unexpected_prompt_text', 400);
+    await expectActionError(fixture.service.draft('session', draftInput(fixture.buttons, 'Build', 'leftNav', { append: threads })), 'unexpected_prompt_text', 400);
+    await expectActionError(fixture.service.start('session', input(fixture.buttons, 'Other', 'leftNav', { requestId: 'request_long', append: 'x'.repeat(32_000) })), 'prompt_too_long', 400);
+    expect(fixture.submitTracked).toHaveBeenCalledTimes(1);
+    expect(fixture.execute).not.toHaveBeenCalled();
+    // the running Ask can't be joined by an Ask carrying other threads
+    await expectActionError(fixture.service.start('session', input(fixture.buttons, 'Ask', 'leftNav', { requestId: 'request_other_threads', append: 'other threads' })), 'action_in_progress');
+    expect(fixture.submitTracked).toHaveBeenCalledTimes(1);
+    expect(buttonActionInputSchema.safeParse(input(fixture.buttons, 'Ask', 'leftNav', { append: '' })).success).toBe(false);
+    expect(buttonActionDraftInputSchema.safeParse(draftInput(fixture.buttons, 'Ask', 'leftNav', { append: 'x\0y' })).success).toBe(false);
+  });
+
   // coalesce normal launch while allowing distinct button operations
   it('shares one Place launch across concurrent distinct prompt buttons', async () => {
     let resolveLaunch!: (value: Agent) => void;

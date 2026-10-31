@@ -5,8 +5,8 @@ import { resetTerminalCommands, terminalCommandFits } from './terminal-command-d
 
 type ButtonColor = 'rosewater' | 'flamingo' | 'pink' | 'mauve' | 'red' | 'maroon' | 'peach' | 'yellow' | 'green' | 'teal' | 'sky' | 'sapphire' | 'blue' | 'lavender';
 type ButtonStyle = 'outline' | 'solid';
-type ButtonSplitKind = 'agent' | 'terminal' | 'note' | 'browser' | 'files' | 'code' | 'review' | 'stack' | 'settings';
-export type ButtonSlot = 'tabLead' | 'leftNav' | 'rightNav' | 'navMenu' | 'pullRequest' | `split:${ButtonSplitKind}`;
+type ButtonSplitKind = 'agent' | 'terminal' | 'note' | 'browser' | 'files' | 'code' | 'review' | 'stack' | 'github' | 'settings';
+export type ButtonSlot = 'tabLead' | 'leftNav' | 'rightNav' | 'navMenu' | 'pullRequest' | 'reviewRequest' | 'issue' | `split:${ButtonSplitKind}`;
 type ButtonPresentation = { id: string; text: string; icon?: string; color: ButtonColor; style: ButtonStyle; actionKind: 'shell' | 'prompt' };
 export type ButtonCatalog = { revision: string; application: Record<ButtonSlot, ButtonPresentation[]>; projects: Record<string, Record<ButtonSlot, ButtonPresentation[]>> };
 type ButtonOperation = { id: string; state: 'queued' | 'launching' | 'running' | 'complete' | 'failed' | 'interrupted'; phase?: string; error?: string; exitCode?: number };
@@ -16,7 +16,8 @@ type ButtonFeedback = (feedback: { tone: 'pending' | 'success' | 'error'; messag
 type ActionContext = { placeId?: string; projectId?: string; agentId?: string; worktreeId?: string };
 export type ButtonActionDraft = { kind: 'shell'; text: string; placeId: string } | { kind: 'prompt'; text: string; placeId: string; agentId: string };
 type ButtonEntry = { key: string; button: ButtonPresentation; slot: ButtonSlot; placeId: string; requestId: string; operation?: ButtonOperation; starting: boolean; boot?: number; worktreeId?: string; filesDirectoryToken?: string };
-type ButtonActionView = ButtonPresentation & { busy: boolean; disabled: boolean; disabledReason?: string; run: () => void; edit: (panelKey?: string) => void };
+// `append` follows a prompt button's own prompt (the GitHub panel's picked Review threads)
+type ButtonActionView = ButtonPresentation & { busy: boolean; disabled: boolean; disabledReason?: string; run: (append?: string) => void; edit: (panelKey?: string, append?: string) => void };
 type ProviderValue = {
   actions: (slot: ButtonSlot | undefined, filesDirectoryToken?: string) => ButtonActionView[];
   busy: (slot: ButtonSlot | undefined) => boolean;
@@ -138,7 +139,7 @@ export function ConfiguredButtonsProvider({ catalog, serverStartedAt, context, r
     timers.current.set(entry.key, tick);
   }, [onFeedback, publish, request]);
 
-  const start = useCallback(async (button: ButtonPresentation, slot: ButtonSlot, filesDirectoryToken?: string) => {
+  const start = useCallback(async (button: ButtonPresentation, slot: ButtonSlot, filesDirectoryToken?: string, append?: string) => {
     const activeCatalog = currentCatalog.current;
     const activeContext = currentContext.current;
     // require a workspace-backed place and current catalog
@@ -157,7 +158,8 @@ export function ConfiguredButtonsProvider({ catalog, serverStartedAt, context, r
       placeId: activeContext.placeId,
       slot,
       ...(activeContext.agentId === undefined ? {} : { agentId: activeContext.agentId }),
-      ...(slot === 'split:files' && button.actionKind === 'shell' && filesDirectoryToken !== undefined ? { filesDirectoryToken } : {})
+      ...(slot === 'split:files' && button.actionKind === 'shell' && filesDirectoryToken !== undefined ? { filesDirectoryToken } : {}),
+      ...(append === undefined ? {} : { append })
     };
     // reuse this request id for the one same-boot recovery attempt
     const submit = async (): Promise<Response | undefined> => {
@@ -197,7 +199,7 @@ export function ConfiguredButtonsProvider({ catalog, serverStartedAt, context, r
   }, [onFeedback, poll, publish, request]);
 
   // prepare editable bytes without invoking the action execution endpoint
-  const edit = useCallback(async (button: ButtonPresentation, slot: ButtonSlot, filesDirectoryToken?: string, panelKey?: string) => {
+  const edit = useCallback(async (button: ButtonPresentation, slot: ButtonSlot, filesDirectoryToken?: string, panelKey?: string, append?: string) => {
     const activeCatalog = currentCatalog.current;
     const activeContext = currentContext.current;
     // require the same workspace and catalog authority as ordinary execution
@@ -213,7 +215,8 @@ export function ConfiguredButtonsProvider({ catalog, serverStartedAt, context, r
       const response = await request('/api/button-actions/draft', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
         actionId: button.id, configRevision: activeCatalog.revision, placeId: activeContext.placeId, slot,
         ...(activeContext.agentId === undefined ? {} : { agentId: activeContext.agentId }),
-        ...(slot === 'split:files' && button.actionKind === 'shell' && filesDirectoryToken !== undefined ? { filesDirectoryToken } : {})
+        ...(slot === 'split:files' && button.actionKind === 'shell' && filesDirectoryToken !== undefined ? { filesDirectoryToken } : {}),
+        ...(append === undefined ? {} : { append })
       }) });
       const payload: unknown = await response.json().catch(() => undefined);
       const draft = response.ok ? draftFrom(payload, button, activeContext) : undefined;
@@ -249,7 +252,7 @@ export function ConfiguredButtonsProvider({ catalog, serverStartedAt, context, r
         const busy = entry?.starting === true || entry?.operation !== undefined && busyStates.has(entry.operation.state);
         const filesUnavailable = slot === 'split:files' && button.actionKind === 'shell' && filesDirectoryToken === undefined;
         const disabledReason = context.placeId === undefined ? 'Open a Workspace to run this action.' : filesUnavailable ? 'Open a Files directory to run this command.' : undefined;
-        return { ...button, busy, disabled: disabledReason !== undefined || busy, ...(disabledReason === undefined ? {} : { disabledReason }), run: () => void start(button, slot, filesDirectoryToken), edit: panelKey => void edit(button, slot, filesDirectoryToken, panelKey) };
+        return { ...button, busy, disabled: disabledReason !== undefined || busy, ...(disabledReason === undefined ? {} : { disabledReason }), run: append => void start(button, slot, filesDirectoryToken, append), edit: (panelKey, append) => void edit(button, slot, filesDirectoryToken, panelKey, append) };
       }),
       busy: slot => buttonsFor(slot).some(button => {
         // require an executable workspace context
@@ -285,11 +288,16 @@ export function ConfiguredButtonIcon({ path, className = 'configured-button-icon
   return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d={path} /></svg>;
 }
 
-// render the same action contract in tabs, toolbars, flyouts and PR controls
-export function ConfiguredButtonList({ slot, filesDirectoryToken, className = '', buttonClassName = '', onSelect }: { slot: ButtonSlot; filesDirectoryToken?: string; className?: string; buttonClassName?: string; onSelect?: () => void }) {
-  const actions = useConfiguredButtons(slot, filesDirectoryToken);
+// render the same action contract in tabs, toolbars, flyouts and PR controls; with `append`, only
+// the prompt buttons, each sending `append.text` after its prompt and labelled "+count"
+export function ConfiguredButtonList({ slot, filesDirectoryToken, className = '', buttonClassName = '', onSelect, append }: { slot: ButtonSlot; filesDirectoryToken?: string; className?: string; buttonClassName?: string; onSelect?: () => void; append?: { text: string; count: number } }) {
+  const actions = useConfiguredButtons(slot, filesDirectoryToken).filter(action => append === undefined || action.actionKind === 'prompt');
   // omit empty slot wrappers
   if (actions.length === 0) return null;
   // panel capture handlers must defer to the custom button's own menu
-  return <span className={`configured-button-list ${className}`.trim()}>{actions.map(action => <button key={action.id} type="button" className={`configured-button configured-button-${action.style} configured-button-${action.color}${action.busy ? ` progress-border progress-${action.color}` : ''}${buttonClassName === '' ? '' : ` ${buttonClassName}`}`} style={{ '--configured-button-color': `var(--${action.color})` } as CSSProperties} disabled={action.disabled} aria-busy={action.busy || undefined} aria-label={action.text} title={action.disabledReason ?? action.text} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={event => openConfiguredButtonMenu(event, action, onSelect)} onClick={() => { action.run(); onSelect?.(); }}>{action.busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon !== undefined && <ConfiguredButtonIcon path={action.icon} />}<span className="configured-button-label">{action.text}</span></button>)}</span>;
+  return <span className={`configured-button-list ${className}`.trim()}>{actions.map(action => {
+    const text = append === undefined ? action.text : `${action.text} +${append.count}`;
+    const menuAction = append === undefined ? action : { ...action, edit: (panelKey?: string) => action.edit(panelKey, append.text) };
+    return <button key={action.id} type="button" className={`configured-button configured-button-${action.style} configured-button-${action.color}${action.busy ? ` progress-border progress-${action.color}` : ''}${buttonClassName === '' ? '' : ` ${buttonClassName}`}`} style={{ '--configured-button-color': `var(--${action.color})` } as CSSProperties} disabled={action.disabled} aria-busy={action.busy || undefined} aria-label={text} title={action.disabledReason ?? text} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={event => openConfiguredButtonMenu(event, menuAction, onSelect)} onClick={() => { action.run(append?.text); onSelect?.(); }}>{action.busy && <span className="update-progress-ring" aria-hidden="true" />}{action.icon !== undefined && <ConfiguredButtonIcon path={action.icon} />}<span className="configured-button-label">{text}</span></button>;
+  })}</span>;
 }

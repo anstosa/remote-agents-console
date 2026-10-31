@@ -59,7 +59,7 @@ function describeButtonSettings(schema: SettingsSchema): void {
       ? 'Replace application buttons with the same text or append new buttons. Empty lists inherit application buttons.'
       : 'Ordered configurable actions shown throughout the application.';
     if (project) buttons.default = {};
-    const labels: Record<string, string> = { tabLead: 'Left of tabs', leftNav: 'Left navigation', rightNav: 'Right navigation', navMenu: 'Navigation menu', pullRequest: 'Pull request' };
+    const labels: Record<string, string> = { tabLead: 'Left of tabs', leftNav: 'Left navigation', rightNav: 'Right navigation', navMenu: 'Navigation menu', pullRequest: 'Pull request', reviewRequest: 'Review request', issue: 'Issue' };
     // annotate every direct slot
     for (const [key, label] of Object.entries(labels)) {
       const list = buttons.properties[key];
@@ -73,7 +73,7 @@ function describeButtonSettings(schema: SettingsSchema): void {
     Object.assign(splits, { label: 'Panel buttons', default: {} });
     // annotate every split-kind slot
     for (const [key, list] of Object.entries(splits.properties)) {
-      Object.assign(list, { label: `${key[0]!.toUpperCase()}${key.slice(1)}`, default: [] });
+      Object.assign(list, { label: key === 'github' ? 'GitHub' : `${key[0]!.toUpperCase()}${key.slice(1)}`, default: [] });
       describeButtonList(list);
     }
   };

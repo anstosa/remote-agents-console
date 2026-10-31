@@ -574,6 +574,29 @@ test('replies to and resolves a Review thread, and re-requests a review, from th
   } finally { details['pulls/214'] = saved; }
 });
 
+test('keeps a half-typed reply when a refresh shows its thread resolved', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  const saved = structuredClone(details['pulls/214']);
+  await mount(page, [lists]);
+  try {
+    await page.goto('/');
+    await page.getByRole('tab', { name: /^feature/u }).click();
+    await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+    const threads = detail(page).getByRole('region', { name: 'Review threads' });
+    const thread = threads.getByRole('article', { name: 'Review thread on src/github/service.ts' });
+    await thread.getByRole('button', { name: 'Reply', exact: true }).click();
+    await thread.getByRole('textbox', { name: 'Reply to @mira' }).fill('Half a thought');
+    // someone resolves it on GitHub, and Refresh reads it so
+    (details['pulls/214'] as { pullRequest: { threads: { resolved: boolean }[] } }).pullRequest.threads[0]!.resolved = true;
+    await page.getByRole('region', { name: 'GitHub', exact: true }).getByRole('button', { name: 'Refresh' }).click();
+    await expect(thread.locator('.github-thread-bar')).toContainText('resolved');
+    await expect(thread.getByRole('textbox', { name: 'Reply to @mira' })).toHaveValue('Half a thought');
+    // once the reply is let go, the resolved thread leaves the list
+    await thread.getByRole('button', { name: 'Cancel' }).click();
+    await expect(thread).toHaveCount(0);
+  } finally { details['pulls/214'] = saved; }
+});
+
 test('says when GitHub held a reply in the operator\'s Draft review', async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 1000 });
   await mount(page, [lists]);
