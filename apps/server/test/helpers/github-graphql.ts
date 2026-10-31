@@ -38,7 +38,7 @@ export type PullFixture = {
   // each reviewer's latest opinionated review
   reviews?: { id?: string; author: string; state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED'; commit: string }[];
 };
-export type IssueFixture = { number: number; title: string; assigned?: boolean; author?: string; updatedAt?: string; labels?: string[]; linked?: { number: number; branch: string; repository?: string }[] };
+export type IssueFixture = { number: number; title: string; assigned?: boolean; author?: string; updatedAt?: string; labels?: string[]; body?: string; linked?: { number: number; branch: string; title?: string; repository?: string }[] };
 export type World = Record<string, { pulls?: PullFixture[]; issues?: IssueFixture[] }>;
 export type GraphqlCall = { query: string; variables: Record<string, unknown> };
 
@@ -82,11 +82,12 @@ function issueNode(repository: string, issue: IssueFixture, selection: string): 
   const asked = (field: string, value: () => unknown): Record<string, unknown> => selection.includes(field) ? { [field]: value() } : {};
   return {
     number: issue.number, title: issue.title, url: `https://github.com/${repository}/issues/${issue.number}`, state: 'OPEN',
+    ...asked('body', () => issue.body ?? ''),
     ...asked('updatedAt', () => issue.updatedAt ?? '2026-10-30T12:00:00Z'),
     ...asked('repository', () => ({ nameWithOwner: repository })),
     ...asked('author', () => ({ login: issue.author ?? 'someone' })),
     ...asked('labels', () => ({ nodes: (issue.labels ?? []).map(name => ({ name })) })),
-    ...asked('closedByPullRequestsReferences', () => ({ nodes: (issue.linked ?? []).map(pull => ({ number: pull.number, headRefName: pull.branch, isCrossRepository: false, repository: { nameWithOwner: pull.repository ?? repository } })) }))
+    ...asked('closedByPullRequestsReferences', () => ({ nodes: (issue.linked ?? []).map(pull => ({ number: pull.number, title: pull.title ?? `PR ${pull.number}`, url: `https://github.com/${pull.repository ?? repository}/pull/${pull.number}`, state: 'OPEN', isDraft: false, headRefName: pull.branch, isCrossRepository: false, repository: { nameWithOwner: pull.repository ?? repository } })) }))
   };
 }
 
@@ -109,6 +110,17 @@ function searches(world: World, { query, variables }: GraphqlCall): Record<strin
 // the data GitHub returns for one module query over `world`
 export function answer(world: World, call: GraphqlCall): Record<string, unknown> {
   const { query, variables } = call;
+  // one pull request's or Issue's detail, with the fields the read asks for
+  const single = /^query (PullRequestDetail|IssueDetail)\b/u.exec(query)?.[1];
+  if (single !== undefined) {
+    const found = Object.entries(world).find(([name]) => name.toLowerCase() === `${String(variables.owner)}/${String(variables.name)}`.toLowerCase());
+    if (found === undefined) return { data: { repository: null }, errors: [{ type: 'NOT_FOUND', message: 'Could not resolve to a Repository.' }] };
+    const [name, { pulls = [], issues = [] }] = found;
+    const pull = pulls.find(candidate => candidate.number === variables.number);
+    const issue = issues.find(candidate => candidate.number === variables.number);
+    if (single === 'PullRequestDetail') return pull === undefined ? { data: { repository: { pullRequest: null } }, errors: [{ type: 'NOT_FOUND', message: 'Could not resolve to a PullRequest.' }] } : { data: { repository: { pullRequest: pullNode(name, pull, query) } } };
+    return issue === undefined ? { data: { repository: { issue: null } }, errors: [{ type: 'NOT_FOUND', message: 'Could not resolve to an Issue.' }] } : { data: { repository: { issue: issueNode(name, issue, query) } } };
+  }
   const data: Record<string, unknown> = searches(world, call);
   // each repository alias and the text of its selection
   for (const section of query.split(/(?=\br\d+:repository\()/u).slice(1)) {

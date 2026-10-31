@@ -479,56 +479,6 @@ describe('check states', () => {
   });
 });
 
-describe('a pull request\'s detail', () => {
-  const author = (login: string, typename = 'User') => ({ login, __typename: typename });
-  const commentsPayload = { data: { repository: { pullRequest: {
-    id: 'PR9', author: author('octocat'), body: 'Retry with backoff', createdAt: '2026-09-30T00:00:00Z', url: 'https://github.com/octo/repo/pull/9',
-    reviewThreads: { nodes: [
-      { id: 'T1', isResolved: false, isOutdated: false, path: 'src/a.ts', line: 12, startLine: 10, originalLine: 11, originalStartLine: 9, comments: { nodes: [
-        { id: 'C1', author: author('mona'), body: 'Back off first', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_r1', diffHunk: '@@ -1 +1 @@\n+retry' },
-        { id: 'C2', author: null, body: 'Agreed', createdAt: '2026-10-01T01:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_r2', diffHunk: '@@ -1 +1 @@\n+retry' }
-      ] } },
-      { id: 'T2', isResolved: false, isOutdated: true, path: 'src/b.ts', line: null, startLine: null, originalLine: 4, originalStartLine: 4, comments: { nodes: [
-        { id: 'C3', author: author('mona'), body: 'Old', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_r3', diffHunk: '@@ -4 +4 @@' }
-      ] } },
-      { id: 'T3', isResolved: true, isOutdated: false, path: 'src/c.ts', line: 1, comments: { nodes: [
-        { id: 'C4', author: author('mona'), body: 'Untrusted', createdAt: '2026-10-01T00:00:00Z', url: 'https://evil.example/x', diffHunk: '' }
-      ] } }
-    ] },
-    reviews: { nodes: [
-      { id: 'R1', author: author('mona'), state: 'CHANGES_REQUESTED', body: 'See inline', submittedAt: '2026-10-01T02:00:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-1' },
-      { id: 'R2', author: author('mona'), state: 'COMMENTED', body: '  ', submittedAt: '2026-10-01T02:00:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-2' },
-      { id: 'R3', author: author('me'), state: 'PENDING', body: 'My draft', submittedAt: null, url: 'https://github.com/octo/repo/pull/9#pullrequestreview-3' }
-    ] },
-    comments: { nodes: [
-      { id: 'I1', author: author('codecov', 'Bot'), body: 'Coverage 80%', createdAt: '2026-10-01T03:00:00Z', url: 'https://github.com/octo/repo/pull/9#issuecomment-1' }
-    ] }
-  } } } };
-  const service = (token?: string) => github(async (url, init) => url.endsWith('/graphql') && String(init?.body).includes('reviews(') ? reply(commentsPayload) : reply({}, 404), { token: async () => token });
-
-  it('reads threads, review summaries and conversation', async () => {
-    const comments = await service('private-token').pullRequest(octo, 9);
-    expect(comments.number).toBe(9);
-    expect(comments.url).toBe('https://github.com/octo/repo/pull/9');
-    expect(comments.description).toEqual({ id: 'PR9', author: 'octocat', bot: false, body: 'Retry with backoff', createdAt: '2026-09-30T00:00:00Z', url: 'https://github.com/octo/repo/pull/9' });
-    expect(comments.threads).toEqual([
-      { id: 'T1', path: 'src/a.ts', line: 12, startLine: 10, resolved: false, outdated: false, diffHunk: '@@ -1 +1 @@\n+retry', comments: [
-        { id: 'C1', author: 'mona', bot: false, body: 'Back off first', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_r1' },
-        { id: 'C2', author: 'ghost', bot: false, body: 'Agreed', createdAt: '2026-10-01T01:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_r2' }
-      ] },
-      { id: 'T2', path: 'src/b.ts', line: 4, resolved: false, outdated: true, diffHunk: '@@ -4 +4 @@', comments: [
-        { id: 'C3', author: 'mona', bot: false, body: 'Old', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_r3' }
-      ] }
-    ]);
-    expect(comments.reviews).toEqual([{ id: 'R1', author: 'mona', bot: false, body: 'See inline', createdAt: '2026-10-01T02:00:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-1', state: 'CHANGES_REQUESTED' }]);
-    expect(comments.comments).toEqual([{ id: 'I1', author: 'codecov', bot: true, body: 'Coverage 80%', createdAt: '2026-10-01T03:00:00Z', url: 'https://github.com/octo/repo/pull/9#issuecomment-1' }]);
-  });
-
-  it('refuses without a token', async () => {
-    await expect(service().pullRequest(octo, 9)).rejects.toMatchObject({ statusCode: 503 });
-  });
-});
-
 // an empty octo/repo, as GitHub answers the module's reads of it
 const empty = (init?: RequestInit) => reply(answer({ 'octo/repo': {} }, JSON.parse(String(init?.body)) as GraphqlCall));
 

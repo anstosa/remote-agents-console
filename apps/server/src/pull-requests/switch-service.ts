@@ -60,7 +60,7 @@ export class PullRequestSwitchService {
 
   // switch and move run git in-process and never touch a pane, so the service takes no tmux
   // adapter: it is structurally unable to type into an agent's terminal.
-  constructor(private readonly config: ValidatedConfig, private readonly discovery: DiscoveryService, private readonly github: Pick<GithubService, 'repositoryAt' | 'repository' | 'branch' | 'pullRequest'> = new GithubService(), private readonly command: GitCommand = runGit) {}
+  constructor(private readonly config: ValidatedConfig, private readonly discovery: DiscoveryService, private readonly github: Pick<GithubService, 'repositoryAt' | 'repository' | 'branch' | 'pullRequestDetail'> = new GithubService(), private readonly command: GitCommand = runGit) {}
 
   // list one worktree's switchable pull requests and local branches, whether or not an agent runs there:
   // the repository-wide list with this worktree's live branch and switch readiness overlaid
@@ -276,7 +276,11 @@ export class PullRequestSwitchService {
     const { pullRequest, problem } = branch ? await this.github.branch(repository, branch, undefined, { wait: true }) : {};
     if (pullRequest === undefined && problem !== undefined) throw problemError(problem);
     if (pullRequest === undefined || pullRequest.status === 'merged') throw new GithubRequestError('This branch has no open pull request.', 404);
-    return await this.github.pullRequest(repository, pullRequest.number);
+    // the comments view's Refresh reads GitHub again
+    const detail = await this.github.pullRequestDetail(repository, pullRequest.number, { fresh: true });
+    // the view shows an error rather than an old read
+    if (detail.problem !== undefined) throw problemError(detail.problem);
+    return detail.pullRequest!;
   }
 
   async switch(worktreeId: string, number: number): Promise<BranchSwitchResult> {

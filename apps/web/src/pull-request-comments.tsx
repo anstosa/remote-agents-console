@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react';
 
-export type PullRequestComment = { id: string; author: string; bot: boolean; body: string; createdAt: string; url: string };
+export type PullRequestComment = { id: string; author: string; bot: boolean; mine?: true; body: string; createdAt: string; url: string };
 export type PullRequestReviewThread = { id: string; path: string; line?: number; startLine?: number; resolved: boolean; outdated: boolean; diffHunk: string; comments: PullRequestComment[] };
 export type PullRequestReviewSummary = PullRequestComment & { state: string };
 export type PullRequestComments = { number: number; url: string; description?: PullRequestComment; threads: PullRequestReviewThread[]; reviews: PullRequestReviewSummary[]; comments: PullRequestComment[] };
@@ -8,12 +8,12 @@ export type PullRequestComments = { number: number; url: string; description?: P
 type Item = { kind: 'thread'; id: string; thread: PullRequestReviewThread } | { kind: 'review'; id: string; review: PullRequestReviewSummary } | { kind: 'comment'; id: string; comment: PullRequestComment };
 type Section = Item['kind'];
 
-const hunkLines = 10;
+export const hunkLines = 10;
 const reviewStates: Record<string, string> = { CHANGES_REQUESTED: 'Changes requested', APPROVED: 'Approved', DISMISSED: 'Dismissed' };
 
 export const unresolvedThreadCount = (comments: PullRequestComments): number => comments.threads.filter(thread => !thread.resolved && !thread.outdated).length;
 
-const threadLines = (thread: PullRequestReviewThread): string => thread.line === undefined ? '' : thread.startLine === undefined ? `${thread.line}` : `${thread.startLine}-${thread.line}`;
+export const threadLines = (thread: PullRequestReviewThread): string => thread.line === undefined ? '' : thread.startLine === undefined ? `${thread.line}` : `${thread.startLine}-${thread.line}`;
 const quote = (text: string): string => text.split('\n').map(line => line === '' ? '>' : `> ${line}`).join('\n');
 // a fence longer than any backtick run inside, so a hunk that itself holds ``` stays one block
 const fence = (text: string): string => '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/gu)].map(match => match[0].length + 1)));

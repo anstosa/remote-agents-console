@@ -40,9 +40,38 @@ const overview = {
   totals: { mine: 0, reviews: 1, issues: 1 }, fetchedAt: Date.now()
 };
 
+// one pull request's detail as the server gives it
+const comment = (id: string, author: string, body: string, extra: Record<string, unknown> = {}) => ({ id, author, bot: false, body, createdAt: minutesAgo(30), url: `https://github.com/octo/repo/pull/214#${id}`, ...extra });
+const pullDetail = (number: number, title: string, extra: Record<string, unknown> = {}) => ({
+  repository: 'octo/repo', number, title, url: `https://github.com/octo/repo/pull/${number}`, state: 'open', draft: false, author: 'tony', mine: true, updatedAt: minutesAgo(10),
+  branch: `branch-${number}`, baseBranch: 'main', headSha: 'a'.repeat(40), headOnOrigin: true, mergeable: 'mergeable', checks: 'passed',
+  threads: [], reviews: [], comments: [], checkRuns: [], reviewers: [], linkedIssues: [], ...extra
+});
+const details: Record<string, unknown> = {
+  'pulls/214': { fetchedAt: Date.now(), pullRequest: pullDetail(214, 'Serve GitHub lists from one cached poll', {
+    branch: 'feature', destination: feature, checks: 'failed',
+    description: comment('d', 'tony', 'One poll for every list.', { mine: true }),
+    threads: [
+      { id: 't1', path: 'src/github/service.ts', line: 42, resolved: false, outdated: false, diffHunk: '@@ -40,3 +40,3 @@\n-  old()\n+  poll()', comments: [comment('c1', 'mira', 'Why one poll?'), comment('c2', 'tony', 'Budget.', { mine: true }), comment('c3', 'mira', 'Fair, but name it.')] },
+      { id: 't2', path: 'src/github/github.ts', line: 7, resolved: false, outdated: false, diffHunk: '@@ -7 +7 @@\n+client', comments: [comment('c4', 'coderabbit', 'Consider a timeout.', { bot: true })] },
+      { id: 't3', path: 'src/app.ts', line: 3, resolved: true, outdated: false, diffHunk: '', comments: [comment('c5', 'kai', 'Done.')] }
+    ],
+    checkRuns: [{ name: 'build', status: 'passed', url: 'https://github.com/octo/repo/actions/runs/1' }, { name: 'test', status: 'failed', url: 'https://github.com/octo/repo/actions/runs/2' }, { name: 'lint', status: 'pending' }],
+    reviewers: [{ login: 'mira', state: 'changes' }, { login: 'kai', state: 'approved', newCommits: true }, { login: 'core', team: true, requested: true }],
+    linkedIssues: [{ number: 201, title: 'GitHub PR dashboard', url: 'https://github.com/octo/repo/issues/201', state: 'open' }],
+    reviews: [{ ...comment('r1', 'mira', 'A few notes inline.'), state: 'CHANGES_REQUESTED' }],
+    comments: [comment('i1', 'codecov', 'Coverage 91%', { bot: true })]
+  }) },
+  'pulls/231': { fetchedAt: Date.now(), pullRequest: pullDetail(231, 'Needs a rebase', { mergeable: 'conflicting', draft: true }) },
+  'pulls/90': { fetchedAt: Date.now(), pullRequest: pullDetail(90, 'Handle redacted events', { author: 'kai', mine: false }) },
+  'issues/201': { fetchedAt: Date.now(), issue: { repository: 'octo/repo', number: 201, title: 'GitHub PR dashboard', url: 'https://github.com/octo/repo/issues/201', state: 'open', author: 'jo', updatedAt: minutesAgo(60), body: 'One place for every PR.', labels: ['feature'], linkedPullRequests: [{ number: 214, title: 'Serve GitHub lists from one cached poll', url: 'https://github.com/octo/repo/pull/214', state: 'open', draft: false }], destination: feature } },
+  'issues/11': { fetchedAt: Date.now(), issue: { repository: 'octo/repo', number: 11, title: 'Launcher search ignores Notes', url: 'https://github.com/octo/repo/issues/11', state: 'open', author: 'jo', body: '', labels: [], linkedPullRequests: [] } }
+};
+
 // stub the console; `panels` answer each panel read in turn (the last repeats), each read's query
-// lands in `reads` and each mark-seen report in `seen`; the dashboard reports `github.revision`
-async function mount(page: Page, panels: unknown[], reads: string[] = [], seen: string[][] = [], github = { revision: 1 }) {
+// lands in `reads` and each mark-seen report in `seen`; the dashboard reports `github.revision`;
+// each detail read's path and query land in `detailReads`
+async function mount(page: Page, panels: unknown[], reads: string[] = [], seen: string[][] = [], github = { revision: 1 }, detailReads: string[] = []) {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     const path = decodeURIComponent(url.pathname);
@@ -58,6 +87,11 @@ async function mount(page: Page, panels: unknown[], reads: string[] = [], seen: 
       reads.push(url.search);
       const next = panels.length > 1 ? panels.shift() : panels[0];
       return next === 'pending' ? undefined : route.fulfill({ json: next });
+    }
+    const detail = /^\/api\/projects\/repo\/github\/((?:pulls|issues)\/\d+)$/u.exec(path)?.[1];
+    if (detail !== undefined) {
+      detailReads.push(`${detail}${url.search}`);
+      return route.fulfill({ json: details[detail] ?? { problem: { kind: 'failing', message: 'GitHub could not read the pull request: Could not resolve to a PullRequest.' } } });
     }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -245,9 +279,212 @@ test('shows skeleton rows, the Overview\'s no-token card, and a stale banner wit
   // the next read (another Workspace visit) lands on stale data
   await page.getByRole('tab', { name: /^Repo/u }).click();
   await page.getByRole('tab', { name: /^feature/u }).click();
-  await expect(panel.getByRole('status')).toHaveText('GitHub is unreachable. Showing what was fetched 6m ago.Retry');
+  await expect(panel.locator('.overview-banner')).toHaveText('GitHub is unreachable. Showing what was fetched 6m ago.Retry');
   await panel.getByRole('button', { name: 'Retry' }).click();
   await expect(panel.getByRole('heading', { name: 'No GitHub token' })).toBeVisible();
   await expect(panel).toContainText('gh auth login');
   expect(reads.slice(-1)).toEqual(['?refresh=1']);
+});
+
+const detail = (page: Page) => page.getByRole('region', { name: 'GitHub', exact: true }).locator('.github-detail');
+
+test('shows This Worktree\'s pull request beside the list on a desktop, read-only and in full', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  const detailReads: string[] = [];
+  await mount(page, [lists], [], [], { revision: 1 }, detailReads);
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^feature/u }).click();
+  await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  const pull = detail(page);
+  await expect(pull.getByRole('heading')).toHaveText('#214Serve GitHub lists from one cached poll');
+  await expect(panel.getByRole('button', { name: /^Pull request #214/u })).toHaveAttribute('aria-current', 'true');
+  await expect(pull.getByRole('link', { name: 'Open on GitHub' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/214');
+  await expect(pull.locator('.github-detail-meta')).toHaveText(/^open@tonyfeature → mainupdated 10m ago$/u);
+  await expect(pull.locator('.overview-chips').first()).toHaveText('@mira on service.ts');
+  await expect(pull.locator('.github-strip')).toHaveText('Checked out here, in feature.');
+  await expect(pull.getByRole('link', { name: 'Merge' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/214');
+  // every section starts open
+  for (const name of ['Review threads', 'Checks', 'Reviewers', 'Linked issues', 'Description', 'Review summaries', 'Conversation']) await expect(pull.getByRole('button', { name: new RegExp(`^${name}`, 'u') })).toHaveAttribute('aria-expanded', 'true');
+
+  // unresolved, current threads by file, each with its hunk and who spoke last; bots like anyone else
+  const threads = pull.getByRole('region', { name: 'Review threads' });
+  await expect(threads.locator('.github-thread-file')).toHaveText(['src/github/github.ts', 'src/github/service.ts']);
+  await expect(threads.locator('.github-thread-bar')).toHaveText(['waiting on you · @coderabbit spoke last', 'waiting on you · @mira spoke last']);
+  await expect(threads.getByRole('article', { name: 'Review thread on src/github/github.ts' }).locator('.github-bot')).toHaveText('bot');
+  await expect(threads.locator('.github-hunk').last()).toContainText('+  poll()');
+  await threads.getByRole('button', { name: 'Resolved 1' }).click();
+  await expect(threads.locator('.github-thread-bar')).toHaveText(['resolved', 'waiting on you · @coderabbit spoke last', 'waiting on you · @mira spoke last']);
+
+  // checks failing first, each linking to its run
+  const checks = pull.getByRole('region', { name: 'Checks' });
+  await expect(checks.getByRole('button', { name: /^Checks/u })).toContainText('1 failing');
+  await expect(checks.locator('.github-list-name')).toHaveText(['test', 'lint', 'build']);
+  await expect(checks.getByRole('link', { name: /test/u })).toHaveAttribute('href', 'https://github.com/octo/repo/actions/runs/2');
+  await expect(pull.getByRole('region', { name: 'Reviewers' }).locator('.github-list-row')).toHaveText(['@mirarequested changes', '@kaiapprovednew commits since', 'corereview pending']);
+  await expect(pull.getByRole('region', { name: 'Description' })).toContainText('One poll for every list.');
+  await expect(pull.getByRole('region', { name: 'Review summaries' })).toContainText('A few notes inline.');
+  await expect(pull.getByRole('region', { name: 'Conversation' })).toContainText('@codecovbot');
+  await pull.getByRole('button', { name: /^Description/u }).click();
+  await expect(pull.getByRole('region', { name: 'Description' })).not.toContainText('One poll');
+
+  // a Linked issue opens the Issue's detail, and its linked pull request leads back
+  await pull.getByRole('region', { name: 'Linked issues' }).getByRole('button', { name: /#201 GitHub PR dashboard/u }).click();
+  const issue = detail(page);
+  await expect(issue.getByRole('heading')).toHaveText('#201GitHub PR dashboard');
+  await expect(panel.getByRole('button', { name: /^Issue #201/u })).toHaveAttribute('aria-current', 'true');
+  await expect(issue.locator('.overview-chip.label')).toHaveText(['feature']);
+  await expect(issue.getByRole('region', { name: 'Description' })).toContainText('One place for every PR.');
+  await expect(issue.locator('.github-strip')).toHaveText('Checked out here, in feature.');
+  await expect(issue.getByRole('link', { name: 'Assign / label' })).toHaveAttribute('href', 'https://github.com/octo/repo/issues/201');
+  await issue.getByRole('region', { name: 'Linked pull request' }).getByRole('button', { name: /#214/u }).click();
+  await expect(detail(page).getByRole('heading')).toHaveText('#214Serve GitHub lists from one cached poll');
+
+  // Refresh reads the shown detail again from GitHub
+  expect(detailReads.filter(read => read.includes('refresh'))).toEqual([]);
+  await panel.getByRole('button', { name: 'Refresh' }).click();
+  await expect.poll(() => detailReads.filter(read => read.includes('refresh'))).toEqual(['pulls/214?refresh=1']);
+});
+
+test('links out to GitHub for review and merge decisions, and points merge conflicts at the Worktree', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await mount(page, [lists]);
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^feature/u }).click();
+  await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  // someone else's pull request, not checked out anywhere
+  await panel.getByRole('button', { name: /^Pull request #90/u }).click();
+  await expect(detail(page).getByRole('heading')).toHaveText('#90Handle redacted events');
+  await expect(detail(page).locator('.github-strip')).toHaveText('Not checked out.');
+  await expect(detail(page).getByRole('link', { name: 'Submit review' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/90/files');
+  await expect(detail(page).getByRole('link', { name: 'Merge' })).toHaveCount(0);
+  // my draft, conflicting with its base
+  await panel.getByRole('button', { name: /^Pull request #231/u }).click();
+  await expect(detail(page).getByRole('link', { name: 'Ready for review' })).toBeVisible();
+  await expect(detail(page).locator('.github-strip.conflict')).toHaveText('Merge conflicts with main. Check it out in a Worktree to rebase it.');
+  // one GitHub cannot read says so
+  await panel.getByRole('button', { name: /^Other open/u }).first().click();
+  await panel.getByRole('button', { name: /^Pull request #205/u }).click();
+  await expect(detail(page).getByRole('heading', { name: 'Pull request #205 could not be read' })).toBeVisible();
+});
+
+test('goes to the Worktree holding a pull request, keeping the panel on it', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await mount(page, [lists]);
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^Repo/u }).click();
+  await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  // the main worktree pins nothing, so nothing is picked yet
+  await expect(panel.getByText('Pick a pull request or issue.')).toBeVisible();
+  await panel.getByRole('button', { name: /^Pull request #214/u }).click();
+  await expect(detail(page).locator('.github-strip')).toHaveText('Checked out in feature.Go to Worktree');
+  await detail(page).getByRole('button', { name: 'Go to Worktree' }).click();
+  await expect(page.getByRole('tab', { name: /^feature/u })).toHaveAttribute('aria-selected', 'true');
+  await expect(detail(page).locator('.github-strip')).toHaveText('Checked out here, in feature.');
+  // not an Overview arrival
+  await expect(panel.locator('.overview-row.focus')).toHaveCount(0);
+});
+
+// whether anything in `selector` runs off its right side; a diff hunk scrolls on its own
+const overflows = (page: Page, selector: string) => page.locator(selector).evaluate(element => element.scrollWidth > element.clientWidth);
+// size the GitHub panel as a split column or a resize would
+const sizePanel = (page: Page, width: number) => page.addStyleTag({ content: `.github-pane { width: ${width}px; }` });
+
+test('fits a pull request\'s detail beside the list from a wide panel down to a narrow one', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  const saved = structuredClone(details['pulls/214']);
+  // a diff line and a branch name far wider than the detail
+  const pull = (details['pulls/214'] as { pullRequest: { threads: { diffHunk: string }[]; branch: string } }).pullRequest;
+  pull.threads[0]!.diffHunk = '@@ -40,3 +40,3 @@\n-  old()\n+  const result = await this.client.graphql<PullRequestReviewThreads>(query, { owner, name, number, after: cursor ?? null });';
+  pull.branch = 'tgrosinger/serve-every-github-list-from-one-cached-poll';
+  await mount(page, [lists]);
+  try {
+    await page.goto('/');
+    await page.getByRole('tab', { name: /^feature/u }).click();
+    await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+    const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+    await expect(detail(page).getByRole('region', { name: 'Reviewers' })).toBeVisible();
+    await expect(panel.locator('.github-pane-body')).toHaveClass(/split/u);
+    expect(await overflows(page, '.github-detail-column')).toBe(false);
+
+    // just wide enough for both: every detail wraps to the column, and the rows to theirs
+    await sizePanel(page, 560);
+    await expect(panel.locator('.github-pane-body')).toHaveClass(/split/u);
+    for (const name of [/^Pull request #214/u, /^Pull request #90/u, /^Pull request #231/u, /^Issue #201/u]) {
+      await panel.getByRole('button', { name }).click();
+      await expect(detail(page).locator('.github-detail-meta')).toBeVisible();
+      expect(await overflows(page, '.github-detail-column')).toBe(false);
+      expect(await overflows(page, '.github-list-column')).toBe(false);
+    }
+  } finally { details['pulls/214'] = saved; }
+});
+
+test('drills down from the list in a panel too narrow for both, as on a phone', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const seen: string[][] = [];
+  await mount(page, [lists], [], seen);
+  await page.goto('/');
+  await sizePanel(page, 480);
+  await page.getByRole('tab', { name: /^feature/u }).click();
+  await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  // the list first: This Worktree's pull request is not opened for it
+  await expect(panel.getByRole('region', { name: 'Pull requests: Mine' })).toBeVisible();
+  await expect(panel.locator('.github-pane-body')).not.toHaveClass(/split/u);
+  await expect(detail(page)).toHaveCount(0);
+  await expect.poll(() => seen.flat().sort()).toEqual(['octo/repo#214:thread:t1:c1', 'octo/repo#90:review:q']);
+
+  await panel.getByRole('button', { name: /^Pull request #231/u }).click();
+  await expect(detail(page).getByRole('heading')).toHaveText('#231Needs a rebase');
+  await expect(panel.getByRole('region', { name: 'Pull requests: Mine' })).toHaveCount(0);
+  expect(await overflows(page, '.github-pane-body')).toBe(false);
+  await detail(page).getByRole('button', { name: '‹ All' }).click();
+  await expect(panel.getByRole('region', { name: 'Pull requests: Mine' })).toBeVisible();
+  await expect(detail(page)).toHaveCount(0);
+
+  // widened, the panel shows both again, This Worktree's pull request beside the list
+  await sizePanel(page, 900);
+  await expect(panel.locator('.github-pane-body')).toHaveClass(/split/u);
+  await expect(detail(page).getByRole('heading')).toHaveText('#214Serve GitHub lists from one cached poll');
+});
+
+test('opens an Overview row\'s item straight on its detail in a narrow panel', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const seen: string[][] = [];
+  await mount(page, [lists], [], seen);
+  await page.goto('/#overview');
+  await sizePanel(page, 480);
+  await page.getByRole('region', { name: 'Overview' }).getByRole('button', { name: '#90 Handle redacted events, in Repo' }).click();
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  await expect(detail(page).getByRole('heading')).toHaveText('#90Handle redacted events');
+  await expect(detail(page)).toContainText('from the Overview');
+  await expect(panel.getByRole('region', { name: 'Pull requests: Mine' })).toHaveCount(0);
+  await expect.poll(() => seen.flat()).toEqual(['octo/repo#90:review:q']);
+  await detail(page).getByRole('button', { name: '‹ All' }).click();
+  await expect(panel.getByRole('region', { name: 'Pull requests: Review requested' }).locator('.overview-row')).toHaveCount(1);
+});
+
+test('drills down from the list on a phone, the open detail counting as shown', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const seen: string[][] = [];
+  await mount(page, [lists], [], seen);
+  // an Overview tap opens straight on the item's detail
+  await page.goto('/#overview');
+  await page.getByRole('region', { name: 'Overview' }).getByRole('tab', { name: /^Reviews/u }).click();
+  await page.getByRole('region', { name: 'Overview' }).getByRole('button', { name: '#90 Handle redacted events, in Repo' }).click();
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  await expect(detail(page).getByRole('heading')).toHaveText('#90Handle redacted events');
+  await expect(detail(page)).toContainText('from the Overview');
+  await expect(panel.getByRole('region', { name: 'Pull requests: Mine' })).toHaveCount(0);
+  await expect.poll(() => seen.flat()).toEqual(['octo/repo#90:review:q']);
+  // nothing in the detail runs off the side of the screen
+  expect(await panel.locator('.github-pane-body').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+
+  await detail(page).getByRole('button', { name: '‹ All' }).click();
+  await expect(panel.getByRole('region', { name: 'Pull requests: Mine' })).toBeVisible();
+  await expect(detail(page)).toHaveCount(0);
+  await panel.getByRole('button', { name: /^Issue #201/u }).click();
+  await expect(detail(page).getByRole('heading')).toHaveText('#201GitHub PR dashboard');
 });

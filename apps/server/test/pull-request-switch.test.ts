@@ -1075,13 +1075,12 @@ describe('pull request switching over the GitHub module', () => {
     command: async () => ({ code: 0, stdout: 'git@github.com:octo/repo.git\n' }),
     request: async (_url, init) => {
       if (world === null) return reply({ message: 'Not Found' }, 404);
-      if (String(init?.body).includes('reviews(')) return reply({ data: { repository: { pullRequest: { id: 'PR9', url: 'https://github.com/octo/repo/pull/9', reviewThreads: { nodes: [] }, reviews: { nodes: [] }, comments: { nodes: [] } } } } });
       return reply(answer(world, JSON.parse(String(init?.body)) as GraphqlCall));
     }
   }), cleanCommand);
 
   it('reads the comments of the branch\'s open pull request, and refuses a branch without one', async () => {
-    await expect(switching(pulled('OPEN')).commentsAt('/worktrees/cora', 'feature/retries')).resolves.toEqual({ number: 9, url: 'https://github.com/octo/repo/pull/9', threads: [], reviews: [], comments: [] });
+    await expect(switching(pulled('OPEN')).commentsAt('/worktrees/cora', 'feature/retries')).resolves.toMatchObject({ number: 9, url: 'https://github.com/octo/repo/pull/9', threads: [], reviews: [], comments: [] });
     await expect(switching({ 'octo/repo': {} }).commentsAt('/worktrees/cora', 'feature/none')).rejects.toMatchObject({ statusCode: 404 });
     await expect(switching(pulled('MERGED')).commentsAt('/worktrees/cora', 'feature/merged')).rejects.toMatchObject({ statusCode: 404 });
     await expect(switching(pulled('OPEN'), null).commentsAt('/worktrees/cora', 'feature/retries')).rejects.toMatchObject({ statusCode: 503 });

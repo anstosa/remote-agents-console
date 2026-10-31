@@ -67,7 +67,7 @@ const seenAfterMs = 700;
 const basename = (path: string) => path.split('/').pop() ?? path;
 
 // one chip per reason, except threads, which share one
-function reasonChips(item: Item): ReactNode[] {
+export function reasonChips(item: Item): ReactNode[] {
   const threads = item.reasons.filter((reason): reason is Extract<Reason, { kind: 'thread' }> => reason.kind === 'thread');
   const authors = [...new Set(threads.map(thread => `@${thread.author}`))];
   const chips: ReactNode[] = [];

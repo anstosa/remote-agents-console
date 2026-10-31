@@ -50,6 +50,29 @@ export type PanelItem = OverviewItem & { state?: 'merged' | 'closed' };
  * `destination` is only ever the Worktree holding it.
  */
 export type GithubPanel = Fetched<{ mine: PanelItem[]; reviews: PanelItem[]; other: PanelItem[]; done: PanelItem[]; assigned: PanelItem[]; issues: PanelItem[] }>;
+/** One check on a head: a check run or a commit status, with where to read it (http(s) only). */
+export type PullRequestCheck = { name: string; status: 'passed' | 'failed' | 'pending' | 'skipped'; url?: string };
+/**
+ * A reviewer of a pull request: their latest submitted review (none while only asked), whether a
+ * review is asked of them now (`requested`), and whether the head moved since they reviewed.
+ */
+export type PullRequestReviewer = { login: string; bot?: true; team?: true; state?: 'approved' | 'changes' | 'commented' | 'dismissed'; requested?: true; newCommits?: true };
+export type LinkedIssue = { number: number; title: string; url: string; state: 'open' | 'closed' };
+/**
+ * Everything the GitHub panel shows of one pull request, for any repository: its state, head and
+ * mergeability, each check, its reviewers, the Issues it closes, and its conversation (the
+ * description, Review threads with their diff hunks, review summaries and comments; `mine` marks
+ * what the viewer wrote, so the last speaker is known). `destination` is the Worktree holding it.
+ */
+export type PullRequestDetail = PullRequestComments & {
+  id: string; repository: string; title: string; state: 'open' | 'merged' | 'closed'; draft: boolean; author?: string; mine: boolean; updatedAt?: string;
+  branch: string; baseBranch?: string; headSha: string; headOnOrigin: boolean; mergeable: 'mergeable' | 'conflicting' | 'unknown';
+  checks: PullRequestCheckStatus; checkRuns: PullRequestCheck[]; reviewers: PullRequestReviewer[]; linkedIssues: LinkedIssue[];
+  destination?: OverviewDestination;
+};
+export type LinkedPullRequest = { number: number; title: string; url: string; state: 'open' | 'merged' | 'closed'; draft: boolean };
+/** One Issue: its header, labels and body, the pull requests in its repository linked to close it, and the Worktree holding one. */
+export type IssueDetail = { repository: string; number: number; title: string; url: string; state: 'open' | 'closed'; author?: string; updatedAt?: string; body: string; labels: string[]; linkedPullRequests: LinkedPullRequest[]; destination?: OverviewDestination };
 /** Runs the poll; injected so tests turn the clock by hand. */
 export type Timer = { set(run: () => void, ms: number): unknown; clear(handle: unknown): void };
 export type GithubServiceOptions = { request?: Request; command?: Command; now?: () => number; token?: Token; timer?: Timer; projects?: () => readonly Project[]; worktrees?: () => readonly Worktree[]; seenFile?: string };
@@ -72,6 +95,10 @@ type OriginEntry = { expiresAt?: number; pending: Promise<GithubRepository | und
 // decided whether a reason still holds (`held`)
 type OverviewRow = Omit<OverviewItem, 'destination' | 'unseen'> & { heads: { number: number; branch: string; onOrigin: boolean }[]; instances: string[]; held: string[] };
 type OverviewEntry = Entry & { mine?: OverviewRow[]; reviews?: OverviewRow[]; issues?: OverviewRow[]; totals?: Overview['totals'] };
+// one pull request's or Issue's detail as last read, with what it was read at (`version`)
+type DetailEntry<T> = Entry & { data?: T; version?: string; failedAt?: number };
+// what a list or branch lookup read of a pull request or Issue, and when
+type Known = { version: string; fetchedAt: number };
 
 // how often the poll runs while watched, and how old data may be before a read refreshes it
 const freshMs = 60_000;
@@ -87,10 +114,14 @@ const branchPage = 20;
 const maxBranches = 50;
 const missingToken = 'GitHub authentication is not configured for pull request lookup.';
 const readAction = 'GitHub could not read pull requests';
+const detailAction = 'GitHub could not read the pull request';
+const issueAction = 'GitHub could not read the Issue';
 // bound the final heads one branch's ancestry check compares against, and the comparisons kept
 const maxAncestorCompares = 3;
 const maxCompares = 1_000;
 const maxRemoteHeads = 8;
+// details kept, the least recently read dropped first
+const maxDetails = 100;
 // a Refresh this soon after the last read answers from it, so repeated clicks cannot drain the budget
 const refreshFloorMs = 10_000;
 
@@ -107,16 +138,27 @@ export function forkCheckoutNumber(branch: string): number | undefined {
   return match === null ? undefined : Number(match[1]);
 }
 
-const commentsQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){
-  id author{login __typename} body createdAt url
-  reviewThreads(first:100){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine comments(first:50){nodes{id author{login __typename} body createdAt url diffHunk}}}}
-  reviews(last:100){nodes{id author{login __typename} state body submittedAt url}}
-  comments(last:100){nodes{id author{login __typename} body createdAt url}}
-}}}`;
 // what every read takes of a pull request; the open lists and a waiting read of one branch also
 // count its threads and the issues it closes
 const pullFields = 'number title url updatedAt author{login} state isDraft baseRefName headRefName headRefOid isCrossRepository viewerDidAuthor mergeable statusCheckRollup{state}';
 const fullPullFields = `${pullFields} reviewThreads(first:100){nodes{isResolved isOutdated}} closingIssuesReferences(first:10){nodes{number}}`;
+// one pull request's detail, with `pullFields` so its version compares with the lists'; the newest
+// threads and comments, so the last speaker is right on a long thread
+const commentFields = 'id author{login __typename} body createdAt url viewerDidAuthor';
+const detailQuery = `query PullRequestDetail($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){
+  ${pullFields} id author{__typename} body createdAt
+  statusCheckRollup{contexts(first:100){nodes{__typename ...on CheckRun{name status conclusion detailsUrl} ...on StatusContext{context state targetUrl}}}}
+  reviewRequests(first:20){nodes{requestedReviewer{__typename ...on User{login} ...on Bot{login} ...on Mannequin{login} ...on Team{slug}}}}
+  latestReviews(first:20){nodes{author{login __typename} state commit{oid}}}
+  closingIssuesReferences(first:10){nodes{number title url state repository{nameWithOwner}}}
+  reviewThreads(last:100){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine comments(last:50){nodes{${commentFields} diffHunk}}}}
+  reviews(last:100){nodes{id author{login __typename} state body submittedAt url viewerDidAuthor}}
+  comments(last:100){nodes{${commentFields}}}
+}}}`;
+const issueQuery = `query IssueDetail($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){
+  number title url state updatedAt author{login} body labels(first:20){nodes{name}}
+  closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number title url state isDraft headRefName isCrossRepository repository{nameWithOwner}}}
+}}}`;
 // the Overview's three searches, newest first; review threads and their last speaker are read
 // for my own PRs only, since they cost the most
 const overviewPullFields = 'number title url state isDraft updatedAt repository{nameWithOwner} author{login} headRefName headRefOid isCrossRepository mergeable statusCheckRollup{state} labels(first:5){nodes{name}}';
@@ -379,6 +421,7 @@ export class GithubService {
   private readonly worktrees: () => readonly Worktree[];
   private readonly overviewEntry: OverviewEntry = {};
   private readonly seen: SeenRecord;
+  private readonly details = new Map<string, DetailEntry<unknown>>();
   private viewerMemo?: { token: string; login: Promise<string> };
   private viewers = 0;
   private scheduled?: unknown;
@@ -642,38 +685,112 @@ export class GithubService {
     return this.summaryOf(entry);
   }
 
-  /** The description, review threads, review summaries and conversation of one pull request, read fresh. */
-  async pullRequest(repository: GithubRepository, number: number): Promise<PullRequestComments> {
-    const token = await this.token();
-    if (token === undefined) throw new GithubRequestError(missingToken, 503);
-    const payload = await this.client.query(token, commentsQuery, { owner: repository.owner, repo: repository.name, number }, 'GitHub could not load the pull request comments');
-    const node = at(payload, 'data', 'repository', 'pullRequest');
-    if (node === null || typeof node !== 'object') throw graphqlError(payload, 'GitHub could not load the pull request comments');
-    const threads = nodes(at(node, 'reviewThreads')).flatMap((thread): PullRequestReviewThread[] => {
-      const comments = nodes(at(thread, 'comments')).flatMap(prComment);
-      const path = at(thread, 'path');
-      const id = at(thread, 'id');
-      if (typeof id !== 'string' || typeof path !== 'string' || comments.length === 0) return [];
-      const line = positive(at(thread, 'line')) ?? positive(at(thread, 'originalLine'));
-      const startLine = positive(at(thread, 'startLine')) ?? positive(at(thread, 'originalStartLine'));
-      const diffHunk = at(nodes(at(thread, 'comments'))[0], 'diffHunk');
-      return [{ id, path, ...(line === undefined ? {} : { line }), ...(startLine === undefined || startLine === line ? {} : { startLine }), resolved: at(thread, 'isResolved') === true, outdated: at(thread, 'isOutdated') === true, diffHunk: typeof diffHunk === 'string' ? diffHunk : '', comments }];
+  /**
+   * One pull request's detail, for any repository. It is read on the first ask and kept while a
+   * list read since, under a minute old, shows the pull request unchanged (its state, `updatedAt`,
+   * head, checks, conflicts and unresolved threads); otherwise it is read again once a minute old.
+   * `fresh` (Refresh) reads it again unless the last read is under ten seconds old; a failed read is
+   * not tried again for ten seconds either.
+   */
+  async pullRequestDetail(repository: GithubRepository, number: number, { fresh = false }: { fresh?: boolean } = {}): Promise<Fetched<{ pullRequest?: PullRequestDetail }>> {
+    const key = `pull:${repositoryKey(repository)}#${number}`;
+    const kept = this.details.get(key)?.data as PullRequestDetail | undefined;
+    // while checks run or GitHub works out mergeability, a check run or the merge state may move
+    // without the lists' version moving, so the detail is only kept for a minute
+    const settling = kept?.checks === 'pending' || kept?.mergeable === 'unknown';
+    const entry = await this.detail(key, settling ? undefined : this.knownPull(repository, number), fresh, async (token) => {
+      const payload = await this.client.query(token, detailQuery, { owner: repository.owner, name: repository.name, number }, detailAction);
+      return readDetail(repository, at(payload, 'data', 'repository', 'pullRequest')) ?? { kind: 'failing', message: graphqlError(payload, detailAction).message };
     });
-    // a review with no summary text is only its inline threads; a pending one is the viewer's unsent draft
-    const reviews = nodes(at(node, 'reviews')).flatMap(review => {
-      const state = at(review, 'state');
-      if (typeof state !== 'string' || state === 'PENDING') return [];
-      return prComment({ ...review as object, createdAt: at(review, 'submittedAt') }).filter(comment => comment.body.trim() !== '').map(comment => ({ ...comment, state }));
-    });
-    // the submitter's opening comment, left out when they wrote none
-    const [description] = prComment(node).filter(comment => comment.body.trim() !== '');
-    // GitHub's own URL survives a renamed repository
-    const url = at(node, 'url');
-    return { number, url: typeof url === 'string' && url.startsWith('https://github.com/') ? url : `https://github.com/${repositoryPath(repository)}/pull/${number}`, ...(description === undefined ? {} : { description }), threads, reviews, comments: nodes(at(node, 'comments')).flatMap(prComment) };
+    const pull = entry.data;
+    const destination = pull === undefined ? undefined : await this.holder(repository, [{ number, branch: pull.branch, onOrigin: pull.headOnOrigin }]);
+    return { ...(pull === undefined ? {} : { pullRequest: { ...pull, ...(destination === undefined ? {} : { destination }) } }), ...fetched(entry) };
   }
 
-  /** An outside writer (Review tour posting) changed a pull request: its repository is read again now. */
-  changed(repository: GithubRepository, _number: number): void {
+  /** One Issue's detail, kept as a pull request's is while the repository's issue list shows it unchanged. */
+  async issueDetail(repository: GithubRepository, number: number, { fresh = false }: { fresh?: boolean } = {}): Promise<Fetched<{ issue?: IssueDetail }>> {
+    const listed = this.repositories.get(repositoryKey(repository));
+    const known = listed?.fetchedAt === undefined ? undefined : listed.issues?.find(issue => issue.number === number);
+    const entry = await this.detail(`issue:${repositoryKey(repository)}#${number}`, known === undefined ? undefined : { version: known.updatedAt ?? '', fetchedAt: listed!.fetchedAt! }, fresh, async (token) => {
+      const payload = await this.client.query(token, issueQuery, { owner: repository.owner, name: repository.name, number }, issueAction);
+      return readIssueDetail(repository, at(payload, 'data', 'repository', 'issue')) ?? { kind: 'failing', message: graphqlError(payload, issueAction).message };
+    });
+    if (entry.data === undefined) return fetched(entry);
+    const { heads, ...issue } = entry.data;
+    const destination = await this.holder(repository, heads);
+    return { issue: { ...issue, ...(destination === undefined ? {} : { destination }) }, ...fetched(entry) };
+  }
+
+  // the Worktree holding one of these heads of a repository, if any
+  private async holder(repository: GithubRepository, heads: OverviewRow['heads']): Promise<OverviewDestination | undefined> {
+    const found = (await this.destinations())(`${repository.owner}/${repository.name}`, heads);
+    return found?.kind === 'worktree' ? found : undefined;
+  }
+
+  // the pull request as the newest list or branch lookup holding it last read it
+  private knownPull(repository: GithubRepository, number: number): Known | undefined {
+    const key = repositoryKey(repository);
+    const listed = this.repositories.get(key);
+    const reads = [...listed === undefined ? [] : [{ fetchedAt: listed.fetchedAt, pulls: listed.open }], ...[...this.branches.values()].filter(branch => repositoryKey(branch.repository) === key)];
+    let known: Known | undefined;
+    for (const { fetchedAt, pulls } of reads) {
+      const pull = pulls?.find(candidate => candidate.number === number);
+      if (pull !== undefined && fetchedAt !== undefined && (known === undefined || fetchedAt > known.fetchedAt)) known = { version: pullVersion(pull), fetchedAt };
+    }
+    return known;
+  }
+
+  // one detail, read again when it is missing, when Refresh asks, when a list read since (and under
+  // a minute old) shows another `version`, or, when none has, once it is a minute old; readers
+  // asking together share a read
+  private async detail<T>(key: string, known: Known | undefined, fresh: boolean, read: (token: string) => Promise<{ data: T; version: string } | GithubProblem>): Promise<DetailEntry<T>> {
+    const entry = (this.details.get(key) ?? {}) as DetailEntry<T>;
+    // the least recently read is dropped first
+    this.details.delete(key);
+    this.details.set(key, entry);
+    for (const [other, kept] of this.details) {
+      if (this.details.size <= maxDetails) break;
+      if (kept.refreshing === undefined) this.details.delete(other);
+    }
+    // a reader arriving during a read (Refresh's, say) gets what it reads
+    if (entry.refreshing !== undefined) {
+      await entry.refreshing;
+      return entry;
+    }
+    const { fetchedAt } = entry;
+    const now = this.now();
+    // asking again straight after a failure does not ask GitHub again
+    if (entry.failedAt !== undefined && now - entry.failedAt < refreshFloorMs) return entry;
+    const due = fetchedAt === undefined
+      || (fresh && now - fetchedAt >= refreshFloorMs)
+      || (known !== undefined && known.fetchedAt > fetchedAt && !this.stale(known) ? known.version !== entry.version : this.stale(entry));
+    if (due) await (entry.refreshing ??= this.readDetail(entry, read));
+    return entry;
+  }
+
+  private async readDetail<T>(entry: DetailEntry<T>, read: (token: string) => Promise<{ data: T; version: string } | GithubProblem>): Promise<void> {
+    const started = this.now();
+    try {
+      const token = await this.token();
+      const result = token === undefined ? { kind: 'no-token' as const, message: missingToken } : await read(token).catch((error: unknown) => {
+        // anything but GitHub's own trouble is a bug
+        if (!(error instanceof GithubRequestError)) throw error;
+        return problemOf(error);
+      });
+      if (!('data' in result)) Object.assign(entry, { problem: result, failedAt: started });
+      else if (entry.fetchedAt === undefined || entry.fetchedAt <= started) {
+        Object.assign(entry, result, { fetchedAt: started });
+        delete entry.problem;
+        delete entry.failedAt;
+      }
+    } finally {
+      delete entry.refreshing;
+    }
+  }
+
+  /** An outside writer (Review tour posting) changed a pull request: its repository and detail are read again. */
+  changed(repository: GithubRepository, number: number): void {
+    this.details.delete(`pull:${repositoryKey(repository)}#${number}`);
     this.background(this.refreshRepository(repository));
   }
 
@@ -937,10 +1054,116 @@ export class GithubService {
   }
 }
 
-// one well-formed comment; a deleted account reads as GitHub's own `ghost`
+// one well-formed comment; a deleted account reads as GitHub's own `ghost`; `mine` marks the viewer's
 function prComment(value: unknown): PullRequestComment[] {
   const [id, body, createdAt, url] = [at(value, 'id'), at(value, 'body'), at(value, 'createdAt'), at(value, 'url')];
   if (typeof id !== 'string' || typeof body !== 'string' || typeof createdAt !== 'string' || typeof url !== 'string' || !url.startsWith('https://github.com/')) return [];
   const login = at(value, 'author', 'login');
-  return [{ id, author: typeof login === 'string' ? login : 'ghost', bot: at(value, 'author', '__typename') === 'Bot', body, createdAt, url }];
+  return [{ id, author: typeof login === 'string' ? login : 'ghost', bot: at(value, 'author', '__typename') === 'Bot', ...(at(value, 'viewerDidAuthor') === true ? { mine: true as const } : {}), body, createdAt, url }];
+}
+
+// what a detail was read at: a list or branch lookup reading the pull request otherwise means it changed
+const pullVersion = (pull: Pull): string => [pull.state, pull.updatedAt, pull.headSha, pull.checks, pull.conflicts, pull.unresolvedThreads].join('|');
+
+// a link to a web page, which a check may name on any host
+function webUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : undefined;
+  } catch { return undefined; }
+}
+
+// one check run or commit status; a run that concluded counts as GitHub's rollup counts it, even
+// one still reporting itself in progress
+function readCheck(value: unknown): PullRequestCheck[] {
+  const run = at(value, '__typename') === 'CheckRun';
+  const [name, url] = run ? [at(value, 'name'), webUrl(at(value, 'detailsUrl'))] : [at(value, 'context'), webUrl(at(value, 'targetUrl'))];
+  if (typeof name !== 'string') return [];
+  const [conclusion, state] = [at(value, 'conclusion'), at(value, 'state')];
+  const status: PullRequestCheck['status'] = run
+    ? typeof conclusion !== 'string' ? 'pending' : conclusion === 'SUCCESS' ? 'passed' : conclusion === 'NEUTRAL' || conclusion === 'SKIPPED' ? 'skipped' : 'failed'
+    : state === 'SUCCESS' ? 'passed' : state === 'FAILURE' || state === 'ERROR' ? 'failed' : 'pending';
+  return [{ name, status, ...(url === undefined ? {} : { url }) }];
+}
+
+const reviewStates = { APPROVED: 'approved', CHANGES_REQUESTED: 'changes', COMMENTED: 'commented', DISMISSED: 'dismissed' } as const;
+
+// each reviewer's latest submitted review, then those asked for a review now (teams by slug)
+function readReviewers(node: unknown, head: string): PullRequestReviewer[] {
+  const reviewers = new Map<string, PullRequestReviewer>();
+  for (const review of nodes(at(node, 'latestReviews'))) {
+    const [login, state] = [at(review, 'author', 'login'), reviewStates[at(review, 'state') as keyof typeof reviewStates]];
+    if (typeof login !== 'string' || state === undefined) continue;
+    const commit = at(review, 'commit', 'oid');
+    reviewers.set(login, { login, ...(at(review, 'author', '__typename') === 'Bot' ? { bot: true as const } : {}), state, ...(typeof commit === 'string' && commit.toLowerCase() !== head ? { newCommits: true as const } : {}) });
+  }
+  for (const request of nodes(at(node, 'reviewRequests'))) {
+    const reviewer = at(request, 'requestedReviewer');
+    const team = at(reviewer, '__typename') === 'Team';
+    const login = at(reviewer, team ? 'slug' : 'login');
+    if (typeof login !== 'string') continue;
+    const key = team ? `team:${login}` : login;
+    reviewers.set(key, { ...reviewers.get(key) ?? { login, ...(team ? { team: true as const } : at(reviewer, '__typename') === 'Bot' ? { bot: true as const } : {}) }, requested: true });
+  }
+  return [...reviewers.values()];
+}
+
+// one pull request's detail as GitHub gave it; undefined for none, or one that is not well formed
+function readDetail(repository: GithubRepository, node: unknown): { data: PullRequestDetail; version: string } | undefined {
+  const pull = readPull(node);
+  if (pull === undefined) return undefined;
+  const threads = nodes(at(node, 'reviewThreads')).flatMap((thread): PullRequestReviewThread[] => {
+    const comments = nodes(at(thread, 'comments')).flatMap(prComment);
+    const [id, path] = [at(thread, 'id'), at(thread, 'path')];
+    if (typeof id !== 'string' || typeof path !== 'string' || comments.length === 0) return [];
+    const line = positive(at(thread, 'line')) ?? positive(at(thread, 'originalLine'));
+    const startLine = positive(at(thread, 'startLine')) ?? positive(at(thread, 'originalStartLine'));
+    const diffHunk = at(nodes(at(thread, 'comments'))[0], 'diffHunk');
+    return [{ id, path, ...(line === undefined ? {} : { line }), ...(startLine === undefined || startLine === line ? {} : { startLine }), resolved: at(thread, 'isResolved') === true, outdated: at(thread, 'isOutdated') === true, diffHunk: typeof diffHunk === 'string' ? diffHunk : '', comments }];
+  });
+  // a review with no summary text is only its inline threads; a pending one is the viewer's unsent draft
+  const reviews = nodes(at(node, 'reviews')).flatMap(review => {
+    const state = at(review, 'state');
+    if (typeof state !== 'string' || state === 'PENDING') return [];
+    return prComment({ ...review as object, createdAt: at(review, 'submittedAt') }).filter(comment => comment.body.trim() !== '').map(comment => ({ ...comment, state }));
+  });
+  // the submitter's opening comment, left out when they wrote none
+  const [description] = prComment(node).filter(comment => comment.body.trim() !== '');
+  const mergeable = at(node, 'mergeable');
+  const name = `${repository.owner}/${repository.name}`;
+  // only this repository's: the panel opens a Linked issue by number
+  const linkedIssues = nodes(at(node, 'closingIssuesReferences')).filter(issue => String(at(issue, 'repository', 'nameWithOwner')).toLowerCase() === name.toLowerCase()).flatMap((issue): LinkedIssue[] => {
+    const [number, title, url, state] = [positive(at(issue, 'number')), at(issue, 'title'), githubUrl(at(issue, 'url')), at(issue, 'state')];
+    return number === undefined || typeof title !== 'string' || url === undefined ? [] : [{ number, title, url, state: state === 'CLOSED' ? 'closed' : 'open' }];
+  });
+  const { unresolvedThreads: _threads, closingIssues: _closing, conflicts: _conflicts, ...fields } = pull;
+  return {
+    data: {
+      ...fields, id: String(at(node, 'id')), repository: name, ...(description === undefined ? {} : { description }), threads, reviews, comments: nodes(at(node, 'comments')).flatMap(prComment),
+      mergeable: mergeable === 'CONFLICTING' ? 'conflicting' : mergeable === 'MERGEABLE' ? 'mergeable' : 'unknown',
+      checkRuns: nodes(at(node, 'statusCheckRollup', 'contexts')).flatMap(readCheck), reviewers: readReviewers(node, pull.headSha), linkedIssues
+    },
+    version: pullVersion(pull)
+  };
+}
+
+// one Issue's detail as GitHub gave it, with the heads of its own repository's linked pull
+// requests, which find its Worktree
+function readIssueDetail(repository: GithubRepository, node: unknown): { data: IssueDetail & { heads: OverviewRow['heads'] }; version: string } | undefined {
+  const [issue] = readIssue(node);
+  const state = at(node, 'state');
+  if (issue === undefined || (state !== 'OPEN' && state !== 'CLOSED')) return undefined;
+  const name = `${repository.owner}/${repository.name}`;
+  const body = at(node, 'body');
+  const labels = nodes(at(node, 'labels')).map(label => at(label, 'name')).filter((label): label is string => typeof label === 'string');
+  const linked = nodes(at(node, 'closedByPullRequestsReferences')).filter(pull => String(at(pull, 'repository', 'nameWithOwner')).toLowerCase() === name.toLowerCase()).flatMap(pull => {
+    const [number, title, url, pullState] = [positive(at(pull, 'number')), at(pull, 'title'), githubUrl(at(pull, 'url')), at(pull, 'state')];
+    if (number === undefined || typeof title !== 'string' || url === undefined) return [];
+    return [{ pull: { number, title, url, state: pullState === 'MERGED' ? 'merged' as const : pullState === 'CLOSED' ? 'closed' as const : 'open' as const, draft: at(pull, 'isDraft') === true }, heads: pullHead(pull, number) }];
+  });
+  return {
+    data: { ...issue, repository: name, state: state === 'OPEN' ? 'open' : 'closed', body: typeof body === 'string' ? body : '', labels, linkedPullRequests: linked.map(({ pull }) => pull), heads: linked.flatMap(({ heads }) => heads) },
+    version: issue.updatedAt ?? ''
+  };
 }

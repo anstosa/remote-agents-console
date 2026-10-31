@@ -2069,6 +2069,18 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (repository === undefined) return reply.code(404).send({ error: 'no github.com repository for this project' });
     return await github.panel(repository, { fresh: (request.query as { refresh?: unknown }).refresh === '1' });
   });
+  // one pull request's or Issue's detail in a Project's repository, kept while it is unchanged; `refresh` reads GitHub again first
+  app.get('/api/projects/:id/github/:kind(^pulls|issues$)/:number', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
+    controlled(request);
+    const { id, kind, number } = request.params as { id: string; kind: 'pulls' | 'issues'; number: string };
+    // GitHub's numbers are GraphQL Ints
+    if (!/^[1-9]\d{0,9}$/u.test(number) || Number(number) > 2_147_483_647) return reply.code(400).send({ error: 'invalid number' });
+    const project = discovery.projectsNow().find(candidate => candidate.id === id);
+    const repository = project === undefined ? undefined : await github.projectRepository(project);
+    if (repository === undefined) return reply.code(404).send({ error: 'no github.com repository for this project' });
+    const options = { fresh: (request.query as { refresh?: unknown }).refresh === '1' };
+    return kind === 'pulls' ? await github.pullRequestDetail(repository, Number(number), options) : await github.issueDetail(repository, Number(number), options);
+  });
   // a browser showed these rows' unseen reasons (their `unseen` keys); the badge drops on every device
   app.post('/api/github/overview/seen', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
     controlled(request, true);
