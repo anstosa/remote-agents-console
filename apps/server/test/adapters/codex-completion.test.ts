@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs';
 import { appendFile, mkdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { codexManagedLifecycleCompatible, codexPromptAccepted, codexRolloutBaseline, codexTurnSince, completionFromRecords, managedPromptLifecycleFromRecords, maxOrdinalFromRecords, promptAcceptedFromRecords } from '../../src/adapters/codex-conversations.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { codexManagedPromptLifecycle, codexPromptAccepted, codexRolloutBaseline, codexTurnSince, completionFromRecords, managedPromptLifecycleFromRecords, maxOrdinalFromRecords, promptAcceptedFromRecords } from '../../src/adapters/codex-conversations.js';
+import { codexManagedPromptLifecycleV1 } from '../../src/adapters/codex-tui.js';
 import { codexHome, fakeProc, tempDir } from '../helpers/codex-fixtures.js';
 
 type Record = { type: string; ordinal: number; payload: unknown };
@@ -34,12 +35,15 @@ async function writeRollout(home: string, id: string, records: Record[], cwd = '
 
 const lines = (records: Record[]): string[] => records.map(record => JSON.stringify(record));
 
-// build one durable Codex user-prompt receipt
-const promptRecord = (ordinal: number, prompt: string): Record => ({
+// build one durable receipt with optional native turn binding
+const promptRecord = (ordinal: number, prompt: string, turnId?: string): Record => ({
   type: 'response_item',
   ordinal,
-  payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] }
+  payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }], ...(turnId === undefined ? {} : { internal_chat_message_metadata_passthrough: { turn_id: turnId, content_item_kinds: ['user.text'] } }) }
 });
+
+// restore runtime version diagnostics between cases
+afterEach(() => { vi.unstubAllEnvs(); });
 
 describe('Codex rollout completion', () => {
   it('correlates one exact numeric native turn without using record timestamps', () => {
@@ -70,15 +74,132 @@ describe('Codex rollout completion', () => {
     expect(managedPromptLifecycleFromRecords(lines(terminal), 0, identity, { receiptOrdinal: 1, startOrdinal: 2, turnId: 'turn-long', startedAt: '2026-10-23T17:16:47.000Z' })).toEqual({ state: 'finished', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: 1, startOrdinal: 2, terminalOrdinal: 500, turnId: 'turn-long', startedAt: '2026-10-23T17:16:47.000Z', finishedAt: '2026-10-23T17:21:47.000Z' });
   });
 
-  it('gates managed lifecycle parsing on the pinned Codex compatibility probe', () => {
-    expect(codexManagedLifecycleCompatible('0.164.0')).toBe(true);
-    expect(codexManagedLifecycleCompatible('0.165.0')).toBe(false);
-    expect(codexManagedLifecycleCompatible(undefined)).toBe(true);
-    const fixture = readFileSync(new URL('../fixtures/codex/managed-lifecycle-v1.jsonl', import.meta.url), 'utf8').trim().split('\n');
-    expect(JSON.parse(fixture[0]!).payload.cli_version).toBe('0.164.0');
+  // validate actual evidence rather than environment or metadata version labels
+  it.each(['0.164.0', '0.166.0', '9.0.0-dev', undefined])('accepts compatible lifecycle records labeled %s', async version => {
+    vi.stubEnv('CODEX_VERSION', version);
+    expect(codexManagedPromptLifecycleV1.compatible()).toBe(true);
+    const records = readFileSync(new URL('../fixtures/codex/managed-lifecycle-v1.jsonl', import.meta.url), 'utf8').trim().split('\n');
+    const metadata = JSON.parse(records[0]!);
+    metadata.payload.cli_version = version;
+    records[0] = JSON.stringify(metadata);
+    const file = join(await tempDir('rac-lifecycle-version-'), 'rollout.jsonl');
+    await writeFile(file, records.join('\n'));
     const prompt = 'sanitized managed lifecycle probe';
-    const identity = { fingerprint: createHash('sha256').update(prompt).digest('hex'), transportFingerprint: createHash('sha256').update(`${prompt} `).digest('hex') };
-    expect(managedPromptLifecycleFromRecords(fixture, 40, identity).state).toBe('finished');
+    const fingerprint = createHash('sha256').update(prompt).digest('hex');
+    await expect(codexManagedPromptLifecycle({ rollout: file, ordinal: 40 }, { fingerprint, transportFingerprint: fingerprint })).resolves.toMatchObject({ state: 'finished', startedAt: '2026-10-23T17:16:47.000Z', finishedAt: '2026-10-23T17:21:47.000Z' });
+  });
+
+  // support native start-first ordering without guessing a prompt association
+  it('waits for an exact prompt receipt before publishing a preceding start', () => {
+    const prompt = 'sanitized managed lifecycle probe';
+    const fingerprint = createHash('sha256').update(prompt).digest('hex');
+    const identity = { fingerprint, transportFingerprint: fingerprint };
+    const fixture = readFileSync(new URL('../fixtures/codex/managed-lifecycle-start-first.jsonl', import.meta.url), 'utf8').trim().split('\n');
+    expect(managedPromptLifecycleFromRecords(fixture.slice(0, 2), 40, identity)).toEqual({ state: 'pending', source: 'codex-rollout', parserVersion: 1 });
+    const started = { state: 'pending', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: 42, startOrdinal: 41, turnId: 'sanitized-turn', startedAt: '2026-10-23T17:16:47.000Z' };
+    expect(managedPromptLifecycleFromRecords(fixture.slice(0, 3), 40, identity)).toEqual(started);
+    expect(managedPromptLifecycleFromRecords(fixture, 40, identity)).toEqual({ ...started, state: 'finished', terminalOrdinal: 43, finishedAt: '2026-10-23T17:21:47.000Z' });
+    expect(managedPromptLifecycleFromRecords(fixture.slice(3), 40, identity, started)).toEqual({ ...started, state: 'finished', terminalOrdinal: 43, finishedAt: '2026-10-23T17:21:47.000Z' });
+  });
+
+  // distinguish native bootstrap instructions from competing actionable receipts
+  it('skips only turn-bound bootstrap context before the exact user receipt', () => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const identity = { fingerprint, transportFingerprint: fingerprint };
+    const start: Record = { type: 'event_msg', ordinal: 1, payload: { type: 'task_started', turn_id: 'turn', started_at: 1_792_775_807 } };
+    const context = { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'sanitized instructions' }, { type: 'input_text', text: 'sanitized environment' }], internal_chat_message_metadata_passthrough: { turn_id: 'turn', content_item_kinds: ['agents_md.instructions', 'environments.environment_context'] } };
+    const receipt = promptRecord(3, 'managed prompt', 'turn');
+    const terminal: Record = { type: 'event_msg', ordinal: 4, payload: { type: 'task_complete', turn_id: 'turn', completed_at: 1_792_776_107 } };
+    expect(managedPromptLifecycleFromRecords(lines([start, { type: 'response_item', ordinal: 2, payload: context }, receipt, terminal]), 0, identity).state).toBe('finished');
+    const competing = { ...context, internal_chat_message_metadata_passthrough: { turn_id: 'turn', content_item_kinds: ['user.text', 'user.text'] } };
+    expect(managedPromptLifecycleFromRecords(lines([start, { type: 'response_item', ordinal: 2, payload: competing }, receipt, terminal]), 0, identity)).toEqual({ state: 'invalid', reason: 'missing_lifecycle_evidence' });
+  });
+
+  // require direct turn binding in start-first formats
+  it.each([undefined, 'other-turn'])('rejects an unbound or mismatched start-first receipt %s', receiptTurnId => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const records: Record[] = [{ type: 'event_msg', ordinal: 1, payload: { type: 'task_started', turn_id: 'turn', started_at: 1_792_775_807 } }, { ...promptRecord(2, 'managed prompt'), payload: { ...(promptRecord(2, 'managed prompt').payload as object), internal_chat_message_metadata_passthrough: { turn_id: receiptTurnId } } }];
+    expect(managedPromptLifecycleFromRecords(lines(records), 0, { fingerprint, transportFingerprint: fingerprint }).state).toBe('invalid');
+  });
+
+  // reject competing prompts even when the native start precedes its receipt
+  it('rejects mismatched or repeated receipts after a native start', () => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const identity = { fingerprint, transportFingerprint: fingerprint };
+    const start: Record = { type: 'event_msg', ordinal: 1, payload: { type: 'task_started', turn_id: 'turn', started_at: 1_792_775_807 } };
+    expect(managedPromptLifecycleFromRecords(lines([start, promptRecord(2, 'other prompt', 'turn')]), 0, identity)).toEqual({ state: 'invalid', reason: 'missing_lifecycle_evidence' });
+    expect(managedPromptLifecycleFromRecords(lines([start, promptRecord(2, 'managed prompt', 'turn'), promptRecord(3, 'managed prompt', 'turn')]), 0, identity)).toEqual({ state: 'invalid', reason: 'missing_lifecycle_evidence' });
+  });
+
+  // retain native receipt identity when start evidence arrives in a later poll
+  it('rejects a later start for a different checkpointed receipt turn', () => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const identity = { fingerprint, transportFingerprint: fingerprint };
+    const evidence = managedPromptLifecycleFromRecords(lines([promptRecord(1, 'managed prompt', 'expected-turn')]), 0, identity);
+    expect(evidence).toEqual({ state: 'pending', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: 1, turnId: 'expected-turn' });
+    expect(managedPromptLifecycleFromRecords(lines([{ type: 'event_msg', ordinal: 2, payload: { type: 'task_started', turn_id: 'different-turn', started_at: 1_792_775_807 } }]), 0, identity, { receiptOrdinal: 1, turnId: 'expected-turn' })).toEqual({ state: 'invalid', reason: 'missing_lifecycle_evidence' });
+  });
+
+  // refuse changed ordinal schemas instead of inferring event sequence
+  it.each([1.5, '2', null, Number.MAX_SAFE_INTEGER + 1])('rejects a native ordinal %s', ordinal => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const records = [JSON.stringify(promptRecord(1, 'managed prompt')), JSON.stringify({ type: 'event_msg', ordinal, payload: { type: 'task_started', turn_id: 'turn', started_at: 1_792_775_807 } })];
+    expect(managedPromptLifecycleFromRecords(records, 0, { fingerprint, transportFingerprint: fingerprint })).toEqual({ state: 'invalid', reason: 'unsupported_lifecycle_contract' });
+  });
+
+  // preserve native event ordering and avoid cross-turn timestamp attribution
+  it.each([
+    { additional: [{ type: 'event_msg', ordinal: 2, payload: { type: 'task_started', turn_id: 'other-turn', started_at: 1_792_775_808 } }] },
+    { additional: [{ type: 'event_msg', ordinal: 1, payload: { type: 'task_complete', turn_id: 'turn', completed_at: 1_792_776_107 } }] },
+    { additional: [{ type: 'event_msg', ordinal: 2, payload: { type: 'task_complete', turn_id: 'turn', completed_at: 1_792_776_107 } }, promptRecord(3, 'managed prompt', 'turn')] }
+  ])('rejects ambiguous start-first event sequences %#', ({ additional }) => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const start: Record = { type: 'event_msg', ordinal: 1, payload: { type: 'task_started', turn_id: 'turn', started_at: 1_792_775_807 } };
+    expect(managedPromptLifecycleFromRecords(lines([start, ...additional]), 0, { fingerprint, transportFingerprint: fingerprint })).toEqual({ state: 'invalid', reason: 'missing_lifecycle_evidence' });
+  });
+
+  // never infer a missing native boundary from the record's outer timestamp
+  it.each([undefined, null, '2026-10-23T17:21:47Z', 0, -1, 1, 1_792_775_807, 1_792_776_107_000, 1_792_776_107.5, 253_402_300_800])('rejects an unsupported or nonpositive finish %s', completedAt => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const records: Record[] = [promptRecord(1, 'managed prompt'), { type: 'event_msg', ordinal: 2, payload: { type: 'task_started', turn_id: 'turn', started_at: 1_792_775_807 } }, { type: 'event_msg', ordinal: 3, payload: { type: 'task_complete', turn_id: 'turn', completed_at: completedAt } }];
+    expect(managedPromptLifecycleFromRecords(lines(records), 0, { fingerprint, transportFingerprint: fingerprint })).toEqual({ state: 'invalid', reason: 'unsupported_lifecycle_contract' });
+  });
+
+  // reject timestamp-unit or precision changes before exposing native work times
+  it.each([1, 946_684_799, 1_792_775_807_000, 1_792_775_807.5, 253_402_300_800])('rejects an unsupported native start %s', startedAt => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const records: Record[] = [promptRecord(1, 'managed prompt'), { type: 'event_msg', ordinal: 2, payload: { type: 'task_started', turn_id: 'turn', started_at: startedAt } }];
+    expect(managedPromptLifecycleFromRecords(lines(records), 0, { fingerprint, transportFingerprint: fingerprint })).toEqual({ state: 'invalid', reason: 'unsupported_lifecycle_contract' });
+  });
+
+  // complete corrupt records cannot be skipped before a later matching terminal
+  it.each([
+    '{"type":"event_msg",', 'null', '[]', '7', '"text"',
+    JSON.stringify({ type: 'event_msg', ordinal: 3, payload: null }),
+    JSON.stringify({ type: 'event_msg', ordinal: 3, payload: [] }),
+    JSON.stringify({ type: 'event_msg', ordinal: 3, payload: 'changed format' }),
+    JSON.stringify({ ordinal: 3, payload: {} })
+  ])('rejects a complete malformed lifecycle record %#', corrupt => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const records = [...lines([promptRecord(1, 'managed prompt'), { type: 'event_msg', ordinal: 2, payload: { type: 'task_started', turn_id: 'turn', started_at: 1_792_775_807 } }]), corrupt, ...lines([{ type: 'event_msg', ordinal: 4, payload: { type: 'task_complete', turn_id: 'turn', completed_at: 1_792_776_107 } }]), ''];
+    expect(managedPromptLifecycleFromRecords(records, 0, { fingerprint, transportFingerprint: fingerprint })).toEqual({ state: 'invalid', reason: 'unsupported_lifecycle_contract' });
+  });
+
+  // malformed turn identities are not evidence of a valid unrelated terminal
+  it.each([undefined, null, 7, '', 'x'.repeat(257)])('rejects an invalid terminal turn identity %#', turnId => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const records: Record[] = [promptRecord(1, 'managed prompt'), { type: 'event_msg', ordinal: 2, payload: { type: 'task_started', turn_id: 'turn', started_at: 1_792_775_807 } }, { type: 'event_msg', ordinal: 3, payload: { type: 'task_complete', turn_id: turnId, completed_at: 1_792_775_900 } }, { type: 'event_msg', ordinal: 4, payload: { type: 'task_complete', turn_id: 'turn', completed_at: 1_792_776_107 } }];
+    expect(managedPromptLifecycleFromRecords(lines(records), 0, { fingerprint, transportFingerprint: fingerprint })).toEqual({ state: 'invalid', reason: 'unsupported_lifecycle_contract' });
+  });
+
+  // tolerate proven historical envelopes and an incomplete final append only
+  it('keeps exact progress pending until the final record is complete', () => {
+    const fingerprint = createHash('sha256').update('managed prompt').digest('hex');
+    const identity = { fingerprint, transportFingerprint: fingerprint };
+    const records = [JSON.stringify({ ordinal: 0, payload: null }), ...lines([promptRecord(1, 'managed prompt'), { type: 'event_msg', ordinal: 2, payload: { type: 'task_started', turn_id: 'turn', started_at: 1_792_775_807 } }])];
+    const expected = { state: 'pending', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: 1, startOrdinal: 2, turnId: 'turn', startedAt: '2026-10-23T17:16:47.000Z' };
+    expect(managedPromptLifecycleFromRecords([...records, '{"type":"event_msg",'], 0, identity)).toEqual(expected);
+    expect(managedPromptLifecycleFromRecords([...records, ...lines([{ type: 'event_msg', ordinal: 3, payload: { type: 'task_complete', turn_id: 'turn', completed_at: 1_792_776_107 } }]), ''], 0, identity)).toEqual({ ...expected, state: 'finished', terminalOrdinal: 3, finishedAt: '2026-10-23T17:21:47.000Z' });
   });
 
   it('reads a completed turn and its answer from the task_complete event', () => {

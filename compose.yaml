@@ -16,7 +16,7 @@ services:
       RAC_CONFIG_WRITE_PATH: /workspace/config/remote-agent-console.docker.json
       # the packaged image runs from /app, so the server's own checkout is the mount
       RAC_SERVER_CHECKOUT: /workspace
-      # match the bundled agent version used by lifecycle compatibility probes
+      # expose the bundled agent version for runtime diagnostics
       CODEX_VERSION: ${CODEX_VERSION:-0.164.0}
       # linux host networking reaches project ports through loopback
       RAC_PROJECT_PROXY_HOST: ${RAC_PROJECT_PROXY_HOST:-127.0.0.1}

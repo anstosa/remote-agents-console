@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 import { sourceSchema } from '../src/config/schema.js';
 import { applicationSettingsSchema } from '../src/settings/schema.js';
 import { environmentDescription, protectedEnvironment } from '../src/settings/catalog.js';
-import { managedLifecycleCodexVersion } from '../src/adapters/codex-conversations.js';
 import argon2 from 'argon2';
 import { validateEnvironment } from '../src/settings/validation.js';
 
@@ -21,15 +20,16 @@ describe('Google Calendar configuration', () => {
       await expect(validateEnvironment(`${auth}\n${name}=${key.slice(0, -1)}B`)).rejects.toMatchObject({ code: 'invalid_google_calendar_token_key' });
     }
   });
-  // keep portable builds aligned with the verified native lifecycle parser
-  it('pins every portable codex default to the supported lifecycle version', async () => {
+  // keep package defaults consistent without tying lifecycle support to one release
+  it('aligns portable codex defaults independently of lifecycle compatibility', async () => {
     const root = new URL('../../../', import.meta.url);
     const dockerfile = await readFile(new URL('Dockerfile', root), 'utf8');
     const compose = await readFile(new URL('compose.yaml', root), 'utf8');
     const catalog = await readFile(new URL('apps/server/src/settings/catalog.ts', root), 'utf8');
-    expect(dockerfile).toContain(`ARG CODEX_VERSION=${managedLifecycleCodexVersion}`);
-    expect(compose.match(/CODEX_VERSION:-([^}]+)/g)).toEqual(Array(2).fill(`CODEX_VERSION:-${managedLifecycleCodexVersion}`));
-    expect(catalog).toContain(`CODEX_VERSION: { value: '${managedLifecycleCodexVersion}'`);
+    const defaultVersion = /ARG CODEX_VERSION=(\S+)/u.exec(dockerfile)?.[1];
+    expect(defaultVersion).toMatch(/^\d+\.\d+\.\d+$/u);
+    expect(compose.match(/CODEX_VERSION:-([^}]+)/g)).toEqual(Array(2).fill(`CODEX_VERSION:-${defaultVersion}`));
+    expect(catalog).toContain(`CODEX_VERSION: { value: '${defaultVersion}'`);
   });
   // preserve an inert installation and the agreed interval defaults
   it('defaults to disabled capture with worktree and actual-work timing', () => {

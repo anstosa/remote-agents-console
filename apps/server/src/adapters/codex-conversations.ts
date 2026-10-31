@@ -49,7 +49,7 @@ const maxCwdRolloutScans = 512;
 const maxListTailBytes = 256 * 1024;
 
 type RolloutRef = { id: string; relativePath: string };
-type RolloutMetadata = { id: string; cwd: string; parentThreadId?: string; createdAt?: number; cliVersion?: string };
+type RolloutMetadata = { id: string; cwd: string; parentThreadId?: string; createdAt?: number };
 type SidecarName = { id: string; name: string };
 type SessionIndex = { byId: Record<string, string>; named: Record<string, string> };
 
@@ -117,12 +117,12 @@ function parseRolloutMetadata(lines: readonly string[]): RolloutMetadata | undef
     const record = JSON.parse(firstLine) as { type?: unknown; payload?: unknown };
     // require session metadata
     if (record.type !== 'session_meta' || record.payload === null || typeof record.payload !== 'object') return undefined;
-    const payload = record.payload as { id?: unknown; cwd?: unknown; originator?: unknown; parent_thread_id?: unknown; timestamp?: unknown; cli_version?: unknown };
+    const payload = record.payload as { id?: unknown; cwd?: unknown; originator?: unknown; parent_thread_id?: unknown; timestamp?: unknown };
     // accept only top-level interactive Codex conversations
     if (typeof payload.id !== 'string' || !validCodexThreadId(payload.id) || typeof payload.cwd !== 'string' || payload.originator !== 'codex-tui') return undefined;
     // the recorded session start, epoch ms; used to tell a post-reset rollout from the pre-reset one
     const createdAt = typeof payload.timestamp === 'string' ? Date.parse(payload.timestamp) : NaN;
-    return { id: payload.id, cwd: payload.cwd, ...(typeof payload.parent_thread_id === 'string' ? { parentThreadId: payload.parent_thread_id } : {}), ...(Number.isFinite(createdAt) ? { createdAt } : {}), ...(typeof payload.cli_version === 'string' ? { cliVersion: payload.cli_version } : {}) };
+    return { id: payload.id, cwd: payload.cwd, ...(typeof payload.parent_thread_id === 'string' ? { parentThreadId: payload.parent_thread_id } : {}), ...(Number.isFinite(createdAt) ? { createdAt } : {}) };
   } catch {
     return undefined;
   }
@@ -561,9 +561,10 @@ export function promptAcceptedFromRecords(lines: Iterable<string>, sinceOrdinal:
   return false;
 }
 
-// convert a native finite epoch-second value exactly once
+// convert native integer epoch seconds without accepting changed timestamp units
 function lifecycleInstant(value: unknown): string | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  // reject duration-like values, changed units and dates outside modern four-digit years
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 946_684_800 || value >= 253_402_300_800) return undefined;
   const milliseconds = value * 1_000;
   // reject values outside the ECMAScript date range
   if (!Number.isFinite(milliseconds) || Math.abs(milliseconds) > 8.64e15) return undefined;
@@ -576,52 +577,100 @@ export function managedPromptLifecycleFromRecords(lines: Iterable<string>, since
   let startOrdinal = checkpoint.startOrdinal;
   let turnId = checkpoint.turnId;
   let startedAt = checkpoint.startedAt;
-  // reject incomplete or malformed durable checkpoints
-  if (startOrdinal !== undefined && (receiptOrdinal === undefined || typeof turnId !== 'string' || turnId.length < 1 || turnId.length > 256 || startedAt === undefined || !Number.isFinite(Date.parse(startedAt)))) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
+  // require exact distinct checkpoints after the managed baseline
+  if (!Number.isSafeInteger(sinceOrdinal) || sinceOrdinal < 0 || receiptOrdinal !== undefined && (!Number.isSafeInteger(receiptOrdinal) || receiptOrdinal <= sinceOrdinal) || startOrdinal !== undefined && (!Number.isSafeInteger(startOrdinal) || startOrdinal <= sinceOrdinal || startOrdinal === receiptOrdinal)) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
+  // publish a native start only when an exact receipt already binds it
+  if (startOrdinal !== undefined && (receiptOrdinal === undefined || typeof turnId !== 'string' || turnId.length < 1 || turnId.length > 256 || startedAt === undefined || !Number.isFinite(Date.parse(startedAt)) || Date.parse(startedAt) <= 0)) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
+  const sinceCheckpoint = Math.max(sinceOrdinal, startOrdinal ?? sinceOrdinal, receiptOrdinal ?? sinceOrdinal);
+  let lastOrdinal = sinceCheckpoint;
+  const records = Array.from(lines);
   // inspect the bounded rollout in native ordinal order
-  for (const line of lines) {
+  for (let index = 0; index < records.length; index += 1) {
+    const line = records[index]!;
+    const finalSegment = index === records.length - 1;
+    // a final delimiter is not an additional native record
+    if (finalSegment && line === '') continue;
     let parsed: unknown;
-    // skip malformed tail fragments without inventing evidence
-    try { parsed = JSON.parse(line) as unknown; } catch { continue; }
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+    // parse one native record before trusting its fields
+    try { parsed = JSON.parse(line) as unknown; } catch {
+      // wait only for a possible final append-in-progress fragment
+      if (finalSegment) break;
+      return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
+    }
+    // complete non-record values cannot establish native evidence
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
     const record = parsed as { type?: unknown; ordinal?: unknown; payload?: unknown };
-    if (typeof record.ordinal !== 'number' || !Number.isFinite(record.ordinal) || record.ordinal <= Math.max(sinceOrdinal, startOrdinal ?? receiptOrdinal ?? sinceOrdinal)) continue;
-    if (record.payload === null || typeof record.payload !== 'object') continue;
-    const payload = record.payload as { type?: unknown; role?: unknown; content?: unknown; turn_id?: unknown; started_at?: unknown; completed_at?: unknown };
+    // reject changed ordinal formats rather than guessing record order
+    if (typeof record.ordinal !== 'number' || !Number.isSafeInteger(record.ordinal) || record.ordinal < 0) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
+    // skip historical records only before the first unprocessed record
+    if (record.ordinal <= sinceCheckpoint && lastOrdinal === sinceCheckpoint) continue;
+    // duplicate or reversed native ordinals cannot prove one exact turn
+    if (record.ordinal <= lastOrdinal) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
+    lastOrdinal = record.ordinal;
+    // require a typed native envelope with a structured payload
+    if (typeof record.type !== 'string' || record.type.length === 0 || record.payload === null || typeof record.payload !== 'object' || Array.isArray(record.payload)) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
+    const payload = record.payload as { type?: unknown; role?: unknown; content?: unknown; turn_id?: unknown; started_at?: unknown; completed_at?: unknown; internal_chat_message_metadata_passthrough?: unknown };
     const userText = record.type === 'response_item' && payload.type === 'message' && payload.role === 'user' && Array.isArray(payload.content) && payload.content.length === 1
       && payload.content[0] !== null && typeof payload.content[0] === 'object' && (payload.content[0] as { type?: unknown }).type === 'input_text'
       && typeof (payload.content[0] as { text?: unknown }).text === 'string' ? (payload.content[0] as { text: string }).text : undefined;
-    // a later user receipt cannot belong to the already-pinned native turn
-    if (userText !== undefined && startOrdinal !== undefined) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
-    // bind exactly one receipt and reject a competing user turn before start
-    if (userText !== undefined && startOrdinal === undefined) {
+    // correlate only native user receipts and explicitly classified bootstrap context
+    if (record.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
+      const rawMetadata = payload.internal_chat_message_metadata_passthrough;
+      // reject changed receipt metadata shapes rather than dropping their turn identity
+      if (rawMetadata !== undefined && (rawMetadata === null || typeof rawMetadata !== 'object' || Array.isArray(rawMetadata))) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
+      const metadata = rawMetadata as { turn_id?: unknown; content_item_kinds?: unknown } | undefined;
+      const receiptTurnId = metadata?.turn_id;
+      // validate direct turn identity whenever the native format supplies metadata
+      if (metadata !== undefined && (typeof receiptTurnId !== 'string' || receiptTurnId.length < 1 || receiptTurnId.length > 256)) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
+      // a receipt for another native turn cannot belong to this managed prompt
+      if (turnId !== undefined && receiptTurnId !== undefined && receiptTurnId !== turnId) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
+      const kinds = metadata?.content_item_kinds;
+      // validate the two native bootstrap blocks without reading instruction contents
+      const bootstrap = Array.isArray(kinds) && kinds.length === 2 && kinds[0] === 'agents_md.instructions' && kinds[1] === 'environments.environment_context'
+        && Array.isArray(payload.content) && payload.content.length === 2 && payload.content.every(item => item !== null && typeof item === 'object' && item.type === 'input_text' && typeof item.text === 'string');
+      // skip only bootstrap context bound to the still-unclaimed native start
+      if (bootstrap && startOrdinal !== undefined && receiptOrdinal === undefined && receiptTurnId === turnId) continue;
+      // other multipart messages cannot prove an exact prompt receipt
+      if (userText === undefined) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
+      // start-first formats must directly bind the receipt to their tentative turn
+      if (startOrdinal !== undefined && receiptTurnId === undefined) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
       const fingerprint = createHash('sha256').update(userText).digest('hex');
+      // a second or unrelated receipt contaminates this managed interval
       if (receiptOrdinal === undefined && (fingerprint === prompt.fingerprint || fingerprint === prompt.transportFingerprint)) receiptOrdinal = record.ordinal;
       else return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
+      // retain direct receipt binding across receipt-first polling checkpoints
+      if (typeof receiptTurnId === 'string') turnId = receiptTurnId;
       continue;
     }
-    // a native start before the managed receipt cannot belong to this prompt
-    if (receiptOrdinal === undefined && record.type === 'event_msg' && payload.type === 'task_started') return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
-    // the first event after receipt must establish a valid native turn
-    if (receiptOrdinal !== undefined && startOrdinal === undefined && record.type === 'event_msg' && payload.type === 'task_started') {
+    // keep an early native start tentative until its exact receipt arrives
+    if (record.type === 'event_msg' && payload.type === 'task_started') {
+      // multiple starts cannot identify one uncontaminated managed turn
+      if (startOrdinal !== undefined) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
+      // preserve a receipt-first turn identity across later native evidence
+      if (turnId !== undefined && payload.turn_id !== turnId) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
       const instant = lifecycleInstant(payload.started_at);
+      // require explicit native identity and time fields
       if (typeof payload.turn_id !== 'string' || payload.turn_id.length < 1 || payload.turn_id.length > 256 || instant === undefined) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
       startOrdinal = record.ordinal;
       turnId = payload.turn_id;
       startedAt = instant;
       continue;
     }
-    // a competing turn start makes the remaining terminal sequence ambiguous
-    if (startOrdinal !== undefined && record.type === 'event_msg' && payload.type === 'task_started' && payload.turn_id !== turnId) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
     // terminalize only the exact native turn
-    if (startOrdinal !== undefined && record.type === 'event_msg' && (payload.type === 'task_complete' || payload.type === 'turn_aborted')) {
-      if (payload.turn_id !== turnId) continue;
+    if (record.type === 'event_msg' && (payload.type === 'task_complete' || payload.type === 'turn_aborted')) {
+      // malformed identities cannot masquerade as unrelated valid terminals
+      if (typeof payload.turn_id !== 'string' || payload.turn_id.length < 1 || payload.turn_id.length > 256) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
+      // another turn's terminal cannot complete this activity
+      if (startOrdinal === undefined || payload.turn_id !== turnId) continue;
+      // a terminal preceding the receipt cannot be paired with a later prompt
+      if (receiptOrdinal === undefined) return { state: 'invalid', reason: 'missing_lifecycle_evidence' };
       const finishedAt = lifecycleInstant(payload.completed_at);
+      // preserve only explicit positive native intervals
       if (finishedAt === undefined || Date.parse(finishedAt) <= Date.parse(startedAt!)) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
       return { state: 'finished', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: receiptOrdinal!, startOrdinal, terminalOrdinal: record.ordinal, turnId: turnId!, startedAt: startedAt!, finishedAt };
     }
   }
-  return { state: 'pending', source: 'codex-rollout', parserVersion: 1, ...(receiptOrdinal === undefined ? {} : { receiptOrdinal }), ...(startOrdinal === undefined ? {} : { startOrdinal, turnId, startedAt }) };
+  return { state: 'pending', source: 'codex-rollout', parserVersion: 1, ...(receiptOrdinal === undefined ? {} : { receiptOrdinal, ...(turnId === undefined ? {} : { turnId }), ...(startOrdinal === undefined ? {} : { startOrdinal, startedAt }) }) };
 }
 
 // read one rollout's current ordinal without leaking filesystem failures
@@ -680,26 +729,10 @@ export async function codexManagedPromptLifecycle(baseline: CompletionBaseline, 
   // a deferred rollout has not recorded a receipt yet
   if (rollout.kind === 'pending') return { state: 'pending', source: 'codex-rollout', parserVersion: 1 };
   const metadata = await rolloutMetadataCache.get(rollout.file).catch(() => undefined);
-  if (metadata?.cliVersion !== managedLifecycleCodexVersion) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
+  // require native session metadata without pinning a CLI release label
+  if (metadata === undefined) return { state: 'invalid', reason: 'unsupported_lifecycle_contract' };
   const lines = await readFileTail(rollout.file, maxCompletionScanBytes).catch(() => undefined);
   return lines === undefined ? { state: 'invalid', reason: 'missing_lifecycle_evidence' } : managedPromptLifecycleFromRecords(lines, baseline.ordinal, prompt, checkpoint);
-}
-
-export const managedLifecycleCodexVersion = '0.164.0';
-const compatibilityPrompt = 'sanitized managed lifecycle probe';
-const compatibilityIdentity = { fingerprint: createHash('sha256').update(compatibilityPrompt).digest('hex'), transportFingerprint: createHash('sha256').update(queueReadyPrompt(compatibilityPrompt)).digest('hex') };
-const compatibilityRecords = [
-  JSON.stringify({ type: 'session_meta', ordinal: 0, payload: { id: '019a1234-5678-7000-8000-000000000001', cwd: '/sanitized/worktree', originator: 'codex-tui', cli_version: managedLifecycleCodexVersion } }),
-  JSON.stringify({ type: 'response_item', ordinal: 41, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: compatibilityPrompt }] } }),
-  JSON.stringify({ type: 'event_msg', ordinal: 42, payload: { type: 'task_started', turn_id: 'sanitized-turn', started_at: 1_792_775_807 } }),
-  JSON.stringify({ type: 'event_msg', ordinal: 43, payload: { type: 'task_complete', turn_id: 'sanitized-turn', completed_at: 1_792_776_107 } })
-];
-
-// require the pinned native version and its sanitized structural probe
-export function codexManagedLifecycleCompatible(version = process.env.CODEX_VERSION): boolean {
-  if (version !== undefined && version !== managedLifecycleCodexVersion) return false;
-  const evidence = managedPromptLifecycleFromRecords(compatibilityRecords, 40, compatibilityIdentity);
-  return evidence.state === 'finished' && evidence.receiptOrdinal === 41 && evidence.startOrdinal === 42 && evidence.terminalOrdinal === 43 && evidence.turnId === 'sanitized-turn';
 }
 
 // resolve the pane's rollout and snapshot its current max ordinal before a turn

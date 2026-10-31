@@ -216,7 +216,7 @@ export type CompletionEvent =
  */
 export type CompletionBaseline = { rollout: string; ordinal: number; resetPane?: { pid: number; cwd?: string } } | { cwd: string; resetAt: number; ordinal: number };
 
-/** exact managed-turn evidence from a version-pinned native event stream */
+/** exact managed-turn evidence from a schema-validated native event stream */
 export type ManagedPromptLifecycleEvidence =
   | { state: 'pending'; source: 'codex-rollout'; parserVersion: 1; receiptOrdinal?: number; startOrdinal?: number; turnId?: string; startedAt?: string }
   | { state: 'finished'; source: 'codex-rollout'; parserVersion: 1; receiptOrdinal: number; startOrdinal: number; terminalOrdinal: number; turnId: string; startedAt: string; finishedAt: string }

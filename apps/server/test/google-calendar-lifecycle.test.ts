@@ -109,6 +109,68 @@ describe('Google Calendar managed lifecycle', () => {
     expect(inspect).toHaveBeenCalledOnce();
   });
 
+  // accept exact native evidence when Codex records start before prompt receipt
+  it('emits one exact short-turn interval for start-before-receipt evidence', async () => {
+    const directory = await tempDir('rac-calendar-reversed-short-');
+    const file = join(directory, 'lifecycle.json');
+    const signals: CalendarSignal[] = [];
+    const lifecycle = new GoogleCalendarLifecycle({
+      file,
+      sink: {
+        // admit the synthetic activity
+        admit: async () => true,
+        // record each acknowledged boundary
+        signal: async signal => { signals.push(signal); }
+      },
+      // return stable public labels
+      labels: async () => ({ worktree: 'Cora', project: 'RAC', agent: 'Codex' })
+    });
+    const admission = { id: 'reversed-short', agentId: 'agent-1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z' };
+    await lifecycle.admit(admission);
+    await lifecycle.beforeSend({ ...admission, prompt: 'short turn', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', sentAt: '2026-10-23T17:00:01.000Z' });
+    // expose a fully correlated reversed-order turn
+    const inspect = vi.fn(async () => ({ state: 'finished' as const, source: 'codex-rollout' as const, parserVersion: 1 as const, receiptOrdinal: 3, startOrdinal: 2, terminalOrdinal: 4, turnId: 'reversed-turn', startedAt: '2026-10-23T17:00:02.000Z', finishedAt: '2026-10-23T17:00:03.000Z' }));
+    await lifecycle.observe(admission.id, { version: 1, compatible: () => true, inspect });
+
+    expect(signals).toEqual([
+      { id: admission.id, type: 'sent', at: '2026-10-23T17:00:01.000Z' },
+      { id: admission.id, type: 'started', at: '2026-10-23T17:00:02.000Z', labels: { worktree: 'Cora', project: 'RAC', agent: 'Codex' } },
+      { id: admission.id, type: 'finished', at: '2026-10-23T17:00:03.000Z' }
+    ]);
+    expect(inspect).toHaveBeenCalledOnce();
+    expect(JSON.parse(await readFile(file, 'utf8')).records).toEqual([]);
+  });
+
+  // reject non-strict native checkpoints regardless of event order
+  it.each([
+    { receiptOrdinal: 2, startOrdinal: 2, terminalOrdinal: 3 },
+    { receiptOrdinal: 3, startOrdinal: 2, terminalOrdinal: 3 },
+    { receiptOrdinal: 2, startOrdinal: 3, terminalOrdinal: 3 }
+  ])('rejects overlapping native checkpoint ordinals %#', async evidence => {
+    const directory = await tempDir('rac-calendar-overlapping-');
+    const signals: CalendarSignal[] = [];
+    const lifecycle = new GoogleCalendarLifecycle({
+      file: join(directory, 'lifecycle.json'),
+      sink: {
+        // admit the synthetic activity
+        admit: async () => true,
+        // record terminal rejection
+        signal: async signal => { signals.push(signal); }
+      },
+      // return stable public labels
+      labels: async () => ({ worktree: 'Cora', project: 'RAC', agent: 'Codex' })
+    });
+    const admission = { id: 'overlapping-checkpoints', agentId: 'agent-1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z' };
+    await lifecycle.admit(admission);
+    await lifecycle.beforeSend({ ...admission, prompt: 'invalid turn', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', sentAt: '2026-10-23T17:00:01.000Z' });
+    // return the selected overlapping checkpoint combination
+    const inspect = async () => ({ state: 'finished' as const, source: 'codex-rollout' as const, parserVersion: 1 as const, ...evidence, turnId: 'overlapping-turn', startedAt: '2026-10-23T17:00:02.000Z', finishedAt: '2026-10-23T17:00:03.000Z' });
+    await lifecycle.observe(admission.id, { version: 1, compatible: () => true, inspect });
+
+    expect(signals).toEqual([{ id: admission.id, type: 'invalid', reason: 'missing_lifecycle_evidence' }]);
+    await expect(lifecycle.pending()).resolves.toEqual([]);
+  });
+
   it('reports unsupported evidence without blocking admission', async () => {
     const directory = await tempDir('rac-calendar-lifecycle-');
     const signals: CalendarSignal[] = [];
@@ -193,6 +255,7 @@ describe('Google Calendar managed lifecycle', () => {
     await expect(restarted.pending()).resolves.toEqual([]);
   });
 
+  // restore reversed native checkpoints before scanning a long turn terminal
   it('rehydrates exact receipt and start checkpoint for a long turn terminal scan', async () => {
     const directory = await tempDir('rac-calendar-lifecycle-');
     const file = join(directory, 'lifecycle.json');
@@ -201,13 +264,13 @@ describe('Google Calendar managed lifecycle', () => {
     const first = new GoogleCalendarLifecycle(options);
     await first.admit({ id: 'long-activity', agentId: 'agent-1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z' });
     await first.beforeSend({ id: 'long-activity', agentId: 'agent-1', kind: 'codex', submittedAt: '2026-10-23T17:00:00.000Z', prompt: 'long turn', baseline: { rollout: '/private/rollout.jsonl', ordinal: 1 }, socketFingerprint: 'socket', socketPath: '/tmp/socket', paneId: '%1', sentAt: '2026-10-23T17:00:01.000Z' });
-    await first.observe('long-activity', { version: 1, compatible: () => true, inspect: async () => ({ state: 'pending', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: 2, startOrdinal: 3, turnId: 'long-turn', startedAt: '2026-10-23T17:00:02.000Z' }) });
+    await first.observe('long-activity', { version: 1, compatible: () => true, inspect: async () => ({ state: 'pending', source: 'codex-rollout', parserVersion: 1, receiptOrdinal: 3, startOrdinal: 2, turnId: 'long-turn', startedAt: '2026-10-23T17:00:02.000Z' }) });
 
-    const terminalInspect = vi.fn(async () => ({ state: 'finished' as const, source: 'codex-rollout' as const, parserVersion: 1 as const, receiptOrdinal: 2, startOrdinal: 3, terminalOrdinal: 500, turnId: 'long-turn', startedAt: '2026-10-23T17:00:02.000Z', finishedAt: '2026-10-23T17:30:00.000Z' }));
+    const terminalInspect = vi.fn(async () => ({ state: 'finished' as const, source: 'codex-rollout' as const, parserVersion: 1 as const, receiptOrdinal: 3, startOrdinal: 2, terminalOrdinal: 500, turnId: 'long-turn', startedAt: '2026-10-23T17:00:02.000Z', finishedAt: '2026-10-23T17:30:00.000Z' }));
     const restarted = new GoogleCalendarLifecycle(options);
     await restarted.observe('long-activity', { version: 1, compatible: () => true, inspect: terminalInspect });
 
-    expect(terminalInspect.mock.calls[0]?.[2]).toEqual({ receiptOrdinal: 2, startOrdinal: 3, turnId: 'long-turn', startedAt: '2026-10-23T17:00:02.000Z' });
+    expect(terminalInspect.mock.calls[0]?.[2]).toEqual({ receiptOrdinal: 3, startOrdinal: 2, turnId: 'long-turn', startedAt: '2026-10-23T17:00:02.000Z' });
     expect(signals.map(signal => signal.type)).toEqual(['sent', 'started', 'finished']);
   });
 

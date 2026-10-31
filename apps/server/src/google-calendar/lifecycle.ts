@@ -85,8 +85,8 @@ const storedCorrelation = z.object({
   } else {
     // native evidence requires its exact matching checkpoint before acknowledgement
     if (row.kind === 'claude' || row.nonce !== undefined || row.receiptObserved && (row.baseline === undefined || row.receiptOrdinal === undefined) || row.startedAt !== undefined && (row.startOrdinal === undefined || row.turnId === undefined) || row.finishedAt !== undefined && row.terminalOrdinal === undefined) reject();
-    // preserve strictly ordered native checkpoint ordinals
-    if (row.receiptOrdinal !== undefined && (row.baseline === undefined || row.receiptOrdinal <= row.baseline.ordinal) || row.startOrdinal !== undefined && (row.receiptOrdinal === undefined || row.startOrdinal <= row.receiptOrdinal) || row.terminalOrdinal !== undefined && (row.startOrdinal === undefined || row.terminalOrdinal <= row.startOrdinal)) reject();
+    // permit either receipt/start order but require distinct post-baseline checkpoints
+    if (row.receiptOrdinal !== undefined && (row.baseline === undefined || row.receiptOrdinal <= row.baseline.ordinal) || row.startOrdinal !== undefined && (row.baseline === undefined || row.receiptOrdinal === undefined || row.startOrdinal <= row.baseline.ordinal || row.startOrdinal === row.receiptOrdinal) || row.terminalOrdinal !== undefined && (row.startOrdinal === undefined || row.receiptOrdinal === undefined || row.terminalOrdinal <= Math.max(row.startOrdinal, row.receiptOrdinal))) reject();
   }
   // persisted acknowledgements must have the evidence that made them safe to send
   if (row.receiptSignalled && !row.receiptObserved || row.startSignalled && (row.startedAt === undefined || !row.receiptSignalled) || row.questionSignalled && (row.questionAt === undefined || !row.startSignalled) || row.finishedAt !== undefined && row.startedAt === undefined) reject();
