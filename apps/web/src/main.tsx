@@ -5498,6 +5498,32 @@ const CodePanel = lazy(() => import('./code-panel/code-panel.js'));
 // share lazy syntax and image rendering without coupling split state
 const PreviewPanel = lazy(() => import('./code-panel/code-panel.js').then(module => ({ default: module.PreviewPanel })));
 
+type CodePaneRecoveryProps = { panelKey: 'code' | 'preview'; onClose: () => void };
+
+// keep failed lazy imports or renderers from replacing the entire workspace
+class CodePaneBoundary extends Component<CodePaneRecoveryProps & { children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  // recover inside the owning split instead of the console boundary
+  static getDerivedStateFromError() { return { failed: true }; }
+  // retain healthy children until their module or renderer fails
+  render() {
+    // normal loads still use the existing suspense skeleton
+    if (!this.state.failed) return this.props.children;
+    return <CodePaneRecovery panelKey={this.props.panelKey} onClose={this.props.onClose} />;
+  }
+}
+
+// preserve sibling drafts and require an explicit reload for a stale module graph
+function CodePaneRecovery({ panelKey, onClose }: CodePaneRecoveryProps) {
+  const expanded = usePanelExpand(panelKey)?.expanded === true;
+  const preview = panelKey === 'preview';
+  const label = preview ? 'file preview' : 'code changes';
+  return <section className={`code-pane${preview ? ' code-pane-file preview-pane' : ''}${expanded ? ' expanded' : ''}`} role="region" aria-label={preview ? 'File preview' : 'Code changes'} onAuxClickCapture={event => closeOnMiddleClick(event, onClose)}>
+    <PanelHeader panelKey={panelKey} label={preview ? 'preview' : 'code panel'} title={preview ? 'Preview' : 'Code'} close={{ key: 'close', label: preview ? 'Close file' : 'Close code changes', title: 'Close', icon: <PanelIcon path={panelIcons.close} />, onSelect: onClose }} />
+    <div className="code-pane-body"><p className="code-pane-status"><span role="alert">Unable to open {label}.</span> <button type="button" className="code-pane-retry" onClick={() => { /* fetch a fresh entry only when requested */ location.reload(); }}>Reload console</button></p></div>
+  </section>;
+}
+
 // render one transient preview beside any retained code comparison
 function PreviewPane({ controller, onReturnToFiles, onReturnToSettings, onOpenInEditor }: { controller: FilePreviewController; onReturnToFiles?: () => void; onReturnToSettings?: () => void; onOpenInEditor?: (target: EditorTarget) => void }) {
   const editorConfigured = useContext(EditorConfiguredContext);
@@ -5512,9 +5538,9 @@ function PreviewPane({ controller, onReturnToFiles, onReturnToSettings, onOpenIn
     if (view.source === 'files') onReturnToFiles?.();
     else if (view.source === 'settings') onReturnToSettings?.();
   };
-  return <Suspense fallback={<section className="code-pane preview-pane" role="region" aria-label="File preview"><CodeLoading kind="file" path={view.path} /></section>}>
+  return <CodePaneBoundary panelKey="preview" onClose={controller.close}><Suspense fallback={<section className="code-pane preview-pane" role="region" aria-label="File preview"><CodeLoading kind="file" path={view.path} /></section>}>
     <PreviewPanel filePreview={view} onBack={back} onClose={controller.close} onRetry={controller.refresh} onEdit={editorConfigured ? view.onEdit : undefined} onOpenInEditor={onOpenInEditor} />
-  </Suspense>;
+  </Suspense></CodePaneBoundary>;
 }
 // Render one Worktree's open Code panel from its controller (callers gate on `controller.open`, so
 // this is only mounted while open). The lazy chunk resolves behind a lightweight fallback so the
@@ -5539,9 +5565,9 @@ function CodePane({ controller, worktreeId, prAvailable, branch, review, onOpenI
     // restore settings without remounting or discarding its draft
     if (fromSettings) onReturnToSettings?.();
   };
-  return <Suspense fallback={<section className="code-pane" role="region" aria-label="Code changes"><CodeLoading kind={controller.filePreview === undefined ? 'diff' : 'file'} path={controller.filePreview?.path} /></section>}>
+  return <CodePaneBoundary panelKey="code" onClose={controller.close}><Suspense fallback={<section className="code-pane" role="region" aria-label="Code changes"><CodeLoading kind={controller.filePreview === undefined ? 'diff' : 'file'} path={controller.filePreview?.path} /></section>}>
     <CodePanel mode={controller.mode} commit={controller.commit} state={controller.state} patch={controller.patch} selectedPath={controller.selectedPath} filePreview={controller.filePreview} prAvailable={prAvailable} branch={branch} review={review} loadFile={controller.loadFile} onSelectFile={controller.selectFile} onClearFile={controller.clearFile} onSetMode={controller.setMode} loadCommits={controller.loadCommits} onSelectCommit={controller.openCommit} onCloseFile={closeFile} onClose={controller.close} onRetry={controller.refresh} savedView={controller.savedView} onSaveView={controller.saveView} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} {...(askable ? { ask } : {})} />
-  </Suspense>;
+  </Suspense></CodePaneBoundary>;
 }
 // render every ordered resizable panel
 // `expansion` is the Workspace's expanded panel; a split without a Workspace keeps its own.
