@@ -20,9 +20,10 @@ import { setAside } from '../set-aside.js';
  * Where a structured Agent's process runs: its holder's socket and tmux pane (ADR 0016), the
  * process's pid, and how many of its lines the console had read at its last idle point, which a
  * console that restarts reconnects from. `host` keeps a bridged pid out of the container's process
- * namespace: its exact tagged window is the only stop authority.
+ * namespace: its exact tagged window is the only stop authority. `sandboxGeneration` binds a
+ * bridged holder to the policy and trusted runtime it loaded.
  */
-export type HolderRef = { agentId: string; socket: string; pane: string; tmuxSocket?: string; host?: true; pid?: number; read?: number };
+export type HolderRef = { agentId: string; socket: string; pane: string; tmuxSocket?: string; host?: true; sandboxGeneration?: string; pid?: number; read?: number };
 /** Whether a holder's process has exited, with its exit status. */
 export type HolderStatus = { dead: boolean; status?: number };
 /** The command a holder runs: the program and its arguments, its environment, and the setup run first. */
@@ -56,6 +57,8 @@ export interface StructuredProcesses {
    * read (`holder.read`); undefined when the process is gone.
    */
   attach(holder: HolderRef, kind: AgentKind, emit: (event: StructuredEvent) => void): Promise<StructuredProcess | undefined>;
+  /** The current bridged sandbox/runtime generation, or undefined when it cannot be proven. */
+  sandboxGeneration?(kind: AgentKind): Promise<string | undefined>;
   /** The process's recent stderr, shown when it fails: what its holder window shows, its last `lines` (40). */
   stderr(holder: HolderRef, lines?: number): Promise<string | undefined>;
   /** Stop the process and remove its holder, then run its kind's teardown in its home. */
@@ -67,6 +70,8 @@ export interface HolderWindows {
   captureHolder(holder: HolderRef, lines?: number): Promise<string | undefined>;
   holderRunning(holder: HolderRef): Promise<boolean>;
   closeHolder(holder: HolderRef): Promise<void>;
+  /** The current bridged sandbox/runtime generation, or undefined off bridge. */
+  holderGeneration?(kind: AgentKind): Promise<string | undefined>;
 }
 
 const running = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -125,6 +130,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       const connected = await connectHolder(holder.socket, { from: holder.read ?? 0, attempts: 3 });
       return connected === undefined ? undefined : clientOver(adapter, holder, connected, emit, { dropped: connected.hello.dropped });
     },
+    sandboxGeneration: async kind => await windows.holderGeneration?.(kind),
     stderr: (holder, lines) => windows.captureHolder(holder, lines),
     async stop(holder, { kind, home }) {
       // native pids may be signalled here; a host pid stops only through its exact tagged window
@@ -185,14 +191,17 @@ const transcriptText = (item: TranscriptItem): string | undefined => {
   }
 };
 const nonNegativeInt = (value: unknown): boolean => value === undefined || Number.isSafeInteger(value) && (value as number) >= 0;
+const sandboxGenerationPattern = /^[0-9a-f]{64}$/u;
 const isStoredRecord = (value: unknown): value is StructuredRecord => {
   const record = value as Partial<StructuredRecord> | null;
   const holder = record?.holder;
   const tmuxSocket = holder?.tmuxSocket;
   const validTmuxSocket = tmuxSocket === undefined || typeof tmuxSocket === 'string' && tmuxSocket.length > 0 && !tmuxSocket.includes('\0') && isAbsolute(tmuxSocket);
   const validHost = holder?.host === undefined || holder.host === true;
+  const sandboxGeneration = holder?.sandboxGeneration;
+  const validSandboxGeneration = sandboxGeneration === undefined || typeof sandboxGeneration === 'string' && sandboxGenerationPattern.test(sandboxGeneration);
   return typeof record === 'object' && record !== null && typeof record.id === 'string' && typeof record.kind === 'string' && typeof record.placeId === 'string' && typeof record.home === 'string'
-    && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && validTmuxSocket && validHost && (holder.host !== true || typeof tmuxSocket === 'string') && nonNegativeInt(holder.read) && (holder.pid === undefined || nonNegativeInt(holder.pid) && holder.pid > 1));
+    && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && validTmuxSocket && validHost && validSandboxGeneration && (holder.host !== true || typeof tmuxSocket === 'string') && nonNegativeInt(holder.read) && (holder.pid === undefined || nonNegativeInt(holder.pid) && holder.pid > 1));
 };
 
 /**
@@ -397,6 +406,8 @@ export class StructuredAgents {
         await this.readStderr(record, live);
         return;
       }
+      // rotate a bridged Pi before attach when this console cannot prove its sandbox is current
+      if (await this.rotateStaleSandbox(record, live)) return;
       const generation = live.generation += 1;
       // a deploy may have moved the pin on under it: it restarts on the pinned version once idle
       const pinned = structuredAdapterFor(record.kind)?.pinned()?.version;
@@ -416,6 +427,40 @@ export class StructuredAgents {
       // lines the holder could no longer replay may have held a question, which then waits unseen
       if ((attached.dropped ?? 0) > 0) this.notice(live, `The console missed ${attached.dropped} lines of this Agent's output while it restarted. If a question was asked then, it is waiting unseen: cancel the Turn if it does not finish.`, 'warning');
     }));
+  }
+
+  // stop an old bridged sandbox before it can retain access, then relaunch the same Agent safely
+  private async rotateStaleSandbox(record: StructuredRecord, live: Live): Promise<boolean> {
+    const holder = record.holder;
+    const bridged = holder?.host === true || process.env.RAC_HOST_TMUX_DIR !== undefined;
+    // native, unsandboxed and non-Pi processes preserve their normal reattach path
+    if (holder === undefined || !bridged || !record.sandboxed || record.kind !== 'pi') return false;
+    const current = await this.processes.sandboxGeneration?.(record.kind).catch(() => undefined);
+    // only the exact current generation may keep running across a deploy
+    if (current !== undefined && holder.sandboxGeneration === current) return false;
+    // invalidate console access before waiting for the old host process to stop
+    delete record.access;
+    await this.save();
+    live.generation += 1;
+    live.connection?.close();
+    this.endScripts(live);
+    try {
+      await this.processes.stop(holder, record);
+    } catch (error) {
+      // retain the holder authority for an operator retry while keeping its console access revoked
+      record.lifecycle = 'failed';
+      record.reason = `Its sandbox policy changed, but its old process could not be stopped: ${error instanceof Error ? error.message : String(error)}`;
+      await this.save();
+      this.changed(live);
+      return true;
+    }
+    record.holder = undefined;
+    record.lifecycle = 'exited';
+    record.reason = 'Its sandbox policy changed and its process was stopped.';
+    await this.save();
+    live.resyncing = false;
+    await this.relaunch(record, live, record.conversationId);
+    return true;
   }
 
   // drive the Agent through a process it started or reattached to

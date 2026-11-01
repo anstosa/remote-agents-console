@@ -15,6 +15,21 @@ afterEach(async () => {
 
 // bridged child pids belong to the host namespace and must never be signalled from the container
 describe('a bridged structured holder', () => {
+  it('exposes the current holder policy generation through the process boundary', async () => {
+    const generation = 'a'.repeat(64);
+    const holderGeneration = vi.fn(async () => generation);
+    const windows: HolderWindows = {
+      openHolderWindow: async () => undefined,
+      captureHolder: async () => undefined,
+      holderRunning: async () => false,
+      closeHolder: async () => {},
+      holderGeneration
+    };
+
+    await expect(holderProcesses(windows, {}).sandboxGeneration?.('pi')).resolves.toBe(generation);
+    expect(holderGeneration).toHaveBeenCalledExactlyOnceWith('pi');
+  });
+
   it('stops by closing its exact tagged window without probing or signalling its host pid', async () => {
     const holder: HolderRef = { agentId: 'agent-1', socket: '/shared/agent-1.sock', pane: '%9', tmuxSocket: '/host-tmux/default', host: true, pid: 4242 };
     const holderRunning = vi.fn(async () => true);
@@ -54,7 +69,9 @@ describe('a bridged structured holder', () => {
     { host: false, tmuxSocket: '/host-tmux/default' },
     { host: true },
     { host: true, tmuxSocket: 'relative/default' },
-    { host: true, tmuxSocket: '' }
+    { host: true, tmuxSocket: '' },
+    { host: true, tmuxSocket: '/host-tmux/default', sandboxGeneration: 'not-a-sha256' },
+    { host: true, tmuxSocket: '/host-tmux/default', sandboxGeneration: [] }
   ])('sets aside malformed persisted holder bridge metadata %#', async metadata => {
     const root = await mkdtemp(join(tmpdir(), 'rac-holder-record-'));
     roots.push(root);

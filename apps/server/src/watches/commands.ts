@@ -35,7 +35,15 @@ export function commandWindows(windows: HolderWindows & { holderStatus(holder: H
       const connected = await connectHolder(holder.socket, { from });
       return connected === undefined ? undefined : { channel: connected.channel, from: connected.hello.from };
     },
-    status: holder => windows.holderStatus(holder),
+    async status(holder) {
+      // old bridged command policies must not survive a console security update
+      if (holder.host === true || process.env.RAC_HOST_TMUX_DIR !== undefined) {
+        const generation = await windows.holderGeneration?.('pi').catch(() => undefined);
+        // closing the exact old window makes the Watch reopen under the new policy
+        if (generation === undefined || generation !== holder.sandboxGeneration) { await windows.closeHolder(holder); return undefined; }
+      }
+      return await windows.holderStatus(holder);
+    },
     close: holder => windows.closeHolder(holder)
   };
 }

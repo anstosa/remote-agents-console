@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { adapterFileContext, consoleRepositoryRoot, hostVisibleRepoRoot, renderAdapterFiles } from '../../src/adapters/files.js';
@@ -9,6 +9,25 @@ afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { re
 async function filesDir(): Promise<string> { const dir = await mkdtemp(join(tmpdir(), 'rac-files-')); dirs.push(dir); return dir; }
 
 describe('adapter file rendering', () => {
+  // a preseeded destination link must never redirect console-owned content
+  it('replaces a destination symlink without overwriting its target', async () => {
+    const dir = await filesDir();
+    const piDir = join(dir, 'pi');
+    const marker = join(dir, 'marker');
+    const policy = join(piDir, 'sandbox.json');
+    await mkdir(piDir);
+    await writeFile(marker, 'untouched');
+    await symlink(marker, policy);
+
+    const rendered = await renderAdapterFiles({ RAC_ADAPTER_FILES_DIR: dir, RAC_HOST_REPOSITORY: '/srv/remoteagents' });
+
+    expect(await readFile(marker, 'utf8')).toBe('untouched');
+    expect((await lstat(policy)).isFile()).toBe(true);
+    expect((await lstat(policy)).isSymbolicLink()).toBe(false);
+    expect(await readFile(rendered.pi!['sandbox.json']!, 'utf8')).toContain('"filesystem"');
+    expect((await stat(policy)).mode & 0o777).toBe(0o644);
+  });
+
   it('renders each kind into <filesDir>/<kind>/<name> at 0644 with host paths handed back', async () => {
     const dir = await filesDir();
     const rendered = await renderAdapterFiles({ RAC_ADAPTER_FILES_DIR: dir, RAC_HOST_REPOSITORY: '/srv/remoteagents', RAC_TMUX_BIN: '/usr/bin/tmux' } as NodeJS.ProcessEnv);

@@ -44,7 +44,7 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
 // reports `attached` (as a client reading its state afresh does), or finds the holder `gone`.
-function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], gone = false, sandboxFails = false, nonce = undefined as string | undefined } = {}) {
+function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], gone = false, sandboxFails = false, nonce = undefined as string | undefined, sandboxGeneration = undefined as string | undefined, sandboxGenerationFails = false, stopFails = false, bridged = false } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -99,7 +99,7 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
       const sent = lastReport;
       if (reporting) queueMicrotask(() => emit({ type: 'report', report: sent }));
       if (exits) setTimeout(() => emit({ type: 'exited' }), 10);
-      return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9' }, connection: connection(), cursor: () => lines, raw: () => raw?.(grants.at(-1)?.token ?? '') ?? [{ from: 'agent' as const, line: '{"type":"agent_start"}' }] };
+      return { holder: { agentId: launch.id, socket: '/tmp/holder.sock', pane: '%9', ...(bridged ? { host: true as const, tmuxSocket: '/host-tmux/default' } : {}), ...(sandboxGeneration === undefined ? {} : { sandboxGeneration }) }, connection: connection(), cursor: () => lines, raw: () => raw?.(grants.at(-1)?.token ?? '') ?? [{ from: 'agent' as const, line: '{"type":"agent_start"}' }] };
     },
     attach: async (holder, _kind, events) => {
       attaches.push(holder);
@@ -111,7 +111,16 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
       return { holder, connection: connection(), cursor: () => lines, dropped };
     },
     stderr: async () => 'pi: could not load its extension',
-    stop: async () => { closed = true; }
+    stop: async () => {
+      // a failed exact-window close must leave authority for an operator retry
+      if (stopFails) throw new Error('kill-window failed');
+      closed = true;
+    },
+    sandboxGeneration: async () => {
+      // model an unavailable runtime identity without weakening the launched holder fixture
+      if (sandboxGenerationFails) throw new Error('generation unavailable');
+      return sandboxGeneration;
+    }
   };
   return { processes, delivered, launches, attaches, grants, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), emitTo: (id: string, event: StructuredEvent) => emitters.get(id)?.(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
 }
@@ -1201,6 +1210,107 @@ describe('the Conductor', () => {
     return { status: response.statusCode, body: response.json(), headers: response.headers };
   };
   const conductorOf = async (app: Awaited<ReturnType<typeof consoleWith>>['app'], headers: Record<string, string>) => (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().agents.find((agent: { structured?: { role?: string } }) => agent.structured?.role === 'conductor');
+
+  it('rotates a bridged Sandboxed Conductor before reattach when its policy generation changes', async () => {
+    const firstGeneration = '1'.repeat(64);
+    const nextGeneration = '2'.repeat(64);
+    const fake = fakeAgent({ sandboxGeneration: firstGeneration, bridged: true });
+    const { app, headers, restart, root } = await consoleWith(fake, { conductor: {} });
+    const conversation = '01a188d1-e7d9-711a-aba8-381b96066aa5';
+    vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'pi'));
+    await piSession(join(root, 'pi'), join(root, 'home'), conversation);
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+    const oldToken = fake.grants[0]!.token;
+    fake.emit({ type: 'conversation', id: conversation });
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/prompt`, headers, payload: { prompt: 'After deploy', attachments: [] } })).statusCode).toBe(204);
+
+    const next = fakeAgent({ sandboxGeneration: nextGeneration, bridged: true });
+    const deployed = await restart(next);
+    await deployed.reattached;
+
+    expect(next.attaches).toEqual([]);
+    expect(next.closed()).toBe(true);
+    expect(next.launches).toEqual([expect.objectContaining({ id, resume: conversation, role: 'conductor', sandboxed: true })]);
+    expect((await deployed.app.inject({ method: 'GET', url: `/api/agents/${id}/queued-prompts`, headers: deployed.headers })).json().prompts).toMatchObject([{ text: 'After deploy' }]);
+    expect((await mcp(deployed.app, oldToken, 'tools/list')).status).toBe(401);
+    expect((await mcp(deployed.app, next.grants[0]!.token, 'tools/list')).status).toBe(200);
+    await deployed.app.close();
+  });
+
+  it('reattaches a bridged Sandboxed Conductor whose policy generation is unchanged', async () => {
+    const generation = '3'.repeat(64);
+    const fake = fakeAgent({ sandboxGeneration: generation, bridged: true });
+    const { app, headers, restart } = await consoleWith(fake, { conductor: {} });
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+    const token = fake.grants[0]!.token;
+
+    const next = fakeAgent({ sandboxGeneration: generation, bridged: true });
+    const deployed = await restart(next);
+    await deployed.reattached;
+
+    expect(next.attaches).toEqual([expect.objectContaining({ agentId: id, sandboxGeneration: generation })]);
+    expect(next.launches).toEqual([]);
+    expect((await mcp(deployed.app, token, 'tools/list')).status).toBe(200);
+    await deployed.app.close();
+  });
+
+  it('rotates an old bridged record without a host marker when the live bridge proves its scope', async () => {
+    const fake = fakeAgent();
+    const { app, headers, restart } = await consoleWith(fake, { conductor: {} });
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+    vi.stubEnv('RAC_HOST_TMUX_DIR', '/host-tmux');
+
+    const next = fakeAgent({ sandboxGeneration: '4'.repeat(64), bridged: true });
+    const deployed = await restart(next);
+    await deployed.reattached;
+
+    expect(next.attaches).toEqual([]);
+    expect(next.launches).toEqual([expect.objectContaining({ id, sandboxed: true })]);
+    await deployed.app.close();
+  });
+
+  it('revokes access and rotates when the current sandbox generation cannot be proven', async () => {
+    const generation = '5'.repeat(64);
+    const fake = fakeAgent({ sandboxGeneration: generation, bridged: true });
+    const { app, headers, restart } = await consoleWith(fake, { conductor: {} });
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+    const oldToken = fake.grants[0]!.token;
+
+    const next = fakeAgent({ sandboxGeneration: generation, sandboxGenerationFails: true, bridged: true });
+    const deployed = await restart(next);
+    await deployed.reattached;
+
+    expect(next.attaches).toEqual([]);
+    expect(next.launches).toEqual([expect.objectContaining({ id, sandboxed: true })]);
+    expect((await mcp(deployed.app, oldToken, 'tools/list')).status).toBe(401);
+    await deployed.app.close();
+  });
+
+  it('revokes access and retains holder authority when an old sandbox cannot be stopped', async () => {
+    const generation = '6'.repeat(64);
+    const fake = fakeAgent({ sandboxGeneration: generation, bridged: true });
+    const { app, headers, restart } = await consoleWith(fake, { conductor: {} });
+    await app.conductor.start();
+    const id = (await conductorOf(app, headers)).id;
+    const oldToken = fake.grants[0]!.token;
+
+    const next = fakeAgent({ sandboxGeneration: '7'.repeat(64), stopFails: true, bridged: true });
+    const deployed = await restart(next);
+    await deployed.reattached;
+
+    expect(next.attaches).toEqual([]);
+    expect(next.launches).toEqual([]);
+    expect(next.closed()).toBe(false);
+    expect(await conductorOf(deployed.app, deployed.headers)).toMatchObject({ id, structured: { lifecycle: 'failed', reason: expect.stringContaining('kill-window failed') } });
+    expect((await deployed.app.inject({ method: 'GET', url: `/api/agents/${id}/holder-window`, headers: deployed.headers })).json()).toMatchObject({ pane: '%9' });
+    expect((await mcp(deployed.app, oldToken, 'tools/list')).status).toBe(401);
+    await deployed.app.close();
+  });
 
   it('launches at console start, Sandboxed in its Project on its model, and is given the console\'s tools in-band', async () => {
     await integrationFiles();

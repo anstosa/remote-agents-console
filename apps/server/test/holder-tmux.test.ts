@@ -91,7 +91,7 @@ async function bridgedWorkspace() {
   process.env.RAC_HOST_INTERACTIVE_SHELL = loginShell!;
   process.env.RAC_HOST_PATH = process.env.PATH ?? '/usr/bin:/bin';
   const holder = fileURLToPath(new URL('../src/transports/holder.ts', import.meta.url));
-  hostPiRuntime.mockReturnValue({ node: process.execPath, cli: '/unused/pi.js', extension: '/unused/extension.js', holder, command: '/unused/command.js' });
+  hostPiRuntime.mockReturnValue({ node: process.execPath, cli: '/unused/pi.js', extension: '/unused/extension.js', holder, command: '/unused/command.js', fingerprint: 'a'.repeat(64) });
   const place = adhocScratchPlace(root);
   expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-x', '80', '-y', '24', '-c', root, 'cat'])).code).toBe(0);
   expect((await run(tmux, ['-S', socketPath, 'set-option', '-t', 'work', '@rac_place', place.id])).code).toBe(0);

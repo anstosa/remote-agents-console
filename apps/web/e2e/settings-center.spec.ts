@@ -178,6 +178,7 @@ const settingsNavigationDestinations = [
     id,
     label: title,
   })),
+  { id: "conductor", label: "Conductor" },
   { id: "google-calendar", label: "Google Calendar" },
 ];
 
@@ -8728,8 +8729,8 @@ for (const width of [320, 390, 1440, 2560]) {
       });
       return { grid, width: bounds.width, terminalWidth: terminal.width, rows };
     });
-    // include notification controls alongside the four appearance controls
-    expect(metrics.rows).toHaveLength(6);
+    // include notification and usage controls alongside the appearance controls
+    expect(metrics.rows).toHaveLength(7);
     // prove right alignment and centering for every interface preference
     for (const row of metrics.rows) {
       expect(row.separation).toBeGreaterThanOrEqual(0);
@@ -10333,7 +10334,9 @@ test("edits and previews icon files beside their use with image-bearing custom d
     name: "Settings section options",
     exact: true,
   });
-  await expect(menu.getByRole("option")).toHaveCount(15);
+  await expect(menu.getByRole("option")).toHaveCount(
+    settingsNavigationDestinations.length,
+  );
   await expect(
     menu.getByRole("option", { name: /Heart icon|Potato icon/u }),
   ).toHaveCount(0);
@@ -10516,7 +10519,11 @@ for (const width of [390, 780]) {
     await expect(
       settings.getByRole("navigation", { name: "Settings sources" }),
     ).toHaveCount(0);
-    await expectSettingsOptions(selector, 15, 6);
+    await expectSettingsOptions(
+      selector,
+      settingsNavigationDestinations.length,
+      6,
+    );
     // keep virtual Application sections together in the mobile group
     await selector.click();
     const application = page
@@ -10525,7 +10532,7 @@ for (const width of [390, 780]) {
         exact: true,
       })
       .getByRole("group", { name: "Application", exact: true });
-    await expect(application.getByRole("option")).toHaveCount(6);
+    await expect(application.getByRole("option")).toHaveCount(7);
     await expect(
       application.getByRole("option", {
         name: "Application",
@@ -10540,6 +10547,9 @@ for (const width of [390, 780]) {
     ).toBeVisible();
     await expect(
       application.getByRole("option", { name: "Reviews", exact: true }),
+    ).toBeVisible();
+    await expect(
+      application.getByRole("option", { name: "Conductor", exact: true }),
     ).toBeVisible();
     await expect(
       application.getByRole("option", { name: "TMUX", exact: true }),
@@ -10634,7 +10644,7 @@ test("preserves mobile section selection, drafts and remasking through search an
     selector.locator(".settings-select-current-label"),
   ).toContainText("Application · Unsaved changes");
   await search.press("Escape");
-  await expectSettingsOptions(selector, 15);
+  await expectSettingsOptions(selector, settingsNavigationDestinations.length);
   await search.fill("no-matching-section");
   await expect(selector).toHaveAttribute("data-value", "app");
   await expect(
@@ -10644,9 +10654,9 @@ test("preserves mobile section selection, drafts and remasking through search an
   ).toHaveCount(0);
   await expect(settings.getByLabel("Server name")).toHaveValue("Mobile draft");
   await search.press("Escape");
-  await expectSettingsOptions(selector, 15);
+  await expectSettingsOptions(selector, settingsNavigationDestinations.length);
   await search.fill("");
-  await expectSettingsOptions(selector, 15);
+  await expectSettingsOptions(selector, settingsNavigationDestinations.length);
 
   // crossing the breakpoint changes only the navigation presentation
   await page.setViewportSize({ width: 781, height: 844 });
@@ -10910,7 +10920,7 @@ test("keeps browser preferences and voice settings available when the file catal
     exact: true,
   });
   await expect(selector).toHaveAttribute("data-value", "voice");
-  await expectSettingsOptions(selector, 15);
+  await expectSettingsOptions(selector, settingsNavigationDestinations.length);
   await selector.click();
   const options = page.getByRole("listbox", {
     name: "Settings section options",
@@ -11514,7 +11524,7 @@ test("shows every settings section and keyboard shortcuts on mobile", async ({
     exact: true,
   });
   const panel = center.locator(".settings-source-panel");
-  await expectSettingsOptions(selector, 15);
+  await expectSettingsOptions(selector, settingsNavigationDestinations.length);
   await expect(
     panel.getByRole("group", { name: "Keyboard shortcuts", exact: true }),
   ).toHaveCount(0);
@@ -11555,7 +11565,7 @@ test("shows every settings section and keyboard shortcuts on mobile", async ({
   await center
     .getByRole("searchbox", { name: "Search settings" })
     .press("Escape");
-  await expectSettingsOptions(selector, 15);
+  await expectSettingsOptions(selector, settingsNavigationDestinations.length);
   await expect(selector.locator(".settings-select-current-label")).toHaveText(
     "Keyboard shortcuts",
   );

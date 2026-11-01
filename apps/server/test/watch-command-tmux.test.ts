@@ -15,6 +15,34 @@ import { commandWindows } from '../src/watches/commands.js';
 import { socketFinder } from './helpers/discovery-stubs.js';
 import { testConfig } from './helpers/config.js';
 
+// stale command holders must be closed before any replay or continued execution
+describe('bridged command Watch generations', () => {
+  // rotate old and legacy holders but retain an unchanged verified generation
+  it.each([undefined, 'a'.repeat(64), 'b'.repeat(64)])('checks the persisted sandbox generation %s', async sandboxGeneration => {
+    const closeHolder = vi.fn(async () => {});
+    const holderStatus = vi.fn(async () => ({ dead: false }));
+    const windows = { closeHolder, holderStatus, holderGeneration: vi.fn(async () => 'b'.repeat(64)), openHolderWindow: async () => undefined, captureHolder: async () => undefined, holderRunning: async () => true };
+    const holder = { agentId: 'watch-1', socket: '/shared/watch.sock', pane: '%9', host: true as const, sandboxGeneration };
+    const status = await commandWindows(windows, {}, async () => undefined).status(holder);
+
+    expect(closeHolder).toHaveBeenCalledTimes(sandboxGeneration === 'b'.repeat(64) ? 0 : 1);
+    expect(status).toEqual(sandboxGeneration === 'b'.repeat(64) ? { dead: false } : undefined);
+    expect(holderStatus).toHaveBeenCalledTimes(sandboxGeneration === 'b'.repeat(64) ? 1 : 0);
+  });
+
+  // a failed trust check must stop the command rather than reconnect to stale code
+  it('closes a bridged Watch when its runtime cannot be verified', async () => {
+    const closeHolder = vi.fn(async () => {});
+    const holderStatus = vi.fn(async () => ({ dead: false }));
+    const windows = { closeHolder, holderStatus, holderGeneration: vi.fn(async () => { throw new Error('unsafe Node'); }), openHolderWindow: async () => undefined, captureHolder: async () => undefined, holderRunning: async () => true };
+    const holder = { agentId: 'watch-1', socket: '/shared/watch.sock', pane: '%9', host: true as const, sandboxGeneration: 'a'.repeat(64) };
+
+    await expect(commandWindows(windows, {}, async () => undefined).status(holder)).resolves.toBeUndefined();
+    expect(closeHolder).toHaveBeenCalledExactlyOnceWith(holder);
+    expect(holderStatus).not.toHaveBeenCalled();
+  });
+});
+
 // A command Watch's window (ADR 0019) under a throwaway tmux server on a private socket: the
 // command runs under the holder in a tagged window of the Place's Workspace session, sandboxed as
 // a Sandboxed Pi's commands are (its folder writable, nothing above it, only the allowlisted

@@ -121,7 +121,10 @@ under `/worktrees`. A Project's `path` must match the container bind destination
 Pi and Conductor can run alongside existing host Codex and Claude agents without
 moving the console out of Docker. Their holder and pinned Pi run on the host;
 the console connects over a private shared Unix socket. Recreating the console
-container leaves those processes and their Conversations running.
+container reattaches unchanged processes. A changed sandbox policy or trusted
+runtime restarts affected bridged Pi agents on their Conversations and replaces
+command Watch holders before reconnecting. This also rotates legacy holders
+that have no recorded sandbox generation.
 
 On the target host, install the checkout's pinned dependencies and build the
 server before rebuilding Compose:
@@ -142,6 +145,18 @@ owner-only `auth.json`; do not place keys in adapter arguments or environment.
 Set `adapters.pi.env.HOME` to the host account's absolute home directory, so
 Pi's shell and sandbox protect the host's credentials rather than the
 container account's. This is required for bridged Pi launches.
+
+Node's canonical executable must have one hard link and live outside every Pi
+Place and configured writable sandbox root. Host checks run before execution
+and before every holder or command Watch launch; glob write roots are refused
+because they cannot establish that boundary. The policy also protects Node's
+configured path and containing directory from writes.
+
+Host-bridge `RAC_ADAPTER_FILES_DIR` must stay inside console-owned `.data/`, whose
+tree every sandbox already protects. Other custom locations and linked or
+externally writable directory ancestry are refused before rendering. Policies
+are atomically replaced without following file links; their bytes must match
+the console-rendered configuration before a new generation is authorized.
 
 The host checkout must be mounted at its host absolute path as well as the
 console's checkout path. Pi's dependencies must match the console's exact Pi,

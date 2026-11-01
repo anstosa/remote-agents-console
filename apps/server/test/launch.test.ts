@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { hostPiRuntime, run } = vi.hoisted(() => ({ hostPiRuntime: vi.fn(), run: vi.fn() }));
+const { hostPiRuntime, verifyHostPiNode, run } = vi.hoisted(() => ({ hostPiRuntime: vi.fn(), verifyHostPiNode: vi.fn(), run: vi.fn() }));
 // mock only the process spawner; keep the module's other helpers real
 vi.mock('../src/tmux/command.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/tmux/command.js')>()), run }));
-vi.mock('../src/adapters/pi-runtime.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/adapters/pi-runtime.js')>()), hostPiRuntime }));
+vi.mock('../src/adapters/pi-runtime.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/adapters/pi-runtime.js')>()), hostPiRuntime, verifyHostPiNode }));
 
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LaunchService, composeCommand, composeLaunch, expandCommand, expandHomeCommand, scratchLabel, withoutFlags, type TmuxSession } from '../src/launch/service.js';
@@ -21,6 +21,7 @@ import type { SocketRef, Worktree } from '../src/domain/models.js';
 import { testWorktree } from './helpers/config.js';
 import { worktreePlace } from '../src/places/places.js';
 import { fileOperations, pathRefusal, sessionPolicy, type SandboxPolicy } from '../src/adapters/pi-sandbox.js';
+import { commandWindows } from '../src/watches/commands.js';
 
 // a kind's interactive Review run arguments and dropped flags, from its Adapter
 const reviewRunArgs = (kind: ReviewAgentKind, run: ReviewRunSettings & { readDirectory?: string }) => reviewRunsFor(kind).interactive.args(run);
@@ -46,7 +47,7 @@ const hostPath = process.env.RAC_HOST_PATH;
 const adapterFilesDir = process.env.RAC_ADAPTER_FILES_DIR;
 const tempDirs: string[] = [];
 // default external tmux operations to success
-beforeEach(() => { hostPiRuntime.mockReset(); hostPiRuntime.mockReturnValue(undefined); run.mockResolvedValue({ code: 0, stdout: '', stderr: '' }); });
+beforeEach(() => { hostPiRuntime.mockReset(); hostPiRuntime.mockReturnValue(undefined); verifyHostPiNode.mockReset(); verifyHostPiNode.mockResolvedValue('b'.repeat(64)); run.mockResolvedValue({ code: 0, stdout: '', stderr: '' }); });
 afterEach(async () => {
   run.mockReset();
   // restore process-wide launch overrides
@@ -1645,7 +1646,7 @@ describe('the console\'s private directory', () => {
     process.env.RAC_HOST_REPOSITORY = parent;
     process.env.RAC_HOST_INTERACTIVE_SHELL = '/usr/bin/zsh';
     process.env.RAC_HOST_PATH = '/host/bin:/usr/bin';
-    hostPiRuntime.mockReturnValue({ node: '/host/bin/node', cli: '/host/pi.js', extension: '/host/extension.js', holder: '/host/holder.js', command: '/host/command.js' });
+    hostPiRuntime.mockReturnValue({ node: '/host/bin/node', cli: '/host/pi.js', extension: '/host/extension.js', holder: '/host/holder.js', command: '/host/command.js', fingerprint: 'a'.repeat(64) });
     run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%9' : '', stderr: '' }));
     const worktree = cora({ path: '/host/cora', identity: '/host/cora', hostPath: undefined });
     const service = new LaunchService(codex, undefined, undefined, undefined, undefined, () => [worktree]);
@@ -1695,6 +1696,116 @@ describe('the console\'s private directory', () => {
 });
 
 describe('bridged structured sandbox boundaries', () => {
+  // a transport error is not evidence that a stale process disappeared
+  it.each(['reject', 'nonzero'])('refuses Agent and Watch rotation after an unproven holder lookup: %s', async failure => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => {
+      // preserve the old pane after either kind of failed identity query
+      if (args.includes('list-panes')) return { code: 0, stdout: '%8\n', stderr: '' };
+      // model transport rejection without inventing a missing pane
+      if (failure === 'reject') throw new Error('tmux transport unavailable');
+      return { code: 1, stdout: '', stderr: 'tmux unavailable' };
+    });
+    const service = new LaunchService(codex);
+    const holder = { agentId: 'agent-old', socket: '/shared/old.sock', pane: '%8', host: true as const, tmuxSocket: '/host-tmux/default' };
+
+    await expect(service.closeHolder(holder)).rejects.toThrow(/could not be verified/u);
+    await expect(commandWindows(service, {}, async () => undefined).status(holder)).rejects.toThrow(/could not be verified/u);
+    expect(run.mock.calls.every(call => !(call[1] as string[]).includes('kill-window'))).toBe(true);
+  });
+
+  // a successful enumeration can prove an already removed pane is absent
+  it('accepts a missing holder only after the host positively proves its absence', async () => {
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: args.includes('list-panes') ? 0 : 1, stdout: '%9\n', stderr: '' }));
+
+    await expect(new LaunchService(codex).closeHolder({ agentId: 'agent-old', socket: '/shared/old.sock', pane: '%8' })).resolves.toBeUndefined();
+  });
+
+  // refuse unsafe storage before the renderer can follow any pre-seeded link
+  it.each(['directory', 'file'])('refuses a pre-seeded policy %s link before touching its target', async layout => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-policy-preseed-'));
+    tempDirs.push(root);
+    const base = join(root, '.data/adapters');
+    const target = join(root, 'victim');
+    await mkdir(target);
+    await mkdir(base, { recursive: true });
+    const marker = join(target, 'sandbox.json');
+    await writeFile(marker, 'unchanged');
+    // exercise both a redirecting kind directory and a redirecting final file
+    if (layout === 'directory') await symlink(target, join(base, 'pi'));
+    else { await mkdir(join(base, 'pi')); await symlink(marker, join(base, 'pi/sandbox.json')); }
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    process.env.RAC_HOST_REPOSITORY = root;
+    process.env.RAC_ADAPTER_FILES_DIR = base;
+    hostPiRuntime.mockReturnValue({ node: '/host/node', fingerprint: 'a'.repeat(64) });
+    const service = new LaunchService(codex);
+    const place = { id: 'home', kind: 'directory' as const, projectId: 'home', label: 'Home', home: root };
+
+    await expect(service.adapterFiles('pi')).rejects.toThrow(/policy.*private/u);
+    await expect(service.openHolderWindow(place, 'preseed', { program: '/host/node', args: [], env: { HOME: '/host/home' } })).rejects.toThrow(/policy.*private/u);
+    await expect(commandWindows(service, {}, kind => service.adapterFiles(kind)).open(place, 'watch', 'echo safe', 'pi')).rejects.toThrow(/policy.*private/u);
+    expect(await readFile(marker, 'utf8')).toBe('unchanged');
+  });
+
+  // bridge policies stay under the already protected console state tree
+  it('refuses a writable custom policy root before creating it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-policy-location-'));
+    tempDirs.push(root);
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    process.env.RAC_HOST_REPOSITORY = root;
+    process.env.RAC_ADAPTER_FILES_DIR = join(root, 'place/policies');
+
+    await expect(new LaunchService(codex).adapterFiles('pi')).rejects.toThrow(/policy.*console/u);
+    expect(existsSync(process.env.RAC_ADAPTER_FILES_DIR)).toBe(false);
+  });
+
+  // hard-linked policy aliases must not acquire a trusted generation
+  it('rejects a hard-linked rendered policy instead of blessing its contents', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-policy-links-'));
+    tempDirs.push(root);
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    process.env.RAC_HOST_REPOSITORY = root;
+    process.env.RAC_ADAPTER_FILES_DIR = join(root, '.data/rendered');
+    hostPiRuntime.mockReturnValue({ node: '/host/node', fingerprint: 'a'.repeat(64) });
+    const service = new LaunchService(codex);
+    const policy = (await service.adapterFiles('pi'))!['sandbox.json']!;
+    await link(policy, join(root, 'policy-alias'));
+
+    await expect(service.holderGeneration('pi')).rejects.toThrow(/policy.*private/u);
+  });
+
+  // failed stops must prevent a new generation from assuming the old process is gone
+  it('reports failure when the exact tagged holder cannot be closed', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: args.includes('kill-window') ? 1 : 0, stdout: 'holder agent-old 0 ', stderr: '' }));
+
+    await expect(new LaunchService(codex).closeHolder({ agentId: 'agent-old', socket: '/shared/old.sock', pane: '%8', host: true, tmuxSocket: '/host-tmux/default' })).rejects.toThrow(/could not be closed/u);
+  });
+
+  // generation changes invalidate a previously loaded policy or trusted runtime
+  it('fingerprints the effective policy and verifies Node before authorizing host holders', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-host-generation-'));
+    tempDirs.push(root);
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    process.env.RAC_HOST_REPOSITORY = root;
+    process.env.RAC_ADAPTER_FILES_DIR = join(root, '.data/rendered');
+    const runtime = { node: '/host/node', fingerprint: 'a'.repeat(64) };
+    hostPiRuntime.mockReturnValue(runtime);
+    const service = new LaunchService(codex);
+    const generation = await service.holderGeneration('pi');
+
+    expect(generation).toMatch(/^[a-f0-9]{64}$/u);
+    expect(await service.holderGeneration('pi')).toBe(generation);
+    const policy = (await service.adapterFiles('pi'))!['sandbox.json']!;
+    runtime.fingerprint = 'c'.repeat(64);
+    expect(await service.holderGeneration('pi')).not.toBe(generation);
+    verifyHostPiNode.mockRejectedValueOnce(new Error('unsafe runtime'));
+    await expect(service.holderGeneration('pi')).rejects.toThrow('unsafe runtime');
+    await writeFile(policy, `${await readFile(policy, 'utf8')}\n`);
+    await expect(service.holderGeneration('pi')).rejects.toThrow(/policy.*match/u);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   // a writable Place must not replace code a later host holder executes
   it('protects the host Node executable and its directory inside a writable Place', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rac-host-node-policy-'));
@@ -1705,9 +1816,10 @@ describe('bridged structured sandbox boundaries', () => {
     await mkdir(bin, { recursive: true });
     await writeFile(node, 'trusted runtime');
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    await mkdir(join(root, 'console'));
     process.env.RAC_HOST_REPOSITORY = join(root, 'console');
     process.env.RAC_HOST_NODE_BIN = node;
-    process.env.RAC_ADAPTER_FILES_DIR = join(root, 'rendered');
+    process.env.RAC_ADAPTER_FILES_DIR = join(root, 'console/.data/rendered');
     const sandbox = { allowedDomains: [], deniedDomains: [], allowWrite: [place], denyWrite: [], denyRead: [], env: [] };
     const config = { ...codex, adapters: { pi: { program: node, args: [], env: {}, launchable: true, sandbox } }, projects: [] } as never;
     const policyPath = (await new LaunchService(config).adapterFiles('pi'))!['sandbox.json']!;
@@ -1727,7 +1839,7 @@ describe('bridged structured sandbox boundaries', () => {
     tempDirs.push(root);
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
     process.env.RAC_HOST_REPOSITORY = root;
-    process.env.RAC_ADAPTER_FILES_DIR = join(root, 'rendered');
+    process.env.RAC_ADAPTER_FILES_DIR = join(root, '.data/rendered');
     const sandbox = { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
     const config = { ...codex, listen: { host: '127.0.0.1', port: 8787 }, publicOrigin: new URL('https://agents.example.com'), adapters: { pi: { program: '/host/node', args: [], env: {}, launchable: true, sandbox } }, projects: [] } as never;
 

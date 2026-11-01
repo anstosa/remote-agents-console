@@ -1,5 +1,7 @@
-import { chmod, mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { constants } from 'node:fs';
+import { mkdir, open, rename, rm, type FileHandle } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { adapters, structuredAdapters } from './registry.js';
 import type { AdapterFileContext, AgentKind, SandboxSettings } from './types.js';
@@ -14,6 +16,28 @@ import type { AdapterFileContext, AgentKind, SandboxSettings } from './types.js'
 
 /** The absolute paths of one kind's rendered files, keyed by name. */
 export type RenderedAdapterFiles = Partial<Record<AgentKind, Record<string, string>>>;
+
+// replace one rendered path without following a preseeded destination link
+async function replaceRenderedFile(path: string, content: string): Promise<void> {
+  const temp = join(dirname(path), `.${basename(path)}.${randomBytes(16).toString('hex')}.tmp`);
+  let handle: FileHandle | undefined;
+  let created = false;
+  try {
+    handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    created = true;
+    await handle.writeFile(content);
+    await handle.chmod(0o644);
+    await handle.close();
+    handle = undefined;
+    await rename(temp, path);
+    created = false;
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    // remove only a temporary file this call created
+    if (created) await rm(temp, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
 
 // under the host bridge the agent runs on the host, outside this container
 function isBridged(env: NodeJS.ProcessEnv): boolean {
@@ -76,9 +100,7 @@ export async function renderAdapterFiles(env: NodeJS.ProcessEnv = process.env, s
     const settings = sandbox(adapter.kind);
     for (const [name, content] of Object.entries(adapter.files({ ...context, ...(settings === undefined ? {} : { sandbox: settings }) }))) {
       const path = join(dir, name);
-      await writeFile(path, content, { mode: 0o644 });
-      // restore the promised mode independently of umask and existing permissions
-      await chmod(path, 0o644);
+      await replaceRenderedFile(path, content);
       paths[name] = path;
     }
     rendered[adapter.kind] = paths;

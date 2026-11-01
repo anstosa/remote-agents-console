@@ -1,6 +1,6 @@
-import { lstat, mkdir, open,unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { resolveAgentProgram, type ValidatedConfig } from '../config/schema.js';
 import { run, tmuxFormatLiteral, tmuxLiteralArg } from '../tmux/command.js';
 import { TmuxAdapter } from '../tmux/adapter.js';
@@ -11,8 +11,9 @@ import { holderAgentOption, holderPaneRole, processPaneRole } from '../tmux/stac
 import { ProcSocketFinder, workspaceRoot, type SocketFinder } from '../discovery/service.js';
 import { projectIdOf, worktreeHostRoot, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
 import { adapterCapabilities, adapterFor, structuredAdapterFor } from '../adapters/registry.js';
-import { hostVisibleRepoRoot, renderAdapterFiles, type RenderedAdapterFiles } from '../adapters/files.js';
-import { hostPiRuntime } from '../adapters/pi-runtime.js';
+import { adapterFileContext, hostVisibleRepoRoot, renderAdapterFiles, type RenderedAdapterFiles } from '../adapters/files.js';
+import { hostPiRuntime, verifyHostPiNode } from '../adapters/pi-runtime.js';
+import { canonical, staticPolicy } from '../adapters/pi-sandbox.js';
 import { agentKinds, type AgentKind, type LaunchInput, type LaunchMode, type ReplacedFlagValue } from '../adapters/types.js';
 import { resolveLaunchProfile, type LaunchResolution, type LaunchScope } from './resolution.js';
 import { WorktreeLaunchStore, scratchLaunchKey } from '../worktrees/store.js';
@@ -164,6 +165,44 @@ export class LaunchService implements HolderWindows {
   }
 
   private adapterFilesPromise: Promise<RenderedAdapterFiles> | undefined;
+  private expectedPiPolicy: string | undefined;
+  // validate host policy ancestry before any renderer can create or replace a file
+  private async prepareHostAdapterDirectory(): Promise<void> {
+    const context = adapterFileContext();
+    const repo = hostVisibleRepoRoot();
+    // host policies may only live in the state tree every existing sandbox already denies
+    if (context === undefined || repo === undefined || !isAbsolute(context.filesDir)) throw new Error('Pi host bridge policy storage must be console-owned absolute state');
+    const state = resolve(repo, '.data');
+    const base = resolve(context.filesDir);
+    // reject custom writable roots and symlinked ancestry before mkdir or write
+    if (canonical(repo) !== resolve(repo) || canonical(base) !== base || base !== state && !base.startsWith(`${state}${sep}`)) throw new Error('Pi host bridge policy directory must stay in console-owned .data');
+    const descendants = relative(resolve(repo), base).split(sep);
+    let directory = resolve(repo);
+    const directories = [directory];
+    // enumerate only fixed descendants of the trusted checkout
+    for (const part of descendants) { directory = join(directory, part); directories.push(directory); }
+    // validate existing state and create absent private descendants without following links
+    for (const path of directories) {
+      // never create an absent checkout as a side effect of rendering
+      if (path !== resolve(repo)) await mkdir(path, { mode: 0o700 }).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; });
+      const info = await lstat(path);
+      // other users and symlink aliases cannot own trusted renderer ancestry
+      if (!info.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o022) !== 0) throw new Error('Pi host bridge policy directory is not private console state');
+    }
+    // preflight each rendered kind before any adapter is written
+    for (const kind of agentKinds) {
+      // kinds without managed files create no output directory
+      if ((adapterFor(kind) ?? structuredAdapterFor(kind))?.files === undefined) continue;
+      const path = join(base, kind);
+      await mkdir(path, { mode: 0o700 }).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; });
+      const info = await lstat(path);
+      // a pre-seeded directory link must fail before the renderer follows it
+      if (!info.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o022) !== 0) throw new Error('Pi host bridge policy directory is not private console state');
+    }
+    const policy = await lstat(join(base, 'pi/sandbox.json')).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return undefined; });
+    // refuse pre-seeded file links before any adapter writes through that pathname
+    if (policy !== undefined && (!policy.isFile() || policy.nlink !== 1 || policy.uid !== process.getuid?.() || (policy.mode & 0o022) !== 0)) throw new Error('Pi host bridge policy is not private immutable console state');
+  }
   // This kind's rendered console-owned files for `LaunchInput.files`, or `undefined`
   // when the kind declares none (Codex) — which keeps the
   // launch hot path off the filesystem. Only a *successful* render is memoized; a
@@ -174,13 +213,18 @@ export class LaunchService implements HolderWindows {
   // so no command reaches `/mcp` (ADR 0018).
   async adapterFiles(kind: AgentKind): Promise<Record<string, string> | undefined> {
     if ((adapterFor(kind) ?? structuredAdapterFor(kind))?.files === undefined) return undefined;
+    // validate old sandbox-controlled paths before boot rendering or reattach can touch them
+    if (this.hostSocket !== undefined) await this.prepareHostAdapterDirectory();
     const checkout = serverCheckout();
     const hostCheckout = hostVisibleRepoRoot();
     const configured = process.env.RAC_CONFIG === undefined ? undefined : resolve(process.env.RAC_CONFIG);
+    const adapterDirectory = process.env.RAC_ADAPTER_FILES_DIR;
+    // bridged policy files must have one absolute spelling in both namespaces
+    if (this.hostSocket !== undefined && adapterDirectory !== undefined && !isAbsolute(adapterDirectory)) throw new Error('Pi host bridge requires an absolute adapter policy directory');
     const configuredRelative = configured === undefined ? undefined : relative(checkout, configured);
     // protect the same console state in the host namespace a bridged process sees
     const hostConfigured = hostCheckout === undefined || configuredRelative === undefined || configuredRelative === '..' || configuredRelative.startsWith(`..${sep}`) || isAbsolute(configuredRelative) ? undefined : join(hostCheckout, configuredRelative);
-    const consoleState = [this.root, join(checkout, '.data'), join(checkout, '.env'), ...(configured === undefined ? [] : [configured]), ...(hostCheckout === undefined ? [] : [join(hostCheckout, '.data'), join(hostCheckout, '.env')]), ...(hostConfigured === undefined ? [] : [hostConfigured])];
+    const consoleState = [this.root, join(checkout, '.data'), join(checkout, '.env'), ...(adapterDirectory === undefined ? [] : [resolve(adapterDirectory)]), ...(configured === undefined ? [] : [configured]), ...(hostCheckout === undefined ? [] : [join(hostCheckout, '.data'), join(hostCheckout, '.env')]), ...(hostConfigured === undefined ? [] : [hostConfigured])];
     const hostNode = process.env.RAC_HOST_NODE_BIN?.trim();
     // deny the executable and its directory so writable Places cannot replace host launch code
     const consoleRuntime = hostCheckout === undefined ? [] : [join(hostCheckout, 'apps/server/dist'), join(hostCheckout, 'node_modules'), join(hostCheckout, 'apps/server/node_modules'), ...(hostNode === undefined || !isAbsolute(hostNode) ? [] : [hostNode, dirname(hostNode)])];
@@ -188,13 +232,45 @@ export class LaunchService implements HolderWindows {
     this.adapterFilesPromise ??= renderAdapterFiles(process.env, candidate => {
       const settings = this.config.adapters[candidate]?.sandbox ?? { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
       const repositories = [checkout, ...(hostCheckout === undefined ? [] : [hostCheckout]), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory, ...(project.hostPath === undefined ? [] : [project.hostPath])])];
-      return { ...settings, deniedDomains: [...settings.deniedDomains, ...consoleHosts], denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState, ...consoleRuntime], repositories };
+      const effective = { ...settings, deniedDomains: [...settings.deniedDomains, ...consoleHosts], denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState, ...consoleRuntime], repositories };
+      // retain expected policy bytes independently of mutable on-disk configuration
+      if (candidate === 'pi') this.expectedPiPolicy = JSON.stringify(staticPolicy(effective), null, 2);
+      return effective;
     }).catch(error => {
       this.adapterFilesPromise = undefined;
+      this.expectedPiPolicy = undefined;
       console.error('[launch] adapter files not rendered:', error instanceof Error ? error.message : 'unknown error');
       return {} as RenderedAdapterFiles;
     });
     return (await this.adapterFilesPromise)[kind];
+  }
+
+  // bind bridged holders to the policy and trusted runtime they actually loaded
+  async holderGeneration(kind: AgentKind, place?: Place): Promise<string | undefined> {
+    // native holders keep their existing deploy reattachment behavior
+    if (this.hostSocket === undefined || kind !== 'pi') return undefined;
+    const runtime = hostPiRuntime();
+    const policy = (await this.adapterFiles(kind))?.['sandbox.json'];
+    // a missing policy or runtime cannot authorize a surviving host process
+    if (runtime === undefined || policy === undefined) throw new Error('Pi host bridge generation is unavailable');
+    const writeRoots = [...(place === undefined ? [] : [place.home, placeHostRoot(place)]), ...(this.config.scratchDirectory === undefined ? [] : [this.config.scratchDirectory]), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory, ...(project.hostPath === undefined ? [] : [project.hostPath])]), ...Object.values(this.config.adapters).flatMap(adapter => adapter?.sandbox?.allowWrite ?? [])];
+    const home = this.config.adapters.pi?.env.HOME ?? process.env.HOME;
+    const directory = canonical(dirname(policy));
+    const protectedState = canonical(join(hostVisibleRepoRoot()!, '.data'));
+    const inProtectedState = directory === protectedState || directory.startsWith(`${protectedState}${sep}`);
+    // the default console state is already denied; custom storage must be outside every write root
+    if (!inProtectedState && writeRoots.some(root => {
+      const expanded = root === '~' || root.startsWith('~/') ? join(home!, root.slice(1)) : root;
+      const writable = canonical(expanded);
+      return directory === writable || directory.startsWith(writable.endsWith(sep) ? writable : `${writable}${sep}`);
+    })) throw new Error('Pi host bridge policy directory overlaps a writable Place or sandbox root');
+    const [fileInfo, directoryInfo, contents] = await Promise.all([lstat(policy), lstat(dirname(policy)), readFile(policy)]);
+    // reject aliases and paths other users can replace before Pi loads the policy
+    if (!fileInfo.isFile() || fileInfo.nlink !== 1 || fileInfo.uid !== process.getuid?.() || (fileInfo.mode & 0o022) !== 0 || !directoryInfo.isDirectory() || directoryInfo.uid !== process.getuid?.() || (directoryInfo.mode & 0o022) !== 0 || canonical(policy) !== resolve(policy)) throw new Error('Pi host bridge policy is not private immutable console state');
+    // generations authorize server-rendered bytes, never whatever a sandbox left on disk
+    if (this.expectedPiPolicy === undefined || !contents.equals(Buffer.from(this.expectedPiPolicy))) throw new Error('Pi host bridge policy does not match its server-rendered configuration');
+    const node = await verifyHostPiNode(runtime.node, { ...process.env, HOME: this.config.adapters.pi?.env.HOME ?? process.env.HOME }, undefined, writeRoots);
+    return createHash('sha256').update('pi-host-sandbox-v1').update(runtime.fingerprint).update(node).update(this.expectedPiPolicy).digest('hex');
   }
 
   // the launchable kinds in registry (resolution) order for the current configuration
@@ -807,6 +883,8 @@ export class LaunchService implements HolderWindows {
     const runtime = host ? hostPiRuntime() : undefined;
     // a bridged launch must never fall back to container-only runtime paths
     if (host && runtime === undefined) throw new Error('Pi host bridge runtime is unavailable');
+    // revalidate executable topology before every holder and Watch launch
+    const sandboxGeneration = host ? await this.holderGeneration('pi', place) : undefined;
     // bridged holder sockets need one path visible unchanged on both sides
     const privateRoot = host ? join(process.env.RAC_HOST_REPOSITORY!.trim(), '.data', 'structured') : this.root;
     const socket = join(privateRoot, 'holders', `${agentId}.sock`);
@@ -827,7 +905,7 @@ export class LaunchService implements HolderWindows {
       (await run(this.tmux, [...socketArgs, 'set-option', '-w', '-t', pane, 'remain-on-exit', 'on', ';', 'set-option', '-p', '-t', pane, '@rac_role', holderPaneRole, ';', 'set-option', '-p', '-t', pane, holderAgentOption, agentId])).code === 0
       && (joined !== undefined || await this.markSessionPlace(tmuxSocket, pane, place.id))
       && (await run(this.tmux, [...socketArgs, 'respawn-pane', '-k', '-t', pane, '-c', tmuxFormatLiteral(cwd), '--', ...launchArgv])).code === 0);
-    return started ? { agentId, socket, pane, ...(host ? { host: true as const } : {}), ...(tmuxSocket === undefined ? {} : { tmuxSocket }) } : undefined;
+    return started ? { agentId, socket, pane, ...(host ? { host: true as const, sandboxGeneration } : {}), ...(tmuxSocket === undefined ? {} : { tmuxSocket }) } : undefined;
   }
 
   // the tmux arguments that reach a holder's pane, or none once the pane is not that holder's any
@@ -837,6 +915,13 @@ export class LaunchService implements HolderWindows {
     const socketPath = holder.tmuxSocket ?? this.hostSocket;
     const socketArgs = socketPath === undefined ? [] : ['-S', socketPath];
     const marks = await run(this.tmux, [...socketArgs, 'display-message', '-p', '-t', holder.pane, `#{@rac_role} #{${holderAgentOption}} #{pane_dead} #{pane_dead_status}`]).catch(() => undefined);
+    // only a successful enumeration may prove absence after a failed identity query
+    if (marks?.code !== 0) {
+      const panes = await run(this.tmux, [...socketArgs, 'list-panes', '-a', '-F', '#{pane_id}']).catch(() => undefined);
+      // transport errors and an existing unverified pane must preserve stop authority
+      if (panes?.code === 0 && !panes.stdout.trim().split('\n').includes(holder.pane)) return undefined;
+      throw new Error('The holder window could not be verified.');
+    }
     const [role, agentId, dead, status] = marks?.code === 0 ? marks.stdout.trim().split(' ') : [];
     if (role !== holderPaneRole || agentId !== holder.agentId) return undefined;
     return { socketArgs, dead: dead === '1', ...(status === undefined || status === '' || Number.isNaN(Number(status)) ? {} : { status: Number(status) }) };
@@ -865,7 +950,8 @@ export class LaunchService implements HolderWindows {
   // remove a holder's window, which hangs up the holder and its child
   async closeHolder(holder: HolderRef): Promise<void> {
     const socketArgs = (await this.holderPane(holder))?.socketArgs;
-    if (socketArgs !== undefined) await run(this.tmux, [...socketArgs, 'kill-window', '-t', holder.pane]).catch(() => undefined);
+    // generation rotation must not claim success after a failed host stop
+    if (socketArgs !== undefined && (await run(this.tmux, [...socketArgs, 'kill-window', '-t', holder.pane])).code !== 0) throw new Error('The holder window could not be closed.');
   }
 
 }

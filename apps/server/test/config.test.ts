@@ -602,8 +602,8 @@ describe('claude adapter configuration', () => {
   // a verified host runtime enables Pi without altering ordinary adapters
   it('enables bridged Pi only after its host runtime has been verified', async () => {
     setEnv('RAC_HOST_TMUX_DIR', '/host/tmux');
-    const verified = vi.spyOn(piRuntime, 'hostPiRuntime').mockReturnValue({ node: '/host/node', cli: '/host/pi.js', extension: '/host/extension.js', holder: '/host/holder.js', command: '/host/command.js' });
-    const node = vi.spyOn(piRuntime, 'verifyHostPiNode').mockResolvedValue();
+    const verified = vi.spyOn(piRuntime, 'hostPiRuntime').mockReturnValue({ node: '/host/node', cli: '/host/pi.js', extension: '/host/extension.js', holder: '/host/holder.js', command: '/host/command.js', fingerprint: 'a'.repeat(64) });
+    const node = vi.spyOn(piRuntime, 'verifyHostPiNode').mockResolvedValue('a'.repeat(64));
     try {
       const config = await validateConfig({ ...scratch, adapters: { pi: { env: { HOME: '/host/account' } } } });
       expect(config.adapters.pi).toMatchObject({ launchable: true, program: '/host/node' });

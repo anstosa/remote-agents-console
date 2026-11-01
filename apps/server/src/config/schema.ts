@@ -393,9 +393,9 @@ export function applyListenOverrides(input: unknown, env: Record<string, string 
 type ParsedAdapters = z.output<typeof adaptersSchema>;
 // resolve each configured adapter program: normalise args/env, probe executability
 // (unless bridged), and warn about operator arguments the Adapter reserves.
-async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean, warn: (message: string) => void, sandbox?: z.output<typeof sandboxLists>): Promise<AdapterConfigs> {
+async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean, warn: (message: string) => void, sandbox?: z.output<typeof sandboxLists>, writeRoots: readonly string[] = []): Promise<AdapterConfigs> {
   const configs: AdapterConfigs = {};
-  if (parsed.pi !== undefined) configs.pi = await piConfig(parsed.pi, warn, sandbox);
+  if (parsed.pi !== undefined) configs.pi = await piConfig(parsed.pi, warn, sandbox, writeRoots);
   for (const kind of agentKinds) {
     const entry = kind === 'pi' ? undefined : parsed[kind] as z.output<typeof adapterEntry> | undefined;
     if (entry === undefined) continue;
@@ -448,7 +448,7 @@ async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean
   return configs;
 }
 // a bridged Pi uses the host's matching pinned build, never a container-only executable
-async function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message: string) => void, shared?: z.output<typeof sandboxLists>): Promise<AdapterLaunchConfig> {
+async function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message: string) => void, shared?: z.output<typeof sandboxLists>, writeRoots: readonly string[] = []): Promise<AdapterLaunchConfig> {
   const config: AdapterLaunchConfig = { program: process.execPath, args: entry.args ?? [], env: entry.env ?? {}, launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.allowedModels === undefined || entry.allowedModels.length === 0 ? {} : { allowedModels: entry.allowedModels }), sandbox: sandboxSettings(shared, entry.sandbox) };
   // native Pi keeps its existing local runtime and lifecycle hooks
   if (process.env.RAC_HOST_TMUX_DIR === undefined) return config;
@@ -458,7 +458,7 @@ async function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message
     // the sandbox must protect the host user's credentials, not the container user's
     if (entry.env?.HOME === undefined || !isAbsolute(entry.env.HOME)) throw new Error('Pi host bridge requires an absolute adapters.pi.env.HOME for the host account');
     config.program = hostPiRuntime()!.node;
-    await verifyHostPiNode(config.program);
+    await verifyHostPiNode(config.program, { ...process.env, HOME: config.env.HOME }, undefined, [...writeRoots, ...config.sandbox!.allowWrite]);
   } catch (error) {
     config.launchable = false;
     config.unavailableReason = error instanceof Error ? error.message : 'Pi host bridge runtime is unavailable';
@@ -486,7 +486,9 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
   const warn = options.warn ?? (() => {});
   // the host bridge cannot stat host program paths from inside the container
   const checkExecutables = options.checkExecutables ?? process.env.RAC_HOST_TMUX_DIR === undefined;
-  const adapters = await resolveAdapters(parsed.adapters, checkExecutables, warn, parsed.sandbox);
+  // host launch code must live outside every configured writable Place and explicit sandbox root
+  const writeRoots = [...(parsed.scratchDirectory === undefined ? [] : [parsed.scratchDirectory]), ...parsed.projects.flatMap(project => [project.path, ...(project.hostPath === undefined ? [] : [project.hostPath]), ...(project.worktreesDirectory === undefined ? [] : [project.worktreesDirectory])]), ...Object.values(parsed.adapters).flatMap(adapter => adapter !== undefined && 'sandbox' in adapter ? adapter.sandbox?.allowWrite ?? [] : [])];
+  const adapters = await resolveAdapters(parsed.adapters, checkExecutables, warn, parsed.sandbox, writeRoots);
   const review = resolveReviewConfig(parsed.review, parsed.adapters);
   const keys = parsed.keys === undefined ? undefined : parseKeysConfig(parsed.keys);
   if (isIP(parsed.listen.host) === 0) throw new Error('listener host must be an IP address literal');

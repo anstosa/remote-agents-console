@@ -140,7 +140,7 @@ const readVariants = (path: string): string[] => {
 };
 // a path with every symlink resolved, as far as it exists; a link to a missing file resolves to
 // where writing through it would land
-function canonical(path: string, links = 0): string {
+export function canonical(path: string, links = 0): string {
   const absolute = resolve(expandHome(path));
   try { return realpathSync(absolute); } catch {
     const parent = dirname(absolute);
