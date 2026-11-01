@@ -116,6 +116,47 @@ For initial setup or direct configuration-file edits outside Settings, copy
 the host-tmux settings if they are not needed, and add each repository bind
 under `/worktrees`. A Project's `path` must match the container bind destination.
 
+## Pi and Conductor on the host bridge
+
+Pi and Conductor can run alongside existing host Codex and Claude agents without
+moving the console out of Docker. Their holder and pinned Pi run on the host;
+the console connects over a private shared Unix socket. Recreating the console
+container leaves those processes and their Conversations running.
+
+On the target host, install the checkout's pinned dependencies and build the
+server before rebuilding Compose:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm --filter @rac/server build
+docker compose up -d --build
+```
+
+The host needs Node.js 22.19 or newer, `bubblewrap`, and `socat`. In the ignored
+Compose override, set `RAC_HOST_NODE_BIN` to the host's absolute Node executable,
+`RAC_HOST_REPOSITORY` to this checkout, and `PI_CODING_AGENT_DIR` to a private
+directory shared at the **same absolute path** on the host and in the container.
+For example, a state directory below the already shared checkout's `.data/`
+avoids an additional mount. Store provider credentials in that directory's
+owner-only `auth.json`; do not place keys in adapter arguments or environment.
+Set `adapters.pi.env.HOME` to the host account's absolute home directory, so
+Pi's shell and sandbox protect the host's credentials rather than the
+container account's. This is required for bridged Pi launches.
+
+The host checkout must be mounted at its host absolute path as well as the
+console's checkout path. Pi's dependencies must match the console's exact Pi,
+code-mode and sandbox-runtime versions, and the compiled holder, extension and
+sandbox helpers must match byte-for-byte. An absent or stale host build leaves
+Pi unavailable instead of falling back to an unconfined launch. Build the host
+server again after updating RAC. Pi `setup` and `teardown` hooks are not supported
+on the bridge.
+
+Pi Places require same-path mounts too: their host and container paths must be
+identical, including the Conductor's directory Project. Existing aliased Codex
+and Claude Projects continue working; Conductor may prompt their agents but
+cannot spawn a Pi worker in an aliased Place. Configure the Pi adapter and
+Conductor as described in [setup](setup.md#the-conductor).
+
 ## Connect to the host tmux server
 
 The bridge needs a **running host tmux server**, not just a socket file. After a

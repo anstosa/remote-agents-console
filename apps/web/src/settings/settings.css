@@ -156,6 +156,18 @@
 .settings-protected-field > small { color: var(--overlay-1); font: 500 .6rem/1.35 var(--font-mono); }
 /* reserve source provenance styling for environment precedence details */
 .settings-field .settings-field-origin { color: var(--overlay-0); font-size: .56rem; }
+/* keep finite permission choices stable and directly scannable */
+.settings-enum-checklist { display: grid; min-width: 0; gap: .38rem; border: 1px solid var(--surface-1); border-radius: var(--control-radius); padding: .55rem .65rem; }
+.settings-enum-checklist > label { display: flex; min-width: 0; align-items: center; gap: .48rem; color: var(--subtext-0); font: 600 .66rem/1.35 var(--font-mono); cursor: pointer; }
+.settings-enum-checklist > label:has(input:disabled) { cursor: default; opacity: .6; }
+.settings-enum-checklist input { flex: none; margin: 0; accent-color: var(--mauve); }
+.settings-enum-checklist .settings-enum-unknown { color: var(--yellow); }
+.settings-enum-checklist .settings-enum-unknown small { color: var(--overlay-1); font-size: .58rem; }
+.settings-field-guidance { margin: 0; color: var(--overlay-1); font: 500 .6rem/1.4 var(--font-mono); }
+.settings-field-guidance-error { color: var(--red); }
+.settings-field-guidance > button { min-height: 1.45rem; margin-left: .25rem; padding: .12rem .38rem; }
+.settings-conductor-schema { gap: .85rem; }
+.settings-conductor-enabled { padding-bottom: .75rem; border-bottom: 1px solid var(--surface-1); }
 .settings-field input[type='text'],
 .settings-field input[type='number'],
 .settings-field input[type='password'],

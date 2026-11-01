@@ -403,7 +403,7 @@ host-side agent reads the file the container wrote.
 
 `adapters.pi` enables Pi Agents. The console runs its own pinned Pi, so the entry
 takes no `program` or `updates`, only `args`, `env`, `setup`, `teardown`,
-`allowedModels` and `sandbox`. Pi is driven over its RPC mode rather than in a terminal (ADR 0017): a Pi Agent's Panel is a transcript, and its process runs under a small holder in a tagged window of the Workspace's tmux session, so a console deploy does not stop it. Pi cannot launch under the host bridge.
+`allowedModels` and `sandbox`. Pi is driven over its RPC mode rather than in a terminal (ADR 0017): a Pi Agent's Panel is a transcript, and its process runs under a small holder in a tagged window of the Workspace's tmux session, so a console deploy does not stop it. Docker's host bridge can run Pi using a matching host installation; see [Docker Pi setup](docker.md#pi-and-conductor-on-the-host-bridge).
 
 **Allowed models** are the only models a Pi Agent may run on: one ordered list,
 edited under **Global settings → Agents → Pi**, each entry an exact Pi
@@ -492,6 +492,17 @@ What is not confined: the Pi process itself (its provider traffic and its own st
 
 ### The Conductor
 
+Edit its controls under **Global settings → Conductor**. Its on/off switch keeps
+the configuration when disabled; save and restart RAC to apply the change. Kind
+is hidden while Pi is the only supported kind. Model searches the API-backed
+catalog for configured providers, independently of running agents. Choosing a
+model not already allowed also adds it to Pi's Allowed models in the same save.
+Effort's **Default** uses the model's configured effort rather than
+an explicit override. Scopes are a fixed set of permission checkboxes: all are
+enabled by default except `admin:dangerous` and `github:read`, and clearing every box grants none.
+Project is the ID of its configured non-Git directory Project—its home folder
+and standing `AGENTS.md` guidance—not a limit on the projects it coordinates.
+
 The Conductor is one always-running Pi Agent that can act on the console itself, through the console's MCP server (ADR 0018). It is the only Agent with that access. Configure it with a top-level `conductor` block:
 
 ```json
@@ -502,14 +513,15 @@ The Conductor is one always-running Pi Agent that can act on the console itself,
 }
 ```
 
-- `kind` is `pi`, the only kind that can host it. `adapters.pi` must be configured, and `model` must be one of its Allowed models; `effort` is optional.
+- `enabled` defaults to `true` for existing configurations. Set it to `false` to turn Conductor off while preserving its home, model and permissions.
+- `kind` is `pi`, the only kind that can host it. When enabled, `adapters.pi` must be configured, and `model` must be one of its Allowed models; `effort` is optional.
 - `project` names a directory Project (a folder that is not a git checkout). It is the Conductor's working folder and the only place its commands may write, and its `AGENTS.md` is your standing guidance to it. Its tab sorts first. If that folder is missing, the console still starts: the Conductor stays off and you get one push saying why.
 - `scopes` chooses what it may call, from `status:read`, `logs:read`, `files:read`, `prompts:write`, `agents:control`, `stack:operate`, `review:write`, `agents:spawn`, `notes:write`, `github:read` and `admin:dangerous` (`agents:spawn`, `notes:write` and `github:read` are the Conductor's own). The default is every scope but `admin:dangerous` and `github:read`, which you name to grant. Its tool list shows only what its scopes allow; `deactivate_agent`, `start_new_task` and `switch_pull_request` need `admin:dangerous`. It never gets `answer_agent_question`, `move_queued_prompt` or the `launch_*` tools, whatever its scopes: one Agent never consents for you, and those launches are unsandboxed. A tool added to the console later stays closed to it until it is listed for it.
 - `maxWorkers` (default 4) caps the workers it has starting or live at once.
 - `maxSelfStartedTurnsPerHour` (default 30) caps the Turns it did not get from you: reports, Watch events and Schedule Runs aimed at it. The excess waits in its queue, behind any prompt of yours, and you get one push that it is throttled.
 - `scriptDeadlineMinutes` (default 10): a code mode script that runs longer cancels its Turn, and its transcript says so.
 
-**Lifecycle.** The console launches the Conductor when it starts and again whenever it exits, on the same Conversation, keeping its queue. After 3 exits in 10 minutes it stays Exited and you get a push; prompts to it keep queueing until you resume it. It is always Sandboxed (see Pi's sandbox above). Its menu offers Restart, which starts its process again in place, and its Conversations menu offers New Conversation; there is no Close or Turn off. Remove the `conductor` block to turn it off. Its model chip shows its configured model without a picker, and it loads no skills or prompt templates from its folder.
+**Lifecycle.** The console launches an enabled Conductor when it starts and again whenever it exits, on the same Conversation, keeping its queue. After 3 exits in 10 minutes it stays Exited and you get a push; prompts to it keep queueing until you resume it. It is always Sandboxed (see Pi's sandbox above). Its menu offers Restart, which starts its process again in place, and its Conversations menu offers New Conversation; there is no Close or Turn off in that menu. Use the Conductor settings switch to turn it off without losing its configuration; removing the `conductor` block also turns it off. Its model chip shows its configured model without a picker, and it loads no skills or prompt templates from its folder.
 
 **Its MCP access.** At each start of its process the console mints a token, keeps only its hash, and hands it to the RAC Pi extension over Pi's RPC channel; the extension registers the console's `/mcp` (at your `publicOrigin`) with it. The token never enters a command's environment, never reaches the model and is redacted from Raw events. Commands cannot reach the endpoint anyway: the console's `publicOrigin` host and listener address are denied domains for every Pi's commands. The token stops working when the process exits or is restarted.
 

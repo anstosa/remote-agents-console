@@ -5,6 +5,7 @@ import type { AdapterConfigs, AgentKind } from '../adapters/types.js';
 import { structuredAdapterFor } from '../adapters/registry.js';
 import type { HolderRef, HolderStatus, HolderWindows } from '../transports/structured-agents.js';
 import { connectHolder } from '../transports/structured.js';
+import { hostPiRuntime } from '../adapters/pi-runtime.js';
 import type { CommandWindows } from './service.js';
 
 // the sandboxed command runner beside this module: compiled in a build, its source under tsx otherwise
@@ -26,7 +27,9 @@ export function commandWindows(windows: HolderWindows & { holderStatus(holder: H
       const env = configs[kind]?.env ?? {};
       const policy = (await files(kind))?.['sandbox.json'];
       if (adapter?.sandbox !== true || policy === undefined) return undefined;
-      return await windows.openHolderWindow(place, watchId, { program: process.execPath, args: [...runner(), command], env: { ...env, RAC_SANDBOX_POLICY: policy } });
+      // command Watches use the same verified host build and state as their owner
+      const host = hostPiRuntime();
+      return await windows.openHolderWindow(place, watchId, { program: host?.node ?? process.execPath, args: [...(host === undefined ? runner() : [host.command]), command], env: { ...env, ...(host === undefined ? {} : { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR! }), RAC_SANDBOX_POLICY: policy } });
     },
     async connect(holder, from) {
       const connected = await connectHolder(holder.socket, { from });

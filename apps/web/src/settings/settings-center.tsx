@@ -35,6 +35,7 @@ type Draft = SettingsDraft;
 type Disclosure = { sourceId: string; path: string[]; value: unknown; leaseId: string; expiresAt: string };
 type SetPatch = (source: SettingsSource, patch: SettingsPatch, disclosureDerived?: boolean) => void;
 type HideCollection = (source: SettingsSource, path: string[]) => void;
+type ConductorModel = { id: string; name?: string; provider?: string };
 // let split lifecycle actions await explicit draft-discard consent
 export type SettingsCloseGuard = { requestClose: () => Promise<boolean> };
 
@@ -74,7 +75,7 @@ const pendingSourceFormats = { app: 'json', env: 'env', installation: 'installat
 // reuse the authoritative labels before the installation catalog arrives
 const pendingSourceNavigation: Pick<SettingsSource, 'id' | 'label' | 'format' | 'path'>[] = Object.entries(pendingSourceFormats).map(([id, format]) => ({ id, label: sourceLabels[id] ?? id, format }));
 // keep dedicated and automatically derived controls out of the application field tree
-const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', 'proxy', 'integrations.multiInstance', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
+const dedicatedApplicationPaths = new Set(['name', 'defaultAgent', 'icon', 'keys', 'tmux', 'adapters', 'conductor', 'review', 'googleCalendar', 'scratchDirectory', 'projects', 'buttons', 'proxy', 'integrations.multiInstance', 'integrations.realtime', 'integrations.realtime.enabled', 'integrations.realtime.name', 'integrations.realtime.context']);
 // keep dedicated source selectors with their application and tmux consumers
 const dedicatedInstallationPaths = new Set(['version', 'sources']);
 
@@ -782,6 +783,166 @@ function ArrayField({ source, schema, value, path, draft, issues, label, itemLab
   </div>;
 }
 
+// render finite enum arrays as fixed choices
+function EnumChecklist({ label, options, value, fallback, disabled, onChange }: { label: string; options: readonly string[]; value: unknown; fallback: unknown; disabled: boolean; onChange: (value: unknown[]) => void }) {
+  const shown = Array.isArray(value) ? value : Array.isArray(fallback) ? fallback : [];
+  const selected = new Set(shown.filter((entry): entry is string => typeof entry === 'string'));
+  // retain unsupported authored entries during known-choice edits
+  const unknown = shown.filter(entry => typeof entry !== 'string' || !options.includes(entry));
+  // toggle one canonical choice without authoring on render
+  const toggle = (option: string, checked: boolean) => {
+    const next = new Set(selected);
+    // apply only the requested checkbox state
+    if (checked) next.add(option);
+    else next.delete(option);
+    onChange([...options.filter(entry => next.has(entry)), ...unknown]);
+  };
+  // remove one unsupported value only through its visible checkbox
+  const removeUnknown = (index: number) => onChange([...options.filter(entry => selected.has(entry)), ...unknown.filter((_, unknownIndex) => unknownIndex !== index)]);
+  return <div className="settings-enum-checklist" role="group" aria-label={label}>{options.map(option => <label key={option}><input type="checkbox" checked={selected.has(option)} disabled={disabled} onChange={event => { /* stage the complete explicit selection */ toggle(option, event.currentTarget.checked); }} /><span>{option}</span></label>)}{unknown.map((entry, index) => <label key={`unknown:${index}`} className="settings-enum-unknown"><input type="checkbox" checked disabled={disabled} onChange={event => { /* remove only this visible unsupported value */ if (!event.currentTarget.checked) removeUnknown(index); }} /><span>{typeof entry === 'string' ? entry : JSON.stringify(entry)} <small>(unsupported)</small></span></label>)}</div>;
+}
+
+// accept only the public model catalog shape
+function conductorModelsFrom(value: unknown): ConductorModel[] | undefined {
+  // require the documented response container
+  if (value === null || typeof value !== 'object' || !Array.isArray((value as Record<string, unknown>).models)) return undefined;
+  const models: ConductorModel[] = [];
+  const seen = new Set<string>();
+  // validate and deduplicate exact model identities
+  for (const candidate of (value as { models: unknown[] }).models) {
+    // reject unsupported catalog entries rather than partially trusting them
+    if (candidate === null || typeof candidate !== 'object') return undefined;
+    const record = candidate as Record<string, unknown>;
+    // require one nonempty exact identifier
+    if (typeof record.id !== 'string' || record.id.trim() === '') return undefined;
+    // reject malformed optional display metadata
+    if (record.name !== undefined && typeof record.name !== 'string' || record.provider !== undefined && typeof record.provider !== 'string') return undefined;
+    // retain the first occurrence in API order
+    if (seen.has(record.id)) continue;
+    seen.add(record.id);
+    models.push({ id: record.id, ...(typeof record.name === 'string' ? { name: record.name } : {}), ...(typeof record.provider === 'string' ? { provider: record.provider } : {}) });
+  }
+  return models;
+}
+
+// identify one model inside Pi's authored allowlist
+const allowedPiModel = (entries: unknown[], model: string): boolean => entries.some(entry => typeof entry === 'string' ? entry === model : entry !== null && typeof entry === 'object' && (entry as Record<string, unknown>).model === model);
+
+// render the API-backed model selector without changing settings during discovery
+function ConductorModelField({ source, schema, value, issues, disabled, onPatch }: { source: SettingsSource; schema: SettingsSchema; value: unknown; issues: SettingsIssue[]; disabled: boolean; onPatch: SetPatch }) {
+  const runtime = useSettingsRuntime();
+  const [models, setModels] = useState<ConductorModel[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const requestSequence = useRef(0);
+  const configured = typeof value === 'string' ? value : '';
+
+  // refresh the authenticated Pi catalog
+  const refresh = useCallback(async () => {
+    const sequence = ++requestSequence.current;
+    setLoading(true);
+    setError('');
+    try {
+      const response = await runtime.request('/api/settings/conductor/models', { cache: 'no-store' });
+      const payload: unknown = response.ok ? await response.json().catch(() => undefined) : undefined;
+      // ignore superseded reads
+      if (sequence !== requestSequence.current) return;
+      // report an authoritative request failure
+      if (!response.ok) {
+        const message = await settingsResponseError(response, 'Available Conductor models could not be loaded.');
+        // ignore a failure parsed after this view was replaced
+        if (sequence === requestSequence.current) setError(message);
+        return;
+      }
+      const catalog = conductorModelsFrom(payload);
+      // reject malformed successful responses
+      if (catalog === undefined) {
+        setError('Available Conductor models returned an unsupported response.');
+        return;
+      }
+      setModels(catalog);
+    } catch {
+      // retain settings while transport is unavailable
+      if (sequence === requestSequence.current) setError('Available Conductor models could not be loaded.');
+    } finally {
+      // release only the current request
+      if (sequence === requestSequence.current) setLoading(false);
+    }
+  }, [runtime.request]);
+
+  // reload when authenticated controller state changes
+  useEffect(() => {
+    void refresh();
+    return () => { requestSequence.current += 1; };
+  }, [refresh, runtime.securityEpoch]);
+
+  const catalogContainsConfigured = configured !== '' && models.some(model => model.id === configured);
+  const configuredAllowed = valueAt(source.value, ['adapters', 'pi', 'allowedModels']);
+  const allowedModels = Array.isArray(configuredAllowed) ? configuredAllowed : [];
+  const allowlistFull = allowedModels.length >= 50;
+  const options: SettingsSelectOption[] = [
+    ...(!catalogContainsConfigured && configured !== '' ? [{ value: configured, label: `${configured} (unavailable)`, disabled: true }] : []),
+    ...models.map(model => ({ value: model.id, label: model.name === undefined || model.name === model.id ? model.id : `${model.name} (${model.id})`, ...(model.provider === undefined || model.provider === '' ? {} : { group: model.provider }), ...(allowlistFull && !allowedPiModel(allowedModels, model.id) ? { disabled: true } : {}) }))
+  ];
+
+  // stage the model and any required Pi allowlist expansion together
+  const selectModel = (model: string) => {
+    // reject a stale selection that would exceed Pi's schema limit
+    if (allowlistFull && !allowedPiModel(allowedModels, model)) return;
+    onPatch(source, { op: 'set', path: ['conductor', 'model'], value: model });
+    // append only a newly selected exact identity
+    if (!allowedPiModel(allowedModels, model)) onPatch(source, { op: 'set', path: ['adapters', 'pi', 'allowedModels'], value: [...allowedModels, { model }] });
+  };
+
+  return <div className="settings-field settings-field-string" data-settings-path="conductor.model" data-settings-search-path={JSON.stringify(['conductor', 'model'])}>
+    <div className="settings-field-summary"><span className="settings-field-copy"><strong>{schema.label ?? 'Model'}</strong>{schema.description && <small>{schema.description}</small>}</span></div>
+    <SettingsSelect searchable label={schema.label ?? 'Model'} value={configured} options={options} disabled={disabled || loading || error !== '' || models.length === 0} onChange={selectModel} />
+    {loading && <p className="settings-field-guidance" role="status">Loading available models…</p>}
+    {!loading && error !== '' && <p className="settings-field-guidance settings-field-guidance-error" role="alert">{error} <button type="button" onClick={() => { /* retry only the catalog read */ void refresh(); }}>Retry</button></p>}
+    {!loading && error === '' && models.length === 0 && <p className="settings-field-guidance" role="note">No Conductor models are currently available.</p>}
+    {!loading && error === '' && !catalogContainsConfigured && configured !== '' && <p className="settings-field-guidance" role="note">The saved model is not currently available. It is preserved until you choose another model.</p>}
+    {allowlistFull && <p className="settings-field-guidance" role="note">Pi agents already have the maximum 50 allowed models. Existing allowed choices remain available.</p>}
+    <p className="settings-field-guidance" role="note">Selecting a new model also allows it for all Pi agents when you save.</p>
+    <FieldIssues issues={issues} sourceId={source.id} path={['conductor', 'model']} />
+  </div>;
+}
+
+type ConductorEditorProps = Omit<Parameters<typeof SchemaField>[0], 'schema' | 'value' | 'path'> & { schema: SettingsSchema };
+
+// render Conductor's permanent enable boundary and fixed field set
+function ConductorEditor({ source, schema, issues, disabled, onPatch, ...fields }: ConductorEditorProps) {
+  const configured = valueAt(source.value, ['conductor']);
+  const record = configured !== null && typeof configured === 'object' && !Array.isArray(configured) ? configured as Record<string, unknown> : undefined;
+  const enabled = record !== undefined && record.enabled !== false;
+  const kindSchema = schema.properties?.kind;
+  const hideKind = kindSchema?.options?.length === 1;
+  const properties = Object.entries(schema.properties ?? {}).filter(([key]) => key !== 'enabled' && !(key === 'kind' && hideKind));
+
+  // preserve existing fields when toggling an authored configuration
+  const toggleEnabled = (next: boolean) => {
+    // initialize only after an explicit enable action
+    if (record === undefined && next) {
+      onPatch(source, { op: 'set', path: ['conductor'], value: { enabled: true, kind: 'pi', project: '', model: '' } });
+      return;
+    }
+    // ignore an impossible disable of an absent configuration
+    if (record === undefined) return;
+    onPatch(source, { op: 'set', path: ['conductor', 'enabled'], value: next });
+  };
+
+  return <section className="settings-schema-section settings-conductor-schema" data-settings-path="conductor" data-settings-search-path={JSON.stringify(['conductor'])}>
+    <div className="settings-field settings-field-boolean settings-conductor-enabled" data-settings-path="conductor.enabled" data-settings-search-path={JSON.stringify(['conductor', 'enabled'])}>
+      <div className="settings-field-summary"><span className="settings-field-copy"><strong>Conductor enabled</strong><small>Changes apply after you save and restart RAC. Disabling Conductor preserves its configuration.</small></span><span className="settings-field-actions"><label className="client-settings-toggle"><input aria-label="Conductor enabled" type="checkbox" role="switch" checked={enabled} disabled={disabled} onChange={event => { /* stage only the requested enabled state */ toggleEnabled(event.currentTarget.checked); }} /><span className="client-settings-switch-state">{enabled ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label></span></div>
+      <FieldIssues issues={issues} sourceId={source.id} path={['conductor', 'enabled']} />
+    </div>
+    {schema.description && <p className="settings-preference-description">{schema.description}</p>}
+    <div className="settings-object-fields">{properties.map(([key, property]) => key === 'model'
+      ? <ConductorModelField key={key} source={source} schema={property} value={record?.[key]} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} />
+      : <SchemaField {...fields} key={key} source={source} schema={property} value={record?.[key]} path={['conductor', key]} issues={issues} disabled={disabled || !enabled} onPatch={onPatch} />)}</div>
+    <FieldIssues issues={issues} sourceId={source.id} path={['conductor']} />
+  </section>;
+}
+
 // render every schema kind with collection-preserving patches
 function SchemaField({ source, schema: providedSchema, value, path, draft, disclosures, issues, disabled: inheritedDisabled, navigationDisabled: inheritedNavigationDisabled = inheritedDisabled, onPatch, onReveal, onRemask, onHideCollection, remoteServers = [], installationKind, renderAdapterEnvironment }: { source: SettingsSource; schema?: SettingsSchema; value: unknown; path: string[]; draft?: Draft; disclosures: Map<string, Disclosure>; issues: SettingsIssue[]; disabled: boolean; navigationDisabled?: boolean; onPatch: SetPatch; onReveal: (source: SettingsSource, path: string[]) => Promise<void>; onRemask: (key: string) => Promise<void>; onHideCollection?: HideCollection; remoteServers?: readonly RemoteServerDefaults[]; installationKind?: SettingsSnapshot['installationKind']; renderAdapterEnvironment?: (adapter: string) => ReactNode }) {
   const controlId = useId();
@@ -808,11 +969,14 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
   const buttonItem = source.id === 'app' && isConfiguredButtonPath(path);
   const buttonField = source.id === 'app' && isConfiguredButtonPath(path.slice(0, -1));
   const buttonIcon = buttonField && path.at(-1) === 'icon';
+  const conductorField = source.id === 'app' && path[0] === 'conductor';
+  const conductorEffort = conductorField && path.length === 2 && path[1] === 'effort';
+  const enumArray = schema.type === 'array' && schema.items?.type === 'enum' && (schema.items.options?.length ?? 0) > 0;
   // hide host namespace overrides unless Docker mode is authoritative
   if (projectHostPath && installationKind !== 'compose') return null;
   // keep resettable fields visible while omission selects their default state
   const reviewField = source.id === 'app' && path[0] === 'review';
-  const permanentField = reviewField || adapterLifecycleCommand || buttonIcon || source.id === 'app' && path.length === 1 && ['scratchDirectory', 'editor'].includes(path[0]!);
+  const permanentField = reviewField || conductorEffort || enumArray || adapterLifecycleCommand || buttonIcon || source.id === 'app' && path.length === 1 && ['scratchDirectory', 'editor'].includes(path[0]!);
   const removable = schema.optional && !hasSchemaDefault(schema) && !projectField && !permanentField;
   // seed only a deliberately edited missing container and retain exact leaf identity
   const stagePatch: SetPatch = (target, next, disclosureDerived) => {
@@ -896,7 +1060,10 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
     control = <div className="settings-object-fields">{Object.entries(properties).filter(([key]) => (source.id !== 'app' || !dedicatedApplicationPaths.has([...path, key].join('.'))) && (source.id !== 'installation' || !dedicatedInstallationPaths.has([...path, key].join('.')))).map(([key, next]) => child(next, value === undefined && defaulted && next.placeholder !== undefined ? undefined : record[key], [...path, key], key))}</div>;
     // share live appearance with the preview and every palette option
     if (buttonItem) control = <SettingsButtonFields value={record}>{control}</SettingsButtonFields>;
-  // render ordered arrays with explicit insert, remove, and move operations
+  // render finite permissions as fixed checkboxes
+  } else if (enumArray) {
+    control = <EnumChecklist label={label} options={schema.items?.options ?? []} value={value} fallback={schema.default} disabled={disabled} onChange={next => { /* preserve explicit empty selections */ stagePatch(source, { op: 'set', path, value: next }); }} />;
+  // render open-ended arrays with explicit insert, remove, and move operations
   } else if (schema.type === 'array') {
     const array = Array.isArray(effectiveValue) ? effectiveValue : [];
     const item = schema.items ?? inferSchema(array[0]);
@@ -916,8 +1083,9 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
     control = <div className="settings-union"><SettingsSelect label={`${label} type`} value={String(variantIndex)} disabled={disabled} options={(schema.variants ?? []).map((candidate, index) => ({ value: String(index), label: candidate.label ?? labelForKey(candidate.type) }))} onChange={index => { /* replace only an explicitly chosen variant */ const next = schema.variants?.[Number(index)]; if (next !== undefined) stagePatch(source, { op: 'set', path, value: defaultForSchema(next) }); }} />{child({ ...variant, label }, effectiveValue, path, `union:${variantIndex}`)}</div>;
   // render enumerated strings without losing their exact value
   } else if (schema.type === 'enum') {
-    const resettable = reviewField && (schema.optional || defaulted);
-    control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: calendarMomentLabel(path, option) ?? option, ...(buttonField && path.at(-1) === 'color' ? { icon: <SettingsButtonColorSwatch color={option} /> } : path.at(-1) === 'icon' && isInstanceIconName(option) ? { icon: <InstanceIconPreview name={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
+    const resettable = conductorEffort || reviewField && (schema.optional || defaulted);
+    // present the adapter kind without changing its stored identity
+    control = <SettingsSelect label={label} value={resettable ? typeof value === 'string' ? value : '' : typeof effectiveValue === 'string' ? effectiveValue : ''} disabled={disabled} options={[...(resettable ? [{ value: '', label: placeholder }] : []), ...(schema.options ?? []).map(option => ({ value: option, label: conductorField && path[1] === 'kind' && option === 'pi' ? 'Pi' : calendarMomentLabel(path, option) ?? option, ...(buttonField && path.at(-1) === 'color' ? { icon: <SettingsButtonColorSwatch color={option} /> } : path.at(-1) === 'icon' && isInstanceIconName(option) ? { icon: <InstanceIconPreview name={option} /> } : {}) }))]} onChange={next => { /* blank review choices restore omission without weakening required enums */ stagePatch(source, { op: 'set', path, value: next }); }} />;
   // render booleans as accessible switches
   } else if (schema.type === 'boolean') {
     control = <label className="client-settings-toggle"><input id={controlId} aria-label={label} type="checkbox" role="switch" checked={effectiveValue === true} disabled={disabled} onChange={event => stagePatch(source, { op: 'set', path, value: event.target.checked })} /><span className="client-settings-switch-state">{effectiveValue === true ? 'On' : 'Off'}</span><span className="client-settings-switch-track" aria-hidden="true" /></label>;
@@ -1187,7 +1355,7 @@ const sourceGroup = (source: Pick<SettingsSource, 'id' | 'format'>): string => {
 // flag backing sources and the dedicated pages that own their invalid controls
 function settingsIssuePageIds(issues: SettingsIssue[]): Set<string> {
   const pages = new Set<string>();
-  const applicationPages: Record<string, string> = { adapters: 'agents', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
+  const applicationPages: Record<string, string> = { adapters: 'agents', conductor: 'conductor', projects: 'projects', review: 'reviews', googleCalendar: 'google-calendar', buttons: 'interface', scratchDirectory: 'storage', tmux: 'tmux', keys: 'keyboard' };
   // route only authoritative issue identities never field values or error text
   for (const { sourceId, path } of issues) {
     pages.add(sourceId);
@@ -1234,6 +1402,7 @@ const sectionIcon = (id: string, format?: SettingsSource['format']): ReactNode =
     voice: 'M9 4a3 3 0 0 1 6 0v8a3 3 0 0 1-6 0zm-3 7v1a6 6 0 0 0 12 0v-1m-6 7v4m-3 0h6',
     'google-calendar': 'M5 3v3m14-3v3M4 8h16v12H4zM8 12h3v3H8z',
     agents: 'M12 3v3M5 7h14v13H5zM2 11v5m20-5v5M8 12h2m4 0h2m-7 4h6',
+    conductor: 'M4 5h16v14H4zM8 9h8m-8 4h5m4 0h.01',
     reviews: 'M5 3h14v18H5zM8 7h8M8 11h5m-5 5 2 2 5-5',
     storage: 'M20 6c0 2-3.6 3-8 3S4 8 4 6s3.6-3 8-3 8 1 8 3v12c0 2-3.6 3-8 3s-8-1-8-3V6m0 6c0 2 3.6 3 8 3s8-1 8-3',
     projects: 'M3 6h6l2 2h10v12H3zM3 6V4h7l2 2h7v2',
@@ -1247,7 +1416,7 @@ const sectionIcon = (id: string, format?: SettingsSource['format']): ReactNode =
     wrapper: 'M3 4h18v16H3zm3 5 3 3-3 3m6 0h4',
     svg: 'M3 3h18v18H3zM3 16l6-6 6 6 3-3 3 3M16 7h.01'
   };
-  return <PanelIcon path={id === 'cloudflare' ? glyphs.cloudflared : id === 'browser' || id === 'interface' || id === 'voice' || id === 'google-calendar' || id === 'keyboard' || id === 'tmux' || id === 'projects' || id === 'agents' || id === 'reviews' || id === 'storage' ? glyphs[id] : glyphs[format ?? 'json']} />;
+  return <PanelIcon path={id === 'cloudflare' ? glyphs.cloudflared : id === 'browser' || id === 'interface' || id === 'voice' || id === 'google-calendar' || id === 'keyboard' || id === 'tmux' || id === 'projects' || id === 'agents' || id === 'conductor' || id === 'reviews' || id === 'storage' ? glyphs[id] : glyphs[format ?? 'json']} />;
 };
 
 // bind tmux controls and wrapper contents to their existing installed sources
@@ -1434,7 +1603,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
       // retain virtual pages and redirect removed standalone tabs
       setSelectedId(current => {
         const next = current === 'compose' ? 'compose-override' : current === 'wrapper' ? 'tmux' : current === 'cloudflared' || current === 'cloudflared-credentials' ? 'cloudflare' : current;
-        return next === 'browser' || next === 'interface' || next === 'voice' || next === 'google-calendar' || next === 'keyboard' || next === 'tmux' || next === 'projects' || next === 'agents' || next === 'reviews' || next === 'storage' || next === 'cloudflare' || payload.sources.some(source => source.id === next) ? next : 'browser';
+        return next === 'browser' || next === 'interface' || next === 'voice' || next === 'google-calendar' || next === 'keyboard' || next === 'tmux' || next === 'projects' || next === 'agents' || next === 'conductor' || next === 'reviews' || next === 'storage' || next === 'cloudflare' || payload.sources.some(source => source.id === next) ? next : 'browser';
       });
       if (!preserveDrafts) { setDrafts({}); setIssues([]); setWarnings([]); setCatalogEditorEpoch(current => current + 1); }
       setError('');
@@ -1691,6 +1860,8 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'googleCalendar' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => googleCalendarEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('google-calendar');
   // keep both original backing sources visible on the dedicated Agents page
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'adapters' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => agentEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('agents');
+  // keep Conductor edits attached to their application transaction
+  if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'conductor' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))))) changedSourceIds.add('conductor');
   // keep data-location drafts visible on Storage without changing either backing source
   if (changes.some(change => change.sourceId === 'app' && (change.content !== undefined || change.remove === true || change.patches?.some(next => next.path[0] === 'scratchDirectory' || next.path.length === 0 && (next.op === 'set' || next.op === 'remove'))) || change.sourceId === 'env' && (change.content !== undefined || change.remove === true || change.patches?.some(next => storageEnvironmentKeys.has(next.path[0] ?? ''))))) changedSourceIds.add('storage');
   // reflect project edits and opaque whole-application drafts on their dedicated page
@@ -2013,6 +2184,20 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
             <SchemaField key={`reviews:${catalogEditorEpoch}`} source={voiceSource} schema={reviewsSchema} value={valueAt(voiceSource.value, ['review'])} path={['review']} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} />
           </>}
   </div>;
+
+  const conductorSchema = voiceSource?.schema?.properties?.conductor;
+  const conductorEditor = <div className="settings-conductor">
+    {voiceSource === undefined ? <p role="note">Load Application configuration before editing Conductor.</p>
+      : voiceSource.value === undefined ? <p role="note">Repair the Application whole source before editing Conductor.</p>
+        : conductorSchema === undefined ? <p role="note">Conductor settings are unavailable in this configuration.</p>
+          : <>
+            {!voiceSource.writable && <p role="note">Conductor settings are read-only in this installation.</p>}
+            {voiceFileDraft?.content !== undefined && <p role="note">Finish or discard the Application whole-source draft before editing Conductor.</p>}
+            {rawSourceIds.has('app') && voiceFileDraft?.content === undefined && <p role="note">Switch Application back to the structured editor before editing Conductor.</p>}
+            {voiceFileDraft?.remove === true && <p role="note">Discard the Application source removal before editing Conductor.</p>}
+            <ConductorEditor key={`conductor:${catalogEditorEpoch}`} source={voiceSource} schema={conductorSchema} draft={voiceFileDraft} disclosures={disclosures} issues={issues} disabled={applicationFieldsDisabled || rawSourceIds.has('app')} navigationDisabled={loading || saving} onPatch={patch} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} />
+          </>}
+  </div>;
   // revoke only disclosures whose binding or table is explicitly replaced or removed
   const stageKeyboardPatches = (patches: SettingsPatch[]): boolean => {
     // retain controller and captured-transaction authority
@@ -2046,6 +2231,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
     { id: 'interface', group: 'Application', label: 'Interface', keywords: 'custom buttons actions slots shell command agent prompt appearance terminal font theme dark light reduced motion notification sounds audio mute flyout markers', content: interfaceEditor },
     { id: 'projects', group: 'Application', label: 'Projects', keywords: 'projects repositories directories dynamic worktrees launcher paths overrides commands tasks button overrides', content: projectsEditor },
     { id: 'reviews', group: 'Application', label: 'Reviews', keywords: 'review tours code review presets prompts model effort codex claude headless interactive', content: reviewsEditor },
+    { id: 'conductor', group: 'Application', label: 'Conductor', keywords: 'conductor orchestration workers pi model effort scopes permissions home project AGENTS.md', content: conductorEditor },
     { id: 'tmux', group: 'Application', label: 'TMUX', keywords: `tmux polling pollIntervalMs wrapper executable connection discovery socket ${[...tmuxEnvironmentKeys].join(' ')} ${sources.find(source => source.id === 'wrapper')?.path ?? ''}`, content: <TmuxSettings sources={sources} installationKind={snapshot?.installationKind} drafts={drafts} disclosures={disclosures} issues={issues} disabled={loading || saving || !runtime.canMutate} navigationDisabled={loading || saving} onPatch={patch} onContent={setContent} onRemove={removeSource} onReveal={reveal} onRemask={remask} onHideCollection={hideCollection} /> },
     { id: 'storage', group: 'Application', label: 'Storage', keywords: `storage data .data files paths directories scratchDirectory scratch notes prompts history worktrees integrations previews ${[...storageEnvironmentKeys].join(' ')}`, content: storageEditor },
     // group external services without changing their backing sources
@@ -2066,7 +2252,7 @@ export function SettingsCenter({ active, browser, voice, onSaved, onSaveNotice, 
   // share the concise application name with its header and scroll region
   const selectedLabel = selected?.id === 'app' ? 'Application' : selectedPreference?.label ?? selected?.label ?? navigationSources.find(source => source.id === selectedId)?.label ?? 'This browser';
   // lock every tab during reads and retain unavailable-source guards afterward
-  const sectionDisabled = (id: string): boolean => loading || snapshot === undefined && (id === 'tmux' || id === 'agents' || id === 'reviews' || id === 'storage' || id === 'google-calendar' || id === 'cloudflare' || !preferences.some(preference => preference.id === id));
+  const sectionDisabled = (id: string): boolean => loading || snapshot === undefined && (id === 'tmux' || id === 'agents' || id === 'conductor' || id === 'reviews' || id === 'storage' || id === 'google-calendar' || id === 'cloudflare' || !preferences.some(preference => preference.id === id));
   const issuePageIds = settingsIssuePageIds(issues);
   // announce validation failures before ordinary unsaved changes
   const navigationLabel = (id: string, label: string): string => `${label}${issuePageIds.has(id) ? ' · Validation issues' : changedSourceIds.has(id) ? ' · Unsaved changes' : ''}`;

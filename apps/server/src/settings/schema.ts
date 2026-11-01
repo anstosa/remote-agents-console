@@ -4,6 +4,7 @@ import { keyActions } from '../config/keys.js';
 import { appApply, composeOptionSettings, protectedPath } from './catalog.js';
 import { sourceSchema } from '../config/schema.js';
 import { builtInTourPrompt } from '../review-runs/config.js';
+import { conductorOptInScopes, conductorScopes } from '../integrations/auth/types.js';
 
 type ApplicationSettingsPresentation = { scratchDirectory?: string };
 
@@ -34,6 +35,7 @@ export function applicationSettingsSchema(presentation: ApplicationSettingsPrese
   describeApplicationCommands(schema);
   describeButtonSettings(schema);
   describeProjectSettings(schema);
+  describeConductorSettings(schema);
   // annotate each declared object and collection control
   const visit = (node: SettingsSchema, path: string[]): void => {
     node.protected = node.protected === true || protectedPath(path); node.apply = appApply(path);
@@ -48,6 +50,20 @@ export function applicationSettingsSchema(presentation: ApplicationSettingsPrese
     if (node.variants !== undefined) for (const child of node.variants) visit(child, path);
   };
   visit(schema, []); return schema;
+}
+
+// explain the Conductor's home and publish its runtime defaults without authoring them
+function describeConductorSettings(schema: SettingsSchema): void {
+  const conductor = schema.properties!.conductor!;
+  const fields = conductor.properties!;
+  conductor.label = 'Conductor';
+  conductor.description = 'An always-running sandboxed agent that coordinates work through the console.';
+  Object.assign(fields.enabled!, { label: 'Conductor enabled', description: 'Save and restart the console to apply. Turning off preserves the configuration.' });
+  Object.assign(fields.kind!, { label: 'Kind', description: 'The agent kinds that can host Conductor. Only Pi currently supports the required sandbox and console tools.' });
+  Object.assign(fields.project!, { label: 'Project', description: 'The ID of a configured directory Project: Conductor’s home folder, containing its files and standing AGENTS.md guidance. Use a non-Git directory. This does not limit which projects it can coordinate.' });
+  Object.assign(fields.model!, { label: 'Model', description: 'Choose an available model from the API catalog for your configured providers.' });
+  Object.assign(fields.effort!, { label: 'Effort', placeholder: 'Default', description: 'Default uses the selected model’s configured effort, or the agent default when no model effort is configured.' });
+  Object.assign(fields.scopes!, { label: 'Scopes', default: conductorScopes.filter(scope => !conductorOptInScopes.includes(scope)) });
 }
 
 // label ordered button slots and their disjoint action editors
@@ -308,6 +324,8 @@ export function settingsSchema(input: z.ZodTypeAny): SettingsSchema {
   // preserve collection and dictionary controls
   if (input instanceof z.ZodArray) return { type: 'array', items: settingsSchema(input.element) };
   if (input instanceof z.ZodRecord) return { type: 'record', items: settingsSchema(input.valueSchema) };
+  // literal strings are finite choices rather than arbitrary JSON
+  if (input instanceof z.ZodLiteral && typeof input.value === 'string') return { type: 'enum', options: [input.value] };
   if (input instanceof z.ZodEnum) return { type: 'enum', options: input.options };
   if (input instanceof z.ZodUnion) return { type: 'union', variants: input.options.map(settingsSchema) };
   if (input instanceof z.ZodString) return { type: 'string' };

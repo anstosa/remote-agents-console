@@ -35,6 +35,11 @@ function settingsDouble() {
   };
 }
 
+// provide a network-free model catalog to isolated route fixtures
+function conductorModelsDouble() {
+  return { list: vi.fn(async () => [{ id: 'openai/gpt-test', name: 'GPT Test', provider: 'openai' }]) };
+}
+
 // log in one independent browser session
 async function login(app: FastifyInstance) {
   const bootstrap = await app.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
@@ -66,8 +71,9 @@ describe('settings browser API authorization', () => {
   // require a canonical browser session while preserving redacted observer reads
   it('rejects wrong-host, anonymous, and bearer-only reads', async () => {
     const service = settingsDouble();
+    const conductorModels = conductorModelsDouble();
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
-    const app = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 41).toString('base64url')), settings: service as never });
+    const app = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 41).toString('base64url')), settings: service as never, conductorModels });
     apps.push(app);
     const browser = await login(app);
     const readOnly = await login(app);
@@ -76,16 +82,24 @@ describe('settings browser API authorization', () => {
     const anonymous = await app.inject({ method: 'GET', url: '/api/settings', headers: { host: 'agents.example.com' } });
     const bearerOnly = await app.inject({ method: 'GET', url: '/api/settings', headers: { host: 'agents.example.com', authorization: 'Bearer integration-token' } });
     const observer = await app.inject({ method: 'GET', url: '/api/settings', headers: { host: 'agents.example.com', cookie: readOnly.cookie } });
+    const wrongHostModels = await app.inject({ method: 'GET', url: '/api/settings/conductor/models', headers: { host: 'evil.example', cookie: browser.cookie } });
+    const anonymousModels = await app.inject({ method: 'GET', url: '/api/settings/conductor/models', headers: { host: 'agents.example.com' } });
+    const bearerOnlyModels = await app.inject({ method: 'GET', url: '/api/settings/conductor/models', headers: { host: 'agents.example.com', authorization: 'Bearer integration-token' } });
+    const observerModels = await app.inject({ method: 'GET', url: '/api/settings/conductor/models', headers: { host: 'agents.example.com', cookie: readOnly.cookie } });
 
     expect(wrongHost).toMatchObject({ statusCode: 403 });
     expect(wrongHost.json()).toEqual({ error: 'forbidden' });
     expect(anonymous).toMatchObject({ statusCode: 401 });
     expect(bearerOnly).toMatchObject({ statusCode: 401 });
     expect(observer).toMatchObject({ statusCode: 200, headers: { 'cache-control': 'no-store' } });
+    expect([wrongHostModels.statusCode, anonymousModels.statusCode, bearerOnlyModels.statusCode]).toEqual([403, 401, 401]);
+    expect(observerModels).toMatchObject({ statusCode: 200, headers: { 'cache-control': 'no-store' } });
+    expect(observerModels.json()).toEqual({ models: [{ id: 'openai/gpt-test', name: 'GPT Test', provider: 'openai' }] });
     expect(observer.body).not.toContain('selected secret');
     expect(observer.json().sources[0]).not.toHaveProperty('content');
     expect(observer.json().sources[0]).not.toHaveProperty('value');
     expect(service.snapshot).toHaveBeenLastCalledWith(false, undefined);
+    expect(conductorModels.list).toHaveBeenCalledTimes(1);
   }, 15_000);
 
   // require Host, Origin, CSRF, and active controller authority for every mutation
@@ -190,6 +204,7 @@ describe('settings reveal takeover boundary', () => {
     let controllerChecks = 0;
     await registerSettingsRoutes(app, {
       service: { ...base, snapshot } as never,
+      conductorModels: conductorModelsDouble(),
       session: () => ({ id: 'session-one' }) as never,
       controlled: () => ({ id: 'session-one' }) as never,
       isController: () => { controllerChecks += 1; return controllerChecks === 1; }
@@ -217,6 +232,7 @@ describe('settings reveal takeover boundary', () => {
     };
     await registerSettingsRoutes(app, {
       service: service as never,
+      conductorModels: conductorModelsDouble(),
       session: () => ({ id: 'session-one' }) as never,
       controlled: () => ({ id: 'session-one' }) as never,
       isController: () => false
@@ -238,6 +254,7 @@ describe('settings reveal takeover boundary', () => {
     const service = settingsDouble();
     await registerSettingsRoutes(app, {
       service: service as never,
+      conductorModels: conductorModelsDouble(),
       session: () => ({ id: 'session-one' }) as never,
       controlled: () => ({ id: 'session-one' }) as never,
       isController: () => false
@@ -258,6 +275,7 @@ describe('settings reveal takeover boundary', () => {
     const service = { ...settingsDouble(), status: vi.fn(async () => { throw new Error('private path /host/config with secret sentinel'); }) };
     await registerSettingsRoutes(app, {
       service: service as never,
+      conductorModels: conductorModelsDouble(),
       session: () => ({ id: 'session-one' }) as never,
       controlled: () => ({ id: 'session-one' }) as never,
       isController: () => true

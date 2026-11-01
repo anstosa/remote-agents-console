@@ -35,6 +35,11 @@
 .settings-select-chevron { width: .95rem; height: .95rem; flex: 0 0 .95rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; transition: transform .14s ease; }
 .settings-select-trigger[aria-expanded='true'] .settings-select-chevron { transform: rotate(180deg); }
 .settings-select-listbox.more-menu { display: grid; min-width: 0; max-height: min(22rem, calc(100vh - 1rem)); gap: .12rem; overflow-y: auto; overscroll-behavior: contain; padding: .3rem; }
+.settings-select-searchable-menu.more-menu { display: grid; min-width: 0; max-height: min(22rem, calc(100vh - 1rem)); grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+.settings-select-search { display: grid; min-width: 0; padding: 0 0 .3rem; }
+.settings-select-search input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--surface-2); border-radius: calc(var(--control-radius) - .1rem); padding: .46rem .5rem; background: color-mix(in srgb, var(--mantle) 86%, var(--crust)); color: var(--text); font: 600 .68rem/1.35 var(--font-mono); }
+.settings-select-search input:focus-visible { outline: 2px solid var(--blue); outline-offset: -1px; }
+.settings-select-searchable-menu > .settings-select-listbox { display: grid; min-width: 0; min-height: 0; gap: .12rem; overflow-y: auto; overscroll-behavior: contain; }
 .settings-select-group { display: grid; min-width: 0; gap: .12rem; }
 .settings-select-group + .settings-select-group { margin-top: .2rem; padding-top: .3rem; border-top: 1px solid var(--surface-1); }
 .settings-select-group > small { padding: .3rem .48rem .16rem; color: var(--overlay-1); font: 800 .56rem var(--font-mono); letter-spacing: .1em; text-transform: uppercase; }

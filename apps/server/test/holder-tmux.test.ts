@@ -3,7 +3,11 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+
+const { hostPiRuntime } = vi.hoisted(() => ({ hostPiRuntime: vi.fn() }));
+vi.mock('../src/adapters/pi-runtime.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/adapters/pi-runtime.js')>()), hostPiRuntime }));
 import { DiscoveryService } from '../src/discovery/service.js';
 import { LaunchService } from '../src/launch/service.js';
 import { TmuxAdapter } from '../src/tmux/adapter.js';
@@ -42,7 +46,16 @@ const tmuxSocketsWork = (() => {
 
 const roots: Array<{ root: string; socket: string }> = [];
 const channels: LineChannel[] = [];
+const hostTmuxDirectory = process.env.RAC_HOST_TMUX_DIR;
+const hostRepository = process.env.RAC_HOST_REPOSITORY;
+const hostInteractiveShell = process.env.RAC_HOST_INTERACTIVE_SHELL;
+const hostPath = process.env.RAC_HOST_PATH;
 afterEach(async () => {
+  hostPiRuntime.mockReset();
+  if (hostTmuxDirectory === undefined) delete process.env.RAC_HOST_TMUX_DIR; else process.env.RAC_HOST_TMUX_DIR = hostTmuxDirectory;
+  if (hostRepository === undefined) delete process.env.RAC_HOST_REPOSITORY; else process.env.RAC_HOST_REPOSITORY = hostRepository;
+  if (hostInteractiveShell === undefined) delete process.env.RAC_HOST_INTERACTIVE_SHELL; else process.env.RAC_HOST_INTERACTIVE_SHELL = hostInteractiveShell;
+  if (hostPath === undefined) delete process.env.RAC_HOST_PATH; else process.env.RAC_HOST_PATH = hostPath;
   for (const channel of channels.splice(0)) channel.close();
   for (const { root, socket } of roots.splice(0)) {
     await run(tmux, ['-S', socket, 'kill-server']).catch(() => undefined);
@@ -66,6 +79,26 @@ async function workspace() {
   const panes = new TmuxAdapter();
   const launch = new LaunchService(testConfig(), socketFinder([socket]), panes, undefined, undefined, () => [], () => new Set(), async () => ({ socket, session: 'work' }), join(root, 'private'));
   return { root, place, socket, socketPath, launch, panes };
+}
+
+// a host-bridge holder uses the same throwaway tmux server and shared path on both sides
+async function bridgedWorkspace() {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-holder-bridge-')));
+  const socketPath = join(root, 'default');
+  roots.push({ root, socket: socketPath });
+  process.env.RAC_HOST_TMUX_DIR = root;
+  process.env.RAC_HOST_REPOSITORY = root;
+  process.env.RAC_HOST_INTERACTIVE_SHELL = loginShell!;
+  process.env.RAC_HOST_PATH = process.env.PATH ?? '/usr/bin:/bin';
+  const holder = fileURLToPath(new URL('../src/transports/holder.ts', import.meta.url));
+  hostPiRuntime.mockReturnValue({ node: process.execPath, cli: '/unused/pi.js', extension: '/unused/extension.js', holder, command: '/unused/command.js' });
+  const place = adhocScratchPlace(root);
+  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-x', '80', '-y', '24', '-c', root, 'cat'])).code).toBe(0);
+  expect((await run(tmux, ['-S', socketPath, 'set-option', '-t', 'work', '@rac_place', place.id])).code).toBe(0);
+  const socket: SocketRef = { fingerprint: 'host-work', path: socketPath, device: 0, inode: 0 };
+  const panes = new TmuxAdapter();
+  const launch = new LaunchService(testConfig(), socketFinder([socket]), panes, undefined, undefined, () => [], () => new Set(), async () => ({ socket, session: 'work' }), join(root, 'container-private'));
+  return { root, place, socketPath, launch };
 }
 
 const nextLine = (lines: string[], channel: LineChannel) => new Promise<string>((resolve, reject) => {
@@ -162,5 +195,27 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined)('the holder in a W
     const agents = await discovery.refresh(true);
     expect(agents.map(agent => agent.pane?.paneId)).not.toContain(holder!.pane);
     expect(agents).toHaveLength(1);
+  });
+
+  it('replays through a bridged shared socket and closes only its exact tagged window', async () => {
+    const { root, place, socketPath, launch } = await bridgedWorkspace();
+    const hostHome = join(root, 'host-home');
+    const spec = echo(250);
+    spec.args[1] = `process.stdout.write('home=' + process.env.HOME + '\\n'); ${spec.args[1]}`;
+    const holder = await launch.openHolderWindow(place, 'agent-host', { ...spec, env: { HOME: hostHome } });
+    expect(holder).toMatchObject({ host: true, tmuxSocket: socketPath, socket: join(root, '.data/structured/holders/agent-host.sock') });
+
+    const first = await connect(holder!.socket);
+    expect(await nextLine(first.lines, first.channel)).toBe(`home=${hostHome}`);
+    first.channel.send('before deploy');
+    first.channel.close();
+    await new Promise(resolve => setTimeout(resolve, 450));
+    const attached = await connect(holder!.socket, 1);
+    expect(await nextLine(attached.lines, attached.channel)).toBe('before deploy');
+
+    await launch.closeHolder(holder!);
+    expect(await launch.holderRunning(holder!)).toBe(false);
+    const remaining = await run(tmux, ['-S', socketPath, 'list-panes', '-a', '-F', '#{pane_current_command}']);
+    expect(remaining.stdout).toContain('cat');
   });
 });

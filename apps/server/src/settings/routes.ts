@@ -1,11 +1,12 @@
 import argon2 from 'argon2';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Session } from '../auth/service.js';
+import type { ConductorModelSource } from './conductor-models.js';
 import { SettingsError, type SettingsInput } from './contracts.js';
 import { safePath } from './patches.js';
 import type { SettingsService } from './service.js';
 
-export type SettingsRoutes = { service: Pick<SettingsService, 'snapshot' | 'status' | 'validate' | 'save' | 'reveal' | 'remask' | 'restart' | 'operation' | 'cloudflareStatus' | 'configureCloudflare' | 'tunnelHealth' | 'reconnectCloudflare'>; session: (request: FastifyRequest, mutation?: boolean) => Session; controlled: (request: FastifyRequest, mutation?: boolean) => Session; isController: (sessionId: string) => boolean };
+export type SettingsRoutes = { service: Pick<SettingsService, 'snapshot' | 'status' | 'validate' | 'save' | 'reveal' | 'remask' | 'restart' | 'operation' | 'cloudflareStatus' | 'configureCloudflare' | 'tunnelHealth' | 'reconnectCloudflare'>; conductorModels: ConductorModelSource; session: (request: FastifyRequest, mutation?: boolean) => Session; controlled: (request: FastifyRequest, mutation?: boolean) => Session; isController: (sessionId: string) => boolean };
 // require one bounded exact JSON body
 function body(request: FastifyRequest, keys?: string[]): Record<string, unknown> {
   const value = request.body;
@@ -38,6 +39,7 @@ export async function registerSettingsRoutes(app: FastifyInstance, deps: Setting
     if (controller && !deps.isController(session.id)) throw new SettingsError('another_client_is_active', 423);
     return snapshot;
   }));
+  app.get('/api/settings/conductor/models', endpoint(async request => { deps.session(request); return { models: await deps.conductorModels.list() }; }));
   app.get('/api/settings/status', endpoint(async request => { deps.session(request); return await deps.service.status(); }));
   app.get('/api/settings/cloudflare', endpoint(async request => { deps.session(request); return await deps.service.cloudflareStatus(); }));
   app.get('/api/settings/cloudflare/health', endpoint(async request => { deps.session(request); return await deps.service.tunnelHealth(); }));

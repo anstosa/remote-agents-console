@@ -17,6 +17,7 @@ import { conductorOptInScopes, conductorScopes, type IntegrationScope } from '..
 import { resolveReviewConfig, reviewConfigSchema, type ResolvedReviewConfig } from '../review-runs/config.js';
 import { agentModel } from '../launch/agent-choice.js';
 import { piEfforts } from '../transports/pi.js';
+import { hostPiRuntime, verifyHostPiNode } from '../adapters/pi-runtime.js';
 import { parseKeysConfig, type KeysConfig } from './keys.js';
 import { applicationButtonsSchema, countButtonDefinitions, projectButtonsSchema, type ButtonSlots } from './buttons.js';
 import { googleCalendarConfigSchema, type GoogleCalendarConfig } from '../google-calendar/contracts.js';
@@ -85,7 +86,7 @@ const adapterProgram = z.string().min(1).max(4096).startsWith('/', 'adapter prog
 const adapterArgument = z.string().max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden');
 // the Conductor runs Pi, which must be enabled, on an Allowed model, in a directory Project; by
 // default it gets every scope but `admin:dangerous` and `github:read`, which the operator names
-function conductorConfig({ project, scopes, ...conductor }: z.output<typeof conductorSchema>, projects: readonly Project[], adapters: AdapterConfigs): ConductorConfig {
+function conductorConfig({ project, scopes, enabled: _enabled, ...conductor }: z.output<typeof conductorSchema>, projects: readonly Project[], adapters: AdapterConfigs): ConductorConfig {
   const adapter = adapters[conductor.kind];
   if (adapter?.launchable !== true) throw new Error(`conductor: adapters.${conductor.kind} must be configured and launchable${adapter?.unavailableReason === undefined ? '' : ` (${adapter.unavailableReason})`}`);
   if (!(adapter.allowedModels ?? []).some(entry => entry.model === conductor.model)) throw new Error(`conductor: ${conductor.model} is not an Allowed model (adapters.${conductor.kind}.allowedModels)`);
@@ -93,6 +94,8 @@ function conductorConfig({ project, scopes, ...conductor }: z.output<typeof cond
   // a Project whose folder is missing leaves the Conductor off, with a notice, rather than stopping the console
   const unavailable = named?.available === false ? { unavailable: named.unavailableReason ?? `${project} is unavailable` } : {};
   if (named === undefined || named.available && named.mode !== 'directory') throw new Error(`conductor: ${project} must name a directory Project`);
+  // Pi's host cwd and conversation store must use the same path as the console
+  if (process.env.RAC_HOST_TMUX_DIR !== undefined && named.available && named.hostPath !== undefined && named.hostPath !== named.identity) throw new Error('conductor: Pi host bridge requires a same-path directory Project mount');
   return { ...conductor, projectId: project, ...unavailable, scopes: scopes ?? conductorScopes.filter(scope => !conductorOptInScopes.includes(scope)) };
 }
 const adapterEnvName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u, 'invalid environment variable name');
@@ -136,6 +139,7 @@ const integrationFeatures = z.object({
 // The Conductor (ADR 0018): one always-running Sandboxed Agent in a directory Project, with the
 // console's MCP tools its scopes allow. Only Pi can host it so far.
 const conductorSchema = z.object({
+  enabled: z.boolean().default(true),
   kind: z.literal('pi'),
   project: z.string().min(1).max(80),
   model: agentModel,
@@ -391,7 +395,7 @@ type ParsedAdapters = z.output<typeof adaptersSchema>;
 // (unless bridged), and warn about operator arguments the Adapter reserves.
 async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean, warn: (message: string) => void, sandbox?: z.output<typeof sandboxLists>): Promise<AdapterConfigs> {
   const configs: AdapterConfigs = {};
-  if (parsed.pi !== undefined) configs.pi = piConfig(parsed.pi, warn, sandbox);
+  if (parsed.pi !== undefined) configs.pi = await piConfig(parsed.pi, warn, sandbox);
   for (const kind of agentKinds) {
     const entry = kind === 'pi' ? undefined : parsed[kind] as z.output<typeof adapterEntry> | undefined;
     if (entry === undefined) continue;
@@ -443,15 +447,23 @@ async function resolveAdapters(parsed: ParsedAdapters, checkExecutables: boolean
   warnCrossedPrograms(parsed, warn);
   return configs;
 }
-// Pi runs the console's own pinned copy under the console's own Node (the Pi Adapter names the
-// CLI), which only a console driving the host's tmux directly can start: the host bridge's tmux
-// runs on the host, where the container's copy is not
-function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message: string) => void, shared?: z.output<typeof sandboxLists>): AdapterLaunchConfig {
+// a bridged Pi uses the host's matching pinned build, never a container-only executable
+async function piConfig(entry: NonNullable<ParsedAdapters['pi']>, warn: (message: string) => void, shared?: z.output<typeof sandboxLists>): Promise<AdapterLaunchConfig> {
   const config: AdapterLaunchConfig = { program: process.execPath, args: entry.args ?? [], env: entry.env ?? {}, launchable: true, ...(entry.setup === undefined ? {} : { setup: entry.setup }), ...(entry.teardown === undefined ? {} : { teardown: entry.teardown }), ...(entry.allowedModels === undefined || entry.allowedModels.length === 0 ? {} : { allowedModels: entry.allowedModels }), sandbox: sandboxSettings(shared, entry.sandbox) };
+  // native Pi keeps its existing local runtime and lifecycle hooks
   if (process.env.RAC_HOST_TMUX_DIR === undefined) return config;
-  config.launchable = false;
-  config.unavailableReason = 'Pi cannot launch under the host bridge: the console runs its pinned Pi itself';
-  warn(`adapters.pi: ${config.unavailableReason}`);
+  try {
+    // lifecycle commands are not yet routed through host structured transport
+    if (entry.setup !== undefined || entry.teardown !== undefined) throw new Error('Pi host bridge does not support setup or teardown hooks');
+    // the sandbox must protect the host user's credentials, not the container user's
+    if (entry.env?.HOME === undefined || !isAbsolute(entry.env.HOME)) throw new Error('Pi host bridge requires an absolute adapters.pi.env.HOME for the host account');
+    config.program = hostPiRuntime()!.node;
+    await verifyHostPiNode(config.program);
+  } catch (error) {
+    config.launchable = false;
+    config.unavailableReason = error instanceof Error ? error.message : 'Pi host bridge runtime is unavailable';
+    warn(`adapters.pi: ${config.unavailableReason}`);
+  }
   return config;
 }
 // a kind's sandbox settings: the shared lists, then the kind's own, each without repeats
@@ -502,6 +514,7 @@ export async function validateConfig(input: unknown, options: ValidateConfigOpti
     else { if (identities.has(project.identity)) throw new Error('duplicate project identity'); identities.add(project.identity); }
     projects.push(project);
   }
-  const conductor = parsed.conductor === undefined ? undefined : conductorConfig(parsed.conductor, projects, adapters);
+  // retain disabled source configuration without exposing a running Conductor or its tools
+  const conductor = parsed.conductor === undefined || parsed.conductor.enabled === false ? undefined : conductorConfig(parsed.conductor, projects, adapters);
   return { listen: { host: parsed.listen.host, port: parsed.listen.port }, name: parsed.name, ...(parsed.icon === undefined ? {} : { icon: parsed.icon }), publicOrigin, remoteServers, trustedProxyIps: new Set(parsed.proxy.trustedSourceIps), pollIntervalMs: parsed.tmux.pollIntervalMs, ...(parsed.defaultAgent === undefined ? {} : { defaultAgent: parsed.defaultAgent }), ...(parsed.scratchDirectory === undefined ? {} : { scratchDirectory: resolve(parsed.scratchDirectory) }), ...(parsed.editor === undefined ? {} : { editor: parsed.editor }), ...(keys === undefined ? {} : { keys }), adapters, integrations: integrationConfigForRemotes(parsed.integrations, remoteServers), ...(conductor === undefined ? {} : { conductor }), googleCalendar: parsed.googleCalendar, review, buttons: parsed.buttons, projects };
 }

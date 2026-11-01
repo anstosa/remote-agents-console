@@ -8,6 +8,7 @@ import { environment, envKey, partitionEnvironment, patchEnvironment, restoreMan
 import { applicationSettingsSchema, installationSettingsPresentationSchema, settingsSchema } from '../src/settings/schema.js';
 import { applicationHash } from '../src/settings/proof.js';
 import { installationSettingsSchema } from '../src/settings/validation.js';
+import { conductorOptInScopes, conductorScopes } from '../src/integrations/auth/types.js';
 
 describe('settings environment source model', () => {
   // preserve dotenv literal semantics without mutating process.env
@@ -219,6 +220,33 @@ describe('settings catalog classification', () => {
 });
 
 describe('settings schema metadata', () => {
+  // string literals expose only the runtime-supported dropdown choices
+  it('presents literal strings as single-option enums', () => {
+    expect(settingsSchema(z.literal('pi'))).toEqual({ type: 'enum', options: ['pi'] });
+    expect(settingsSchema(z.literal('pi').optional())).toEqual({ type: 'enum', options: ['pi'], optional: true });
+  });
+
+  // defaulted scopes describe runtime omission without granting dangerous access
+  it('describes Conductor home, model, effort and its complete fixed scope set', () => {
+    const conductor = applicationSettingsSchema().properties!.conductor!;
+    expect(conductor.properties!.kind).toMatchObject({ type: 'enum', options: ['pi'] });
+    expect(conductor.properties!.project!.description).toMatch(/AGENTS\.md/u);
+    expect(conductor.properties!.project!.description).toMatch(/does not limit/u);
+    expect(conductor.properties!.model!.description).toMatch(/API/u);
+    expect(conductor.properties!.enabled).toMatchObject({ type: 'boolean', optional: true, default: true });
+    expect(conductor.properties!.effort).toMatchObject({ type: 'enum', optional: true, placeholder: 'Default' });
+    expect(conductor.properties!.scopes).toMatchObject({ type: 'array', optional: true, default: conductorScopes.filter(scope => !conductorOptInScopes.includes(scope)), items: { type: 'enum', options: [...conductorScopes] } });
+    expect(conductor.properties!.scopes!.description).toBeUndefined();
+    expect(Object.hasOwn(conductor.properties!.effort!, 'default')).toBe(false);
+    expect(conductor.default).toBeUndefined();
+    // presentation defaults must not become authored permissions or effort
+    const input = { kind: 'pi', project: 'home', model: 'openai/gpt-6.1-sol' };
+    const parsed = sourceSchema.parse({ publicOrigin: 'https://agents.example.com', conductor: input }).conductor;
+    expect(parsed).not.toHaveProperty('scopes');
+    expect(parsed).not.toHaveProperty('effort');
+    expect(sourceSchema.parse({ publicOrigin: 'https://agents.example.com', conductor: { ...input, scopes: [] } }).conductor?.scopes).toEqual([]);
+  });
+
   // describe every nested application configuration category from the runtime schema
   it('preserves nested object, array, record, enum, union, optional, and default metadata', () => {
     const schema = settingsSchema(sourceSchema);

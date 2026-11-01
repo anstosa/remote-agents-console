@@ -15,6 +15,7 @@ const pageHeaders: Readonly<Record<string, PageHeaderCopy>> = {
   interface: { eyebrow: 'Application settings', description: 'Customize this browser’s appearance and configure application-wide buttons.' },
   app: { eyebrow: 'Server settings', description: 'Configure network access, integrations, and remote servers.' },
   agents: { eyebrow: 'Server settings', description: 'Configure agent programs, launch commands, and credentials.' },
+  conductor: { eyebrow: 'Server settings', description: 'Configure Conductor’s home Project, model, effort, worker limits, and permission scopes.' },
   projects: { eyebrow: 'Server settings', description: 'Configure repositories, worktrees, project-specific commands, and this browser’s launcher behavior.' },
   reviews: { eyebrow: 'Server settings', description: 'Configure Review tours and optional AI code-review presets.' },
   tmux: { eyebrow: 'Server settings', description: 'Configure terminal discovery, polling, and the host tmux wrapper.' },

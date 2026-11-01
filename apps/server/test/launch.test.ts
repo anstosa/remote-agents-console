@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { run } = vi.hoisted(() => ({ run: vi.fn() }));
+const { hostPiRuntime, run } = vi.hoisted(() => ({ hostPiRuntime: vi.fn(), run: vi.fn() }));
 // mock only the process spawner; keep the module's other helpers real
 vi.mock('../src/tmux/command.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/tmux/command.js')>()), run }));
+vi.mock('../src/adapters/pi-runtime.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../src/adapters/pi-runtime.js')>()), hostPiRuntime }));
 
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -19,6 +20,7 @@ import { terminalColorFallbackArgv } from '../src/tmux/terminal-colors.js';
 import type { SocketRef, Worktree } from '../src/domain/models.js';
 import { testWorktree } from './helpers/config.js';
 import { worktreePlace } from '../src/places/places.js';
+import { fileOperations, pathRefusal, sessionPolicy, type SandboxPolicy } from '../src/adapters/pi-sandbox.js';
 
 // a kind's interactive Review run arguments and dropped flags, from its Adapter
 const reviewRunArgs = (kind: ReviewAgentKind, run: ReviewRunSettings & { readDirectory?: string }) => reviewRunsFor(kind).interactive.args(run);
@@ -36,13 +38,15 @@ const cora = (over: Partial<Worktree> = {}) => testWorktree({ id: 'cora', projec
 
 const codexBin = process.env.RAC_CODEX_BIN;
 const hostTmuxDirectory = process.env.RAC_HOST_TMUX_DIR;
+const hostRepository = process.env.RAC_HOST_REPOSITORY;
 const hostCodexBin = process.env.RAC_HOST_CODEX_BIN;
+const hostNodeBin = process.env.RAC_HOST_NODE_BIN;
 const hostInteractiveShell = process.env.RAC_HOST_INTERACTIVE_SHELL;
 const hostPath = process.env.RAC_HOST_PATH;
 const adapterFilesDir = process.env.RAC_ADAPTER_FILES_DIR;
 const tempDirs: string[] = [];
 // default external tmux operations to success
-beforeEach(() => { run.mockResolvedValue({ code: 0, stdout: '', stderr: '' }); });
+beforeEach(() => { hostPiRuntime.mockReset(); hostPiRuntime.mockReturnValue(undefined); run.mockResolvedValue({ code: 0, stdout: '', stderr: '' }); });
 afterEach(async () => {
   run.mockReset();
   // restore process-wide launch overrides
@@ -50,8 +54,13 @@ afterEach(async () => {
   else process.env.RAC_CODEX_BIN = codexBin;
   if (hostTmuxDirectory === undefined) delete process.env.RAC_HOST_TMUX_DIR;
   else process.env.RAC_HOST_TMUX_DIR = hostTmuxDirectory;
+  if (hostRepository === undefined) delete process.env.RAC_HOST_REPOSITORY;
+  else process.env.RAC_HOST_REPOSITORY = hostRepository;
   if (hostCodexBin === undefined) delete process.env.RAC_HOST_CODEX_BIN;
   else process.env.RAC_HOST_CODEX_BIN = hostCodexBin;
+  // keep host runtime overrides isolated between cases
+  if (hostNodeBin === undefined) delete process.env.RAC_HOST_NODE_BIN;
+  else process.env.RAC_HOST_NODE_BIN = hostNodeBin;
   if (hostInteractiveShell === undefined) delete process.env.RAC_HOST_INTERACTIVE_SHELL;
   else process.env.RAC_HOST_INTERACTIVE_SHELL = hostInteractiveShell;
   if (hostPath === undefined) delete process.env.RAC_HOST_PATH;
@@ -1627,5 +1636,106 @@ describe('the console\'s private directory', () => {
     await chmod(open, 0o777);
     await expect(new LaunchService(codex, undefined, undefined, undefined, undefined, () => [cora()], undefined, undefined, open).openHolderWindow(worktreePlace(cora()), 'agent-1', holder)).rejects.toThrow(/not private/);
     expect(existsSync(join(open, 'holders'))).toBe(false);
+  });
+
+  it('opens a bridged holder through the host runtime and keeps its socket in shared private state', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'rac-private-'));
+    tempDirs.push(parent);
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    process.env.RAC_HOST_REPOSITORY = parent;
+    process.env.RAC_HOST_INTERACTIVE_SHELL = '/usr/bin/zsh';
+    process.env.RAC_HOST_PATH = '/host/bin:/usr/bin';
+    hostPiRuntime.mockReturnValue({ node: '/host/bin/node', cli: '/host/pi.js', extension: '/host/extension.js', holder: '/host/holder.js', command: '/host/command.js' });
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%9' : '', stderr: '' }));
+    const worktree = cora({ path: '/host/cora', identity: '/host/cora', hostPath: undefined });
+    const service = new LaunchService(codex, undefined, undefined, undefined, undefined, () => [worktree]);
+
+    const opened = await service.openHolderWindow(worktreePlace(worktree), 'agent-1', { program: '/host/bin/node', args: ['/host/pi.js'], env: { HOME: '/home/ubuntu', RAC_LAUNCH_NONCE: 'n1' } });
+
+    expect(opened).toMatchObject({
+      agentId: 'agent-1',
+      host: true,
+      pane: '%9',
+      socket: join(parent, '.data/structured/holders/agent-1.sock'),
+      tmuxSocket: '/host-tmux/default'
+    });
+    expect((await stat(join(parent, '.data/structured'))).mode & 0o777).toBe(0o700);
+    expect((await stat(join(parent, '.data/structured/holders'))).mode & 0o777).toBe(0o700);
+    const created = run.mock.calls.find(call => (call[1] as string[]).includes('new-session'))?.[1] as string[];
+    expect(created.slice(0, 8)).toEqual(['-S', '/host-tmux/default', 'new-session', '-d', '-s', expect.any(String), '-c', '/host/cora']);
+    const respawned = run.mock.calls.find(call => (call[1] as string[]).includes('respawn-pane'))?.[1] as string[];
+    expect(respawned).toEqual(expect.arrayContaining(['-S', '/host-tmux/default', 'respawn-pane', '-k', '-t', '%9', '-c', '/host/cora', '--']));
+    expect(respawned.join(' ')).toContain('/host/bin/node /host/holder.js');
+    expect(respawned.join(' ')).toContain('/host/bin/node /host/pi.js');
+    expect(respawned.at(-1)).toContain('export PATH=');
+    expect(respawned.at(-1)).toContain("export HOME='/home/ubuntu'");
+  });
+
+  it('refuses a bridged holder whose console and host paths differ', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    const worktree = cora({ hostPath: '/host/cora' });
+    const opened = await new LaunchService(codex, undefined, undefined, undefined, undefined, () => [worktree]).openHolderWindow(worktreePlace(worktree), 'agent-2', holder);
+    expect(opened).toBeUndefined();
+    expect(hostPiRuntime).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('uses the exact configured host socket for an old holder record missing bridge metadata', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('display-message') ? 'holder agent-old 0 ' : '', stderr: '' }));
+    const service = new LaunchService(codex);
+
+    await service.closeHolder({ agentId: 'agent-old', socket: '/shared/agent-old.sock', pane: '%8' });
+
+    expect(run.mock.calls.map(call => call[1])).toEqual([
+      expect.arrayContaining(['-S', '/host-tmux/default', 'display-message', '-p', '-t', '%8']),
+      ['-S', '/host-tmux/default', 'kill-window', '-t', '%8']
+    ]);
+  });
+});
+
+describe('bridged structured sandbox boundaries', () => {
+  // a writable Place must not replace code a later host holder executes
+  it('protects the host Node executable and its directory inside a writable Place', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-host-node-policy-'));
+    tempDirs.push(root);
+    const place = join(root, 'place');
+    const bin = join(place, 'runtime/bin');
+    const node = join(bin, 'node');
+    await mkdir(bin, { recursive: true });
+    await writeFile(node, 'trusted runtime');
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    process.env.RAC_HOST_REPOSITORY = join(root, 'console');
+    process.env.RAC_HOST_NODE_BIN = node;
+    process.env.RAC_ADAPTER_FILES_DIR = join(root, 'rendered');
+    const sandbox = { allowedDomains: [], deniedDomains: [], allowWrite: [place], denyWrite: [], denyRead: [], env: [] };
+    const config = { ...codex, adapters: { pi: { program: node, args: [], env: {}, launchable: true, sandbox } }, projects: [] } as never;
+    const policyPath = (await new LaunchService(config).adapterFiles('pi'))!['sandbox.json']!;
+    const rendered = JSON.parse(await readFile(policyPath, 'utf8')) as SandboxPolicy;
+    const policy = sessionPolicy(rendered, { cwd: place, stateDir: join(root, 'state'), tempDir: join(root, 'tmp') });
+
+    expect(policy.filesystem.denyWrite).toEqual(expect.arrayContaining([node, bin]));
+    expect(pathRefusal('write', { path: node }, place, policy)).toMatch(/protected/u);
+    expect(pathRefusal('write', { path: join(bin, 'replacement') }, place, policy)).toMatch(/protected/u);
+    await expect(fileOperations(() => ({ policy, cwd: place })).writeFile(node, 'untrusted')).rejects.toThrow(/protected/u);
+    expect(await readFile(node, 'utf8')).toBe('trusted runtime');
+    expect(pathRefusal('write', { path: join(place, 'ordinary.txt') }, place, policy)).toBeUndefined();
+  });
+
+  it('protects host state and runtime aliases as well as container paths', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rac-host-policy-'));
+    tempDirs.push(root);
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    process.env.RAC_HOST_REPOSITORY = root;
+    process.env.RAC_ADAPTER_FILES_DIR = join(root, 'rendered');
+    const sandbox = { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
+    const config = { ...codex, listen: { host: '127.0.0.1', port: 8787 }, publicOrigin: new URL('https://agents.example.com'), adapters: { pi: { program: '/host/node', args: [], env: {}, launchable: true, sandbox } }, projects: [] } as never;
+
+    const policyPath = (await new LaunchService(config).adapterFiles('pi'))!['sandbox.json']!;
+    const policy = JSON.parse(await readFile(policyPath, 'utf8')) as { filesystem: { denyRead: string[]; denyWrite: string[] }; repositories: string[] };
+
+    expect(policy.filesystem.denyRead).toEqual(expect.arrayContaining([join(root, '.data'), join(root, '.env')]));
+    expect(policy.filesystem.denyWrite).toEqual(expect.arrayContaining([join(root, 'apps/server/dist'), join(root, 'node_modules'), join(root, 'apps/server/node_modules')]));
+    expect(policy.repositories).toContain(root);
   });
 });

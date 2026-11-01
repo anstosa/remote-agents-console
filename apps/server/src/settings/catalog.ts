@@ -127,7 +127,7 @@ const environmentDescriptions = {
   RAC_HOST_TMUX_SOURCE: 'Host tmux socket directory prefix used to identify sockets listed by host procfs.',
   RAC_HOST_UNIX_SOCKETS: 'Host procfs unix-socket table used to discover tmux sockets.',
   RAC_HOST_UID: 'Numeric host user ID used to validate host processes, sockets, and Files access.',
-  RAC_HOST_NODE_BIN: 'Host-visible Node.js executable used to run the host Files broker.',
+  RAC_HOST_NODE_BIN: 'Host-visible Node.js executable used to run the host Files broker and pinned Pi holders.',
   RAC_HOST_CODEX_BIN: 'Host-visible Codex executable used by the server update advisor.',
   RAC_HOST_INTERACTIVE_SHELL: 'Absolute host zsh, bash, or fish executable used for host-tmux agent sessions.',
   RAC_HOST_PATH: 'Complete host PATH exported before RAC runs host agent, update, and stack commands.',

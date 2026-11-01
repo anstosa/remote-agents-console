@@ -15,11 +15,17 @@ const threeWayOptions: SettingsSelectOption[] = [
   { value: 'gamma', label: 'Gamma', disabled: true, icon: choiceIcon('M19 7a7 7 0 1 0 0 10') }
 ];
 
+const searchableOptions: SettingsSelectOption[] = [
+  { value: 'gpt-5.1-codex', label: 'Codex', group: 'OpenAI' },
+  { value: 'claude-opus', label: 'Opus', group: 'Anthropic' }
+];
+
 // mount focused selector states without application settings dependencies
 function SettingsSelectControlFixture() {
   const [twoWay, setTwoWay] = useState('left');
   const [unknown, setUnknown] = useState('legacy');
   const [threeWay, setThreeWay] = useState('beta');
+  const [searchable, setSearchable] = useState('gpt-5.1-codex');
   const [changes, setChanges] = useState<string[]>([]);
 
   // record only explicit selector callbacks
@@ -37,6 +43,9 @@ function SettingsSelectControlFixture() {
     <label>Locked<SettingsSelect label="Locked mode" value="left" options={twoWayOptions} disabled onChange={value => { /* expose an unexpected locked callback */ change('locked', value, () => { /* keep the fixed fixture value */ }); }} /></label>
     <label>Three way<SettingsSelect label="Three-way mode" value={threeWay} options={threeWayOptions} onChange={value => { /* record an explicit dropdown choice */ change('three-way', value, setThreeWay); }} /></label>
     <output aria-label="Three-way value">{threeWay}</output>
+    <label>Searchable<SettingsSelect label="Searchable model" value={searchable} options={searchableOptions} searchable onChange={value => { /* record an explicit searchable choice */ change('searchable', value, setSearchable); }} /></label>
+    <output aria-label="Searchable value">{searchable}</output>
+    <label>Locked searchable<SettingsSelect label="Locked searchable model" value="gpt-5.1-codex" options={searchableOptions} searchable disabled onChange={value => { /* expose an unexpected locked searchable callback */ change('locked-searchable', value, () => { /* keep the fixed fixture value */ }); }} /></label>
     <output aria-label="Change log">{changes.join(',')}</output>
   </main>;
 }

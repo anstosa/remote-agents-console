@@ -50,6 +50,7 @@ const applicationDedicatedPaths = new Set([
   'keys',
   'scratchDirectory',
   'adapters',
+  'conductor',
   'tmux',
   'projects',
   'buttons',
@@ -153,6 +154,8 @@ function visitSchema(index: FieldIndex, pageId: string, schema: SettingsSchema, 
 
   // index existing array entries without copying their values into labels
   if (schema.type === 'array') {
+    // fixed checkbox sets have no numbered entry editors to navigate to
+    if (schema.items?.type === 'enum') return;
     const values = Array.isArray(effectiveValue) ? effectiveValue : [];
     const entrySchema = schema.items ?? { type: 'json' };
     const entryName = itemLabel(label, schema);
@@ -285,6 +288,14 @@ function addApplicationFields(index: FieldIndex, source: SettingsSource | undefi
   // route the unchanged application adapter subtree to its dedicated page
   if (adapters !== undefined) visitSchema(index, 'agents', adapters, childValue(source.value, 'adapters'), ['adapters'], [], {
     keywordFor: path => applicationEnvironmentAliases[path.join('.')]
+  });
+
+  const conductor = baseSchema.properties?.conductor;
+  // keep omitted Conductor fields searchable without creating configuration
+  if (conductor !== undefined && !options.rawSourceIds.has(source.id)) visitSchema(index, 'conductor', conductor, childValue(source.value, 'conductor'), ['conductor'], [], {
+    forceAbsentChildren: true,
+    // omit the fixed implementation kind while retaining future choices
+    skip: path => path.length === 2 && path[0] === 'conductor' && path[1] === 'kind' && conductor.properties?.kind?.options?.length === 1
   });
 
   const projects = baseSchema.properties?.projects;

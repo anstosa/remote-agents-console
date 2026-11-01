@@ -3303,7 +3303,8 @@ test("moves structured TMUX settings into one Application tab and saves original
   );
   expect(labels.indexOf("Projects")).toBe(labels.indexOf("Interface") + 1);
   expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
-  expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Reviews") + 1);
+  expect(labels.indexOf("Conductor")).toBe(labels.indexOf("Reviews") + 1);
+  expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Conductor") + 1);
   expect(labels.indexOf("Storage")).toBe(labels.indexOf("TMUX") + 1);
   expect(labels.indexOf("Agents")).toBe(labels.indexOf("Storage") + 1);
   await expect(
@@ -4831,7 +4832,8 @@ test("moves Projects into its own Application section on desktop and mobile", as
   );
   expect(labels.indexOf("Projects")).toBe(labels.indexOf("Interface") + 1);
   expect(labels.indexOf("Reviews")).toBe(labels.indexOf("Projects") + 1);
-  expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Reviews") + 1);
+  expect(labels.indexOf("Conductor")).toBe(labels.indexOf("Reviews") + 1);
+  expect(labels.indexOf("TMUX")).toBe(labels.indexOf("Conductor") + 1);
   expect(labels.indexOf("Storage")).toBe(labels.indexOf("TMUX") + 1);
   expect(labels.indexOf("Agents")).toBe(labels.indexOf("Storage") + 1);
 

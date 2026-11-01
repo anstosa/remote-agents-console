@@ -87,3 +87,79 @@ test('keeps three-choice selectors as icon-capable dropdowns', async ({ page }) 
   await expect(page.getByRole('status', { name: 'Three-way value', exact: true })).toHaveText('alpha');
   await expect(page.getByRole('status', { name: 'Change log', exact: true })).toHaveText('three-way:alpha');
 });
+
+test('filters searchable two-choice dropdowns without committing search text', async ({ page }) => {
+  await mountSettingsSelectControls(page);
+  const control = page.getByRole('combobox', { name: 'Searchable model', exact: true });
+  const value = page.getByRole('status', { name: 'Searchable value', exact: true });
+  const changes = page.getByRole('status', { name: 'Change log', exact: true });
+
+  await expect(page.getByRole('switch', { name: 'Searchable model', exact: true })).toHaveCount(0);
+  await expect(control).toHaveAttribute('data-value', 'gpt-5.1-codex');
+  await expect(control.locator('.settings-select-current-label')).toHaveText('Codex');
+  await control.click();
+
+  const search = page.getByRole('searchbox', { name: 'Search Searchable model options', exact: true });
+  const options = page.getByRole('listbox', { name: 'Searchable model options', exact: true });
+  await expect(search).toBeFocused();
+
+  await search.fill('ANTHROPIC');
+  await expect(options.getByRole('option')).toHaveCount(1);
+  await expect(options.getByRole('option')).toHaveText(/Opus/u);
+  await expect(options.getByRole('group', { name: 'Anthropic', exact: true })).toBeVisible();
+
+  await search.fill('gpt-5.1');
+  await expect(options.getByRole('option')).toHaveCount(1);
+  await expect(options.getByRole('option')).toHaveAttribute('data-value', 'gpt-5.1-codex');
+
+  await search.fill('codex');
+  await expect(options.getByRole('option')).toHaveCount(1);
+  await expect(options.getByRole('option')).toHaveText(/Codex/u);
+
+  await search.fill('missing model');
+  await expect(options.getByRole('option')).toHaveCount(0);
+  await expect(options.getByRole('status')).toHaveText('No matching options');
+  await expect(value).toHaveText('gpt-5.1-codex');
+  await expect(changes).toHaveText('');
+
+  await search.press('Escape');
+  await expect(options).toHaveCount(0);
+  await expect(control).toBeFocused();
+  await expect(value).toHaveText('gpt-5.1-codex');
+  await expect(changes).toHaveText('');
+});
+
+test('commits searchable choices only through keyboard selection and keeps disabled controls read-only', async ({ page }) => {
+  await mountSettingsSelectControls(page);
+  const control = page.getByRole('combobox', { name: 'Searchable model', exact: true });
+  const locked = page.getByRole('combobox', { name: 'Locked searchable model', exact: true });
+  const value = page.getByRole('status', { name: 'Searchable value', exact: true });
+  const changes = page.getByRole('status', { name: 'Change log', exact: true });
+
+  await expect(locked).toBeDisabled();
+  await expect(page.getByRole('switch', { name: 'Locked searchable model', exact: true })).toHaveCount(0);
+  await locked.click({ force: true });
+  await expect(page.getByRole('searchbox', { name: 'Search Locked searchable model options', exact: true })).toHaveCount(0);
+  await expect(changes).toHaveText('');
+
+  await control.press('Enter');
+  const search = page.getByRole('searchbox', { name: 'Search Searchable model options', exact: true });
+  const options = page.getByRole('listbox', { name: 'Searchable model options', exact: true });
+  await expect(search).toBeFocused();
+  await search.fill('anthropic');
+  await expect(value).toHaveText('gpt-5.1-codex');
+  await search.press('ArrowDown');
+  await expect(options.locator('[role="option"][data-value="claude-opus"]')).toHaveAttribute('data-active', 'true');
+  await search.press('Enter');
+  await expect(control).toBeFocused();
+  await expect(value).toHaveText('claude-opus');
+  await expect(changes).toHaveText('searchable:claude-opus');
+
+  await control.press('Enter');
+  await expect(search).toBeFocused();
+  await search.press('ArrowUp');
+  await expect(options.locator('[role="option"][data-value="gpt-5.1-codex"]')).toHaveAttribute('data-active', 'true');
+  await search.press('Enter');
+  await expect(value).toHaveText('gpt-5.1-codex');
+  await expect(changes).toHaveText('searchable:claude-opus,searchable:gpt-5.1-codex');
+});

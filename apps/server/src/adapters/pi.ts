@@ -1,10 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { piClient, piEfforts } from '../transports/pi.js';
 import { locatePiSession, piConversationName, piConversationSummaries, validPiSessionId } from './pi-conversations.js';
 import { staticPolicy } from './pi-sandbox.js';
+import { hostPiRuntime, piPackageRoot } from './pi-runtime.js';
 import type { StructuredAdapter } from './types.js';
 
 const piPackage = '@earendil-works/pi-coding-agent';
@@ -13,17 +13,11 @@ const piPackage = '@earendil-works/pi-coding-agent';
  * The pinned Pi's CLI from the server's own dependencies (ADR 0017). The package exports no
  * `package.json` and no CommonJS entry to resolve, so its directory is found on the module paths.
  */
-function piRoot(): string {
-  const roots = createRequire(import.meta.url).resolve.paths(piPackage) ?? [];
-  const root = roots.map(directory => join(directory, piPackage)).find(directory => existsSync(join(directory, 'package.json')));
-  if (root === undefined) throw new Error(`${piPackage} is not installed`);
-  return root;
-}
-const piProgram = (): string => join(piRoot(), 'dist', 'bundle', 'cli.js');
+const piProgram = (): string => join(piPackageRoot(), 'dist', 'bundle', 'cli.js');
 // the pinned Pi's package and version, read once
 let pinnedVersion: string | undefined;
 const piPinned = (): { package: string; version: string } | undefined => {
-  try { pinnedVersion ??= (JSON.parse(readFileSync(join(piRoot(), 'package.json'), 'utf8')) as { version?: unknown }).version as string; } catch { return undefined; }
+  try { pinnedVersion ??= (JSON.parse(readFileSync(join(piPackageRoot(), 'package.json'), 'utf8')) as { version?: unknown }).version as string; } catch { return undefined; }
   return typeof pinnedVersion === 'string' ? { package: piPackage, version: pinnedVersion } : undefined;
 };
 
@@ -58,15 +52,19 @@ const projectResources = (cwd: string): string[] => [['--skill', '.pi/skills'], 
  */
 export const piAdapter = {
   kind: 'pi',
-  launch: ({ cwd, sandboxed, files, nonce = '', resume, continue: latest, models, role }) => ({
+  // recheck the host pin and helper bytes immediately before every launch
+  launch: ({ cwd, sandboxed, files, nonce = '', resume, continue: latest, models, role }) => {
+    const host = hostPiRuntime();
+    return {
     args: [
       // the Conductor loads no project skills or prompt templates
-      piProgram(), '--mode', 'rpc', '-ne', '-e', extension(), '--offline', '--no-approve', '--tools', role === 'conductor' ? conductorTools : tools, ...(role === 'conductor' ? [] : projectResources(cwd)),
+      host?.cli ?? piProgram(), '--mode', 'rpc', '-ne', '-e', host?.extension ?? extension(), '--offline', '--no-approve', '--tools', role === 'conductor' ? conductorTools : tools, ...(role === 'conductor' ? [] : projectResources(cwd)),
       ...(models === undefined || models.allowed.length === 0 ? [] : ['--models', models.allowed.join(',')]),
       ...(resume !== undefined ? ['--session', resume] : latest === true ? ['--continue'] : models?.start === undefined ? [] : ['--model', models.start.model, ...(models.start.effort === undefined ? [] : ['--thinking', models.start.effort])])
     ],
-    env: { RAC_LAUNCH_NONCE: nonce, ...(sandboxed ? { RAC_SANDBOX_POLICY: files?.['sandbox.json'] ?? '' } : {}), ...(role === 'conductor' ? { RAC_ROLE: 'conductor' } : {}) }
-  }),
+    env: { RAC_LAUNCH_NONCE: nonce, ...(host === undefined ? {} : { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR! }), ...(sandboxed ? { RAC_SANDBOX_POLICY: files?.['sandbox.json'] ?? '' } : {}), ...(role === 'conductor' ? { RAC_ROLE: 'conductor' } : {}) }
+    };
+  },
   client: piClient,
   steers: true,
   pinned: piPinned,

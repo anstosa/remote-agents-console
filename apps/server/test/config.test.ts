@@ -9,6 +9,7 @@ import { builtInCorrectnessPrompt, builtInTourPrompt } from '../src/review-runs/
 import { defaultDavoContext } from '../src/integrations/realtime/settings.js';
 import { run } from '../src/tmux/command.js';
 import { accountHome } from '../src/places/places.js';
+import * as piRuntime from '../src/adapters/pi-runtime.js';
 
 const dirs: string[] = [];
 // restore configuration overrides and temporary repositories
@@ -591,11 +592,39 @@ describe('claude adapter configuration', () => {
     await expect(validateConfig({ ...scratch, sandbox: { allowAllUnixSockets: true } })).rejects.toThrow(/allowAllUnixSockets/u);
   });
 
-  it('leaves Pi unlaunchable under the host bridge', async () => {
+  it('leaves Pi unlaunchable under an unprovisioned host bridge', async () => {
     setEnv('RAC_HOST_TMUX_DIR', '/host/tmux');
     const config = await validateConfig({ ...scratch, adapters: { pi: {} } });
     expect(config.adapters?.pi).toMatchObject({ launchable: false });
     expect(config.adapters?.pi?.unavailableReason).toContain('bridge');
+  });
+
+  // a verified host runtime enables Pi without altering ordinary adapters
+  it('enables bridged Pi only after its host runtime has been verified', async () => {
+    setEnv('RAC_HOST_TMUX_DIR', '/host/tmux');
+    const verified = vi.spyOn(piRuntime, 'hostPiRuntime').mockReturnValue({ node: '/host/node', cli: '/host/pi.js', extension: '/host/extension.js', holder: '/host/holder.js', command: '/host/command.js' });
+    const node = vi.spyOn(piRuntime, 'verifyHostPiNode').mockResolvedValue();
+    try {
+      const config = await validateConfig({ ...scratch, adapters: { pi: { env: { HOME: '/host/account' } } } });
+      expect(config.adapters.pi).toMatchObject({ launchable: true, program: '/host/node' });
+      expect(verified).toHaveBeenCalledOnce();
+    } finally { verified.mockRestore(); node.mockRestore(); }
+  });
+
+  // lifecycle hooks must never accidentally execute inside the container
+  it.each(['setup', 'teardown'])('refuses bridged Pi %s hooks', async hook => {
+    setEnv('RAC_HOST_TMUX_DIR', '/host/tmux');
+    const config = await validateConfig({ ...scratch, adapters: { pi: { [hook]: 'touch /must-not-run' } } });
+    expect(config.adapters.pi).toMatchObject({ launchable: false });
+    expect(config.adapters.pi?.unavailableReason).toContain('setup or teardown');
+  });
+
+  // the process and sandbox must agree on the host account's home
+  it('refuses a missing or relative host HOME for bridged Pi', async () => {
+    setEnv('RAC_HOST_TMUX_DIR', '/host/tmux');
+    const config = await validateConfig({ ...scratch, adapters: { pi: { env: { HOME: 'relative' } } } });
+    expect(config.adapters.pi).toMatchObject({ launchable: false });
+    expect(config.adapters.pi?.unavailableReason).toContain('adapters.pi.env.HOME');
   });
 
   it('leaves Claude unlaunchable under a bridge without RAC_HOST_REPOSITORY', async () => {
@@ -721,6 +750,14 @@ describe('Conductor configuration', () => {
     // GitHub reads are the operator's to grant by name
     expect((await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', scopes: ['status:read', 'github:read'] }))).conductor?.scopes).toEqual(['status:read', 'github:read']);
     expect((await validateConfig({ publicOrigin: 'https://agents.example.com' })).conductor).toBeUndefined();
+  });
+
+  // disabling keeps authored settings while withholding every runtime capability
+  it('keeps an explicitly disabled Conductor off without requiring an available adapter or home', async () => {
+    const source = await configured({ enabled: false, kind: 'pi', project: 'home', model: 'openai/gpt-5.6', scopes: ['status:read'] }, {});
+    const config = await validateConfig(source);
+    expect(config.conductor).toBeUndefined();
+    expect(source.conductor).toEqual({ enabled: false, kind: 'pi', project: 'home', model: 'openai/gpt-5.6', scopes: ['status:read'] });
   });
 
   it('refuses another kind, a model that is not Allowed, a repository or unknown Project, an unknown scope, and Pi left unconfigured', async () => {

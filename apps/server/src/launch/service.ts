@@ -1,5 +1,5 @@
 import { lstat, mkdir, open,unlink } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { resolveAgentProgram, type ValidatedConfig } from '../config/schema.js';
 import { run, tmuxFormatLiteral, tmuxLiteralArg } from '../tmux/command.js';
@@ -11,7 +11,8 @@ import { holderAgentOption, holderPaneRole, processPaneRole } from '../tmux/stac
 import { ProcSocketFinder, workspaceRoot, type SocketFinder } from '../discovery/service.js';
 import { projectIdOf, worktreeHostRoot, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
 import { adapterCapabilities, adapterFor, structuredAdapterFor } from '../adapters/registry.js';
-import { renderAdapterFiles, type RenderedAdapterFiles } from '../adapters/files.js';
+import { hostVisibleRepoRoot, renderAdapterFiles, type RenderedAdapterFiles } from '../adapters/files.js';
+import { hostPiRuntime } from '../adapters/pi-runtime.js';
 import { agentKinds, type AgentKind, type LaunchInput, type LaunchMode, type ReplacedFlagValue } from '../adapters/types.js';
 import { resolveLaunchProfile, type LaunchResolution, type LaunchScope } from './resolution.js';
 import { WorktreeLaunchStore, scratchLaunchKey } from '../worktrees/store.js';
@@ -173,11 +174,21 @@ export class LaunchService implements HolderWindows {
   // so no command reaches `/mcp` (ADR 0018).
   async adapterFiles(kind: AgentKind): Promise<Record<string, string> | undefined> {
     if ((adapterFor(kind) ?? structuredAdapterFor(kind))?.files === undefined) return undefined;
-    const consoleState = [this.root, join(serverCheckout(), '.data'), join(serverCheckout(), '.env'), ...(process.env.RAC_CONFIG === undefined ? [] : [resolve(process.env.RAC_CONFIG)])];
+    const checkout = serverCheckout();
+    const hostCheckout = hostVisibleRepoRoot();
+    const configured = process.env.RAC_CONFIG === undefined ? undefined : resolve(process.env.RAC_CONFIG);
+    const configuredRelative = configured === undefined ? undefined : relative(checkout, configured);
+    // protect the same console state in the host namespace a bridged process sees
+    const hostConfigured = hostCheckout === undefined || configuredRelative === undefined || configuredRelative === '..' || configuredRelative.startsWith(`..${sep}`) || isAbsolute(configuredRelative) ? undefined : join(hostCheckout, configuredRelative);
+    const consoleState = [this.root, join(checkout, '.data'), join(checkout, '.env'), ...(configured === undefined ? [] : [configured]), ...(hostCheckout === undefined ? [] : [join(hostCheckout, '.data'), join(hostCheckout, '.env')]), ...(hostConfigured === undefined ? [] : [hostConfigured])];
+    const hostNode = process.env.RAC_HOST_NODE_BIN?.trim();
+    // deny the executable and its directory so writable Places cannot replace host launch code
+    const consoleRuntime = hostCheckout === undefined ? [] : [join(hostCheckout, 'apps/server/dist'), join(hostCheckout, 'node_modules'), join(hostCheckout, 'apps/server/node_modules'), ...(hostNode === undefined || !isAbsolute(hostNode) ? [] : [hostNode, dirname(hostNode)])];
     const consoleHosts = [this.config.publicOrigin?.hostname, this.config.listen?.host].filter((host): host is string => host !== undefined);
     this.adapterFilesPromise ??= renderAdapterFiles(process.env, candidate => {
       const settings = this.config.adapters[candidate]?.sandbox ?? { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: [] };
-      return { ...settings, deniedDomains: [...settings.deniedDomains, ...consoleHosts], denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState], repositories: [serverCheckout(), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory])] };
+      const repositories = [checkout, ...(hostCheckout === undefined ? [] : [hostCheckout]), ...this.config.projects.flatMap(project => [project.path, project.worktreesDirectory, ...(project.hostPath === undefined ? [] : [project.hostPath])])];
+      return { ...settings, deniedDomains: [...settings.deniedDomains, ...consoleHosts], denyRead: [...settings.denyRead, ...consoleState], denyWrite: [...settings.denyWrite, ...consoleState, ...consoleRuntime], repositories };
     }).catch(error => {
       this.adapterFilesPromise = undefined;
       console.error('[launch] adapter files not rendered:', error instanceof Error ? error.message : 'unknown error');
@@ -771,8 +782,9 @@ export class LaunchService implements HolderWindows {
   // The console's private directory, or a folder in it, made owner-only. One that is not the
   // console user's, or is open to others (another user made it first in the shared /tmp, say), is
   // refused: launch descriptors and holder sockets live there.
-  private async privateDirectory(name?: string): Promise<string> {
-    const directories = name === undefined ? [this.root] : [this.root, join(this.root, name)];
+  private async privateDirectory(name?: string, root = this.root): Promise<string> {
+    const directories = name === undefined ? [root] : [root, join(root, name)];
+    // validate every created private path before storing launch control data in it
     for (const directory of directories) {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const info = await lstat(directory);
@@ -787,27 +799,43 @@ export class LaunchService implements HolderWindows {
   // briefly a Terminal and keeps its pane even when the holder exits at once; the holder then runs
   // through the operator's login shell, with its environment and setup, as a pane launch does.
   async openHolderWindow(place: Place, agentId: string, launch: HolderLaunch): Promise<HolderRef | undefined> {
-    if (this.hostSocket !== undefined) return undefined;
-    const socket = join(await this.privateDirectory('holders'), `${agentId}.sock`);
-    const [node, ...holder] = holderArgv(socket, [launch.program, ...launch.args]);
+    const host = this.hostSocket !== undefined;
+    // bridged structured sessions require one canonical path for history and sandbox policy
+    if (host && place.home !== placeHostRoot(place)) { console.warn(`[launch] ${place.home}: structured Agents cannot launch through an aliased host path`); return undefined; }
+    // a bridged shell must protect and load the host account rather than the container account
+    if (host && (launch.env.HOME === undefined || !isAbsolute(launch.env.HOME))) throw new Error('Pi host bridge requires an absolute adapters.pi.env.HOME');
+    const runtime = host ? hostPiRuntime() : undefined;
+    // a bridged launch must never fall back to container-only runtime paths
+    if (host && runtime === undefined) throw new Error('Pi host bridge runtime is unavailable');
+    // bridged holder sockets need one path visible unchanged on both sides
+    const privateRoot = host ? join(process.env.RAC_HOST_REPOSITORY!.trim(), '.data', 'structured') : this.root;
+    const socket = join(privateRoot, 'holders', `${agentId}.sock`);
+    // linux unix sockets leave one byte for the terminator
+    if (Buffer.byteLength(socket) > 107) { console.warn(`[launch] ${place.home}: holder socket path is too long`); return undefined; }
+    await this.privateDirectory('holders', privateRoot);
+    const [node, ...holder] = runtime === undefined ? holderArgv(socket, [launch.program, ...launch.args]) : [runtime.node, runtime.holder, socket, '--', launch.program, ...launch.args];
     const command = composeLaunch(node!, holder, [], launch.env, {}, launch.setup);
     const cwd = placeHostRoot(place);
     const joined = await this.placeSession(place);
-    const tmuxSocket = joined?.socket.path;
+    const tmuxSocket = joined?.socket.path ?? this.hostSocket;
     const socketArgs = tmuxSocket === undefined ? [] : ['-S', tmuxSocket];
     const pane = await this.openPane(joined ?? await this.availableSessionName(placeSessionName(place)), cwd, holderPlaceholder, place.home);
     if (pane === undefined) return undefined;
+    const account = host ? launch.env.HOME! : this.agentHome(place.kind === 'worktree' ? place.projectId : undefined);
+    const launchArgv = host ? this.hostShellArgv(expandHomeCommand(command, cwd), account) : [this.localShell, '-lc', interactiveShellBootstrap(expandHomeCommand(command, cwd), '$HOME', this.localShell)];
     const started = await this.finishCreatedPane(tmuxSocket, pane, place.home, async () =>
       (await run(this.tmux, [...socketArgs, 'set-option', '-w', '-t', pane, 'remain-on-exit', 'on', ';', 'set-option', '-p', '-t', pane, '@rac_role', holderPaneRole, ';', 'set-option', '-p', '-t', pane, holderAgentOption, agentId])).code === 0
       && (joined !== undefined || await this.markSessionPlace(tmuxSocket, pane, place.id))
-      && (await run(this.tmux, [...socketArgs, 'respawn-pane', '-k', '-t', pane, '-c', tmuxFormatLiteral(cwd), '--', this.localShell, '-lc', interactiveShellBootstrap(expandHomeCommand(command, cwd), '$HOME', this.localShell)])).code === 0);
-    return started ? { agentId, socket, pane, ...(tmuxSocket === undefined ? {} : { tmuxSocket }) } : undefined;
+      && (await run(this.tmux, [...socketArgs, 'respawn-pane', '-k', '-t', pane, '-c', tmuxFormatLiteral(cwd), '--', ...launchArgv])).code === 0);
+    return started ? { agentId, socket, pane, ...(host ? { host: true as const } : {}), ...(tmuxSocket === undefined ? {} : { tmuxSocket }) } : undefined;
   }
 
   // the tmux arguments that reach a holder's pane, or none once the pane is not that holder's any
   // more: a tmux server restart reuses pane ids
   private async holderPane(holder: HolderRef): Promise<{ socketArgs: string[] } & HolderStatus | undefined> {
-    const socketArgs = holder.tmuxSocket === undefined ? [] : ['-S', holder.tmuxSocket];
+    // old bridged records without a socket marker still resolve only on the configured host socket
+    const socketPath = holder.tmuxSocket ?? this.hostSocket;
+    const socketArgs = socketPath === undefined ? [] : ['-S', socketPath];
     const marks = await run(this.tmux, [...socketArgs, 'display-message', '-p', '-t', holder.pane, `#{@rac_role} #{${holderAgentOption}} #{pane_dead} #{pane_dead_status}`]).catch(() => undefined);
     const [role, agentId, dead, status] = marks?.code === 0 ? marks.stdout.trim().split(' ') : [];
     if (role !== holderPaneRole || agentId !== holder.agentId) return undefined;
@@ -839,4 +867,5 @@ export class LaunchService implements HolderWindows {
     const socketArgs = (await this.holderPane(holder))?.socketArgs;
     if (socketArgs !== undefined) await run(this.tmux, [...socketArgs, 'kill-window', '-t', holder.pane]).catch(() => undefined);
   }
+
 }

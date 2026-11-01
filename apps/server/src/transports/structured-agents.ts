@@ -1,11 +1,11 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { structuredAdapterFor } from '../adapters/registry.js';
 import type { AdapterConfigs, AgentKind, AllowedModel, StructuredAdapter } from '../adapters/types.js';
 import type { Agent, AgentLifecycle } from '../domain/models.js';
 import type { ShapedQuestion } from '../adapters/types.js';
-import type { Place } from '../places/places.js';
+import { placeHostRoot, type Place } from '../places/places.js';
 import { expandCommand } from '../launch/service.js';
 import { run } from '../tmux/command.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
@@ -19,9 +19,10 @@ import { setAside } from '../set-aside.js';
 /**
  * Where a structured Agent's process runs: its holder's socket and tmux pane (ADR 0016), the
  * process's pid, and how many of its lines the console had read at its last idle point, which a
- * console that restarts reconnects from.
+ * console that restarts reconnects from. `host` keeps a bridged pid out of the container's process
+ * namespace: its exact tagged window is the only stop authority.
  */
-export type HolderRef = { agentId: string; socket: string; pane: string; tmuxSocket?: string; pid?: number; read?: number };
+export type HolderRef = { agentId: string; socket: string; pane: string; tmuxSocket?: string; host?: true; pid?: number; read?: number };
 /** Whether a holder's process has exited, with its exit status. */
 export type HolderStatus = { dead: boolean; status?: number };
 /** The command a holder runs: the program and its arguments, its environment, and the setup run first. */
@@ -102,6 +103,8 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
       const adapter = structuredAdapterFor(kind);
       const configured = configs[kind];
       if (adapter === undefined || configured?.launchable !== true) return undefined;
+      // one path namespace must drive session lookup, policy checks and the host process
+      if (process.env.RAC_HOST_TMUX_DIR !== undefined && place.home !== placeHostRoot(place)) { console.warn(`[structured] ${place.home}: aliased host paths cannot launch ${kind}`); return undefined; }
       const located = resume === undefined ? undefined : await adapter.conversations.locate(resume, place.home);
       if (resume !== undefined && located === undefined) return undefined;
       const allowed = configured.allowedModels ?? [];
@@ -124,12 +127,13 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
     },
     stderr: (holder, lines) => windows.captureHolder(holder, lines),
     async stop(holder, { kind, home }) {
-      // the process is asked to stop, then killed; only while the window is still this Agent's holder
-      if (holder.pid !== undefined && await windows.holderRunning(holder)) await terminate(holder.pid);
+      // native pids may be signalled here; a host pid stops only through its exact tagged window
+      const bridged = holder.host === true || process.env.RAC_HOST_TMUX_DIR !== undefined;
+      if (!bridged && holder.pid !== undefined && await windows.holderRunning(holder)) await terminate(holder.pid);
       await windows.closeHolder(holder);
       const teardown = configs[kind]?.teardown;
       // best-effort, as for a pane: a failed teardown never blocks the stop
-      if (teardown !== undefined && (await run('/bin/sh', ['-c', expandCommand(teardown, { identity: home })], undefined, 60_000).catch(() => undefined))?.code !== 0) console.error(`[structured] adapters.${kind} teardown failed in ${JSON.stringify(home)}`);
+      if (teardown !== undefined && (bridged || (await run('/bin/sh', ['-c', expandCommand(teardown, { identity: home })], undefined, 60_000).catch(() => undefined))?.code !== 0)) console.error(`[structured] adapters.${kind} teardown failed in ${JSON.stringify(home)}`);
     }
   };
 }
@@ -184,8 +188,11 @@ const nonNegativeInt = (value: unknown): boolean => value === undefined || Numbe
 const isStoredRecord = (value: unknown): value is StructuredRecord => {
   const record = value as Partial<StructuredRecord> | null;
   const holder = record?.holder;
+  const tmuxSocket = holder?.tmuxSocket;
+  const validTmuxSocket = tmuxSocket === undefined || typeof tmuxSocket === 'string' && tmuxSocket.length > 0 && !tmuxSocket.includes('\0') && isAbsolute(tmuxSocket);
+  const validHost = holder?.host === undefined || holder.host === true;
   return typeof record === 'object' && record !== null && typeof record.id === 'string' && typeof record.kind === 'string' && typeof record.placeId === 'string' && typeof record.home === 'string'
-    && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && nonNegativeInt(holder.read) && (holder.pid === undefined || nonNegativeInt(holder.pid) && holder.pid > 1));
+    && (holder === undefined || typeof holder.agentId === 'string' && typeof holder.socket === 'string' && typeof holder.pane === 'string' && validTmuxSocket && validHost && (holder.host !== true || typeof tmuxSocket === 'string') && nonNegativeInt(holder.read) && (holder.pid === undefined || nonNegativeInt(holder.pid) && holder.pid > 1));
 };
 
 /**

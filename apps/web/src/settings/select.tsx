@@ -27,24 +27,24 @@ function TwoWayChoice({ option, selected }: { option: SettingsSelectOption; sele
 }
 
 // find the first enabled choice
-const firstIndex = (options: readonly SettingsSelectOption[]): number => options.findIndex(option => option.disabled !== true);
+const firstIndex = (entries: readonly IndexedOption[]): number => entries.find(entry => entry.option.disabled !== true)?.index ?? -1;
 
 // find the selected enabled choice
-const initialIndex = (options: readonly SettingsSelectOption[], value: string): number => {
-  const selected = options.findIndex(option => option.value === value && option.disabled !== true);
+const initialIndex = (entries: readonly IndexedOption[], value: string): number => {
+  const selected = entries.find(entry => entry.option.value === value && entry.option.disabled !== true)?.index ?? -1;
   // prefer the current choice
   if (selected >= 0) return selected;
-  return firstIndex(options);
+  return firstIndex(entries);
 };
 
 // find the last enabled choice
-const finalIndex = (options: readonly SettingsSelectOption[]): number => {
-  return options.map((option, index) => option.disabled === true ? -1 : index).filter(index => index >= 0).at(-1) ?? -1;
+const finalIndex = (entries: readonly IndexedOption[]): number => {
+  return entries.filter(entry => entry.option.disabled !== true).at(-1)?.index ?? -1;
 };
 
 // step among enabled choices
-const steppedIndex = (options: readonly SettingsSelectOption[], current: number, direction: -1 | 1): number => {
-  const enabled = options.map((option, index) => option.disabled === true ? -1 : index).filter(index => index >= 0);
+const steppedIndex = (entries: readonly IndexedOption[], current: number, direction: -1 | 1): number => {
+  const enabled = entries.filter(entry => entry.option.disabled !== true).map(entry => entry.index);
   // keep an empty menu inactive
   if (enabled.length === 0) return -1;
   const position = enabled.indexOf(current);
@@ -54,41 +54,44 @@ const steppedIndex = (options: readonly SettingsSelectOption[], current: number,
 };
 
 // match one enabled typeahead choice
-const matchedIndex = (options: readonly SettingsSelectOption[], current: number, query: string): number => {
-  const enabled = options.map((option, index) => option.disabled === true ? -1 : index).filter(index => index >= 0);
+const matchedIndex = (entries: readonly IndexedOption[], current: number, query: string): number => {
+  const enabled = entries.filter(entry => entry.option.disabled !== true);
   // keep an empty menu inactive
   if (enabled.length === 0) return -1;
-  const position = enabled.indexOf(current);
+  const position = enabled.findIndex(entry => entry.index === current);
   const start = position < 0 ? 0 : position + 1;
   const ordered = [...enabled.slice(start), ...enabled.slice(0, start)];
   const normalized = query.toLocaleLowerCase();
-  return ordered.find(index => options[index]!.label.trim().toLocaleLowerCase().startsWith(normalized)) ?? -1;
+  return ordered.find(entry => entry.option.label.trim().toLocaleLowerCase().startsWith(normalized))?.index ?? -1;
 };
 
 // retain option order within labelled groups
-const optionSegments = (options: readonly SettingsSelectOption[]): OptionSegment[] => options.reduce<OptionSegment[]>((segments, option, index) => {
+const optionSegments = (entries: readonly IndexedOption[]): OptionSegment[] => entries.reduce<OptionSegment[]>((segments, entry) => {
   const last = segments.at(-1);
   // extend only an adjacent group
-  if (last !== undefined && last.group === option.group) {
-    last.entries.push({ option, index });
+  if (last !== undefined && last.group === entry.option.group) {
+    last.entries.push(entry);
     return segments;
   }
-  segments.push({ group: option.group, entries: [{ option, index }] });
+  segments.push({ group: entry.option.group, entries: [entry] });
   return segments;
 }, []);
 
 // provide one accessible custom settings selector
-export function SettingsSelect({ label, value, options, disabled = false, onChange }: { label: string; value: string; options: readonly SettingsSelectOption[]; disabled?: boolean; onChange: (value: string) => void }) {
+export function SettingsSelect({ label, value, options, disabled = false, searchable = false, onChange }: { label: string; value: string; options: readonly SettingsSelectOption[]; disabled?: boolean; searchable?: boolean; onChange: (value: string) => void }) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchInput = useRef<HTMLInputElement>(null);
   const typeahead = useRef({ value: '', at: 0 });
   const generatedId = useId().replaceAll(':', '');
   const listboxId = `settings-select-${generatedId}`;
+  const searchId = `${listboxId}-search`;
   const switchDescriptionId = `${listboxId}-switch-description`;
   const { anchorRef, flyoutRef, style } = useViewportFlyout<HTMLButtonElement>(open, { align: 'start', matchAnchorWidth: true });
   const selected = options.find(option => option.value === value);
   const shown: SettingsSelectOption = selected ?? { value, label: value };
-  const twoWay = options.length === 2 && selected !== undefined;
+  const twoWay = !searchable && options.length === 2 && selected !== undefined;
   const first = twoWay ? options[0]! : undefined;
   const second = twoWay ? options[1]! : undefined;
   const switchChecked = second?.value === value;
@@ -96,12 +99,18 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
   const switchDisabled = disabled || switchTarget?.disabled === true;
   const busy = shown.busy === true;
   const hasIcons = options.some(option => option.icon !== undefined);
-  const segments = optionSegments(options);
+  // retain source indexes through filtering
+  const entries = options.map((option, index) => ({ option, index }));
+  const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
+  // filter authored option metadata without changing its value
+  const visibleEntries = !searchable || normalizedSearch === '' ? entries : entries.filter(({ option }) => `${option.label}\n${option.value}\n${option.group ?? ''}`.toLocaleLowerCase().includes(normalizedSearch));
+  const segments = optionSegments(visibleEntries);
 
   // clear transient navigation state
   const closeMenu = useCallback(() => {
     setOpen(false);
     setActiveIndex(-1);
+    setSearchQuery('');
     typeahead.current = { value: '', at: 0 };
   }, []);
 
@@ -109,9 +118,9 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
   const openMenu = useCallback((edge?: 'first' | 'last') => {
     // ignore unavailable controls
     if (disabled) return;
-    setActiveIndex(edge === 'first' ? firstIndex(options) : edge === 'last' ? finalIndex(options) : initialIndex(options, value));
+    setActiveIndex(edge === 'first' ? firstIndex(entries) : edge === 'last' ? finalIndex(entries) : initialIndex(entries, value));
     setOpen(true);
-  }, [disabled, options, value]);
+  }, [disabled, entries, value]);
 
   // commit one enabled choice
   const commitOption = useCallback((index: number) => {
@@ -128,6 +137,14 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
     if (!open || activeIndex < 0) return;
     flyoutRef.current?.querySelector<HTMLElement>(`#${listboxId}-option-${activeIndex}`)?.scrollIntoView({ block: 'nearest' });
   }, [activeIndex, flyoutRef, listboxId, open]);
+
+  // move searchable menus directly into their filter
+  useEffect(() => {
+    // preserve trigger focus for ordinary dropdowns
+    if (!open || !searchable) return;
+    const frame = window.requestAnimationFrame(() => { searchInput.current?.focus(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, searchable]);
 
   // close when the trigger becomes unavailable
   useEffect(() => {
@@ -203,7 +220,7 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
       event.stopPropagation();
       // open before moving further
       if (!open) openMenu();
-      else setActiveIndex(current => steppedIndex(options, current, 1));
+      else setActiveIndex(current => steppedIndex(entries, current, 1));
       return;
     }
     // navigate to the previous choice
@@ -212,7 +229,7 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
       event.stopPropagation();
       // open before moving further
       if (!open) openMenu();
-      else setActiveIndex(current => steppedIndex(options, current, -1));
+      else setActiveIndex(current => steppedIndex(entries, current, -1));
       return;
     }
     // jump to the first choice
@@ -248,7 +265,7 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
     const repeated = new Set(continued.toLocaleLowerCase()).size === 1;
     const query = repeated ? event.key : continued;
     typeahead.current = { value: query, at: now };
-    const match = matchedIndex(options, activeIndex, query);
+    const match = matchedIndex(entries, activeIndex, query);
     // open only for a valid match
     if (match >= 0) {
       setActiveIndex(match);
@@ -262,6 +279,89 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
     if (open) closeMenu();
     else openMenu();
   };
+
+  // navigate filtered choices without committing search text
+  const handleSearchKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    // close and restore the owning trigger
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu();
+      anchorRef.current?.focus();
+      return;
+    }
+    // leave the menu through the normal tab order
+    if (event.key === 'Tab') {
+      closeMenu();
+      return;
+    }
+    // navigate to the next visible choice
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      event.stopPropagation();
+      setActiveIndex(current => steppedIndex(visibleEntries, current, 1));
+      return;
+    }
+    // navigate to the previous visible choice
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      event.stopPropagation();
+      setActiveIndex(current => steppedIndex(visibleEntries, current, -1));
+      return;
+    }
+    // commit the active or first enabled visible choice
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      const target = visibleEntries.find(entry => entry.index === activeIndex && entry.option.disabled !== true) ?? visibleEntries.find(entry => entry.option.disabled !== true);
+      // keep an empty result set read-only
+      if (target === undefined) return;
+      commitOption(target.index);
+      anchorRef.current?.focus();
+    }
+  };
+
+  const listbox = <div
+    ref={searchable ? undefined : flyoutRef}
+    id={listboxId}
+    className={`settings-select-listbox${searchable ? '' : ' more-menu flyout-menu'}`}
+    role="listbox"
+    aria-label={`${label} options`}
+    data-has-icons={hasIcons || undefined}
+    style={searchable ? undefined : style}
+  >
+    {visibleEntries.length === 0 && <span className="settings-select-empty" role="status">{options.length === 0 ? 'No options' : 'No matching options'}</span>}
+    {/* render adjacent accessible groups */}
+    {segments.map((segment, segmentIndex) => {
+      const choices = <>{/* render every visible source choice */}{segment.entries.map(({ option, index }) => {
+        const active = index === activeIndex;
+        const chosen = option.value === value;
+        return <div
+          key={`${option.value}:${index}`}
+          id={`${listboxId}-option-${index}`}
+          className={`settings-select-option${option.busy === true ? ' progress-border progress-blue' : ''}`}
+          role="option"
+          aria-selected={chosen}
+          aria-busy={option.busy || undefined}
+          aria-disabled={option.disabled || undefined}
+          data-active={active || undefined}
+          data-value={option.value}
+          data-has-issues={option.hasIssues || undefined}
+          onMouseDown={event => { /* preserve trigger or search focus */ event.preventDefault(); }}
+          onPointerMove={() => { /* follow enabled pointer choices */ if (option.disabled !== true) setActiveIndex(index); }}
+          onClick={() => { /* commit one pointer choice */ commitOption(index); }}
+        >
+          {option.busy === true && <span className="update-progress-ring" aria-hidden="true" />}
+          {hasIcons && <span className="settings-select-option-icon" aria-hidden="true">{option.icon}</span>}
+          <span className="settings-select-option-label">{option.label}</span>
+          <span className="settings-select-option-check" aria-hidden="true">{chosen && <PanelIcon path={panelIcons.check} />}</span>
+        </div>;
+      })}</>;
+      // expose labelled groups to assistive technology
+      if (segment.group !== undefined) return <div key={`${segment.group}:${segmentIndex}`} className="settings-select-group" role="group" aria-label={segment.group}><small aria-hidden="true">{segment.group}</small>{choices}</div>;
+      return <Fragment key={`ungrouped:${segmentIndex}`}>{choices}</Fragment>;
+    })}
+  </div>;
 
   // exactly two choices use the compact binary control
   if (first !== undefined && second !== undefined) return <span className="settings-select settings-select-binary">
@@ -310,39 +410,25 @@ export function SettingsSelect({ label, value, options, disabled = false, onChan
       <svg className="settings-select-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
     </button>
     {open && <FlyoutPortal onDismiss={closeMenu}>
-      <div ref={flyoutRef} id={listboxId} className="settings-select-listbox more-menu flyout-menu" role="listbox" aria-label={`${label} options`} data-has-icons={hasIcons || undefined} style={style}>
-        {options.length === 0 && <span className="settings-select-empty">No options</span>}
-        {/* render adjacent accessible groups */}
-        {segments.map((segment, segmentIndex) => {
-          const choices = <>{/* render every source choice */}{segment.entries.map(({ option, index }) => {
-            const active = index === activeIndex;
-            const chosen = option.value === value;
-            return <div
-              key={`${option.value}:${index}`}
-              id={`${listboxId}-option-${index}`}
-              className={`settings-select-option${option.busy === true ? ' progress-border progress-blue' : ''}`}
-              role="option"
-              aria-selected={chosen}
-              aria-busy={option.busy || undefined}
-              aria-disabled={option.disabled || undefined}
-              data-active={active || undefined}
-              data-value={option.value}
-              data-has-issues={option.hasIssues || undefined}
-              onMouseDown={event => { /* preserve trigger focus */ event.preventDefault(); }}
-              onPointerMove={() => { /* follow enabled pointer choices */ if (option.disabled !== true) setActiveIndex(index); }}
-              onClick={() => { /* commit one pointer choice */ commitOption(index); }}
-            >
-              {option.busy === true && <span className="update-progress-ring" aria-hidden="true" />}
-              {hasIcons && <span className="settings-select-option-icon" aria-hidden="true">{option.icon}</span>}
-              <span className="settings-select-option-label">{option.label}</span>
-              <span className="settings-select-option-check" aria-hidden="true">{chosen && <PanelIcon path={panelIcons.check} />}</span>
-            </div>;
-          })}</>;
-          // expose labelled groups to assistive technology
-          if (segment.group !== undefined) return <div key={`${segment.group}:${segmentIndex}`} className="settings-select-group" role="group" aria-label={segment.group}><small aria-hidden="true">{segment.group}</small>{choices}</div>;
-          return <Fragment key={`ungrouped:${segmentIndex}`}>{choices}</Fragment>;
-        })}
-      </div>
+      {searchable ? <div ref={flyoutRef} className="settings-select-searchable-menu more-menu flyout-menu" style={style}>
+        <label className="settings-select-search" htmlFor={searchId}><span className="sr-only">Search {label} options</span><input
+          ref={searchInput}
+          id={searchId}
+          type="search"
+          value={searchQuery}
+          placeholder="Search options"
+          autoComplete="off"
+          spellCheck={false}
+          aria-autocomplete="list"
+          aria-haspopup="listbox"
+          aria-expanded="true"
+          aria-controls={listboxId}
+          aria-activedescendant={activeIndex >= 0 ? `${listboxId}-option-${activeIndex}` : undefined}
+          onChange={event => { /* filter without changing the selected value */ setSearchQuery(event.target.value); setActiveIndex(-1); }}
+          onKeyDown={handleSearchKeyDown}
+        /></label>
+        {listbox}
+      </div> : listbox}
     </FlyoutPortal>}
   </span>;
 }
