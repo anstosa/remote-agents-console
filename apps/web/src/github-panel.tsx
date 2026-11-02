@@ -615,10 +615,14 @@ export type GithubPanelProps = {
   onOpenWorktree?: OpenWorktree;
   onNewWorktree?: GithubPanelNewWorktree;
   onAddToPrompt?: (text: string) => void;
+  // what this panel last showed in its Workspace, restored on mount; `onSaveView` takes it back as it changes
+  savedView?: GithubPanelView;
+  onSaveView?: (view: GithubPanelView) => void;
 };
+export type GithubPanelView = { selection?: GithubItemIdentity; tab?: ColumnKey };
 
 // host repository and cross-repository GitHub browsing in one Workspace split
-export function GithubPanel({ request, projectId, repository, worktreeId, main, branch, hasPullRequest, revision, focus, projects = [], scope, onScopeChange, dynamicWorktrees = true, actions, onClose, onOpenWorktree, onNewWorktree, onAddToPrompt }: GithubPanelProps) {
+export function GithubPanel({ request, projectId, repository, worktreeId, main, branch, hasPullRequest, revision, focus, projects = [], scope, onScopeChange, dynamicWorktrees = true, actions, onClose, onOpenWorktree, onNewWorktree, onAddToPrompt, savedView, onSaveView }: GithubPanelProps) {
   const ref = useRef<HTMLElement | null>(null);
   const [narrow, setNarrow] = useState(false);
   // a phone, or a panel too narrow for list and detail, drills down
@@ -631,11 +635,12 @@ export function GithubPanel({ request, projectId, repository, worktreeId, main, 
   const [refreshing, setRefreshing] = useState(false);
   const [refreshes, setRefreshes] = useState(0);
   const [now, setNow] = useState(() => Date.now());
-  const [allTab, setAllTab] = useState<ColumnKey>('mine');
-  // choose the first unseen phone tab only once
-  const allTabChosen = useRef(false);
+  const [allTab, setAllTab] = useState<ColumnKey>(savedView?.tab ?? 'mine');
+  // choose the first unseen phone tab only once, and never over a restored one
+  const allTabChosen = useRef(savedView?.tab !== undefined);
   const initialFocus = focusIdentity(focus, repository);
-  const [selected, setSelected] = useState<Selection | undefined>(initialFocus);
+  const [selected, setSelected] = useState<Selection | undefined>(initialFocus ?? savedView?.selection);
+  useEffect(() => onSaveView?.({ selection: selected, tab: allTabChosen.current ? allTab : undefined }), [selected, allTab]);
   const [focused, setFocused] = useState<string>();
   const inView = useInView(ref);
   const expanded = usePanelExpand('github')?.expanded === true;

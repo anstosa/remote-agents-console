@@ -66,7 +66,7 @@ import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, Op
 import { installProgressAnimationSync, type ProgressKind } from './progress-animation.js';
 import { Skeleton } from './skeleton.js';
 import { icons as githubIcons, issueBranch, OverviewButton, type NewWorktreeFor } from './github-overview.js';
-import { GithubPanel, type GithubFocus, type OpenWorktree, type StripActions } from './github-panel.js';
+import { GithubPanel, type GithubFocus, type GithubPanelView, type OpenWorktree, type StripActions } from './github-panel.js';
 import { normalizeGithubRepository, type GithubNewWorktreeContext } from './github-client.js';
 import { CodeLoading } from './code-panel/loading.js';
 import { ModelChip, type AgentModel } from './model-picker.js';
@@ -4919,11 +4919,15 @@ type GithubScope = 'repo' | 'all';
 type GithubOpenRequest = { id: number; placeId: string; scope?: GithubScope; focus?: GithubFocus; maximize?: boolean };
 const GithubWorkspaceContext = createContext<{ request?: GithubOpenRequest; consume: (id: number) => void; newWorktree?: NewWorktreeFor; dynamicWorktrees: boolean; feedback: (feedback: Omit<OperationFeedback, 'id'>) => void } | undefined>(undefined);
 const githubPanelKey = (placeId: string) => `rac.github-panel:${placeId}`;
+// What an open GitHub split shows is kept in memory only, like the Stack panel's selection, so a
+// Workspace switch returns to it, a reload starts fresh, and closing the split forgets it.
+const githubViews = new Map<string, GithubPanelView & { scope?: GithubScope }>();
 const savedGithubPanel = (placeId: string) => {
   try { return localStorage.getItem(githubPanelKey(placeId)) === 'open'; }
   catch { return false; }
 };
 const saveGithubPanel = (placeId: string, open: boolean) => {
+  if (!open) githubViews.delete(placeId);
   try { localStorage.setItem(githubPanelKey(placeId), open ? 'open' : 'closed'); }
   catch { /* browser storage is optional */ }
 };
@@ -4933,7 +4937,11 @@ function useGithubPanel(placeId: string | undefined, defaultScope: GithubScope) 
   const [open, setOpen] = useState(() => placeId !== undefined && savedGithubPanel(placeId));
   const [focus, setFocus] = useState<GithubFocus>();
   // scope selection lasts for this open split rather than overriding the repo default
-  const [scope, setScope] = useState(defaultScope);
+  const [scope, setScopeState] = useState(() => (placeId === undefined ? undefined : githubViews.get(placeId)?.scope) ?? defaultScope);
+  const remember = (view: GithubPanelView & { scope?: GithubScope }) => {
+    if (placeId !== undefined) githubViews.set(placeId, { ...githubViews.get(placeId), ...view });
+  };
+  const setScope = (next: GithubScope) => { setScopeState(next); remember({ scope: next }); };
   const [maximizeRequest, setMaximizeRequest] = useState<number>();
   const pending = controller?.request;
   // accept only the command addressed to this mounted place
@@ -4953,10 +4961,10 @@ function useGithubPanel(placeId: string | undefined, defaultScope: GithubScope) 
   const save = (value: boolean) => {
     setOpen(value);
     // a later ordinary open does not replay an earlier command
-    if (!value) { setFocus(undefined); setMaximizeRequest(undefined); setScope(defaultScope); }
+    if (!value) { setFocus(undefined); setMaximizeRequest(undefined); setScopeState(defaultScope); }
     if (placeId !== undefined) saveGithubPanel(placeId, value);
   };
-  return { open: open && placeId !== undefined, focus, scope, setScope, maximizeRequest, didMaximize: () => setMaximizeRequest(undefined), show: () => save(true), toggle: () => save(!open), close: () => save(false) };
+  return { open: open && placeId !== undefined, focus, scope, setScope, savedView: placeId === undefined ? undefined : githubViews.get(placeId), saveView: remember, maximizeRequest, didMaximize: () => setMaximizeRequest(undefined), show: () => save(true), toggle: () => save(!open), close: () => save(false) };
 }
 // fork hints can change holder associations even before github data or branches change
 const githubListsRevision = (serverStartedAt: number | undefined, githubRevision: number | undefined, projects: readonly Project[]) => `${serverStartedAt ?? ''}:${githubRevision ?? ''}:${projects.map(project => `${project.id}@${project.github ?? ''}>${project.githubForkOf ?? ''}`).join(',')}:${projects.flatMap(project => project.worktrees.map(worktree => `${worktree.id}@${worktree.branch ?? ''}`)).join(',')}`;
@@ -7085,7 +7093,7 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
     // non-git owners can still report actions targeting another repository
     onFeedback: feedback => githubController?.feedback({ ...feedback, workspaceKey: workspace.viewKey })
   };
-  const githubPane = githubPanel.open ? <GithubPanel request={request} projects={projects} scope={githubPanel.scope} onScopeChange={githubPanel.setScope} dynamicWorktrees={githubController?.dynamicWorktrees ?? true} projectId={githubProject?.github === undefined ? undefined : githubProject.id} repository={githubProject?.github} worktreeId={place.worktreeId} main={githubWorktree?.main ?? true} branch={place.branch} hasPullRequest={place.pullRequest !== undefined} revision={githubListsRevision(serverStartedAt, githubRevision, projects)} focus={githubPanel.focus} actions={githubActions} onClose={githubPanel.close} onOpenWorktree={onOpenGithub} onNewWorktree={githubController?.newWorktree ?? githubNewWorktree(git?.onNewWorktree)} onAddToPrompt={selectionActions.addToPrompt} /> : null;
+  const githubPane = githubPanel.open ? <GithubPanel request={request} projects={projects} scope={githubPanel.scope} onScopeChange={githubPanel.setScope} dynamicWorktrees={githubController?.dynamicWorktrees ?? true} projectId={githubProject?.github === undefined ? undefined : githubProject.id} repository={githubProject?.github} worktreeId={place.worktreeId} main={githubWorktree?.main ?? true} branch={place.branch} hasPullRequest={place.pullRequest !== undefined} revision={githubListsRevision(serverStartedAt, githubRevision, projects)} focus={githubPanel.focus} savedView={githubPanel.savedView} onSaveView={githubPanel.saveView} actions={githubActions} onClose={githubPanel.close} onOpenWorktree={onOpenGithub} onNewWorktree={githubController?.newWorktree ?? githubNewWorktree(git?.onNewWorktree)} onAddToPrompt={selectionActions.addToPrompt} /> : null;
   return <SelectionActionsContext.Provider value={selectionActions}><section className="log-shell" data-workspace-key={workspace.viewKey}><div className={`log${idle ? ' inactive-log' : ''}`}><ResizableLogSplit withSettings worktreeId={place.id} expansion={expansion} output={visibleOutput} empty={empty} note={notes.pane} browser={browserPane} files={filesPane} code={codePane} preview={previewPane} previewController={preview} review={reviewPanel} stack={stackPane} github={githubPane} terminals={workspace.terminals.columns} terminalSelectionActions={terminalSelectionActions} onCarousel={workspace.setCarousel} initialPanelsReady={notes.initialNotesLoaded} /></div></section></SelectionActionsContext.Provider>;
 }
 

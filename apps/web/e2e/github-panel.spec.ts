@@ -304,6 +304,34 @@ test('defaults every explicit GitHub open to repo while All remains transient wi
   await expect(panel.getByRole('region', { name: 'Review requests' })).toBeVisible();
 });
 
+test('keeps the scope, open pull request and list tab across a Workspace switch', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await mount(page, [lists]);
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^feature/u }).click();
+  await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  const scope = panel.getByRole('group', { name: 'GitHub scope' });
+  await scope.getByRole('button', { name: 'All repos' }).click();
+  await panel.getByRole('button', { name: /^#90 Handle redacted events/u }).click();
+  await expect(panel.getByRole('article', { name: 'Pull request #90' })).toBeVisible();
+  await expect(panel.getByRole('tab', { name: /^Reviews/u })).toHaveAttribute('aria-selected', 'true');
+
+  // leave for the main Worktree's Workspace, and come back
+  await page.getByRole('tab', { name: /^Repo/u }).click();
+  await expect(panel.getByRole('article', { name: 'Pull request #90' })).toHaveCount(0);
+  await page.getByRole('tab', { name: /^feature/u }).click();
+  await expect(scope.getByRole('button', { name: 'All repos' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(panel.getByRole('article', { name: 'Pull request #90' })).toBeVisible();
+  await expect(panel.getByRole('tab', { name: /^Reviews/u })).toHaveAttribute('aria-selected', 'true');
+
+  // closing forgets it
+  await panel.getByRole('button', { name: 'Close GitHub panel' }).click();
+  await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
+  await expect(scope.getByRole('button', { name: 'repo', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(panel.getByRole('article', { name: 'Pull request #90' })).toHaveCount(0);
+});
+
 test('reads the lists again when the dashboard\'s GitHub revision moves', async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 1280, height: 900 });
