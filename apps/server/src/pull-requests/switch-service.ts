@@ -5,11 +5,12 @@ import type { ValidatedConfig } from '../config/schema.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import { run } from '../tmux/command.js';
 import { cleanWorkingTree, type GitCommand } from '../git/worktree-state.js';
+import { parseWorktreeListNul } from '../git/worktrees.js';
 import { branchCommitSummary, type BranchCommitSummary } from '../git/comparison.js';
-import { worktreeById, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
+import { projectIdOf, worktreeById, worktreeMatchesWorkspace, worktreeWireId } from '../workspaces/resolver.js';
 import { agentAttentionState } from '../notifications.js';
-import { GithubService, forkCheckoutBranch, forkCheckoutNumber, problemError, type PullRequestChoice, type RepositoryPullRequests } from '../github/service.js';
-import { repositoryPath } from '../github/github.js';
+import { GithubService, contextualForkCheckoutBranch, forkCheckoutBranch, forkCheckoutIdentity, forkCheckoutNumber, problemError, type PullRequestChoice, type PullRequestDetail, type RepositoryPullRequests } from '../github/service.js';
+import { githubRepository, repositoryPath } from '../github/github.js';
 import type { PullRequestSummary, Worktree } from '../domain/models.js';
 
 // bound the local-branch list folded into the availability payload
@@ -31,10 +32,18 @@ export type SwitchableBranch = { branch: string; checkedOut: boolean; openIn?: P
 export type RepositoryBranchList = { pullRequests: SwitchablePullRequest[]; otherPullRequests: SwitchablePullRequest[]; branches: SwitchableBranch[]; pullRequestsSupported: boolean };
 // one worktree's view of the list; `enabled` when its working tree is clean enough to switch
 export type PullRequestSwitchAvailability = RepositoryBranchList & { enabled: boolean };
-export type PullRequestMoveResult = 'moved' | 'unavailable' | 'recovery-required' | 'busy';
+export type GithubPullMutationContext = {
+  identity: { repositoryKey: string; kind: 'pull'; number: number };
+  targetProjectId: string;
+  targetWorktreeId?: string;
+  expectedHolderWorktreeIds: string[];
+  expectedSourceWorktreeId?: string;
+};
+export type ContextualRefusal = { error: string; refresh: true };
+export type PullRequestMoveResult = 'moved' | 'unavailable' | 'recovery-required' | 'busy' | ContextualRefusal;
 // a branch/PR checkout outcome; 'busy' means an involved agent is working and, with job
 // control gone, cannot be interrupted for the checkout; `error` explains any other refusal
-export type BranchSwitchResult = 'switched' | 'busy' | { error: string };
+export type BranchSwitchResult = 'switched' | 'busy' | { error: string; refresh?: true };
 type BranchSummaryOwner = { workspace: string; defaultBranch?: string };
 const mutationInProgress = 'Another branch checkout or move is already running. Try again when it finishes.';
 const switchingUnavailable = 'Branch switching is unavailable for this worktree.';
@@ -53,14 +62,77 @@ type GitHead = { branch?: string; commit: string };
 // a pull request head fetched and verified for checkout: the local `branch` to check out (reused when
 // `existing`), else to create at the verified `sha` — never at the fetched ref, which another fetch can
 // move after the check. An origin PR's new branch then tracks `upstream`; a `fork` PR's has none.
-export type PinnedPullRequestHead = { branch: string; sha: string; existing: boolean } & ({ fork: false; upstream: string } | { fork: true });
+export type PinnedPullRequestHead = { branch: string; sha: string; existing: boolean; repositoryScope?: { baseRepositoryKey: string; originRepositoryKey: string } } & ({ fork: false; upstream: string } | { fork: true });
+export type MoveToNewCandidate = {
+  worktreeId: string;
+  path: string;
+  pathExists: boolean;
+  pathKnown: boolean;
+  registered: boolean;
+  registrationKnown: boolean;
+  valid: boolean;
+  head?: string;
+  detached?: boolean;
+};
+export type MoveToNewCandidateResult =
+  | { status: 'usable'; candidate: MoveToNewCandidate }
+  | { status: 'absent'; candidate: MoveToNewCandidate; error: string }
+  | { status: 'recovery'; candidate: MoveToNewCandidate; error: string };
+export type MoveToNewCandidateFactory = {
+  inspectCandidate(): Promise<MoveToNewCandidate>;
+  createDetachedCandidate(expectedSourceHead: string): Promise<MoveToNewCandidateResult>;
+};
+export type MoveToNewResult =
+  | { status: 'moved'; target: Worktree; fork: boolean }
+  | { status: 'refused'; error: string; refresh?: true }
+  | { status: 'recovery'; error: string };
+type ContextualAction = 'switch' | 'move' | 'create' | 'held-new';
+type PullFetchSource = { remote: string; repositoryKey: string; baseRepositoryKey: string; originRepositoryKey: string; sourceRef: string; pinnedRef: string; upstream?: string };
+type ContextualPullRequest = SwitchablePullRequest & { fetchSource?: PullFetchSource };
+type ContextualPull = { pullRequest: ContextualPullRequest; targetProjectId: string; target?: Worktree; source?: Worktree };
+
+// validate one optional unified-split mutation assertion before service entry
+export function githubPullMutationContext(value: unknown, input: { number: number; targetProjectId: string; targetWorktreeId?: string; sourceRequired: boolean; newWorktree: boolean }): GithubPullMutationContext | undefined {
+  // require one valid route identity
+  if (!Number.isSafeInteger(input.number) || input.number < 1 || input.targetProjectId === '') return undefined;
+  // require one record
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const context = value as Record<string, unknown>;
+  const identity = context.identity;
+  // require one pull identity
+  if (identity === null || typeof identity !== 'object' || Array.isArray(identity)) return undefined;
+  const item = identity as Record<string, unknown>;
+  const repositoryKey = item.repositoryKey;
+  // require a canonical lowercase github repository
+  if (typeof repositoryKey !== 'string' || repositoryKey !== repositoryKey.trim().toLowerCase() || !/^[^/\s]+\/[^/\s]+$/u.test(repositoryKey)) return undefined;
+  // bind the item and route number
+  if (item.kind !== 'pull' || item.number !== input.number) return undefined;
+  // bind the route project
+  if (context.targetProjectId !== input.targetProjectId) return undefined;
+  const targetWorktreeId = context.targetWorktreeId;
+  // bind existing-target routes only
+  if (input.newWorktree ? targetWorktreeId !== undefined : targetWorktreeId !== input.targetWorktreeId) return undefined;
+  const holders = context.expectedHolderWorktreeIds;
+  // require unique exact holder ids
+  if (!Array.isArray(holders) || holders.some(holder => typeof holder !== 'string' || holder === '' || holder.length > 4096) || new Set(holders).size !== holders.length) return undefined;
+  const expectedSourceWorktreeId = context.expectedSourceWorktreeId;
+  // bind move sources to the sole expected holder
+  if (input.sourceRequired ? typeof expectedSourceWorktreeId !== 'string' || holders.length !== 1 || holders[0] !== expectedSourceWorktreeId : expectedSourceWorktreeId !== undefined) return undefined;
+  return {
+    identity: { repositoryKey, kind: 'pull', number: input.number },
+    targetProjectId: input.targetProjectId,
+    ...(typeof targetWorktreeId === 'string' ? { targetWorktreeId } : {}),
+    expectedHolderWorktreeIds: holders as string[],
+    ...(typeof expectedSourceWorktreeId === 'string' ? { expectedSourceWorktreeId } : {})
+  };
+}
 
 export class PullRequestSwitchService {
   private branchMutationInProgress = false;
 
   // switch and move run git in-process and never touch a pane, so the service takes no tmux
   // adapter: it is structurally unable to type into an agent's terminal.
-  constructor(private readonly config: ValidatedConfig, private readonly discovery: DiscoveryService, private readonly github: Pick<GithubService, 'repositoryAt' | 'repository' | 'branch'> = new GithubService(), private readonly command: GitCommand = runGit) {}
+  constructor(private readonly config: ValidatedConfig, private readonly discovery: DiscoveryService, private readonly github: Pick<GithubService, 'repositoryAt' | 'repository' | 'branch' | 'pullRequestDetail' | 'repositoryParent'> = new GithubService(), private readonly command: GitCommand = runGit) {}
 
   // list one worktree's switchable pull requests and local branches, whether or not an agent runs there:
   // the repository-wide list with this worktree's live branch and switch readiness overlaid
@@ -78,9 +150,9 @@ export class PullRequestSwitchService {
 
   // list one project's pull requests and every local branch, each annotated with the worktree that holds it;
   // the New worktree dialog reads only the pull requests, so no commit summaries are read
-  async branchList(projectId: string): Promise<RepositoryBranchList | undefined> {
+  async branchList(projectId: string, requestedRepository?: { owner: string; name: string }): Promise<RepositoryBranchList | undefined> {
     const anchor = this.projectAnchor(projectId);
-    return anchor === undefined ? undefined : await this.repositoryList(anchor, undefined, false);
+    return anchor === undefined ? undefined : await this.repositoryList(anchor, undefined, false, false, requestedRepository);
   }
 
   // fetch and verify one open pull request of a project for a new worktree, refusing one a worktree already
@@ -101,6 +173,26 @@ export class PullRequestSwitchService {
     }
   }
 
+  // create one contextual unheld-pr worktree without handing validation to an unlocked caller
+  async createUnheldWorktree<T>(context: GithubPullMutationContext, refuseFork: boolean, createFromPinnedHead: (head: PinnedPullRequestHead) => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: string; refresh?: true }> {
+    // reject malformed direct callers before acquiring the mutation lock
+    if (githubPullMutationContext(context, { number: context.identity.number, targetProjectId: context.targetProjectId, sourceRequired: false, newWorktree: true }) === undefined) return { ok: false, error: 'The selected GitHub destination changed. Refresh and try again.', refresh: true };
+    return await this.withBranchMutation({ ok: false as const, error: mutationInProgress }, async () => {
+      const resolved = await this.contextualPull(context, 'create');
+      // preserve refreshable contextual refusals
+      if ('error' in resolved) return { ok: false as const, error: resolved.error, refresh: true as const };
+      // preserve fork execution policy
+      if (refuseFork && !resolved.pullRequest.headOnOrigin) return { ok: false as const, error: forkWithoutAgent };
+      const anchor = this.projectAnchor(context.targetProjectId);
+      // require one current project anchor
+      if (anchor === undefined) return { ok: false as const, error: 'Pull requests are unavailable for this project.', refresh: true as const };
+      const head = await this.fetchPinnedHead(anchor.identity, resolved.pullRequest);
+      // preserve pinned-head refusals
+      if ('error' in head) return { ok: false as const, error: head.error };
+      return { ok: true as const, value: await createFromPinnedHead(head) };
+    });
+  }
+
   // one listed pull request that no worktree holds yet
   private checkoutCandidate(list: RepositoryBranchList, number: number): SwitchablePullRequest | { error: string } {
     const pullRequest = list.pullRequests.find(candidate => candidate.number === number) ?? list.otherPullRequests.find(candidate => candidate.number === number);
@@ -114,9 +206,179 @@ export class PullRequestSwitchService {
     return worktrees.find(candidate => candidate.main) ?? worktrees[0];
   }
 
+  // run one operation under the existing global branch-mutation lock
+  private async withBranchMutation<T>(refused: T, operation: () => Promise<T>): Promise<T> {
+    // refuse lock overlap
+    if (this.branchMutationInProgress) return refused;
+    this.branchMutationInProgress = true;
+    try {
+      return await operation();
+    } finally {
+      this.branchMutationInProgress = false;
+    }
+  }
+
+  // normalize one github repository identity
+  private repositoryKey(repository: { owner: string; name: string }): string {
+    return `${repository.owner.toLowerCase()}/${repository.name.toLowerCase()}`;
+  }
+
+  // turn fresh detail into the checkout descriptor used by existing switch code
+  private contextualChoice(detail: PullRequestDetail, base: { owner: string; name: string }, origin: { owner: string; name: string }): ContextualPullRequest {
+    const baseKey = this.repositoryKey(base);
+    const originKey = this.repositoryKey(origin);
+    const localHead = detail.headRepository?.toLowerCase() === originKey;
+    const checkoutBranch = localHead ? detail.branch : originKey === baseKey ? (detail.headOnOrigin ? detail.branch : forkCheckoutBranch(detail)) : contextualForkCheckoutBranch(base, detail);
+    return {
+      number: detail.number,
+      title: detail.title,
+      branch: detail.branch,
+      headSha: detail.headSha,
+      headOnOrigin: detail.headOnOrigin,
+      ...(detail.headRepository === undefined ? {} : { headRepository: detail.headRepository }),
+      draft: detail.draft,
+      url: detail.url,
+      checks: detail.checks,
+      checkoutBranch,
+      checkedOut: false
+    };
+  }
+
+  // find a live local remote that names the exact expected repository
+  private async verifiedRemote(workspace: string, expectedRepositoryKey: string): Promise<string | undefined> {
+    const listed = await this.command('/usr/bin/git', ['-C', workspace, 'remote']).catch(() => undefined);
+    // require a complete remote list
+    if (listed?.code !== 0 || listed.stdoutTruncated === true) return undefined;
+    for (const remote of listed.stdout.split('\n').map(name => name.trim()).filter(name => name !== '').sort()) {
+      // never let a configured remote name become a git option
+      if (remote.startsWith('-')) continue;
+      const url = await this.command('/usr/bin/git', ['-C', workspace, 'remote', 'get-url', remote]).catch(() => undefined);
+      // ignore unreadable candidates
+      if (url?.code !== 0 || url.stdoutTruncated === true) continue;
+      const repository = githubRepository(url.stdout);
+      // return only an exact github identity match
+      if (repository !== undefined && this.repositoryKey(repository) === expectedRepositoryKey) return remote;
+    }
+    return undefined;
+  }
+
+  // derive a server-owned fetch source for the selected live project
+  private async contextualFetchSource(workspace: string, base: { owner: string; name: string }, origin: { owner: string; name: string }, pull: PullRequestDetail): Promise<PullFetchSource | undefined> {
+    const baseKey = this.repositoryKey(base);
+    const originKey = this.repositoryKey(origin);
+    const headKey = pull.headRepository?.toLowerCase();
+    const fromLocalHead = headKey !== undefined && headKey === originKey;
+    const repositoryKey = fromLocalHead ? originKey : baseKey;
+    const remote = fromLocalHead || originKey === baseKey ? 'origin' : await this.verifiedRemote(workspace, baseKey);
+    // refuse a missing verified source remote
+    if (remote === undefined) return undefined;
+    const branchSource = fromLocalHead || pull.headOnOrigin;
+    const sourceRef = branchSource ? `refs/heads/${pull.branch}` : `refs/pull/${pull.number}/head`;
+    const pinnedRef = branchSource ? `refs/remotes/${remote}/${pull.branch}` : `refs/rac/fetch/${base.owner.toLowerCase()}/${base.name.toLowerCase()}/${pull.number}`;
+    return { remote, repositoryKey, baseRepositoryKey: baseKey, originRepositoryKey: originKey, sourceRef, pinnedRef, ...(pull.headOnOrigin ? { upstream: pinnedRef } : {}) };
+  }
+
+  // read the live top-level worktrees for one project
+  private async liveProjectWorktrees(projectPath: string): Promise<ReturnType<typeof parseWorktreeListNul> | undefined> {
+    const listed = await this.command('/usr/bin/git', ['-C', projectPath, 'worktree', 'list', '--porcelain', '-z']).catch(() => undefined);
+    // refuse unreadable metadata
+    if (listed?.code !== 0 || listed.stdoutTruncated === true) return undefined;
+    return parseWorktreeListNul(listed.stdout);
+  }
+
+  // prove canonical repository, exact target/source and the global holder set without leaving the lock
+  private async contextualPull(context: GithubPullMutationContext, action: ContextualAction): Promise<ContextualPull | ContextualRefusal> {
+    const projects = this.discovery.projectsNow();
+    const worktrees = this.discovery.worktreesNow();
+    const targetProject = projects.find(project => project.id === context.targetProjectId);
+    const target = context.targetWorktreeId === undefined ? undefined : worktreeById(worktrees, context.targetWorktreeId);
+    const source = context.expectedSourceWorktreeId === undefined ? undefined : worktreeById(worktrees, context.expectedSourceWorktreeId);
+    // require exact current route bindings
+    if (targetProject === undefined || context.targetWorktreeId !== undefined && (target === undefined || target.projectId !== targetProject.id) || context.expectedSourceWorktreeId !== undefined && (source === undefined || source.projectId !== targetProject.id)) return { error: 'The selected GitHub destination changed. Refresh and try again.', refresh: true };
+    const [owner = '', name = '', extra = ''] = context.identity.repositoryKey.split('/');
+    // retain one exact canonical repository key
+    if (owner === '' || name === '' || extra !== '') return { error: 'The selected GitHub repository changed. Refresh and try again.', refresh: true };
+    const expectedRepository = { owner, name };
+    const detail = await this.github.pullRequestDetail(expectedRepository, context.identity.number, { fresh: true }).catch(() => undefined);
+    const pull = detail?.pullRequest;
+    // require one still-open pull request in the asserted repository
+    if (pull === undefined || pull.state !== 'open' || pull.number !== context.identity.number) return { error: `Pull request #${context.identity.number} is no longer open in ${context.identity.repositoryKey}.`, refresh: true };
+    const matching = new Map<string, { entries: ReturnType<typeof parseWorktreeListNul>; origin: { owner: string; name: string } }>();
+    // fresh-read every repository project origin
+    for (const project of projects) {
+      // ignore non-repository projects
+      if (project.mode !== 'repository') continue;
+      const remote = await this.command('/usr/bin/git', ['-C', project.path, 'remote', 'get-url', 'origin']).catch(() => undefined);
+      // refuse an unreadable origin because it cannot prove global absence
+      if (remote?.code !== 0 || remote.stdoutTruncated === true) return { error: 'A project origin could not be verified. Refresh and try again.', refresh: true };
+      const namedRepository = githubRepository(remote.stdout);
+      // skip only a positively read non-github origin
+      if (namedRepository === undefined) continue;
+      const repository = await this.github.repositoryAt(project.path, true).catch(() => undefined);
+      // require cache-bypassed origin resolution to agree with the live remote
+      if (repository === undefined || this.repositoryKey(repository) !== this.repositoryKey(namedRepository)) return { error: 'A project origin could not be verified. Refresh and try again.', refresh: true };
+      const exactBase = this.repositoryKey(repository) === context.identity.repositoryKey;
+      const parent = exactBase ? undefined : await this.github.repositoryParent(repository, { fresh: true }).catch(() => null);
+      // fail closed when github could not prove a non-base project's lineage
+      if (!exactBase && parent === null) return { error: 'A project repository relationship could not be verified. Refresh and try again.', refresh: true };
+      const qualified = exactBase || parent !== undefined && parent !== null && this.repositoryKey(parent) === context.identity.repositoryKey;
+      // require the selected project to remain the base or its authenticated direct fork
+      if (project.id === targetProject.id && !qualified) return { error: 'The selected GitHub repository changed. Refresh and try again.', refresh: true };
+      // scan only qualified base and direct-fork projects
+      if (!qualified) continue;
+      const entries = await this.liveProjectWorktrees(project.path);
+      // fail closed on unreadable matching-repository metadata
+      if (entries === undefined) return { error: 'Git worktree ownership could not be verified. Refresh and try again.', refresh: true };
+      matching.set(project.id, { entries, origin: repository });
+    }
+    const targetMatch = matching.get(targetProject.id);
+    // require the selected project to remain a matching repository
+    if (targetMatch === undefined) return { error: 'The selected GitHub repository changed. Refresh and try again.', refresh: true };
+    const choice = this.contextualChoice(pull, expectedRepository, targetMatch.origin);
+    // require exact target and source registrations
+    if (target !== undefined && !targetMatch.entries.some(entry => worktreeMatchesWorkspace(target, entry.path))) return { error: 'The selected destination is no longer registered. Refresh and try again.', refresh: true };
+    if (source !== undefined && !targetMatch.entries.some(entry => worktreeMatchesWorkspace(source, entry.path))) return { error: 'The pull request source is no longer registered. Refresh and try again.', refresh: true };
+    const holders: string[] = [];
+    // derive holders only from current porcelain branch facts
+    for (const [projectId, { entries, origin }] of matching) {
+      const projectChoice = this.contextualChoice(pull, expectedRepository, origin);
+      // inspect each exact checkout
+      for (const entry of entries) {
+        const fork = forkCheckoutIdentity(entry.branch ?? '');
+        const exactOrigin = this.repositoryKey(origin) === context.identity.repositoryKey;
+        // legacy fork families remain valid only in the exact base project
+        const priorHead = fork?.number === context.identity.number && (fork.repository === context.identity.repositoryKey || fork.repository === undefined && exactOrigin);
+        // keep only this base repository's asserted branch family
+        if (entry.branch !== projectChoice.checkoutBranch && !priorHead) continue;
+        const discovered = worktrees.filter(candidate => candidate.path === entry.path || candidate.identity === entry.path);
+        // reject ambiguous cross-project path mappings
+        if (discovered.some(candidate => candidate.projectId !== projectId) || discovered.length > 1) return { error: 'Git worktree ownership is ambiguous. Refresh and try again.', refresh: true };
+        holders.push(discovered[0]?.id ?? worktreeWireId(projectId, entry.path));
+      }
+    }
+    holders.sort();
+    const expected = [...context.expectedHolderWorktreeIds].sort();
+    // require the exact globally observed holder set
+    if (holders.length !== expected.length || holders.some((holder, index) => holder !== expected[index])) return { error: 'The pull request checkout moved. Refresh and try again.', refresh: true };
+    // require unheld actions to stay unheld
+    if ((action === 'switch' || action === 'create') && holders.length !== 0) return { error: 'The pull request is already checked out. Refresh and try again.', refresh: true };
+    // require held actions to name the sole current source
+    if ((action === 'move' || action === 'held-new') && (holders.length !== 1 || source === undefined || holders[0] !== source.id)) return { error: 'The pull request source changed. Refresh and try again.', refresh: true };
+    // refuse a move onto its own holder
+    if (action === 'move' && target?.id === source?.id) return { error: 'The pull request is already checked out there.', refresh: true };
+    if (action === 'switch' || action === 'create') {
+      const workspace = target?.identity ?? targetProject.path;
+      const fetchSource = await this.contextualFetchSource(workspace, expectedRepository, targetMatch.origin, pull);
+      // refuse before mutation when no exact source remote exists
+      if (fetchSource === undefined) return { error: `Pull request #${pull.number} has no verified local fetch remote.`, refresh: true };
+      choice.fetchSource = fetchSource;
+    }
+    return { pullRequest: choice, targetProjectId: targetProject.id, ...(target === undefined ? {} : { target }), ...(source === undefined ? {} : { source }) };
+  }
+
   // the repository-wide list, read through one checkout. A `currentBranch` ('' when detached) makes it
   // that checkout's own list: its live branch outranks cached ownership and is left off the local branches.
-  private async repositoryList(anchor: Worktree, currentBranch: string | undefined, includeCommitSummaries: boolean, fresh = false): Promise<RepositoryBranchList | undefined> {
+  private async repositoryList(anchor: Worktree, currentBranch: string | undefined, includeCommitSummaries: boolean, fresh = false, requestedRepository?: { owner: string; name: string }): Promise<RepositoryBranchList | undefined> {
     const discoveredWorktrees = this.discovery.worktreesNow();
     // require one canonical repository identity, not merely a GitHub origin
     const repository = await this.repositoryIdentity(anchor.identity);
@@ -163,19 +425,39 @@ export class PullRequestSwitchService {
     }
     // list pull requests only for a supported GitHub origin; a list GitHub never gave is refused, as before
     const origin = await this.github.repositoryAt(anchor.identity, true);
-    const pullRequestsSupported = origin !== undefined;
-    const pullRequests: RepositoryPullRequests = origin === undefined ? { own: [], others: [], issues: [] } : await this.github.repository(origin, { wait: fresh });
+    let listedRepository = origin;
+    // admit only the live origin or github's authenticated direct parent
+    if (origin !== undefined && requestedRepository !== undefined && this.repositoryKey(requestedRepository) !== this.repositoryKey(origin)) {
+      const parent = await this.github.repositoryParent(origin).catch(() => undefined);
+      // reject unrelated repository overrides
+      if (parent === undefined || this.repositoryKey(parent) !== this.repositoryKey(requestedRepository)) return undefined;
+      listedRepository = parent;
+    }
+    // reject an override when no github origin exists
+    if (origin === undefined && requestedRepository !== undefined) return undefined;
+    const pullRequestsSupported = listedRepository !== undefined;
+    const pullRequests: RepositoryPullRequests = listedRepository === undefined ? { own: [], others: [], issues: [] } : await this.github.repository(listedRepository, { wait: fresh });
     if (pullRequests.problem !== undefined && pullRequests.fetchedAt === undefined) throw problemError(pullRequests.problem);
     // apply worktree availability around each checkout branch; a pull request is also held by its
     // `pr-<number>` worktree and by a checkout of an earlier head of the same fork pull request
     const prFolders = discoveredWorktrees.filter(candidate => candidate.projectId === anchor.projectId && !candidate.main);
     const holder = (number: number): { checkedOut: boolean; openIn?: PullRequestWorktree } => {
-      for (const [branch, openIn] of checkedOut) if (forkCheckoutNumber(branch) === number) return { checkedOut: true, ...(openIn === undefined ? {} : { openIn }) };
-      const folder = prFolders.find(candidate => basename(candidate.path) === `pr-${number}`);
+      for (const [branch, openIn] of checkedOut) {
+        const fork = forkCheckoutIdentity(branch);
+        const listedKey = listedRepository === undefined ? undefined : this.repositoryKey(listedRepository);
+        const originKey = origin === undefined ? undefined : this.repositoryKey(origin);
+        // legacy fork branches belong only to the exact origin list
+        if (fork?.number === number && (fork.repository === listedKey || fork.repository === undefined && listedKey === originKey)) return { checkedOut: true, ...(openIn === undefined ? {} : { openIn }) };
+      }
+      const listedKey = listedRepository === undefined ? undefined : this.repositoryKey(listedRepository);
+      const originKey = origin === undefined ? undefined : this.repositoryKey(origin);
+      const folder = listedKey === originKey ? prFolders.find(candidate => basename(candidate.path) === `pr-${number}`) : undefined;
       return folder === undefined ? { checkedOut: false } : { checkedOut: true, openIn: { worktreeId: folder.id, worktreeName: folder.label } };
     };
     const switchable = (choices: PullRequestChoice[]): SwitchablePullRequest[] => choices.map(pullRequest => {
-      const branch = pullRequest.headOnOrigin ? pullRequest.branch : forkCheckoutBranch(pullRequest);
+      const localHead = origin !== undefined && pullRequest.headRepository?.toLowerCase() === this.repositoryKey(origin);
+      const sameRepository = origin !== undefined && listedRepository !== undefined && this.repositoryKey(origin) === this.repositoryKey(listedRepository);
+      const branch = localHead ? pullRequest.branch : sameRepository ? (pullRequest.headOnOrigin ? pullRequest.branch : forkCheckoutBranch(pullRequest)) : contextualForkCheckoutBranch(listedRepository!, pullRequest);
       const annotation = this.checkoutAnnotation(branch, checkedOut);
       return { ...pullRequest, checkoutBranch: branch, ...(annotation.checkedOut ? annotation : holder(pullRequest.number)) };
     });
@@ -269,8 +551,27 @@ export class PullRequestSwitchService {
     return repository === undefined ? undefined : (await this.github.branch(repository, branch, undefined, { wait: true })).pullRequest;
   }
 
-  async switch(worktreeId: string, number: number): Promise<BranchSwitchResult> {
+  async switch(worktreeId: string, number: number, context?: GithubPullMutationContext): Promise<BranchSwitchResult> {
     if (!Number.isInteger(number) || number < 1) return { error: 'That is not a valid pull request number.' };
+    // keep legacy callers on their established path
+    if (context === undefined) return await this.switchLegacy(worktreeId, number);
+    // bind direct service callers to the same route assertion
+    if (githubPullMutationContext(context, { number, targetProjectId: projectIdOf(worktreeId), targetWorktreeId: worktreeId, sourceRequired: false, newWorktree: false }) === undefined) return { error: 'The selected GitHub destination changed. Refresh and try again.', refresh: true };
+    return await this.withBranchMutation({ error: mutationInProgress }, async () => {
+      const resolved = await this.contextualPull(context, 'switch');
+      // return a refreshable mismatch without fallback
+      if ('error' in resolved) return resolved;
+      const target = resolved.target;
+      // require the exact contextual target
+      if (target === undefined || target.id !== worktreeId) return { error: 'The selected destination changed. Refresh and try again.', refresh: true as const };
+      // preserve target readiness and busy guards
+      if (!await this.switchReady(target)) return { error: uncommittedChanges };
+      return await this.runSwitch(worktreeId, resolved.pullRequest.checkoutBranch, workspace => this.switchPullRequest(workspace, resolved.pullRequest));
+    });
+  }
+
+  // retain the context-absent switch contract
+  private async switchLegacy(worktreeId: string, number: number): Promise<BranchSwitchResult> {
     if (this.branchMutationInProgress) return { error: mutationInProgress };
     this.branchMutationInProgress = true;
     try {
@@ -321,9 +622,32 @@ export class PullRequestSwitchService {
   }
 
   // move one occupied pull request into the requested worktree
-  async move(worktreeId: string, number: number): Promise<PullRequestMoveResult> {
+  async move(worktreeId: string, number: number, context?: GithubPullMutationContext): Promise<PullRequestMoveResult> {
     // reject invalid or concurrent move requests
-    if (!Number.isInteger(number) || number < 1 || this.branchMutationInProgress) return 'unavailable';
+    if (!Number.isInteger(number) || number < 1) return 'unavailable';
+    // keep legacy callers on their established path
+    if (context === undefined) return await this.moveLegacy(worktreeId, number);
+    // bind direct service callers to the same route assertion
+    if (githubPullMutationContext(context, { number, targetProjectId: projectIdOf(worktreeId), targetWorktreeId: worktreeId, sourceRequired: true, newWorktree: false }) === undefined) return { error: 'The selected GitHub destination changed. Refresh and try again.', refresh: true };
+    return await this.withBranchMutation('unavailable', async () => {
+      const resolved = await this.contextualPull(context, 'move');
+      // return a refreshable mismatch without fallback
+      if ('error' in resolved) return resolved;
+      const target = resolved.target;
+      const source = resolved.source;
+      // require exact current bindings
+      if (target === undefined || source === undefined || target.id !== worktreeId) return { error: 'The selected destination changed. Refresh and try again.', refresh: true as const };
+      // preserve target readiness and both busy guards
+      if (!await this.switchReady(target)) return 'unavailable';
+      if (await this.busy(target) || await this.busy(source)) return 'busy';
+      return await this.moveResolved(source, target, resolved.pullRequest.checkoutBranch);
+    });
+  }
+
+  // retain the context-absent move contract
+  private async moveLegacy(worktreeId: string, number: number): Promise<PullRequestMoveResult> {
+    // reject concurrent move requests
+    if (this.branchMutationInProgress) return 'unavailable';
     this.branchMutationInProgress = true;
     try {
       const available = await this.available(worktreeId, false, true);
@@ -333,6 +657,82 @@ export class PullRequestSwitchService {
     } finally {
       this.branchMutationInProgress = false;
     }
+  }
+
+  // move one held pull request into one exact detached candidate under the shared lock
+  async moveToNew(context: GithubPullMutationContext, operationId: string, openAgent: boolean, candidateFactory: MoveToNewCandidateFactory): Promise<MoveToNewResult> {
+    // reject malformed direct callers before acquiring the mutation lock
+    if (githubPullMutationContext(context, { number: context.identity.number, targetProjectId: context.targetProjectId, sourceRequired: true, newWorktree: true }) === undefined) return { status: 'refused', error: 'The selected GitHub destination changed. Refresh and try again.', refresh: true };
+    return await this.withBranchMutation({ status: 'refused' as const, error: mutationInProgress }, async () => {
+      let recoveryPossible = false;
+      try {
+        const resolved = await this.contextualPull(context, 'held-new');
+        // return a refreshable contextual mismatch without candidate allocation
+        if ('error' in resolved) return { status: 'refused' as const, error: resolved.error, refresh: true as const };
+        const source = resolved.source;
+        // require the exact sole holder
+        if (source === undefined) return { status: 'refused' as const, error: 'The pull request source changed. Refresh and try again.', refresh: true as const };
+        // preserve fork execution policy before target creation
+        if (openAgent && !resolved.pullRequest.headOnOrigin) return { status: 'refused' as const, error: forkWithoutAgent };
+        // refuse a source whose agent cannot pause
+        if (await this.busy(source)) return { status: 'refused' as const, error: 'An agent in the source worktree is busy.' };
+        const sourceHead = await this.gitHead(source.identity);
+        const sourceBranch = await this.command('/usr/bin/git', ['-C', source.identity, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
+        // bind creation to the current exact source head and branch
+        if (sourceHead === undefined || sourceBranch.code !== 0 || sourceBranch.stdout.trim() !== resolved.pullRequest.checkoutBranch) return { status: 'refused' as const, error: 'The pull request source changed. Refresh and try again.', refresh: true as const };
+        recoveryPossible = true;
+        const existing = await candidateFactory.inspectCandidate();
+        // an uncertain or present exact candidate must be inspected, never reused
+        if (!existing.pathKnown || !existing.registrationKnown || existing.pathExists || existing.registered) return { status: 'recovery' as const, error: 'This move already has a target to inspect.' };
+        recoveryPossible = false;
+        const complete = await this.heldMoveSourceComplete(source.identity);
+        // refuse unsupported or unreadable source state before target creation
+        if (!complete.ok) return { status: 'refused' as const, error: complete.error };
+        recoveryPossible = true;
+        const created = await candidateFactory.createDetachedCandidate(sourceHead.commit);
+        // distinguish a side-effect-free add refusal
+        if (created.status === 'absent') return { status: 'refused' as const, error: created.error };
+        // preserve every ambiguous candidate side effect
+        if (created.status === 'recovery') return { status: 'recovery' as const, error: created.error };
+        this.discovery.invalidateWorktrees();
+        const refreshed = await this.discovery.worktrees(true);
+        const target = refreshed.find(worktree => worktree.id === created.candidate.worktreeId || worktree.identity === created.candidate.path);
+        // require fresh discovery after candidate creation
+        if (target === undefined) return { status: 'recovery' as const, error: 'The target was created but could not be resolved.' };
+        const afterCreation = await this.gitHead(source.identity);
+        // close the source-head race after candidate observation
+        if (afterCreation?.commit !== sourceHead.commit) return { status: 'recovery' as const, error: 'The source changed after the target was created.' };
+        const revalidated = await this.contextualPull(context, 'held-new');
+        // repeat exact origin and holder proof at the final pre-move boundary
+        if ('error' in revalidated || revalidated.source?.id !== source.id || revalidated.pullRequest.checkoutBranch !== resolved.pullRequest.checkoutBranch) return { status: 'recovery' as const, error: 'The pull request source changed after the target was created.' };
+        const moved = await this.performMove(source, target, resolved.pullRequest.checkoutBranch, {
+          expectedSourceHead: sourceHead.commit,
+          stashMessage: `rac move-to-new ${operationId} ${resolved.pullRequest.checkoutBranch}`
+        });
+        // every post-candidate non-success requires inspection
+        if (moved !== 'moved') return { status: 'recovery' as const, error: 'The target exists, but the pull request move needs manual recovery.' };
+        return { status: 'moved' as const, target, fork: !resolved.pullRequest.headOnOrigin };
+      } catch {
+        // classify every post-candidate exception as recovery
+        return recoveryPossible ? { status: 'recovery' as const, error: 'The target may exist, but the pull request move needs manual recovery.' } : { status: 'refused' as const, error: 'The pull request move could not be verified.' };
+      }
+    });
+  }
+
+  // prove held-new can represent every top-level source change
+  private async heldMoveSourceComplete(workspace: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    const [index, tree, status] = await Promise.all([
+      this.command('/usr/bin/git', ['-C', workspace, 'ls-files', '--stage', '-z']),
+      this.command('/usr/bin/git', ['-C', workspace, 'ls-tree', '-r', '-z', 'HEAD']),
+      this.command('/usr/bin/git', ['-C', workspace, 'status', '--porcelain=v1', '-z', '--untracked-files=all'])
+    ]);
+    // require readable source metadata
+    if (index.code !== 0 || tree.code !== 0 || status.code !== 0 || index.stdoutTruncated === true || tree.stdoutTruncated === true || status.stdoutTruncated === true) return { ok: false, error: 'The source worktree state could not be verified.' };
+    const indexGitlink = index.stdout.split('\0').some(record => record.startsWith('160000 '));
+    const treeGitlink = tree.stdout.split('\0').some(record => record.startsWith('160000 '));
+    // fail closed for any current or indexed gitlink
+    if (indexGitlink || treeGitlink) return { ok: false, error: 'Pull requests in repositories with submodules cannot be moved to a new worktree.' };
+    return { ok: true };
   }
 
   // move one occupied local branch into the requested worktree
@@ -356,7 +756,17 @@ export class PullRequestSwitchService {
 
   // whether any agent in the worktree is working; a worktree with no agent is never busy
   private async busy(worktree: Worktree): Promise<boolean> {
-    return (await this.discovery.refresh()).some(agent => this.worktree(agent.home)?.id === worktree.id && agentAttentionState(agent) === 'working');
+    return await this.busyAny([worktree]);
+  }
+
+  // resolve one fresh agent snapshot against all involved worktrees
+  private async busyAny(worktrees: readonly Worktree[]): Promise<boolean> {
+    const ids = new Set(worktrees.map(worktree => worktree.id));
+    return (await this.discovery.refresh()).some(agent => {
+      const found = this.worktree(agent.home);
+      // match only exact involved worktrees
+      return found !== undefined && ids.has(found.id) && agentAttentionState(agent) === 'working';
+    });
   }
 
   // switch/move readiness: a clean working tree, whether or not the branch is pushed
@@ -369,7 +779,7 @@ export class PullRequestSwitchService {
     const repository = await this.command('/usr/bin/git', ['-C', workspace, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
     const path = repository.stdout.trim();
     // reject unreadable repository metadata
-    if (repository.code !== 0 || !path.startsWith('/')) return undefined;
+    if (repository.code !== 0 || repository.stdoutTruncated === true || !path.startsWith('/')) return undefined;
     try {
       const info = await stat(path, { bigint: true });
       return `inode:${info.dev}:${info.ino}`;
@@ -398,8 +808,21 @@ export class PullRequestSwitchService {
     }
   }
 
+  // move between an already contextually resolved source and target
+  private async moveResolved(sourceWorktree: Worktree, targetWorktree: Worktree, checkoutBranch: string): Promise<PullRequestMoveResult> {
+    const sourceBranch = await this.command('/usr/bin/git', ['-C', sourceWorktree.identity, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
+    // close the live holder race
+    if (sourceBranch.code !== 0 || sourceBranch.stdout.trim() !== checkoutBranch) return 'unavailable';
+    try {
+      return await this.performMove(sourceWorktree, targetWorktree, checkoutBranch);
+    } catch {
+      // retain exact-stash recovery semantics
+      return 'recovery-required';
+    }
+  }
+
   // execute the git transaction after both agents pause
-  private async performMove(sourceWorktree: Worktree, targetWorktree: Worktree, checkoutBranch: string): Promise<PullRequestMoveResult> {
+  private async performMove(sourceWorktree: Worktree, targetWorktree: Worktree, checkoutBranch: string, options: { expectedSourceHead?: string; stashMessage?: string } = {}): Promise<PullRequestMoveResult> {
     const [sourceRepository, targetRepository] = await Promise.all([this.repositoryIdentity(sourceWorktree.identity), this.repositoryIdentity(targetWorktree.identity)]);
     // prevent branch-name collisions across repositories
     if (sourceRepository === undefined || sourceRepository !== targetRepository) return 'unavailable';
@@ -411,20 +834,25 @@ export class PullRequestSwitchService {
     const targetHead = await this.gitHead(targetWorktree.identity);
     // preserve an exact destination rollback point
     if (targetHead === undefined) return 'unavailable';
+    const sourceHead = await this.gitHead(sourceWorktree.identity);
+    // close the held-new source-head race at the final pre-stash point
+    if (options.expectedSourceHead !== undefined && sourceHead?.commit !== options.expectedSourceHead) return 'unavailable';
 
     const sourceStatus = await this.command('/usr/bin/git', ['-C', sourceWorktree.identity, 'status', '--porcelain=v1', '--untracked-files=all']);
     // refuse unreadable source state
-    if (sourceStatus.code !== 0) return 'unavailable';
+    if (sourceStatus.code !== 0 || options.expectedSourceHead !== undefined && sourceStatus.stdoutTruncated === true) return 'unavailable';
+    // held-new rechecks both agents immediately before its first write
+    if (options.expectedSourceHead !== undefined && await this.busyAny([sourceWorktree, targetWorktree])) return 'unavailable';
     let stashOid: string | undefined;
     // capture all tracked and untracked source changes
     if (sourceStatus.stdout.trim()) {
-      const stashMessage = `rac move ${randomUUID()} ${checkoutBranch}`;
+      const stashMessage = options.stashMessage ?? `rac move ${randomUUID()} ${checkoutBranch}`;
       const stashed = await this.command('/usr/bin/git', ['-C', sourceWorktree.identity, 'stash', 'push', '--include-untracked', '--message', stashMessage]);
       if (stashed.code !== 0) return 'unavailable';
       const stashes = await this.command('/usr/bin/git', ['-C', sourceWorktree.identity, 'stash', 'list', '--format=%H%x09%gs']);
       const matching = stashes.stdout.split('\n').map(line => line.split('\t')).find(([, subject]) => subject?.endsWith(stashMessage));
       // identify only the uniquely named stash created by this move
-      if (stashes.code !== 0 || matching === undefined || !/^[0-9a-f]{40}$/u.test(matching[0] ?? '')) {
+      if (stashes.code !== 0 || stashes.stdoutTruncated === true || matching === undefined || !/^[0-9a-f]{40}$/u.test(matching[0] ?? '')) {
         const afterStash = await this.command('/usr/bin/git', ['-C', sourceWorktree.identity, 'status', '--porcelain=v1', '--untracked-files=all']);
         // distinguish a no-op stash from hidden changes
         return afterStash.code === 0 && afterStash.stdout === sourceStatus.stdout ? 'unavailable' : 'recovery-required';
@@ -432,7 +860,7 @@ export class PullRequestSwitchService {
       stashOid = matching[0];
       const cleanSource = await this.command('/usr/bin/git', ['-C', sourceWorktree.identity, 'status', '--porcelain=v1', '--untracked-files=all']);
       // restore the stash if unsupported source state remains
-      if (cleanSource.code !== 0 || cleanSource.stdout.trim()) return await this.applyAndDropStash(sourceWorktree.identity, stashOid) ? 'unavailable' : 'recovery-required';
+      if (cleanSource.code !== 0 || options.expectedSourceHead !== undefined && cleanSource.stdoutTruncated === true || cleanSource.stdout.trim()) return await this.applyAndDropStash(sourceWorktree.identity, stashOid) ? 'unavailable' : 'recovery-required';
     }
 
     const detached = await this.command('/usr/bin/git', ['-C', sourceWorktree.identity, 'switch', '--detach']);
@@ -520,20 +948,34 @@ export class PullRequestSwitchService {
   // fetch a pull request's head into its pinned ref and verify it is the reviewed head: an origin PR
   // lands in its remote-tracking ref (so its local branch tracks it), a fork PR in refs/rac/pull/N.
   // An existing local branch is reusable only when it already sits at that head.
-  private async fetchPinnedHead(workspace: string, pullRequest: SwitchablePullRequest): Promise<PinnedPullRequestHead | { error: string }> {
+  private async fetchPinnedHead(workspace: string, pullRequest: ContextualPullRequest): Promise<PinnedPullRequestHead | { error: string }> {
     const { number, headSha, checkoutBranch: branch, headOnOrigin } = pullRequest;
+    const source = pullRequest.fetchSource;
+    const branchSource = source?.sourceRef.startsWith('refs/heads/') ?? headOnOrigin;
     // GitHub's head ref name is untrusted and lands in a forced refspec and a local branch name
-    if (headOnOrigin && !await this.safeBranchName(workspace, pullRequest.branch)) return { error: `Pull request #${number} has a head branch name git cannot check out.` };
-    const startPoint = headOnOrigin ? `refs/remotes/origin/${pullRequest.branch}` : `refs/rac/pull/${number}`;
-    const fetchSpec = `${headOnOrigin ? `refs/heads/${pullRequest.branch}` : `refs/pull/${number}/head`}:${startPoint}`;
-    const fetched = await this.command('/usr/bin/git', ['-C', workspace, 'fetch', 'origin', '--no-tags', '--force', fetchSpec]);
+    if (branchSource && !await this.safeBranchName(workspace, pullRequest.branch)) return { error: `Pull request #${number} has a head branch name git cannot check out.` };
+    const remote = source?.remote ?? 'origin';
+    let fetchTarget = remote;
+    const startPoint = source?.pinnedRef ?? (headOnOrigin ? `refs/remotes/origin/${pullRequest.branch}` : `refs/rac/pull/${number}`);
+    const sourceRef = source?.sourceRef ?? (headOnOrigin ? `refs/heads/${pullRequest.branch}` : `refs/pull/${number}/head`);
+    if (source !== undefined) {
+      const remoteUrl = await this.command('/usr/bin/git', ['-C', workspace, 'remote', 'get-url', remote]).catch(() => undefined);
+      const repository = remoteUrl?.code === 0 && remoteUrl.stdoutTruncated !== true ? githubRepository(remoteUrl.stdout) : undefined;
+      // close the remote-url race immediately before fetch
+      if (repository === undefined || this.repositoryKey(repository) !== source.repositoryKey) return { error: `Pull request #${number} no longer has its verified local fetch remote.` };
+      // fetch the proven immutable url, never the mutable alias again
+      fetchTarget = remoteUrl!.stdout.trim();
+    }
+    const fetchSpec = `${sourceRef}:${startPoint}`;
+    const fetched = await this.command('/usr/bin/git', ['-C', workspace, 'fetch', fetchTarget, '--no-tags', '--force', fetchSpec]);
     const fetchFailure = gitFailure(workspace, 'fetch', fetched);
-    if (fetchFailure !== undefined) return { error: `Pull request #${number} could not be fetched from origin. ${fetchFailure}` };
+    if (fetchFailure !== undefined) return { error: `Pull request #${number} could not be fetched from ${remote}. ${fetchFailure}` };
     // require the fetched ref to pin the exact reviewed head before mutating any checkout
     if (!await this.commitMatches(workspace, `${startPoint}^{commit}`, headSha)) return { error: `Pull request #${number} changed on GitHub after it was listed. Reopen the list and try again.` };
     const existing = (await this.command('/usr/bin/git', ['-C', workspace, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
     if (existing && !await this.commitMatches(workspace, `refs/heads/${branch}^{commit}`, headSha)) return { error: `The local branch ${branch} differs from the pull request head. Update or delete it, then try again.` };
-    return { branch, sha: headSha, existing, ...(headOnOrigin ? { fork: false as const, upstream: startPoint } : { fork: true as const }) };
+    const repositoryScope = source === undefined ? undefined : { baseRepositoryKey: source.baseRepositoryKey, originRepositoryKey: source.originRepositoryKey };
+    return { branch, sha: headSha, existing, ...(repositoryScope === undefined ? {} : { repositoryScope }), ...(headOnOrigin ? { fork: false as const, upstream: source?.upstream ?? startPoint } : { fork: true as const }) };
   }
 
   // a branch name git accepts as-is: not `HEAD`, not flag-shaped, and passing `check-ref-format --branch`

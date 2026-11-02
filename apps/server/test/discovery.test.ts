@@ -892,6 +892,19 @@ describe('DiscoveryService dashboard', () => {
     expect(worktreeScans).toBe(1);
   });
 
+  it('publishes github\'s direct-parent hint without replacing the live origin', async () => {
+    const project = testProject({ id: 'audio', label: 'Audiobookshelf', path: '/repo' });
+    const github = {
+      branch: async () => ({}),
+      repositoryAt: async () => ({ owner: 'anstosa', name: 'audiobookshelf' }),
+      repositoryParent: async () => ({ owner: 'advplyr', name: 'audiobookshelf' }),
+      invalidateRepositories: () => {}
+    };
+    const service = new DiscoveryService(socketFinder(), paneLister([]) as never, processInspector({ codex: false }), github, undefined, [project], undefined, listImpl({ '/repo': [entry('/repo', 'main')] }));
+
+    expect((await service.dashboard()).projects[0]).toMatchObject({ github: 'anstosa/audiobookshelf', githubForkOf: 'advplyr/audiobookshelf' });
+  });
+
   it('discovers worktrees from git porcelain, excludes bare and stale entries, and shapes them by Project', async () => {
     const finder = socketFinder();
     const tmux = paneLister([]);

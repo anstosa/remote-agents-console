@@ -4,7 +4,7 @@ import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../src/tmux/command.js';
-import { gitCommonDir, listWorktrees, parseWorktreeList } from '../src/git/worktrees.js';
+import { gitCommonDir, listWorktrees, parseWorktreeList, parseWorktreeListNul } from '../src/git/worktrees.js';
 
 const dirs: string[] = [];
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -43,6 +43,13 @@ describe('parseWorktreeList', () => {
   it('tolerates a trailing entry without a final blank line and a bare `locked` with no reason', () => {
     const porcelain = 'worktree /repo/main\nHEAD aaaa\nbranch refs/heads/main\nlocked\n';
     expect(parseWorktreeList(porcelain)).toEqual([{ path: '/repo/main', head: 'aaaa', branch: 'main', detached: false, bare: false, locked: true, prunable: false }]);
+  });
+  it('parses nul-delimited paths and reasons containing newlines without splitting records', () => {
+    const porcelain = ['worktree /repo/line\nbreak', 'HEAD aaaa', 'branch refs/heads/main', 'locked first\nsecond', '', 'worktree /repo/next', 'HEAD bbbb', 'detached', ''].join('\0');
+    expect(parseWorktreeListNul(porcelain)).toEqual([
+      { path: '/repo/line\nbreak', head: 'aaaa', branch: 'main', detached: false, bare: false, locked: true, lockedReason: 'first\nsecond', prunable: false },
+      { path: '/repo/next', head: 'bbbb', detached: true, bare: false, locked: false, prunable: false }
+    ]);
   });
 });
 

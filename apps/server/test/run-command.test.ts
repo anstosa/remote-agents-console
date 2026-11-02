@@ -16,4 +16,10 @@ describe('run', () => {
     const script = 'process.stdout.write(Buffer.from([0xe2, 0x9e])); setTimeout(() => process.stdout.write(Buffer.from([0x9c, 0x0a])), 100);';
     await expect(run(process.execPath, ['-e', script])).resolves.toMatchObject({ code: 0, stdout: '➜\n' });
   });
+
+  it('marks a retained stdout tail as truncated', async () => {
+    const result = await run(process.execPath, ['-e', "process.stdout.write('x'.repeat(1000001))"]);
+    expect(result).toMatchObject({ code: 0, stdoutTruncated: true });
+    expect(result.stdout).toHaveLength(1_000_000);
+  });
 });

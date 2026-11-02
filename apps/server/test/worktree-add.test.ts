@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../src/tmux/command.js';
-import { WorktreeManagementService, worktreeManagementAvailability, type GitExec } from '../src/worktrees/management.js';
+import { WorktreeManagementService, worktreeManagementAvailability, type AddResult, type GitExec } from '../src/worktrees/management.js';
 import { PullRequestSwitchService } from '../src/pull-requests/switch-service.js';
 import type { ValidatedConfig } from '../src/config/schema.js';
 import type { GitCommand } from '../src/git/worktree-state.js';
@@ -12,7 +12,7 @@ import { testProject, testWorktree } from './helpers/config.js';
 const dirs: string[] = [];
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
-type GitResult = { code: number; stdout: string; stderr: string };
+type GitResult = { code: number; stdout: string; stderr: string; stdoutTruncated?: true };
 const ok = (stdout = ''): GitResult => ({ code: 0, stdout, stderr: '' });
 const no = (stderr = '', code = 1): GitResult => ({ code, stdout: '', stderr });
 
@@ -309,6 +309,73 @@ describe('WorktreeManagementService.add — from a pull request', () => {
     expect(await git(path, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/feature/draft');
   });
 
+  it('keeps the shared mutation lock through the contextual ordinary-create callback', async () => {
+    const project = await fakeProject();
+    const headSha = '1234567890abcdef1234567890abcdef12345678';
+    const main = testWorktree({ id: `proj:${project.path}`, projectId: 'proj', path: project.path, identity: project.path, main: true, branch: 'main' });
+    const commandCalls: string[][] = [];
+    const command: GitCommand = async (_binary, args) => {
+      commandCalls.push(args);
+      if (has(args, 'remote', 'get-url', 'origin')) return ok('git@github.com:acme/repo.git\n');
+      if (has(args, 'worktree', 'list', '--porcelain', '-z')) return ok(`worktree ${project.path}\0HEAD ${headSha}\0branch refs/heads/main\0\0`);
+      if (has(args, 'check-ref-format', '--branch')) return ok('feature/draft\n');
+      if (has(args, 'rev-parse', '--verify', '--quiet')) return ok(`${headSha}\n`);
+      if (has(args, 'show-ref', '--verify', '--quiet')) return no();
+      return ok();
+    };
+    const discovery = { projectsNow: () => [project], worktreesNow: () => [main] };
+    const github = {
+      repositoryAt: async () => ({ owner: 'acme', name: 'repo' }),
+      pullRequestDetail: async () => ({ pullRequest: { number: 7, title: 'Work', branch: 'feature/draft', headSha, headOnOrigin: true, draft: false, url: 'https://github.com/acme/repo/pull/7', state: 'open', checks: 'passed' } })
+    };
+    const switching = new PullRequestSwitchService({} as ValidatedConfig, discovery as never, github as never, command);
+    let enterAdd!: () => void;
+    let releaseAdd!: () => void;
+    const addEntered = new Promise<void>(resolve => { enterAdd = resolve; });
+    const addReleased = new Promise<void>(resolve => { releaseAdd = resolve; });
+    const structuralCalls: string[][] = [];
+    const structuralGit: GitExec = async args => {
+      structuralCalls.push(args);
+      // pause the first structural write under both locks
+      if (has(args, 'worktree', 'add')) { enterAdd(); await addReleased; }
+      return ok();
+    };
+    const management = new WorktreeManagementService(() => [project], structuralGit, undefined, switching, () => [main]);
+    const context = { identity: { repositoryKey: 'acme/repo', kind: 'pull' as const, number: 7 }, targetProjectId: 'proj', expectedHolderWorktreeIds: [] };
+    const adding = management.add('proj', { mode: 'pull-request', number: 7, context });
+    await addEntered;
+    const callsAtBarrier = commandCalls.length;
+    await expect(switching.fetchForWorktree('proj', 7)).resolves.toEqual({ error: 'Another branch checkout or move is already running. Try again when it finishes.' });
+    expect(commandCalls).toHaveLength(callsAtBarrier);
+    releaseAdd();
+    await expect(adding).resolves.toEqual({ ok: true, path: join(project.worktreesDirectory, 'pr-7') });
+    expect(structuralCalls.some(args => has(args, 'worktree', 'add', '--no-track', '-b', 'feature/draft'))).toBe(true);
+  });
+
+  it('keeps same-number origin and parent pull request worktree paths independent', async () => {
+    const project = await fakeProject();
+    const originKey = 'anstosa/audiobookshelf';
+    const parentKey = 'advplyr/audiobookshelf';
+    const pullRequestHeads = {
+      createUnheldWorktree: async (context: { identity: { repositoryKey: string } }, _refuseFork: boolean, create: (head: object) => Promise<AddResult>) => ({ ok: true as const, value: await create({
+        branch: context.identity.repositoryKey === originKey ? 'origin-pr' : 'parent-pr', sha: 'a'.repeat(40), existing: false, fork: true,
+        repositoryScope: { baseRepositoryKey: context.identity.repositoryKey, originRepositoryKey: originKey }
+      }) })
+    };
+    const structuralGit: GitExec = async args => {
+      if (has(args, 'worktree', 'add')) await mkdir(args.at(-2)!, { recursive: true });
+      return ok();
+    };
+    const management = new WorktreeManagementService(() => [project], structuralGit, undefined, pullRequestHeads as never);
+    const context = (repositoryKey: string) => ({ identity: { repositoryKey, kind: 'pull' as const, number: 7 }, targetProjectId: 'proj', expectedHolderWorktreeIds: [] });
+
+    const origin = await management.add('proj', { mode: 'pull-request', number: 7, context: context(originKey) });
+    const parent = await management.add('proj', { mode: 'pull-request', number: 7, context: context(parentKey) });
+    expect(origin).toEqual({ ok: true, path: join(project.worktreesDirectory, 'pr-7'), fork: true });
+    expect(parent).toMatchObject({ ok: true, path: expect.stringMatching(new RegExp(`${project.worktreesDirectory.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}/pr-7-[a-f0-9]{16}$`, 'u')), fork: true });
+    expect(parent).not.toEqual(origin);
+  });
+
   it('checks out the verified head even when the fetched ref moves right after the check', async () => {
     const { project, checkout, draftSha } = await pullRequestRepository();
     const base = await git(checkout, 'rev-parse', 'origin/main');
@@ -388,5 +455,237 @@ describe('WorktreeManagementService.add — from a pull request', () => {
     expect(result).toEqual({ ok: false, status: 409, error: `Pull request #8 is already checked out at ${older}.` });
     // match the requested checkout rather than a random parent name
     expect((await git(checkout, 'worktree', 'list', '--porcelain')).split('\n')).not.toContain(`worktree ${join(project.worktreesDirectory, 'pr-8')}`);
+  });
+});
+
+describe('WorktreeManagementService.moveHeldPullRequest', () => {
+  const operationId = '123e4567-e89b-42d3-a456-426614174000';
+  const git = async (cwd: string, ...args: string[]) => { const result = await run('/usr/bin/git', ['-C', cwd, ...args]); if (result.code !== 0) throw new Error(`git ${args.join(' ')}: ${result.stderr}`); return result.stdout.trim(); };
+
+  // create one disposable linked-worktree holder fixture
+  async function heldRepository(
+    withGitlink = false,
+    afterCandidateDiscovery?: (sourcePath: string) => Promise<void>,
+    commandFactory?: (sourcePath: string) => GitCommand,
+    refreshAgents?: (call: number, sourcePath: string, candidatePath: string) => object[]
+  ) {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-github-split-')));
+    dirs.push(root);
+    const mainPath = join(root, 'main');
+    const sourcePath = join(root, 'source');
+    const worktreesDirectory = join(root, 'wts');
+    await mkdir(mainPath);
+    await git(mainPath, 'init', '-q', '-b', 'main');
+    await git(mainPath, 'config', 'user.email', 'test@example.com');
+    await git(mainPath, 'config', 'user.name', 'Test');
+    await git(mainPath, 'remote', 'add', 'origin', 'git@github.com:acme/repo.git');
+    await writeFile(join(mainPath, 'tracked.txt'), 'original\n');
+    await git(mainPath, 'add', 'tracked.txt');
+    await git(mainPath, 'commit', '-q', '-m', 'base');
+    // add a metadata-only gitlink without reading nested configuration
+    if (withGitlink) {
+      const commit = await git(mainPath, 'rev-parse', 'HEAD');
+      await git(mainPath, 'update-index', '--add', '--cacheinfo', `160000,${commit},module`);
+      await git(mainPath, 'commit', '-q', '-m', 'gitlink');
+    }
+    await git(mainPath, 'branch', 'feature/draft');
+    await git(mainPath, 'worktree', 'add', '-q', sourcePath, 'feature/draft');
+    const headSha = await git(sourcePath, 'rev-parse', 'HEAD');
+    const project = testProject({ id: 'proj', path: mainPath, identity: join(mainPath, '.git'), worktreesDirectory });
+    const main = testWorktree({ id: `proj:${mainPath}`, projectId: 'proj', path: mainPath, identity: mainPath, branch: 'main' });
+    const source = testWorktree({ id: `proj:${sourcePath}`, projectId: 'proj', path: sourcePath, identity: sourcePath, main: false, branch: 'feature/draft' });
+    const candidatePath = join(worktreesDirectory, `pr-7-move-${operationId}`);
+    const target = testWorktree({ id: `proj:${candidatePath}`, projectId: 'proj', path: candidatePath, identity: candidatePath, main: false, detached: true, branch: undefined });
+    let candidateDiscovered = false;
+    let refreshCount = 0;
+    const discovery = {
+      projectsNow: () => [project],
+      worktreesNow: () => [main, source, ...(candidateDiscovered ? [target] : [])],
+      refresh: async () => refreshAgents?.(++refreshCount, sourcePath, candidatePath) ?? [],
+      invalidateWorktrees: () => {},
+      worktrees: async () => { candidateDiscovered = true; return [main, source, target]; }
+    };
+    const github = {
+      repositoryAt: async () => ({ owner: 'acme', name: 'repo' }),
+      pullRequestDetail: async () => ({ pullRequest: { number: 7, title: 'Work', branch: 'feature/draft', headSha, headOnOrigin: true, draft: false, url: 'https://github.com/acme/repo/pull/7', state: 'open', checks: 'passed' } })
+    };
+    const switching = new PullRequestSwitchService({} as ValidatedConfig, discovery as never, github as never, commandFactory?.(sourcePath) ?? run);
+    const management = new WorktreeManagementService(() => [project], undefined, undefined, switching, () => discovery.worktreesNow());
+    let discoveryHookRan = false;
+    discovery.worktrees = async () => {
+      candidateDiscovered = true;
+      // inject one exact post-create race once
+      if (!discoveryHookRan && afterCandidateDiscovery !== undefined) { discoveryHookRan = true; await afterCandidateDiscovery(sourcePath); }
+      return [main, source, target];
+    };
+    // construct a state-free recovery reader over explicit current discovery
+    const freshManagement = (visible: ReturnType<typeof testWorktree>[] = discovery.worktreesNow()) => new WorktreeManagementService(() => [project], undefined, undefined, undefined, () => visible);
+    return { mainPath, sourcePath, worktreesDirectory, candidatePath, headSha, project, main, source, target, management, freshManagement, refreshCount: () => refreshCount };
+  }
+
+  it('moves the exact held branch and staged, unstaged and untracked changes into the UUID target', async () => {
+    const { sourcePath, candidatePath, source, management } = await heldRepository();
+    await writeFile(join(sourcePath, 'tracked.txt'), 'staged\n');
+    await git(sourcePath, 'add', 'tracked.txt');
+    await writeFile(join(sourcePath, 'tracked.txt'), 'staged\nunstaged\n');
+    await writeFile(join(sourcePath, 'notes.txt'), 'untracked\n');
+    const context = {
+      identity: { repositoryKey: 'acme/repo', kind: 'pull' as const, number: 7 },
+      targetProjectId: 'proj',
+      expectedHolderWorktreeIds: [source.id],
+      expectedSourceWorktreeId: source.id
+    };
+
+    await expect(management.moveHeldPullRequest('proj', { number: 7, sourceWorktreeId: source.id, context, operationId, openAgent: false })).resolves.toEqual({ ok: true, path: candidatePath, fork: false });
+    expect(await git(candidatePath, 'branch', '--show-current')).toBe('feature/draft');
+    expect(await readFile(join(candidatePath, 'tracked.txt'), 'utf8')).toBe('staged\nunstaged\n');
+    expect(await readFile(join(candidatePath, 'notes.txt'), 'utf8')).toBe('untracked\n');
+    expect(await git(sourcePath, 'branch', '--show-current')).toBe('');
+    const inspected = await management.inspectHeldPullRequest('proj', 7, source.id, operationId);
+    expect(inspected).toMatchObject({ ok: true, recovery: { candidateWorktreeId: `proj:${candidatePath}`, currentHolderWorktreeId: `proj:${candidatePath}`, inferredPhase: 'moved' } });
+  });
+
+  it('reconstructs C1-C6 facts from git with fresh service instances and preserves the exact bytes and index', async () => {
+    const { mainPath, sourcePath, candidatePath, source, main, target, freshManagement } = await heldRepository();
+    await mkdir(join(candidatePath, '..'), { recursive: true });
+    await git(mainPath, 'worktree', 'add', '-q', '--detach', candidatePath, 'HEAD');
+    const c1Worktrees = await git(mainPath, 'worktree', 'list', '--porcelain');
+    const c1Stashes = await git(mainPath, 'stash', 'list');
+    const c1 = await freshManagement([main, source]).inspectHeldPullRequest('proj', 7, source.id, operationId);
+    expect(c1).toMatchObject({ ok: true, recovery: { candidate: { pathExists: true, registered: true, discovered: false, status: 'clean' }, source: { branch: 'feature/draft', status: 'clean' }, inferredPhase: 'target-detached' } });
+    expect(await git(mainPath, 'worktree', 'list', '--porcelain')).toBe(c1Worktrees);
+    expect(await git(mainPath, 'stash', 'list')).toBe(c1Stashes);
+
+    await writeFile(join(sourcePath, 'tracked.txt'), 'staged\n');
+    await git(sourcePath, 'add', 'tracked.txt');
+    await writeFile(join(sourcePath, 'tracked.txt'), 'staged\nunstaged\n');
+    await writeFile(join(sourcePath, 'notes.txt'), 'untracked\n');
+    const tag = `rac move-to-new ${operationId} feature/draft`;
+    await git(sourcePath, 'stash', 'push', '--include-untracked', '--message', tag);
+    const stashOid = await git(mainPath, 'rev-parse', 'refs/stash');
+    const c2 = await freshManagement([main, source]).inspectHeldPullRequest('proj', 7, source.id, operationId);
+    expect(c2).toMatchObject({ ok: true, recovery: { taggedStash: { oid: stashOid, subject: expect.stringContaining(tag) }, inferredPhase: 'stashed-source' } });
+
+    await git(sourcePath, 'switch', '--detach');
+    const c3 = await freshManagement([main, source]).inspectHeldPullRequest('proj', 7, source.id, operationId);
+    expect(c3).toMatchObject({ ok: true, recovery: { inferredPhase: 'source-detached' } });
+    if (c3.ok) expect('branch' in c3.recovery.source).toBe(false);
+    await git(candidatePath, 'switch', 'feature/draft');
+    const attachedTarget = { ...target, detached: false, branch: 'feature/draft' };
+    const c4 = await freshManagement([main, source, attachedTarget]).inspectHeldPullRequest('proj', 7, source.id, operationId);
+    expect(c4).toMatchObject({ ok: true, recovery: { currentHolderWorktreeId: `proj:${candidatePath}`, taggedStash: { oid: stashOid }, inferredPhase: 'target-holds-with-stash' } });
+
+    await git(candidatePath, 'stash', 'apply', '--index', stashOid);
+    expect(await readFile(join(candidatePath, 'tracked.txt'), 'utf8')).toBe('staged\nunstaged\n');
+    expect(await readFile(join(candidatePath, 'notes.txt'), 'utf8')).toBe('untracked\n');
+    expect(await git(candidatePath, 'diff', '--cached', '--name-only')).toBe('tracked.txt');
+    expect(await git(candidatePath, 'diff', '--name-only')).toBe('tracked.txt');
+    expect(await git(candidatePath, 'ls-files', '--others', '--exclude-standard')).toBe('notes.txt');
+    await git(mainPath, 'stash', 'drop', 'stash@{0}');
+    const c6 = await freshManagement([main, source, attachedTarget]).inspectHeldPullRequest('proj', 7, source.id, operationId);
+    expect(c6).toMatchObject({ ok: true, recovery: { currentHolderWorktreeId: `proj:${candidatePath}`, candidate: { status: 'dirty' }, inferredPhase: 'moved' } });
+    expect(c6).not.toMatchObject({ recovery: { taggedStash: expect.anything() } });
+    expect(await git(mainPath, 'stash', 'list')).toBe('');
+    expect(await git(mainPath, 'worktree', 'list', '--porcelain')).toContain(`worktree ${sourcePath}`);
+    expect(await git(mainPath, 'worktree', 'list', '--porcelain')).toContain(`worktree ${candidatePath}`);
+  });
+
+  it('returns recovery when source HEAD changes after candidate creation without stashing or detaching source', async () => {
+    const fixture = await heldRepository(false, async sourcePath => {
+      await writeFile(join(sourcePath, 'tracked.txt'), 'advanced source\n');
+      await git(sourcePath, 'add', 'tracked.txt');
+      await git(sourcePath, 'commit', '-q', '-m', 'advance during move');
+    });
+    const { sourcePath, candidatePath, headSha, source, management } = fixture;
+    const context = {
+      identity: { repositoryKey: 'acme/repo', kind: 'pull' as const, number: 7 },
+      targetProjectId: 'proj',
+      expectedHolderWorktreeIds: [source.id],
+      expectedSourceWorktreeId: source.id
+    };
+
+    await expect(management.moveHeldPullRequest('proj', { number: 7, sourceWorktreeId: source.id, context, operationId, openAgent: false })).resolves.toMatchObject({ ok: false, status: 409, operationId, candidateWorktreeId: `proj:${candidatePath}`, recoveryRequired: true, recovery: { inferredPhase: 'target-detached' } });
+    expect(await git(sourcePath, 'branch', '--show-current')).toBe('feature/draft');
+    expect(await git(sourcePath, 'rev-parse', 'HEAD')).not.toBe(headSha);
+    expect(await git(candidatePath, 'rev-parse', 'HEAD')).toBe(headSha);
+    expect(await readFile(join(sourcePath, 'tracked.txt'), 'utf8')).toBe('advanced source\n');
+    expect(await git(sourcePath, 'stash', 'list')).toBe('');
+  });
+
+  it('rechecks source HEAD at the final pre-stash seam and retains the candidate on a race', async () => {
+    let sourceHeadReads = 0;
+    const fixture = await heldRepository(false, undefined, sourcePath => async (binary, args) => {
+      // move the source only at the last held-move head read
+      if (args[args.indexOf('-C') + 1] === sourcePath && has(args, 'rev-parse', '--verify', 'HEAD^{commit}') && ++sourceHeadReads === 3) {
+        await writeFile(join(sourcePath, 'tracked.txt'), 'last-seam advance\n');
+        await git(sourcePath, 'add', 'tracked.txt');
+        await git(sourcePath, 'commit', '-q', '-m', 'advance before stash');
+      }
+      return await run(binary, args);
+    });
+    const { sourcePath, candidatePath, headSha, source, management } = fixture;
+    const context = {
+      identity: { repositoryKey: 'acme/repo', kind: 'pull' as const, number: 7 },
+      targetProjectId: 'proj',
+      expectedHolderWorktreeIds: [source.id],
+      expectedSourceWorktreeId: source.id
+    };
+
+    await expect(management.moveHeldPullRequest('proj', { number: 7, sourceWorktreeId: source.id, context, operationId, openAgent: false })).resolves.toMatchObject({ ok: false, status: 409, candidateWorktreeId: `proj:${candidatePath}`, recoveryRequired: true });
+    expect(sourceHeadReads).toBe(3);
+    expect(await git(sourcePath, 'branch', '--show-current')).toBe('feature/draft');
+    expect(await git(sourcePath, 'rev-parse', 'HEAD')).not.toBe(headSha);
+    expect(await git(candidatePath, 'rev-parse', 'HEAD')).toBe(headSha);
+    expect(await readFile(join(sourcePath, 'tracked.txt'), 'utf8')).toBe('last-seam advance\n');
+    expect(await git(sourcePath, 'stash', 'list')).toBe('');
+  });
+
+  it('rechecks source busy state after final contextual proof and preserves the created candidate', async () => {
+    let lateSourceStatusRead = false;
+    const fixture = await heldRepository(false, undefined, sourcePath => async (binary, args) => {
+      const result = await run(binary, args);
+      // make the source busy only after the last read before mutation
+      if (args[args.indexOf('-C') + 1] === sourcePath && has(args, 'status', '--porcelain=v1') && !args.includes('-z')) lateSourceStatusRead = true;
+      return result;
+    }, (_call, sourcePath) => lateSourceStatusRead ? [{ home: sourcePath, attention: 'working' }] : []);
+    const { sourcePath, candidatePath, source, management, refreshCount } = fixture;
+    const context = {
+      identity: { repositoryKey: 'acme/repo', kind: 'pull' as const, number: 7 },
+      targetProjectId: 'proj',
+      expectedHolderWorktreeIds: [source.id],
+      expectedSourceWorktreeId: source.id
+    };
+
+    await expect(management.moveHeldPullRequest('proj', { number: 7, sourceWorktreeId: source.id, context, operationId, openAgent: false })).resolves.toMatchObject({ ok: false, status: 409, candidateWorktreeId: `proj:${candidatePath}`, recoveryRequired: true, recovery: { inferredPhase: 'target-detached' } });
+    expect(lateSourceStatusRead).toBe(true);
+    expect(refreshCount()).toBe(2);
+    expect(await git(sourcePath, 'branch', '--show-current')).toBe('feature/draft');
+    expect(await git(candidatePath, 'branch', '--show-current')).toBe('');
+    expect(await git(sourcePath, 'stash', 'list')).toBe('');
+  });
+
+  it('refuses a current gitlink before candidate creation while ordinary move behavior stays separate', async () => {
+    const { candidatePath, source, management } = await heldRepository(true);
+    const context = {
+      identity: { repositoryKey: 'acme/repo', kind: 'pull' as const, number: 7 },
+      targetProjectId: 'proj',
+      expectedHolderWorktreeIds: [source.id],
+      expectedSourceWorktreeId: source.id
+    };
+
+    await expect(management.moveHeldPullRequest('proj', { number: 7, sourceWorktreeId: source.id, context, operationId, openAgent: false })).resolves.toEqual({ ok: false, status: 409, error: 'Pull requests in repositories with submodules cannot be moved to a new worktree.', operationId });
+    expect(await management.inspectHeldPullRequest('proj', 7, source.id, operationId)).toMatchObject({ ok: true, recovery: { candidate: { pathExists: false, registered: false }, inferredPhase: 'none' } });
+    expect((await run('/usr/bin/git', ['-C', candidatePath, 'rev-parse', 'HEAD'])).code).not.toBe(0);
+  });
+
+  it('refuses a truncated recovery metadata projection', async () => {
+    const project = await fakeProject();
+    const source = testWorktree({ id: `proj:${project.path}`, projectId: 'proj', path: project.path, identity: project.path, branch: 'feature/draft' });
+    const recoveryGit: GitExec = async args => {
+      if (has(args, 'worktree', 'list')) return { ...ok(`worktree ${project.path}\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/feature/draft\0\0`), stdoutTruncated: true };
+      return ok();
+    };
+    const management = new WorktreeManagementService(() => [project], recoveryGit, undefined, undefined, () => [source]);
+    await expect(management.inspectHeldPullRequest('proj', 7, source.id, operationId)).resolves.toEqual({ ok: false, status: 409, error: 'recovery metadata could not be read' });
   });
 });

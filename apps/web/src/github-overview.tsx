@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Skeleton } from './skeleton.js';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { githubItemIdentity, githubItemKey, type GithubNewWorktreeContext } from './github-client.js';
 
-// The Overview (CONTEXT.md): the operator's Pull requests, Review requests and assigned Issues
-// across every repository, as the server's GitHub module last read them, with what is Waiting on
-// me called out by reason. It replaces the Workspace while open; the tab row stays.
+// Shared GitHub list primitives: the operator's Pull requests, Review requests and assigned Issues
+// across repositories, with what is Waiting on me called out by reason.
 
 // the server's `Overview` (src/github/service.ts), which the web cannot import: its module graph
 // reaches Node-only code
@@ -21,14 +20,8 @@ export type Item = {
   destination?: { kind: 'worktree' | 'project'; worktreeId: string; label: string };
 };
 export type Problem = { kind: 'no-token' | 'rate-limited' | 'failing'; message: string; until?: number };
-type Overview = { mine: Item[]; reviews: Item[]; issues: Item[]; totals: { mine: number; reviews: number; issues: number }; fetchedAt?: number; problem?: Problem };
+export type Overview = { mine: Item[]; reviews: Item[]; issues: Item[]; totals: { mine: number; reviews: number; issues: number }; fetchedAt?: number; problem?: Problem };
 export type ColumnKey = 'mine' | 'reviews' | 'issues';
-
-const columns: { key: ColumnKey; label: string; tab: string; icon: keyof typeof icons; search: string }[] = [
-  { key: 'mine', label: 'My pull requests', tab: 'Mine', icon: 'pull', search: 'is:pr is:open author:@me archived:false' },
-  { key: 'reviews', label: 'Review requests', tab: 'Reviews', icon: 'review', search: 'is:pr is:open review-requested:@me archived:false' },
-  { key: 'issues', label: 'Assigned issues', tab: 'Issues', icon: 'issue', search: 'is:issue is:open assignee:@me archived:false' }
-];
 
 export const icons = {
   pull: <><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 0 1 2 2v7M6 9v12" /></>,
@@ -120,7 +113,7 @@ export function RowCopy({ item, now, isNew, showAuthor, status, note }: { item: 
 /** A row's new-Worktree choices: check a pull request out, or with a Review tour started; an Issue's own branch. */
 export type NewWorktreeAction = 'checkout' | 'tour' | 'issue';
 /** Opens the New worktree dialog for a row's item. */
-export type NewWorktreeFor = (item: Item, action: NewWorktreeAction) => void;
+export type NewWorktreeFor = (item: Item, action: NewWorktreeAction, context?: GithubNewWorktreeContext) => void;
 
 /** An Issue's branch as `gh issue develop` and GitHub name it: `<number>-<title slug>`, the slug cut to 40 characters. */
 export function issueBranch(number: number, title: string): string {
@@ -154,23 +147,33 @@ export function useNewWorktreeMenu(item: Item, issue: boolean, newWorktree?: New
   ];
 }
 
-function Row({ item, column, now, isNew, onOpen, newWorktree }: { item: Item; column: ColumnKey; now: number; isNew: boolean; onOpen: OpenItem; newWorktree?: NewWorktreeFor }) {
+type OverviewRowState = { id?: string; here?: boolean; selected?: boolean; focused?: boolean };
+
+// keep item selection separate from the right-side checkout and external controls
+function Row({ item, column, now, isNew, onOpen, onSelect, selectable, actions, rowState, newWorktree }: { item: Item; column: ColumnKey; now: number; isNew: boolean; onOpen: OpenItem; onSelect?: (item: Item, column: ColumnKey) => void; selectable?: (item: Item, column: ColumnKey) => boolean; actions?: (item: Item, column: ColumnKey) => ReactNode; rowState?: (item: Item, column: ColumnKey) => OverviewRowState; newWorktree?: NewWorktreeFor }) {
   const destination = item.destination;
+  const state = rowState?.(item, column) ?? {};
   const [branchPlus, menu] = useNewWorktreeMenu(item, column === 'issues', newWorktree, destination?.label);
   const content = <>
     <RowCopy item={item} now={now} isNew={isNew} showAuthor={column !== 'mine'} />
     {destination === undefined
-      ? <span className="overview-destination" title="No Project for this repository: opens on github.com"><Icon name="external" />github.com</span>
+      ? <span className="overview-destination" title="No local Project for this repository">No local Project</span>
       : <span className={`overview-destination ${destination.kind}`} title={destination.kind === 'worktree' ? 'Opens this Worktree\'s Workspace' : 'Opens the Project\'s main worktree'}><Icon name={destination.kind === 'worktree' ? 'branch' : 'folder'} />{destination.label}</span>}
   </>;
   const label = `#${item.number} ${item.title}${isNew ? ', new' : ''}`;
+  const localSelection = onSelect !== undefined;
+  const localDetail = localSelection && selectable?.(item, column) !== false;
   return <>
-    <div className={`overview-row${waiting(item) ? ' waiting' : ''}${isNew ? ' new' : ''}`}>
-      {destination === undefined
+    <div className={`overview-row${localSelection ? ' github-row' : ''}${waiting(item) ? ' waiting' : ''}${isNew ? ' new' : ''}${state.selected ? ' selected' : ''}${state.focused ? ' focus' : ''}${state.here ? ' current-holder' : ''}`} {...(state.id === undefined ? {} : { 'data-row': state.id })}>
+      {localDetail
+        ? <button className="overview-row-main" type="button" aria-label={`${label}${state.here ? ', here' : ''}, details`} aria-current={state.selected || undefined} onClick={() => onSelect(item, column)}>{content}{state.here && <span className="github-here" title="This Worktree">here</span>}</button>
+        : localSelection || destination === undefined
         ? <a className="overview-row-main" href={item.url} target="_blank" rel="noreferrer" aria-label={`${label}, on GitHub`}>{content}</a>
         : <button className="overview-row-main" type="button" aria-label={`${label}, in ${destination.label}`} onClick={() => onOpen(destination.worktreeId, item, column)}>{content}</button>}
-      {branchPlus}
-      {destination !== undefined && <a className="overview-row-browser" href={item.url} target="_blank" rel="noreferrer" title="Open on GitHub" aria-label={`Open #${item.number} on GitHub`}><Icon name="external" /></a>}
+      <div className="github-card-controls" role="group" aria-label={`Card controls for #${item.number}`}>
+        {actions?.(item, column) ?? branchPlus}
+        <a className="overview-row-browser" href={item.url} target="_blank" rel="noreferrer" title="Open on GitHub" aria-label={`Open #${item.number} on GitHub`}><Icon name="external" /></a>
+      </div>
     </div>
     {menu}
   </>;
@@ -179,8 +182,9 @@ function Row({ item, column, now, isNew, onOpen, newWorktree }: { item: Item; co
 // a column's rows by repository: those holding something new first, then the busiest, then by
 // name; in each, Waiting on me rows first, new ones first among those. A row whose repository has a
 // Project and which no Worktree holds yet offers `newWorktree`.
-function RepositoryGroups({ items, column, now, isNew, onOpen, newWorktree }: { items: Item[]; column: ColumnKey; now: number; isNew: (item: Item) => boolean; onOpen: OpenItem; newWorktree?: ProjectNewWorktree }) {
-  if (items.length === 0) return <p className="overview-none">None.</p>;
+export function RepositoryGroups({ items, column, now, isNew, onOpen, onSelect, selectable, actions, rowState, newWorktree }: { items: Item[]; column: ColumnKey; now: number; isNew: (item: Item) => boolean; onOpen: OpenItem; onSelect?: (item: Item, column: ColumnKey) => void; selectable?: (item: Item, column: ColumnKey) => boolean; actions?: (item: Item, column: ColumnKey) => ReactNode; rowState?: (item: Item, column: ColumnKey) => OverviewRowState; newWorktree?: ProjectNewWorktree }) {
+  // the enclosing lane remains visible without placeholder contents
+  if (items.length === 0) return null;
   const groups = new Map<string, Item[]>();
   for (const item of items) groups.set(item.repository, [...groups.get(item.repository) ?? [], item]);
   const count = (rows: Item[]) => rows.filter(waiting).length;
@@ -191,7 +195,12 @@ function RepositoryGroups({ items, column, now, isNew, onOpen, newWorktree }: { 
     const waits = count(rows);
     return <section key={repository} className="overview-repository" aria-label={repository}>
       <h4 className="overview-repository-head"><span>{owner}/<b>{name}</b></span>{rows.some(row => row.destination !== undefined) && <span className="overview-project" title="Has a Project" aria-label="Has a Project"><Icon name="folder" /></span>}{waits > 0 && <span className="overview-waits" title={`${waits} waiting on me`}>{waits}</span>}</h4>
-      {attentionOrder(rows, isNew).map(item => <Row key={item.url} item={item} column={column} now={now} isNew={isNew(item)} onOpen={onOpen} newWorktree={item.destination?.kind === 'project' ? newWorktree?.(item.destination.worktreeId) : undefined} />)}
+      {attentionOrder(rows, isNew).map(item => {
+        const identity = githubItemIdentity(item.repository, column === 'issues' ? 'issue' : 'pull', item.number);
+        // malformed repository rows remain external-only and keep their url key
+        const key = identity === undefined ? item.url : githubItemKey(identity);
+        return <Row key={key} item={item} column={column} now={now} isNew={isNew(item)} onOpen={onOpen} onSelect={onSelect} selectable={selectable} actions={actions} rowState={rowState} newWorktree={item.destination?.kind === 'project' ? newWorktree?.(item.destination.worktreeId) : undefined} />;
+      })}
     </section>;
   })}</>;
 }
@@ -233,7 +242,11 @@ export function useSeenRows(request: Request, shown: readonly Item[], active: bo
     const keys = signature.split('\n');
     const timer = window.setTimeout(() => {
       for (const key of keys) reported.current.add(key);
-      setShownNew(previous => new Set([...previous, ...latest.current.map(item => item.url)]));
+      setShownNew(previous => new Set([...previous, ...latest.current.map(item => {
+        const kind = item.url.includes('/pull/') ? 'pull' : 'issue';
+        const identity = githubItemIdentity(item.repository, kind, item.number);
+        return identity === undefined ? item.url : githubItemKey(identity);
+      })]));
       void request('/api/github/overview/seen', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keys }) })
         .then(response => { if (!response.ok) throw new Error(); })
         // a report that did not land is sent again with the next lists
@@ -241,7 +254,11 @@ export function useSeenRows(request: Request, shown: readonly Item[], active: bo
     }, seenAfterMs);
     return () => window.clearTimeout(timer);
   }, [active, visible, signature, request]);
-  return item => unseen(item) || shownNew.has(item.url);
+  return item => {
+    const kind = item.url.includes('/pull/') ? 'pull' : 'issue';
+    const identity = githubItemIdentity(item.repository, kind, item.number);
+    return unseen(item) || shownNew.has(identity === undefined ? item.url : githubItemKey(identity));
+  };
 }
 
 /** What the yellow banner says when the lists shown are older than they should be; nothing while they are current. */
@@ -259,113 +276,11 @@ export const NoTokenCard = () => <div className="overview-card"><h3>No GitHub to
 export const freshness = (fetchedAt: number, now: number) => now - fetchedAt < 60_000 ? 'updated just now' : `updated ${age(fetchedAt, now)} ago`;
 
 /**
- * The Overview: three columns (tabs on a phone) grouped by repository. `revision` changes when the
- * server's GitHub data or the console's Worktrees change, and the lists are read again then.
- * `newWorktree` offers a row no Worktree holds a new one in its Project.
- */
-export function GithubOverview({ request, revision, phone, onClose, onOpen, newWorktree }: { request: Request; revision: string; phone: boolean; onClose: () => void; onOpen: OpenItem; newWorktree?: ProjectNewWorktree }) {
-  const [overview, setOverview] = useState<Overview>();
-  const [unreachable, setUnreachable] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [tab, setTab] = useState<ColumnKey>('mine');
-  const [now, setNow] = useState(() => Date.now());
-  // a phone opens on the first tab holding something unseen, once the lists first land
-  const tabChosen = useRef(false);
-  const load = useCallback(async (refresh: boolean) => {
-    try {
-      const response = await request(`/api/github/overview${refresh ? '?refresh=1' : ''}`);
-      if (!response.ok) throw new Error();
-      const next = await response.json() as Overview;
-      setOverview(next);
-      if (!tabChosen.current && next.fetchedAt !== undefined) {
-        tabChosen.current = true;
-        setTab(columns.find(({ key }) => next[key].some(unseen))?.key ?? 'mine');
-      }
-      setUnreachable(false);
-    } catch { setUnreachable(true); }
-    setNow(Date.now());
-  }, [request]);
-  useEffect(() => { void load(false); }, [load, revision]);
-  // keep "updated … ago" and row ages moving
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || (event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable="true"]') !== null)) return;
-      // a flyout or dialog over the Overview takes Esc first
-      if (document.querySelector('.flyout-backdrop, [role="dialog"][aria-modal="true"]') !== null) return;
-      event.preventDefault();
-      onClose();
-    };
-    document.addEventListener('keydown', close);
-    return () => document.removeEventListener('keydown', close);
-  }, [onClose]);
-  const refresh = async () => {
-    setRefreshing(true);
-    await load(true);
-    setRefreshing(false);
-  };
-  // the rows on screen (every column, or a phone's open tab) count as seen once shown a moment
-  const listed = overview !== undefined && overview.fetchedAt !== undefined && overview.problem?.kind !== 'no-token';
-  const isNew = useSeenRows(request, overview === undefined ? [] : phone ? overview[tab] : [...overview.mine, ...overview.reviews], listed);
-
-  const problem = overview?.problem;
-  const items = overview === undefined ? [] : [...overview.mine, ...overview.reviews, ...overview.issues];
-  const waits = overview === undefined ? 0 : [...overview.mine, ...overview.reviews].filter(waiting).length;
-  const newCount = items.filter(isNew).length;
-  const summary = listed ? <span className="overview-summary">{waits > 0 ? <><b>{waits}</b> waiting on me</> : 'Nothing waiting on me'}{newCount > 0 && <> · <b>{newCount}</b> new</>}</span> : null;
-  const banner = staleNotice(overview, unreachable, now);
-
-  let body: ReactNode;
-  if (problem?.kind === 'no-token') body = <NoTokenCard />;
-  else if (overview === undefined && unreachable) body = <div className="overview-card"><h3>The console could not be reached</h3><p>The Overview loads once the console answers again.</p><button type="button" onClick={() => void refresh()}>Retry</button></div>;
-  else if (overview === undefined || (overview.fetchedAt === undefined && problem === undefined)) body = <div className="overview-skeletons" role="status" aria-label="Loading the Overview" aria-busy="true">{Array.from({ length: 6 }, (_, index) => <div className="overview-skeleton" key={index}><Skeleton className="overview-skeleton-title" /><Skeleton className="overview-skeleton-meta" /></div>)}</div>;
-  else if (overview.fetchedAt === undefined) body = <div className="overview-card"><h3>GitHub is unreachable</h3><p>{problem?.message}</p><button type="button" onClick={() => void refresh()}>Retry</button></div>;
-  else if (items.length === 0) body = <div className="overview-card"><h3>Nothing open</h3><p>You have no open pull requests, review requests or assigned issues in any repository you can access.</p></div>;
-  else {
-    const column = (key: ColumnKey) => {
-      const { label, icon, search } = columns.find(candidate => candidate.key === key)!;
-      const rows = overview[key];
-      const waits = rows.filter(waiting).length;
-      const more = overview.totals[key] - rows.length;
-      return <section key={key} className="overview-column" aria-label={label}>
-        {!phone && <header className="overview-column-head"><Icon name={icon} /><h3>{label}</h3><span className="overview-count">{overview.totals[key]}</span>{waits > 0 && <span className="overview-waits">{waits} waiting on me</span>}</header>}
-        <div className="overview-column-body">
-          <RepositoryGroups items={rows} column={key} now={now} isNew={isNew} onOpen={onOpen} newWorktree={newWorktree} />
-          {more > 0 && <a className="overview-more" href={`https://github.com/search?type=issues&q=${encodeURIComponent(search)}`} target="_blank" rel="noreferrer">{more} more on github.com</a>}
-        </div>
-      </section>;
-    };
-    body = phone
-      ? <><div className="overview-tabs" role="tablist" aria-label="Overview lists">{columns.map(({ key, tab: name }) => {
-        const [waits, total] = [overview[key].filter(waiting).length, overview.totals[key]];
-        return <button key={key} type="button" role="tab" aria-selected={tab === key} aria-label={`${name}, ${total}${waits > 0 ? `, ${waits} waiting on me` : ''}`} className={tab === key ? 'active' : ''} onClick={() => { tabChosen.current = true; setTab(key); }}>{name}<span className="overview-count">{total}</span>{waits > 0 && <span className="overview-waits" title="Waiting on me">{waits}</span>}{overview[key].some(unseen) && <i className="overview-tab-dot" role="img" aria-label="Holds something new" />}</button>;
-      })}</div>{column(tab)}</>
-      : <div className="overview-columns">{columns.map(({ key }) => column(key))}</div>;
-  }
-
-  return <section className={`overview${phone ? ' phone' : ''}`} aria-label="Overview">
-    <header className="overview-head">
-      <div className="overview-title"><small>GITHUB</small><h2>Overview</h2></div>
-      {!phone && summary}
-      <span className="overview-grow" />
-      {listed && <span className="overview-freshness">{freshness(overview.fetchedAt!, now)}</span>}
-      <button type="button" className="overview-action" aria-label="Refresh" title="Refresh now" disabled={refreshing} aria-busy={refreshing || undefined} onClick={() => void refresh()}><Icon name="refresh" /></button>
-      <button type="button" className="overview-action" aria-label="Close Overview" title="Back to the Workspace (Esc)" onClick={onClose}><Icon name="cross" /></button>
-    </header>
-    {phone && summary !== null && <div className="overview-subhead">{summary}</div>}
-    {banner !== undefined && <div className="overview-banner" role="status"><Icon name="clock" /><span>{banner}</span><button type="button" onClick={() => void refresh()} disabled={refreshing}>Retry</button></div>}
-    <div className={`overview-body${phone ? '' : ' columns'}`}>{body}</div>
-  </section>;
-}
-
-/**
- * The tab row's Overview button: it toggles the Overview, shows active while it is open, and
+ * The tab row's Overview button: it opens the unified GitHub split, shows active while it is open, and
  * counts the Pull requests holding something the operator has not been shown (a corner badge on a
  * phone).
  */
-export function OverviewButton({ open, phone, badge, onToggle }: { open: boolean; phone: boolean; badge: number; onToggle: () => void }) {
-  return <button type="button" className={`overview-button${open ? ' active' : ''}`} aria-pressed={open} aria-label={badge > 0 ? `Overview, ${badge} new` : 'Overview'} title={`Overview: pull requests, review requests and issues${badge > 0 ? ` (${badge} new)` : ''}`} onClick={onToggle}><Icon name="pull" />{!phone && <span>Overview</span>}{badge > 0 && <span className={`overview-badge${phone ? ' corner' : ''}`}>{badge}</span>}</button>;
+export function OverviewButton({ open, phone, badge, disabledReason, onToggle }: { open: boolean; phone: boolean; badge: number; disabledReason?: string; onToggle: () => void }) {
+  // reserve the shared square geometry only while the label is hidden
+  return <button type="button" className={`overview-button${phone ? ' icon-only' : ''}${open ? ' active' : ''}`} aria-pressed={open} aria-label={badge > 0 ? `Overview, ${badge} new` : 'Overview'} title={disabledReason ?? `Overview: pull requests, review requests and issues${badge > 0 ? ` (${badge} new)` : ''}`} disabled={disabledReason !== undefined} onClick={onToggle}><Icon name="pull" />{!phone && <span>Overview</span>}{badge > 0 && <span className={`overview-badge${phone ? ' corner' : ''}`}>{badge}</span>}</button>;
 }

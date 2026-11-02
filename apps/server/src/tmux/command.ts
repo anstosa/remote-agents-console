@@ -52,7 +52,8 @@ export const paneEnv = (source: NodeJS.ProcessEnv = process.env): NodeJS.Process
   for (const name of paneVariables) { const value = source[name]; if (value !== undefined && value !== '') env[name] = value; }
   return env;
 };
-type RunResult = { code: number; stdout: string; stderr: string; timedOut?: true };
+export type RunResult = { code: number; stdout: string; stderr: string; timedOut?: true; stdoutTruncated?: true };
+const maxStdoutCharacters = 1_000_000;
 // git subcommands that change a checkout, its branches or its stashes
 const gitWrites = new Set(['add', 'apply', 'branch', 'checkout', 'cherry-pick', 'clean', 'commit', 'fetch', 'merge', 'mv', 'pull', 'push', 'rebase', 'reset', 'restore', 'rm', 'stash', 'submodule', 'switch', 'update-ref', 'worktree']);
 // the `-C` checkout and subcommand of a git argv; a `--git-dir` call names its repository outright
@@ -87,16 +88,22 @@ export async function run(command: string, args: string[], input?: string, timeo
     const child = spawn(command, args, { shell: false, env: basename(command) === 'git' ? gitEnv() : safeEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     let timedOut = false;
+    let stdoutTruncated = false;
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     // distinguish a deadline kill from other signal interruptions
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
-    child.stdout.on('data', d => { stdout = (stdout + d).slice(-1_000_000); });
+    child.stdout.on('data', d => {
+      const combined = stdout + d;
+      // retain the existing tail while exposing lost prefix evidence
+      if (combined.length > maxStdoutCharacters) stdoutTruncated = true;
+      stdout = combined.slice(-maxStdoutCharacters);
+    });
     child.stderr.on('data', d => { stderr = (stderr + d).slice(-16_384); });
     child.on('error', reject);
     child.on('close', code => {
       clearTimeout(timer);
-      resolve({ code: code ?? -1, stdout, stderr, ...(timedOut ? { timedOut: true } : {}) });
+      resolve({ code: code ?? -1, stdout, stderr, ...(timedOut ? { timedOut: true } : {}), ...(stdoutTruncated ? { stdoutTruncated: true } : {}) });
     });
     // close stdin even when no payload is supplied
     if (input !== undefined) child.stdin.end(input);

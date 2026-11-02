@@ -138,6 +138,17 @@ describe('the Overview', () => {
     });
   });
 
+  it('maps an upstream pull request to the worktree holding its real local-fork head', async () => {
+    const worktrees = [testWorktree({ id: 'audio-head', projectId: 'anstosa-audiobookshelf', label: 'audio-head', path: '/w/audio-head', branch: 'ansel/continueSerialPodcasts', main: false })];
+    const { service } = polled({
+      'anstosa/audiobookshelf': { forkOf: 'advplyr/audiobookshelf' },
+      'advplyr/audiobookshelf': { pulls: [{ number: 4978, branch: 'ansel/continueSerialPodcasts', head: 'anstosa/audiobookshelf', mine: true }] }
+    }, { repositories: ['anstosa/audiobookshelf'], worktrees: () => worktrees });
+    await service.repositoryParent({ owner: 'anstosa', name: 'audiobookshelf' });
+
+    expect((await service.overview()).mine[0]?.destination).toEqual({ kind: 'worktree', worktreeId: 'audio-head', label: 'audio-head' });
+  });
+
   it('reads only the searches when nothing read them yet, answers at once after a minute while refreshing behind, and reads now on Refresh', async () => {
     let title = 'Before';
     const { service, calls, searches, clock } = polled(() => ({ 'octo/repo': { pulls: [{ number: 1, branch: 'feature', mine: true, title }] } }));

@@ -4,6 +4,7 @@ import { expect, test } from '@playwright/test';
 // opens a dialog with a new-branch and an existing-branch mode, and POSTs the choice
 const dashboard = {
   generation: 1,
+  serverStartedAt: 1001,
   reviewTour: { available: true },
   agents: [],
   projects: [

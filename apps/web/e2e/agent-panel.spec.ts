@@ -35,7 +35,8 @@ const workspaceControls = (page: Page) => page.getByRole('region', { name: 'Work
 
 test('the agent output is a panel with a floating header and the composer at its foot', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
-  await mockConsole(page, { attention: 'finished', newTaskConfigured: true });
+  // match the unconfigured project-action assertions below
+  await mockConsole(page, { attention: 'finished', newTaskConfigured: false });
   await page.goto('/');
   const panel = agentPanel(page);
   await expect(panel).toBeVisible();

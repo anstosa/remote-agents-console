@@ -11,12 +11,13 @@ test('keeps phone icon controls square and aligned with the workspace tab', asyn
         <button class="server-switcher-button server-switcher-voice" aria-label="Call"><svg viewBox="0 0 24 24"></svg><span>Call</span></button>
       </div>
       <button class="workspace-dropdown active" role="tab" aria-selected="true"><span class="tab-kind-stack"><span class="tab-place-mark">◈</span></span><span class="workspace-dropdown-label">Workspace</span><svg class="workspace-dropdown-chevron" viewBox="0 0 24 24"></svg></button>
+      <button class="overview-button icon-only" aria-label="Overview, 2 new"><svg class="overview-icon" viewBox="0 0 24 24"></svg><span class="overview-badge corner">2</span></button>
       <span class="launcher"><button class="new-agent-tab" aria-label="Launch agent"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg></button></span>
       <span class="server-switcher-settings-wrap"><button class="server-switcher-button server-switcher-settings" aria-label="Settings"><svg viewBox="0 0 24 24"></svg></button></span>
     </nav>
   `);
   await page.setViewportSize({ width: 390, height: 844 });
-  const controls = [page.getByRole('button', { name: 'Switch server' }), page.getByRole('button', { name: 'Call' }), page.getByRole('button', { name: 'Settings' }), page.getByRole('button', { name: 'Launch agent' })];
+  const controls = [page.getByRole('button', { name: 'Switch server' }), page.getByRole('button', { name: 'Call' }), page.getByRole('button', { name: 'Settings' }), page.getByRole('button', { name: 'Overview, 2 new' })];
   const tab = page.getByRole('tab', { name: /Workspace/u });
   const tabBox = await tab.boundingBox();
   expect(tabBox).not.toBeNull();
@@ -33,9 +34,11 @@ test('keeps phone icon controls square and aligned with the workspace tab', asyn
   }
   expect(tabBox!.height).toBeCloseTo(41.6, 1);
   const phoneNav = await page.locator('.tabs').boundingBox();
-  // balance the two left controls against launch and settings on the right
+  // balance the two left controls against Overview and Settings on the right
   expect(tabBox!.x + tabBox!.width / 2).toBeCloseTo(phoneNav!.x + phoneNav!.width / 2, 1);
   expect((await controls[2].boundingBox())!.x).toBeGreaterThan((await controls[3].boundingBox())!.x);
+  // the hidden plus must not reserve an empty mobile slot
+  await expect(page.locator('.new-agent-tab')).toBeHidden();
   await expect(tab).toHaveCSS('border-top-width', '1px');
   // preserve the server status dot inset
   const [serverBox, serverDotBox] = await Promise.all([controls[0].boundingBox(), controls[0].locator('.server-switcher-attention').boundingBox()]);
@@ -46,7 +49,7 @@ test('keeps phone icon controls square and aligned with the workspace tab', asyn
 
   await page.setViewportSize({ width: 1280, height: 800 });
   const desktopTab = await tab.boundingBox();
-  const [settingsBox, plusBox] = await Promise.all([controls[2].boundingBox(), controls[3].boundingBox()]);
+  const [settingsBox, plusBox] = await Promise.all([controls[2].boundingBox(), page.locator('.new-agent-tab').boundingBox()]);
   expect(desktopTab).not.toBeNull();
   expect(settingsBox).not.toBeNull();
   expect(plusBox).not.toBeNull();

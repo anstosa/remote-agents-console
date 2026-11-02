@@ -16,8 +16,13 @@ const slots = {
 };
 const dashboard = {
   generation: 1,
+  serverStartedAt: 1001,
   githubRevision: 1,
-  agents: [],
+  reviewTour: { available: true },
+  agents: [
+    { id: 'agent-feature', sessionId: 'socket:$214', home: '/repo/wts/feature', projectId: 'repo', worktreeId: 'repo:/repo/wts/feature', worktreeLabel: 'feature', branch: 'feature', title: 'Ready' },
+    { id: 'agent-review', sessionId: 'socket:$90', home: '/repo/wts/pr-90', projectId: 'repo', worktreeId: 'repo:/repo/wts/pr-90', worktreeLabel: 'pr-90', branch: 'branch-90', title: 'Ready' }
+  ],
   projects: [{ id: 'repo', label: 'Repo', github: 'octo/repo', available: true, worktrees: [worktree('repo:/repo', 'Repo', 'main', true, 0), worktree('repo:/repo/wts/feature', 'feature', 'feature', false, 1), worktree('repo:/repo/wts/pr-90', 'pr-90', 'branch-90', false, 2)] }],
   buttons: { revision: 'buttons-v1', application: slots, projects: { repo: slots } }
 };
@@ -27,7 +32,7 @@ const feature = { kind: 'worktree', worktreeId: 'repo:/repo/wts/feature', label:
 const review = { kind: 'worktree', worktreeId: 'repo:/repo/wts/pr-90', label: 'pr-90' };
 const row = (number: number, title: string, extra: Record<string, unknown> = {}) => ({ repository: 'octo/repo', number, title, url: `https://github.com/octo/repo/pull/${number}`, updatedAt: minutesAgo(10), reasons: [], ...extra });
 const lists = {
-  mine: [row(214, 'Serve GitHub lists from one cached poll', { destination: feature }), row(230, 'Quiet work')],
+  mine: [row(214, 'Serve GitHub lists from one cached poll', { destination: feature }), row(230, 'Quiet work', { draft: true })],
   reviews: [row(90, 'Handle redacted events', { author: 'kai', destination: review })],
   other: [], done: [row(203, 'Scheduled prompts', { state: 'merged', destination: feature })],
   assigned: [row(201, 'GitHub PR dashboard', { url: 'https://github.com/octo/repo/issues/201', destination: feature }), row(11, 'Launcher search ignores Notes', { url: 'https://github.com/octo/repo/issues/11' })],
@@ -60,7 +65,7 @@ async function mount(page: Page, starts: Record<string, unknown>[] = [], drafts:
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (path === '/api/dashboard') return route.fulfill({ json: dashboard });
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
-    if (path === '/api/github/overview') return route.fulfill({ json: { mine: [], reviews: [], issues: [], totals: { mine: 0, reviews: 0, issues: 0 }, fetchedAt: Date.now() } });
+    if (path === '/api/github/overview') return route.fulfill({ json: { mine: [...lists.mine, ...lists.done], reviews: lists.reviews, issues: lists.assigned, totals: { mine: lists.mine.length + lists.done.length, reviews: lists.reviews.length, issues: lists.assigned.length }, fetchedAt: Date.now() } });
     if (path === '/api/github/overview/seen') return route.fulfill({ status: 204 });
     if (path === '/api/projects/repo/github') return route.fulfill({ json: lists });
     const detail = /^\/api\/projects\/repo\/github\/((?:pulls|issues)\/\d+)$/u.exec(path)?.[1];
@@ -80,7 +85,9 @@ async function mount(page: Page, starts: Record<string, unknown>[] = [], drafts:
 const toolbar = (page: Page) => page.getByRole('region', { name: 'Workspace toolbar' });
 const panel = (page: Page) => page.getByRole('region', { name: 'GitHub', exact: true });
 const detail = (page: Page) => panel(page).locator('.github-detail');
-const composer = (page: Page, worktreeId: string) => page.locator(`textarea[data-prompt-id="worktree-prompt:${worktreeId}"]`);
+const composer = (page: Page) => page.getByRole('textbox', { name: 'Prompt' });
+// isolate the card's icon-only control column from its text-bearing flyout
+const cardControls = (page: Page, number: number) => panel(page).locator('.overview-row').filter({ hasText: `#${number}` }).locator('.github-card-controls');
 
 // the flyout's "Add to prompt" text for the service.ts thread alone
 const serviceThread = [
@@ -111,8 +118,26 @@ test('puts my pull request\'s buttons in its detail and hands picked threads to 
   // the panel-wide slot sits in the header
   await expect(panel(page).getByRole('toolbar', { name: 'GitHub actions' }).getByRole('button', { name: 'gh status' })).toBeVisible();
 
+  // the card keeps workflow links in detail and out of its compact control rail
+  const mineControls = cardControls(page, 214);
+  await expect(mineControls.locator('button, a')).toHaveCount(2);
+  await expect(mineControls.getByRole('link', { name: /^(?:Merge|Ready for review|Submit review)$/u })).toHaveCount(0);
+  const checkout = mineControls.getByRole('button', { name: 'Checkout and actions for pull request #214' });
+  await expect(checkout).toHaveText('');
+  await checkout.click();
+  const cardActions = page.getByRole('group', { name: 'Actions for pull request #214' });
+  await expect(cardActions.getByRole('button', { name: /^View in feature/u })).toBeVisible();
+  await expect(cardActions.getByRole('link')).toHaveCount(0);
+  await expect(cardActions.getByRole('button', { name: 'Commit/Push' })).toBeVisible();
+  await expect(cardActions.getByRole('button', { name: '$fixup' })).toBeVisible();
+  await expect(cardActions.getByRole('button', { name: 'Push now' })).toBeVisible();
+  await expect(cardActions.getByRole('button', { name: 'Start Review tour' })).toBeVisible();
+  await page.keyboard.press('Escape');
+
   // my pull request, checked out here: the Pull request slot, not the Review request one
+  await panel(page).getByRole('button', { name: /^#214 Serve GitHub lists from one cached poll/u }).click();
   await expect(detail(page).getByRole('heading')).toHaveText('#214Serve GitHub lists from one cached poll');
+  await expect(detail(page).getByRole('link', { name: 'Merge' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/214');
   const actions = detail(page).getByRole('group', { name: 'Pull request actions' });
   await expect(actions.getByRole('button')).toHaveText(['Commit/Push', '$fixup', 'Push now']);
   await expect(detail(page).getByRole('button', { name: '$review' })).toHaveCount(0);
@@ -145,19 +170,27 @@ test('puts my pull request\'s buttons in its detail and hands picked threads to 
   await threads.getByRole('checkbox', { name: 'Select the thread on src/github/service.ts' }).check();
   await threads.getByRole('checkbox', { name: 'Select the thread on src/github/github.ts' }).check();
   await bar.getByRole('button', { name: 'Add 2 to prompt' }).click();
-  await expect(composer(page, 'repo:/repo/wts/feature')).toHaveValue(/^Address this feedback on PR #214:\n\n1\. Review thread on src\/github\/github\.ts:7\n[^]*\n2\. Review thread on src\/github\/service\.ts:42\n/u);
+  await expect(composer(page)).toHaveValue(/^Address this feedback on PR #214:\n\n1\. Review thread on src\/github\/github\.ts:7\n[^]*\n2\. Review thread on src\/github\/service\.ts:42\n/u);
   await expect(bar).toHaveCount(0);
   expect(starts).toHaveLength(2);
 
   // an Issue whose Worktree is here offers the Issue slot
-  await panel(page).getByRole('button', { name: /^Issue #201/u }).click();
+  await panel(page).getByRole('tab', { name: /^Issues/u }).click();
+  await panel(page).getByRole('button', { name: /^#201 GitHub PR dashboard/u }).click();
   await expect(detail(page).getByRole('group', { name: 'Issue actions' }).getByRole('button')).toHaveText(['$plan']);
   // one no Worktree holds offers none
-  await panel(page).getByRole('button', { name: /^Issue #11/u }).click();
+  await panel(page).getByRole('button', { name: /^#11 Launcher search ignores Notes/u }).click();
   await expect(detail(page).getByRole('heading')).toHaveText('#11Launcher search ignores Notes');
   await expect(detail(page).getByRole('group', { name: 'Issue actions' }).getByRole('button')).toHaveCount(0);
   // nor does my merged pull request, though its Worktree is here
-  await panel(page).getByRole('button', { name: /^Pull request #203/u }).click();
+  await panel(page).getByRole('tab', { name: /^Mine/u }).click();
+  await panel(page).getByRole('button', { name: 'Checkout and actions for pull request #203' }).click();
+  const closedActions = page.getByRole('group', { name: 'Actions for pull request #203' });
+  await expect(closedActions.getByRole('button', { name: /^View in feature/u })).toBeVisible();
+  await expect(closedActions.getByRole('button', { name: /new Worktree|Already checked out|Commit\/Push|\$fixup|\$review/u })).toHaveCount(0);
+  await expect(closedActions.getByRole('link', { name: /Merge|Ready for review|Submit review/u })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await panel(page).getByRole('button', { name: /^#203 Scheduled prompts/u }).click();
   await expect(detail(page).getByRole('heading')).toHaveText('#203Scheduled prompts');
   await expect(detail(page).getByRole('button', { name: 'Commit/Push' })).toHaveCount(0);
   await expect(detail(page).getByRole('checkbox')).toHaveCount(0);
@@ -166,27 +199,62 @@ test('puts my pull request\'s buttons in its detail and hands picked threads to 
 test('keeps prompt actions in the Worktree holding the pull request, and puts the Review request slot on someone else\'s', async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 1000 });
   const starts: Record<string, unknown>[] = [];
+  const requests: string[] = [];
+  page.on('request', request => requests.push(decodeURIComponent(new URL(request.url()).pathname)));
   await mount(page, starts);
   await page.goto('/');
   await page.getByRole('tab', { name: /^feature/u }).click();
   await toolbar(page).getByRole('button', { name: 'GitHub', exact: true }).click();
 
+  // someone else's held pull request exposes review and navigation, but not its holder's configured actions here
+  const reviewControls = cardControls(page, 90);
+  await expect(reviewControls.locator('button, a')).toHaveCount(2);
+  await expect(reviewControls.getByRole('link', { name: /^(?:Merge|Ready for review|Submit review)$/u })).toHaveCount(0);
+  await panel(page).getByRole('button', { name: 'Checkout and actions for pull request #90' }).click();
+  let cardActions = page.getByRole('group', { name: 'Actions for pull request #90' });
+  await expect(cardActions.getByRole('button', { name: /^View in pr-90/u })).toBeVisible();
+  await expect(cardActions.getByRole('link')).toHaveCount(0);
+  await expect(cardActions.getByRole('button', { name: '$review' })).toHaveCount(0);
+  await expect(cardActions.getByRole('button', { name: 'Start Review tour' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+
+  // an unheld draft keeps workflow in detail and gets no holder-bound prompt actions
+  const draftControls = cardControls(page, 230);
+  await expect(draftControls.locator('button, a')).toHaveCount(2);
+  await expect(draftControls.getByRole('link', { name: /^(?:Merge|Ready for review|Submit review)$/u })).toHaveCount(0);
+  await panel(page).getByRole('button', { name: 'Checkout and actions for pull request #230' }).click();
+  cardActions = page.getByRole('group', { name: 'Actions for pull request #230' });
+  await expect(cardActions.getByRole('link')).toHaveCount(0);
+  await expect(cardActions.getByRole('button', { name: 'Commit/Push' })).toHaveCount(0);
+  await expect(cardActions.getByRole('button', { name: '$review' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+
   // someone else's pull request, checked out in another Worktree
-  await panel(page).getByRole('button', { name: /^Pull request #90/u }).click();
+  await panel(page).getByRole('button', { name: /^#90 Handle redacted events/u }).click();
   await expect(detail(page).getByRole('heading')).toHaveText('#90Handle redacted events');
   await expect(detail(page).getByRole('checkbox')).toHaveCount(0);
   await expect(detail(page).getByRole('button', { name: '$review' })).toHaveCount(0);
   await expect(detail(page).locator('.github-prompt-elsewhere')).toHaveText('Selecting threads for a prompt, and this pull request\'s buttons, are in pr-90, so its Agent gets them.');
   // mine, checked out nowhere
-  await panel(page).getByRole('button', { name: /^Pull request #230/u }).click();
+  await panel(page).getByRole('tab', { name: /^Mine/u }).click();
+  await panel(page).getByRole('button', { name: /^#230 Quiet work/u }).click();
   await expect(detail(page).getByRole('heading')).toHaveText('#230Quiet work');
   await expect(detail(page).getByRole('button', { name: 'Commit/Push' })).toHaveCount(0);
   await expect(detail(page).locator('.github-prompt-elsewhere')).toHaveText('Selecting threads for a prompt, and this pull request\'s buttons, are in a Worktree for it, so its Agent gets them.');
 
   // going there brings them
-  await panel(page).getByRole('button', { name: /^Pull request #90/u }).click();
-  await detail(page).getByRole('button', { name: 'Go to Worktree' }).click();
+  await panel(page).getByRole('tab', { name: /^Reviews/u }).click();
+  await panel(page).getByRole('button', { name: /^#90 Handle redacted events/u }).click();
+  await detail(page).getByRole('button', { name: 'View in pr-90' }).click();
   await expect(page.getByRole('tab', { name: /^pr-90/u })).toHaveAttribute('aria-selected', 'true');
+  expect(requests.filter(path => /\/(?:switch-pr|move-pr)$/u.test(path))).toEqual([]);
+  await panel(page).getByRole('button', { name: 'Checkout and actions for pull request #90' }).click();
+  cardActions = page.getByRole('group', { name: 'Actions for pull request #90' });
+  await expect(cardActions.getByRole('link')).toHaveCount(0);
+  await expect(cardActions.getByRole('button', { name: '$review' })).toBeVisible();
+  await expect(cardActions.getByRole('button', { name: 'Fetch' })).toBeVisible();
+  await expect(cardActions.getByRole('button', { name: 'Start Review tour' })).toBeVisible();
+  await page.keyboard.press('Escape');
   const actions = detail(page).getByRole('group', { name: 'Pull request actions' });
   await expect(actions.getByRole('button')).toHaveText(['$review', 'Fetch']);
   await expect(detail(page).getByRole('button', { name: 'Commit/Push' })).toHaveCount(0);
@@ -197,6 +265,7 @@ test('keeps prompt actions in the Worktree holding the pull request, and puts th
   await expect.poll(() => starts.map(start => [start.slot, start.actionId])).toEqual([['reviewRequest', 'review']]);
   expect(starts[0]!.append).toBe('Address this feedback on PR #90:\n\nReview thread on src/events.ts:12\nhttps://github.com/octo/repo/pull/214#c9\n\n> @tony: Why redact here?');
   expect(starts[0]!.placeId).toBe('repo:/repo/wts/pr-90');
+  expect(starts[0]!.agentId).toBe('agent-review');
 });
 
 test('picks threads and runs a button with them on a phone', async ({ page }) => {
@@ -206,7 +275,16 @@ test('picks threads and runs a button with them on a phone', async ({ page }) =>
   await page.goto('/#tab=feature');
   await toolbar(page).getByRole('button', { name: 'More options' }).click();
   await page.locator('.place-menu').getByRole('button', { name: 'GitHub', exact: true }).click();
-  await panel(page).getByRole('region', { name: 'This Worktree' }).getByRole('button', { name: /^Pull request #214/u }).click();
+  await panel(page).getByRole('button', { name: 'Checkout and actions for pull request #214' }).click();
+  const cardActions = page.getByRole('group', { name: 'Actions for pull request #214' });
+  await expect(cardActions.getByRole('button', { name: '$fixup' })).toBeInViewport();
+  await expect(cardActions.getByRole('link')).toHaveCount(0);
+  await expect(cardControls(page, 214).locator('button, a')).toHaveCount(2);
+  await expect(cardControls(page, 214).getByRole('link', { name: /^(?:Merge|Ready for review|Submit review)$/u })).toHaveCount(0);
+  await expect(cardActions.getByRole('button', { name: 'Start Review tour' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await panel(page).getByRole('button', { name: /^#214 Serve GitHub lists from one cached poll/u }).click();
+  await expect(detail(page).getByRole('link', { name: 'Merge' })).toHaveAttribute('href', 'https://github.com/octo/repo/pull/214');
   await expect(detail(page).getByRole('group', { name: 'Pull request actions' }).getByRole('button', { name: '$fixup' })).toBeVisible();
   await detail(page).getByRole('checkbox', { name: 'Select the thread on src/github/service.ts' }).check();
   const bar = detail(page).getByRole('group', { name: 'Selected threads' });

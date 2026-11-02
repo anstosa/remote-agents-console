@@ -62,6 +62,24 @@ describe('GitHub origins', () => {
     expect(githubRepository('https://github.com/octo/repo.git')).toEqual(octo);
     expect(githubRepository('https://example.com/octo/repo.git')).toBeUndefined();
   });
+
+  it('caches authenticated direct-parent lineage and bypasses it for mutation proof', async () => {
+    const scripted = graphqlGithub({ 'anstosa/audiobookshelf': { forkOf: 'advplyr/audiobookshelf' } });
+    const service = github(scripted.request);
+    const fork = { owner: 'anstosa', name: 'audiobookshelf' };
+
+    await expect(service.repositoryParent(fork)).resolves.toEqual({ owner: 'advplyr', name: 'audiobookshelf' });
+    await expect(service.repositoryParent(fork)).resolves.toEqual({ owner: 'advplyr', name: 'audiobookshelf' });
+    expect(scripted.calls).toHaveLength(1);
+    await expect(service.repositoryParent(fork, { fresh: true })).resolves.toEqual({ owner: 'advplyr', name: 'audiobookshelf' });
+    expect(scripted.calls).toHaveLength(2);
+  });
+
+  it('refuses missing fork lineage instead of treating it as a confirmed non-fork', async () => {
+    const service = github(async () => reply({ data: { repository: { parent: null } } }));
+
+    await expect(service.repositoryParent({ owner: 'anstosa', name: 'audiobookshelf' })).rejects.toMatchObject({ statusCode: 502, message: 'GitHub returned incomplete repository fork data.' });
+  });
 });
 
 // the repositories, lists and branches one GraphQL read asked for
@@ -206,8 +224,8 @@ describe('a repository\'s open pull requests and issues', () => {
     await timers.fire();
 
     await expect(service.repository(octo)).resolves.toEqual({
-      own: [{ number: 7, title: 'Draft work', draft: true, url: 'https://github.com/octo/repo/pull/7', branch: 'feature/draft', headSha: sha('c'), headOnOrigin: true, checks: 'failed', issues: { mergeConflicts: true, failingChecks: true, unresolvedComments: true } }],
-      others: [{ number: 8, title: 'Other user', draft: false, url: 'https://github.com/octo/repo/pull/8', branch: 'feature/other', headSha: sha('d'), headOnOrigin: false }],
+      own: [{ number: 7, title: 'Draft work', draft: true, url: 'https://github.com/octo/repo/pull/7', branch: 'feature/draft', headSha: sha('c'), headOnOrigin: true, headRepository: 'octo/repo', checks: 'failed', issues: { mergeConflicts: true, failingChecks: true, unresolvedComments: true } }],
+      others: [{ number: 8, title: 'Other user', draft: false, url: 'https://github.com/octo/repo/pull/8', branch: 'feature/other', headSha: sha('d'), headOnOrigin: false, headRepository: 'contributor/repo' }],
       issues: [{ number: 3, title: 'Crash on start', url: 'https://github.com/octo/repo/issues/3', author: 'someone', updatedAt: '2026-10-30T12:00:00Z' }],
       fetchedAt: 0
     });

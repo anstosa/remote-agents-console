@@ -39,7 +39,7 @@ import { safeEnv } from './tmux/command.js';
 import { PushService } from './push-service.js';
 import { processActions, WorktreeCommandService } from './worktree-commands/service.js';
 import { GithubService } from './github/service.js';
-import { PullRequestSwitchService } from './pull-requests/switch-service.js';
+import { githubPullMutationContext, PullRequestSwitchService, type GithubPullMutationContext } from './pull-requests/switch-service.js';
 import { NewTaskService } from './new-task/service.js';
 import { WorktreeManagementService } from './worktrees/management.js';
 import { agentAttentionState, AgentNotificationCoordinator, pushNotifications, type AgentNotificationContext } from './notifications.js';
@@ -216,7 +216,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     workspace: serverCheckout(),
     hostWorkspace: serverCheckoutOnHost(config.projects, process.env.RAC_HOST_REPOSITORY?.trim() || process.env.RAC_HOST_WORKSPACE)
   };
-  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const github: GithubService = deps.github ?? new GithubService({ request: deps.githubRequest, projects: (): readonly Project[] => discovery.projectsNow(), worktrees: () => discovery.worktreesNow() }); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, github, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch: LaunchService = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId), undefined, async (place, kind, options) => await structuredAgents.launch(place, kind, options) !== undefined); const structuredAgents: StructuredAgents = deps.structuredAgents ?? new StructuredAgents(holderProcesses(launch, config.adapters, kind => launch.adapterFiles(kind)), { allowedModels: kind => config.adapters[kind]?.allowedModels ?? [] }); discovery.useStructuredAgents?.(structuredAgents); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const transport = deps.prompts?.transport ?? new TmuxTransport(discovery, tmux, { begin: agentId => prompts.beginAgentMutation(agentId), version: agentId => prompts.mutationVersion(agentId), busy: agentId => prompts.mutating(agentId), restored: async (scope, deliveredPromptId) => await prompts.resetRestored(scope, deliveredPromptId) }, queuedPrompts.resets, undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, async (agentId, to) => await switchByRestart(agentId, to)); const prompts: PromptService = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, undefined, undefined, calendarLifecycle, transport, structuredAgents.turns); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery, github); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, github, prSwitch); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
+  const auth = deps.auth ?? new AuthService(process.env.RAC_PASSWORD_HASH ?? '', process.env.RAC_SESSION_SECRET ?? ''); const control = deps.control ?? new ControlService(); const devices = deps.devices ?? new DeviceService(); const tmux = deps.tmux ?? new TmuxAdapter(new TmuxCommandRegistry()); const worktreeStore = deps.worktreeStore ?? new WorktreeLaunchStore(); const openedFolders = deps.openedFolders ?? new OpenedFolderStore(); const github: GithubService = deps.github ?? new GithubService({ request: deps.githubRequest, projects: (): readonly Project[] => discovery.projectsNow(), worktrees: () => discovery.worktreesNow() }); const discovery = deps.discovery ?? new DiscoveryService(undefined, tmux, undefined, github, config.adapters, config.projects, worktreeStore, undefined, config.scratchDirectory); const tickets = deps.tickets ?? new TicketStore(); const launch: LaunchService = deps.launch ?? new LaunchService(config, undefined, tmux, undefined, worktreeStore, () => discovery.worktreesNow(), () => paneStream.openPaneKeys(), async placeId => await placeAgentSession(placeId), undefined, async (place, kind, options) => await structuredAgents.launch(place, kind, options) !== undefined); const structuredAgents: StructuredAgents = deps.structuredAgents ?? new StructuredAgents(holderProcesses(launch, config.adapters, kind => launch.adapterFiles(kind)), { allowedModels: kind => config.adapters[kind]?.allowedModels ?? [] }); discovery.useStructuredAgents?.(structuredAgents); const promptHistory = deps.promptHistory ?? new PromptHistoryService(); const queuedPrompts = deps.queuedPrompts ?? new QueuedPromptService(); const transport = deps.prompts?.transport ?? new TmuxTransport(discovery, tmux, { begin: agentId => prompts.beginAgentMutation(agentId), version: agentId => prompts.mutationVersion(agentId), busy: agentId => prompts.mutating(agentId), restored: async (scope, deliveredPromptId) => await prompts.resetRestored(scope, deliveredPromptId) }, queuedPrompts.resets, undefined, kind => config.adapters[kind]?.teardown, attachmentStaging, async (agentId, to) => await switchByRestart(agentId, to)); const prompts: PromptService = deps.prompts ?? new PromptService(discovery, tmux, promptHistory, queuedPrompts, (scope: string, prompt: QueuedPrompt) => drainUndelivered(scope, prompt), undefined, undefined, undefined, calendarLifecycle, transport, structuredAgents.turns); const notes = deps.notes ?? new WorktreeNoteService(); const consoleNamed = deps.consoleNamed ?? new ConsoleNamedConversationService(); const commandCatalog = deps.commandCatalog ?? new CommandCatalogService(); const workspaceFiles = deps.workspaceFiles ?? new WorkspaceFileService(); const comparison = deps.comparison ?? new ComparisonService(async worktreeId => worktreePrBase(await discovery.dashboard(), worktreeId)); const push = deps.push ?? new PushService(); const notifications = deps.notifications ?? new AgentNotificationCoordinator(() => {}); const prSwitch = deps.prSwitch ?? new PullRequestSwitchService(config, discovery, github); const worktreeManagement = deps.worktreeManagement ?? new WorktreeManagementService(() => discovery.projectsNow(), undefined, github, prSwitch, () => discovery.worktreesNow()); const cleanup = deps.cleanup ?? new CleanupService(discovery, undefined, tmux, undefined, worktreeManagement); const stackCommands = deps.worktreeCommands ?? new WorktreeCommandService(config, discovery); const newTask = deps.newTask ?? new NewTaskService(config, discovery, tmux); const dashboardUpdates = deps.dashboardUpdates ?? new DashboardUpdates<DashboardPayload>(dashboardFingerprint); const codexProgram = resolveAgentProgram(config, 'codex'); const review = reviewConfig(config); const interactiveRunner = interactiveReviewRunner(); const reviewRunner = deps.reviewRunner ?? new ModeDispatchReviewRunner(review.agents, byReviewAgentKind(kind => new HeadlessReviewRunner(reviewRunsFor(kind).headless, resolveAgentProgram(config, kind) ?? '')), interactiveRunner); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
   const temporaryPreviews = deps.temporaryPreviews ?? new TemporaryPreviewService();
   // what happens in the console, published once for every subscriber; push notifications are the first (ADR 0019)
   const events = new ConsoleEvents();
@@ -2132,7 +2132,16 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // a Worktree's pull requests and local branches, whether or not an Agent runs there
   app.get('/api/worktrees/:id/switch-prs', async (request, reply) => { controlled(request); const availability = await prSwitch.available((request.params as { id: string }).id); return availability === undefined ? reply.code(404).send({ error: 'pull request switching unavailable' }) : availability; });
   // the same list for the whole repository, with no worktree's checkout overlaid; it asks GitHub, so it shares the branch list's budget
-  app.get('/api/projects/:id/switch-prs', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => { controlled(request); const list = await prSwitch.branchList((request.params as { id: string }).id); return list === undefined ? reply.code(404).send({ error: 'repository branch list unavailable' }) : list; });
+  app.get('/api/projects/:id/switch-prs', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
+    controlled(request);
+    const requested = (request.query as { repository?: unknown }).repository;
+    // reject malformed upstream repository assertions
+    if (requested !== undefined && (typeof requested !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}$/u.test(requested))) return reply.code(400).send({ error: 'invalid repository' });
+    const [owner, name] = typeof requested === 'string' ? requested.split('/') : [];
+    const repository = owner === undefined || name === undefined ? undefined : { owner, name };
+    const list = await prSwitch.branchList((request.params as { id: string }).id, repository);
+    return list === undefined ? reply.code(404).send({ error: 'repository branch list unavailable' }) : list;
+  });
   // the Overview's lists from the module's cache; `refresh` (Refresh, Retry) reads GitHub again first
   app.get('/api/github/overview', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async request => { controlled(request); return await github.overview({ fresh: (request.query as { refresh?: unknown }).refresh === '1' }); });
   // one Project's lists for the GitHub panel, from the module's cache; `refresh` reads GitHub again first
@@ -2144,22 +2153,55 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return await github.panel(repository, { fresh: (request.query as { refresh?: unknown }).refresh === '1', project: project!.id });
   });
   // the Project's github.com repository and the number a GitHub route names, or the reply refusing them
-  const githubItem = async (request: FastifyRequest, reply: FastifyReply): Promise<{ repository: GithubRepository; number: number } | undefined> => {
+  const githubItem = async (request: FastifyRequest, reply: FastifyReply, freshScope = false): Promise<{ repository: GithubRepository; number: number } | undefined> => {
     const { id, number } = request.params as { id: string; number: string };
     // GitHub's numbers are GraphQL Ints
     if (!/^[1-9]\d{0,9}$/u.test(number) || Number(number) > 2_147_483_647) { await reply.code(400).send({ error: 'invalid number' }); return undefined; }
     const project = discovery.projectsNow().find(candidate => candidate.id === id);
-    const repository = project === undefined ? undefined : await github.projectRepository(project);
-    if (repository === undefined) { await reply.code(404).send({ error: 'no github.com repository for this project' }); return undefined; }
-    return { repository, number: Number(number) };
+    const origin = project?.mode === 'repository' ? await github.repositoryAt(project.path, freshScope).catch(() => undefined) : undefined;
+    if (origin === undefined) { await reply.code(404).send({ error: 'no github.com repository for this project' }); return undefined; }
+    const requested = (request.query as { repository?: unknown }).repository;
+    // preserve origin-scoped routes when no repository override is present
+    if (requested === undefined) return { repository: origin, number: Number(number) };
+    // accept only one canonical github owner/name assertion
+    if (typeof requested !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}$/u.test(requested)) { await reply.code(400).send({ error: 'invalid repository' }); return undefined; }
+    const [owner = '', name = ''] = requested.split('/');
+    const repository = { owner, name };
+    const key = ({ owner: foundOwner, name: foundName }: GithubRepository) => `${foundOwner.toLowerCase()}/${foundName.toLowerCase()}`;
+    // retain ordinary exact-origin access
+    if (key(repository) === key(origin)) return { repository: origin, number: Number(number) };
+    const parent = await github.repositoryParent(origin, { fresh: freshScope });
+    // allow only github's authenticated direct parent
+    if (parent === undefined || key(parent) !== key(repository)) { await reply.code(404).send({ error: 'repository is not this project\'s origin or direct parent' }); return undefined; }
+    return { repository: parent, number: Number(number) };
   };
   const githubItemLimit = { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } };
+  // validate one repository-addressed github item without consulting local projects
+  const githubRepositoryItem = async (request: FastifyRequest, reply: FastifyReply): Promise<{ repository: GithubRepository; number: number } | undefined> => {
+    const { owner, repo, number } = request.params as { owner: string; repo: string; number: string };
+    const validOwner = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u.test(owner);
+    const validRepo = /^(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}$/u.test(repo);
+    // reject malformed identities before github sees them
+    if (!validOwner || !validRepo) { await reply.code(400).send({ error: 'invalid repository' }); return undefined; }
+    // github's numbers are graphql ints
+    if (!/^[1-9]\d{0,9}$/u.test(number) || Number(number) > 2_147_483_647) { await reply.code(400).send({ error: 'invalid number' }); return undefined; }
+    return { repository: { owner, name: repo }, number: Number(number) };
+  };
   // one pull request's or Issue's detail in a Project's repository, kept while it is unchanged; `refresh` reads GitHub again first
   app.get('/api/projects/:id/github/:kind(^pulls|issues$)/:number', githubItemLimit, async (request, reply) => {
     controlled(request);
     const item = await githubItem(request, reply);
     if (item === undefined) return reply;
     const options = { fresh: (request.query as { refresh?: unknown }).refresh === '1', project: (request.params as { id: string }).id };
+    return (request.params as { kind: 'pulls' | 'issues' }).kind === 'pulls' ? await github.pullRequestDetail(item.repository, item.number, options) : await github.issueDetail(item.repository, item.number, options);
+  });
+  // one read-only detail by repository, including repositories without a configured project
+  app.get('/api/github/repos/:owner/:repo/:kind(^pulls|issues$)/:number', githubItemLimit, async (request, reply) => {
+    controlled(request);
+    const item = await githubRepositoryItem(request, reply);
+    // keep validation replies terminal
+    if (item === undefined) return reply;
+    const options = { fresh: (request.query as { refresh?: unknown }).refresh === '1' };
     return (request.params as { kind: 'pulls' | 'issues' }).kind === 'pulls' ? await github.pullRequestDetail(item.repository, item.number, options) : await github.issueDetail(item.repository, item.number, options);
   });
   // the operator's writes to a pull request from the GitHub panel: a reply to or resolve of one of
@@ -2174,7 +2216,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   };
   const githubWrite = async (request: FastifyRequest, reply: FastifyReply, write: (repository: GithubRepository, number: number) => Promise<unknown>) => {
     controlled(request, true);
-    const item = await githubItem(request, reply);
+    const item = await githubItem(request, reply, true);
     if (item === undefined) return reply;
     return await githubRefusal(reply, async () => {
       const result = await write(item.repository, item.number);
@@ -2244,9 +2286,56 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await dashboardUpdates.refresh().catch(() => undefined);
     return reply.code(204).send();
   });
-  app.post('/api/worktrees/:id/switch-pr', async (request, reply) => { controlled(request, true); const number = body(request).number; if (!Number.isInteger(number)) return reply.code(409).send({ error: 'That is not a valid pull request number.' }); const result = await prSwitch.switch((request.params as { id: string }).id, number as number); if (result === 'busy') return reply.code(409).send({ error: 'An agent in this worktree is busy. Wait for it to finish, then switch again.' }); if (result !== 'switched') return reply.code(409).send({ error: result.error }); discovery.invalidateWorktrees(); await dashboardUpdates.refresh().catch(() => undefined); return reply.code(202).send(); });
+  app.post('/api/worktrees/:id/switch-pr', async (request, reply) => {
+    controlled(request, true);
+    const worktreeId = (request.params as { id: string }).id;
+    const requestBody = body(request);
+    const number = requestBody.number;
+    // preserve the legacy invalid-number response
+    if (!Number.isInteger(number)) return requestBody.context === undefined ? reply.code(409).send({ error: 'That is not a valid pull request number.' }) : reply.code(400).send({ error: 'invalid pull request mutation context' });
+    let context: GithubPullMutationContext | undefined;
+    // reject malformed-present context without legacy fallback
+    if (requestBody.context !== undefined) {
+      context = githubPullMutationContext(requestBody.context, { number: number as number, targetProjectId: projectIdOf(worktreeId), targetWorktreeId: worktreeId, sourceRequired: false, newWorktree: false });
+      if (context === undefined) return reply.code(400).send({ error: 'invalid pull request mutation context' });
+    }
+    const result = context === undefined ? await prSwitch.switch(worktreeId, number as number) : await prSwitch.switch(worktreeId, number as number, context);
+    // preserve busy refusal wording
+    if (result === 'busy') return reply.code(409).send({ error: 'An agent in this worktree is busy. Wait for it to finish, then switch again.' });
+    // surface contextual refresh without reinterpretation
+    if (result !== 'switched') return reply.code(409).send({ error: result.error, ...('refresh' in result && result.refresh === true ? { refresh: true } : {}) });
+    discovery.invalidateWorktrees();
+    await dashboardUpdates.refresh().catch(() => undefined);
+    return reply.code(202).send();
+  });
   // move one occupied pull request into the requested worktree
-  app.post('/api/worktrees/:id/move-pr', async (request, reply) => { controlled(request, true); const number = body(request).number; if (!Number.isInteger(number)) return reply.code(409).send({ error: 'Unable to move that pull request. The destination must be clean and the source branch must still be open in another worktree.' }); const result = await prSwitch.move((request.params as { id: string }).id, number as number); if (result === 'busy') return reply.code(409).send({ error: 'An agent is busy. Wait for it to finish, then move the pull request again.' }); if (result === 'moved' || result === 'recovery-required') { discovery.invalidateWorktrees(); await dashboardUpdates.refresh().catch(() => undefined); } if (result === 'recovery-required') return reply.code(409).send({ error: 'The pull request move needs manual recovery. Check both worktrees; any unrecovered changes remain safely stored in Git stash.', recoveryRequired: true }); return result === 'moved' ? reply.code(202).send() : reply.code(409).send({ error: 'Unable to move that pull request. The destination must be clean and the source branch must still be open in another worktree.' }); });
+  app.post('/api/worktrees/:id/move-pr', async (request, reply) => {
+    controlled(request, true);
+    const worktreeId = (request.params as { id: string }).id;
+    const requestBody = body(request);
+    const number = requestBody.number;
+    // preserve the legacy invalid-number response
+    if (!Number.isInteger(number)) return requestBody.context === undefined ? reply.code(409).send({ error: 'Unable to move that pull request. The destination must be clean and the source branch must still be open in another worktree.' }) : reply.code(400).send({ error: 'invalid pull request mutation context' });
+    let context: GithubPullMutationContext | undefined;
+    // reject malformed-present context without legacy fallback
+    if (requestBody.context !== undefined) {
+      context = githubPullMutationContext(requestBody.context, { number: number as number, targetProjectId: projectIdOf(worktreeId), targetWorktreeId: worktreeId, sourceRequired: true, newWorktree: false });
+      if (context === undefined) return reply.code(400).send({ error: 'invalid pull request mutation context' });
+    }
+    const result = context === undefined ? await prSwitch.move(worktreeId, number as number) : await prSwitch.move(worktreeId, number as number, context);
+    // preserve busy refusal wording
+    if (result === 'busy') return reply.code(409).send({ error: 'An agent is busy. Wait for it to finish, then move the pull request again.' });
+    // return contextual drift without fallback
+    if (typeof result === 'object') return reply.code(409).send(result);
+    // publish every moved or recovery state
+    if (result === 'moved' || result === 'recovery-required') {
+      discovery.invalidateWorktrees();
+      await dashboardUpdates.refresh().catch(() => undefined);
+    }
+    // preserve manual-recovery wording
+    if (result === 'recovery-required') return reply.code(409).send({ error: 'The pull request move needs manual recovery. Check both worktrees; any unrecovered changes remain safely stored in Git stash.', recoveryRequired: true });
+    return result === 'moved' ? reply.code(202).send() : reply.code(409).send({ error: 'Unable to move that pull request. The destination must be clean and the source branch must still be open in another worktree.' });
+  });
   app.post('/api/worktrees/:id/switch-branch', async (request, reply) => { controlled(request, true); const branch = body(request).branch; if (typeof branch !== 'string') return reply.code(409).send({ error: 'No branch was named.' }); const result = await prSwitch.switchBranch((request.params as { id: string }).id, branch); if (result === 'busy') return reply.code(409).send({ error: 'An agent in this worktree is busy. Wait for it to finish, then switch again.' }); if (result !== 'switched') return reply.code(409).send({ error: result.error }); discovery.invalidateWorktrees(); await dashboardUpdates.refresh().catch(() => undefined); return reply.code(202).send(); });
   // move one occupied local branch into the requested worktree
   app.post('/api/worktrees/:id/move-branch', async (request, reply) => { controlled(request, true); const branch = body(request).branch; if (typeof branch !== 'string') return reply.code(409).send({ error: 'Unable to move that branch. The destination must be clean and the source branch must still be open in another worktree.' }); const result = await prSwitch.moveBranch((request.params as { id: string }).id, branch); if (result === 'busy') return reply.code(409).send({ error: 'An agent is busy. Wait for it to finish, then move the branch again.' }); if (result === 'moved' || result === 'recovery-required') { discovery.invalidateWorktrees(); await dashboardUpdates.refresh().catch(() => undefined); } if (result === 'recovery-required') return reply.code(409).send({ error: 'The branch move needs manual recovery. Check both worktrees; any unrecovered changes remain safely stored in Git stash.', recoveryRequired: true }); return result === 'moved' ? reply.code(202).send() : reply.code(409).send({ error: 'Unable to move that branch. The destination must be clean and the source branch must still be open in another worktree.' }); });
@@ -3528,6 +3617,110 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (!result.ok) return reply.code(result.status).send({ error: result.error });
     return { branches: result.branches, ...(result.base === undefined ? {} : { base: result.base }) };
   });
+  type FinalizationStage = 'pin' | 'discovery' | 'setup' | 'shell' | 'agent' | 'refresh' | 'finalize';
+  type FinalizationError = { stage: FinalizationStage; message: string };
+  // finalize one structurally created worktree after its git transaction stands
+  const finalizeCreatedWorktree = async (input: { projectId: string; path: string; open: 'agent' | 'terminal' | 'empty'; fork: boolean; issue?: number; bounded: boolean }) => {
+    const finalizationErrors: FinalizationError[] = [];
+    const record = (stage: FinalizationStage, message: string): void => {
+      // retain at most one bounded operator-safe message per stage
+      if (!finalizationErrors.some(entry => entry.stage === stage)) finalizationErrors.push({ stage, message: message.slice(0, 300) });
+    };
+    const stableWorktreeId = worktreeWireId(input.projectId, input.path);
+    let worktree: Worktree | undefined;
+    try {
+      discovery.invalidateWorktrees();
+      try {
+        worktree = (await discovery.worktrees(true)).find(candidate => candidate.identity === input.path);
+      } catch (error) {
+        // preserve legacy throws while bounding held-move discovery
+        if (!input.bounded) throw error;
+        record('discovery', 'The pull request moved, but the new worktree could not be resolved.');
+      }
+      const worktreeId = worktree?.id ?? stableWorktreeId;
+      let agentId: string | undefined;
+      let launchError: string | undefined;
+      let setupError: string | undefined;
+      // stop follow-on work when fresh discovery cannot resolve the target
+      if (worktree === undefined) {
+        launchError = 'The worktree was created, but it could not be resolved to prepare or open it.';
+        if (input.bounded && finalizationErrors.every(entry => entry.stage !== 'discovery')) record('discovery', launchError);
+      } else {
+        try {
+          await worktreeStore.setPinned(worktreeId, true);
+        } catch (error) {
+          // preserve legacy best-effort pinning
+          if (input.bounded) record('pin', 'The pull request moved, but the worktree could not be pinned.');
+          else void error;
+        }
+        // preserve independent best-effort issue association
+        if (input.issue !== undefined) await worktreeStore.setIssue(worktreeId, input.issue).catch(() => {});
+        let setup: { ok: boolean; log?: string } = { ok: true };
+        // skip setup for fork pull requests
+        if (!input.fork) {
+          try {
+            setup = await stackCommands.runSetup(worktree);
+          } catch (error) {
+            // bound held-move setup throws
+            if (!input.bounded) throw error;
+            setup = { ok: false };
+            record('setup', 'The pull request moved, but its setup command failed.');
+          }
+        }
+        // report setup refusal and gate agent launch
+        if (!setup.ok) {
+          setupError = 'The worktree was created, but its setup command failed.';
+          if (input.bounded) record('setup', setupError);
+          if (setup.log !== undefined) console.error(`[worktrees] setup failed for ${worktreeId}; see ${setup.log}`);
+        }
+        // start the requested shell or setup-failure fallback
+        if (input.open === 'terminal' || input.open === 'agent' && !setup.ok) {
+          try {
+            if (!await launch.startWorktreeShell(worktree)) {
+              launchError = 'The worktree was created, but its shell could not be started.';
+              if (input.bounded) record('shell', launchError);
+            }
+          } catch (error) {
+            // bound held-move shell throws
+            if (!input.bounded) throw error;
+            launchError = 'The worktree was created, but its shell could not be started.';
+            record('shell', launchError);
+          }
+        } else if (input.open === 'agent') {
+          try {
+            const shellStarted = await launch.startWorktreeShell(worktree);
+            // retain movement truth while reporting a missing idle shell
+            if (input.bounded && !shellStarted) record('shell', 'The pull request moved, but its shell could not be started.');
+            const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
+            const launched = await launchTmuxAgent(waitForAgent, before, inWorktree(worktreeId), () => launch.launch(worktreeId));
+            // report only a resolved agent
+            if ('agent' in launched) agentId = launched.agent.id;
+            else if (launched.failure === 'refused' || input.bounded) launchError = 'The worktree was created, but the agent could not be started.';
+            if (input.bounded && launchError !== undefined) record('agent', launchError);
+          } catch (error) {
+            // bound held-move agent throws
+            if (!input.bounded) throw error;
+            launchError = 'The worktree was created, but the agent could not be started.';
+            record('agent', launchError);
+          }
+        }
+      }
+      discovery.invalidateWorktrees();
+      try {
+        await dashboardUpdates.refresh();
+      } catch (error) {
+        // preserve legacy best-effort refresh
+        if (input.bounded) record('refresh', 'The pull request moved, but the dashboard could not be refreshed.');
+        else void error;
+      }
+      return { worktreeId, targetResolved: worktree !== undefined, agentId, launchError, setupError, finalizationErrors };
+    } catch (error) {
+      // convert unexpected held-move finalizer failures after the one-way boundary
+      if (!input.bounded) throw error;
+      record('finalize', 'The pull request moved, but worktree finalization did not finish.');
+      return { worktreeId: stableWorktreeId, targetResolved: worktree !== undefined, finalizationErrors };
+    }
+  };
   // create a Worktree for a new or existing branch, pin it, run the Project's configured
   // `commands.setup` to prepare the fresh checkout, give it an idle shell, and — unless the
   // operator opted out — launch the Project's last-used kind in it. The created Worktree
@@ -3550,52 +3743,96 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (open !== 'agent' && open !== 'terminal' && open !== 'empty') return reply.code(400).send({ error: 'invalid open choice' });
     // the Issue a branch is created for; a pull request's checkout is for the pull request
     if (issue !== undefined && (mode === 'pull-request' || !validIssue(issue))) return reply.code(400).send({ error: 'invalid issue' });
-    // the service refuses an Agent for a fork pull request, which it resolves from its own list
-    const outcome = await worktreeManagement.add(projectId, mode === 'pull-request' ? { mode, number: number as number, openAgent: open === 'agent' } : { mode, branch: branch as string, ...(typeof base === 'string' ? { base } : {}) });
-    if (!outcome.ok) return reply.code(outcome.status).send({ error: outcome.error });
-    // republish discovery so the new checkout is keyed and resolvable before pin and launch
-    discovery.invalidateWorktrees();
-    const worktree = (await discovery.worktrees(true)).find(candidate => candidate.identity === outcome.path);
-    const worktreeId = worktree?.id ?? worktreeWireId(projectId, outcome.path);
-    // a created checkout keeps its tab from the start
-    await worktreeStore.setPinned(worktreeId, true).catch(() => {});
-    // the GitHub views offer Go to Worktree on the Issue from now on; GitHub itself is untouched
-    if (issue !== undefined) await worktreeStore.setIssue(worktreeId, issue).catch(() => {});
-    // Prepare the fresh checkout, then open what the operator chose: `terminal` gives it its idle
-    // shell, `agent` adds the Project's last-used kind (the launch path adopts that idle shell
-    // once it is up, else starts the agent's own session), and `empty` opens nothing — the pin
-    // alone keeps its tab. Setup runs once here in every mode (a no-op when unconfigured) and
-    // blocks until it finishes; a setup failure never fails the creation but does gate the
-    // agent, so none starts into a half-prepared worktree. A fork pull request's code never runs
-    // setup (and the service already refused an agent for it). The creation stands regardless:
-    // any failure past this point is a setupError and/or launchError, never a non-201.
-    let agentId: string | undefined;
-    let launchError: string | undefined;
-    let setupError: string | undefined;
-    if (worktree === undefined) {
-      launchError = 'The worktree was created, but it could not be resolved to prepare or open it.';
-    } else {
-      const setup = outcome.fork === true ? { ok: true as const } : await stackCommands.runSetup(worktree);
-      if (!setup.ok) {
-        setupError = 'The worktree was created, but its setup command failed.';
-        // the operator sees a generic banner; the host log (kept only on failure) carries the output
-        if (setup.log !== undefined) console.error(`[worktrees] setup failed for ${worktreeId}; see ${setup.log}`);
-      }
-      if (open === 'terminal' || (open === 'agent' && !setup.ok)) {
-        // a Terminal, or an Agent whose setup failed, gets the idle shell alone
-        if (!await launch.startWorktreeShell(worktree)) launchError = 'The worktree was created, but its shell could not be started.';
-      } else if (open === 'agent') {
-        await launch.startWorktreeShell(worktree);
-        const before = new Set((await discovery.dashboard()).agents.map(agent => agent.id));
-        // report the agent when it appears, but never fail the creation on a slow launch
-        const launched = await launchTmuxAgent(waitForAgent, before, inWorktree(worktreeId), () => launch.launch(worktreeId));
-        if ('agent' in launched) agentId = launched.agent.id;
-        else if (launched.failure === 'refused') launchError = 'The worktree was created, but the agent could not be started.';
-      }
+    let context: GithubPullMutationContext | undefined;
+    // accept context only for pull-request creation
+    if (requestBody.context !== undefined) {
+      if (mode !== 'pull-request') return reply.code(400).send({ error: 'invalid pull request mutation context' });
+      context = githubPullMutationContext(requestBody.context, { number: number as number, targetProjectId: projectId, sourceRequired: false, newWorktree: true });
+      if (context === undefined) return reply.code(400).send({ error: 'invalid pull request mutation context' });
     }
-    discovery.invalidateWorktrees();
-    await dashboardUpdates.refresh().catch(() => undefined);
-    return reply.code(201).send({ worktreeId, ...(agentId === undefined ? {} : { agentId }), ...(launchError === undefined ? {} : { launchError }), ...(setupError === undefined ? {} : { setupError }), ...(outcome.fetchError === undefined ? {} : { fetchError: outcome.fetchError }) });
+    // the service refuses an Agent for a fork pull request, which it resolves from its own list
+    const outcome = await worktreeManagement.add(projectId, mode === 'pull-request' ? { mode, number: number as number, openAgent: open === 'agent', ...(context === undefined ? {} : { context }) } : { mode, branch: branch as string, ...(typeof base === 'string' ? { base } : {}) });
+    if (!outcome.ok) return reply.code(outcome.status).send({ error: outcome.error, ...(outcome.refresh === true ? { refresh: true } : {}) });
+    const finalized = await finalizeCreatedWorktree({ projectId, path: outcome.path, open: open as 'agent' | 'terminal' | 'empty', fork: outcome.fork === true, ...(issue === undefined ? {} : { issue: issue as number }), bounded: false });
+    return reply.code(201).send({ worktreeId: finalized.worktreeId, ...(finalized.agentId === undefined ? {} : { agentId: finalized.agentId }), ...(finalized.launchError === undefined ? {} : { launchError: finalized.launchError }), ...(finalized.setupError === undefined ? {} : { setupError: finalized.setupError }), ...(outcome.fetchError === undefined ? {} : { fetchError: outcome.fetchError }) });
+  });
+  // inspect one exact held-pr move across server boots without mutating it
+  app.get('/api/projects/:id/worktrees/move-pull-request', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
+    controlled(request);
+    const projectId = (request.params as { id: string }).id;
+    const query = request.query as Record<string, unknown>;
+    const number = typeof query.number === 'string' && /^\d+$/u.test(query.number) ? Number(query.number) : NaN;
+    const sourceWorktreeId = query.sourceWorktreeId;
+    const operationId = query.operationId;
+    // reject malformed inspection identity
+    if (!Number.isSafeInteger(number) || number < 1 || typeof sourceWorktreeId !== 'string' || typeof operationId !== 'string') return reply.code(400).send({ error: 'invalid held pull request inspection' });
+    const inspected = await worktreeManagement.inspectHeldPullRequest(projectId, number, sourceWorktreeId, operationId).catch(() => ({ ok: false as const, status: 409, error: 'recovery metadata could not be read' }));
+    // preserve bounded lookup status
+    if (!inspected.ok) return reply.code(inspected.status).send({ error: inspected.error });
+    return inspected.recovery;
+  });
+  type HeldMoveLogPhase = 'pre-target' | 'mutation' | 'post-target' | 'finalization';
+  type HeldMoveLogOutcome = 'refused' | 'recovery-required' | 'unexpected-failure' | 'success' | 'success-with-finalization-errors';
+  // emit bounded held-move identity and phase facts only
+  const logHeldMove = (input: { phase: HeldMoveLogPhase; outcome: HeldMoveLogOutcome; operationId: string; serverStartedAt: number; projectId: string; pullRequestNumber: number; sourceWorktreeId: string; targetWorktreeId?: string }): void => {
+    console.info('[held-pull-move]', {
+      ...input,
+      projectId: input.projectId.slice(0, 512),
+      sourceWorktreeId: input.sourceWorktreeId.slice(0, 4_096),
+      ...(input.targetWorktreeId === undefined ? {} : { targetWorktreeId: input.targetWorktreeId.slice(0, 4_096) })
+    });
+  };
+  // move one held-pr checkout and its ordinary changes into one exact new worktree
+  app.post('/api/projects/:id/worktrees/move-pull-request', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+    controlled(request, true);
+    const projectId = (request.params as { id: string }).id;
+    const requestBody = body(request);
+    const { number, sourceWorktreeId, open, serverStartedAt, operationId } = requestBody;
+    // hand-validate mutation inputs before management
+    if (typeof number !== 'number' || !Number.isSafeInteger(number) || number < 1 || typeof sourceWorktreeId !== 'string' || sourceWorktreeId === '' || (open !== 'agent' && open !== 'terminal' && open !== 'empty') || typeof operationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(operationId)) return reply.code(400).send({ error: 'invalid held pull request move' });
+    const context = githubPullMutationContext(requestBody.context, { number, targetProjectId: projectId, sourceRequired: true, newWorktree: true });
+    // require exact body/context source binding
+    if (context === undefined || context.expectedSourceWorktreeId !== sourceWorktreeId) return reply.code(400).send({ error: 'invalid pull request mutation context', operationId });
+    // fence mutation replay to one current server boot
+    if (typeof serverStartedAt !== 'number' || !Number.isSafeInteger(serverStartedAt)) return reply.code(400).send({ error: 'invalid server boot identity', operationId });
+    const observedBoot = (await discovery.dashboard(true).catch(() => undefined))?.serverStartedAt;
+    // reject stale browser generations
+    if (observedBoot !== serverStartedAt) {
+      logHeldMove({ phase: 'pre-target', outcome: 'refused', operationId, serverStartedAt, projectId, pullRequestNumber: number, sourceWorktreeId });
+      return reply.code(409).send({ error: 'The server restarted. Refresh before moving the pull request.', operationId });
+    }
+    const confirmedBoot = (await discovery.dashboard(true).catch(() => undefined))?.serverStartedAt;
+    // close a boot change before management entry
+    if (confirmedBoot !== serverStartedAt) {
+      logHeldMove({ phase: 'pre-target', outcome: 'refused', operationId, serverStartedAt, projectId, pullRequestNumber: number, sourceWorktreeId });
+      return reply.code(409).send({ error: 'The server restarted. Refresh before moving the pull request.', operationId });
+    }
+    let moved: Awaited<ReturnType<typeof worktreeManagement.moveHeldPullRequest>>;
+    try {
+      moved = await worktreeManagement.moveHeldPullRequest(projectId, { number, sourceWorktreeId, context, operationId, openAgent: open === 'agent' });
+    } catch (error) {
+      // log no exception or request data
+      logHeldMove({ phase: 'mutation', outcome: 'unexpected-failure', operationId, serverStartedAt, projectId, pullRequestNumber: number, sourceWorktreeId });
+      throw error;
+    }
+    // return every pre-moved refusal or recovery fact without finalization
+    if (!moved.ok) {
+      const targetWorktreeId = moved.candidateWorktreeId ?? moved.recovery?.candidateWorktreeId;
+      logHeldMove({ phase: moved.recoveryRequired === true ? 'post-target' : 'pre-target', outcome: moved.recoveryRequired === true ? 'recovery-required' : 'refused', operationId, serverStartedAt, projectId, pullRequestNumber: number, sourceWorktreeId, ...(targetWorktreeId === undefined ? {} : { targetWorktreeId }) });
+      return reply.code(moved.status).send({ error: moved.error, operationId: moved.operationId, ...(moved.candidateWorktreeId === undefined ? {} : { candidateWorktreeId: moved.candidateWorktreeId }), ...(moved.refresh === true ? { refresh: true } : {}), ...(moved.recoveryRequired === true ? { recoveryRequired: true } : {}), ...(moved.recovery === undefined ? {} : moved.recovery) });
+    }
+    const finalized = await finalizeCreatedWorktree({ projectId, path: moved.path, open, fork: moved.fork, bounded: true });
+    logHeldMove({ phase: 'finalization', outcome: finalized.finalizationErrors.length === 0 ? 'success' : 'success-with-finalization-errors', operationId, serverStartedAt, projectId, pullRequestNumber: number, sourceWorktreeId, targetWorktreeId: finalized.worktreeId });
+    return reply.code(201).send({
+      moved: true,
+      worktreeId: finalized.worktreeId,
+      targetResolved: finalized.targetResolved,
+      ...(finalized.agentId === undefined ? {} : { agentId: finalized.agentId }),
+      ...(finalized.setupError === undefined ? {} : { setupError: finalized.setupError }),
+      ...(finalized.launchError === undefined ? {} : { launchError: finalized.launchError }),
+      finalizationErrors: finalized.finalizationErrors,
+      operationId
+    });
   });
   // the session + socket of a Place's live Agent, so a new Console shell or Agent opens beside it
   // (an Agent adopted into the operator's own session lives wherever, so it is resolved from

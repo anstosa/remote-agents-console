@@ -1,10 +1,12 @@
-import { access, mkdir, realpath } from 'node:fs/promises';
+import { access, lstat, mkdir, realpath } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { resolve, sep } from 'node:path';
 import type { Project, Worktree } from '../domain/models.js';
-import { GithubService, forkCheckoutNumber, type PullRequestCleanupStatus } from '../github/service.js';
-import type { PullRequestSwitchService } from '../pull-requests/switch-service.js';
+import { GithubService, forkCheckoutIdentity, forkCheckoutNumber, type PullRequestCleanupStatus } from '../github/service.js';
+import type { GithubPullMutationContext, MoveToNewCandidate, MoveToNewCandidateFactory, PullRequestSwitchService } from '../pull-requests/switch-service.js';
 import { run } from '../tmux/command.js';
-import { checkoutBranch, originDefaultBranch, repositoryArgs, repositoryDefaultBranch, type GitRun } from '../git/worktrees.js';
+import { checkoutBranch, originDefaultBranch, parseWorktreeListNul, repositoryArgs, repositoryDefaultBranch, type GitRun } from '../git/worktrees.js';
+import { worktreeById, worktreeMatchesWorkspace, worktreePathOf, worktreeWireId } from '../workspaces/resolver.js';
 
 /**
  * The git subprocess seam for Worktree management, always spawning `/usr/bin/git`.
@@ -12,7 +14,7 @@ import { checkoutBranch, originDefaultBranch, repositoryArgs, repositoryDefaultB
  * backstop error text a refused `worktree add` surfaces to the operator. Injected so
  * tests assert flag composition and stage refusals without a real repository.
  */
-export type GitExec = (args: string[], timeoutMs?: number) => Promise<{ code: number; stdout: string; stderr: string }>;
+export type GitExec = (args: string[], timeoutMs?: number) => Promise<{ code: number; stdout: string; stderr: string; timedOut?: true; stdoutTruncated?: true }>;
 const defaultGit: GitExec = (args, timeoutMs) => run('/usr/bin/git', args, undefined, timeoutMs);
 
 // git `worktree add` may clone a large tree; the shared executor's default 5s is not enough
@@ -30,10 +32,10 @@ export type BranchOption = { name: string; ref: string; remote: boolean; checked
 // `base` is what a new branch starts from unless the operator picks another (see `defaultBase`)
 export type BranchesResult = { ok: true; branches: BranchOption[]; base?: string } | { ok: false; status: number; error: string };
 // `openAgent` asks for an Agent in the new checkout, which a fork pull request refuses
-export type AddInput = { mode: 'new' | 'existing'; branch: string; base?: string } | { mode: 'pull-request'; number: number; openAgent?: boolean };
+export type AddInput = { mode: 'new' | 'existing'; branch: string; base?: string } | { mode: 'pull-request'; number: number; openAgent?: boolean; context?: GithubPullMutationContext };
 // `fork` marks a checkout of a fork pull request's code, in which no setup or Agent runs; `fetchError`
 // says why origin's default could not be fetched, so a new branch started from it as last fetched
-export type AddResult = { ok: true; path: string; fork?: true; fetchError?: string } | { ok: false; status: number; error: string };
+export type AddResult = { ok: true; path: string; fork?: true; fetchError?: string } | { ok: false; status: number; error: string; refresh?: true };
 
 /**
  * The fresh facts the Remove dialog decides with (ADR 0003): the structural flags from
@@ -64,6 +66,21 @@ export type CleanupBranch = { projectId: string; projectLabel: string; branch: s
 // a linked Worktree whose branch's pull request merged or closed at (or past) the checked-out head
 export type ClosedPullRequestWorktree = { worktreeId: string; reason: CleanupBranch['reason'] };
 export type PruneOutcome = { ok: true } | { ok: false; status: number; error: string };
+export type HeldMoveRecovery = {
+  operationId: string;
+  sourceWorktreeId: string;
+  candidateWorktreeId: string;
+  source: { exists: boolean; branch?: string; head?: string; status?: 'clean' | 'dirty' | 'unreadable' };
+  candidate: { pathExists: boolean; registered: boolean; discovered: boolean; branch?: string; head?: string; status?: 'clean' | 'dirty' | 'unreadable' };
+  currentHolderWorktreeId?: string;
+  taggedStash?: { oid: string; subject: string };
+  inferredPhase: 'none' | 'candidate-partial' | 'target-detached' | 'stashed-source' | 'source-detached' | 'target-holds-with-stash' | 'moved' | 'diverged';
+};
+export type HeldMoveInput = { number: number; sourceWorktreeId: string; context: GithubPullMutationContext; operationId: string; openAgent: boolean };
+export type HeldMoveResult =
+  | { ok: true; path: string; fork: boolean }
+  | { ok: false; status: number; error: string; operationId: string; candidateWorktreeId?: string; refresh?: true; recoveryRequired?: true; recovery?: HeldMoveRecovery };
+export type HeldMoveInspectionResult = { ok: true; recovery: HeldMoveRecovery } | { ok: false; status: number; error: string };
 
 /**
  * Whether the console may create or remove Worktrees in this Project. A missing checkout
@@ -106,7 +123,13 @@ export class WorktreeManagementService {
 
   // share exact-head PR evidence between suggestions and guarded deletion
   // `pullRequestHeads` resolves and fetches a pull request for the `pull-request` Add mode
-  constructor(private readonly projects: () => readonly Project[], private readonly git: GitExec = defaultGit, private readonly github: Pick<GithubService, 'repositoryAt' | 'cleanupHeads'> = new GithubService(), private readonly pullRequestHeads?: Pick<PullRequestSwitchService, 'fetchForWorktree'>) {}
+  constructor(
+    private readonly projects: () => readonly Project[],
+    private readonly git: GitExec = defaultGit,
+    private readonly github: Pick<GithubService, 'repositoryAt' | 'cleanupHeads'> = new GithubService(),
+    private readonly pullRequestHeads?: Pick<PullRequestSwitchService, 'fetchForWorktree' | 'createUnheldWorktree' | 'moveToNew'>,
+    private readonly worktrees: () => readonly Worktree[] = () => []
+  ) {}
 
   private project(projectId: string): Project | undefined {
     return this.projects().find(project => project.id === projectId);
@@ -188,7 +211,11 @@ export class WorktreeManagementService {
     if (!availability.available) return { ok: false, status: 409, error: availability.reason! };
     if (input.mode === 'pull-request') {
       if (!Number.isSafeInteger(input.number) || input.number < 1) return { ok: false, status: 400, error: 'invalid pull request number' };
-      return await this.serialize(projectId, () => this.runPullRequestAdd(project, input.number, input.openAgent === true));
+      // bind contextual creation to the route project and unheld invariant
+      if (input.context !== undefined && (input.context.identity.number !== input.number || input.context.targetProjectId !== project.id || input.context.targetWorktreeId !== undefined || input.context.expectedHolderWorktreeIds.length !== 0 || input.context.expectedSourceWorktreeId !== undefined)) return { ok: false, status: 400, error: 'invalid pull request mutation context' };
+      return await this.serialize(projectId, () => input.context === undefined
+        ? this.runPullRequestAdd(project, input.number, input.openAgent === true)
+        : this.runContextualPullRequestAdd(project, input.number, input.openAgent === true, input.context));
     }
     if (input.mode !== 'new' && input.mode !== 'existing') return { ok: false, status: 400, error: 'invalid worktree mode' };
     const branchIssue = invalidBranchReason(input.branch);
@@ -222,6 +249,34 @@ export class WorktreeManagementService {
     return added;
   }
 
+  // add an unheld pull request through the switch service's locked structural callback
+  private async runContextualPullRequestAdd(project: Project, number: number, openAgent: boolean, context: GithubPullMutationContext): Promise<AddResult> {
+    if (this.pullRequestHeads?.createUnheldWorktree === undefined) return { ok: false, status: 409, error: 'pull request worktrees are unavailable' };
+    const result = await this.pullRequestHeads.createUnheldWorktree(context, openAgent, async head => {
+      const parentScoped = head.repositoryScope !== undefined && head.repositoryScope.baseRepositoryKey !== head.repositoryScope.originRepositoryKey;
+      const repositorySuffix = parentScoped ? `-${createHash('sha256').update(head.repositoryScope!.baseRepositoryKey).digest('hex').slice(0, 16)}` : '';
+      const leaf = `pr-${number}${repositorySuffix}`;
+      const path = worktreePath(project.worktreesDirectory, leaf);
+      // retain the safe-path invariant after server-owned repository proof
+      if (path === undefined) return { ok: false as const, status: 409, error: 'the target worktree path is invalid' };
+      // keep exact-path refusal inside the mutation lock
+      if (await this.pathExists(path)) return { ok: false as const, status: 409, error: `Pull request #${number} already has a worktree at ${leaf}.` };
+      const added = await this.addCheckout(project, path, head.existing ? [path, head.branch] : ['--no-track', '-b', head.branch, path, head.sha]);
+      // preserve add failures and fork markers
+      if (!added.ok || head.fork) return added.ok ? { ...added, fork: true as const } : added;
+      // configure tracking only after the checkout exists
+      if (!head.existing) {
+        const tracked = await this.git([...repositoryArgs(path), 'branch', '--set-upstream-to', head.upstream]);
+        // keep a usable checkout when tracking setup fails
+        if (tracked.code !== 0) console.warn(`[worktrees] ${path}: could not track ${head.upstream}: ${tracked.stderr.trim()}`);
+      }
+      return added;
+    });
+    // preserve contextual refresh semantics
+    if (!result.ok) return { ok: false, status: 409, error: result.error, ...(result.refresh === true ? { refresh: true as const } : {}) };
+    return result.value;
+  }
+
   // run `git worktree add` with the given arguments, returning the realpath'd root
   private async addCheckout(project: Project, path: string, args: string[]): Promise<AddResult> {
     await mkdir(project.worktreesDirectory, { recursive: true });
@@ -250,6 +305,202 @@ export class WorktreeManagementService {
     if (await this.pathExists(path)) return { ok: false, status: 409, error: 'the target worktree path already exists' };
     const added = await this.addCheckout(project, path, input.mode === 'new' ? ['--no-track', '-b', input.branch, path, base!] : [path, input.branch]);
     return added.ok && fetchError !== undefined ? { ...added, fetchError } : added;
+  }
+
+  // move one held pull request into its exact operation-correlated target
+  async moveHeldPullRequest(projectId: string, input: HeldMoveInput): Promise<HeldMoveResult> {
+    const project = this.project(projectId);
+    // require one current managed project
+    if (project === undefined) return { ok: false, status: 404, error: 'project unavailable', operationId: input.operationId };
+    const availability = worktreeManagementAvailability(project);
+    // preserve the project management boundary
+    if (!availability.available) return { ok: false, status: 409, error: availability.reason!, operationId: input.operationId };
+    // validate service inputs independently of the route
+    if (!Number.isSafeInteger(input.number) || input.number < 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(input.operationId)) return { ok: false, status: 400, error: 'invalid held pull request move', operationId: input.operationId };
+    // bind held-new context to one exact project, number and source
+    if (input.context.identity.number !== input.number || input.context.targetProjectId !== project.id || input.context.targetWorktreeId !== undefined || input.context.expectedHolderWorktreeIds.length !== 1 || input.context.expectedHolderWorktreeIds[0] !== input.sourceWorktreeId || input.context.expectedSourceWorktreeId !== input.sourceWorktreeId) return { ok: false, status: 400, error: 'invalid pull request mutation context', operationId: input.operationId };
+    const source = worktreeById(this.worktrees(), input.sourceWorktreeId);
+    // require the source inside the selected project
+    if (source === undefined || source.projectId !== project.id || input.context.expectedSourceWorktreeId !== source.id) return { ok: false, status: 409, error: 'The pull request source changed. Refresh and try again.', operationId: input.operationId, refresh: true };
+    const leaf = `pr-${input.number}-move-${input.operationId}`;
+    const candidatePath = worktreePath(project.worktreesDirectory, leaf);
+    // retain the safe-path invariant
+    if (candidatePath === undefined) return { ok: false, status: 409, error: 'the target worktree path is invalid', operationId: input.operationId };
+    const candidateWorktreeId = worktreeWireId(project.id, candidatePath);
+    return await this.serialize(project.id, async () => {
+      // require the dedicated switch-service transaction
+      if (this.pullRequestHeads?.moveToNew === undefined) return { ok: false as const, status: 409, error: 'pull request worktrees are unavailable', operationId: input.operationId };
+      const factory = this.moveCandidateFactory(project, candidatePath);
+      const moved = await this.pullRequestHeads.moveToNew(input.context, input.operationId, input.openAgent, factory);
+      // return the one-way moved result
+      if (moved.status === 'moved') return { ok: true as const, path: moved.target.identity, fork: moved.fork };
+      // return a side-effect-free refusal
+      if (moved.status === 'refused') return { ok: false as const, status: 409, error: moved.error, operationId: input.operationId, ...(moved.refresh === true ? { refresh: true as const } : {}) };
+      const inspected = await this.inspectHeldPullRequest(project.id, input.number, input.sourceWorktreeId, input.operationId).catch(() => undefined);
+      // preserve a stable recovery identity even if inspection itself is incomplete
+      if (inspected === undefined || !inspected.ok) return { ok: false as const, status: 409, error: moved.error, operationId: input.operationId, candidateWorktreeId, recoveryRequired: true as const };
+      return { ok: false as const, status: 409, error: moved.error, operationId: input.operationId, candidateWorktreeId, recoveryRequired: true as const, recovery: inspected.recovery };
+    });
+  }
+
+  // derive one immutable candidate factory for the transaction
+  private moveCandidateFactory(project: Project, candidatePath: string): MoveToNewCandidateFactory {
+    return {
+      inspectCandidate: async () => await this.observeMoveCandidate(project, candidatePath),
+      createDetachedCandidate: async expectedSourceHead => {
+        await mkdir(project.worktreesDirectory, { recursive: true });
+        let result: Awaited<ReturnType<GitExec>> | undefined;
+        let thrown = false;
+        try {
+          result = await this.git([...repositoryArgs(project.path), 'worktree', 'add', '--detach', candidatePath, expectedSourceHead], addTimeoutMs);
+        } catch {
+          // classify thrown commands only from exact observed side effects
+          thrown = true;
+        }
+        const candidate = await this.observeMoveCandidate(project, candidatePath, expectedSourceHead);
+        const sideEffect = candidate.pathExists || candidate.registered;
+        const observationCertain = candidate.pathKnown && candidate.registrationKnown;
+        // continue only after unambiguous valid success
+        if (observationCertain && !thrown && result?.code === 0 && result.timedOut !== true && candidate.valid) return { status: 'usable' as const, candidate };
+        // keep a clean refusal only when no side effect exists
+        if (observationCertain && !sideEffect) return { status: 'absent' as const, candidate, error: result?.stderr.trim() || 'git worktree add failed' };
+        return { status: 'recovery' as const, candidate, error: 'The target worktree may have been created and needs inspection.' };
+      }
+    };
+  }
+
+  // observe only the exact candidate path and registration
+  private async observeMoveCandidate(project: Project, candidatePath: string, expectedHead?: string): Promise<MoveToNewCandidate> {
+    let pathInfo: Awaited<ReturnType<typeof lstat>> | undefined;
+    let pathKnown = true;
+    try {
+      pathInfo = await lstat(candidatePath);
+    } catch (error) {
+      // distinguish proven absence from an unreadable path
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') pathKnown = false;
+    }
+    const listed = await this.git([...repositoryArgs(project.path), 'worktree', 'list', '--porcelain', '-z']).catch(() => undefined);
+    const registrationKnown = listed?.code === 0 && listed.stdoutTruncated !== true;
+    const entries = registrationKnown ? parseWorktreeListNul(listed.stdout) : [];
+    const entry = entries.find(candidate => candidate.path === candidatePath);
+    const registered = entry !== undefined;
+    const valid = pathInfo?.isDirectory() === true && entry !== undefined && entry.detached && !entry.bare && !entry.prunable && (expectedHead === undefined || entry.head === expectedHead);
+    return {
+      worktreeId: worktreeWireId(project.id, candidatePath),
+      path: candidatePath,
+      pathExists: pathInfo !== undefined,
+      pathKnown,
+      registered,
+      registrationKnown,
+      valid,
+      ...(entry?.head === undefined ? {} : { head: entry.head }),
+      ...(entry === undefined ? {} : { detached: entry.detached })
+    };
+  }
+
+  // inspect one known held-move operation without mutating git or the filesystem
+  async inspectHeldPullRequest(projectId: string, number: number, sourceWorktreeId: string, operationId: string): Promise<HeldMoveInspectionResult> {
+    const project = this.project(projectId);
+    // require one current repository project and valid operation identity
+    if (project === undefined || project.mode !== 'repository') return { ok: false, status: 404, error: 'project unavailable' };
+    if (!Number.isSafeInteger(number) || number < 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(operationId)) return { ok: false, status: 400, error: 'invalid held pull request inspection' };
+    const sourcePath = worktreePathOf(sourceWorktreeId);
+    // bind the source id to the route project
+    if (sourcePath === undefined || !sourceWorktreeId.startsWith(`${project.id}:`)) return { ok: false, status: 400, error: 'invalid source worktree' };
+    const candidatePath = worktreePath(project.worktreesDirectory, `pr-${number}-move-${operationId}`);
+    // retain the safe-path invariant
+    if (candidatePath === undefined) return { ok: false, status: 400, error: 'invalid held pull request inspection' };
+    const [listed, candidatePathState, sourcePathState, stashes] = await Promise.all([
+      this.git([...repositoryArgs(project.path), 'worktree', 'list', '--porcelain', '-z']).catch(() => undefined),
+      this.recoveryPath(candidatePath),
+      this.recoveryPath(sourcePath),
+      this.git([...repositoryArgs(project.path), 'stash', 'list', '--format=%H%x09%gs']).catch(() => undefined)
+    ]);
+    // require readable top-level repository metadata
+    if (listed?.code !== 0 || listed.stdoutTruncated === true || stashes?.code !== 0 || stashes.stdoutTruncated === true || !candidatePathState.known || !sourcePathState.known) return { ok: false, status: 409, error: 'recovery metadata could not be read' };
+    const entries = parseWorktreeListNul(listed.stdout);
+    const sourceEntry = entries.find(entry => entry.path === sourcePath);
+    const sourceDiscovered = worktreeById(this.worktrees(), sourceWorktreeId);
+    // authenticate the exact source through discovery or current registration
+    if (sourceDiscovered !== undefined && sourceDiscovered.projectId !== project.id || sourceDiscovered === undefined && sourceEntry === undefined) return { ok: false, status: 404, error: 'source worktree unavailable' };
+    const candidateEntry = entries.find(entry => entry.path === candidatePath);
+    const candidateWorktreeId = worktreeWireId(project.id, candidatePath);
+    const candidateDiscovered = this.worktrees().some(worktree => worktree.projectId === project.id && (worktree.id === candidateWorktreeId || worktreeMatchesWorkspace(worktree, candidatePath)));
+    const [sourceStatus, candidateStatus] = await Promise.all([
+      sourceEntry === undefined ? Promise.resolve(undefined) : this.recoveryStatus(sourcePath),
+      candidateEntry === undefined ? Promise.resolve(undefined) : this.recoveryStatus(candidatePath)
+    ]);
+    const marker = `rac move-to-new ${operationId} `;
+    const tagged = stashes.stdout.split('\n').flatMap(line => {
+      const tab = line.indexOf('\t');
+      const oid = tab === -1 ? '' : line.slice(0, tab);
+      const subject = tab === -1 ? '' : line.slice(tab + 1);
+      const start = subject.lastIndexOf(marker);
+      // keep only exact operation tags with one branch suffix
+      return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(oid) && start >= 0 && subject.slice(start + marker.length) !== '' ? [{ oid, subject, branch: subject.slice(start + marker.length) }] : [];
+    });
+    const branchFacts = new Set([tagged[0]?.branch, sourceEntry?.branch, candidateEntry?.branch].filter((branch): branch is string => branch !== undefined));
+    const recoveryBranch = branchFacts.size === 1 ? [...branchFacts][0] : undefined;
+    const holders = recoveryBranch === undefined ? [] : entries.filter(entry => entry.branch === recoveryBranch);
+    const currentHolderWorktreeId = holders.length === 1 ? worktreeWireId(project.id, holders[0]!.path) : undefined;
+    const pathExists = candidatePathState.exists;
+    const registered = candidateEntry !== undefined;
+    const candidateValid = candidateEntry !== undefined && !candidateEntry.bare && !candidateEntry.prunable;
+    let inferredPhase: HeldMoveRecovery['inferredPhase'];
+    // classify only current exact facts
+    if (!pathExists && !registered && tagged.length === 0) inferredPhase = 'none';
+    else if (pathExists !== registered || registered && !candidateValid) inferredPhase = 'candidate-partial';
+    else if (tagged.length > 1 || branchFacts.size > 1 || holders.length > 1) inferredPhase = 'diverged';
+    else if (candidateEntry?.detached && sourceEntry?.branch !== undefined && tagged.length === 0) inferredPhase = 'target-detached';
+    else if (candidateEntry?.detached && sourceEntry?.branch !== undefined && tagged.length === 1) inferredPhase = 'stashed-source';
+    else if (candidateEntry?.detached && sourceEntry?.detached && tagged.length === 1) inferredPhase = 'source-detached';
+    else if (candidateEntry?.branch === recoveryBranch && tagged.length === 1) inferredPhase = 'target-holds-with-stash';
+    else if (candidateEntry?.branch === recoveryBranch && tagged.length === 0 && sourceEntry?.detached) inferredPhase = 'moved';
+    else inferredPhase = 'diverged';
+    return {
+      ok: true,
+      recovery: {
+        operationId,
+        sourceWorktreeId,
+        candidateWorktreeId,
+        source: {
+          exists: sourcePathState.exists,
+          ...(sourceEntry?.branch === undefined ? {} : { branch: sourceEntry.branch }),
+          ...(sourceEntry?.head === undefined ? {} : { head: sourceEntry.head }),
+          ...(sourceStatus === undefined ? {} : { status: sourceStatus })
+        },
+        candidate: {
+          pathExists,
+          registered,
+          discovered: candidateDiscovered,
+          ...(candidateEntry?.branch === undefined ? {} : { branch: candidateEntry.branch }),
+          ...(candidateEntry?.head === undefined ? {} : { head: candidateEntry.head }),
+          ...(candidateStatus === undefined ? {} : { status: candidateStatus })
+        },
+        ...(currentHolderWorktreeId === undefined ? {} : { currentHolderWorktreeId }),
+        ...(tagged.length === 1 ? { taggedStash: { oid: tagged[0]!.oid, subject: tagged[0]!.subject } } : {}),
+        inferredPhase
+      }
+    };
+  }
+
+  // report only clean, dirty or unreadable status
+  private async recoveryStatus(path: string): Promise<'clean' | 'dirty' | 'unreadable'> {
+    const status = await this.git([...repositoryArgs(path), 'status', '--porcelain=v1', '-z', '--untracked-files=all']).catch(() => undefined);
+    // hide paths and bytes from recovery output
+    if (status?.code !== 0 || status.stdoutTruncated === true) return 'unreadable';
+    return status.stdout === '' ? 'clean' : 'dirty';
+  }
+
+  // distinguish exact path absence from an unreadable probe
+  private async recoveryPath(path: string): Promise<{ known: boolean; exists: boolean }> {
+    try {
+      await lstat(path);
+      return { known: true, exists: true };
+    } catch (error) {
+      // only enoent proves absence
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { known: true, exists: false } : { known: false, exists: false };
+    }
   }
 
   // the fresh Remove-dialog facts for one discovered Worktree: its structural flags plus
@@ -472,10 +723,10 @@ export class WorktreeManagementService {
     // pushed; git marks it `[gone]` in the upstream track field. `@{upstream}` itself no longer
     // resolves in that state, so read the branch's track field rather than rev-parse it.
     if (branch === undefined) return false;
-    // a fork pull request's checkout is held on GitHub as refs/pull/<n>/head, which the
-    // console fetched into refs/rac/pull/<n>
-    const forkNumber = forkCheckoutNumber(branch);
-    if (forkNumber !== undefined && (await this.git([...repositoryArgs(path), 'merge-base', '--is-ancestor', ref, `refs/rac/pull/${forkNumber}`])).code === 0) return true;
+    // a fork pull request's checkout is held in its exact pinned ref
+    const fork = forkCheckoutIdentity(branch);
+    const pinned = fork?.repository === undefined ? fork === undefined ? undefined : `refs/rac/pull/${fork.number}` : `refs/rac/fetch/${fork.repository}/${fork.number}`;
+    if (pinned !== undefined && (await this.git([...repositoryArgs(path), 'merge-base', '--is-ancestor', ref, pinned])).code === 0) return true;
     const track =await this.git([...repositoryArgs(path), 'for-each-ref', '--format=%(upstream:track)', `refs/heads/${branch}`]);
     return track.code === 0 && track.stdout.includes('[gone]');
   }

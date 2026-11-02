@@ -6,7 +6,7 @@ import { createPullRequest, replyToThread, rerequestReviews, resolveThread } fro
 import { at, GithubClient, GithubRequestError, graphqlError, githubRepository, githubToken, repositoryPath, type Command, type GithubRepository, type GraphqlPayload, type Request, type Token } from './github.js';
 
 export type PullRequestCleanupStatus = 'merged' | 'closed';
-export type PullRequestChoice = { number: number; title: string; branch: string; headSha: string; headOnOrigin: boolean; draft: boolean; url: string; checks?: PullRequestCheckStatus; issues?: PullRequestIssues };
+export type PullRequestChoice = { number: number; title: string; branch: string; headSha: string; headOnOrigin: boolean; headRepository?: string; draft: boolean; url: string; checks?: PullRequestCheckStatus; issues?: PullRequestIssues };
 export type OpenPullRequestChoices = { own: PullRequestChoice[]; others: PullRequestChoice[] };
 export type RepositoryIssue = { number: number; title: string; url: string; author?: string; updatedAt?: string };
 /** Why GitHub data may be missing or old: no token, a rate limit holding requests until `until`, or GitHub failing. */
@@ -68,7 +68,7 @@ export type LinkedIssue = { number: number; title: string; url: string; state: '
  */
 export type PullRequestDetail = PullRequestComments & {
   id: string; repository: string; title: string; state: 'open' | 'merged' | 'closed'; draft: boolean; author?: string; mine: boolean; updatedAt?: string;
-  branch: string; baseBranch?: string; headSha: string; headOnOrigin: boolean; mergeable: 'mergeable' | 'conflicting' | 'unknown';
+  branch: string; baseBranch?: string; headSha: string; headOnOrigin: boolean; headRepository?: string; mergeable: 'mergeable' | 'conflicting' | 'unknown';
   checks: PullRequestCheckStatus; checkRuns: PullRequestCheck[]; reviewers: PullRequestReviewer[]; linkedIssues: LinkedIssue[];
   destination?: OverviewDestination;
   // the lists GitHub gave a full page of (`detailPageLimits`), which may be missing older ones
@@ -134,7 +134,7 @@ export type GithubServiceOptions = { request?: Request; command?: Command; now?:
 
 // one pull request as the module keeps it; `unresolvedThreads` and `closingIssues` are only known
 // from a read that asked for them
-type Pull = { number: number; title: string; url: string; author?: string; updatedAt?: string; state: 'open' | 'closed' | 'merged'; draft: boolean; baseBranch?: string; branch: string; headSha: string; headOnOrigin: boolean; mine: boolean; conflicts: boolean; checks: PullRequestCheckStatus; unresolvedThreads?: number; closingIssues?: number[] };
+type Pull = { number: number; title: string; url: string; author?: string; updatedAt?: string; state: 'open' | 'closed' | 'merged'; draft: boolean; baseBranch?: string; branch: string; headSha: string; headOnOrigin: boolean; headRepository?: string; mine: boolean; conflicts: boolean; checks: PullRequestCheckStatus; unresolvedThreads?: number; closingIssues?: number[] };
 // `failedAt` is when the last read failed, while its problem stands
 type Entry = { fetchedAt?: number; problem?: GithubProblem; failedAt?: number; refreshing?: Promise<void> };
 type RepositoryEntry = Entry & { repository: GithubRepository; open?: Pull[]; issues?: RepositoryIssue[] };
@@ -146,10 +146,11 @@ type BranchEntry = Entry & { repository: GithubRepository; name: string; publish
 // one repository in one GraphQL read: its lists, and the branches to look up
 type Plan = { repository: GithubRepository; list: boolean; branches: BranchEntry[] };
 type OriginEntry = { expiresAt?: number; pending: Promise<GithubRepository | undefined> };
+type LineageEntry = { expiresAt?: number; pending: Promise<GithubRepository | undefined> };
 // an Overview row as read, with the heads that find its Worktree (a PR's own, an Issue's linked
 // PRs'), the seen-record keys of its reasons (`instances`, one for each reason, in the same order),
 // and those kept while GitHub has not decided whether a reason still holds (`held`)
-type OverviewRow = Omit<OverviewItem, 'destination' | 'unseen'> & { heads: { number: number; branch: string; onOrigin: boolean }[]; instances: string[]; held: string[]; pull?: PullHints };
+type OverviewRow = Omit<OverviewItem, 'destination' | 'unseen'> & { heads: { number: number; branch: string; onOrigin: boolean; headRepository?: string }[]; instances: string[]; held: string[]; pull?: PullHints };
 // `requests` are the viewer's own review requests, kept only when GitHub gave the whole list
 type OverviewEntry = Entry & { mine?: OverviewRow[]; reviews?: OverviewRow[]; issues?: OverviewRow[]; totals?: Overview['totals']; requests?: RepositoryReviewRequest[]; viewer?: string };
 type RepositoryReviewRequest = ViewerReviewRequest & { repository: string };
@@ -167,6 +168,7 @@ const freshMs = 60_000;
 // how long a branch stays in the poll after its last read
 const trackMs = 600_000;
 const repositoryCacheTtlMs = 30_000;
+const lineageCacheLimit = 100;
 // one page of open pull requests and issues: at 50, a repository's lists cost one point a poll
 const openPage = 50;
 const issuePage = 50;
@@ -204,17 +206,26 @@ const realTimer: Timer = {
   clear: handle => clearTimeout(handle as ReturnType<typeof setTimeout>)
 };
 
-// the console-owned local branch a fork pull request checks out as, since its head branch
-// lives in another repository; `forkCheckoutNumber` reads the number back from one
+// console-owned local branches for fork pull requests; contextual branches carry their base
+// repository while `forkCheckoutNumber` preserves the legacy exact-origin shape
 export const forkCheckoutBranch = (pullRequest: Pick<PullRequestChoice, 'number' | 'headSha'>): string => `rac/pr/${pullRequest.number}/${pullRequest.headSha.slice(0, 12)}`;
+export const contextualForkCheckoutBranch = (repository: GithubRepository, pullRequest: Pick<PullRequestChoice, 'number' | 'headSha'>): string => `rac/pr/${repository.owner.toLowerCase()}/${repository.name.toLowerCase()}/${pullRequest.number}/${pullRequest.headSha.slice(0, 12)}`;
+export type ForkCheckoutIdentity = { repository?: string; number: number };
+export function forkCheckoutIdentity(branch: string): ForkCheckoutIdentity | undefined {
+  const contextual = /^rac\/pr\/([^/]+)\/([^/]+)\/([1-9]\d{0,9})\/[a-f0-9]{12}$/u.exec(branch);
+  // retain the base repository in contextual branch identities
+  if (contextual !== null) return { repository: `${contextual[1]!.toLowerCase()}/${contextual[2]!.toLowerCase()}`, number: Number(contextual[3]) };
+  const legacy = /^rac\/pr\/([1-9]\d{0,9})\/[a-f0-9]{12}$/u.exec(branch);
+  return legacy === null ? undefined : { number: Number(legacy[1]) };
+}
 export function forkCheckoutNumber(branch: string): number | undefined {
-  const match = /^rac\/pr\/([1-9]\d{0,9})\/[a-f0-9]{12}$/u.exec(branch);
-  return match === null ? undefined : Number(match[1]);
+  const legacy = /^rac\/pr\/([1-9]\d{0,9})\/[a-f0-9]{12}$/u.exec(branch);
+  return legacy === null ? undefined : Number(legacy[1]);
 }
 
 // what every read takes of a pull request; the open lists and a waiting read of one branch also
 // count its threads and the issues it closes
-const pullFields = 'number title url updatedAt author{login} state isDraft baseRefName headRefName headRefOid isCrossRepository viewerDidAuthor mergeable statusCheckRollup{state}';
+const pullFields = 'number title url updatedAt author{login} state isDraft baseRefName headRefName headRefOid headRepository{nameWithOwner} isCrossRepository viewerDidAuthor mergeable statusCheckRollup{state}';
 const fullPullFields = `${pullFields} reviewThreads(first:100){nodes{isResolved isOutdated}} closingIssuesReferences(first:10){nodes{number}}`;
 // one pull request's detail, with `pullFields` so its version compares with the lists'; the newest
 // threads and comments, so the last speaker is right on a long thread
@@ -241,7 +252,11 @@ const viewerRequestFields = 'reviewRequests(first:100){nodes{requestedReviewer{.
 const reviewRequestsQuery = `query ReviewRequests($q:String!){requests:search(type:ISSUE,first:50,query:$q){nodes{...on PullRequest{number url repository{nameWithOwner} ${viewerRequestFields}}}}}`;
 // the Overview's three searches, newest first; review threads and their last speaker are read
 // for my own PRs only, since they cost the most
-const overviewPullFields = 'number title url state isDraft updatedAt repository{nameWithOwner} author{login} headRefName headRefOid isCrossRepository mergeable statusCheckRollup{state} labels(first:5){nodes{name}}';
+const overviewPullFields = 'number title url state isDraft updatedAt repository{nameWithOwner} author{login} headRefName headRefOid headRepository{nameWithOwner} isCrossRepository mergeable statusCheckRollup{state} labels(first:5){nodes{name}}';
+const lineageQuery = 'query RepositoryLineage($owner:String!,$name:String!){repository(owner:$owner,name:$name){isFork parent{nameWithOwner}}}';
+// one fork branch's open pull requests in its authenticated direct parent
+const parentHeadPage = 100;
+const parentHeadQuery = `query ParentHeadPullRequests($owner:String!,$name:String!,$branch:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,headRefName:$branch,first:${parentHeadPage}){totalCount nodes{headRepository{nameWithOwner}}}}}`;
 // the newest review threads of each of my pull requests the Overview reads
 const myThreadsPage = 50;
 const overviewSearches = {
@@ -266,6 +281,14 @@ const repositoryKey = ({ owner, name }: GithubRepository): string => `${owner.to
 const branchKey = (repository: GithubRepository, name: string): string => `${repositoryKey(repository)}:${name}`;
 const apiUrl = (repository: GithubRepository, path: string): string => `https://api.github.com/repos/${repositoryPath(repository)}/${path}`;
 
+// parse github's canonical owner/name response
+function repositoryName(value: unknown): GithubRepository | undefined {
+  // require one owner and repository segment
+  if (typeof value !== 'string' || !/^[^/\s]+\/[^/\s]+$/u.test(value)) return undefined;
+  const [owner, name] = value.split('/');
+  return owner === undefined || name === undefined ? undefined : { owner, name };
+}
+
 // GitHub's own link, only when it points at github.com
 function githubUrl(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -289,6 +312,7 @@ function readPull(value: unknown): Pull | undefined {
   const url = githubUrl(at(value, 'url'));
   if (number === undefined || typeof title !== 'string' || url === undefined || (state !== 'OPEN' && state !== 'CLOSED' && state !== 'MERGED') || typeof branch !== 'string' || typeof headSha !== 'string' || !/^[a-f0-9]{40}$/iu.test(headSha)) return undefined;
   const [base, author, updatedAt] = [at(value, 'baseRefName'), at(value, 'author', 'login'), at(value, 'updatedAt')];
+  const headRepository = repositoryName(at(value, 'headRepository', 'nameWithOwner'));
   const threads = at(value, 'reviewThreads', 'nodes');
   const closing = at(value, 'closingIssuesReferences', 'nodes');
   return {
@@ -297,6 +321,7 @@ function readPull(value: unknown): Pull | undefined {
     state: state === 'OPEN' ? 'open' : state === 'MERGED' ? 'merged' : 'closed',
     draft: at(value, 'isDraft') === true,
     ...(typeof base === 'string' && base !== '' ? { baseBranch: base } : {}),
+    ...(headRepository === undefined ? {} : { headRepository: `${headRepository.owner}/${headRepository.name}` }),
     // the same repository even after a rename, which the origin URL may still predate
     headOnOrigin: at(value, 'isCrossRepository') === false,
     mine: at(value, 'viewerDidAuthor') === true,
@@ -318,7 +343,7 @@ function pullIssues(pull: Pull): PullRequestIssues {
 
 function choice(pull: Pull): PullRequestChoice {
   const issues = pullIssues(pull);
-  return { number: pull.number, title: pull.title, branch: pull.branch, headSha: pull.headSha, headOnOrigin: pull.headOnOrigin, draft: pull.draft, url: pull.url, ...(pull.mine ? { checks: pull.checks, ...(Object.keys(issues).length === 0 ? {} : { issues }) } : {}) };
+  return { number: pull.number, title: pull.title, branch: pull.branch, headSha: pull.headSha, headOnOrigin: pull.headOnOrigin, ...(pull.headRepository === undefined ? {} : { headRepository: pull.headRepository }), draft: pull.draft, url: pull.url, ...(pull.mine ? { checks: pull.checks, ...(Object.keys(issues).length === 0 ? {} : { issues }) } : {}) };
 }
 
 function summary(pull: Pull): PullRequestSummary {
@@ -379,7 +404,8 @@ const seenKey = (row: Pick<OverviewRow, 'repository' | 'number'>, instance: stri
 // a pull request's own head, which finds the Worktree holding it
 function pullHead(value: unknown, number: number): OverviewRow['heads'] {
   const branch = at(value, 'headRefName');
-  return typeof branch === 'string' ? [{ number, branch, onOrigin: at(value, 'isCrossRepository') === false }] : [];
+  const headRepository = repositoryName(at(value, 'headRepository', 'nameWithOwner'));
+  return typeof branch === 'string' ? [{ number, branch, onOrigin: at(value, 'isCrossRepository') === false, ...(headRepository === undefined ? {} : { headRepository: `${headRepository.owner}/${headRepository.name}` }) }] : [];
 }
 
 // what the searches read of a pull request beyond its row
@@ -535,6 +561,7 @@ export class GithubService {
   private readonly repositories = new Map<string, RepositoryEntry>();
   private readonly branches = new Map<string, BranchEntry>();
   private readonly origins = new Map<string, OriginEntry>();
+  private readonly lineages = new Map<string, LineageEntry>();
   // GitHub's comparison of a closed pull request's final head with a checkout, which never changes
   private readonly compares = new Map<string, unknown>();
   private readonly command: Command;
@@ -649,6 +676,65 @@ export class GithubService {
 
   // forget every checkout's origin after checkouts change
   invalidateRepositories(): void { this.origins.clear(); }
+
+  /** The direct parent GitHub authenticates for one fork, cached briefly unless `fresh`. */
+  async repositoryParent(repository: GithubRepository, { fresh = false }: { fresh?: boolean } = {}): Promise<GithubRepository | undefined> {
+    const key = repositoryKey(repository);
+    const now = this.now();
+    const cached = this.lineages.get(key);
+    // bypass every retained proof for mutation revalidation
+    if (fresh) this.lineages.delete(key);
+    else if (cached !== undefined && (cached.expiresAt === undefined || cached.expiresAt > now)) return await cached.pending;
+    // prune expired and oldest proofs before retaining another
+    for (const [candidate, entry] of this.lineages) {
+      // drop expired proofs
+      if (entry.expiresAt !== undefined && entry.expiresAt <= now) this.lineages.delete(candidate);
+    }
+    // enforce the lineage cache bound
+    while (this.lineages.size >= lineageCacheLimit) this.lineages.delete(this.lineages.keys().next().value as string);
+    const entry: LineageEntry = { pending: this.readRepositoryParent(repository) };
+    entry.pending = entry.pending.then(parent => {
+      // start the ttl after github answers
+      if (this.lineages.get(key) === entry) entry.expiresAt = this.now() + repositoryCacheTtlMs;
+      return parent;
+    }, (error: unknown) => {
+      // retry failed proofs on the next request
+      if (this.lineages.get(key) === entry) this.lineages.delete(key);
+      throw error;
+    });
+    this.lineages.set(key, entry);
+    return await entry.pending;
+  }
+
+  /** A direct parent already authenticated for this repository, without starting a GitHub read. */
+  async cachedRepositoryParent(repository: GithubRepository): Promise<GithubRepository | undefined> {
+    const entry = this.lineages.get(repositoryKey(repository));
+    // omit absent and expired proofs
+    if (entry === undefined || entry.expiresAt !== undefined && entry.expiresAt <= this.now()) return undefined;
+    return await entry.pending.catch(() => undefined);
+  }
+
+  // read one direct fork parent from authenticated github data
+  private async readRepositoryParent(repository: GithubRepository, provenToken?: string): Promise<GithubRepository | undefined> {
+    const token = provenToken ?? await this.token();
+    // unauthenticated lineage is never trusted
+    if (token === undefined || token.trim() === '') return undefined;
+    const payload = await this.client.query(token, lineageQuery, { owner: repository.owner, name: repository.name }, 'GitHub could not verify the repository fork');
+    const node = at(payload, 'data', 'repository');
+    if (node !== null && typeof node === 'object') {
+      const isFork = at(node, 'isFork');
+      // a missing fork assertion is not proof of a non-fork
+      if (typeof isFork !== 'boolean') throw new GithubRequestError('GitHub returned incomplete repository fork data.', 502, undefined, 'transient');
+      // only github's positive direct-fork assertion qualifies
+      if (!isFork) return undefined;
+      const parent = repositoryName(at(node, 'parent', 'nameWithOwner'));
+      // refuse malformed positive lineage instead of treating it as a non-fork
+      if (parent === undefined) throw new GithubRequestError('GitHub returned incomplete repository fork data.', 502, undefined, 'transient');
+      return parent;
+    }
+    // surface missing or refused repositories instead of caching them as non-forks
+    throw graphqlError(payload, 'GitHub could not verify the repository fork');
+  }
 
   /**
    * One repository's open pull requests (the viewer's own, with their checks and issues, apart
@@ -794,33 +880,48 @@ export class GithubService {
   // of its heads, then those created for the Issue, across the repository's Projects (the asking
   // Project's first), and each of those Projects with its main worktree
   private async matcher(asking?: string): Promise<(repository: string, heads: OverviewRow['heads'], issue?: number) => LocalMatches> {
-    const projects = new Map<string, Project[]>();
-    for (const { project, repository } of await this.projectRepositories()) {
+    const projects = new Map<string, { project: Project; origin: GithubRepository }[]>();
+    // index both exact origins and authenticated direct parents
+    for (const { project, repository, origin } of await this.projectRepositories()) {
       const found = projects.get(repositoryKey(repository)) ?? [];
-      if (project.id === asking) found.unshift(project); else found.push(project);
+      // prefer the asking project without losing its live origin identity
+      if (project.id === asking) found.unshift({ project, origin }); else found.push({ project, origin });
       projects.set(repositoryKey(repository), found);
     }
     const worktrees = this.worktrees();
     return (repository, heads, issue) => {
       // keyed as `repositoryKey` keys it
       const candidates = projects.get(repository.toLowerCase()) ?? [];
-      const own = candidates.flatMap(project => worktrees.filter(worktree => worktree.projectId === project.id));
-      const byHead = own.filter(worktree => worktree.branch !== undefined && heads.some(head => forkCheckoutNumber(worktree.branch!) === head.number || (head.onOrigin && worktree.branch === head.branch)));
-      const byIssue = issue === undefined ? [] : own.filter(worktree => worktree.issue === issue && !byHead.includes(worktree));
-      const mains = candidates.map(project => {
-        const main = own.find(worktree => worktree.main && worktree.projectId === project.id);
+      const own = candidates.flatMap(candidate => worktrees.filter(worktree => worktree.projectId === candidate.project.id).map(worktree => ({ worktree, origin: candidate.origin })));
+      const byHead = own.filter(({ worktree, origin }) => worktree.branch !== undefined && heads.some(head => {
+        // match a fork's real head branch only when github names that exact live origin
+        const localHead = head.headRepository !== undefined && head.headRepository.toLowerCase() === repositoryKey(origin);
+        const fork = forkCheckoutIdentity(worktree.branch!);
+        // legacy fork branches belong only to their live origin; contextual ones carry the base
+        const forkMatch = fork?.number === head.number && (fork.repository === repository.toLowerCase() || fork.repository === undefined && repositoryKey(origin) === repository.toLowerCase());
+        return forkMatch || ((head.onOrigin || localHead) && worktree.branch === head.branch);
+      })).map(({ worktree }) => worktree);
+      const ownWorktrees = own.map(({ worktree }) => worktree);
+      const byIssue = issue === undefined ? [] : ownWorktrees.filter(worktree => worktree.issue === issue && !byHead.includes(worktree));
+      const mains = candidates.map(({ project }) => {
+        const main = ownWorktrees.find(worktree => worktree.main && worktree.projectId === project.id);
         return { project, ...(main === undefined ? {} : { worktree: main }) };
       });
       return { holders: [...byHead, ...byIssue], mains };
     };
   }
 
-  // each repository Project and the GitHub repository its origin names
-  private async projectRepositories(): Promise<{ project: Project; repository: GithubRepository }[]> {
-    const found: { project: Project; repository: GithubRepository }[] = [];
+  // each repository project under its origin and authenticated direct parent
+  private async projectRepositories(): Promise<{ project: Project; repository: GithubRepository; origin: GithubRepository }[]> {
+    const found: { project: Project; repository: GithubRepository; origin: GithubRepository }[] = [];
     for (const project of this.projects()) {
-      const repository = await this.projectRepository(project);
-      if (repository !== undefined) found.push({ project, repository });
+      const origin = await this.projectRepository(project);
+      // skip projects without a github origin
+      if (origin === undefined) continue;
+      found.push({ project, repository: origin, origin });
+      const parent = await this.cachedRepositoryParent(origin);
+      // include only github's direct-parent assertion
+      if (parent !== undefined && repositoryKey(parent) !== repositoryKey(origin)) found.push({ project, repository: parent, origin });
     }
     return found;
   }
@@ -861,7 +962,7 @@ export class GithubService {
     const { entry } = await this.pullEntry(repository, number, { fresh });
     const pull = entry.data;
     let destination: OverviewDestination | undefined;
-    if (pull?.state === 'open') destination = await this.holder(repository, [{ number, branch: pull.branch, onOrigin: pull.headOnOrigin }], undefined, project);
+    if (pull?.state === 'open') destination = await this.holder(repository, [{ number, branch: pull.branch, onOrigin: pull.headOnOrigin, ...(pull.headRepository === undefined ? {} : { headRepository: pull.headRepository }) }], undefined, project);
     else if (pull !== undefined) {
       const finished = await this.finishedHolders(repository, pull);
       const holder = finished.find(worktree => worktree.projectId === project) ?? finished[0];
@@ -932,7 +1033,7 @@ export class GithubService {
       : await this.pullEntry(repository, number, { fresh: mode === 'now' && !this.lowBudget(), asked: true });
     const pull = entry?.data;
     let local: LocalMatches | undefined;
-    if (pull?.state === 'open') local = (await this.matcher())(`${repository.owner}/${repository.name}`, [{ number, branch: pull.branch, onOrigin: pull.headOnOrigin }]);
+    if (pull?.state === 'open') local = (await this.matcher())(`${repository.owner}/${repository.name}`, [{ number, branch: pull.branch, onOrigin: pull.headOnOrigin, ...(pull.headRepository === undefined ? {} : { headRepository: pull.headRepository }) }]);
     else if (pull !== undefined) local = { holders: await this.finishedHolders(repository, pull), mains: [] };
     const stale = entry?.fetchedAt === undefined || this.outdated(entry, this.pullKnown(repository, number));
     return { ...(pull === undefined ? {} : { pullRequest: pull }), ...(entry?.missing === true ? { missing: true as const } : {}), ...(local === undefined ? {} : { local }), network, stale, polling: this.viewers > 0, ...(entry === undefined ? {} : fetched(entry)) };
@@ -1078,7 +1179,7 @@ export class GithubService {
    * Issue the Worktree was made for.
    */
   async pullRequestDraft(worktreeId: string): Promise<PullRequestDraft> {
-    const { worktree, branch, base } = await this.pullRequestSource(worktreeId);
+    const { worktree, branch, base } = await this.pullRequestSource(worktreeId, await this.token());
     const commits = await this.git('/usr/bin/git', [...repositoryArgs(worktree.identity), 'log', '--reverse', '--format=%s', `refs/remotes/origin/${base}..refs/heads/${branch}`, '--']);
     const title = commits.code === 0 ? commits.stdout.split('\n')[0]!.trim() : '';
     return { branch, base, title, ...(worktree.issue === undefined ? {} : { issue: worktree.issue }) };
@@ -1096,10 +1197,11 @@ export class GithubService {
     const base = input.base.trim();
     // a plain branch name: no leading `-`, `.` or `/`, no `..`
     if (!/^(?![-./])(?!.*\.\.)[\w./-]{1,255}$/u.test(base)) throw new GithubRequestError('The base must be a branch name.', 400);
-    const { worktree, branch, repository } = await this.pullRequestSource(worktreeId);
-    if (branch === base) throw new GithubRequestError(`A pull request from ${branch} cannot go into ${branch} itself.`, 409);
     const token = await this.token();
-    if (token === undefined) throw new GithubRequestError(missingToken, 503);
+    // one exact nonempty credential proves the parent and performs the mutation
+    if (token === undefined || token.trim() === '') throw new GithubRequestError(missingToken, 503);
+    const { worktree, branch, repository } = await this.pullRequestSource(worktreeId, token);
+    if (branch === base) throw new GithubRequestError(`A pull request from ${branch} cannot go into ${branch} itself.`, 409);
     const pushed = await this.command('/usr/bin/git', [...repositoryArgs(worktree.identity), 'push', '--set-upstream', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], undefined, pushTimeoutMs)
       .catch((error: unknown) => ({ code: -1, stdout: '', stderr: error instanceof Error ? error.message : String(error) }));
     if (pushed.code !== 0) {
@@ -1118,17 +1220,37 @@ export class GithubService {
 
   // a linked Worktree's branch on a github.com origin, which a pull request can be opened from: the
   // one git has checked out now, never a fork checkout or the repository's default branch (`base`)
-  private async pullRequestSource(worktreeId: string): Promise<{ worktree: Worktree; branch: string; repository: GithubRepository; base: string }> {
+  private async pullRequestSource(worktreeId: string, token?: string): Promise<{ worktree: Worktree; branch: string; repository: GithubRepository; base: string }> {
     const worktree = this.worktrees().find(candidate => candidate.id === worktreeId);
     const project = worktree === undefined ? undefined : this.projects().find(candidate => candidate.id === worktree.projectId);
-    const repository = project === undefined ? undefined : await this.projectRepository(project);
+    const repository = project?.mode === 'repository' ? await this.repositoryAt(project.path, true).catch(() => undefined) : undefined;
     if (worktree === undefined || project === undefined || repository === undefined) throw new GithubRequestError('No Worktree with a github.com origin by that id.', 404);
     if (worktree.main) throw new GithubRequestError('A pull request is opened from a linked Worktree, not the main one.', 409);
     const branch = await checkoutBranch(worktree.identity, this.git);
-    if (branch === undefined || forkCheckoutNumber(branch) !== undefined) throw new GithubRequestError('This Worktree has no branch of its own to open a pull request from.', 409);
+    if (branch === undefined || forkCheckoutIdentity(branch) !== undefined) throw new GithubRequestError('This Worktree has no branch of its own to open a pull request from.', 409);
     const base = await repositoryDefaultBranch(project.path, this.git) ?? '';
     if (branch === base) throw new GithubRequestError(`${branch} is the repository's default branch; a pull request is opened from a branch of its own.`, 409);
+    await this.refuseParentPullRequest(repository, branch, token);
     return { worktree, branch, repository, base };
+  }
+
+  // refuse a real local fork branch that already heads an open pull request in its direct parent
+  private async refuseParentPullRequest(repository: GithubRepository, branch: string, token?: string): Promise<void> {
+    // a draft may be read without auth, but no write may treat that as negative proof
+    if (token === undefined || token.trim() === '') return;
+    const parent = await this.readRepositoryParent(repository, token);
+    if (parent === undefined) return;
+    const payload = await this.client.query(token, parentHeadQuery, { owner: parent.owner, name: parent.name, branch }, 'GitHub could not verify whether this branch already has a pull request');
+    if (Array.isArray(payload.errors) && payload.errors.length > 0) throw graphqlError(payload, 'GitHub could not verify whether this branch already has a pull request');
+    const connection = at(payload, 'data', 'repository', 'pullRequests');
+    const total = at(connection, 'totalCount');
+    const found = nodes(connection);
+    // incomplete pages and malformed heads cannot prove that creation is safe
+    if (!Number.isInteger(total) || Number(total) < 0 || Number(total) !== found.length || found.length > parentHeadPage) throw new GithubRequestError('GitHub returned incomplete pull request data for this branch.', 502, undefined, 'transient');
+    const heads = found.map(node => repositoryName(at(node, 'headRepository', 'nameWithOwner')));
+    if (heads.some(head => head === undefined)) throw new GithubRequestError('GitHub returned incomplete pull request data for this branch.', 502, undefined, 'transient');
+    // only the exact live origin's head in the exact authenticated parent is the existing pull request
+    if (heads.some(head => repositoryKey(head!) === repositoryKey(repository))) throw new GithubRequestError(`This Worktree's branch already heads an open pull request in ${parent.owner}/${parent.name}.`, 409);
   }
 
   // the pull request as its detail shows it, which a write must find its target in

@@ -44,7 +44,7 @@ export type PullFixture = {
   reviews?: { id?: string; author: string; state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED'; commit: string }[];
 };
 export type IssueFixture = { number: number; title: string; assigned?: boolean; author?: string; updatedAt?: string; labels?: string[]; body?: string; linked?: { number: number; branch: string; title?: string; repository?: string }[] };
-export type World = Record<string, { pulls?: PullFixture[]; issues?: IssueFixture[] }>;
+export type World = Record<string, { pulls?: PullFixture[]; issues?: IssueFixture[]; forkOf?: string }>;
 export type GraphqlCall = { query: string; variables: Record<string, unknown> };
 
 export const sha = (character: string): string => character.repeat(40);
@@ -78,6 +78,7 @@ export function pullNode(repository: string, pull: PullFixture, selection = 'rev
     baseRefName: pull.base === undefined ? 'main' : pull.base,
     headRefName: pull.branch,
     headRefOid: pull.sha ?? sha('a'),
+    ...asked('headRepository', () => ({ nameWithOwner: pull.head ?? repository })),
     isCrossRepository: pull.head !== undefined && pull.head !== repository,
     viewerDidAuthor: pull.mine ?? false,
     mergeable: pull.mergeable ?? 'MERGEABLE',
@@ -132,6 +133,21 @@ function searches(world: World, { query, variables }: GraphqlCall): Record<strin
 // the data GitHub returns for one module query over `world`
 export function answer(world: World, call: GraphqlCall): Record<string, unknown> {
   const { query, variables } = call;
+  // one repository's authenticated direct-fork lineage
+  if (/^query RepositoryLineage\b/u.test(query)) {
+    const found = Object.entries(world).find(([name]) => name.toLowerCase() === `${String(variables.owner)}/${String(variables.name)}`.toLowerCase());
+    if (found === undefined) return { data: { repository: null }, errors: [{ type: 'NOT_FOUND', message: 'Could not resolve to a Repository.' }] };
+    const [, repository] = found;
+    return { data: { repository: { isFork: repository.forkOf !== undefined, parent: repository.forkOf === undefined ? null : { nameWithOwner: repository.forkOf } } } };
+  }
+  // one exact fork head's open pull requests in its authenticated parent
+  if (/^query ParentHeadPullRequests\b/u.test(query)) {
+    const found = Object.entries(world).find(([name]) => name.toLowerCase() === `${String(variables.owner)}/${String(variables.name)}`.toLowerCase());
+    if (found === undefined) return { data: { repository: null }, errors: [{ type: 'NOT_FOUND', message: 'Could not resolve to a Repository.' }] };
+    const [name, { pulls = [] }] = found;
+    const matching = pulls.filter(pull => (pull.state ?? 'OPEN') === 'OPEN' && pull.branch === variables.branch);
+    return { data: { repository: { pullRequests: { totalCount: matching.length, nodes: matching.slice(0, 100).map(pull => pullNode(name, pull, query)) } } } };
+  }
   // one pull request's or Issue's detail, with the fields the read asks for
   const single = /^query (PullRequestDetail|IssueDetail)\b/u.exec(query)?.[1];
   if (single !== undefined) {

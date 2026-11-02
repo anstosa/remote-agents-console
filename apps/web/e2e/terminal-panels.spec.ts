@@ -236,6 +236,14 @@ test('lists panes with the agent and a claimed window disabled, and opens a colu
   await seedPaneSize(page, '%5', 80, 24);
   await pushBytes(page, '%5', 'shell ready\r\n');
   await expect(status).toHaveCount(0);
+  // the plain shell title adds no trailing inset to the shared symmetric pill
+  const titleSpacing = await header.evaluate(element => {
+    const style = getComputedStyle(element);
+    const label = element.querySelector('.pane-title')!;
+    return { left: parseFloat(style.paddingLeft), right: parseFloat(style.paddingRight), tail: parseFloat(getComputedStyle(label).paddingRight) };
+  });
+  expect(titleSpacing.left).toBeCloseTo(titleSpacing.right, 2);
+  expect(titleSpacing.tail).toBe(0);
   // a dropped stream shows its reconnect until the fresh seed lands
   const connects = await paneConnectCount(page, '%5');
   await dropPane(page, '%5');

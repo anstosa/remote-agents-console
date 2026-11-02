@@ -159,6 +159,8 @@ test('keeps Agent, a companion panel, and Code full-height on desktop', async ({
   const agent = agentOutput(page);
   const note = page.getByRole('dialog', { name: 'Note' });
   const code = codePanel(page);
+  // note subtitles have no comparison-picker trailing spacer
+  await expect(note.locator('.panel-header-sub')).toHaveCSS('padding-right', '0px');
   // compare rendered panel geometry, not implementation-only class names
   const expectHorizontalFullHeight = async (panels: ReturnType<Page['locator']>[]) => {
     const splitBox = await split.boundingBox();

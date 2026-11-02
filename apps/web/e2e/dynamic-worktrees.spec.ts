@@ -114,7 +114,8 @@ test('a stale single-worktree project stays contained when compacted', async ({ 
   await settings.getByRole('switch', { name: 'Dynamic worktrees' }).uncheck();
   await settings.getByRole('button', { name: 'Save changes', exact: true }).click();
   await settings.getByRole('button', { name: 'Close settings' }).click();
-  await page.getByRole('tablist', { name: 'Agents and worktrees' }).getByRole('button', { name: 'Launch agent', exact: true }).click();
+  await page.locator('.workspace-dropdown').click();
+  await page.getByRole('button', { name: /New Workspace/u }).click();
 
   const soloProject = page.getByRole('group', { name: 'Agent launcher' }).getByRole('group', { name: 'Solo', exact: true });
   const soloHeader = soloProject.locator('.launcher-project-header');

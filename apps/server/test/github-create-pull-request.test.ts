@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { GithubService } from '../src/github/service.js';
 import { run } from '../src/tmux/command.js';
 import { testProject, testWorktree } from './helpers/config.js';
-import { graphqlGithub, graphqlSyntaxError, manualTimer, reply, settled, type GraphqlCall, type PullFixture } from './helpers/github-graphql.js';
+import { graphqlGithub, graphqlSyntaxError, manualTimer, reply, settled, type GraphqlCall, type PullFixture, type World } from './helpers/github-graphql.js';
 
 const repo = { owner: 'octo', name: 'repo' };
 const git = (path: string, ...args: string[]) => execFileSync('git', ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8' }).trim();
@@ -17,13 +17,13 @@ const pushed = (bare: string) => execFileSync('git', ['--git-dir', bare, 'for-ea
 
 // octo/repo checked out with a linked Worktree on `42-retries` two commits past origin's `main`;
 // origin's fetch URL names github.com while its pushes land in a local bare repository
-async function checkouts() {
+async function checkouts(repository = 'octo/repo') {
   const root = await mkdtemp(join(tmpdir(), 'rac-create-pr-'));
   const [bare, main, linked] = [join(root, 'origin.git'), join(root, 'repo'), join(root, 'repo-42-retries')];
   execFileSync('git', ['init', '-q', '--bare', bare]);
   execFileSync('git', ['init', '-q', '-b', 'main', main]);
   git(main, 'commit', '-q', '--allow-empty', '-m', 'Initial');
-  git(main, 'remote', 'add', 'origin', 'git@github.com:octo/repo.git');
+  git(main, 'remote', 'add', 'origin', `git@github.com:${repository}.git`);
   git(main, 'config', 'remote.origin.pushurl', bare);
   git(main, 'push', '-q', 'origin', 'main');
   git(main, 'update-ref', 'refs/remotes/origin/main', 'main');
@@ -35,10 +35,14 @@ async function checkouts() {
 }
 
 // the module over those checkouts and a GitHub whose world gains the pull request it creates
-async function harness(create: (call: GraphqlCall) => unknown = () => ({ data: { createPullRequest: { pullRequest: { number: 77, url: 'https://github.com/octo/repo/pull/77' } } } })) {
-  const paths = await checkouts();
+async function harness(
+  create: (call: GraphqlCall) => unknown = () => ({ data: { createPullRequest: { pullRequest: { number: 77, url: 'https://github.com/octo/repo/pull/77' } } } }),
+  options: { origin?: string; world?: (pulls: PullFixture[]) => World; token?: () => Promise<string | undefined> } = {}
+) {
+  const origin = options.origin ?? 'octo/repo';
+  const paths = await checkouts(origin);
   const pulls: PullFixture[] = [];
-  const scripted = graphqlGithub(() => ({ 'octo/repo': { pulls } }));
+  const scripted = graphqlGithub(() => options.world?.(pulls) ?? { [origin]: { pulls } });
   const calls: GraphqlCall[] = [];
   const timers = manualTimer();
   const worktrees = [
@@ -58,7 +62,7 @@ async function harness(create: (call: GraphqlCall) => unknown = () => ({ data: {
       return await scripted.request(url, init);
     },
     command: run,
-    token: async () => 'private-token',
+    token: options.token ?? (async () => 'private-token'),
     timer: timers.timer,
     projects: () => [testProject({ id: 'proj', path: paths.main })],
     worktrees: () => worktrees
@@ -110,8 +114,39 @@ describe('pushing a Worktree\'s branch and creating its pull request', () => {
     await expect(service.createPullRequest('wt', input)).rejects.toMatchObject({ statusCode: 409 });
     git(linked, 'checkout', '-q', '-b', `rac/pr/7/${'a'.repeat(12)}`);
     await expect(service.createPullRequest('wt', input)).rejects.toMatchObject({ statusCode: 409 });
+    git(linked, 'checkout', '-q', '-b', `rac/pr/advplyr/audiobookshelf/7/${'b'.repeat(12)}`, 'main');
+    await expect(service.pullRequestDraft('wt')).rejects.toMatchObject({ statusCode: 409 });
+    await expect(service.createPullRequest('wt', input)).rejects.toMatchObject({ statusCode: 409 });
     expect(pushed(bare)).toBe('refs/heads/main');
     expect(calls.filter(isCreate)).toHaveLength(0);
+  });
+
+  it('refuses a real local fork branch that already heads an open parent pull request before draft or create', async () => {
+    const origin = 'anstosa/audiobookshelf';
+    const parent = 'advplyr/audiobookshelf';
+    const { service, calls, bare } = await harness(undefined, {
+      origin,
+      world: pulls => ({
+        [origin]: { pulls, forkOf: parent },
+        [parent]: { pulls: [{ number: 4978, branch: '42-retries', head: origin }] }
+      })
+    });
+
+    await expect(service.pullRequestDraft('wt')).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('already heads an open pull request') });
+    await expect(service.createPullRequest('wt', input)).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining(parent) });
+    expect(pushed(bare)).toBe('refs/heads/main');
+    expect(calls.filter(isCreate)).toHaveLength(0);
+    expect(calls.filter(call => call.query.startsWith('query ParentHeadPullRequests'))).toHaveLength(2);
+  });
+
+  it('never accepts missing authentication as negative lineage proof before a later write', async () => {
+    let reads = 0;
+    const { service, calls, bare } = await harness(undefined, { token: async () => ++reads === 1 ? undefined : 'late-token' });
+
+    await expect(service.createPullRequest('wt', input)).rejects.toMatchObject({ statusCode: 503 });
+    expect(reads).toBe(1);
+    expect(pushed(bare)).toBe('refs/heads/main');
+    expect(calls).toEqual([]);
   });
 
   it('pushes the branch git has checked out now, not the one the snapshot last saw', async () => {

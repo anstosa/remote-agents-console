@@ -103,7 +103,7 @@ type GitMeta = { workspace: string; branch?: string; gitStatus?: GitStatusSummar
 // retain one pending or completed root lookup until expiry
 type RootLookup = { expiresAt: number; value: Promise<string> };
 // discovery reads branch summaries and forgets origins when checkouts change
-type BranchLookup = Pick<GithubService, 'repositoryAt' | 'branch' | 'invalidateRepositories'>;
+type BranchLookup = Pick<GithubService, 'repositoryAt' | 'branch' | 'invalidateRepositories'> & Partial<Pick<GithubService, 'repositoryParent'>>;
 // resolve one pane path to its repository root
 export async function workspaceRoot(path: string): Promise<string> {
   const canonical = await realpath(path).catch(() => path);
@@ -875,7 +875,8 @@ export class DiscoveryService {
       const management = worktreeManagementAvailability(project);
       // the GitHub panel shows only where the origin is on github.com
       const github = project.mode === 'repository' ? await this.github.repositoryAt(project.path).catch(() => undefined) : undefined;
-      return { id: project.id, ...(project.implicit === true ? { implicit: true as const } : {}), label: project.label, mode: project.mode, ...(github === undefined ? {} : { github: `${github.owner}/${github.name}` }), available: project.available, ...(project.unavailableReason === undefined ? {} : { unavailableReason: project.unavailableReason }), manageWorktrees: management.available, ...(management.reason === undefined ? {} : { manageWorktreesReason: management.reason }), stalePaths: this.staleSnapshot.get(project.id) ?? [], ...(project.commands?.setup === undefined ? {} : { setup: true }), worktrees: byProject.get(project.id) ?? [] };
+      const parent = github === undefined || this.github.repositoryParent === undefined ? undefined : await this.github.repositoryParent(github).catch(() => undefined);
+      return { id: project.id, ...(project.implicit === true ? { implicit: true as const } : {}), label: project.label, mode: project.mode, ...(github === undefined ? {} : { github: `${github.owner}/${github.name}` }), ...(parent === undefined ? {} : { githubForkOf: `${parent.owner}/${parent.name}` }), available: project.available, ...(project.unavailableReason === undefined ? {} : { unavailableReason: project.unavailableReason }), manageWorktrees: management.available, ...(management.reason === undefined ? {} : { manageWorktreesReason: management.reason }), stalePaths: this.staleSnapshot.get(project.id) ?? [], ...(project.commands?.setup === undefined ? {} : { setup: true }), worktrees: byProject.get(project.id) ?? [] };
     }));
     const listed = this.listPlaces(places, [...discovered.flatMap(agent => this.placeOf(agent, places) ?? []), ...shellPlaces, ...await this.pinnedScratchPlaces(places)]);
     this.listedPlaces = new Map(listed.map(place => [place.id, place]));

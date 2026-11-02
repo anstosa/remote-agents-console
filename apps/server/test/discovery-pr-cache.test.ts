@@ -130,13 +130,13 @@ describe('DiscoveryService and the GitHub poll', () => {
 
     await service.dashboard(false, true);
     await service.dashboard(false, true);
-    expect(calls).toHaveLength(0);
+    expect(calls.map(call => call.variables)).toEqual([{ owner: 'acme', name: 'pushed' }]);
     remote = 'b'.repeat(40);
     service.invalidateWorktrees();
     await service.dashboard(false, true);
     await new Promise(resolve => setTimeout(resolve, 0));
-    // the published branch is in the repository's read; nothing else was asked
-    expect(calls.map(call => call.variables)).toEqual([{ o0: 'acme', n0: 'pushed', b0_0: 'feature/cache' }]);
+    // lineage stays cached while the published branch joins the repository read
+    expect(calls.map(call => call.variables)).toEqual([{ owner: 'acme', name: 'pushed' }, { o0: 'acme', n0: 'pushed', b0_0: 'feature/cache' }]);
   });
 
   it('names each Project\'s github.com repository, so the web shows the GitHub panel only there', async () => {

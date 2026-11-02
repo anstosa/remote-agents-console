@@ -46,6 +46,7 @@ export type PanelExpansion = {
   expanded: string | undefined;
   immersive: boolean;
   setExpanded: (key: string, on: boolean) => void;
+  maximize: (key: string) => void;
   toggle: (key: string) => void;
   restore: () => void;
 };
@@ -75,16 +76,22 @@ export function usePanelExpansion(): PanelExpansion {
     if (phone.current) setImmersive(current => !current);
     else setExpandedKey(current => current === key ? undefined : key);
   }, []);
+  // explicitly maximize a visible panel on either layout
+  const maximize = useCallback((key: string) => {
+    // phones immerse the carousel's already-visible panel
+    if (phone.current) setImmersive(true);
+    else setExpandedKey(key);
+  }, []);
   const restore = useCallback(() => {
     setExpandedKey(undefined);
     setImmersive(false);
   }, []);
-  return { expanded, immersive, setExpanded, toggle, restore };
+  return { expanded, immersive, setExpanded, maximize, toggle, restore };
 }
 
 // What the split hands its panels: the expanded key (only while that panel is open) and the
 // controls. Panels read it by their own key through usePanelExpand.
-export const PanelExpandContext = createContext<Omit<PanelExpansion, 'setExpanded' | 'immersive'> | undefined>(undefined);
+export const PanelExpandContext = createContext<Omit<PanelExpansion, 'setExpanded' | 'maximize' | 'immersive'> | undefined>(undefined);
 
 // Scope an expansion to the panels a container holds (`openKeys`, in any order). The expanded key
 // counts only while its panel is open: a panel that has not mounted yet (a note still loading)

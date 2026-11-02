@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PullRequestSwitchService } from '../src/pull-requests/switch-service.js';
+import { githubPullMutationContext, PullRequestSwitchService } from '../src/pull-requests/switch-service.js';
 import { GithubService } from '../src/github/service.js';
 import { answer, graphqlGithub, reply, type GraphqlCall, type World } from './helpers/github-graphql.js';
 import type { ValidatedConfig } from '../src/config/schema.js';
@@ -130,6 +130,241 @@ function moveService(repository: Awaited<ReturnType<typeof createMoveRepository>
 const branchOnlyPulls = { repositoryAt: async () => octo, repository: async () => ({ own: [], others: [] }) };
 
 describe('pull request switching', () => {
+  it('validates canonical contextual assertions without accepting malformed-present fallback', () => {
+    const targetWorktreeId = 'proj:/repo';
+    const value = { identity: { repositoryKey: 'acme/repo', kind: 'pull', number: 7 }, targetProjectId: 'proj', targetWorktreeId, expectedHolderWorktreeIds: [] };
+    expect(githubPullMutationContext(value, { number: 7, targetProjectId: 'proj', targetWorktreeId, sourceRequired: false, newWorktree: false })).toEqual(value);
+    expect(githubPullMutationContext({ ...value, identity: { ...value.identity, repositoryKey: 'Acme/Repo' } }, { number: 7, targetProjectId: 'proj', targetWorktreeId, sourceRequired: false, newWorktree: false })).toBeUndefined();
+    expect(githubPullMutationContext({ ...value, expectedHolderWorktreeIds: ['source'], expectedSourceWorktreeId: 'other' }, { number: 7, targetProjectId: 'proj', targetWorktreeId, sourceRequired: true, newWorktree: false })).toBeUndefined();
+  });
+
+  it('refuses a contextual switch when another matching clone holds the pull request', async () => {
+    const target = { ...worktree, id: 'b2:/b2', projectId: 'b2', path: '/b2', identity: '/b2', branch: 'main' };
+    const holder = { ...worktree, id: 'b1:/b1-holder', projectId: 'b1', path: '/b1-holder', identity: '/b1-holder', branch: 'feature/draft' };
+    const projects = [
+      { id: 'b1', label: 'B1', path: '/b1', identity: '/b1/.git', mode: 'repository', worktreesDirectory: '/b1-wts', available: true },
+      { id: 'b2', label: 'B2', path: '/b2', identity: '/b2/.git', mode: 'repository', worktreesDirectory: '/b2-wts', available: true }
+    ];
+    const writes: string[] = [];
+    const command: GitCommand = async (_binary, args) => {
+      const subcommand = args.find(arg => ['fetch', 'switch', 'stash', 'worktree'].includes(arg));
+      if (subcommand !== undefined && !(subcommand === 'worktree' && args.includes('list'))) writes.push(subcommand);
+      if (args.includes('worktree') && args.includes('list')) {
+        const path = args[args.indexOf('-C') + 1];
+        if (path === '/b1') return { code: 0, stdout: 'worktree /b1\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/main\0\0worktree /b1-holder\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/feature/draft\0\0' };
+        return { code: 0, stdout: 'worktree /b2\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/main\0\0' };
+      }
+      if (args.includes('remote') && args.includes('get-url')) return { code: 0, stdout: 'git@github.com:acme/repo.git\n' };
+      return { code: 0, stdout: '' };
+    };
+    const discovery = { projectsNow: () => projects, worktreesNow: () => [target, holder] };
+    const pulls = {
+      repositoryAt: async () => ({ owner: 'acme', name: 'repo' }),
+      pullRequestDetail: async () => ({ pullRequest: { number: 7, title: 'Work', branch: 'feature/draft', headSha, headOnOrigin: true, draft: false, url: 'https://github.com/acme/repo/pull/7', state: 'open', checks: 'passed' } })
+    };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, command);
+    const context = { identity: { repositoryKey: 'acme/repo', kind: 'pull' as const, number: 7 }, targetProjectId: 'b2', targetWorktreeId: target.id, expectedHolderWorktreeIds: [] };
+
+    await expect(service.switch(target.id, 7, context)).resolves.toEqual({ error: 'The pull request checkout moved. Refresh and try again.', refresh: true });
+    expect(writes).toEqual([]);
+  });
+
+  it('refuses contextual absence proof when origin or holder metadata is incomplete', async () => {
+    const target = { ...worktree, id: 'b2:/b2', projectId: 'b2', path: '/b2', identity: '/b2', branch: 'main' };
+    const projects = [
+      { id: 'b2', label: 'B2', path: '/b2', identity: '/b2/.git', mode: 'repository', worktreesDirectory: '/b2-wts', available: true },
+      { id: 'unknown', label: 'Unknown', path: '/unknown', identity: '/unknown/.git', mode: 'repository', worktreesDirectory: '/unknown-wts', available: true }
+    ];
+    const command: GitCommand = async (_binary, args) => {
+      const path = args[args.indexOf('-C') + 1];
+      if (args.includes('remote') && path === '/unknown') return { code: 1, stdout: '' };
+      if (args.includes('remote')) return { code: 0, stdout: 'git@github.com:acme/repo.git\n' };
+      if (args.includes('worktree')) return { code: 0, stdout: 'worktree /b2\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/main\0\0' };
+      return { code: 0, stdout: '' };
+    };
+    const discovery = { projectsNow: () => projects, worktreesNow: () => [target] };
+    const pulls = {
+      repositoryAt: async () => ({ owner: 'acme', name: 'repo' }),
+      pullRequestDetail: async () => ({ pullRequest: { number: 7, title: 'Work', branch: 'feature/draft', headSha, headOnOrigin: true, draft: false, url: 'https://github.com/acme/repo/pull/7', state: 'open', checks: 'passed' } })
+    };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, command);
+    const context = { identity: { repositoryKey: 'acme/repo', kind: 'pull' as const, number: 7 }, targetProjectId: 'b2', targetWorktreeId: target.id, expectedHolderWorktreeIds: [] };
+
+    await expect(service.switch(target.id, 7, context)).resolves.toEqual({ error: 'A project origin could not be verified. Refresh and try again.', refresh: true });
+    const truncatedCommand: GitCommand = async (_binary, args) => {
+      if (args.includes('remote')) return { code: 0, stdout: 'git@github.com:acme/repo.git\n' };
+      if (args.includes('worktree')) return { code: 0, stdout: 'worktree /b2\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/main\0\0', stdoutTruncated: true };
+      return { code: 0, stdout: '' };
+    };
+    const completeProjects = { projectsNow: () => [projects[0]], worktreesNow: () => [target] };
+    const truncated = new PullRequestSwitchService(config, completeProjects as never, pulls as never, truncatedCommand);
+    await expect(truncated.switch(target.id, 7, context)).resolves.toEqual({ error: 'Git worktree ownership could not be verified. Refresh and try again.', refresh: true });
+  });
+
+  it('checks out an upstream pull request from its local fork head without using the base PR namespace', async () => {
+    const branch = 'ansel/continueSerialPodcasts';
+    const target = { ...worktree, id: 'audio:/audio', projectId: 'audio', path: '/audio', identity: '/audio', branch: 'main' };
+    const project = { id: 'audio', label: 'Audiobookshelf', path: '/audio', identity: '/audio/.git', mode: 'repository', worktreesDirectory: '/audio-wts', available: true };
+    let current = 'main';
+    let holderBranch = 'main';
+    const fetches: string[][] = [];
+    const command: GitCommand = async (_binary, args) => {
+      if (args.includes('worktree') && args.includes('list')) return { code: 0, stdout: `worktree /audio\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/${holderBranch}\0\0` };
+      if (args.includes('remote') && args.includes('get-url')) return { code: 0, stdout: 'git@github.com:anstosa/audiobookshelf.git\n' };
+      if (args.includes('status')) return { code: 0, stdout: '' };
+      if (args.includes('check-ref-format')) return { code: 0, stdout: `${branch}\n` };
+      if (args.includes('fetch')) { fetches.push(args); return { code: 0, stdout: '' }; }
+      if (args.includes('rev-parse')) return { code: 0, stdout: `${headSha}\n` };
+      if (args.includes('show-ref')) return { code: 1, stdout: '' };
+      if (args.includes('symbolic-ref')) return { code: 0, stdout: `${current}\n` };
+      if (args.includes('switch')) { current = args.includes('-c') ? args[args.indexOf('-c') + 1]! : args.at(-1)!; return { code: 0, stdout: '' }; }
+      return { code: 0, stdout: '' };
+    };
+    const discovery = { projectsNow: () => [project], worktreesNow: () => [target], refresh: async () => [] };
+    const repositoryParent = vi.fn(async () => ({ owner: 'advplyr', name: 'audiobookshelf' }));
+    const pulls = {
+      repositoryAt: async () => ({ owner: 'anstosa', name: 'audiobookshelf' }),
+      repositoryParent,
+      pullRequestDetail: async () => ({ pullRequest: { number: 4978, title: 'Continue serial podcasts', branch, headSha, headOnOrigin: false, headRepository: 'anstosa/audiobookshelf', draft: false, url: 'https://github.com/advplyr/audiobookshelf/pull/4978', state: 'open', checks: 'passed' } })
+    };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, command);
+    const context = { identity: { repositoryKey: 'advplyr/audiobookshelf', kind: 'pull' as const, number: 4978 }, targetProjectId: 'audio', targetWorktreeId: target.id, expectedHolderWorktreeIds: [] };
+    const newContext = { identity: context.identity, targetProjectId: 'audio', expectedHolderWorktreeIds: [] };
+
+    await expect(service.createUnheldWorktree(newContext, false, async head => head)).resolves.toMatchObject({ ok: true, value: { branch, sha: headSha, fork: true } });
+    fetches.length = 0;
+    await expect(service.switch(target.id, 4978, context)).resolves.toBe('switched');
+    expect(fetches).toEqual([expect.arrayContaining(['fetch', 'git@github.com:anstosa/audiobookshelf.git', `refs/heads/${branch}:refs/remotes/origin/${branch}`])]);
+    expect(fetches[0]!.join(' ')).not.toContain('refs/pull/4978/head');
+    expect(repositoryParent).toHaveBeenCalledWith({ owner: 'anstosa', name: 'audiobookshelf' }, { fresh: true });
+    holderBranch = branch;
+    current = 'main';
+    await expect(service.switch(target.id, 4978, context)).resolves.toEqual({ error: 'The pull request checkout moved. Refresh and try again.', refresh: true });
+    expect(fetches).toHaveLength(1);
+  });
+
+  it('fetches another author through an exact base remote and refuses spoofed lineage before fetch', async () => {
+    const target = { ...worktree, id: 'audio:/audio', projectId: 'audio', path: '/audio', identity: '/audio', branch: 'main' };
+    const project = { id: 'audio', label: 'Audiobookshelf', path: '/audio', identity: '/audio/.git', mode: 'repository', worktreesDirectory: '/audio-wts', available: true };
+    const fetches: string[][] = [];
+    let current = 'main';
+    let driftRemote = false;
+    let upstreamReads = 0;
+    let resolvedSha = headSha;
+    let rewriteAfterProof = false;
+    let aliasRewritten = false;
+    const command: GitCommand = async (_binary, args) => {
+      if (args.includes('worktree') && args.includes('list')) return { code: 0, stdout: 'worktree /audio\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/main\0\0' };
+      if (args.includes('remote') && !args.includes('get-url')) return { code: 0, stdout: 'origin\nupstream\n' };
+      if (args.includes('remote') && args.includes('get-url')) {
+        if (args.at(-1) !== 'upstream') return { code: 0, stdout: 'git@github.com:anstosa/audiobookshelf.git\n' };
+        upstreamReads += 1;
+        // simulate an alias rewrite immediately after the final proof
+        if (rewriteAfterProof && upstreamReads > 1) aliasRewritten = true;
+        return { code: 0, stdout: driftRemote && upstreamReads > 1 ? 'git@github.com:spoof/audiobookshelf.git\n' : 'git@github.com:advplyr/audiobookshelf.git\n' };
+      }
+      if (args.includes('status')) return { code: 0, stdout: '' };
+      if (args.includes('fetch')) { fetches.push(args); return { code: 0, stdout: '' }; }
+      if (args.includes('rev-parse')) return { code: 0, stdout: `${resolvedSha}\n` };
+      if (args.includes('show-ref')) return { code: 1, stdout: '' };
+      if (args.includes('symbolic-ref')) return { code: 0, stdout: `${current}\n` };
+      if (args.includes('switch')) { current = args.includes('-c') ? args[args.indexOf('-c') + 1]! : args.at(-1)!; return { code: 0, stdout: '' }; }
+      return { code: 0, stdout: '' };
+    };
+    const discovery = { projectsNow: () => [project], worktreesNow: () => [target], refresh: async () => [] };
+    let verified = true;
+    const pulls = {
+      repositoryAt: async () => ({ owner: 'anstosa', name: 'audiobookshelf' }),
+      repositoryParent: async () => verified ? { owner: 'advplyr', name: 'audiobookshelf' } : undefined,
+      pullRequestDetail: async () => ({ pullRequest: { number: 4978, title: 'Other fork', branch: 'feature/other', headSha, headOnOrigin: false, headRepository: 'someone/audiobookshelf', draft: false, url: 'https://github.com/advplyr/audiobookshelf/pull/4978', state: 'open', checks: 'passed' } })
+    };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, command);
+    const context = { identity: { repositoryKey: 'advplyr/audiobookshelf', kind: 'pull' as const, number: 4978 }, targetProjectId: 'audio', targetWorktreeId: target.id, expectedHolderWorktreeIds: [] };
+
+    await expect(service.switch(target.id, 4978, context)).resolves.toBe('switched');
+    expect(fetches).toEqual([expect.arrayContaining(['fetch', 'git@github.com:advplyr/audiobookshelf.git', 'refs/pull/4978/head:refs/rac/fetch/advplyr/audiobookshelf/4978'])]);
+    current = 'main';
+    fetches.length = 0;
+    driftRemote = true;
+    upstreamReads = 0;
+    await expect(service.switch(target.id, 4978, context)).resolves.toEqual({ error: 'Pull request #4978 no longer has its verified local fetch remote.' });
+    expect(fetches).toEqual([]);
+    driftRemote = false;
+    upstreamReads = 0;
+    rewriteAfterProof = true;
+    await expect(service.switch(target.id, 4978, context)).resolves.toBe('switched');
+    expect(aliasRewritten).toBe(true);
+    expect(fetches.at(-1)).toEqual(expect.arrayContaining(['fetch', 'git@github.com:advplyr/audiobookshelf.git']));
+    expect(fetches.at(-1)).not.toContain('upstream');
+    current = 'main';
+    rewriteAfterProof = false;
+    upstreamReads = 0;
+    resolvedSha = 'b'.repeat(40);
+    await expect(service.switch(target.id, 4978, context)).resolves.toEqual({ error: 'Pull request #4978 changed on GitHub after it was listed. Reopen the list and try again.' });
+    expect(current).toBe('main');
+    verified = false;
+    current = 'main';
+    fetches.length = 0;
+    resolvedSha = headSha;
+    await expect(service.switch(target.id, 4978, context)).resolves.toEqual({ error: 'The selected GitHub repository changed. Refresh and try again.', refresh: true });
+    expect(fetches).toEqual([]);
+  });
+
+  it('maps uncertain candidate inspection and post-create discovery throws to recovery', async () => {
+    const source = { ...worktree, id: 'proj:/source', projectId: 'proj', path: '/source', identity: '/source', main: false, branch: 'feature/draft' };
+    const main = { ...worktree, id: 'proj:/repo', projectId: 'proj', path: '/repo', identity: '/repo', branch: 'main' };
+    const project = { id: 'proj', label: 'Repo', path: '/repo', identity: '/repo/.git', mode: 'repository', worktreesDirectory: '/wts', available: true };
+    const command: GitCommand = async (_binary, args) => {
+      const workspace = args[args.indexOf('-C') + 1];
+      if (args.includes('remote')) return { code: 0, stdout: 'git@github.com:acme/repo.git\n' };
+      if (args.includes('worktree')) return { code: 0, stdout: 'worktree /repo\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/main\0\0worktree /source\0HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/feature/draft\0\0' };
+      if (args.includes('symbolic-ref')) return { code: 0, stdout: workspace === '/source' ? 'feature/draft\n' : 'main\n' };
+      if (args.includes('rev-parse')) return { code: 0, stdout: `${headSha}\n` };
+      if (args.includes('ls-files') || args.includes('ls-tree') || args.includes('status')) return { code: 0, stdout: '' };
+      return { code: 0, stdout: '' };
+    };
+    const discovery = {
+      projectsNow: () => [project],
+      worktreesNow: () => [main, source],
+      refresh: async () => [],
+      invalidateWorktrees: () => {},
+      worktrees: async () => { throw new Error('discovery failed'); }
+    };
+    const pulls = {
+      repositoryAt: async () => ({ owner: 'acme', name: 'repo' }),
+      pullRequestDetail: async () => ({ pullRequest: { number: 7, title: 'Work', branch: 'feature/draft', headSha, headOnOrigin: true, draft: false, url: 'https://github.com/acme/repo/pull/7', state: 'open', checks: 'passed' } })
+    };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, command);
+    const context = { identity: { repositoryKey: 'acme/repo', kind: 'pull' as const, number: 7 }, targetProjectId: 'proj', expectedHolderWorktreeIds: [source.id], expectedSourceWorktreeId: source.id };
+    let created = 0;
+    const uncertainFactory = {
+      inspectCandidate: async () => ({ worktreeId: 'proj:/wts/candidate', path: '/wts/candidate', pathExists: false, pathKnown: true, registered: false, registrationKnown: false, valid: false }),
+      createDetachedCandidate: async () => { created += 1; throw new Error('must not create'); }
+    };
+    await expect(service.moveToNew(context, '123e4567-e89b-42d3-a456-426614174000', false, uncertainFactory)).resolves.toEqual({ status: 'recovery', error: 'This move already has a target to inspect.' });
+    expect(created).toBe(0);
+
+    const truncatedCommand: GitCommand = async (binary, args) => {
+      const result = await command(binary, args);
+      // an incomplete index cannot prove gitlink absence
+      return args.includes('ls-files') ? { ...result, stdoutTruncated: true as const } : result;
+    };
+    const truncatedService = new PullRequestSwitchService(config, discovery as never, pulls as never, truncatedCommand);
+    const absentFactory = {
+      inspectCandidate: async () => ({ worktreeId: 'proj:/wts/candidate', path: '/wts/candidate', pathExists: false, pathKnown: true, registered: false, registrationKnown: true, valid: false }),
+      createDetachedCandidate: async () => { created += 1; throw new Error('must not create'); }
+    };
+    await expect(truncatedService.moveToNew(context, '123e4567-e89b-42d3-a456-426614174000', false, absentFactory)).resolves.toEqual({ status: 'refused', error: 'The source worktree state could not be verified.' });
+    expect(created).toBe(0);
+
+    const throwingFactory = {
+      inspectCandidate: async () => ({ worktreeId: 'proj:/wts/candidate', path: '/wts/candidate', pathExists: false, pathKnown: true, registered: false, registrationKnown: true, valid: false }),
+      createDetachedCandidate: async () => { created += 1; return { status: 'usable' as const, candidate: { worktreeId: 'proj:/wts/candidate', path: '/wts/candidate', pathExists: true, pathKnown: true, registered: true, registrationKnown: true, valid: true, head: headSha, detached: true } }; }
+    };
+    await expect(service.moveToNew(context, '123e4567-e89b-42d3-a456-426614174000', false, throwingFactory)).resolves.toEqual({ status: 'recovery', error: 'The target may exist, but the pull request move needs manual recovery.' });
+    expect(created).toBe(1);
+  });
+
   it('finds GitHub Actions for configured worktrees and scratch repositories', async () => {
     const requested: string[] = [];
     const pulls = { repositoryAt: async (workspace: string) => { requested.push(workspace); return octo; } };
@@ -363,6 +598,37 @@ describe('pull request switching', () => {
       { ...choices[0], checkoutBranch: 'feature/draft', checkedOut: true, openIn: { worktreeId: prFolder.id, worktreeName: 'Cora · pr-7' } },
       { ...fork, checkoutBranch: `rac/pr/8/${forkSha.slice(0, 12)}`, checkedOut: true, openIn: { worktreeId: 'echo', worktreeName: 'Echo' } }
     ]);
+  });
+
+  it('lists an authenticated parent pull request through its local fork and recognizes the real head branch', async () => {
+    const origin = { owner: 'anstosa', name: 'audiobookshelf' };
+    const upstream = { owner: 'advplyr', name: 'audiobookshelf' };
+    const localBranch = 'ansel/continueSerialPodcasts';
+    const localView = { id: worktree.id, projectId: 'cora', label: 'Cora', path: worktree.path, available: true, pinned: true, main: true, detached: false, locked: false, order: 0, branch: localBranch };
+    const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [{ id: 'cora', label: 'Cora', available: true, worktrees: [localView] }] }) };
+    const pull = { number: 4978, title: 'Continue serial podcasts', branch: localBranch, headSha, headOnOrigin: false, headRepository: 'anstosa/audiobookshelf', draft: false, url: 'https://github.com/advplyr/audiobookshelf/pull/4978' };
+    const pulls = {
+      repositoryAt: async () => origin,
+      repositoryParent: async () => upstream,
+      repository: async (repository: typeof upstream) => ({ own: [], others: repository.owner === 'advplyr' ? [pull] : [] })
+    };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand(`${localBranch}\n`));
+
+    await expect(service.branchList('cora', upstream)).resolves.toMatchObject({
+      otherPullRequests: [{ ...pull, checkoutBranch: localBranch, checkedOut: true, openIn: { worktreeId: worktree.id, worktreeName: worktree.label } }]
+    });
+    await expect(service.branchList('cora', { owner: 'spoof', name: 'audiobookshelf' })).resolves.toBeUndefined();
+  });
+
+  it('namespaces a parent pull request whose head belongs to another fork', async () => {
+    const origin = { owner: 'anstosa', name: 'audiobookshelf' };
+    const upstream = { owner: 'advplyr', name: 'audiobookshelf' };
+    const pull = { number: 4978, title: 'Someone else', branch: 'feature/elsewhere', headSha, headOnOrigin: false, headRepository: 'someone/audiobookshelf', draft: false, url: 'https://github.com/advplyr/audiobookshelf/pull/4978' };
+    const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [] }) };
+    const pulls = { repositoryAt: async () => origin, repositoryParent: async () => upstream, repository: async () => ({ own: [], others: [pull] }) };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand(''));
+
+    expect((await service.branchList('cora', upstream))?.otherPullRequests[0]).toMatchObject({ checkoutBranch: `rac/pr/advplyr/audiobookshelf/4978/${headSha.slice(0, 12)}`, checkedOut: false });
   });
 
   it('returns local branches with pull requests unsupported when there is no GitHub origin', async () => {

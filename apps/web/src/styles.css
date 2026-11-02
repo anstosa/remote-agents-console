@@ -751,10 +751,11 @@ button.conversation-choice:not(:disabled):hover { background: color-mix(in srgb,
 .terminal-pane { --panel-accent: var(--green); }
 .panel-header { position: absolute; top: .4rem; right: .4rem; left: .4rem; z-index: 7; display: flex; min-width: 0; justify-content: space-between; gap: .4rem; pointer-events: none; }
 .panel-header-pill { display: flex; min-width: 0; min-height: 2.35rem; align-items: center; gap: .25rem; padding: .2rem; border: 1px solid var(--surface-1); border-radius: .55rem; background: color-mix(in srgb, var(--crust) 80%, transparent); box-shadow: 0 .4rem 1.2rem color-mix(in srgb, var(--crust) 70%, transparent); backdrop-filter: blur(8px); pointer-events: auto; }
-.panel-header-title { flex: 0 1 auto; padding-left: .45rem; color: var(--panel-accent); font-size: .76rem; font-weight: 700; }
+/* title pills share equal horizontal content insets */
+.panel-header-title { flex: 0 1 auto; padding-inline: .45rem; color: var(--panel-accent); font-size: .76rem; font-weight: 700; }
 .panel-header-title:has(.note-title-form, .pane-rename) { flex: 1 1 auto; }
 .panel-header-actions { flex: none; }
-.panel-header-sub { flex: 0 1 auto; min-width: 0; overflow: hidden; padding-right: .35rem; color: var(--overlay-1); font-size: .64rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.panel-header-sub { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--overlay-1); font-size: .64rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .panel-header-action { display: grid; flex: 0 0 1.9rem; width: 1.9rem; height: 1.9rem; padding: 0; place-items: center; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: var(--subtext-0); box-shadow: none; }
 .panel-header-action:hover:not(:disabled) { border-color: var(--panel-accent); color: var(--text); }
 .panel-header-action:disabled { color: var(--overlay-0); cursor: not-allowed; opacity: .65; }
@@ -1058,6 +1059,8 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 .code-pane-crumb-back:hover { color: var(--text); text-decoration: underline; }
 .code-pane-crumb-sep { flex: 0 0 auto; color: var(--surface-2); }
 .code-pane-crumb-current, .code-pane-title { min-width: 0; overflow: hidden; color: var(--text); font-family: var(--font-mono); font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
+/* balance the comparison picker's intrinsic leading padding */
+.code-pane .panel-header-sub { padding-right: .35rem; }
 /* the Diff mode / Diff layout segmented controls */
 .code-pane-segment { display: inline-flex; flex: 0 0 auto; align-items: stretch; border: 1px solid var(--surface-1); border-radius: var(--control-radius); overflow: hidden; }
 .code-pane-segment button { height: 1.9rem; padding: 0 .5rem; border: 0; border-left: 1px solid var(--surface-1); background: transparent; color: var(--subtext-0); font: inherit; font-size: .7rem; white-space: nowrap; }
@@ -1192,7 +1195,7 @@ html.software-keyboard-open :is(.log, .log-split) > :is(.log-output, .terminal-p
 /* scale the shared agent pill down for the shell toolbar */
 .terminal-pane .pane-status { height: 1.25rem; padding: 0 .4rem; font-size: .58rem; white-space: nowrap; }
 .terminal-pane .pane-status.error { --log-status-color: var(--red); }
-.terminal-pane .pane-title { flex: 0 1 auto; min-width: 0; padding-right: .3rem; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-pane .pane-title { flex: 0 1 auto; min-width: 0; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-pane .pane-rename { display: flex; flex: 1; align-items: center; gap: .2rem; min-width: 0; }
 .terminal-pane .pane-rename input { flex: 1; min-width: 0; height: 1.9rem; padding: .1rem .3rem; border: 1px solid var(--surface-2); border-radius: var(--control-radius); background: var(--base); color: var(--text); font: inherit; }
 .terminal-pane .terminal-canvas { position: relative; min-width: 0; min-height: 0; }
@@ -1989,8 +1992,6 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .client-settings-page::before { position: absolute; inset: 0; z-index: -1; content: ''; opacity: .28; background-image: linear-gradient(#585b7018 1px, transparent 1px), linear-gradient(90deg, #585b7018 1px, transparent 1px); background-size: 2.5rem 2.5rem; mask-image: radial-gradient(ellipse at 70% 0, #000 0, transparent 72%); }
 .client-settings-page:focus { outline: none; }
 .client-settings-page .panel-header-title h1 { margin: 0; font: inherit; }
-/* match the title pill's left and right inset */
-.client-settings-page .panel-header-title { padding-right: .45rem; }
 .client-settings-section > header > small { color: var(--mauve); font: 800 .62rem var(--font-mono); letter-spacing: .14em; }
 .client-settings-page-content { display: grid; width: min(76rem, 100%); min-height: 0; align-content: start; gap: 1.25rem; justify-self: center; overflow-y: auto; overscroll-behavior: contain; padding: clamp(.85rem, 2.5vw, 1.75rem); touch-action: pan-y; -webkit-overflow-scrolling: touch; }
 .client-settings-section { display: grid; min-width: 0; gap: .7rem; }
@@ -2540,6 +2541,8 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .tab-place-mark.shells { color: var(--green); }
 /* keep primary phone controls on one line around the Workspace dropdown */
 .tabs.workspace-dropdown-row { flex-wrap: nowrap; overflow: hidden; }
+/* phones launch from New Workspace instead of reserving a main plus slot */
+@media (max-width: 768px) { .tabs.workspace-dropdown-row > :is(.launcher, .tab-spacer) { display: none; } }
 /* let Workspace absorb the Call slot when Davo is disabled */
 .tabs.workspace-dropdown-row > .tab-row-lead { flex: 0 0 auto; }
 /* keep optional notification enrollment below the primary control row */
@@ -3006,6 +3009,8 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 
 /* The Overview: replaces the Workspace (panels, composer, toolbar) above the tab row */
 .tabs .overview-button { position: relative; flex: 0 0 auto; display: inline-flex; align-items: center; gap: .45rem; }
+/* match icon-only Overview to the shared square toolbar controls */
+.tabs .overview-button.icon-only { flex: 0 0 var(--standard-control-size); width: var(--standard-control-size); min-width: var(--standard-control-size); height: var(--standard-control-size); padding: 0; justify-content: center; }
 .overview-badge { display: inline-grid; min-width: 1.15rem; height: 1.15rem; place-items: center; padding: 0 .25rem; border-radius: 999px; background: var(--red); color: var(--crust); font-size: .65rem; font-weight: 800; line-height: 1; }
 .overview-badge.corner { position: absolute; top: -.42rem; right: -.42rem; min-width: 1.2rem; height: 1.2rem; box-shadow: 0 0 0 2px var(--crust); }
 .tabs .overview-button.active { border-color: var(--lavender); color: var(--lavender); background: color-mix(in srgb, var(--lavender) 14%, var(--mantle)); }
@@ -3028,7 +3033,8 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .overview-body { min-height: 0; overflow: auto; padding: .5rem .8rem 1rem; }
 .overview-body.columns { overflow: hidden; padding-bottom: .6rem; }
 .overview-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .6rem; height: 100%; }
-.overview-column { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+/* card wrapping follows its lane width rather than the full github panel */
+.overview-column { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; container-type: inline-size; }
 .overview-columns .overview-column { border: 1px solid var(--surface-0); border-radius: var(--control-radius); background: color-mix(in srgb, var(--mantle) 60%, transparent); }
 .overview-column-head { display: flex; align-items: center; gap: .45rem; padding: .55rem .6rem; border-bottom: 1px solid var(--surface-0); color: var(--text); }
 .overview-column-head h3 { margin: 0; font-size: .82rem; }
@@ -3106,8 +3112,10 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .overview-skeleton-title { width: 60%; height: .8rem; }
 .overview-skeleton-meta { width: 35%; }
 
-/* the GitHub panel: one Project's Pull requests and Issues as Overview rows, in groups */
-.github-pane { position: relative; z-index: 1; display: grid; min-width: 0; min-height: 0; grid-template-rows: auto minmax(0, 1fr); padding-top: var(--panel-header-clearance); border-top: 1px solid color-mix(in srgb, var(--lavender) 52%, var(--surface-1)); background: var(--base); container-type: inline-size; animation: note-pane-appear .15s ease-out; }
+/* shared github swim lanes and item detail */
+.github-pane { position: relative; z-index: 1; display: grid; min-width: 0; min-height: 0; grid-template-rows: minmax(0, 1fr); padding-top: var(--panel-header-clearance); border-top: 1px solid color-mix(in srgb, var(--lavender) 52%, var(--surface-1)); background: var(--base); container-type: inline-size; animation: note-pane-appear .15s ease-out; }
+/* the floating header takes no grid row; only a banner needs a separate track */
+.github-pane:has(> .overview-banner) { grid-template-rows: auto minmax(0, 1fr); }
 .github-pane.expanded { width: 100%; height: 100%; border: 0; }
 .github-pane-title { min-width: 0; overflow: hidden; padding: 0 .35rem; font: 700 .75rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .github-freshness { align-self: center; padding: 0 .3rem; color: var(--overlay-1); font-size: .66rem; white-space: nowrap; }
@@ -3145,6 +3153,9 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
    The list column is its rows' container, so they wrap by its width. */
 .github-pane-body.split { display: grid; grid-template: minmax(0, 1fr) / minmax(12rem, 38%) minmax(0, 1fr); padding: 0; overflow: hidden; }
 .github-pane-body.split > * { min-height: 0; overflow: auto; }
+.github-worktree-utility { margin-bottom: .5rem; }
+.github-pane-body.split:has(> .github-worktree-utility) { grid-template-rows: auto minmax(0, 1fr); }
+.github-pane-body.split > .github-worktree-utility { grid-column: 1 / -1; max-height: 35vh; margin: 0; padding: .4rem .55rem; }
 .github-list-column { padding: .45rem .5rem 2rem; border-right: 1px solid var(--surface-0); container-type: inline-size; }
 .github-detail-column { padding: .45rem .7rem 2rem; }
 .github-detail-placeholder { display: grid; height: 100%; margin: 0; place-items: center; color: var(--overlay-1); font-size: .74rem; }
@@ -3242,4 +3253,47 @@ a.github-list-row:hover, button.github-list-row:hover { background: var(--surfac
 @container (max-width: 30rem) {
   .github-pane .overview-row-main { flex-wrap: wrap; }
   .github-pane .overview-destination { flex-basis: 100%; max-width: none; }
+}
+
+/* unified GitHub split scope and card actions */
+.github-scope-toggle { display: inline-flex; align-items: center; padding: .12rem; border: 1px solid var(--surface-1); border-radius: calc(var(--control-radius) + .1rem); background: var(--crust); }
+.github-scope-toggle button { min-height: 1.65rem; padding: 0 .5rem; border: 0; border-radius: var(--control-radius); background: none; color: var(--overlay-1); font-size: .65rem; font-weight: 750; white-space: nowrap; }
+.github-scope-toggle button[aria-pressed='true'] { background: color-mix(in srgb, var(--lavender) 18%, var(--surface-0)); color: var(--lavender); }
+.github-scope-toggle button:disabled { opacity: .4; cursor: not-allowed; }
+.github-item-actions { position: relative; display: flex; flex: 0 0 2.6rem; align-items: stretch; }
+.github-item-actions > .overview-row-new { width: 100%; }
+.github-direct-actions { display: flex; flex: 0 0 auto; align-items: stretch; }
+/* standalone card icons stay top-aligned instead of stretching into split-button segments */
+.github-row { display: grid; grid-template-columns: minmax(0, 1fr); }
+/* keep the real primary button beneath the whole card without nesting interactive controls */
+.github-row > .overview-row-main { grid-area: 1 / 1; box-sizing: border-box; width: 100%; padding-right: calc(var(--standard-control-size) + 1.05rem); }
+.github-card-controls, .github-card-controls .github-direct-actions { display: flex; flex: 0 0 auto; flex-direction: column; align-items: center; gap: .35rem; }
+.github-card-controls { align-self: flex-start; padding: .45rem .45rem .45rem 0; }
+/* rail padding and gaps fall through to the primary button; icon hit targets stay independent */
+.github-row > .github-card-controls { grid-area: 1 / 1; justify-self: end; z-index: 1; pointer-events: none; }
+.github-row > .github-card-controls :is(button, a) { pointer-events: auto; }
+.github-card-controls .github-item-actions { flex: none; width: var(--standard-control-size); height: var(--standard-control-size); }
+.github-card-controls :is(.overview-row-new, .overview-row-browser, .github-card-view) { position: relative; display: grid; box-sizing: border-box; flex: 0 0 var(--standard-control-size); width: var(--standard-control-size); min-width: var(--standard-control-size); height: var(--standard-control-size); margin: 0; padding: 0; place-items: center; border: 1px solid var(--surface-1); border-radius: var(--control-radius); background: color-mix(in srgb, var(--surface-0) 50%, transparent); color: var(--subtext-0); text-decoration: none; box-shadow: none; }
+.github-card-controls .overview-row-new { color: var(--green); }
+.github-card-controls .github-card-view { color: var(--blue); }
+.github-card-controls :is(button, a):hover:not(:disabled) { border-color: var(--overlay-0); background: var(--surface-0); }
+.github-card-controls .github-checkout-menu[aria-expanded='true'] { border-color: var(--green); background: var(--green); color: var(--crust); }
+/* checkout menus always disclose their flyout; direct checkout buttons have no marker */
+.github-checkout-menu { position: relative; }
+.github-checkout-menu > .flyout-caret { display: block; background: currentColor; }
+.github-item-menu { position: fixed; z-index: var(--layer-popover); width: min(23rem, calc(100vw - 2rem)); max-height: min(28rem, 70vh); margin: 0; overflow-y: auto; border-top: 1px solid color-mix(in srgb, var(--green) 45%, var(--surface-1)); border-radius: var(--control-radius); box-shadow: 0 .7rem 2rem color-mix(in srgb, var(--crust) 75%, transparent); }
+.github-item-menu button:disabled { opacity: .58; cursor: not-allowed; }
+.github-item-menu button:disabled:hover { border-color: var(--surface-1); }
+.github-row.current-holder { border-color: color-mix(in srgb, var(--green) 72%, var(--surface-1)); box-shadow: inset .2rem 0 var(--green); }
+.github-item-direct[aria-busy='true'] { color: var(--yellow); }
+.github-detail .github-item-actions { flex-basis: auto; align-self: stretch; }
+.github-detail .github-item-actions > button { width: auto; min-height: 2rem; border: 1px solid color-mix(in srgb, var(--green) 60%, var(--surface-1)); border-radius: var(--control-radius); }
+.github-detail .github-item-menu { right: 0; }
+.github-all-columns { min-height: 100%; }
+.github-all-list .overview-column-head { display: none; }
+/* compact lane tabs fit beside narrow item details */
+.github-all-list .overview-tabs button { min-width: 0; flex-wrap: wrap; gap: 0 .25rem; padding: .2rem .25rem; }
+@container (max-width: 42rem) {
+  .github-freshness { display: none; }
+  .github-scope-toggle button { max-width: 7rem; overflow: hidden; text-overflow: ellipsis; }
 }

@@ -1,6 +1,6 @@
 import { run } from '../tmux/command.js';
 
-export type GitCommand = (binary: string, args: string[]) => Promise<{ code: number; stdout: string; stderr?: string }>;
+export type GitCommand = (binary: string, args: string[]) => Promise<{ code: number; stdout: string; stderr?: string; stdoutTruncated?: true }>;
 
 export async function cleanAndPushedOrDetached(workspace: string, command: GitCommand = run): Promise<boolean> {
   const status = await command('/usr/bin/git', ['-C', workspace, 'status', '--porcelain=v1']);

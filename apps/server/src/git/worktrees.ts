@@ -87,6 +87,37 @@ export function parseWorktreeList(porcelain: string): WorktreeEntry[] {
   return entries;
 }
 
+/** parse `git worktree list --porcelain -z` without treating embedded newlines as records */
+export function parseWorktreeListNul(porcelain: string): WorktreeEntry[] {
+  const entries: WorktreeEntry[] = [];
+  let current: WorktreeEntry | undefined;
+  // nul terminates fields and an empty field terminates one entry
+  for (const field of porcelain.split('\0')) {
+    // finish one entry at its empty separator
+    if (field === '') {
+      if (current !== undefined) { entries.push(current); current = undefined; }
+      continue;
+    }
+    const space = field.indexOf(' ');
+    const key = space === -1 ? field : field.slice(0, space);
+    const value = space === -1 ? '' : field.slice(space + 1);
+    // start one exact path-bearing entry
+    if (key === 'worktree') { current = { path: value, detached: false, bare: false, locked: false, prunable: false }; continue; }
+    // ignore fields before an entry
+    if (current === undefined) continue;
+    // apply recognized entry fields
+    if (key === 'HEAD') current.head = value;
+    else if (key === 'branch') current.branch = shortBranch(value);
+    else if (key === 'detached') current.detached = true;
+    else if (key === 'bare') current.bare = true;
+    else if (key === 'locked') { current.locked = true; if (value !== '') current.lockedReason = value; }
+    else if (key === 'prunable') { current.prunable = true; if (value !== '') current.prunableReason = value; }
+  }
+  // tolerate a missing final empty separator
+  if (current !== undefined) entries.push(current);
+  return entries;
+}
+
 /**
  * The repository's common git directory (realpath'd) — the Project identity: two
  * Projects that resolve to the same common dir are the same repository (ADR 0003).

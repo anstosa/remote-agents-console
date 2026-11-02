@@ -1,7 +1,7 @@
 # Design
 
 ## Source of truth
-Status: Active. Updated: 2026-10-30. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls, workspace toolbar decorators, public homepage and policies, independent file previews, conversation browsing.
+Status: Active. Updated: 2026-11-01. Scope: Settings page headers, navigation, search, Cloudflare setup, notices, shared spinner timing, prompt submission controls, workspace toolbar decorators, main toolbar controls, public homepage and policies, independent file previews, conversation browsing.
 Evidence: existing Settings forms and split confirmation, `compose.yaml`, the
 host settings queue/applier, and Cloudflare's official Tunnel setup documentation.
 Toolbar evidence: `apps/web/src/styles.css`, browser layout regressions, and the
@@ -89,6 +89,9 @@ counts above the top-right edge, git status dots inside the top-right corner, an
 compact PR status icons inside the bottom-right corner. Only labels and control
 widths adapt; do not move decorators into the centered content row. PR cards keep
 their separate inline status presentation.
+Hide the main toolbar's Launch (+) control on phones; New Workspace in the
+workspace chooser retains launch access. Icon-only GitHub Overview uses the
+shared square control size, with its badge remaining in the corner.
 Notes use a slightly overlapping upper-right row of circular counts, ordered
 gray for shared notes, yellow for locked non-shared notes, and purple for all
 remaining notes. Shared status takes precedence over locking; omit empty categories.
