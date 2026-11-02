@@ -260,7 +260,7 @@ function GithubItemActions({ item, context, request, dynamicWorktrees, ownerNotR
     if (!checkoutAllowed || !dynamicWorktrees || newProject === undefined || onNewWorktree === undefined) return null;
     // name checkout and move operations before their destinations
     const operation = holder === undefined ? 'Checkout in' : 'Move checkout to';
-    const label = action === 'issue' ? `New Worktree in ${newProject.label}` : action === 'tour' ? `${operation} a new Worktree and start a Review tour` : `${operation} a new Worktree in ${newProject.label}`;
+    const label = action === 'issue' ? `New Worktree in ${newProject.label}` : `${operation} a new Worktree in ${newProject.label}`;
     return <button type="button" className={action} disabled={!canCreate} title={canCreate ? undefined : newProject.manageWorktreesReason ?? 'New Worktree is unavailable'} onClick={() => { setOpen(false); onNewWorktree(item, action, githubNewWorktreeContext(context, newProject)); }}><Icon name={newWorktreeChoices[action].icon} /><span>{label}<small>{newProject.manageWorktreesReason ?? (holder === undefined ? 'check out there' : `move from ${holder.worktree.label}`)}</small></span></button>;
   };
   // render one exact destination choice
@@ -309,7 +309,7 @@ function GithubItemActions({ item, context, request, dynamicWorktrees, ownerNotR
       {checkoutAllowed && context.identity.kind === 'pull' && newProject === undefined && <button type="button" disabled title="Add this repository as a Project to check it out"><Icon name="branch" /><span>Checkout unavailable<small>No local Project for this repository</small></span></button>}
       {checkoutAllowed && directTarget === undefined && !context.sameRepository && owner !== undefined && <button type="button" disabled title="Here belongs to a different repository"><Icon name="branch" /><span>Checkout here<small>Different repository</small></span></button>}
       {displayedMenuTargets.map(target => targetButton(target, owner?.project.id === target.project.id && owner.worktree.id === target.worktree.id))}
-      {context.identity.kind === 'issue' ? create('issue') : <>{create('checkout')}{create('tour')}</>}
+      {context.identity.kind === 'issue' ? create('issue') : create('checkout')}
       {configuredSlot !== undefined && <ConfiguredButtonList slot={configuredSlot} className="configured-nav-menu" onSelect={dismiss} />}
       {cardReview !== undefined && <button type="button" className="tour" disabled={cardReview.onReview === undefined || (!cardReview.open && cardReview.unavailable !== undefined)} aria-busy={cardReview.generating || undefined} title={cardReview.unavailable} onClick={() => { setOpen(false); cardReview.onReview?.(); }}><Icon name="review" />{cardReview.generating ? 'Generating Review tour…' : cardReview.open ? 'Open Review tour' : 'Start Review tour'}</button>}
     </div></FlyoutPortal>}

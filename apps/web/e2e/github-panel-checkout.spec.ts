@@ -397,11 +397,10 @@ test('does not broaden new-Worktree setup policy for a verified fork', async ({ 
   await github.getByRole('button', { name: 'Checkout and actions for pull request #4978' }).click();
   const menu = page.getByRole('group', { name: 'Actions for pull request #4978' });
   await expect(menu.getByRole('button', { name: /^Checkout in Fork Main/u })).toBeEnabled();
-  const newWorktrees = menu.getByRole('button', { name: /new Worktree/u });
-  await expect(newWorktrees).toHaveCount(2);
-  await expect(newWorktrees.first()).toBeDisabled();
-  await expect(newWorktrees.last()).toBeDisabled();
-  await expect(newWorktrees.first()).toHaveAttribute('title', 'Repository setup is unavailable');
+  const newWorktree = menu.getByRole('button', { name: /new Worktree/u });
+  await expect(newWorktree).toHaveCount(1);
+  await expect(newWorktree).toBeDisabled();
+  await expect(newWorktree).toHaveAttribute('title', 'Repository setup is unavailable');
 });
 
 // suppress only new-worktree choices when dynamic worktrees are off
@@ -520,7 +519,7 @@ test('marks the exact current holder and offers no checkout mutation', async ({ 
   const menu = page.getByRole('group', { name: 'Actions for pull request #214' });
   await expect(menu.getByRole('button', { name: 'Already checked out here' })).toBeDisabled();
   await expect(menu.getByRole('button', { name: /^(?:Checkout here|Checkout in |Move checkout here|Move checkout to (?!a new Worktree))/u })).toHaveCount(0);
-  await expect(menu.getByRole('button', { name: /^Move checkout to a new Worktree/u })).toHaveCount(2);
+  await expect(menu.getByRole('button', { name: /^Move checkout to a new Worktree/u })).toHaveCount(1);
   await expect(strip(page).getByRole('button', { name: /Checkout|Move checkout here/u })).toHaveCount(0);
   expect(calls).toEqual([]);
 });

@@ -3,8 +3,8 @@ import { installPaneMock } from './pane-stream-mock';
 
 // New Worktrees from GitHub: the shared triage lanes' and the GitHub detail's branch+ on a row no
 // Worktree holds, and an Issue's detail, open the New worktree dialog prefilled. A pull request
-// opens in Pull request mode (Start a Review tour ticked by the tour action) and lands on the
-// GitHub panel focused on it; an Issue opens a new branch named for it on origin's fresh default,
+// opens in Pull request mode, where Start a Review tour can be ticked, and lands on the GitHub
+// panel focused on it; an Issue opens a new branch named for it on origin's fresh default,
 // recorded as the Worktree's, with the Issue drafted in the new Worktree's composer.
 
 type Worktree = { id: string; projectId: string; label: string; path: string; main: boolean; detached: boolean; locked: boolean; available: boolean; pinned: boolean; order: number; branch: string };
@@ -94,7 +94,7 @@ async function mount(page: Page, created: Created, posts: { path: string; body: 
   });
 }
 
-test('a repo-scope row checks a pull request out in a new Worktree with a Review tour, landing on it in the GitHub panel', async ({ page }) => {
+test('a repo-scope row opens the New worktree dialog on a pull request, with a Review tour ticked there, landing on it in the GitHub panel', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   const posts: { path: string; body: unknown }[] = [];
   await mount(page, { worktree: worktree('repo:/repo/wts/pr-12', 'Repo · pr-12', 'branch-12', false, 2), agentId: 'agent-pr' }, posts);
@@ -104,18 +104,19 @@ test('a repo-scope row checks a pull request out in a new Worktree with a Review
   await branchPlus.click();
   await expect(branchPlus).toHaveAttribute('aria-expanded', 'true');
   const menu = page.getByRole('group', { name: 'Actions for pull request #12' });
-  await expect(menu.getByRole('button', { name: /^Checkout in a new Worktree in Repo/u })).toBeVisible();
-  await expect(menu.getByRole('button', { name: /^Checkout in a new Worktree and start a Review tour/u })).toBeVisible();
-  await menu.getByRole('button', { name: /^Checkout in a new Worktree and start a Review tour/u }).click();
+  // the Review tour is ticked in the dialog, not chosen here
+  await expect(menu.getByRole('button', { name: /Review tour/u })).toHaveCount(0);
+  await menu.getByRole('button', { name: /^Checkout in a new Worktree in Repo/u }).click();
   await expect(menu).toHaveCount(0);
 
   const dialog = page.getByRole('dialog', { name: 'New worktree' });
   await expect(dialog.getByRole('tab', { name: 'Pull request' })).toHaveAttribute('aria-selected', 'true');
   await expect(dialog.getByRole('radio', { name: 'Select #12' })).toBeChecked();
   const tour = dialog.getByRole('checkbox', { name: 'Start a Review tour' });
-  await expect(tour).toBeChecked();
+  await expect(tour).not.toBeChecked();
   // the tour runs beside an Agent, so the other openings wait until it is unticked
   const open = dialog.getByRole('radiogroup', { name: 'Open in the new worktree' });
+  await tour.check();
   await expect(open.getByRole('radio', { name: 'Agent' })).toBeChecked();
   await expect(open.getByRole('radio', { name: 'Terminal' })).toBeDisabled();
   await tour.uncheck();
@@ -193,7 +194,6 @@ test('the GitHub panel offers new Worktrees on its rows and an Issue\'s detail',
   const heldMenu = page.getByRole('group', { name: 'Actions for pull request #214' });
   await expect(heldMenu.getByRole('button', { name: 'Already checked out here' })).toBeDisabled();
   await expect(heldMenu.getByRole('button', { name: /^Move checkout to a new Worktree in Repo/u })).toBeVisible();
-  await expect(heldMenu.getByRole('button', { name: /^Move checkout to a new Worktree and start a Review tour/u })).toBeVisible();
   await page.keyboard.press('Escape');
   await panel.getByRole('button', { name: 'Checkout and actions for pull request #205' }).click();
   await page.getByRole('group', { name: 'Actions for pull request #205' }).getByRole('button', { name: /^Checkout in a new Worktree in Repo/u }).click();
@@ -202,12 +202,12 @@ test('the GitHub panel offers new Worktrees on its rows and an Issue\'s detail',
   await expect(dialog.getByRole('checkbox', { name: 'Start a Review tour' })).not.toBeChecked();
   await dialog.getByRole('button', { name: 'Cancel' }).click();
 
-  // a pull request's detail offers both when it is checked out nowhere
+  // a pull request's detail offers one when it is checked out nowhere
   await panel.getByRole('button', { name: /^#205 Bump vite/u }).click();
   const pullDetail = panel.getByRole('article', { name: 'Pull request #205' });
   await pullDetail.getByRole('button', { name: 'Checkout' }).click();
   const pullMenu = page.getByRole('group', { name: 'Actions for pull request #205' });
-  await expect(pullMenu.getByRole('button', { name: /^Checkout in a new Worktree and start a Review tour/u })).toBeVisible();
+  await expect(pullMenu.getByRole('button', { name: /Review tour/u })).toHaveCount(0);
   await pullMenu.getByRole('button', { name: /^Checkout in a new Worktree in Repo/u }).click();
   await expect(dialog.getByRole('radio', { name: 'Select #205' })).toBeChecked();
   await dialog.getByRole('button', { name: 'Cancel' }).click();

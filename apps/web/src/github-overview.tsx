@@ -110,8 +110,8 @@ export function RowCopy({ item, now, isNew, showAuthor, status, note }: { item: 
   </span>;
 }
 
-/** A row's new-Worktree choices: check a pull request out, or with a Review tour started; an Issue's own branch. */
-export type NewWorktreeAction = 'checkout' | 'tour' | 'issue';
+/** A row's new-Worktree action: a pull request checked out, or an Issue's own branch. */
+export type NewWorktreeAction = 'checkout' | 'issue';
 /** Opens the New worktree dialog for a row's item. */
 export type NewWorktreeFor = (item: Item, action: NewWorktreeAction, context?: GithubNewWorktreeContext) => void;
 
@@ -124,27 +124,14 @@ export function issueBranch(number: number, title: string): string {
 /** Each new-Worktree action's wording and icon, wherever it is offered. */
 export const newWorktreeChoices: Record<NewWorktreeAction, { label: string; icon: keyof typeof icons }> = {
   checkout: { label: 'Check out in a new Worktree', icon: 'worktree' },
-  tour: { label: 'New Worktree and start a Review tour', icon: 'review' },
   issue: { label: 'New Worktree for this Issue…', icon: 'worktree' }
 };
 
-/**
- * A row's green branch+ and the menu it opens under the row: a pull request checked out in a new
- * Worktree, with or without a Review tour, or an Issue's own branch, in the Project `where` names.
- * Returns the button, for the row, and the menu, for after it; neither without `newWorktree`.
- */
-export function useNewWorktreeMenu(item: Item, issue: boolean, newWorktree?: NewWorktreeFor, where?: string): [ReactNode, ReactNode] {
-  const [open, setOpen] = useState(false);
-  if (newWorktree === undefined) return [null, null];
+/** A row's green branch+, opening the New worktree dialog on its item; none without `newWorktree`. */
+export function NewWorktreeButton({ item, issue, newWorktree }: { item: Item; issue: boolean; newWorktree?: NewWorktreeFor }) {
+  if (newWorktree === undefined) return null;
   const name = `New Worktree for #${item.number}`;
-  const note = (action: NewWorktreeAction) => action === 'issue' ? `branch ${issueBranch(item.number, item.title)}` : `pr-${item.number}${action === 'tour' ? ' · the tour/review agent from settings' : ''}`;
-  const actions: NewWorktreeAction[] = issue ? ['issue'] : ['checkout', 'tour'];
-  return [
-    <button type="button" className="overview-row-new" aria-expanded={open} title={name} aria-label={name} onClick={() => setOpen(value => !value)}><Icon name="worktree" /></button>,
-    open && <div className="overview-row-menu" role="group" aria-label={name}>{actions.map(action => <button key={action} type="button" className={action} onClick={() => { setOpen(false); newWorktree(item, action); }}>
-      <Icon name={newWorktreeChoices[action].icon} /><span>{newWorktreeChoices[action].label}<small>{where === undefined ? '' : `${where} · `}{note(action)}</small></span>
-    </button>)}</div>
-  ];
+  return <button type="button" className="overview-row-new" title={`${name}…`} aria-label={name} onClick={() => newWorktree(item, issue ? 'issue' : 'checkout')}><Icon name="worktree" /></button>;
 }
 
 type OverviewRowState = { id?: string; here?: boolean; selected?: boolean; focused?: boolean };
@@ -153,7 +140,6 @@ type OverviewRowState = { id?: string; here?: boolean; selected?: boolean; focus
 function Row({ item, column, now, isNew, onOpen, onSelect, selectable, actions, rowState, newWorktree }: { item: Item; column: ColumnKey; now: number; isNew: boolean; onOpen: OpenItem; onSelect?: (item: Item, column: ColumnKey) => void; selectable?: (item: Item, column: ColumnKey) => boolean; actions?: (item: Item, column: ColumnKey) => ReactNode; rowState?: (item: Item, column: ColumnKey) => OverviewRowState; newWorktree?: NewWorktreeFor }) {
   const destination = item.destination;
   const state = rowState?.(item, column) ?? {};
-  const [branchPlus, menu] = useNewWorktreeMenu(item, column === 'issues', newWorktree, destination?.label);
   const content = <>
     <RowCopy item={item} now={now} isNew={isNew} showAuthor={column !== 'mine'} />
     {destination === undefined
@@ -163,20 +149,17 @@ function Row({ item, column, now, isNew, onOpen, onSelect, selectable, actions, 
   const label = `#${item.number} ${item.title}${isNew ? ', new' : ''}`;
   const localSelection = onSelect !== undefined;
   const localDetail = localSelection && selectable?.(item, column) !== false;
-  return <>
-    <div className={`overview-row${localSelection ? ' github-row' : ''}${waiting(item) ? ' waiting' : ''}${isNew ? ' new' : ''}${state.selected ? ' selected' : ''}${state.focused ? ' focus' : ''}${state.here ? ' current-holder' : ''}`} {...(state.id === undefined ? {} : { 'data-row': state.id })}>
-      {localDetail
-        ? <button className="overview-row-main" type="button" aria-label={`${label}${state.here ? ', here' : ''}, details`} aria-current={state.selected || undefined} onClick={() => onSelect(item, column)}>{content}{state.here && <span className="github-here" title="This Worktree">here</span>}</button>
-        : localSelection || destination === undefined
-        ? <a className="overview-row-main" href={item.url} target="_blank" rel="noreferrer" aria-label={`${label}, on GitHub`}>{content}</a>
-        : <button className="overview-row-main" type="button" aria-label={`${label}, in ${destination.label}`} onClick={() => onOpen(destination.worktreeId, item, column)}>{content}</button>}
-      <div className="github-card-controls" role="group" aria-label={`Card controls for #${item.number}`}>
-        {actions?.(item, column) ?? branchPlus}
-        <a className="overview-row-browser" href={item.url} target="_blank" rel="noreferrer" title="Open on GitHub" aria-label={`Open #${item.number} on GitHub`}><Icon name="external" /></a>
-      </div>
+  return <div className={`overview-row${localSelection ? ' github-row' : ''}${waiting(item) ? ' waiting' : ''}${isNew ? ' new' : ''}${state.selected ? ' selected' : ''}${state.focused ? ' focus' : ''}${state.here ? ' current-holder' : ''}`} {...(state.id === undefined ? {} : { 'data-row': state.id })}>
+    {localDetail
+      ? <button className="overview-row-main" type="button" aria-label={`${label}${state.here ? ', here' : ''}, details`} aria-current={state.selected || undefined} onClick={() => onSelect(item, column)}>{content}{state.here && <span className="github-here" title="This Worktree">here</span>}</button>
+      : localSelection || destination === undefined
+      ? <a className="overview-row-main" href={item.url} target="_blank" rel="noreferrer" aria-label={`${label}, on GitHub`}>{content}</a>
+      : <button className="overview-row-main" type="button" aria-label={`${label}, in ${destination.label}`} onClick={() => onOpen(destination.worktreeId, item, column)}>{content}</button>}
+    <div className="github-card-controls" role="group" aria-label={`Card controls for #${item.number}`}>
+      {actions?.(item, column) ?? <NewWorktreeButton item={item} issue={column === 'issues'} newWorktree={newWorktree} />}
+      <a className="overview-row-browser" href={item.url} target="_blank" rel="noreferrer" title="Open on GitHub" aria-label={`Open #${item.number} on GitHub`}><Icon name="external" /></a>
     </div>
-    {menu}
-  </>;
+  </div>;
 }
 
 // a column's rows by repository: those holding something new first, then the busiest, then by

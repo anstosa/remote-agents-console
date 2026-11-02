@@ -8958,16 +8958,16 @@ function ToastRegion({ children, feedback, onDismissFeedback, updateError, onDis
 
 // whether a Project offers New worktree, from the launcher and the git flyout's rows alike
 const offersNewWorktree = (project: Project, dynamicWorktrees: boolean): boolean => dynamicWorktrees && project.manageWorktrees !== false;
-// the source and preselected PR or branch the New worktree dialog can open on: `review` ticks Start a
-// Review tour, and an Issue opens a new branch named for it
-type NewWorktreeSelection = { mode: 'pull-request'; number: number; review?: true; context?: GithubNewWorktreeContext }
-  | { mode: 'move-pull-request'; number: number; sourceWorktreeId: string; context: GithubNewWorktreeContext; review?: true }
+// the source and preselected PR or branch the New worktree dialog can open on; an Issue opens a new
+// branch named for it
+type NewWorktreeSelection = { mode: 'pull-request'; number: number; context?: GithubNewWorktreeContext }
+  | { mode: 'move-pull-request'; number: number; sourceWorktreeId: string; context: GithubNewWorktreeContext }
   | { mode: 'existing'; branch: string } | { mode: 'issue'; number: number; title: string; url: string; repository?: string };
-// a GitHub row's or detail's new-Worktree choice as the dialog's selection
+// a GitHub row's or detail's new-Worktree action as the dialog's selection
 const githubNewWorktree = (open: ((initial: NewWorktreeSelection) => void) | undefined): NewWorktreeFor | undefined => open === undefined ? undefined
   : (item, action, context) => open(action === 'issue' ? { mode: 'issue', number: item.number, title: item.title, url: item.url, repository: item.repository }
-    : context?.expectedSourceWorktreeId !== undefined ? { mode: 'move-pull-request', number: item.number, sourceWorktreeId: context.expectedSourceWorktreeId, context, ...(action === 'tour' ? { review: true as const } : {}) }
-    : { mode: 'pull-request', number: item.number, ...(context === undefined ? {} : { context }), ...(action === 'tour' ? { review: true as const } : {}) });
+    : context?.expectedSourceWorktreeId !== undefined ? { mode: 'move-pull-request', number: item.number, sourceWorktreeId: context.expectedSourceWorktreeId, context }
+    : { mode: 'pull-request', number: item.number, ...(context === undefined ? {} : { context }) });
 // what a successful worktree creation hands back to the launcher
 // `fetchError` says why origin could not be fetched, so a new branch started from its default as last fetched
 type WorktreeCreated = { worktreeId: string; agentId?: string; launchError?: string; setupError?: string; fetchError?: string; moved?: true; targetResolved?: boolean; finalizationErrors?: { stage: string; message: string }[] };
@@ -9124,7 +9124,7 @@ function NewWorktreeDialog({ project, request, initial, initialRecovery, onRecov
   const [base, setBase] = useState('');
   // the Issue's body for the composer draft, read as the dialog opens; the draft goes without it if it cannot be read
   const issueBody = useRef<Promise<string | undefined>>(undefined);
-  const [review, setReview] = useState(pullInitial?.review === true);
+  const [review, setReview] = useState(false);
   const [existingRef, setExistingRef] = useState('');
   // the Project's pull requests: undefined while loading, 'unsupported' without a GitHub origin
   const [pullRequests, setPullRequests] = useState<RepositoryBranchList | 'unsupported' | 'failed'>();
