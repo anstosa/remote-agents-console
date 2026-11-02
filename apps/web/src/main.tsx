@@ -10090,7 +10090,6 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     if (!worktrees.some(worktree => worktree.id === placeId) && !data?.places?.some(place => place.id === placeId)) return;
     // spend the link; the tab publishes its own address once it opens
     history.replaceState(null, '', `${location.pathname}${location.search}`);
-    setOverviewOpen(false);
     openEmptyWorkspace(placeId);
   };
   useEffect(() => {
