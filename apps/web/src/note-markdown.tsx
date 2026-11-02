@@ -1,6 +1,7 @@
 import { Fragment, type ReactNode, type Ref } from 'react';
 
-const safeLink = (value: string) => /^(?:https?:|mailto:)/iu.test(value) ? value : undefined;
+// a `#` link is one of the console's own addresses (`#worktree=<id>` opens that Workspace), so it stays in this tab
+const safeLink = (value: string) => /^(?:https?:|mailto:|#)/iu.test(value) ? value : undefined;
 const inlinePattern = /(`([^`\n]+)`|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|\*([^*\n]+)\*|_([^_\n]+)_)/gu;
 const bareLinkPattern = /(?:https?:\/\/|mailto:|www\.)[^\s<]+/giu;
 const singleTildeListStrike = /(^|[^~])~([^~\n]+)~(?!~)/gu;
@@ -39,7 +40,7 @@ const inlineMarkdown = (text: string, key: string): ReactNode[] => {
     if (match[2] !== undefined) content.push(<code key={`${key}-${index}`}>{match[2]}</code>);
     else if (match[3] !== undefined && match[4] !== undefined) {
       const href = safeLink(match[4]);
-      content.push(href === undefined ? match[3] : <a key={`${key}-${index}`} href={href} target="_blank" rel="noreferrer">{match[3]}</a>);
+      content.push(href === undefined ? match[3] : href.startsWith('#') ? <a key={`${key}-${index}`} href={href}>{match[3]}</a> : <a key={`${key}-${index}`} href={href} target="_blank" rel="noreferrer">{match[3]}</a>);
     } else if (match[5] !== undefined || match[6] !== undefined) content.push(<strong key={`${key}-${index}`}>{match[5] ?? match[6]}</strong>);
     else if (match[7] !== undefined) content.push(<del key={`${key}-${index}`}>{match[7]}</del>);
     else content.push(<em key={`${key}-${index}`}>{match[8] ?? match[9]}</em>);

@@ -6,8 +6,9 @@ type Console = { agents: MockAgent[]; dismissed: string[] };
 
 const worktree = { id: 'app:/worktrees/cora', projectId: 'app', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'cora', available: true, pinned: false, order: 0 };
 const delta = { ...worktree, id: 'app:/worktrees/delta', label: 'Delta', path: '/worktrees/delta', branch: 'delta', pinned: true, order: 1 };
+const echo = { ...worktree, id: 'app:/worktrees/echo', label: 'Echo', path: '/worktrees/echo', branch: 'echo', order: 2 };
 
-// Two Agents at the Cora Worktree and a pinned, agentless Delta. The dashboard is served from
+// Two Agents at the Cora Worktree, a pinned, agentless Delta and an unpinned Echo with no tab. The dashboard is served from
 // `state`, so a test changes the Agents between refreshes.
 async function mockConsole(page: Page, state: Console) {
   await page.route('**/api/**', route => {
@@ -17,7 +18,7 @@ async function mockConsole(page: Page, state: Console) {
     if (path === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (path === '/api/dashboard') {
       const agents = state.agents.map(agent => ({ id: agent.id, sessionId: 'socket:$1', home: '/worktrees/cora', placeId: worktree.id, worktreeId: worktree.id, projectId: 'app', title: 'Ready', branch: 'cora', kind: agent.kind, queuedPromptCount: 0, ...(agent.attention === undefined ? {} : { attention: agent.attention }), ...(agent.hasMessageQuestion === true ? { hasMessageQuestion: true } : {}), ...(agent.unread === true ? { unread: true } : {}) }));
-      return route.fulfill({ json: { generation: 1, agents, projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree, delta] }] } });
+      return route.fulfill({ json: { generation: 1, agents, projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree, delta, echo] }] } });
     }
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
     const agentRoute = /^\/api\/agents\/([^/]+)\/(.+)$/u.exec(path);
@@ -150,6 +151,22 @@ test('an #agent= link opens its Place and selects it in the switcher; #worktree=
 
   await page.evaluate(() => { location.hash = `worktree=${encodeURIComponent('app:/worktrees/delta')}`; });
   await expect(page.getByRole('tab', { name: /^Delta — / })).toHaveAttribute('aria-selected', 'true');
+});
+
+test('a #worktree= link to a Worktree with no tab opens its Workspace with no panels, once', async ({ page }) => {
+  await mockConsole(page, { agents: [{ id: 'agent-1', kind: 'claude', attention: 'finished' }], dismissed: [] });
+  await page.goto('/#agent=agent-1');
+  await expect(page.getByRole('tab', { name: /^Cora — / })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: /^Echo — / })).toHaveCount(0);
+
+  await page.evaluate(() => { location.hash = `worktree=${encodeURIComponent('app:/worktrees/echo')}`; });
+  await expect(page.getByRole('tab', { name: /^Echo — / })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('region', { name: 'Empty workspace' })).toBeVisible();
+  await expect(page).not.toHaveURL(/#worktree=/u);
+
+  // an unknown id changes nothing
+  await page.evaluate(() => { location.hash = 'worktree=app%3A%2Fworktrees%2Fgone'; });
+  await expect(page.getByRole('tab', { name: /^Echo — / })).toHaveAttribute('aria-selected', 'true');
 });
 
 test('turning off one of two Agents leaves the panel on the other, and marks it read', async ({ page }) => {

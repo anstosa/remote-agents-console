@@ -9937,6 +9937,16 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     const keys = new Set(tabKey.split('\u0000'));
     setAgentChoice(current => Object.keys(current).every(key => keys.has(key)) ? current : Object.fromEntries(Object.entries(current).filter(([key]) => keys.has(key))));
   }, [tabKey]);
+  // a `#worktree=` link to a known Place with no tab opens its Workspace with no panels; read
+  // through a ref so a later hashchange sees the current Places, not those of the last tab change
+  const openLinkedPlace = useRef<(placeId: string) => void>(() => undefined);
+  openLinkedPlace.current = placeId => {
+    if (!worktrees.some(worktree => worktree.id === placeId) && !data?.places?.some(place => place.id === placeId)) return;
+    // spend the link; the tab publishes its own address once it opens
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+    setOverviewOpen(false);
+    openEmptyWorkspace(placeId);
+  };
   useEffect(() => {
     // activate initial and same-document links
     const activateLinkedItem = () => {
@@ -9951,7 +9961,11 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       switch (kind) {
         case 'worktree':
           linked = items.findIndex(item => item.placeId === target);
-          break;
+          // a followed link is spent: select publishes the tab's own address in its place, so a later
+          // tab change (its Place closing) cannot follow it again
+          if (linked >= 0) return select(linked);
+          openLinkedPlace.current(target);
+          return;
         case 'agent':
           // an Agent opens its Place's tab with the Agent chosen in the switcher
           linked = items.findIndex(item => item.agents.some(agent => agent.id === target));

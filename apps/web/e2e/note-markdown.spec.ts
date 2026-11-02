@@ -19,6 +19,7 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
     '   - ~Nested detail~',
     '',
     'Bare links work at https://example.com/bare and www.example.org/docs.',
+    'Open [the worktree](#worktree=wt%3A1) here.',
     'Keep ~literal tildes~ outside lists.',
     '',
     '> Important',
@@ -94,6 +95,8 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
   await expect(preview.getByRole('link', { name: 'the guide' })).toHaveAttribute('href', 'https://example.com/docs');
   await expect(preview.getByRole('link', { name: 'https://example.com/bare' })).toHaveAttribute('href', 'https://example.com/bare');
   await expect(preview.getByRole('link', { name: 'www.example.org/docs' })).toHaveAttribute('href', 'https://www.example.org/docs');
+  await expect(preview.getByRole('link', { name: 'the worktree' })).toHaveAttribute('href', '#worktree=wt%3A1');
+  await expect(preview.getByRole('link', { name: 'the worktree' })).not.toHaveAttribute('target');
   await expect(preview.locator(':scope > ul > li')).toHaveCount(2);
   await expect(preview.locator(':scope > ol')).toHaveCount(1);
   await expect(preview.locator(':scope > ol > li')).toHaveText([
