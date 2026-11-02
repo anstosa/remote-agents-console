@@ -88,14 +88,14 @@ function collector(describe: () => Promise<string | undefined>): { events: Struc
 // How a case launches: Sandboxed or not, the provider's scripted replies (or the one tool call it
 // makes first), environment the CLI and its holder get beyond the stub's (the operator's
 // `adapters.<kind>.env`), the policy's extra names, and whether the place is a repository's main
-// checkout or a linked Worktree of one.
-type LaunchOptions = { sandboxed?: boolean; replies?: StubReply[]; toolCall?: { name: string; arguments: object }; env?: Record<string, string>; sandboxEnv?: string[]; git?: 'main' | 'linked'; role?: 'conductor' };
+// checkout or a linked Worktree of one, and the CLI's own `settings` in its state directory.
+type LaunchOptions = { sandboxed?: boolean; replies?: StubReply[]; toolCall?: { name: string; arguments: object }; env?: Record<string, string>; sandboxEnv?: string[]; git?: 'main' | 'linked'; role?: 'conductor'; settings?: object };
 const nonce = 'contract-nonce-0123456789abcdef';
 
 // launch `client`'s CLI under the holder in a Workspace session, its events collected in order;
 // the place is `<root>/place` (a repository, or a linked Worktree of `<root>/repo`, when asked),
 // the console's private directory `<root>/private`
-async function launched(client: ContractClient, { sandboxed = false, replies, toolCall, env = {}, sandboxEnv = [], git: checkout, role }: LaunchOptions = {}) {
+async function launched(client: ContractClient, { sandboxed = false, replies, toolCall, env = {}, sandboxEnv = [], git: checkout, role, settings }: LaunchOptions = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-contract-')));
   const socketPath = join(root, 'tmux');
   const state = join(root, 'state');
@@ -117,6 +117,7 @@ async function launched(client: ContractClient, { sandboxed = false, replies, to
   expect((await run(tmux, ['-S', socketPath, 'set-option', '-t', 'work', '@rac_place', place.id])).code).toBe(0);
   const socket: SocketRef = { fingerprint: 'work', path: socketPath, device: 0, inode: 0 };
   const stub = await client.stub(provider.baseUrl, state);
+  if (settings !== undefined) await writeFile(join(state, 'settings.json'), JSON.stringify(settings));
   const configured = { program: process.execPath, args: stub.args, env: { ...stub.env, ...env }, launchable: true, sandbox: { allowedDomains: [], deniedDomains: [], allowWrite: [], denyWrite: [], denyRead: [], env: sandboxEnv } };
   const launch = new LaunchService(testConfig({ adapters: { [client.adapter.kind]: configured } }), socketFinder([socket]), new TmuxAdapter(), undefined, undefined, () => [], () => new Set(), async () => ({ socket, session: 'work' }), join(root, 'private'));
   const processes = holderProcesses(launch, { [client.adapter.kind]: configured }, kind => launch.adapterFiles(kind));
@@ -391,6 +392,53 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     expect((await client.adapter.conversations.list([home])).map(row => row.id)).toEqual([first]);
     expect(second).not.toBe(first);
   }, 60_000);
+
+  // a context so small that everything before the last prompt is summarized
+  const compactable = { compaction: { keepRecentTokens: 1 } };
+  const said = async (agent: Awaited<ReturnType<typeof launched>>, prompt: string) => {
+    expect(await agent.connection.deliver(prompt)).toBe('started');
+    await agent.next('turn', event => event.type === 'turn' && event.turn.type === 'settled');
+  };
+
+  it('compacts the Conversation between Turns, its summary focused by the operator\'s instructions, and frees the context', async () => {
+    const agent = await launched(client, { settings: compactable });
+    await agent.next('report');
+    await said(agent, 'First');
+    await said(agent, 'Second');
+    const before = agent.bodies.length;
+    expect(await agent.connection.compact({ instructions: 'Keep the colour' })).toEqual({ tokensBefore: expect.any(Number), tokensAfter: expect.any(Number) });
+    expect(agent.bodies.slice(before).join('')).toContain('Keep the colour');
+    // the context is unknown until the next answer
+    expect(agent.events.filter(event => event.type === 'usage').at(-1)).toEqual({ type: 'usage', usage: { cost: expect.any(Number) } });
+    expect(await agent.connection.compact({})).toEqual({ error: expect.any(String) });
+  }, 60_000);
+
+  it('hands the Conductor\'s compaction its own focus and appends the console\'s state to the summary, dropping the last one', async () => {
+    const agent = await launched(client, { role: 'conductor', settings: compactable });
+    await agent.next('report');
+    await said(agent, 'First');
+    await said(agent, 'Second');
+    let before = agent.bodies.length;
+    expect(await agent.connection.compact({ state: 'Workers you spawned:\n- Agent one', instructions: 'Keep the release plan' })).not.toHaveProperty('error');
+    const summarizing = agent.bodies.slice(before).join('');
+    expect(summarizing).toContain('handoff to itself');
+    expect(summarizing).toContain('Keep the release plan');
+    expect(summarizing).toContain('- Agent one');
+
+    // the next Turn sees the state after the summary
+    before = agent.bodies.length;
+    await said(agent, 'Third');
+    expect(agent.bodies[before]).toContain(JSON.stringify('<rac-console-state>\nWorkers you spawned:\n- Agent one\n</rac-console-state>').slice(1, -1));
+
+    // the next compaction's summary carries only the newer state
+    before = agent.bodies.length;
+    expect(await agent.connection.compact({ state: 'Workers you spawned:\n- Agent two' })).not.toHaveProperty('error');
+    expect(agent.bodies.slice(before).join('')).not.toContain('Agent one');
+    before = agent.bodies.length;
+    await said(agent, 'Fourth');
+    expect(agent.bodies[before]).toContain('- Agent two');
+    expect(agent.bodies[before]).not.toContain('Agent one');
+  }, 90_000);
 
   it('answers busy to a second prompt while a Turn runs', async () => {
     const { connection, next } = await launched(client);

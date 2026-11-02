@@ -9,7 +9,7 @@ import { placeHostRoot, type Place } from '../places/places.js';
 import { expandCommand } from '../launch/service.js';
 import { run } from '../tmux/command.js';
 import { serverCheckout } from '../workspaces/server-checkout.js';
-import { connectHolder, type AgentUsage, type HolderHello, type LineChannel, type PromptDisposition, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
+import { connectHolder, type AgentUsage, type CompactRequest, type HolderHello, type LineChannel, type PromptDisposition, type ModelInfo, type ModelSetting, type StructuredConnection, type StructuredEvent, type StructuredQuestion, type TranscriptItem, type TranscriptTool } from './structured.js';
 import { agentPanel, type InterruptOutcome, type QuestionAnswer, type TurnEvent } from './transport.js';
 import { validPrompt } from '../prompts/validation.js';
 import type { StructuredTurnTransport } from '../prompts/service.js';
@@ -656,6 +656,31 @@ export class StructuredAgents {
   async rename(id: string, name: string): Promise<'ok' | StructuredRefusal> {
     return await this.whileIdle(id, async ({ connection }) => await connection.renameConversation(name));
   }
+
+  /**
+   * Compact the Conversation while the Agent is idle, marking the transcript with what it freed; a
+   * refusal carries the Agent's reason. Prompts wait in the queue meanwhile. `state` is read only
+   * once the Agent is held, so it is as current as it can be.
+   */
+  async compact(id: string, { instructions, state }: { instructions?: string; state?: () => Promise<string> } = {}): Promise<'ok' | Exclude<StructuredRefusal, 'refused'> | { refused: string }> {
+    let reason = 'The agent did not compact.';
+    const outcome = await this.whileIdle(id, async ({ live, connection }) => {
+      // a summary without the console's state is still worth having
+      const known = await state?.().catch((error: unknown) => { console.error('[structured] the state for a compaction could not be read:', error); return undefined; });
+      const request: CompactRequest = { ...(instructions === undefined ? {} : { instructions }), ...(known === undefined ? {} : { state: known }) };
+      const result = await connection.compact(request);
+      if ('error' in result) { reason = result.error; return false; }
+      const tokens = (count: number) => `${Math.round(count / 1000)}k`;
+      this.notice(live, result.tokensBefore === undefined ? 'Compacted the conversation' : `Compacted the conversation: ${tokens(result.tokensBefore)} → about ${tokens(result.tokensAfter ?? 0)} tokens of context`);
+      return true;
+    });
+    // queued prompts held back meanwhile can go now
+    this.changed();
+    return outcome === 'refused' ? { refused: reason } : outcome;
+  }
+
+  /** How many tokens the Agent's context holds now, when its kind says; unknown again right after a compaction. */
+  contextTokens(id: string): number | undefined { return this.live.get(id)?.usage?.contextTokens; }
 
   /** The Allowed models the Agent can reach, in the operator's order, and the one it is on. */
   async models(id: string): Promise<{ models: ModelInfo[]; current?: ModelSetting } | undefined> {

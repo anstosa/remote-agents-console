@@ -229,11 +229,12 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
     if (tool !== undefined) tool.item = item;
     transcript(item);
   };
-  const usage = () => void request({ type: 'get_session_stats' }).then(response => {
+  const usage = (): Promise<void> => request({ type: 'get_session_stats' }).then(response => {
     const data = isObject(response.data) ? response.data : undefined;
     if (typeof data?.cost !== 'number') return;
-    const percent = isObject(data.contextUsage) && typeof data.contextUsage.percent === 'number' ? data.contextUsage.percent : undefined;
-    emit({ type: 'usage', usage: { cost: data.cost, ...(percent === undefined ? {} : { contextPercent: percent }) } });
+    // both are null after a compaction until the next answer
+    const context = isObject(data.contextUsage) ? data.contextUsage : {};
+    emit({ type: 'usage', usage: { cost: data.cost, ...(typeof context.percent === 'number' ? { contextPercent: context.percent } : {}), ...(typeof context.tokens === 'number' ? { contextTokens: context.tokens } : {}) } });
   });
   // the Conversation's transcript from its history: on a launch only when it has one, and after
   // a Conversation change always, so a new one starts empty
@@ -323,7 +324,7 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
         }
         void refresh();
         void history(false);
-        usage();
+        void usage();
         return;
       case 'queue_update':
         emit({ type: 'steers', pending: strings(record.steering) });
@@ -362,7 +363,7 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
         const shown = answerText(message);
         if (said !== '') answer = said;
         if (shown !== '') transcript({ id: next('m'), kind: 'message', role: 'assistant', text: shown });
-        usage();
+        void usage();
         return;
       }
       case 'tool_execution_start': {
@@ -417,7 +418,7 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
   if (attached !== undefined) {
     void refresh();
     void history(false);
-    usage();
+    void usage();
   }
 
   return {
@@ -435,7 +436,7 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
       if (keep !== undefined) await apply(keep);
       await refresh();
       void history(true);
-      usage();
+      void usage();
       return true;
     },
     async switchConversation(reference) {
@@ -446,13 +447,24 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
       if (own !== undefined) await apply(own);
       await refresh();
       void history(true);
-      usage();
+      void usage();
       return true;
     },
     async renameConversation(name) {
       if (!accepted(await request({ type: 'set_session_name', name }))) return false;
       await refresh();
       return true;
+    },
+    // a `state` goes to the RAC extension's compaction hook, which tells it from plain instructions
+    // by this shape; Pi hands the instructions to that hook as given
+    async compact({ instructions, state }) {
+      const customInstructions = state === undefined ? instructions : JSON.stringify({ rac: 'compact', state, ...(instructions === undefined ? {} : { instructions }) });
+      const response = await request({ type: 'compact', ...(customInstructions === undefined ? {} : { customInstructions }) });
+      // read before the operation ends, so no one sees the context as full still
+      await usage();
+      if (response.success !== true) return { error: typeof response.error === 'string' ? response.error : 'The agent did not compact.' };
+      const data = isObject(response.data) ? response.data : {};
+      return { ...(typeof data.tokensBefore === 'number' ? { tokensBefore: data.tokensBefore } : {}), ...(typeof data.estimatedTokensAfter === 'number' ? { tokensAfter: data.estimatedTokensAfter } : {}) };
     },
     async models() {
       const data = (await request({ type: 'get_available_models' })).data;

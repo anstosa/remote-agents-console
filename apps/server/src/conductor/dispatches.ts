@@ -129,6 +129,11 @@ export class Dispatches implements PromptDispatchHooks {
     });
   }
 
+  /** The prompts `from` dispatched whose end has not been reported to it yet. */
+  async open(from: string): Promise<Array<{ promptId: string; to: string; delivered: boolean }>> {
+    return (await this.load()).filter(record => record.from === from).map(record => ({ promptId: record.promptId, to: record.to, delivered: record.delivered === true }));
+  }
+
   async handedOver(fromAgentId: string, toAgentId: string): Promise<void> {
     await this.mutate(records => {
       const moved = records.filter(record => record.to === fromAgentId);

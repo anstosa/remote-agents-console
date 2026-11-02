@@ -24,7 +24,7 @@ import { TmuxAdapter } from './tmux/adapter.js';
 import { maxPromptAttachmentBytes, PromptService, promptScope, type PromptAttachment } from './prompts/service.js';
 import { launchTmuxAgent, TmuxTransport } from './transports/tmux.js';
 import { consoleTokenPrefix, holderProcesses, StructuredAgents } from './transports/structured-agents.js';
-import { Conductor } from './conductor/service.js';
+import { Conductor, handoffStateText } from './conductor/service.js';
 import { Dispatches, reviewReportText } from './conductor/dispatches.js';
 import { redactIntegrationText } from './integrations/text.js';
 import { promptAttachmentBytes, promptAttachmentData, promptAttachmentName, validPrompt, validPromptAttachments } from './prompts/validation.js';
@@ -92,7 +92,7 @@ import { loadInstanceIconSvg, isInstanceIcon, type InstanceIcon } from './instan
 import { instanceAttention, RemoteInstanceStatusPoller, validInstanceStatusRequest, type InstanceStatus } from './instance-status.js';
 import { createHmac, randomBytes } from 'node:crypto';
 import { integrationConfigForRemotes, parseDavoSettings, resolveAgentProgram, reviewConfig } from './config/schema.js';
-import { OrchestrationService } from './orchestration/index.js';
+import { OrchestrationService, type AgentStatusV1, type PlaceScope } from './orchestration/index.js';
 import { IntegrationAuthService, registerIntegrationAuthServer, type IntegrationScope, type LocalIntegrationSubject } from './integrations/auth/index.js';
 import { IntegrationPolicyService } from './integrations/policy/service.js';
 import { IntegrationAuditService } from './integrations/audit/service.js';
@@ -140,6 +140,8 @@ declare module 'fastify' {
 }
 // how long a pane must be quiet after output before its live frame is captured
 const logQuietWindowMs = 250;
+// the operator's instructions for a compaction's summary
+const maxCompactInstructions = 4000;
 const body = (request: FastifyRequest): Record<string, unknown> => (request.body && typeof request.body === 'object' ? request.body as Record<string, unknown> : {});
 // a path relative to a Place's folder that cannot climb out of it: no leading `/`, no `..`
 // segment, and nothing a shell line or tmux could misread
@@ -585,6 +587,8 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (secureOrigin) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     return payload;
   });
+  // the Agents a Conductor sees through its MCP tools, set once those are served
+  let conductorAgents: ((conductorId: string) => Promise<AgentStatusV1[]>) | undefined;
   // expose the same shared services through remote transports: the integrations' (OAuth, Realtime,
   // federation) when enabled, and `/mcp` for the Conductor whenever one is configured (ADR 0018)
   if (integrationConfig.enabled || config.conductor !== undefined) {
@@ -642,16 +646,24 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const integrationGateway = new IntegrationGateway({ config: integrationConfig, instanceId: config.publicOrigin.origin, orchestration, policy: integrationPolicy, audit: integrationAudit, control: integrationControl, ...(integrationConfig.multiInstance.enabled ? { forward: federationForwarder(config.remoteServers, federationSecret) } : {}) });
     const realtimeScopes: IntegrationScope[] = ['status:read', 'logs:read', 'files:read', ...(integrationConfig.realtime.writeToolsEnabled ? ['prompts:write', 'agents:control', 'stack:operate', 'review:write'] as IntegrationScope[] : [])];
     const conductorConfig = config.conductor;
+    // the Conductor's scope: the configured Projects and any Place whose Workspace exists
+    const conductorPlaces = (): PlaceScope => {
+      const configured = new Set(config.projects.map(project => project.id));
+      const workspaces = discovery.workspacePlaces();
+      return worktree => configured.has(worktree.projectId) || workspaces.has(worktree.id);
+    };
     const conductorAccess = conductorConfig === undefined ? undefined : {
       prefix: consoleTokenPrefix,
-      // the Conductor whose current process holds the token, scoped to the configured Projects and any Place whose Workspace exists
+      // the Conductor whose current process holds the token
       authenticate: async (token: string) => {
         const holder = await structuredAgents.tokenHolder(token);
         if (holder?.role !== 'conductor') return undefined;
-        const configured = new Set(config.projects.map(project => project.id));
-        const workspaces = discovery.workspacePlaces();
-        return { authentication: 'conductor' as const, subjectId: holder.id, clientId: 'conductor', audience: resource, scopes: [...conductorConfig.scopes], places: (worktree: { id: string; projectId: string }) => configured.has(worktree.projectId) || workspaces.has(worktree.id) };
+        return { authentication: 'conductor' as const, subjectId: holder.id, clientId: 'conductor', audience: resource, scopes: [...conductorConfig.scopes], places: conductorPlaces() };
       }
+    };
+    conductorAgents = async conductorId => {
+      const listed = await orchestration.scoped(conductorPlaces(), conductorId).listAgents();
+      return listed.ok ? listed.value : [];
     };
     const derivedRealtimeToken = createHmac('sha256', process.env.RAC_SESSION_SECRET ?? '').update('remote-agents:realtime-mcp:v1').digest('base64url');
     const realtimeToken = process.env.RAC_REALTIME_MCP_TOKEN?.trim() || derivedRealtimeToken;
@@ -1029,7 +1041,21 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const conductorProject = config.projects.find(project => project.id === config.conductor?.projectId);
   if (config.conductor !== undefined) structuredAgents.useConductor({ endpoint: `${config.publicOrigin.origin}/mcp`, model: { model: config.conductor.model, ...(config.conductor.effort === undefined ? {} : { effort: config.conductor.effort }) }, scriptDeadlineMs: config.conductor.scriptDeadlineMinutes * 60_000 });
   const conductorPlaceId = conductorProject === undefined ? undefined : worktreeWireId(conductorProject.id, conductorProject.identity);
-  const conductor = new Conductor(config.conductor, structuredAgents, conductorPlaceId, async () => conductorPlaceId === undefined ? undefined : await resolvePlace(conductorPlaceId), message => { void push.notify(message).catch(() => undefined); });
+  // what the console appends to the Conductor's summary when it compacts: its workers, open
+  // dispatches and Watches, and what else in its scope is busy
+  const conductorHandoff = async (conductorId: string): Promise<string> => {
+    const workers = (await structuredAgents.agents()).filter(agent => agent.structured?.spawnedBy === conductorId);
+    const listed = await conductorAgents?.(conductorId) ?? [];
+    const worktreeOf = (id: string) => { const worktreeId = listed.find(agent => agent.id === id)?.worktreeId; return worktreeId === undefined ? {} : { worktreeId }; };
+    return handoffStateText({
+      at: new Date(),
+      workers: workers.map(worker => ({ id: worker.id, ...worktreeOf(worker.id), state: worker.structured?.lifecycle === 'live' ? worker.attention : worker.structured?.lifecycle ?? worker.attention, ...(worker.structured?.model === undefined ? {} : { model: worker.structured.model.id }) })),
+      dispatches: await dispatches.open(conductorId),
+      watches: await watches.list(conductorId),
+      busy: listed.filter(agent => agent.id !== conductorId && agent.attention !== 'finished' && !workers.some(worker => worker.id === agent.id)).map(agent => ({ id: agent.id, ...worktreeOf(agent.id), state: agent.attention }))
+    });
+  };
+  const conductor = new Conductor(config.conductor, structuredAgents, conductorPlaceId, async () => conductorPlaceId === undefined ? undefined : await resolvePlace(conductorPlaceId), message => { void push.notify(message).catch(() => undefined); }, conductorHandoff);
   // bind configured actions to existing host, prompt and normal-launch engines
   const buttonActions = deps.buttonActions ?? new ButtonActionService(buttonCatalog, {
     resolvePlace,
@@ -1932,6 +1958,22 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (started === 'ok') return reply.code(204).send();
     if (started === 'unavailable') return reply.code(404).send({ error: 'agent unavailable' });
     return reply.code(409).send({ error: started === 'busy' ? 'The agent is working. Start a new conversation once its turn ends.' : 'The agent refused to start a new conversation.' });
+  });
+  // compact a structured Agent's Conversation between Turns, with optional instructions for its
+  // summary; the Conductor's summary also carries the console's state. A pane's CLI compacts with
+  // its own `/compact`.
+  app.post('/api/agents/:id/compact', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+    controlled(request, true);
+    const id = (request.params as { id: string }).id;
+    const agent = await structuredAgents.agent(id);
+    if (agent === undefined) return reply.code(await discovery.target(id) === undefined ? 404 : 409).send({ error: 'This agent compacts with its own /compact command.' });
+    const raw = body(request).instructions;
+    if (raw !== undefined && (typeof raw !== 'string' || raw.length > maxCompactInstructions)) return reply.code(400).send({ error: `Instructions are text of at most ${maxCompactInstructions} characters.` });
+    const instructions = raw?.trim() || undefined;
+    const compacted = agent.structured?.role === 'conductor' ? await conductor.compact(instructions) : await structuredAgents.compact(id, instructions === undefined ? {} : { instructions });
+    if (compacted === 'ok') return reply.code(204).send();
+    if (compacted === 'unavailable') return reply.code(404).send({ error: 'agent unavailable' });
+    return reply.code(409).send({ error: compacted === 'busy' ? 'The agent is working. Compact once its turn ends.' : compacted.refused });
   });
   // the Allowed models a structured Agent can switch to, in the operator's order, and the one it is on
   app.get('/api/agents/:id/models', async (request, reply) => {

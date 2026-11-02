@@ -12,7 +12,7 @@ import { QueuedPromptService } from '../src/prompts/queue.js';
 import { StructuredAgents, type HolderRef, type RawLine, type StructuredLaunch, type StructuredProcesses } from '../src/transports/structured-agents.js';
 import { PushService } from '../src/push-service.js';
 import { AgentNotificationCoordinator, type AgentNotification } from '../src/notifications.js';
-import type { PromptDisposition, LaunchReport, ModelInfo, ModelSetting, StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
+import type { CompactRequest, PromptDisposition, LaunchReport, ModelInfo, ModelSetting, StructuredConnection, StructuredEvent } from '../src/transports/structured.js';
 import type { QuestionAnswer } from '../src/transports/transport.js';
 import { WorktreeNoteService } from '../src/notes/service.js';
 import type { AllowedModel } from '../src/adapters/types.js';
@@ -41,6 +41,8 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // Each delivery answers with the next of `dispositions`, then `started` (`gone`: its process exits
 // with the delivery unanswered, which the client answers as refused); a steer waits as pending
 // until the Agent takes it or a cancel returns it, and a cancel aborts the Turn before it answers.
+// A compaction is recorded in `compactions` and frees its context: it reports no context tokens
+// until the next answer, as Pi does.
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
 // reports `attached` (as a client reading its state afresh does), or finds the holder `gone`.
@@ -50,6 +52,7 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
   const operations: string[] = [];
   const dispositions: Array<PromptDisposition | 'gone'> = [];
   const answers: Array<[string, QuestionAnswer]> = [];
+  const compactions: CompactRequest[] = [];
   let pending: string[] = [];
   let emit: (event: StructuredEvent) => void = () => {};
   // each process's own events, by its Agent's id
@@ -61,7 +64,8 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
   const attaches: HolderRef[] = [];
   const grants: Array<{ url: string; token: string }> = [];
   let reporting = reports;
-  const connection = (): StructuredConnection => ({
+  // `own` is the process's own events, as `emit` was when it started
+  const connection = (own = emit): StructuredConnection => ({
     deliver: async prompt => {
       delivered.push(prompt);
       const disposition = dispositions.shift() ?? 'started';
@@ -72,6 +76,12 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
     newConversation: async () => { operations.push('new'); if (refuses) return false; emit({ type: 'conversation', id: `new-${conversations += 1}` }); return true; },
     switchConversation: async reference => { operations.push(`switch ${reference}`); if (refuses) return false; emit({ type: 'conversation', id: 'switched' }); if (switchedTo !== undefined) emit({ type: 'model', current: switchedTo }); return true; },
     renameConversation: async name => { operations.push(`rename ${name}`); if (refuses) return false; emit({ type: 'conversation', id: 'named', name }); return true; },
+    compact: async request => {
+      compactions.push(request);
+      if (refuses) return { error: 'Nothing to compact (session too small)' };
+      own({ type: 'usage', usage: { cost: 1 } });
+      return { tokensBefore: 152_400, tokensAfter: 31_200 };
+    },
     models: async () => models,
     setModel: async setting => { operations.push(`model ${setting.model} ${setting.effort}`); if (refuses || unavailable.includes(setting.model)) return false; emit({ type: 'model', current: setting }); return true; },
     steer: async prompt => { pending = [...pending, prompt]; emit({ type: 'steers', pending }); return true; },
@@ -122,7 +132,7 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
       return sandboxGeneration;
     }
   };
-  return { processes, delivered, launches, attaches, grants, operations, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), emitTo: (id: string, event: StructuredEvent) => emitters.get(id)?.(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
+  return { processes, delivered, launches, attaches, grants, operations, compactions, dispositions, answers, steers: () => pending, cancels: () => cancels, report: () => lastReport!, emit: (event: StructuredEvent) => emit(event), emitTo: (id: string, event: StructuredEvent) => emitters.get(id)?.(event), closed: () => closed, read: (count: number) => { lines = count; }, quiet: () => { reporting = false; } };
 }
 
 // the integration gateway's state and audit files, in a temporary folder
@@ -509,6 +519,36 @@ describe('a structured Agent\'s Named conversations', () => {
     expect((await app.inject({ method: 'POST', url: `/api/agents/${id}/conversations/new`, headers })).statusCode).toBe(409);
     expect(await dashboardAgent(id)).toMatchObject({ conversationId: 'first' });
     await app.close();
+  });
+
+  it('compacts between Turns with the operator\'s instructions, marks the transcript, and passes on a refusal', async () => {
+    const fake = fakeAgent();
+    const { app, headers } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+    const compact = async (payload: object) => await app.inject({ method: 'POST', url: `/api/agents/${id}/compact`, headers, payload });
+
+    fake.emit({ type: 'turn', turn: { type: 'started' } });
+    expect((await compact({})).statusCode).toBe(409);
+    fake.emit({ type: 'turn', turn: { type: 'settled', message: 'done' } });
+    expect((await compact({ instructions: 42 })).statusCode).toBe(400);
+    expect((await compact({ instructions: 'x'.repeat(4001) })).statusCode).toBe(400);
+    expect(fake.compactions).toEqual([]);
+
+    expect((await compact({ instructions: '  Keep the PR numbers  ' })).statusCode).toBe(204);
+    expect((await compact({ instructions: ' ' })).statusCode).toBe(204);
+    // an ordinary Agent is never sent the console's state
+    expect(fake.compactions).toEqual([{ instructions: 'Keep the PR numbers' }, {}]);
+    const items = (await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json().items;
+    expect(items.at(-1)).toMatchObject({ kind: 'notice', text: 'Compacted the conversation: 152k → about 31k tokens of context' });
+    await app.close();
+
+    const refusing = fakeAgent({ refuses: true });
+    const other = await consoleWith(refusing);
+    const otherId: string = (await other.app.inject({ method: 'POST', url: '/api/agents/launch', headers: other.headers, payload: { kind: 'pi' } })).json().agentId;
+    const refused = await other.app.inject({ method: 'POST', url: `/api/agents/${otherId}/compact`, headers: other.headers, payload: {} });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toEqual({ error: 'Nothing to compact (session too small)' });
+    await other.app.close();
   });
 
   it('resumes a listed Pi Conversation by launching a Pi Agent on it', async () => {
@@ -2154,6 +2194,41 @@ describe('the Conductor\'s Watches', () => {
     const later = async (app = console.app) => { clock.now += 60_000; await app.watches.check(); };
     return { ...console, conductor, dashboard, call, worktree, github, windows, repo, deploy, later, told: () => eventsTo(console, conductor, fake) };
   }
+
+  it('compacts once its context passes 150k tokens between Turns, appending the console\'s state of its work', async () => {
+    const fake = fakeAgent();
+    const { app, headers, conductor, call, worktree } = await watching(fake);
+    const spawned = (await call('spawn_agent', { worktree_id: worktree })).data.agent_id as string;
+    const busy = (await app.inject({ method: 'POST', url: `/api/worktrees/${encodeURIComponent(worktree)}/launch`, headers, payload: { kind: 'pi' } })).json().agentId as string;
+    fake.emitTo(busy, { type: 'turn', turn: { type: 'started' } });
+    const sent = (await call('queue_prompt', { agent_id: busy, prompt: 'Then lint' })).data.prompt_id as string;
+    const watch = (await call('watch_process', { worktree_id: worktree, process: 'dev' })).data.watch_id as string;
+
+    // not mid-Turn, nor below the threshold
+    fake.emitTo(conductor, { type: 'turn', turn: { type: 'started' } });
+    fake.emitTo(conductor, { type: 'usage', usage: { cost: 1, contextTokens: 160_000 } });
+    fake.emitTo(conductor, { type: 'usage', usage: { cost: 1, contextTokens: 160_000 } });
+    expect(fake.compactions).toEqual([]);
+    fake.emitTo(conductor, { type: 'turn', turn: { type: 'settled', message: 'done' } });
+    await vi.waitFor(() => expect(fake.compactions).toHaveLength(1));
+
+    const state = fake.compactions[0]!.state!;
+    expect(fake.compactions[0]!.instructions).toBeUndefined();
+    expect(state).toContain('may have changed since');
+    expect(state).toContain(`Workers you spawned:\n- Agent ${spawned} in Worktree ${worktree}: idle`);
+    expect(state).toContain(`${sent} to Agent ${busy}: still in its queue`);
+    expect(state).toContain(`${watch} (process): Stack process dev in`);
+    expect(state).toContain(`Other Agents in your scope that are working or waiting on the operator:\n- Agent ${busy} in Worktree ${worktree}: working`);
+    // the freed context is not compacted again
+    fake.emitTo(conductor, { type: 'turn', turn: { type: 'settled', message: 'done' } });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(fake.compactions).toHaveLength(1);
+
+    // the operator's own compaction carries their instructions beside the state
+    expect((await app.inject({ method: 'POST', url: `/api/agents/${conductor}/compact`, headers, payload: { instructions: 'Keep the release plan' } })).statusCode).toBe(204);
+    expect(fake.compactions[1]).toMatchObject({ instructions: 'Keep the release plan', state: expect.stringContaining('Your Watches:') });
+    await app.close();
+  });
 
   // the comparisons themselves are watches-github.test.ts's; these are the tools, the queue and deploys
   it('watches a pull request: settled checks and a new thread are one event, nothing repeats, and merging ends it', async () => {

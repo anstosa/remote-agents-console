@@ -1969,6 +1969,13 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* keep power actions and restart choices compact */
 .more-menu.agent-power-menu { width: 13rem; }
 .more-menu.agent-power-menu .agent-power-off { color: var(--red); }
+.more-menu.agent-power-menu.compacting { width: min(22rem, calc(100vw - 1rem)); }
+.agent-compact-form { display: grid; gap: .5rem; padding: .4rem; }
+.agent-compact-form label small { color: var(--subtext-0); font-weight: 500; }
+.agent-compact-form textarea { min-height: 5.5rem; padding: .5rem; font-size: .78rem; letter-spacing: normal; }
+.agent-compact-form p { margin: 0; color: var(--subtext-0); font-weight: 500; letter-spacing: normal; white-space: normal; }
+.more-menu .agent-compact-form button { justify-content: center; border: 1px solid var(--blue); color: var(--blue); }
+.more-menu .agent-compact-form button:hover { background: color-mix(in srgb, var(--blue) 14%, transparent); }
 .flyout-menu[data-flyout-side="above"] { top: auto; bottom: calc(100% + .4rem); }
 .flyout-menu[data-flyout-side="below"] { top: calc(100% + .4rem); bottom: auto; }
 .more-menu button { width: 100%; justify-content: flex-start; border: 0; background: transparent; color: var(--text); box-shadow: none; white-space: nowrap; transition: background-color .15s ease, color .15s ease; }

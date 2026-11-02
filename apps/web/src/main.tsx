@@ -2345,8 +2345,11 @@ type RestartAs = { label: string; resolution?: LaunchResolution; onLaunch: (choi
 // `disabledReason` holds the menu shut (an Agent at work) and explains why in the button's title.
 // An Agent outside a Worktree (Scratch, a directory Project) has no Restart: Turn off closes it.
 type NewTaskPower = { agentId: string; worktreeId?: string; configured: boolean; onOperationFeedback: (feedback: Omit<OperationFeedback, 'id'>) => void };
-// the Conductor's menu offers only Restart: it has no Clear and no Turn off
-type AgentPowerMenuProps = { pending: boolean; progressColor?: ProgressColor; hidden?: boolean; disabledReason?: string; className?: string; onTurnOff?: () => void; onRestart?: () => void; onClear?: () => void; restartAs?: RestartAs; newTask?: NewTaskPower };
+// the Conductor's menu offers only Restart and Compact: it has no Clear and no Turn off.
+// `onCompact` (a structured Agent's) opens a page asking for optional instructions for the summary.
+type AgentPowerMenuProps = { pending: boolean; progressColor?: ProgressColor; hidden?: boolean; disabledReason?: string; className?: string; onTurnOff?: () => void; onRestart?: () => void; onClear?: () => void; onCompact?: (instructions?: string) => void; restartAs?: RestartAs; newTask?: NewTaskPower };
+// as the server allows
+const maxCompactInstructions = 4000;
 // keep task availability and the handoff alive while the power flyout closes
 function useNewTaskPowerOption(task: NewTaskPower | undefined, open: boolean, closeMenu: () => void): ReactNode {
   const [availability, setAvailability] = useState<NewTaskAvailability>();
@@ -2431,11 +2434,12 @@ function AgentPowerMenu(props: AgentPowerMenuProps) {
   const { pending, hidden = false, disabledReason, className = 'danger icon-button deactivate-agent', onRestart } = props;
   const adapters = useContext(AdaptersContext);
   const [open, setOpen] = useState(false);
-  const [view, setView] = useState<'root' | 'restart-as'>('root');
+  const [view, setView] = useState<'root' | 'restart-as' | 'compact'>('root');
+  const [instructions, setInstructions] = useState('');
   const { anchorRef, flyoutRef, style } = useViewportFlyout(open);
   const newTaskOption = useNewTaskPowerOption(props.newTask, open, () => setOpen(false));
-  // reopen every menu on its root page
-  useEffect(() => { if (!open) setView('root'); }, [open]);
+  // reopen every menu on its root page, with no instructions left over
+  useEffect(() => { if (!open) { setView('root'); setInstructions(''); } }, [open]);
   // choose one power action
   const choose = (action: () => void) => {
     setOpen(false);
@@ -2447,13 +2451,20 @@ function AgentPowerMenu(props: AgentPowerMenuProps) {
   // a held menu closes rather than stranding an open flyout
   useEffect(() => { if (disabledReason !== undefined) setOpen(false); }, [disabledReason]);
   // Restart as… sits between Restart and Clear
-  const stateActions = <>{onRestart !== undefined && <button type="button" role="menuitem" onClick={() => choose(onRestart)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7L20 7.6M20 3v4.6h-4.6" /></svg>Restart</button>}{restartAs !== undefined && <button type="button" role="menuitem" data-context-flyout aria-haspopup="menu" onClick={() => setView('restart-as')}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7L20 7.6M20 3v4.6h-4.6" /></svg>Restart as…</button>}{props.onClear !== undefined && <button type="button" role="menuitem" onClick={() => choose(props.onClear!)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 15 8-8 5 5-8 8H4v-5Zm7-7 5 5M10 20h10" /></svg>Clear</button>}</>;
+  const stateActions = <>{onRestart !== undefined && <button type="button" role="menuitem" onClick={() => choose(onRestart)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7L20 7.6M20 3v4.6h-4.6" /></svg>Restart</button>}{restartAs !== undefined && <button type="button" role="menuitem" data-context-flyout aria-haspopup="menu" onClick={() => setView('restart-as')}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7L20 7.6M20 3v4.6h-4.6" /></svg>Restart as…</button>}{props.onCompact !== undefined && <button type="button" role="menuitem" data-context-flyout aria-haspopup="dialog" onClick={() => setView('compact')}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l5 5m0-4v4H5M20 4l-5 5m0-4v4h4M4 20l5-5m0 4v-4H5M20 20l-5-5m0 4v-4h4" /></svg>Compact…</button>}{props.onClear !== undefined && <button type="button" role="menuitem" onClick={() => choose(props.onClear!)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 15 8-8 5 5-8 8H4v-5Zm7-7 5 5M10 20h10" /></svg>Clear</button>}</>;
   const restartAsPage = restartAs === undefined ? null : <LaunchMenu verb="Restart" label={restartAs.label} resolution={restartAs.resolution} onLaunch={choice => choose(() => restartAs.onLaunch(choice))} />;
+  const onCompact = props.onCompact;
+  const compactPage = onCompact === undefined ? null : <form className="agent-compact-form" onSubmit={event => { event.preventDefault(); choose(() => onCompact(instructions.trim() || undefined)); }}>
+    <label htmlFor="agent-compact-instructions">Instructions for the summary <small>(optional)</small></label>
+    <textarea id="agent-compact-instructions" autoFocus value={instructions} maxLength={maxCompactInstructions} placeholder="e.g. Keep the release plan and the open PR numbers" onChange={event => setInstructions(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+    <p>Summarizes the conversation so far to free context. Prompts wait in the queue until it is done.</p>
+    <button type="submit">Compact</button>
+  </form>;
   // Turn off at the foot of the menu
   const footAction = props.onTurnOff !== undefined && <button className="agent-power-off" type="button" role="menuitem" onClick={() => choose(props.onTurnOff!)}><svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9m5.7-5.7a8 8 0 1 1-11.4 0" /></svg>Turn off</button>;
   const menuLabel = 'Agent power options';
   // keep restart choices in the same compact power flyout
-  return <><span className="power-menu-wrap" ref={anchorRef} hidden={hidden}><button className={`${className}${progressBorder(pending, props.progressColor ?? 'red')}`} type="button" disabled={pending || disabledReason !== undefined || hidden} aria-busy={pending || undefined} aria-label={menuLabel} data-context-flyout aria-expanded={open && !hidden} aria-haspopup="menu" title={disabledReason ?? menuLabel} onClick={() => setOpen(current => !current)}><ProgressRing busy={pending} /><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9m5.7-5.7a8 8 0 1 1-11.4 0" /></svg></button></span>{open && !hidden && <FlyoutPortal onDismiss={() => setOpen(false)}><div className="more-menu flyout-menu agent-power-menu" ref={flyoutRef} style={style} role="menu" aria-label={menuLabel}>{view === 'restart-as' && restartAs !== undefined ? restartAsPage : <>{stateActions}{newTaskOption}{footAction}</>}</div></FlyoutPortal>}</>;
+  return <><span className="power-menu-wrap" ref={anchorRef} hidden={hidden}><button className={`${className}${progressBorder(pending, props.progressColor ?? 'red')}`} type="button" disabled={pending || disabledReason !== undefined || hidden} aria-busy={pending || undefined} aria-label={menuLabel} data-context-flyout aria-expanded={open && !hidden} aria-haspopup="menu" title={disabledReason ?? menuLabel} onClick={() => setOpen(current => !current)}><ProgressRing busy={pending} /><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9m5.7-5.7a8 8 0 1 1-11.4 0" /></svg></button></span>{open && !hidden && <FlyoutPortal onDismiss={() => setOpen(false)}>{view === 'compact' && compactPage !== null ? <div className="more-menu flyout-menu agent-power-menu compacting" ref={flyoutRef} style={style} role="dialog" aria-label="Compact the conversation">{compactPage}</div> : <div className="more-menu flyout-menu agent-power-menu" ref={flyoutRef} style={style} role="menu" aria-label={menuLabel}>{view === 'restart-as' && restartAs !== undefined ? restartAsPage : <>{stateActions}{newTaskOption}{footAction}</>}</div>}</FlyoutPortal>}</>;
 }
 
 // render reusable mobile terminal controls
@@ -7881,6 +7892,24 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
       if (mounted.current) setClearing(false);
     }
   };
+  // compact a structured Agent's conversation between Turns; the Conductor's summary also carries the console's state
+  const [compacting, setCompacting] = useState(false);
+  const compact = async (instructions?: string) => {
+    if (compacting) return;
+    setCompacting(true);
+    const label = displayLabel;
+    onOperationFeedback({ tone: 'pending', message: `Compacting ${label}…`, detail: 'Summarizing its conversation to free context. This can take a minute.', worktreeId: agent.worktreeId });
+    try {
+      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(instructions === undefined ? {} : { instructions }) });
+      if (!response.ok) return onOperationFeedback({ tone: 'error', message: `${label} could not compact`, detail: await launchError(response), worktreeId: agent.worktreeId });
+      onOperationFeedback({ tone: 'success', message: `${label} compacted`, detail: 'Its conversation continues from a summary.', worktreeId: agent.worktreeId });
+    } catch {
+      onOperationFeedback({ tone: 'error', message: `${label} could not compact`, detail: 'The console could not be reached. The conversation was not compacted.', worktreeId: agent.worktreeId });
+    } finally {
+      // avoid updating an unmounted agent panel
+      if (mounted.current) setCompacting(false);
+    }
+  };
   // the inline question the dashboard reported for this agent (OMX files); the
   // Log socket supplies the parsed one, and the dashboard's takes precedence
   // a structured Agent's open questions page one at a time, each dismissable
@@ -7907,7 +7936,8 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     } catch { onOperationFeedback({ tone: 'error', message: 'The Conductor could not restart', detail: 'The console could not be reached.' }); }
     finally { if (mounted.current) setRestarting(false); }
   };
-  const power = conductor ? <AgentPowerMenu className="panel-header-action agent-power" pending={restarting} progressColor="yellow" hidden={active} {...(active ? { disabledReason: 'Cancel the Conductor’s work before restarting it' } : {})} onRestart={() => void restartConductor()} /> : <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || clearing || deactivating || deleting} progressColor={restarting ? 'yellow' : 'red'} hidden={active} {...(active ? { disabledReason: 'Cancel the agent’s work before restarting, clearing or turning it off' } : {})} onClear={() => void clear()} onTurnOff={() => void (agent.worktreeId === undefined ? remove() : deactivate())} newTask={agent.worktreeId !== undefined || agent.placeId === undefined ? { agentId: agent.id, worktreeId: agent.worktreeId, configured: agent.newTaskConfigured === true, onOperationFeedback } : undefined} {...(agent.worktreeId === undefined ? {} : { onRestart: () => void restart(), restartAs: { label: displayLabel, resolution: agent.launch, onLaunch: choice => void restart(choice) } })} />;
+  const onCompact = agent.structured === undefined ? undefined : (instructions?: string) => void compact(instructions);
+  const power = conductor ? <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || compacting} progressColor={compacting ? 'blue' : 'yellow'} hidden={active} {...(active ? { disabledReason: 'Cancel the Conductor’s work before restarting it' } : {})} onRestart={() => void restartConductor()} onCompact={onCompact} /> : <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || clearing || compacting || deactivating || deleting} progressColor={restarting ? 'yellow' : compacting ? 'blue' : 'red'} hidden={active} {...(active ? { disabledReason: 'Cancel the agent’s work before restarting, clearing or turning it off' } : {})} onClear={() => void clear()} onCompact={onCompact} onTurnOff={() => void (agent.worktreeId === undefined ? remove() : deactivate())} newTask={agent.worktreeId !== undefined || agent.placeId === undefined ? { agentId: agent.id, worktreeId: agent.worktreeId, configured: agent.newTaskConfigured === true, onOperationFeedback } : undefined} {...(agent.worktreeId === undefined ? {} : { onRestart: () => void restart(), restartAs: { label: displayLabel, resolution: agent.launch, onLaunch: choice => void restart(choice) } })} />;
   const title = conversationName ?? displayLabel;
   const switcher = <AgentSwitcher agent={agent} agents={agents} title={title} placeLabel={displayLabel} onSelect={onSelectAgent} />;
   const model = agent.structured?.model;
