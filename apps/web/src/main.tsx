@@ -11177,6 +11177,8 @@ function App() {
   const [updatingAgent, setUpdatingAgent] = useState<AgentKind>();
   const [agentUpdateError, setAgentUpdateError] = useState('');
   const [versionCheckError, setVersionCheckError] = useState('');
+  // reuse the serialized polling owner for manual retries
+  const refreshAgentVersions = useRef<(() => void) | undefined>(undefined);
   const [defaultAgentError, setDefaultAgentError] = useState('');
   const [defaultAgentPending, setDefaultAgentPending] = useState(false);
   const announcedServerUpdateTarget = useRef<string | undefined>(undefined);
@@ -11265,9 +11267,9 @@ function App() {
     const response = await request('/api/agents/updates');
     const payload = await response.json().catch(() => undefined) as { agents?: unknown; error?: unknown } | undefined;
     // surface request failures without discarding prior UI state
-    if (!response.ok) return { error: typeof payload?.error === 'string' ? payload.error : 'Unable to check agent versions.' };
+    if (!response.ok) return { error: typeof payload?.error === 'string' ? payload.error : `Unable to check agent versions (HTTP ${response.status}).` };
     // require a complete typed status list
-    if (!Array.isArray(payload?.agents) || !payload.agents.every(isAgentUpdateStatus)) return { error: 'Unable to check agent versions.' };
+    if (!Array.isArray(payload?.agents) || !payload.agents.every(isAgentUpdateStatus)) return { error: 'Unable to check agent versions: invalid server response.' };
     return { agents: payload.agents };
   }, []);
   // start once and poll without holding a tunnel request open during installation
@@ -11351,10 +11353,12 @@ function App() {
       if (inFlight) { queued = true; return; }
       void drain();
     };
+    refreshAgentVersions.current = refresh;
     refresh();
     const interval = window.setInterval(refresh, 15 * 60_000);
     return () => {
       active = false;
+      refreshAgentVersions.current = undefined;
       generation += 1;
       queued = false;
       window.clearInterval(interval);
@@ -11743,7 +11747,8 @@ function App() {
   // expose settings without a manual server update bypass
   const clientSettings = useMemo<ClientSettings | undefined>(() => state === 'ready' && sessionInfo?.deviceName !== undefined ? { deviceName: sessionInfo.deviceName, serverName: serverInfo.name, serverUrl: serverInfo.url, clientUpdateAvailable, serverUpdateAvailable, serverUpdateVisible: serverUpdateOpen && !serverUpdateMinimized, serverUpdateMinimized, davo: sessionInfo.davo ?? legacyDavoSettings, renameClient, renameServer, loadServerRevision, reloadClient, openServerUpdate, disableDavo, refreshDavo, codexAccounts, claudeAccounts: loadClaudeAccounts, switchCodexAccount, renameCodexAccount, resetCodexAccount, addCodexApiKeyAccount, startCodexAccountLogin, codexAccountLoginStatus, cancelCodexAccountLogin } : undefined, [addCodexApiKeyAccount, cancelCodexAccountLogin, clientUpdateAvailable, codexAccountLoginStatus, codexAccounts, loadServerRevision, openServerUpdate, reloadClient, renameClient, renameServer, renameCodexAccount, resetCodexAccount, serverInfo.name, serverInfo.url, serverUpdateAvailable, serverUpdateMinimized, serverUpdateOpen, sessionInfo?.davo, sessionInfo?.deviceName, startCodexAccountLogin, state, switchCodexAccount, disableDavo, refreshDavo]);
   // share the current launch settings with every flyout
-  const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, loading: agentVersionsLoading, updating: updatingAgent, errors: Array.from(new Set([defaultAgentError, versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), defaultAgent: sessionInfo?.defaultAgent, defaultPending: defaultAgentPending, setDefaultAgent: (kind: AgentKind) => { /* persist one default */ void selectDefaultAgent(kind); }, updateAgent: (kind: AgentKind) => { /* run one installer */ void runAgentUpdate(kind); } }), [agentUpdateStatuses, agentVersionsLoading, updatingAgent, versionCheckError, defaultAgentError, sessionInfo?.defaultAgent, defaultAgentPending, selectDefaultAgent, runAgentUpdate]);
+  // keep retry availability separate from provider and operation failures
+  const agentLaunchSettings = useMemo(() => ({ statuses: agentUpdateStatuses, loading: agentVersionsLoading, updating: updatingAgent, errors: Array.from(new Set([defaultAgentError, versionCheckError, ...agentUpdateStatuses.map(status => status.error ?? '')].filter(Boolean))), retryVersions: versionCheckError ? () => { /* retry through the existing request owner */ refreshAgentVersions.current?.(); } : undefined, defaultAgent: sessionInfo?.defaultAgent, defaultPending: defaultAgentPending, setDefaultAgent: (kind: AgentKind) => { /* persist one default */ void selectDefaultAgent(kind); }, updateAgent: (kind: AgentKind) => { /* run one installer */ void runAgentUpdate(kind); } }), [agentUpdateStatuses, agentVersionsLoading, updatingAgent, versionCheckError, defaultAgentError, sessionInfo?.defaultAgent, defaultAgentPending, selectDefaultAgent, runAgentUpdate]);
   return <SettingsRuntimeProvider request={request} monitorRequest={monitorRequest} enabled={sessionInfo !== undefined} canMutate={state === 'ready'} beforeRestart={beforeRestart} onRestartSettled={onRestartSettled} beforeTunnelReconnect={beforeTunnelReconnect} onTunnelReconnectSettled={onTunnelReconnectSettled}><ServerContext.Provider value={serverInfo}><ServerStatusContext.Provider value={serverStatuses}><ClientSettingsContext.Provider value={clientSettings}><AgentLaunchSettingsContext.Provider value={agentLaunchSettings}>{screen}{state !== 'ready' && sessionInfo !== undefined && <><StandaloneSettingsRestartNotice /><StandaloneTunnelHealthNotice /></>}<ContextMenuHost /><ContextFlyoutEvents /><ServerUpdateDialog open={serverUpdateOpen} minimized={serverUpdateMinimized} onMinimize={minimizeServerUpdate} onClose={closeServerUpdate} /><ConsoleFullscreenLoader action={action} reconnecting={reconnecting} onEntered={fullscreenActionEntered} /></AgentLaunchSettingsContext.Provider></ClientSettingsContext.Provider></ServerStatusContext.Provider></ServerContext.Provider></SettingsRuntimeProvider>;
 }
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js');
