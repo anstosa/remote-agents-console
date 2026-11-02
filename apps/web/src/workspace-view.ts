@@ -5,7 +5,7 @@ export type WorkspaceSplit = { key: string; label: string };
 // and focuses it, its input (a terminal, the composer) when `input`. `currentPanel` is the panel
 // holding focus, else the last focused, else the one in view; `lastPanel` the one before it.
 // `toggleCode` is set only for a Worktree, which has a Code panel; `toggleStack` only for a Worktree
-// whose Stack has processes.
+// whose Stack has processes; `toggleGithub` only for a Worktree whose Project has a GitHub repository.
 export type WorkspaceView = {
   splits: WorkspaceSplit[];
   canClose: boolean;
@@ -23,6 +23,7 @@ export type WorkspaceView = {
   openTerminal: (binding?: { table: string; key: string }) => void;
   toggleCode?: () => void;
   toggleStack?: () => void;
+  toggleGithub?: () => void;
 };
 export const workspaceViews = new Map<string, WorkspaceView>();
 export const pendingWorkspaceJumps = new Map<string, string>();

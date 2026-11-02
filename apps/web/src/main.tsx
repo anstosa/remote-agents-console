@@ -6963,7 +6963,8 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
           pendingWorkspaceJumps.set(key, 'code');
           code.openChanges('working');
         },
-        ...((place.stack?.processes?.length ?? 0) === 0 ? {} : { toggleStack: () => stackPanel.open ? stackPanel.close() : openStackPanel() })
+        ...((place.stack?.processes?.length ?? 0) === 0 ? {} : { toggleStack: () => stackPanel.open ? stackPanel.close() : openStackPanel() }),
+        ...(projectOfWorktree(githubProjects, place.worktreeId)?.github === undefined ? {} : { toggleGithub: () => githubPanel.open ? githubPanel.close() : openGithubPanel() })
       })
     };
     workspaceViews.set(key, view);
@@ -10237,6 +10238,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     'toggle-expand': onPanels((view, _panels, current) => { if (current !== undefined) view.toggleExpand(current); }),
     'toggle-code': onPanels(view => { if (view.toggleCode === undefined) return false; view.toggleCode(); }),
     'toggle-stack': onPanels(view => { if (view.toggleStack === undefined) return false; view.toggleStack(); }),
+    'toggle-github': onPanels(view => { if (view.toggleGithub === undefined) return false; view.toggleGithub(); }),
+    'github-overview': () => { if (overviewOwnerId === undefined) return false; openOverview(); },
     'rename-panel': onPanels((view, _panels, current) => { if (current !== undefined) view.renamePanel(current); }),
     'close-panel': onPanels((view, _panels, current) => {
       const split = view.splits.find(candidate => candidate.key === current);

@@ -162,6 +162,30 @@ test('lists one repository in the same three triage swimlanes without leaking ca
   await expect(toggle).toHaveAttribute('aria-pressed', 'false');
 });
 
+test('the palette opens the GitHub panel and the Overview, and a bound key closes the panel', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await mount(page, [lists], [], [], { revision: 1 }, [], {}, { ...dashboard, keys: { prefix: { k: 'toggle-github' } } });
+  await page.goto('/');
+  await page.getByRole('tab', { name: /^feature/u }).click();
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  const runCommand = async (text: string) => {
+    await page.keyboard.press('Control+b');
+    await page.keyboard.press(':');
+    await page.keyboard.type(text);
+    await page.keyboard.press('Enter');
+  };
+
+  await runCommand('github panel');
+  await expect(panel).toBeVisible();
+  await expect(panel).not.toHaveClass(/\bexpanded\b/u);
+  await page.keyboard.press('Control+b');
+  await page.keyboard.press('k');
+  await expect(panel).toHaveCount(0);
+
+  await runCommand('github overview');
+  await expect(panel).toHaveClass(/\bexpanded\b/u);
+});
+
 test('pins a Push and create PR card for a branch with no pull request, and nothing in the main worktree', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   const quiet = { ...lists, mine: lists.mine.slice(1) };
