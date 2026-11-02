@@ -284,7 +284,11 @@ test('opens Overview maximized in repo scope and switches to the identical all-r
   await expectCardControlColumn(own, 2);
   const ownCheckout = own.getByRole('button', { name: 'Checkout and actions for pull request #214' });
   await expect(ownCheckout).toHaveAttribute('aria-expanded', 'false');
+  // its caret follows the Flyout markers setting, off by default
+  await expect(ownCheckout.locator('.flyout-caret')).toBeHidden();
+  await page.evaluate(() => { document.documentElement.dataset.flyoutMarkers = 'enabled'; });
   await expect(ownCheckout.locator('.flyout-caret')).toBeVisible();
+  await page.evaluate(() => { delete document.documentElement.dataset.flyoutMarkers; });
   await expect(own.locator('.github-card-controls').getByRole('link', { name: /^(?:Merge|Ready for review|Submit review)$/u })).toHaveCount(0);
   await expect(mine.locator('.overview-row').nth(1)).toContainText('merge conflicts');
   await expect(mine.locator('.overview-row').nth(2)).toContainText('approved');
