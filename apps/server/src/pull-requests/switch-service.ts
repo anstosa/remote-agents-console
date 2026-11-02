@@ -306,9 +306,11 @@ export class PullRequestSwitchService {
     const matching = new Map<string, { entries: ReturnType<typeof parseWorktreeListNul>; origin: { owner: string; name: string } }>();
     // fresh-read every repository project origin
     for (const project of projects) {
-      // ignore non-repository projects
-      if (project.mode !== 'repository') continue;
+      // ignore non-repository projects and ones whose path is missing
+      if (project.mode !== 'repository' || !project.available) continue;
       const remote = await this.command('/usr/bin/git', ['-C', project.path, 'remote', 'get-url', 'origin']).catch(() => undefined);
+      // git exits 2 for "No such remote": a project with no origin names no GitHub repository
+      if (remote?.code === 2) continue;
       // refuse an unreadable origin because it cannot prove global absence
       if (remote?.code !== 0 || remote.stdoutTruncated === true) return { error: 'A project origin could not be verified. Refresh and try again.', refresh: true };
       const namedRepository = githubRepository(remote.stdout);

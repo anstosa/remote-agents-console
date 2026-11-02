@@ -169,6 +169,33 @@ describe('pull request switching', () => {
     expect(writes).toEqual([]);
   });
 
+  it('skips projects with no origin remote or a missing path in contextual absence proof', async () => {
+    const target = { ...worktree, id: 'b2:/b2', projectId: 'b2', path: '/b2', identity: '/b2', branch: 'main' };
+    const projects = [
+      { id: 'no-origin', label: 'No origin', path: '/no-origin', identity: '/no-origin/.git', mode: 'repository', worktreesDirectory: '/no-origin-wts', available: true },
+      { id: 'missing', label: 'Missing', path: '/missing', identity: '/missing', mode: 'repository', worktreesDirectory: '/missing-wts', available: false },
+      { id: 'b2', label: 'B2', path: '/b2', identity: '/b2/.git', mode: 'repository', worktreesDirectory: '/b2-wts', available: true }
+    ];
+    const command: GitCommand = async (_binary, args) => {
+      const path = args[args.indexOf('-C') + 1];
+      if (args.includes('remote') && path === '/no-origin') return { code: 2, stdout: '' };
+      if (args.includes('remote') && path === '/missing') return { code: 128, stdout: '' };
+      if (args.includes('remote')) return { code: 0, stdout: 'git@github.com:acme/repo.git\n' };
+      // a truncated listing marks that the proof reached the target project
+      if (args.includes('worktree')) return { code: 0, stdout: '', stdoutTruncated: true };
+      return { code: 0, stdout: '' };
+    };
+    const discovery = { projectsNow: () => projects, worktreesNow: () => [target] };
+    const pulls = {
+      repositoryAt: async () => ({ owner: 'acme', name: 'repo' }),
+      pullRequestDetail: async () => ({ pullRequest: { number: 7, title: 'Work', branch: 'feature/draft', headSha, headOnOrigin: true, draft: false, url: 'https://github.com/acme/repo/pull/7', state: 'open', checks: 'passed' } })
+    };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, command);
+    const context = { identity: { repositoryKey: 'acme/repo', kind: 'pull' as const, number: 7 }, targetProjectId: 'b2', targetWorktreeId: target.id, expectedHolderWorktreeIds: [] };
+
+    await expect(service.switch(target.id, 7, context)).resolves.toEqual({ error: 'Git worktree ownership could not be verified. Refresh and try again.', refresh: true });
+  });
+
   it('refuses contextual absence proof when origin or holder metadata is incomplete', async () => {
     const target = { ...worktree, id: 'b2:/b2', projectId: 'b2', path: '/b2', identity: '/b2', branch: 'main' };
     const projects = [
