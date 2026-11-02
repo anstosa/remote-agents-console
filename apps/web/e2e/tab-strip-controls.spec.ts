@@ -75,6 +75,10 @@ test('keeps phone icon controls square and aligned with the workspace tab', asyn
   expect(enrollment!.y).toBeGreaterThanOrEqual(enrollmentTab!.y + enrollmentTab!.height);
   expect(enrollmentTab!.x).toBeCloseTo(noCallTab!.x, 1);
   expect(enrollmentTab!.width).toBeCloseTo(noCallTab!.width, 1);
+  // a long Workspace name truncates rather than wrapping settings onto its own row
+  await page.locator('.workspace-dropdown-label').evaluate(label => { label.textContent = 'Workspace for the Remote Agent Console long branch'; });
+  expect((await controls[2].boundingBox())!.y).toBeCloseTo((await tab.boundingBox())!.y, 1);
+  expect((await tab.boundingBox())!.width).toBeCloseTo(noCallTab!.width, 1);
 
   // keep denied status on the second row too
   await page.locator('.notification-control').evaluate(element => { element.outerHTML = '<span class="notification-status">Alerts blocked</span>'; });

@@ -2543,7 +2543,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .tabs.workspace-dropdown-row:has(> :is(.notification-control, .notification-status)) { flex-wrap: wrap; }
 .tabs.workspace-dropdown-row > :is(.notification-control, .notification-status) { order: 1; flex: 1 0 100%; }
 /* reserve touch gestures for adjacent workspaces and swiping the chooser open */
-.tabs > .workspace-dropdown { flex: 1 1 auto; justify-content: flex-start; white-space: nowrap; touch-action: none; }
+.tabs > .workspace-dropdown { flex: 1 1 0; justify-content: flex-start; white-space: nowrap; touch-action: none; }
 /* use the workspace status on the outside border without an inset outline */
 .tabs > .workspace-dropdown.active { --workspace-status: var(--overlay-1); border-color: var(--workspace-status); box-shadow: none; }
 .tabs > .workspace-dropdown.active.unread { --workspace-status: var(--green); }
