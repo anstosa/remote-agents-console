@@ -104,6 +104,8 @@ export type TmuxSession = { socket: SocketRef; session: string };
 // where a launch runs: the folder tmux opens it in (the host-visible one under the bridge) and
 // the HOME its shell exports (`$HOME` leaves a local shell's own)
 type LaunchSite = { cwd: string; home: string };
+// what a pane launch records on its pane: a Sandboxed launch, and the Conductor that spawned a worker
+type PaneMarks = { sandboxed: boolean; spawnedBy?: string };
 
 export function expandHomeCommand(command: string, home: string): string {
   return expandCommand(command, { identity: home });
@@ -537,7 +539,7 @@ export class LaunchService implements HolderWindows {
       const id = randomBytes(18).toString('base64url');
       const joined = await this.placeSession(place);
       if (joined !== undefined) {
-        const pane = await this.launchInSessionWindow(site, command, id, false, joined, place.home);
+        const pane = await this.launchInSessionWindow(site, command, id, { sandboxed: false }, joined, place.home);
         // the window failed or already rolled back
         if (pane === undefined) return false;
         // protect the pane until its label is complete
@@ -593,9 +595,10 @@ export class LaunchService implements HolderWindows {
     return this.hostSocket === undefined ? { cwd: worktree.identity, home: '$HOME' } : { cwd: worktreeHostRoot(worktree), home: this.agentHome(worktree.projectId) };
   }
 
-  // launch a fresh agent in a worktree, resolving the kind (or using the requested one)
-  async launch(worktreeId: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean): Promise<boolean> {
-    return await this.launchWorktree(worktreeId, { mode: 'fresh', ...(kind === undefined ? {} : { kind }), ...(model === undefined ? {} : { model }), ...(sandboxed === undefined ? {} : { sandboxed }) });
+  // launch a fresh agent in a worktree, resolving the kind (or using the requested one); a
+  // Conductor's worker names it as `spawnedBy` (ADR 0018), which only a pane launch records
+  async launch(worktreeId: string, kind?: AgentKind, model?: ModelSetting, sandboxed?: boolean, spawnedBy?: string): Promise<boolean> {
+    return await this.launchWorktree(worktreeId, { mode: 'fresh', ...(kind === undefined ? {} : { kind }), ...(model === undefined ? {} : { model }), ...(sandboxed === undefined ? {} : { sandboxed }), ...(spawnedBy === undefined ? {} : { spawnedBy }) });
   }
 
   // launch a Review run's Agent (ADR 0010): a `kind` pane in the Worktree's Workspace, fresh or
@@ -666,7 +669,7 @@ export class LaunchService implements HolderWindows {
   }
 
   // start one worktree in the requested mode, composing its command from the Adapter
-  private async launchWorktree(worktreeId: string, input: { mode: LaunchMode; conversationId?: string; sandboxed?: boolean; kind?: AgentKind; model?: ModelSetting }): Promise<boolean> {
+  private async launchWorktree(worktreeId: string, input: { mode: LaunchMode; conversationId?: string; sandboxed?: boolean; kind?: AgentKind; model?: ModelSetting; spawnedBy?: string }): Promise<boolean> {
     const worktree = this.worktreeById(worktreeId);
     // Every refusal below logs its reason. The web only ever sees a bare "couldn't
     // start", so without this the operator has nothing to diagnose from — the cause
@@ -688,11 +691,12 @@ export class LaunchService implements HolderWindows {
         const command = await this.worktreeCommand(worktree, kind, { mode: input.mode, ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }), sandboxed });
         // a worktree with no launch command (and no override) cannot start
         if (command === undefined) { console.warn(`[launch] ${worktree.identity}: agent kind ${kind} produced no launch command`); return false; }
-        launched = await this.dispatchWorktreeLaunch(worktree, command, id, sandboxed);
+        launched = await this.dispatchWorktreeLaunch(worktree, command, id, { sandboxed, ...(input.spawnedBy === undefined ? {} : { spawnedBy: input.spawnedBy }) });
       }
       // record the kind so it resolves first next time — for this Worktree and for its
-      // Project (which seeds a fresh Worktree); storage failure never fails a live launch
-      if (launched) {
+      // Project (which seeds a fresh Worktree), but not the kind the Conductor chose for a
+      // worker; storage failure never fails a live launch
+      if (launched && input.spawnedBy === undefined) {
         await this.worktreeStore.rememberLaunchProfile(worktreeId, kind).catch(() => {});
         await this.worktreeStore.rememberLaunchProfile(worktree.projectId, kind).catch(() => {});
       }
@@ -703,11 +707,11 @@ export class LaunchService implements HolderWindows {
   }
 
   // dispatch a composed worktree launch without modifying an idle shell's input
-  private async dispatchWorktreeLaunch(worktree: Worktree, command: string, id: string, sandboxed: boolean): Promise<boolean> {
+  private async dispatchWorktreeLaunch(worktree: Worktree, command: string, id: string, marks: PaneMarks): Promise<boolean> {
     const site = this.worktreeSite(worktree);
     // join the marked Place session without modifying any existing pane
     const joined = await this.placeSession(worktree);
-    if (joined !== undefined) return await this.launchInSessionWindow(site, command, id, sandboxed, joined, worktree.identity) !== undefined;
+    if (joined !== undefined) return await this.launchInSessionWindow(site, command, id, marks, joined, worktree.identity) !== undefined;
     const session = worktreeSessionName(worktreeHostRoot(worktree));
     // suffix past an unmarked name collision instead of displacing an unproven session
     const name = await this.availableSessionName(session);
@@ -715,19 +719,19 @@ export class LaunchService implements HolderWindows {
     // nothing was created to roll back
     if (pane === undefined) return false;
     // protect the pane until all worktree metadata is complete
-    return await this.finishCreatedPane(this.hostSocket, pane, worktree.identity, async () => await this.markSessionPlace(this.hostSocket, pane, worktree.id) && await this.markConsoleManaged(this.hostSocket, pane) && await this.markSandboxed(this.hostSocket, pane, sandboxed));
+    return await this.finishCreatedPane(this.hostSocket, pane, worktree.identity, async () => await this.markSessionPlace(this.hostSocket, pane, worktree.id) && await this.markConsoleManaged(this.hostSocket, pane) && await this.markLaunch(this.hostSocket, pane, marks));
   }
 
   // launch the agent in a new detached window of an existing session (the session holding the
   // place's console shells or live agent), mirroring the fresh-session dispatch but with
   // `new-window` — the same host bootstrap / local runner split. returns the new pane, marked
-  // console-managed (and sandboxed when asked), or undefined; `logName` names the place in logs.
-  private async launchInSessionWindow(site: LaunchSite, command: string, id: string, sandboxed: boolean, joined: TmuxSession, logName: string): Promise<string | undefined> {
+  // console-managed (and with its `marks`), or undefined; `logName` names the place in logs.
+  private async launchInSessionWindow(site: LaunchSite, command: string, id: string, marks: PaneMarks, joined: TmuxSession, logName: string): Promise<string | undefined> {
     const pane = await this.openLaunchPane(site, command, id, joined, logName);
     // nothing was created to roll back
     if (pane === undefined) return undefined;
     // protect the pane until all window metadata is complete
-    return await this.finishCreatedPane(joined.socket.path, pane, logName, async () => await this.markConsoleManaged(joined.socket.path, pane) && await this.markSandboxed(joined.socket.path, pane, sandboxed)) ? pane : undefined;
+    return await this.finishCreatedPane(joined.socket.path, pane, logName, async () => await this.markConsoleManaged(joined.socket.path, pane) && await this.markLaunch(joined.socket.path, pane, marks)) ? pane : undefined;
   }
 
   // keep only a fresh pane with all required metadata
@@ -846,13 +850,12 @@ export class LaunchService implements HolderWindows {
     return (await run(this.tmux, [...socket, 'set-option', '-p', '-t', target, '@rac_console_managed', '1'])).code === 0;
   }
 
-  // record a Sandboxed launch on the pane so `Agent.sandboxed` reflects it; a
-  // dead pane's option is cleared by discovery. Chunk 1 never launches sandboxed
-  // (chunk 4 realises the sandbox), so in practice this is a no-op until then.
-  private async markSandboxed(socketPath: string | undefined, target: string, sandboxed: boolean): Promise<boolean> {
-    if (!sandboxed) return true;
+  // record a Sandboxed launch on the pane so `Agent.sandboxed` reflects it (a dead pane's option
+  // is cleared by discovery), and a Conductor's worker as `@rac_spawned_by`, its `Agent.spawnedBy`
+  private async markLaunch(socketPath: string | undefined, target: string, { sandboxed, spawnedBy }: PaneMarks): Promise<boolean> {
     const socket = socketPath === undefined ? [] : ['-S', socketPath];
-    return (await run(this.tmux, [...socket, 'set-option', '-p', '-t', target, '@rac_sandboxed', '1'])).code === 0;
+    if (sandboxed && (await run(this.tmux, [...socket, 'set-option', '-p', '-t', target, '@rac_sandboxed', '1'])).code !== 0) return false;
+    return spawnedBy === undefined || (await run(this.tmux, [...socket, 'set-option', '-p', '-t', target, '@rac_spawned_by', tmuxLiteralArg(spawnedBy)])).code === 0;
   }
 
   // The console's private directory, or a folder in it, made owner-only. One that is not the

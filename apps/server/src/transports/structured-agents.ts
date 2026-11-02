@@ -257,20 +257,6 @@ export class StructuredAgents {
     return started === true ? record.id : undefined;
   }
 
-  /**
-   * Spawn a Sandboxed worker for the Conductor `by` (ADR 0018), on `model` if given: one at a time,
-   * and none while it has `max` workers starting or live.
-   */
-  spawn(place: Place, kind: AgentKind, by: string, max: number, model?: ModelSetting): Promise<string | 'at-capacity' | undefined> {
-    const spawning = this.spawning.then(async () => {
-      const live = (await this.load()).filter(record => typeof record.origin === 'object' && record.origin.conductor === by && (record.lifecycle === 'starting' || record.lifecycle === 'live'));
-      if (live.length >= max) return 'at-capacity' as const;
-      return await this.launch(place, kind, { sandboxed: true, spawnedBy: by, ...(model === undefined ? {} : { model }) });
-    });
-    this.spawning = spawning.then(() => undefined, () => undefined);
-    return spawning;
-  }
-  private spawning: Promise<unknown> = Promise.resolve();
 
   /** How the console gives the Conductor its access, model and script deadline. */
   useConductor(options: ConductorOptions): void { this.conductor = options; }

@@ -122,11 +122,11 @@ One prompt and the Agent's complete response to it. What prompt history records;
 _Avoid_: Exchange, round, message pair
 
 **Conductor**:
-The one Agent that acts on the console itself, through the console's MCP server: it sends prompts to other Agents and hears back when their Turns end, spawns new Agents, keeps Notes of its own, and reacts to what it Watches. It lives in a directory Project the operator chooses, is always running, and is always Sandboxed; the Agents it spawns are Sandboxed Pi Agents. A role any kind could fill once the console can arm and confirm that kind's sandbox; Pi so far. No other Agent can act on the console.
+The one Agent that acts on the console itself, through the console's MCP server: it sends prompts to other Agents and hears back when their Turns end, spawns new Agents, keeps Notes of its own, and reacts to what it Watches. It lives in a directory Project the operator chooses, is always running, and is always Sandboxed; the Agents it spawns are Sandboxed Pi Agents unless the operator also lets it spawn Claude or Codex Agents. A role any kind could fill once the console can arm and confirm that kind's sandbox; Pi so far. No other Agent can act on the console.
 _Avoid_: Foreman, Overseer, Supervisor (a process that keeps processes alive), orchestrator, Steward
 
 **Worker**:
-An Agent the Conductor spawned: always a Sandboxed Pi Agent, with no access to the console of its own. The Conductor may close only its workers; it is their origin.
+An Agent the Conductor spawned, with no access to the console of its own: a Sandboxed Pi Agent, or a Claude or Codex Agent where the operator enabled that kind, which runs under the operator's own configuration of it rather than the console's sandbox. The Conductor may close only its workers; it is their origin.
 _Avoid_: Child, sub-agent
 
 **Report**:

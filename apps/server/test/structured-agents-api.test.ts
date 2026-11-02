@@ -19,10 +19,12 @@ import type { AllowedModel } from '../src/adapters/types.js';
 import type { ConductorConfig, ValidatedConfig } from '../src/config/schema.js';
 import { piAdapter } from '../src/adapters/pi.js';
 import type { CommandWindows } from '../src/watches/service.js';
-import type { Project } from '../src/domain/models.js';
+import type { Pane, Project } from '../src/domain/models.js';
 import { authenticatedHeaders, testAuthService } from './helpers/auth.js';
 import { testConfig, testProject } from './helpers/config.js';
-import { paneLister, processInspector, socketFinder } from './helpers/discovery-stubs.js';
+import { paneLister, processInspector, socketFinder, testSocket } from './helpers/discovery-stubs.js';
+import { LaunchService } from '../src/launch/service.js';
+import { TmuxAdapter } from '../src/tmux/adapter.js';
 import { GithubService } from '../src/github/service.js';
 import { graphqlGithub, sha, type PullFixture } from './helpers/github-graphql.js';
 
@@ -146,18 +148,19 @@ async function integrationFiles(): Promise<void> {
 // a console with one Project whose only Worktree is a temporary folder, and the Scratch folder beside it
 // (`linked` adds a linked Worktree beside it; `deps` replace the app's own services)
 // (`conductor` configures the Conductor in a directory Project `home` beside it, on `openai/gpt-5.6`)
-async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { reportTimeoutMs?: number; allowedModels?: AllowedModel[]; linked?: boolean; deps?: Record<string, unknown>; config?: Partial<ValidatedConfig>; conductor?: Partial<ConductorConfig>; project?: Partial<Project> } = {}) {
+// (`panes` are tmux panes on one socket, each a Claude Agent, read afresh on every listing)
+async function consoleWith(fake: ReturnType<typeof fakeAgent>, options: { reportTimeoutMs?: number; allowedModels?: AllowedModel[]; linked?: boolean; deps?: Record<string, unknown>; config?: Partial<ValidatedConfig>; conductor?: Partial<ConductorConfig>; project?: Partial<Project>; panes?: Partial<Pane>[] } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-structured-')));
   dirs.push(root);
   const project = testProject({ path: join(root, 'repo'), ...options.project });
   const home = join(root, 'home');
   const allowed = options.allowedModels ?? (options.conductor === undefined ? [] : [{ model: 'openai/gpt-5.6' }]);
-  const conductor: ConductorConfig | undefined = options.conductor === undefined ? undefined : { kind: 'pi', projectId: 'home', model: 'openai/gpt-5.6', scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write', 'agents:spawn', 'notes:write'], maxWorkers: 4, maxSelfStartedTurnsPerHour: 30, scriptDeadlineMinutes: 10, ...options.conductor };
+  const conductor: ConductorConfig | undefined = options.conductor === undefined ? undefined : { kind: 'pi', projectId: 'home', model: 'openai/gpt-5.6', scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write', 'agents:spawn', 'notes:write'], spawnKinds: ['pi'], maxWorkers: 4, maxSelfStartedTurnsPerHour: 30, scriptDeadlineMinutes: 10, ...options.conductor };
   if (conductor !== undefined) await mkdir(home);
   const config = testConfig({ scratchDirectory: root, projects: [project, ...(conductor === undefined ? [] : [testProject({ id: 'home', label: 'Conductor', path: home, identity: home, mode: 'directory' })])], adapters: { pi: { program: '/pinned/pi', args: [], env: {}, launchable: true, ...(allowed.length === 0 ? {} : { allowedModels: allowed }) } }, ...(conductor === undefined ? {} : { conductor }), ...options.config });
   const worktreeStore = new WorktreeLaunchStore({ file: join(root, 'worktrees.json') });
   const worktrees = async (path: string) => path === project.path ? [{ path: project.path, branch: 'refs/heads/main', detached: false, bare: false, locked: false, prunable: false }, ...(options.linked === true ? [{ path: join(root, 'feat'), branch: 'refs/heads/feat', detached: false, bare: false, locked: false, prunable: false }] : [])] : undefined;
-  const discovery = new DiscoveryService(socketFinder([]), paneLister([]) as never, processInspector(), { repositoryAt: async () => undefined, branch: async () => ({}), invalidateRepositories: () => {} } as never, config.adapters, config.projects, worktreeStore, worktrees, root);
+  const discovery = new DiscoveryService(socketFinder(options.panes === undefined ? [] : [testSocket]), paneLister(options.panes ?? []) as never, processInspector({ kind: 'claude' }), { repositoryAt: async () => undefined, branch: async () => ({}), invalidateRepositories: () => {} } as never, config.adapters, config.projects, worktreeStore, worktrees, root);
   // the console as it starts, over the stores in `root`, driving its structured Agents through `processes`
   const start = async (processes: StructuredProcesses, changed: Partial<ValidatedConfig> = {}) => {
     vi.stubEnv('RAC_DISPATCHES_FILE', join(root, 'dispatches.json'));
@@ -1648,9 +1651,9 @@ describe('the Conductor\'s dispatches', () => {
   const writable = { integrations: { enabled: false, mcp: { readEnabled: true, writeEnabled: true, dangerousEnabled: false }, realtime: { enabled: false, name: 'Davo', context: '', writeToolsEnabled: false }, multiInstance: { enabled: false } } };
   // a console whose Conductor is live, with MCP write tools enabled; `call` runs one of its tools
   // and answers the result's structured content
-  async function conducting(fake: ReturnType<typeof fakeAgent>, options: { conductor?: Partial<ConductorConfig>; deps?: Record<string, unknown> } = {}) {
+  async function conducting(fake: ReturnType<typeof fakeAgent>, options: { conductor?: Partial<ConductorConfig>; deps?: Record<string, unknown>; panes?: Partial<Pane>[] } = {}) {
     await integrationFiles();
-    const console = await consoleWith(fake, { conductor: options.conductor ?? {}, config: writable, ...(options.deps === undefined ? {} : { deps: options.deps }) });
+    const console = await consoleWith(fake, { conductor: options.conductor ?? {}, config: writable, ...(options.deps === undefined ? {} : { deps: options.deps }), ...(options.panes === undefined ? {} : { panes: options.panes }) });
     await console.app.conductor.start();
     const conductor: string = (await console.app.inject({ method: 'GET', url: '/api/dashboard', headers: console.headers })).json().agents.find((agent: { structured?: { role?: string } }) => agent.structured?.role === 'conductor').id;
     let requests = 0;
@@ -2118,6 +2121,33 @@ describe('the Conductor\'s dispatches', () => {
     expect(report).toContain('The answer was cut at 8 KiB.');
     expect(report).not.toContain('END');
     expect(report.length).toBeLessThan(9_000);
+    await app.close();
+  });
+  it('spawns a Claude worker only once the operator enabled Claude, in a pane marked with it, under one cap with its Pi workers', async () => {
+    const fake = fakeAgent();
+    const panes: Partial<Pane>[] = [];
+    const launches: unknown[][] = [];
+    let checkout = '';
+    // a Claude launch opens a pane in the Worktree, marked as the console marks it, that is ready
+    // for a prompt once it reports its session
+    vi.spyOn(LaunchService.prototype, 'launch').mockImplementation(async (...args) => { launches.push(args); panes.push({ paneId: '%9', sessionId: '$1', sessionName: 'repo', pid: 4242, path: checkout, command: 'claude', title: '', consoleManaged: true, reportedSession: '0b6c1f9a-2d3e-4f50-8a1b-2c3d4e5f6a7b', spawnedBy: args[4]!, socket: testSocket }); return true; });
+    vi.spyOn(TmuxAdapter.prototype, 'capture').mockResolvedValue('Ready to help.');
+    const { app, headers, call, conductor, dashboardAgent } = await conducting(fake, { conductor: { spawnKinds: ['pi', 'claude'], maxWorkers: 2 }, panes });
+    const worktree = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects.find((project: { id: string }) => project.id !== 'home').worktrees[0];
+    checkout = worktree.path;
+
+    expect(await call('spawn_agent', { worktree_id: worktree.id, kind: 'codex' })).toMatchObject({ ok: false, error: { code: 'invalid_request', message: expect.stringContaining('pi, claude') } });
+    const spawned = await call('spawn_agent', { worktree_id: worktree.id, kind: 'claude' });
+    expect(spawned).toMatchObject({ ok: true, data: { agent_id: expect.any(String) } });
+    // it launches unsandboxed by the console, under the operator's own Claude configuration
+    expect(launches).toEqual([[worktree.id, 'claude', undefined, false, conductor]]);
+    const claude = await dashboardAgent(spawned.data.agent_id as string);
+    expect(claude).toMatchObject({ kind: 'claude', transport: 'tmux', spawnedBy: conductor });
+    expect(claude.sandboxed).toBeUndefined();
+    // a Pi worker is still the default, and the Claude worker counts against the cap
+    expect(await call('spawn_agent', { worktree_id: worktree.id })).toMatchObject({ ok: true });
+    expect(fake.launches.at(-1)).toMatchObject({ kind: 'pi', sandboxed: true });
+    expect(await call('spawn_agent', { worktree_id: worktree.id })).toMatchObject({ ok: false, error: { code: 'conflict' } });
     await app.close();
   });
   it('spawns no more workers than its cap when it asks for several at once', async () => {

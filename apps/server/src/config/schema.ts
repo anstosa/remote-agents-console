@@ -13,7 +13,7 @@ import { agentKinds, type AdapterConfigs, type AdapterLaunchConfig, type AgentKi
 import { instanceIconNames, type InstanceIcon } from '../instance-icon.js';
 import { isIP } from 'node:net';
 import { defaultDavoContext, defaultDavoName } from '../integrations/realtime/settings.js';
-import { conductorOptInScopes, conductorScopes, type IntegrationScope } from '../integrations/auth/types.js';
+import { conductorOptInScopes, conductorScopes, conductorSpawnKinds, type ConductorSpawnKind, type IntegrationScope } from '../integrations/auth/types.js';
 import { resolveReviewConfig, reviewConfigSchema, type ResolvedReviewConfig } from '../review-runs/config.js';
 import { agentModel } from '../launch/agent-choice.js';
 import { piEfforts } from '../transports/pi.js';
@@ -85,11 +85,13 @@ const serverName = z.string().trim().min(1).max(80).refine(value => !value.inclu
 const adapterProgram = z.string().min(1).max(4096).startsWith('/', 'adapter program must be an absolute path').refine(value => !value.includes('\0'), 'NUL is forbidden');
 const adapterArgument = z.string().max(4096).refine(value => !value.includes('\0'), 'NUL is forbidden');
 // the Conductor runs Pi, which must be enabled, on an Allowed model, in a directory Project; by
-// default it gets every scope but `admin:dangerous` and `github:read`, which the operator names
+// default it gets every scope but `admin:dangerous` and `github:read`, which the operator names,
+// and spawns only Sandboxed Pi workers unless the operator names other configured kinds
 function conductorConfig({ project, scopes, enabled: _enabled, ...conductor }: z.output<typeof conductorSchema>, projects: readonly Project[], adapters: AdapterConfigs): ConductorConfig {
   const adapter = adapters[conductor.kind];
   if (adapter?.launchable !== true) throw new Error(`conductor: adapters.${conductor.kind} must be configured and launchable${adapter?.unavailableReason === undefined ? '' : ` (${adapter.unavailableReason})`}`);
   if (!(adapter.allowedModels ?? []).some(entry => entry.model === conductor.model)) throw new Error(`conductor: ${conductor.model} is not an Allowed model (adapters.${conductor.kind}.allowedModels)`);
+  for (const kind of conductor.spawnKinds) if (adapters[kind] === undefined) throw new Error(`conductor: spawnKinds names ${kind}, but adapters.${kind} is not configured`);
   const named = projects.find(candidate => candidate.id === project);
   // a Project whose folder is missing leaves the Conductor off, with a notice, rather than stopping the console
   const unavailable = named?.available === false ? { unavailable: named.unavailableReason ?? `${project} is unavailable` } : {};
@@ -145,6 +147,8 @@ const conductorSchema = z.object({
   model: agentModel,
   effort: z.enum(piEfforts).optional(),
   scopes: z.array(z.enum(conductorScopes)).max(conductorScopes.length).optional(),
+  // the kinds its workers may be: only Pi's sandbox is the console's own (ADR 0018)
+  spawnKinds: z.array(z.enum(conductorSpawnKinds)).min(1).max(conductorSpawnKinds.length).refine(kinds => new Set(kinds).size === kinds.length, 'each kind once').default(['pi']),
   maxWorkers: z.number().int().min(1).max(16).default(4),
   maxSelfStartedTurnsPerHour: z.number().int().min(1).max(1_000).default(30),
   scriptDeadlineMinutes: z.number().int().min(1).max(120).default(10)
@@ -192,10 +196,11 @@ export type RemoteServer = { url: URL; name?: string; icon?: InstanceIcon };
 export type IntegrationConfig = z.output<typeof integrationFeatures>;
 export type DavoSettings = z.output<typeof davoSettingsSchema>;
 /**
- * The Conductor as configured: its kind, directory Project, Allowed model and Effort, MCP scopes and
- * limits; `unavailable` says why its Project cannot be used now, which leaves it off.
+ * The Conductor as configured: its kind, directory Project, Allowed model and Effort, MCP scopes,
+ * the kinds its workers may be, and limits; `unavailable` says why its Project cannot be used now,
+ * which leaves it off.
  */
-export type ConductorConfig = { kind: 'pi'; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
+export type ConductorConfig = { kind: 'pi'; projectId: string; unavailable?: string; model: string; effort?: string; scopes: IntegrationScope[]; spawnKinds: ConductorSpawnKind[]; maxWorkers: number; maxSelfStartedTurnsPerHour: number; scriptDeadlineMinutes: number };
 export type ValidatedConfig = { listen: { host: string; port: number }; name: string; icon?: InstanceIcon; publicOrigin: URL; remoteServers: RemoteServer[]; trustedProxyIps: Set<string>; pollIntervalMs: number; defaultAgent?: AgentKind; scratchDirectory?: string; editor?: string; keys?: KeysConfig; adapters: AdapterConfigs; integrations?: IntegrationConfig; conductor?: ConductorConfig; googleCalendar?: GoogleCalendarConfig; review: ResolvedReviewConfig; buttons?: ButtonSlots; projects: Project[] };
 // how validation surfaces non-fatal facts: `warn` collects boot warnings (non-executable
 // programs, a crossed OMX/Codex program); `checkExecutables` runs the boot X_OK probe

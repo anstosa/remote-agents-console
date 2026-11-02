@@ -64,6 +64,7 @@ function describeConductorSettings(schema: SettingsSchema): void {
   Object.assign(fields.model!, { label: 'Model', description: 'Choose an available model from the API catalog for your configured providers.' });
   Object.assign(fields.effort!, { label: 'Effort', placeholder: 'Default', description: 'Default uses the selected model’s configured effort, or the agent default when no model effort is configured.' });
   Object.assign(fields.scopes!, { label: 'Scopes', default: conductorScopes.filter(scope => !conductorOptInScopes.includes(scope)) });
+  Object.assign(fields.spawnKinds!, { label: 'Worker kinds', description: 'The kinds of Agent Conductor may spawn as workers (with the agents:spawn scope). Only Sandboxed Pi workers carry the console’s sandbox guarantee. Claude and Codex workers run under your own configuration of those agents, which the console does not sandbox or check, and text Conductor reads can steer what it asks them to do: before enabling one, make sure its permissions and sandbox settings restrict a worker as you want.' });
 }
 
 // label ordered button slots and their disjoint action editors

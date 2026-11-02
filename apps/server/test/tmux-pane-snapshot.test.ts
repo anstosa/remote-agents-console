@@ -8,7 +8,7 @@ import { testConfig, testWorktree } from './helpers/config.js';
 
 const socket = { path: '/tmp/tmux-test', fingerprint: 'one', device: 1, inode: 2 };
 // include stack metadata in the shared dashboard row
-const row = (dead = '0', status = '', cwd = '/worktree', keyBinding = '') => ['%1', '$1', 'main', '123', cwd, 'node', 'café ☕', '', '', '', '', '', '', '', 'process', '', '@1', '', 'project:/worktree', 'dev', '', dead, status, keyBinding, '/worktree'].join('\t') + '\n';
+const row = (dead = '0', status = '', cwd = '/worktree', keyBinding = '') => ['%1', '$1', 'main', '123', cwd, 'node', 'café ☕', '', '', '', '', '', '', '', 'process', '', '@1', '', 'project:/worktree', 'dev', '', dead, status, keyBinding, '', '/worktree'].join('\t') + '\n';
 // isolate clock and command mocks
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); vi.unstubAllEnvs(); run.mockReset(); });
 

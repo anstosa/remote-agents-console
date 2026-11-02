@@ -162,6 +162,10 @@
 .settings-enum-checklist > label:has(input:disabled) { cursor: default; opacity: .6; }
 .settings-enum-checklist input { flex: none; margin: 0; accent-color: var(--mauve); }
 .settings-enum-checklist .settings-enum-unknown { color: var(--yellow); }
+.settings-enum-checklist > label.settings-enum-described { align-items: flex-start; }
+.settings-enum-checklist > label.settings-enum-described input { margin-top: .12rem; }
+.settings-enum-checklist .settings-enum-detail { display: block; margin-top: .1rem; color: var(--overlay-1); font-weight: 500; font-size: .6rem; }
+.settings-enum-checklist .settings-enum-detail.caution { color: var(--yellow); }
 .settings-enum-checklist .settings-enum-unknown small { color: var(--overlay-1); font-size: .58rem; }
 .settings-field-guidance { margin: 0; color: var(--overlay-1); font: 500 .6rem/1.4 var(--font-mono); }
 .settings-field-guidance-error { color: var(--red); }

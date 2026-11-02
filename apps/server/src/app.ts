@@ -93,7 +93,7 @@ import { instanceAttention, RemoteInstanceStatusPoller, validInstanceStatusReque
 import { createHmac, randomBytes } from 'node:crypto';
 import { integrationConfigForRemotes, parseDavoSettings, resolveAgentProgram, reviewConfig } from './config/schema.js';
 import { OrchestrationService, type AgentStatusV1, type PlaceScope } from './orchestration/index.js';
-import { IntegrationAuthService, registerIntegrationAuthServer, type IntegrationScope, type LocalIntegrationSubject } from './integrations/auth/index.js';
+import { IntegrationAuthService, registerIntegrationAuthServer, type ConductorSpawnKind, type IntegrationScope, type LocalIntegrationSubject } from './integrations/auth/index.js';
 import { IntegrationPolicyService } from './integrations/policy/service.js';
 import { IntegrationAuditService } from './integrations/audit/service.js';
 import { IntegrationGateway, registerMcpServer } from './integrations/mcp/index.js';
@@ -587,6 +587,38 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     if (secureOrigin) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     return payload;
   });
+  // A Conductor's worker (ADR 0018) is a kind the operator enabled (Pi unless asked otherwise), on
+  // an Allowed model of that kind. Pi is Sandboxed by the console; Claude and Codex run in a pane
+  // under the operator's own configuration, marked with the Conductor, and are answered only once
+  // ready for a prompt (one that never gets there is closed). One spawn at a time, and none while
+  // the Conductor has `maxWorkers` of any kind starting or live.
+  let workerSpawns: Promise<unknown> = Promise.resolve();
+  const spawnWorker = (placeId: string, by: string, requested?: ConductorSpawnKind, model?: string): Promise<string | { enabled: ConductorSpawnKind[] } | 'not-allowed' | 'at-capacity' | undefined> => {
+    const spawning = workerSpawns.then(async () => {
+      const { spawnKinds: enabled, maxWorkers } = config.conductor!;
+      const kind = requested ?? (enabled.includes('pi') ? 'pi' : enabled[0]!);
+      if (!enabled.includes(kind)) return { enabled };
+      if (model !== undefined && !(config.adapters[kind]?.allowedModels ?? []).some(entry => entry.model === model)) return 'not-allowed' as const;
+      const live = (await discovery.dashboard(true)).agents.filter(agent => agent.spawnedBy === by && (agent.structured === undefined || agent.structured.lifecycle === 'starting' || agent.structured.lifecycle === 'live'));
+      if (live.length >= maxWorkers) return 'at-capacity' as const;
+      const setting = model === undefined ? undefined : { model };
+      if (kind === 'pi') {
+        const place = await resolvePlace(placeId);
+        return place === undefined ? undefined : await structuredAgents.launch(place, kind, { sandboxed: true, spawnedBy: by, ...(setting === undefined ? {} : { model: setting }) });
+      }
+      const outcome = await launchFresh({
+        launch: () => launchAgent(inWorktree(placeId), () => launch.launch(placeId, kind, setting, false, by)),
+        waitForReadiness,
+        close: agentId => prompts.close(agentId),
+        // the Conductor's prompts reach it through its queue
+        deliver: async () => true
+      });
+      if (outcome.status === 'failed') console.warn(`[conductor] a ${kind} worker did not start: ${outcome.reason}${outcome.detail === undefined ? '' : ` (${outcome.detail})`}`);
+      return outcome.status === 'launched' ? outcome.agentId : undefined;
+    });
+    workerSpawns = spawning.then(() => undefined, () => undefined);
+    return spawning;
+  };
   // the Agents a Conductor sees through its MCP tools, set once those are served
   let conductorAgents: ((conductorId: string) => Promise<AgentStatusV1[]>) | undefined;
   // expose the same shared services through remote transports: the integrations' (OAuth, Realtime,
@@ -634,13 +666,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         changed: () => publishNotesRevision()
       },
       watches,
-      // a worker is the Conductor's kind, Sandboxed, on an Allowed model (ADR 0018)
-      ...(config.conductor === undefined ? {} : { spawnWorker: async (placeId: string, by: string, model?: string) => {
-        const conductorConfig = config.conductor!;
-        if (model !== undefined && !(config.adapters[conductorConfig.kind]?.allowedModels ?? []).some(entry => entry.model === model)) return 'not-allowed' as const;
-        const place = await resolvePlace(placeId);
-        return place === undefined ? undefined : await structuredAgents.spawn(place, conductorConfig.kind, by, conductorConfig.maxWorkers, model === undefined ? undefined : { model });
-      } })
+      ...(config.conductor === undefined ? {} : { spawnWorker })
     });
     const federationSecret = process.env.RAC_INTEGRATION_FEDERATION_SECRET?.trim() || instanceStatusSecret;
     const integrationGateway = new IntegrationGateway({ config: integrationConfig, instanceId: config.publicOrigin.origin, orchestration, policy: integrationPolicy, audit: integrationAudit, control: integrationControl, ...(integrationConfig.multiInstance.enabled ? { forward: federationForwarder(config.remoteServers, federationSecret) } : {}) });

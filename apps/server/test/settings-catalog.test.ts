@@ -8,7 +8,7 @@ import { environment, envKey, partitionEnvironment, patchEnvironment, restoreMan
 import { applicationSettingsSchema, installationSettingsPresentationSchema, settingsSchema } from '../src/settings/schema.js';
 import { applicationHash } from '../src/settings/proof.js';
 import { installationSettingsSchema } from '../src/settings/validation.js';
-import { conductorOptInScopes, conductorScopes } from '../src/integrations/auth/types.js';
+import { conductorOptInScopes, conductorScopes, conductorSpawnKinds } from '../src/integrations/auth/types.js';
 
 describe('settings environment source model', () => {
   // preserve dotenv literal semantics without mutating process.env
@@ -237,6 +237,9 @@ describe('settings schema metadata', () => {
     expect(conductor.properties!.effort).toMatchObject({ type: 'enum', optional: true, placeholder: 'Default' });
     expect(conductor.properties!.scopes).toMatchObject({ type: 'array', optional: true, default: conductorScopes.filter(scope => !conductorOptInScopes.includes(scope)), items: { type: 'enum', options: [...conductorScopes] } });
     expect(conductor.properties!.scopes!.description).toBeUndefined();
+    // only Pi's sandbox is the console's guarantee; the others are the operator's to configure
+    expect(conductor.properties!.spawnKinds).toMatchObject({ type: 'array', default: ['pi'], items: { type: 'enum', options: [...conductorSpawnKinds] } });
+    expect(conductor.properties!.spawnKinds!.description).toMatch(/Only Sandboxed Pi workers carry the console’s sandbox guarantee/u);
     expect(Object.hasOwn(conductor.properties!.effort!, 'default')).toBe(false);
     expect(conductor.default).toBeUndefined();
     // presentation defaults must not become authored permissions or effort

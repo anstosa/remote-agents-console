@@ -196,7 +196,7 @@ export class TmuxAdapter {
     const previous = this.paneSnapshots.get(socket.path);
     // ordinary dashboard polls back off only confirmed absent servers
     if (backoffMissingServer && previous?.fingerprint === socket.fingerprint && previous.status === 'unavailable' && (previous.retryAt ?? 0) > Date.now()) return [];
-    const format = `#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{${processNameOption}}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{${processWorktreeOption}}`;
+    const format = `#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{${processNameOption}}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{@rac_spawned_by}\t#{${processWorktreeOption}}`;
     const entry: { fingerprint: string; at: number; status: 'pending'|'available'|'unavailable'; panes?: Pane[]; retryAt?: number } = { fingerprint: socket.fingerprint, at: Date.now(), status: 'pending' };
     this.paneSnapshots.set(socket.path, entry);
     const persistent = await this.commands?.listPanes(socket, format).catch(() => undefined);
@@ -215,11 +215,11 @@ export class TmuxAdapter {
     if (this.commandsClosed || out.code !== 0) { entry.status = 'unavailable'; entry.at = Date.now(); return []; }
     const lines = out.stdout.split('\n').filter(Boolean);
     const panes: Pane[] = lines.flatMap((line) => {
-      const [id, session, name, pid, path, command, title, displayLabel, startCommand, attention, sessionRef, sandboxed, question, consoleManaged, role, paneName, windowId, mode, placeMark, processName, reviewRun, dead, status, keyBinding, ...worktree] = line.split('\t');
+      const [id, session, name, pid, path, command, title, displayLabel, startCommand, attention, sessionRef, sandboxed, question, consoleManaged, role, paneName, windowId, mode, placeMark, processName, reviewRun, dead, status, keyBinding, spawnedBy, ...worktree] = line.split('\t');
       const exitCode = status && /^\d+$/u.test(status) ? Number(status) : undefined;
       // dead remain-on-exit panes may have neither cwd nor a live pid
       if (!paneId.test(id) || !sessionId.test(session) || !name || (dead !== '1' && (!/^\d+$/.test(pid) || !path))) return [];
-      return [{ paneId: id, sessionId: session, sessionName: name, pid: Number(pid) || 0, path: path ?? '', command: command ?? '', title: title ?? '', ...(displayLabel ? { displayLabel } : {}), ...(startCommand ? { startCommand } : {}), ...(attention ? { reportedAttention: attention } : {}), ...(sessionRef ? { reportedSession: sessionRef } : {}), ...(sandboxed ? { reportedSandboxed: sandboxed } : {}), ...(question ? { reportedQuestion: question } : {}), ...(consoleManaged === '1' ? { consoleManaged: true } : {}), ...(role ? { role } : {}), ...(role === processPaneRole && processName ? { processName } : {}), ...(paneName ? { paneName } : {}), ...(windowId ? { windowId } : {}), ...(mode && !inputBlockingPaneModes.has(mode) ? { paneMode: mode } : {}), ...(placeMark ? { placeMark } : {}), ...(reviewRun ? { reviewRun } : {}), ...(dead === '0' || dead === '1' ? { dead: dead === '1' } : {}), ...(exitCode === undefined ? {} : { exitCode }), ...(keyBinding ? { keyBinding } : {}), ...(worktree.length === 0 ? {} : { processWorktree: worktree.join('\t') }), socket }];
+      return [{ paneId: id, sessionId: session, sessionName: name, pid: Number(pid) || 0, path: path ?? '', command: command ?? '', title: title ?? '', ...(displayLabel ? { displayLabel } : {}), ...(startCommand ? { startCommand } : {}), ...(attention ? { reportedAttention: attention } : {}), ...(sessionRef ? { reportedSession: sessionRef } : {}), ...(sandboxed ? { reportedSandboxed: sandboxed } : {}), ...(question ? { reportedQuestion: question } : {}), ...(consoleManaged === '1' ? { consoleManaged: true } : {}), ...(role ? { role } : {}), ...(role === processPaneRole && processName ? { processName } : {}), ...(paneName ? { paneName } : {}), ...(windowId ? { windowId } : {}), ...(mode && !inputBlockingPaneModes.has(mode) ? { paneMode: mode } : {}), ...(placeMark ? { placeMark } : {}), ...(reviewRun ? { reviewRun } : {}), ...(dead === '0' || dead === '1' ? { dead: dead === '1' } : {}), ...(exitCode === undefined ? {} : { exitCode }), ...(keyBinding ? { keyBinding } : {}), ...(spawnedBy ? { spawnedBy } : {}), ...(worktree.length === 0 ? {} : { processWorktree: worktree.join('\t') }), socket }];
     });
     // retain only a complete reply; a malformed row must not hide a running process
     entry.status = panes.length === lines.length ? 'available' : 'unavailable';
@@ -240,10 +240,11 @@ export class TmuxAdapter {
     return out.stdout.split('\n').map(line => line.trim()).filter(id => paneId.test(id));
   }
 
-  // clear the console-owned reported-state options once a pane's agent is gone
+  // clear the console-owned reported-state options once a pane's agent is gone, and the
+  // Conductor's mark on a worker's pane, so an Agent started there later is not its worker
   async unsetReportedState(socket: SocketRef, pane: string): Promise<boolean> {
     if (!paneId.test(pane)) return false;
-    const results = await Promise.all(['@rac_attention', '@rac_session', '@rac_sandboxed', '@rac_question'].map(
+    const results = await Promise.all(['@rac_attention', '@rac_session', '@rac_sandboxed', '@rac_question', '@rac_spawned_by'].map(
       option => run(this.binary, ['-S', socket.path, 'set-option', '-p', '-t', pane, '-u', option])
     ));
     return results.every(result => result.code === 0);

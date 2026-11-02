@@ -784,7 +784,7 @@ function ArrayField({ source, schema, value, path, draft, issues, label, itemLab
 }
 
 // render finite enum arrays as fixed choices
-function EnumChecklist({ label, options, value, fallback, disabled, onChange }: { label: string; options: readonly string[]; value: unknown; fallback: unknown; disabled: boolean; onChange: (value: unknown[]) => void }) {
+function EnumChecklist({ label, options, value, fallback, disabled, onChange, describe }: { label: string; options: readonly string[]; value: unknown; fallback: unknown; disabled: boolean; onChange: (value: unknown[]) => void; describe?: (option: string) => EnumChoice }) {
   const shown = Array.isArray(value) ? value : Array.isArray(fallback) ? fallback : [];
   const selected = new Set(shown.filter((entry): entry is string => typeof entry === 'string'));
   // retain unsupported authored entries during known-choice edits
@@ -799,8 +799,17 @@ function EnumChecklist({ label, options, value, fallback, disabled, onChange }: 
   };
   // remove one unsupported value only through its visible checkbox
   const removeUnknown = (index: number) => onChange([...options.filter(entry => selected.has(entry)), ...unknown.filter((_, unknownIndex) => unknownIndex !== index)]);
-  return <div className="settings-enum-checklist" role="group" aria-label={label}>{options.map(option => <label key={option}><input type="checkbox" checked={selected.has(option)} disabled={disabled} onChange={event => { /* stage the complete explicit selection */ toggle(option, event.currentTarget.checked); }} /><span>{option}</span></label>)}{unknown.map((entry, index) => <label key={`unknown:${index}`} className="settings-enum-unknown"><input type="checkbox" checked disabled={disabled} onChange={event => { /* remove only this visible unsupported value */ if (!event.currentTarget.checked) removeUnknown(index); }} /><span>{typeof entry === 'string' ? entry : JSON.stringify(entry)} <small>(unsupported)</small></span></label>)}</div>;
+  return <div className="settings-enum-checklist" role="group" aria-label={label}>{options.map(option => { const choice = describe?.(option); return <label key={option} className={choice?.detail === undefined ? undefined : 'settings-enum-described'}><input type="checkbox" checked={selected.has(option)} disabled={disabled} onChange={event => { /* stage the complete explicit selection */ toggle(option, event.currentTarget.checked); }} /><span>{choice?.label ?? option}{choice?.detail !== undefined && <small className={`settings-enum-detail${choice.caution === true ? ' caution' : ''}`}>{choice.detail}</small>}</span></label>; })}{unknown.map((entry, index) => <label key={`unknown:${index}`} className="settings-enum-unknown"><input type="checkbox" checked disabled={disabled} onChange={event => { /* remove only this visible unsupported value */ if (!event.currentTarget.checked) removeUnknown(index); }} /><span>{typeof entry === 'string' ? entry : JSON.stringify(entry)} <small>(unsupported)</small></span></label>)}</div>;
 }
+
+// what a choice in an EnumChecklist shows: its name and, below it, what choosing it means
+type EnumChoice = { label: string; detail?: string; caution?: true };
+// the Conductor's worker kinds: only Pi carries the console's sandbox guarantee (ADR 0018)
+const conductorSpawnKindChoices: Record<string, EnumChoice> = {
+  pi: { label: 'Pi', detail: 'Sandboxed by the console, which arms and confirms the sandbox itself. The only kind with that guarantee.' },
+  claude: { label: 'Claude', detail: 'Runs under your own Claude configuration. The console neither sandboxes nor checks it: make sure its permissions and sandbox settings restrict a worker as you want.', caution: true },
+  codex: { label: 'Codex', detail: 'Runs under your own Codex configuration. The console neither sandboxes nor checks it: make sure its approval and sandbox settings restrict a worker as you want.', caution: true }
+};
 
 // accept only the public model catalog shape
 function conductorModelsFrom(value: unknown): ConductorModel[] | undefined {
@@ -1062,7 +1071,7 @@ function SchemaField({ source, schema: providedSchema, value, path, draft, discl
     if (buttonItem) control = <SettingsButtonFields value={record}>{control}</SettingsButtonFields>;
   // render finite permissions as fixed checkboxes
   } else if (enumArray) {
-    control = <EnumChecklist label={label} options={schema.items?.options ?? []} value={value} fallback={schema.default} disabled={disabled} onChange={next => { /* preserve explicit empty selections */ stagePatch(source, { op: 'set', path, value: next }); }} />;
+    control = <EnumChecklist label={label} options={schema.items?.options ?? []} value={value} fallback={schema.default} disabled={disabled} onChange={next => { /* preserve explicit empty selections */ stagePatch(source, { op: 'set', path, value: next }); }} {...(conductorField && path[1] === 'spawnKinds' ? { describe: (option: string) => conductorSpawnKindChoices[option] ?? { label: option } } : {})} />;
   // render open-ended arrays with explicit insert, remove, and move operations
   } else if (schema.type === 'array') {
     const array = Array.isArray(effectiveValue) ? effectiveValue : [];

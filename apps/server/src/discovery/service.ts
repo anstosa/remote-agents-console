@@ -386,7 +386,9 @@ export class DiscoveryService {
       // ordinary polling revalidates established lineages; lifecycle scans walk afresh
       const recognized = await this.processes.recognizeAgent(pane.pid, { reusePositive: !force });
       if (recognized === undefined) {
-        // a pane whose agent is gone must not keep a stale report; nothing else clears it
+        // a pane whose agent is gone must not keep a stale report; nothing else clears it. A
+        // worker's `@rac_spawned_by` goes with it, but never starts the clearing: it is set before
+        // the agent's process is recognised
         if (pane.reportedAttention !== undefined || pane.reportedSession !== undefined || pane.reportedSandboxed !== undefined || pane.reportedQuestion !== undefined) void this.tmux.unsetReportedState(pane.socket, pane.paneId).catch(() => {});
         return undefined;
       }
@@ -401,7 +403,7 @@ export class DiscoveryService {
       const attention = resolveAttention({ kind: recognized.kind, title: pane.title, reported, hasQuestion: false });
       const conversationId = pane.reportedSession !== undefined && pane.reportedSession.length > 0 ? pane.reportedSession : undefined;
       const agentPane: AgentPane = { paneId: pane.paneId, sessionId: `${pane.socket.fingerprint}:${pane.sessionId}`, socketFingerprint: pane.socket.fingerprint, ...(pane.paneMode === undefined ? {} : { paneMode: pane.paneMode }) };
-      const agent: Agent = { id, home, title: pane.title, kind: recognized.kind, attention, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }), transport: 'tmux', panel: agentPanel('tmux'), pane: agentPane };
+      const agent: Agent = { id, home, title: pane.title, kind: recognized.kind, attention, ...(pane.reportedSandboxed === '1' ? { sandboxed: true } : {}), ...(conversationId === undefined ? {} : { conversationId }), ...(pane.displayLabel === undefined ? {} : { displayLabel: pane.displayLabel }), ...(pane.reviewRun === undefined ? {} : { reviewRun: pane.reviewRun }), ...(pane.spawnedBy === undefined ? {} : { spawnedBy: pane.spawnedBy }), transport: 'tmux', panel: agentPanel('tmux'), pane: agentPane };
       return agent;
     }))).filter((agent): agent is Agent => agent !== undefined);
     const sessionKey = (pane: Pane) => `${pane.socket.fingerprint}:${pane.sessionId}`;

@@ -744,9 +744,9 @@ describe('Conductor configuration', () => {
 
   it('runs Pi in a directory Project on an Allowed model, with every scope but admin:dangerous and github:read by default', async () => {
     const config = await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openrouter/z/glm' }));
-    expect(config.conductor).toEqual({ kind: 'pi', projectId: 'home', model: 'openrouter/z/glm', scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write', 'agents:spawn', 'notes:write'], maxWorkers: 4, maxSelfStartedTurnsPerHour: 30, scriptDeadlineMinutes: 10 });
-    const chosen = await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', effort: 'high', scopes: ['status:read'], maxWorkers: 2, maxSelfStartedTurnsPerHour: 5, scriptDeadlineMinutes: 3 }));
-    expect(chosen.conductor).toEqual({ kind: 'pi', projectId: 'home', model: 'openai/gpt-5.6', effort: 'high', scopes: ['status:read'], maxWorkers: 2, maxSelfStartedTurnsPerHour: 5, scriptDeadlineMinutes: 3 });
+    expect(config.conductor).toEqual({ kind: 'pi', projectId: 'home', model: 'openrouter/z/glm', scopes: ['status:read', 'logs:read', 'files:read', 'prompts:write', 'agents:control', 'stack:operate', 'review:write', 'agents:spawn', 'notes:write'], spawnKinds: ['pi'], maxWorkers: 4, maxSelfStartedTurnsPerHour: 30, scriptDeadlineMinutes: 10 });
+    const chosen = await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', effort: 'high', scopes: ['status:read'], spawnKinds: ['pi', 'claude'], maxWorkers: 2, maxSelfStartedTurnsPerHour: 5, scriptDeadlineMinutes: 3 }, { ...pi, claude: { program: '/bin/echo' } }));
+    expect(chosen.conductor).toEqual({ kind: 'pi', projectId: 'home', model: 'openai/gpt-5.6', effort: 'high', scopes: ['status:read'], spawnKinds: ['pi', 'claude'], maxWorkers: 2, maxSelfStartedTurnsPerHour: 5, scriptDeadlineMinutes: 3 });
     // GitHub reads are the operator's to grant by name
     expect((await validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', scopes: ['status:read', 'github:read'] }))).conductor?.scopes).toEqual(['status:read', 'github:read']);
     expect((await validateConfig({ publicOrigin: 'https://agents.example.com' })).conductor).toBeUndefined();
@@ -767,6 +767,11 @@ describe('Conductor configuration', () => {
     await expect(validateConfig(await configured({ kind: 'pi', project: 'nowhere', model: 'openai/gpt-5.6' }))).rejects.toThrow(/directory Project/u);
     await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', scopes: ['everything'] }))).rejects.toThrow();
     await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6' }, {}))).rejects.toThrow(/adapters\.pi/u);
+    // worker kinds: each once, at least one, and only configured ones
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', spawnKinds: ['codex'] }))).rejects.toThrow(/adapters\.codex is not configured/u);
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', spawnKinds: ['pi', 'pi'] }))).rejects.toThrow();
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', spawnKinds: [] }))).rejects.toThrow();
+    await expect(validateConfig(await configured({ kind: 'pi', project: 'home', model: 'openai/gpt-5.6', spawnKinds: ['omx'] }))).rejects.toThrow();
   });
 
   it('leaves the Conductor off, saying why, when its Project\'s folder is missing, rather than refusing the configuration', async () => {

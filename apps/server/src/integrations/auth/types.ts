@@ -17,6 +17,9 @@ export const conductorScopes = [...supportedIntegrationScopes, 'agents:spawn', '
 export const conductorOptInScopes: readonly IntegrationScope[] = ['admin:dangerous', 'github:read'];
 
 export type IntegrationScope = typeof conductorScopes[number];
+// the kinds a Conductor's workers may be; only Pi's sandbox is the console's own (ADR 0018)
+export const conductorSpawnKinds = ['pi', 'claude', 'codex'] as const;
+export type ConductorSpawnKind = typeof conductorSpawnKinds[number];
 
 export type OAuthErrorCode =
   | 'invalid_request'

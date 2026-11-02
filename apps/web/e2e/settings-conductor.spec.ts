@@ -272,6 +272,20 @@ test('disables every Conductor control in read-only catalogs', async ({ page }) 
   await expect(settings.getByRole('note').filter({ hasText: 'Conductor settings are read-only' })).toBeVisible();
 });
 
+test('says only Pi workers carry the console\'s sandbox guarantee, and stages Claude workers as the operator\'s choice', async ({ page }) => {
+  const { settings, validationRequests } = await setupConductorSettings(page);
+  await openConductor(settings);
+  await expect(settings.locator('[data-settings-path="conductor.spawnKinds"]')).toContainText('Only Sandboxed Pi workers carry the console’s sandbox guarantee');
+  const kinds = settings.getByRole('group', { name: 'Worker kinds', exact: true });
+  await expect(kinds.getByRole('checkbox', { name: /^Pi Sandboxed by the console/u })).toBeChecked();
+  for (const kind of ['Claude', 'Codex']) await expect(kinds.getByRole('checkbox', { name: new RegExp(`^${kind} Runs under your own ${kind} configuration`, 'u') })).not.toBeChecked();
+  await expect(kinds.locator('.settings-enum-detail.caution')).toHaveCount(2);
+  await kinds.getByRole('checkbox', { name: /^Claude/u }).check();
+  await settings.getByRole('button', { name: 'Save changes' }).click();
+  await expect.poll(() => validationRequests.length).toBe(1);
+  expect(validationRequests[0]!.changes.flatMap(change => change.patches ?? []).find(patch => patch.path.join('.') === 'conductor.spawnKinds')).toMatchObject({ op: 'set', value: ['pi', 'claude'] });
+});
+
 test('keeps effort and scopes permanent', async ({ page }) => {
   const { settings, validationRequests } = await setupConductorSettings(page, { effort: 'high', scopes: ['legacy:unknown', 'status:read'] });
   await openConductor(settings);

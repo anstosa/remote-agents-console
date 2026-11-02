@@ -52,13 +52,21 @@ describe('TmuxAdapter capture', () => {
       socket
     }]);
 
-    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'list-panes', '-a', '-F', '#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{@rac_process}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{@rac_worktree}']);
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'list-panes', '-a', '-F', '#{pane_id}\t#{session_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@rac_display_label}\t#{pane_start_command}\t#{@rac_attention}\t#{@rac_session}\t#{@rac_sandboxed}\t#{@rac_question}\t#{@rac_console_managed}\t#{@rac_role}\t#{@rac_pane_name}\t#{window_id}\t#{?pane_in_mode,#{pane_mode},}\t#{@rac_place}\t#{@rac_process}\t#{@rac_review_run}\t#{pane_dead}\t#{pane_dead_status}\t#{@rac_key_binding}\t#{@rac_spawned_by}\t#{@rac_worktree}']);
   });
 
   it("reads a Review run pane's run id", async () => {
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
     run.mockResolvedValueOnce({ code: 0, stdout: '%1\t$1\talex\t123\t/worktrees/alex\tclaude\t\t🔍 Review · Correctness\t\t\t\t\t\t1\t\t\t@7\t\talex:/worktrees/alex\t\trun_abcdefgh1234\n', stderr: '' });
     await expect(new TmuxAdapter().listPanes(socket)).resolves.toMatchObject([{ paneId: '%1', displayLabel: '🔍 Review · Correctness', placeMark: 'alex:/worktrees/alex', reviewRun: 'run_abcdefgh1234' }]);
+  });
+
+  it("reads the Conductor that spawned a worker's pane, before the Stack process's Worktree", async () => {
+    const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
+    run.mockResolvedValueOnce({ code: 0, stdout: '%1\t$1\talex\t123\t/worktrees/alex\tclaude\t\t\t\t\t\t\t\t1\t\t\t@7\t\talex:/worktrees/alex\t\t\t0\t\t\tconductor-1\n', stderr: '' });
+    const [pane] = await new TmuxAdapter().listPanes(socket);
+    expect(pane).toMatchObject({ paneId: '%1', spawnedBy: 'conductor-1' });
+    expect(pane).not.toHaveProperty('processWorktree');
   });
 
   it("reads a pane's session Place mark and marks a session by its id or one of its panes", async () => {
@@ -144,7 +152,7 @@ describe('TmuxAdapter capture', () => {
 
     await expect(new TmuxAdapter().unsetReportedState(socket, '%1')).resolves.toBe(true);
 
-    for (const option of ['@rac_attention', '@rac_session', '@rac_sandboxed', '@rac_question']) {
+    for (const option of ['@rac_attention', '@rac_session', '@rac_sandboxed', '@rac_question', '@rac_spawned_by']) {
       expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/tmp/tmux', 'set-option', '-p', '-t', '%1', '-u', option]);
     }
     // never touches the server-owned display label

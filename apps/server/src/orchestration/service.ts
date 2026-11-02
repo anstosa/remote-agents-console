@@ -1,4 +1,5 @@
 import type { ValidatedConfig } from '../config/schema.js';
+import type { ConductorSpawnKind } from '../integrations/auth/index.js';
 import type { DashboardPayload } from '../dashboard/updates.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import { stackActions, type Agent, type Worktree } from '../domain/models.js';
@@ -99,10 +100,11 @@ export type OrchestrationDependencies = {
   /** The Conductor acting through these operations (ADR 0018), by its Agent id; none for the operator's integrations. */
   conductor?: string;
   /**
-   * Spawn a Sandboxed Pi worker for the Conductor at a Place (ADR 0018): its id, or why not (the
-   * model is not allowed, the Conductor has its cap of live workers, or it could not start).
+   * Spawn a worker for the Conductor at a Place (ADR 0018), of `kind` or its default kind: its id,
+   * or why not (the operator did not enable that kind, which names those enabled; the model is not
+   * allowed; the Conductor has its cap of live workers; or it could not start).
    */
-  spawnWorker?: (placeId: string, conductor: string, model?: string) => Promise<string | 'not-allowed' | 'at-capacity' | undefined>;
+  spawnWorker?: (placeId: string, conductor: string, kind?: ConductorSpawnKind, model?: string) => Promise<string | { enabled: ConductorSpawnKind[] } | 'not-allowed' | 'at-capacity' | undefined>;
   /** The Notes of a Place (its notes key, the store, deletion and a Schedule aimed at the Conductor), and telling the web they changed. */
   notes?: NoteFacade;
   /** The Watches the Conductor sets (ADR 0019). */
@@ -768,13 +770,14 @@ export class OrchestrationService {
   }
 
   // spawn a worker for the Conductor in one Worktree within its scope
-  async spawnAgent(input: { worktreeId: string; model?: string }): Promise<OrchestrationResult<{ agent_id: string }>> {
+  async spawnAgent(input: { worktreeId: string; kind?: ConductorSpawnKind; model?: string }): Promise<OrchestrationResult<{ agent_id: string }>> {
     const { conductor, spawnWorker } = this.dependencies;
     if (!validIdentifier(input.worktreeId)) return failure('invalid_request', 'Invalid worktree identifier.');
     if (conductor === undefined || spawnWorker === undefined) return failure('unavailable', 'Only the Conductor spawns workers.');
     if (this.worktree(input.worktreeId) === undefined) return failure('not_found', 'Worktree not found.');
     return await this.operation(async () => {
-      const spawned = await spawnWorker(input.worktreeId, conductor, input.model);
+      const spawned = await spawnWorker(input.worktreeId, conductor, input.kind, input.model);
+      if (typeof spawned === 'object') return failure('invalid_request', `The operator has not enabled ${input.kind} workers; you may spawn ${spawned.enabled.join(', ')}.`);
       if (spawned === 'not-allowed') return failure('invalid_request', 'That model is not one of the operator\'s Allowed models.');
       if (spawned === 'at-capacity') return failure('conflict', 'You already have your most live workers: close one first.');
       return spawned === undefined ? failure('operation_failed', 'The worker could not be started.', true) : success({ agent_id: spawned });

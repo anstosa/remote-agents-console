@@ -448,6 +448,18 @@ describe('LaunchService', () => {
     expect(run).not.toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['@rac_sandboxed']));
   });
 
+  it('marks a Conductor\'s worker with @rac_spawned_by and does not remember its kind for the Worktree', async () => {
+    process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
+    run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-session') ? '%7\n' : '', stderr: '' }));
+    const store = { rememberLaunchProfile: vi.fn(async () => {}), launchProfile: async () => undefined };
+    const service = new LaunchService(codex, { find: async () => [] }, undefined, undefined, store as never, () => [cora()]);
+
+    await expect(service.launch('cora', 'codex', undefined, false, 'conductor-1')).resolves.toBe(true);
+    expect(run).toHaveBeenCalledWith('/usr/bin/tmux', ['-S', '/host-tmux/default', 'set-option', '-p', '-t', '%7', '@rac_spawned_by', 'conductor-1']);
+    expect(run).not.toHaveBeenCalledWith('/usr/bin/tmux', expect.arrayContaining(['@rac_sandboxed']));
+    expect(store.rememberLaunchProfile).not.toHaveBeenCalled();
+  });
+
   it('records @rac_sandboxed on the fresh window beside an idle shell', async () => {
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
     run.mockImplementation(async (_binary: string, args: string[]) => ({ code: 0, stdout: args.includes('new-window') ? '%9' : '', stderr: '' }));
