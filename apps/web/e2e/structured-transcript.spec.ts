@@ -16,7 +16,7 @@ async function mockPi(page: Page, transcript: Transcript, { attention = 'finishe
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') {
       const worktree = { id: 'cora', projectId: 'app', label: 'Cora', path: '/worktrees/cora', main: false, detached: false, locked: false, branch: 'cora', available: true, pinned: true, order: 0 };
-      const agent = { id: 'agent-1', transport: 'structured', panel: 'transcript', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: '', branch: 'cora', kind: 'pi', attention, structured: { lifecycle, revision: 4, ...(spawnedBy === undefined ? {} : { spawnedBy }), ...(watches === undefined ? {} : { role: 'conductor' }) }, queuedPromptCount: queued.length, ...(watches === undefined || watches.length === 0 ? {} : { watches }) };
+      const agent = { id: 'agent-1', transport: 'structured', panel: 'transcript', home: '/worktrees/cora', worktreeId: 'cora', projectId: 'app', worktreeLabel: 'Cora', worktreeOrder: 0, title: '', branch: 'cora', kind: 'pi', attention, ...(spawnedBy === undefined ? {} : { spawnedBy }), structured: { lifecycle, revision: 4, ...(watches === undefined ? {} : { role: 'conductor' }) }, queuedPromptCount: queued.length, ...(watches === undefined || watches.length === 0 ? {} : { watches }) };
       return route.fulfill({ json: { generation: 1, agents: [agent], projects: [{ id: 'app', label: 'App', available: true, worktrees: [worktree] }] } });
     }
     if (url.pathname === '/api/agents/agent-1/transcript') {

@@ -1044,7 +1044,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // what the console appends to the Conductor's summary when it compacts: its workers, open
   // dispatches and Watches, and what else in its scope is busy
   const conductorHandoff = async (conductorId: string): Promise<string> => {
-    const workers = (await structuredAgents.agents()).filter(agent => agent.structured?.spawnedBy === conductorId);
+    const workers = (await structuredAgents.agents()).filter(agent => agent.spawnedBy === conductorId);
     const listed = await conductorAgents?.(conductorId) ?? [];
     const worktreeOf = (id: string) => { const worktreeId = listed.find(agent => agent.id === id)?.worktreeId; return worktreeId === undefined ? {} : { worktreeId }; };
     return handoffStateText({

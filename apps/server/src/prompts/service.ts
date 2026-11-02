@@ -136,9 +136,9 @@ export class PromptService {
    * one the console started on its behalf, or one the Conductor that spawned it dispatched. A Turn
    * the Conductor dispatched to the operator's own Agent still pushes.
    */
-  quiet(agent: Pick<Agent, 'id' | 'structured'>): boolean {
+  quiet(agent: Pick<Agent, 'id' | 'spawnedBy'>): boolean {
     const sender = this.senders.get(agent.id);
-    return sender?.label !== undefined || sender?.from !== undefined && sender.from === agent.structured?.spawnedBy;
+    return sender?.label !== undefined || sender?.from !== undefined && sender.from === agent.spawnedBy;
   }
 
   /** The queued prompt whose Turn the Agent is on now, and who sent it. */

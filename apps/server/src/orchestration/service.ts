@@ -865,7 +865,7 @@ export class OrchestrationService {
     return await this.operation(async () => {
       const agent = (await this.dependencies.loadDashboard()).agents.find(candidate => candidate.id === agentId);
       if (agent === undefined) return failure('not_found', 'Agent not found.');
-      if (agent.structured?.spawnedBy !== conductor) return failure('conflict', 'You can close only workers you spawned.');
+      if (agent.spawnedBy !== conductor) return failure('conflict', 'You can close only workers you spawned.');
       return await this.dependencies.prompts.close(agentId) ? success({ closed: true as const }) : failure('not_found', 'Agent not found.');
     });
   }

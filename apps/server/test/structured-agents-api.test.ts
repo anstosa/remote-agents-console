@@ -1979,7 +1979,7 @@ describe('the Conductor\'s dispatches', () => {
     expect(fake.launches.at(-1)).not.toHaveProperty('role');
     // only the Conductor's own process was given the console's tools
     expect(fake.grants).toHaveLength(1);
-    expect(await dashboardAgent(workerId)).toMatchObject({ worktreeId: worktree, sandboxed: true, structured: { spawnedBy: conductor } });
+    expect(await dashboardAgent(workerId)).toMatchObject({ worktreeId: worktree, sandboxed: true, spawnedBy: conductor });
     // at most one live worker
     expect(await call('spawn_agent', { worktree_id: worktree })).toMatchObject({ ok: false, error: { code: 'conflict' } });
 
