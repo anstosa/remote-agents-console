@@ -62,4 +62,18 @@ describe('a Pi Conversation reloaded from its messages', () => {
       { id: 'h4', kind: 'settled', outcome: 'cancelled', cost: 0.003, toolCalls: 3 }
     ]);
   });
+
+  it('marks where the Conversation was compacted, with the summary it left', () => {
+    const messages = [
+      { role: 'compactionSummary', summary: '## Goal\nShip it', tokensBefore: 152_400, timestamp: 1 },
+      user('Carry on'),
+      { role: 'assistant', content: [{ type: 'text', text: 'On it.' }], usage: usage(0.001), stopReason: 'stop' }
+    ];
+    expect(piHistory(messages)).toEqual([
+      { id: 'h0', kind: 'notice', tone: 'info', text: 'Compacted the conversation: 152k tokens of context before', detail: '## Goal\nShip it' },
+      { id: 'h1', kind: 'message', role: 'user', text: 'Carry on' },
+      { id: 'h2', kind: 'message', role: 'assistant', text: 'On it.' },
+      { id: 'h3', kind: 'settled', outcome: 'done', cost: 0.001, toolCalls: 0 }
+    ]);
+  });
 });

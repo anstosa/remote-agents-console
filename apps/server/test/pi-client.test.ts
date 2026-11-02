@@ -79,6 +79,23 @@ describe('the Pi client', () => {
     expect(events).toEqual([{ type: 'draft', text: 'prefilled text' }, { type: 'steers', pending: ['Use tabs'] }]);
   });
 
+  it('marks the transcript with each compaction, its cause and summary, and with one that failed but not one cancelled', () => {
+    const { pi, events } = piOverChannel();
+    const result = { summary: '## Goal\nShip it', firstKeptEntryId: 'e9', tokensBefore: 152_400, estimatedTokensAfter: 31_200 };
+    pi({ type: 'compaction_start', reason: 'manual' });
+    pi({ type: 'compaction_end', reason: 'manual', result, aborted: false, willRetry: false });
+    pi({ type: 'compaction_end', reason: 'threshold', result, aborted: false, willRetry: false });
+    pi({ type: 'compaction_end', reason: 'overflow', result: { ...result, estimatedTokensAfter: undefined }, aborted: false, willRetry: true });
+    pi({ type: 'compaction_end', reason: 'threshold', result: undefined, aborted: false, willRetry: false, errorMessage: 'Auto-compaction failed: rate limited' });
+    pi({ type: 'compaction_end', reason: 'threshold', result: undefined, aborted: true, willRetry: false });
+    expect(events).toEqual([
+      { type: 'transcript', item: { id: 'n1', kind: 'notice', tone: 'info', text: 'Compacted the conversation: 152k → about 31k tokens of context', detail: '## Goal\nShip it' } },
+      { type: 'transcript', item: { id: 'n2', kind: 'notice', tone: 'info', text: 'Pi compacted the conversation as its context neared the model\'s limit: 152k → about 31k tokens of context', detail: '## Goal\nShip it' } },
+      { type: 'transcript', item: { id: 'n3', kind: 'notice', tone: 'info', text: 'Pi compacted the conversation after the model refused it as too long: 152k tokens of context before', detail: '## Goal\nShip it' } },
+      { type: 'transcript', item: { id: 'n4', kind: 'notice', tone: 'warning', text: 'Auto-compaction failed: rate limited' } }
+    ]);
+  });
+
   it('reads a prompt Pi handled without a Turn, one it refused while working, and one it refused outright', async () => {
     const { connection, sent, pi } = piOverChannel();
     const handled = connection.deliver('/rac-status');

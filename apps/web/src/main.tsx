@@ -8076,7 +8076,7 @@ type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string;
 type TranscriptItem =
   | { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string; steer?: true; queued?: true; label?: PromptSender['label'] }
   | { id: string; kind: 'thinking'; text: string; live?: true }
-  | { id: string; kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error' }
+  | { id: string; kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error'; detail?: string }
   | { id: string; kind: 'settled'; outcome: 'done' | 'cancelled' | 'failed'; cost?: number; toolCalls?: number }
   | TranscriptTool;
 // the latest `limit` lines of an Agent's transcript, how many come before them, and its status line
@@ -8186,7 +8186,10 @@ function Transcript({ agent, showThinking, onOpenDiff }: { agent: Agent; showThi
             if (line.kind === 'message') return line.role === 'user'
               ? <TranscriptLine key={line.id} className="transcript-steer" glyph="⤷">{line.text}<span className="transcript-dim"> (steer)</span></TranscriptLine>
               : <div key={line.id} className="transcript-line transcript-answer"><span className="transcript-glyph" aria-hidden="true">●</span><div className="note-markdown transcript-markdown"><MarkdownBlocks text={line.text} /></div></div>;
-            if (line.kind === 'notice') return <TranscriptLine key={line.id} className={`transcript-notice ${line.tone}`} glyph="※">{line.text}</TranscriptLine>;
+            // a compaction's notice opens on the summary it left
+            if (line.kind === 'notice') return line.detail === undefined
+              ? <TranscriptLine key={line.id} className={`transcript-notice ${line.tone}`} glyph="※">{line.text}</TranscriptLine>
+              : <div key={line.id} className={`transcript-line transcript-notice ${line.tone}`}><span className="transcript-glyph" aria-hidden="true">※</span><details className="transcript-notice-detail"><summary>{line.text}</summary><div className="note-markdown transcript-markdown"><MarkdownBlocks text={line.detail} /></div></details></div>;
             // thinking shows only while live, unless Show thinking is on
             if (line.kind !== 'thinking' || (!showThinking && line.live !== true) || (line.text === '' && line.live !== true)) return null;
             return <TranscriptLine key={line.id} className="transcript-thinking" glyph="∴">{showThinking && line.text !== '' ? line.text : 'thinking…'}</TranscriptLine>;

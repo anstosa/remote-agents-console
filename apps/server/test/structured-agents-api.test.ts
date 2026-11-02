@@ -41,8 +41,8 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // Each delivery answers with the next of `dispositions`, then `started` (`gone`: its process exits
 // with the delivery unanswered, which the client answers as refused); a steer waits as pending
 // until the Agent takes it or a cancel returns it, and a cancel aborts the Turn before it answers.
-// A compaction is recorded in `compactions` and frees its context: it reports no context tokens
-// until the next answer, as Pi does.
+// A compaction is recorded in `compactions`, marks the transcript and frees its context: it
+// reports no context tokens until the next answer, as Pi does.
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
 // reports `attached` (as a client reading its state afresh does), or finds the holder `gone`.
@@ -78,9 +78,10 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
     renameConversation: async name => { operations.push(`rename ${name}`); if (refuses) return false; emit({ type: 'conversation', id: 'named', name }); return true; },
     compact: async request => {
       compactions.push(request);
-      if (refuses) return { error: 'Nothing to compact (session too small)' };
+      if (refuses) return 'Nothing to compact (session too small)';
+      own({ type: 'transcript', item: { id: `compacted-${compactions.length}`, kind: 'notice', text: 'Compacted the conversation', tone: 'info' } });
       own({ type: 'usage', usage: { cost: 1 } });
-      return { tokensBefore: 152_400, tokensAfter: 31_200 };
+      return undefined;
     },
     models: async () => models,
     setModel: async setting => { operations.push(`model ${setting.model} ${setting.effort}`); if (refuses || unavailable.includes(setting.model)) return false; emit({ type: 'model', current: setting }); return true; },
@@ -539,7 +540,7 @@ describe('a structured Agent\'s Named conversations', () => {
     // an ordinary Agent is never sent the console's state
     expect(fake.compactions).toEqual([{ instructions: 'Keep the PR numbers' }, {}]);
     const items = (await app.inject({ method: 'GET', url: `/api/agents/${id}/transcript`, headers })).json().items;
-    expect(items.at(-1)).toMatchObject({ kind: 'notice', text: 'Compacted the conversation: 152k → about 31k tokens of context' });
+    expect(items.at(-1)).toMatchObject({ kind: 'notice', text: 'Compacted the conversation' });
     await app.close();
 
     const refusing = fakeAgent({ refuses: true });

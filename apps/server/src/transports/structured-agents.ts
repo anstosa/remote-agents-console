@@ -658,21 +658,19 @@ export class StructuredAgents {
   }
 
   /**
-   * Compact the Conversation while the Agent is idle, marking the transcript with what it freed; a
-   * refusal carries the Agent's reason. Prompts wait in the queue meanwhile. `state` is read only
+   * Compact the Conversation while the Agent is idle (its kind marks the transcript); a refusal
+   * carries the Agent's reason. Prompts wait in the queue meanwhile. `state` is read only
    * once the Agent is held, so it is as current as it can be.
    */
   async compact(id: string, { instructions, state }: { instructions?: string; state?: () => Promise<string> } = {}): Promise<'ok' | Exclude<StructuredRefusal, 'refused'> | { refused: string }> {
     let reason = 'The agent did not compact.';
-    const outcome = await this.whileIdle(id, async ({ live, connection }) => {
+    const outcome = await this.whileIdle(id, async ({ connection }) => {
       // a summary without the console's state is still worth having
       const known = await state?.().catch((error: unknown) => { console.error('[structured] the state for a compaction could not be read:', error); return undefined; });
       const request: CompactRequest = { ...(instructions === undefined ? {} : { instructions }), ...(known === undefined ? {} : { state: known }) };
-      const result = await connection.compact(request);
-      if ('error' in result) { reason = result.error; return false; }
-      const tokens = (count: number) => `${Math.round(count / 1000)}k`;
-      this.notice(live, result.tokensBefore === undefined ? 'Compacted the conversation' : `Compacted the conversation: ${tokens(result.tokensBefore)} → about ${tokens(result.tokensAfter ?? 0)} tokens of context`);
-      return true;
+      const refusal = await connection.compact(request);
+      if (refusal !== undefined) reason = refusal;
+      return refusal === undefined;
     });
     // queued prompts held back meanwhile can go now
     this.changed();

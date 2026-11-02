@@ -406,11 +406,13 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     await said(agent, 'First');
     await said(agent, 'Second');
     const before = agent.bodies.length;
-    expect(await agent.connection.compact({ instructions: 'Keep the colour' })).toEqual({ tokensBefore: expect.any(Number), tokensAfter: expect.any(Number) });
+    expect(await agent.connection.compact({ instructions: 'Keep the colour' })).toBeUndefined();
     expect(agent.bodies.slice(before).join('')).toContain('Keep the colour');
+    // the transcript is marked with what it freed and the summary left
+    expect(agent.events).toContainEqual({ type: 'transcript', item: { id: expect.any(String), kind: 'notice', tone: 'info', text: expect.stringMatching(/^Compacted the conversation: \d+k → about \d+k tokens of context$/u), detail: expect.any(String) } });
     // the context is unknown until the next answer
     expect(agent.events.filter(event => event.type === 'usage').at(-1)).toEqual({ type: 'usage', usage: { cost: expect.any(Number) } });
-    expect(await agent.connection.compact({})).toEqual({ error: expect.any(String) });
+    expect(await agent.connection.compact({})).toEqual(expect.any(String));
   }, 60_000);
 
   it('hands the Conductor\'s compaction its own focus and appends the console\'s state to the summary, dropping the last one', async () => {
@@ -419,7 +421,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
     await said(agent, 'First');
     await said(agent, 'Second');
     let before = agent.bodies.length;
-    expect(await agent.connection.compact({ state: 'Workers you spawned:\n- Agent one', instructions: 'Keep the release plan' })).not.toHaveProperty('error');
+    expect(await agent.connection.compact({ state: 'Workers you spawned:\n- Agent one', instructions: 'Keep the release plan' })).toBeUndefined();
     const summarizing = agent.bodies.slice(before).join('');
     expect(summarizing).toContain('handoff to itself');
     expect(summarizing).toContain('Keep the release plan');
@@ -432,7 +434,7 @@ describe.skipIf(!tmuxSocketsWork || loginShell === undefined).each(clients)('the
 
     // the next compaction's summary carries only the newer state
     before = agent.bodies.length;
-    expect(await agent.connection.compact({ state: 'Workers you spawned:\n- Agent two' })).not.toHaveProperty('error');
+    expect(await agent.connection.compact({ state: 'Workers you spawned:\n- Agent two' })).toBeUndefined();
     expect(agent.bodies.slice(before).join('')).not.toContain('Agent one');
     before = agent.bodies.length;
     await said(agent, 'Fourth');

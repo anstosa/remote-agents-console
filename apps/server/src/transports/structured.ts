@@ -32,7 +32,8 @@ export type TranscriptItem =
   // a prompt the console sent of its own carries its `label`
   | { id: string; kind: 'message'; role: 'user' | 'assistant'; text: string; steer?: true; queued?: true; label?: PromptLabel }
   | { id: string; kind: 'thinking'; text: string; live?: true }
-  | { id: string; kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error' }
+  // a compaction's notice carries the summary it left as its `detail`
+  | { id: string; kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error'; detail?: string }
   | { id: string; kind: 'settled'; outcome: 'done' | 'cancelled' | 'failed'; cost?: number; toolCalls?: number }
   | TranscriptTool;
 /** What an Agent has used of its Conversation: its cost so far and how full its context is, as a share and in tokens. */
@@ -42,8 +43,6 @@ export type AgentUsage = { cost: number; contextPercent?: number; contextTokens?
  * for an Agent whose extension appends it to the summary (the Conductor's).
  */
 export type CompactRequest = { instructions?: string; state?: string };
-/** What a compaction did: the context's tokens before it and an estimate after, or why it did not run. */
-export type CompactResult = { tokensBefore?: number; tokensAfter?: number } | { error: string };
 /**
  * A model an Agent can run on: the kind's id for it, its display name and provider, its price per 1M
  * input and output tokens, its context window, and the Efforts it supports.
@@ -95,8 +94,11 @@ export interface StructuredConnection {
   /** Switch to a Conversation by the reference its kind's store located. */
   switchConversation(reference: string): Promise<boolean>;
   renameConversation(name: string): Promise<boolean>;
-  /** Summarize the Conversation so far in place of its older messages, freeing context. */
-  compact(request: CompactRequest): Promise<CompactResult>;
+  /**
+   * Summarize the Conversation so far in place of its older messages, freeing context, and mark
+   * the transcript; resolves to why it did not, if it did not.
+   */
+  compact(request: CompactRequest): Promise<string | undefined>;
   /** The models the Agent can reach now. */
   models(): Promise<ModelInfo[]>;
   setModel(setting: ModelSetting): Promise<boolean>;

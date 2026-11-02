@@ -73,6 +73,15 @@ const outcome = (aborted: boolean, failed: boolean): 'done' | 'cancelled' | 'fai
 // Pi bounds a tool's output (about 50 KiB); this guards every kept text against a tool or model that does not
 const maxText = 64 * 1024;
 const bounded = (value: string): string => value.length > maxText ? value.slice(-maxText) : value;
+const thousands = (tokens: number): string => `${Math.round(tokens / 1000)}k`;
+// the notice for a compaction, live (`compaction_end`) or found in the history; a history's says
+// neither why nor what it freed
+const compactionNotice = (id: string, summary: unknown, tokensBefore: unknown, tokensAfter?: unknown, reason?: unknown): TranscriptItem => {
+  const before = typeof tokensBefore === 'number' ? thousands(tokensBefore) : undefined;
+  const freed = before === undefined ? '' : typeof tokensAfter === 'number' ? `: ${before} → about ${thousands(tokensAfter)} tokens of context` : `: ${before} tokens of context before`;
+  const why = reason === 'threshold' ? ' as its context neared the model\'s limit' : reason === 'overflow' ? ' after the model refused it as too long' : '';
+  return { id, kind: 'notice', text: `${reason === 'threshold' || reason === 'overflow' ? 'Pi compacted' : 'Compacted'} the conversation${why}${freed}`, tone: 'info', ...(typeof summary === 'string' && summary !== '' ? { detail: bounded(summary) } : {}) };
+};
 
 // Pi's tool names as the transcript's verbs; any other tool keeps its own name
 const verbs: Record<string, string> = { read: 'Read', write: 'Write', edit: 'Edit', bash: 'Run', grep: 'Search', find: 'Find', ls: 'List', codemode: 'Script', ask_user: 'Ask' };
@@ -147,6 +156,8 @@ export function piHistory(messages: readonly unknown[], { running = false } = {}
         items.push({ ...toolCall(block.id, block.name, block.arguments), state: 'done' });
         toolCalls += 1;
       }
+    } else if (message.role === 'compactionSummary') {
+      items.push(compactionNotice(id(), message.summary, message.tokensBefore));
     } else if (message.role === 'toolResult' && typeof message.toolCallId === 'string') {
       const call = calls.get(message.toolCallId);
       const item = call === undefined ? undefined : items[call.index];
@@ -396,6 +407,13 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
         transcript({ ...started, ...(started.summary === waitingForAnswer ? { summary: '' } : {}), ...finished(tool.toolName, tool.args, record.result, failed, record.durationMs), ...(calls === undefined ? {} : { summary: scriptSummary(calls) }) });
         return;
       }
+      // every compaction, the console's and Pi's own; one aborted (by a Turn's cancel) says nothing
+      case 'compaction_end': {
+        const result = isObject(record.result) ? record.result : undefined;
+        if (result !== undefined) transcript(compactionNotice(next('n'), result.summary, result.tokensBefore, result.estimatedTokensAfter, record.reason));
+        else if (typeof record.errorMessage === 'string') transcript({ id: next('n'), kind: 'notice', text: bounded(record.errorMessage), tone: 'warning' });
+        return;
+      }
       case 'agent_settled':
         if (working === false) return;
         working = false;
@@ -462,9 +480,8 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
       const response = await request({ type: 'compact', ...(customInstructions === undefined ? {} : { customInstructions }) });
       // read before the operation ends, so no one sees the context as full still
       await usage();
-      if (response.success !== true) return { error: typeof response.error === 'string' ? response.error : 'The agent did not compact.' };
-      const data = isObject(response.data) ? response.data : {};
-      return { ...(typeof data.tokensBefore === 'number' ? { tokensBefore: data.tokensBefore } : {}), ...(typeof data.estimatedTokensAfter === 'number' ? { tokensAfter: data.estimatedTokensAfter } : {}) };
+      if (response.success !== true) return typeof response.error === 'string' ? response.error : 'The agent did not compact.';
+      return undefined;
     },
     async models() {
       const data = (await request({ type: 'get_available_models' })).data;

@@ -358,6 +358,9 @@ html.software-keyboard-open .tabs { display: none; }
 .transcript-untrusted { margin: .25rem 0 .25rem 1.2rem; padding: .3rem .45rem; border: 1px dashed color-mix(in srgb, var(--yellow) 60%, transparent); border-radius: .3rem; }
 .transcript-untrusted small { color: var(--yellow); font-size: .875em; }
 .transcript-untrusted pre { margin: .2rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.transcript-notice-detail { min-width: 0; }
+.transcript-notice-detail > summary { cursor: pointer; overflow-wrap: anywhere; }
+.transcript-notice-detail > .transcript-markdown { margin: .35rem 0; padding-left: .6rem; border-left: 2px solid var(--surface-1); color: var(--text); }
 .transcript-notice.warning .transcript-glyph { color: var(--yellow); }
 .transcript-notice.error .transcript-glyph { color: var(--red); }
 .transcript-group-end { margin: .35rem 0 0 1.2rem; font-size: .9em; }
