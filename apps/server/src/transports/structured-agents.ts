@@ -154,7 +154,7 @@ export function holderProcesses(windows: HolderWindows, configs: AdapterConfigs,
 // by `offers` so the web takes each one once. `nonce` is what the latest process's launch report
 // must echo, and `refusal` why its report refused it. `access` is the console MCP token a
 // Conductor's process is given once it reports in, and `scripts` the deadlines of its scripts running
-type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
+type Live = { generation: number; nonce?: string; access?: string; scripts?: Map<string, NodeJS.Timeout>; refusal?: string; connection?: StructuredConnection; cursor?: () => number; raw?: () => readonly RawLine[]; prompt?: string; offPin?: boolean; resyncing?: boolean; working: boolean; busy: boolean; turn?: Exclude<TurnEvent, { type: 'started' }>; questions: StructuredQuestion[]; steers: string[]; offers: number; draft?: { id: number; text: string }; transcript: TranscriptItem[]; revision: number; status: Map<string, string>; usage?: AgentUsage; compacting?: boolean; queuedNext?: boolean; labelNext?: PromptLabel; stderr?: string; reported?: (reported: boolean) => void; conversationName?: string; model?: ModelSetting; models?: ModelInfo[]; guarded?: boolean; noticeCount: number; notices: TranscriptItem[] };
 /** Why an operation on a structured Agent did not run: no such live Agent, it is working, or it refused. */
 export type StructuredRefusal = 'unavailable' | 'busy' | 'refused';
 const maxTranscriptItems = 2_000;
@@ -650,13 +650,18 @@ export class StructuredAgents {
    */
   async compact(id: string, { instructions, state }: { instructions?: string; state?: () => Promise<string> } = {}): Promise<'ok' | Exclude<StructuredRefusal, 'refused'> | { refused: string }> {
     let reason = 'The agent did not compact.';
-    const outcome = await this.whileIdle(id, async ({ connection }) => {
-      // a summary without the console's state is still worth having
-      const known = await state?.().catch((error: unknown) => { console.error('[structured] the state for a compaction could not be read:', error); return undefined; });
-      const request: CompactRequest = { ...(instructions === undefined ? {} : { instructions }), ...(known === undefined ? {} : { state: known }) };
-      const refusal = await connection.compact(request);
-      if (refusal !== undefined) reason = refusal;
-      return refusal === undefined;
+    const outcome = await this.whileIdle(id, async ({ live, connection }) => {
+      // not a Turn, so the Agent is not working, but prompts wait on it all the same
+      live.compacting = true;
+      this.changed(live);
+      try {
+        // a summary without the console's state is still worth having
+        const known = await state?.().catch((error: unknown) => { console.error('[structured] the state for a compaction could not be read:', error); return undefined; });
+        const request: CompactRequest = { ...(instructions === undefined ? {} : { instructions }), ...(known === undefined ? {} : { state: known }) };
+        const refusal = await connection.compact(request);
+        if (refusal !== undefined) reason = refusal;
+        return refusal === undefined;
+      } finally { live.compacting = false; }
     });
     // queued prompts held back meanwhile can go now
     this.changed();
@@ -735,7 +740,7 @@ export class StructuredAgents {
       // one resyncing after a reattach may be working: nothing takes it to have finished
       const attention = questions.length > 0 ? 'question' : live?.working === true || live?.resyncing === true ? 'working' : 'finished';
       const model = current === undefined ? undefined : { id: current.model, ...(name === undefined ? {} : { name }), ...(current.effort === undefined ? {} : { effort: current.effort }) };
-      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), ...(typeof record.origin === 'object' ? { spawnedBy: record.origin.conductor } : {}), structured: { lifecycle, ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: record.role === undefined && this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }) } };
+      return { id: record.id, transport: 'structured', panel: agentPanel('structured'), home: record.home, title: '', kind: record.kind, attention, placeId: record.placeId, ...(record.sandboxed ? { sandboxed: true } : {}), ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }), ...(questions[0] === undefined ? {} : { question: questions[0] }), ...(typeof record.origin === 'object' ? { spawnedBy: record.origin.conductor } : {}), structured: { lifecycle, ...(record.role === undefined ? {} : { role: record.role }), ...(record.reason === undefined ? {} : { reason: record.reason }), revision: live?.revision ?? 0, ...(model === undefined ? {} : { model }), switchable: record.role === undefined && this.allowed(record.kind).length > 0, ...(questions.length === 0 ? {} : { questions }), ...(live === undefined || live.steers.length === 0 ? {} : { steers: live.steers }), ...(live?.draft === undefined ? {} : { draft: live.draft }), ...(live?.compacting === true ? { compacting: true } : {}) } };
     });
   }
 

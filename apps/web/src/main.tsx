@@ -8054,6 +8054,7 @@ function agentPanelState(agent: Agent, starting: boolean): AgentPanelState {
   const state = agentState(agent);
   if (state === 'action-required') return { label: 'Needs answer', tone: 'needs-answer' };
   if (state === 'working') return { label: 'Working', tone: 'working' };
+  if (agent.structured?.compacting === true) return { label: 'Compacting', tone: 'working' };
   return agent.unread === true ? { label: 'Done', tone: 'done' } : { label: 'Idle', tone: 'idle' };
 }
 
@@ -8091,7 +8092,7 @@ function AgentPanelTitle({ kind, sandboxed, title, switcher, state, connection =
 // A structured Agent's process state (`revision` changes with its transcript). `questions` are
 // every open question (the first is the Agent's `question`), `steers` the steers its process holds
 // not yet taken, and `draft` text it offers for an empty composer
-type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; role?: 'conductor'; reason?: string; revision: number; model?: AgentModel; switchable?: boolean; questions?: InlineQuestion[]; steers?: string[]; draft?: { id: number; text: string } };
+type StructuredAgentState = { lifecycle: 'starting' | 'live' | 'exited' | 'failed'; role?: 'conductor'; reason?: string; revision: number; model?: AgentModel; switchable?: boolean; questions?: InlineQuestion[]; steers?: string[]; draft?: { id: number; text: string }; compacting?: true };
 // A tool call as the transcript lists it: one result (a short line, an edit's diff, or a command's
 // last lines with their count). Its full output and a script's source are read when it is opened.
 type TranscriptTool = { id: string; kind: 'tool'; name: string; summary: string; state: 'running' | 'done' | 'failed'; parentId?: string; durationMs?: number; result?: string; diff?: { path: string; patch: string }; tail?: string; outputLines?: number; output?: string; source?: string; kept?: false };

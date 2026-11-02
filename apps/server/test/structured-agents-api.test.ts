@@ -44,11 +44,11 @@ const report = { loaded: true as const, sandbox: { engaged: false, reason: 'not 
 // with the delivery unanswered, which the client answers as refused); a steer waits as pending
 // until the Agent takes it or a cancel returns it, and a cancel aborts the Turn before it answers.
 // A compaction is recorded in `compactions`, marks the transcript and frees its context: it
-// reports no context tokens until the next answer, as Pi does.
+// reports no context tokens until the next answer, as Pi does. It finishes once `compacting` resolves.
 // `lines` is how many lines the console has read from its process, which a reattach (after a
 // console restart) resumes from; `attaches` lists the holders it was reattached to. A reattach
 // reports `attached` (as a client reading its state afresh does), or finds the holder `gone`.
-function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], gone = false, sandboxFails = false, nonce = undefined as string | undefined, sandboxGeneration = undefined as string | undefined, sandboxGenerationFails = false, stopFails = false, bridged = false } = {}) {
+function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefined, reports = true, exits = false, refuses = false, models = [] as ModelInfo[], switchedTo = undefined as ModelSetting | undefined, unavailable = [] as string[], version = report.version, attaching = Promise.resolve(), dropped = 0, attached = [] as StructuredEvent[], gone = false, sandboxFails = false, nonce = undefined as string | undefined, sandboxGeneration = undefined as string | undefined, sandboxGenerationFails = false, stopFails = false, bridged = false, compacting = Promise.resolve() } = {}) {
   const delivered: string[] = [];
   const launches: StructuredLaunch[] = [];
   const operations: string[] = [];
@@ -80,6 +80,7 @@ function fakeAgent({ raw = undefined as ((token: string) => RawLine[]) | undefin
     renameConversation: async name => { operations.push(`rename ${name}`); if (refuses) return false; emit({ type: 'conversation', id: 'named', name }); return true; },
     compact: async request => {
       compactions.push(request);
+      await compacting;
       if (refuses) return 'Nothing to compact (session too small)';
       own({ type: 'transcript', item: { id: `compacted-${compactions.length}`, kind: 'notice', text: 'Compacted the conversation', tone: 'info' } });
       own({ type: 'usage', usage: { cost: 1 } });
@@ -553,6 +554,22 @@ describe('a structured Agent\'s Named conversations', () => {
     expect(refused.statusCode).toBe(409);
     expect(refused.json()).toEqual({ error: 'Nothing to compact (session too small)' });
     await other.app.close();
+  });
+
+  it('shows the Agent compacting while its compaction runs, though it is not working', async () => {
+    let finish!: () => void;
+    const fake = fakeAgent({ compacting: new Promise<void>(resolve => { finish = resolve; }) });
+    const { app, headers, dashboardAgent } = await consoleWith(fake);
+    const id: string = (await app.inject({ method: 'POST', url: '/api/agents/launch', headers, payload: { kind: 'pi' } })).json().agentId;
+
+    const compacted = app.inject({ method: 'POST', url: `/api/agents/${id}/compact`, headers, payload: {} });
+    await vi.waitFor(() => expect(fake.compactions).toHaveLength(1));
+    expect(await dashboardAgent(id)).toMatchObject({ attention: 'finished', structured: { compacting: true } });
+
+    finish();
+    expect((await compacted).statusCode).toBe(204);
+    expect((await dashboardAgent(id)).structured).not.toHaveProperty('compacting');
+    await app.close();
   });
 
   it('resumes a listed Pi Conversation by launching a Pi Agent on it', async () => {
