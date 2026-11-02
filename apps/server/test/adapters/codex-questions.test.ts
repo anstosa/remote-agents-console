@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { parseChoiceQuestion, queuedCodexQuestion } from '../../src/adapters/codex-questions.js';
+import { codexQuestionTextEntry, parseChoiceQuestion, queuedCodexQuestion } from '../../src/adapters/codex-questions.js';
 import { codexSubmission, parseCodexQuestion } from '../../src/adapters/codex-tui.js';
 import { inlineQuestionId } from '../../src/adapters/inline-questions.js';
 
@@ -11,6 +11,51 @@ const menu = (selected: number) => [
   ...['First model (current)', 'Second model', 'Third model'].map((label, index) => `${index === selected ? '› ' : '  '}${index + 1}. ${label}`),
   'Press enter to confirm or esc to go back'
 ].join('\n');
+
+// codex 0.166 startup hook-review snapshot
+const hookReview = [
+  '  Hooks need review',
+  '  2 hooks are new or changed.',
+  '  Hooks can run outside the sandbox',
+  '  after you trust them.',
+  '',
+  '',
+  '› 1. Review hooks',
+  '  2. Trust all and continue',
+  '  3. Continue without trusting (hooks',
+  "     won't run)",
+  '',
+  '  enter confirm · esc skip'
+].join('\n');
+
+// expose only the live startup menu without changing native trust semantics
+describe('Codex hook review', () => {
+  const text = 'Hooks need review 2 hooks are new or changed. Hooks can run outside the sandbox after you trust them.';
+  const choices = ['Review hooks', 'Trust all and continue', "Continue without trusting (hooks won't run)"];
+  // preserve the warning and wrapped choice exactly as the native picker draws them
+  it('parses the narrow hook-review snapshot without treating its footer as newer output', () => {
+    expect(parseCodexQuestion(hookReview)).toEqual({ text, choices, pane: { selectedIndex: 0 }, id: inlineQuestionId(text, choices), source: 'parsed' });
+  });
+  // native cursor movement and width changes preserve the question identity
+  it('keeps the same id after wrapping or highlight changes', () => {
+    const wide = hookReview.replace('outside the sandbox\n  after', 'outside the sandbox after').replace("(hooks\n     won't run)", "(hooks won't run)").replace('› 1.', '  1.').replace('  2.', '› 2.');
+    expect(parseCodexQuestion(wide)).toEqual({ text, choices, pane: { selectedIndex: 1 }, id: inlineQuestionId(text, choices), source: 'parsed' });
+  });
+  // prose notes must never confirm the selected trust option
+  it('does not offer text entry for hook review', () => {
+    const question = parseCodexQuestion(hookReview);
+    expect(question).toBeDefined();
+    expect(codexQuestionTextEntry(question!, hookReview)).toBeUndefined();
+  });
+  // a completed review cannot remain actionable through captured scrollback
+  it('ignores hook review once newer output follows it', () => {
+    expect(parseCodexQuestion(`${hookReview}\n• Hooks loaded\n› Ask Codex to do anything`)).toBeUndefined();
+  });
+  // the unnumbered native trust browser remains terminal-only
+  it('leaves per-hook trust details out of answer mode', () => {
+    expect(parseCodexQuestion('PreToolUse hooks\n\nEvent: PreToolUse\nSource: plugin\nCommand: review-hook\nTrust: needs review\n\nt trust · esc back')).toBeUndefined();
+  });
+});
 
 // preserve complete native questions instead of just the final terminal row
 describe('Codex question content', () => {

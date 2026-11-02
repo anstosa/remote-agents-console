@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { installPaneMock, seedPaneSize, pushBytes, pushQuestion } from './pane-stream-mock.js';
 
 // The server derive reports the viewed pane's inline question on the pane socket's
@@ -37,6 +37,106 @@ const modelQuestion = {
   ] },
   source: 'parsed'
 };
+const hookApprovalQuestion = {
+  id: 'question-hook-approval',
+  text: 'Hooks need review 2 hooks are new or changed. Hooks can run outside the sandbox after you trust them.',
+  field: { kind: 'choice', choices: ['Review hooks', 'Trust all and continue', "Continue without trusting (hooks won't run)"] },
+  source: 'parsed'
+};
+type HookApprovalState = {
+  reject: boolean;
+  questionPosts: Array<{ questionId: string; index: number }>;
+  promptPosts: unknown[];
+};
+
+// serve one isolated hook approval question
+async function installHookApprovalMock(page: Page, state: HookApprovalState) {
+  await installPaneMock(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    // authenticate the mocked console
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    // expose one blocked codex agent
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', kind: 'codex', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Hooks need review', attention: 'question', queuedPromptCount: 0 }], projects: [] } });
+    // mint the mocked pane socket
+    if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
+    // keep prompt sources empty
+    if (/^\/api\/agents\/agent-1\/(?:saved-prompts|prompt-history|queued-prompts)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
+    // capture forbidden prompt fallback
+    if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') {
+      state.promptPosts.push(request.postDataJSON());
+      return route.fulfill({ status: 204 });
+    }
+    // capture the only approval write
+    if (url.pathname === '/api/agents/agent-1/question' && request.method() === 'POST') {
+      state.questionPosts.push(request.postDataJSON() as { questionId: string; index: number });
+      // preserve the question after one conflict
+      if (state.reject) return route.fulfill({ status: 409, json: { error: 'question unavailable' } });
+      return route.fulfill({ status: 204 });
+    }
+    // disable unrelated push setup
+    if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    // contain every remaining api read
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+}
+
+const hookApprovalViewports = [
+  { name: 'desktop', width: 1280, height: 800 },
+  { name: 'phone', width: 390, height: 844 }
+] as const;
+
+// cover hook approval on desktop and phone
+for (const viewport of hookApprovalViewports) {
+  // verify one explicit approval flow
+  test(`answers a hook approval question explicitly on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const state: HookApprovalState = { reject: true, questionPosts: [], promptPosts: [] };
+    await installHookApprovalMock(page, state);
+    await page.goto('/');
+    await seedPaneSize(page, 'agent-1', 80, 24);
+    await pushQuestion(page, 'agent-1', hookApprovalQuestion);
+
+    const question = page.getByRole('region', { name: 'Agent question' });
+    await expect(question).toBeVisible();
+    await expect(question.getByText(hookApprovalQuestion.text, { exact: true })).toBeVisible();
+    const choices = question.getByRole('button', { name: 'Review hooks', exact: true })
+      .or(question.getByRole('button', { name: 'Trust all and continue', exact: true }))
+      .or(question.getByRole('button', { name: "Continue without trusting (hooks won't run)", exact: true }));
+    await expect(choices).toHaveText(['1Review hooks', '2Trust all and continue', "3Continue without trusting (hooks won't run)"]);
+    await expect(choices.nth(0)).toBeVisible();
+    await expect(choices.nth(1)).toBeVisible();
+    await expect(choices.nth(2)).toBeVisible();
+
+    // toggles never answer the approval
+    await page.getByRole('button', { name: 'Switch to normal prompt mode' }).click();
+    await expect(page.getByRole('button', { name: 'Switch to answer mode' })).toBeVisible();
+    await page.getByRole('button', { name: 'Switch to answer mode' }).click();
+    await expect(question).toBeVisible();
+    expect(state.questionPosts).toEqual([]);
+    expect(state.promptPosts).toEqual([]);
+
+    // a failed explicit answer remains retryable
+    await choices.nth(1).click();
+    await expect(page.getByRole('alert')).toContainText('Unable to send this answer.');
+    await expect(question).toBeVisible();
+    expect(state.questionPosts).toEqual([{ questionId: hookApprovalQuestion.id, index: 1 }]);
+    expect(state.promptPosts).toEqual([]);
+
+    // a successful retry dismisses the stale frame
+    state.reject = false;
+    await choices.nth(1).click();
+    await expect(question).toHaveCount(0);
+    expect(state.questionPosts).toEqual([
+      { questionId: hookApprovalQuestion.id, index: 1 },
+      { questionId: hookApprovalQuestion.id, index: 1 }
+    ]);
+    expect(state.promptPosts).toEqual([]);
+    await pushQuestion(page, 'agent-1', hookApprovalQuestion);
+    await expect(question).toHaveCount(0);
+  });
+}
 
 test('renders inline questions from the pane stream and answers through one endpoint', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 800 });

@@ -62,8 +62,8 @@ const agentMessageLines = (message: string) => message.replace(/\x1b\[[0-?]*[ -/
 // native question boundaries must never become question or answer content
 const questionHeader = /^(?:• Queued follow-up inputs|question \d+(?: of |\/)\d+(?: \(\d+ unanswered\))?)$/iu;
 const questionChrome = /^(?:[•■─]|[›❯>](?:\s|$))/u;
-// allow wrapped native shortcuts after a choice list, never later agent output
-const questionFooter = /^(?:tab to add notes\b|enter (?:submit|to submit answer|to select)\b|esc to (?:interrupt|cancel)\b|press enter to confirm\b|ctrl\s*\+\s*\] skip\b|(?:alt|⌥|shift)\s*\+\s*[↑↓←→] (?:main prompt|prev question|next question|queued messages)\b|←\/→ to navigate questions\b|[↑↓←→](?:\s|$)|[›❯>]\s*$)/iu;
+// allow native question and hook-review shortcuts, never later agent output
+const questionFooter = /^(?:tab to add notes\b|enter (?:confirm|submit|to submit answer|to select)\b|esc to (?:interrupt|cancel)\b|press enter to confirm\b|ctrl\s*\+\s*\] skip\b|(?:alt|⌥|shift)\s*\+\s*[↑↓←→] (?:main prompt|prev question|next question|queued messages)\b|←\/→ to navigate questions\b|[↑↓←→](?:\s|$)|[›❯>]\s*$)/iu;
 
 type ChoiceBlock = { labelColumn: number; rows: string[] };
 

@@ -1288,6 +1288,43 @@ it('answers a Codex menu relative to its fresh highlight without changing its qu
   expect(sent).toHaveLength(2);
 });
 
+// use the existing fresh-capture boundary for explicit hook-review choices
+it.each(['codex', 'omx'])('answers %s hook review only through explicit current choices', async kind => {
+  const hookAgent = { ...agent, kind };
+  const text = 'Hooks need review 2 hooks are new or changed. Hooks can run outside the sandbox after you trust them.';
+  const choices = ['Review hooks', 'Trust all and continue', "Continue without trusting (hooks won't run)"];
+  let capture = `${text}\n\n› 1. Review hooks\n  2. Trust all and continue\n  3. Continue without trusting (hooks won't run)\n\nenter confirm · esc skip`;
+  const id = inlineQuestionId(text, choices);
+  const sent: string[][] = [];
+  const discovery = { worktreesNow: () => [], target: async () => ({ agent: hookAgent, socket }) };
+  const tmux = {
+    // re-read the native menu before each answer
+    capture: async () => capture,
+    // record intentional selection without trusting any real hooks
+    sendKeys: async (_s: unknown, pane: string, keys: string[]) => { sent.push([pane, ...keys]); return true; },
+    pastePrompt: vi.fn(async () => true)
+  };
+  const service = new PromptService(discovery as never, tmux as never);
+  // merely seeing a review, stale clicks and prose notes cannot select a trust action
+  await expect(service.answerQuestion(hookAgent.id, 'stale-hook-review', 1)).resolves.toBe(false);
+  await expect(service.answerQuestion(hookAgent.id, id, 'Trust these hooks')).resolves.toBe(false);
+  await expect(service.answerQuestion(hookAgent.id, id, 3)).resolves.toBe(false);
+  expect(sent).toEqual([]);
+  expect(tmux.pastePrompt).not.toHaveBeenCalled();
+  // each operator choice follows the current highlight rather than a numeric shortcut
+  await expect(service.answerQuestion(hookAgent.id, id, 0)).resolves.toBe(true);
+  await expect(service.answerQuestion(hookAgent.id, id, 1)).resolves.toBe(true);
+  capture = capture.replace('› 1.', '  1.').replace('  3.', '› 3.');
+  await expect(service.answerQuestion(hookAgent.id, id, 2)).resolves.toBe(true);
+  expect(sent).toEqual([['%1', 'Enter'], ['%1', 'Down', 'Enter'], ['%1', 'Enter']]);
+  // changed review content and completed menus invalidate the old click
+  capture = capture.replace('2 hooks', '3 hooks');
+  await expect(service.answerQuestion(hookAgent.id, id, 1)).resolves.toBe(false);
+  capture = '› Ask Codex to do anything';
+  await expect(service.answerQuestion(hookAgent.id, id, 1)).resolves.toBe(false);
+  expect(sent).toHaveLength(3);
+});
+
 it('answers a Claude reported question by re-deriving it from a fresh payload and capture', async () => {
   const sent: string[][] = [];
   const claudeAgent = { id: 'socket:%1', pane: { paneId: '%1' }, home: '/tmp', kind: 'claude' as const, title: '' };
