@@ -186,6 +186,11 @@ export class IntegrationGateway {
       case 'run_stack_action': return await orchestration.runStackAction({ worktreeId: input.worktree_id as string, action: input.action as 'start' | 'stop' | 'build' | 'restart' | 'migrate', ...(input.process === undefined ? {} : { process: input.process as string }) });
       case 'start_review': return await orchestration.startReview({ agentId: input.agent_id as string, scope: input.scope as 'working' | 'pr', includeTests: input.include_tests as boolean, includeDocs: input.include_docs as boolean });
       case 'spawn_agent': return await orchestration.spawnAgent({ worktreeId: input.worktree_id as string, ...(input.kind === undefined ? {} : { kind: input.kind as ConductorSpawnKind }), ...(input.model === undefined ? {} : { model: input.model as string }) });
+      case 'create_worktree': return await orchestration.createWorktree({
+        worktreeId: input.worktree_id as string, mode: input.mode as 'new' | 'existing' | 'pull-request',
+        ...(input.branch === undefined ? {} : { branch: input.branch as string }), ...(input.base === undefined ? {} : { base: input.base as string }),
+        ...(input.number === undefined ? {} : { number: input.number as number }), ...(input.issue === undefined ? {} : { issue: input.issue as number })
+      });
       case 'close_agent': return await orchestration.closeAgent(input.agent_id as string);
       case 'watch_pull_request': return await orchestration.watchPullRequest({ worktreeId: input.worktree_id as string, number: input.number as number });
       case 'watch_process': return await orchestration.watchProcess({ worktreeId: input.worktree_id as string, process: input.process as string });

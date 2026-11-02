@@ -4,6 +4,7 @@ import type { DashboardPayload } from '../src/dashboard/updates.js';
 import type { Agent, Worktree } from '../src/domain/models.js';
 import { stated } from './helpers/agent.js';
 import { OrchestrationService, type OrchestrationDependencies } from '../src/orchestration/service.js';
+import { forkWithoutAgent } from '../src/pull-requests/switch-service.js';
 
 const cora: Worktree = { id: 'cora', projectId: 'proj', label: 'Cora', path: '/worktrees/cora', identity: '/worktrees/cora', available: true, pinned: true, main: true, detached: false, locked: false, commands: { build: 'docker compose build' }, projectUrl: 'https://cora.external.example.com' };
 const dave: Worktree = { id: 'dave', projectId: 'proj', label: 'Dave', path: '/worktrees/dave', identity: '/worktrees/dave', available: true, pinned: false, main: false, detached: false, locked: false, projectUrl: 'https://dave.example.com', projectPort: 4000 };
@@ -325,6 +326,33 @@ describe('OrchestrationService', () => {
     agent = { ...activeAgent, home: '/scratch/repo', title: 'Ready' };
     await expect(service.deactivate(activeAgent.id)).resolves.toMatchObject({ ok: false, error: { code: 'conflict' } });
     expect(closed).toBe(1);
+  });
+
+  it('creates a Worktree for the Conductor in a configured Project of a Worktree in its scope, opening nothing', async () => {
+    const calls: unknown[][] = [];
+    const createWorktree: OrchestrationDependencies['createWorktree'] = async (...args) => { calls.push(args); return { ok: true, worktreeId: 'proj:/worktrees/feat', setupError: 'The worktree was created, but its setup command failed.', fetchError: 'could not reach origin' }; };
+    const configured = { ...config, projects: [{ id: 'proj' }] as ValidatedConfig['projects'] };
+    const conductor = new OrchestrationService(dependencies({ config: configured, createWorktree })).scoped(worktree => worktree.id === cora.id, 'conductor-1');
+    await expect(conductor.createWorktree({ worktreeId: cora.id, mode: 'new', branch: 'feat', base: 'main', issue: 7 })).resolves.toEqual({ ok: true, version: 'v1', value: { worktree_id: 'proj:/worktrees/feat', setup_error: 'The worktree was created, but its setup command failed.', fetch_error: 'could not reach origin' } });
+    await conductor.createWorktree({ worktreeId: cora.id, mode: 'pull-request', number: 12 });
+    expect(calls).toEqual([['proj', { mode: 'new', branch: 'feat', base: 'main' }, 'empty', 7], ['proj', { mode: 'pull-request', number: 12, refuseFork: true }, 'empty', undefined]]);
+    // each mode takes only its own fields
+    for (const input of [{ mode: 'pull-request' as const, number: 3, branch: 'x' }, { mode: 'pull-request' as const, number: 3, issue: 4 }, { mode: 'existing' as const, branch: 'x', base: 'main' }, { mode: 'new' as const }, { mode: 'existing' as const, branch: 'x', number: 3 }]) {
+      await expect(conductor.createWorktree({ worktreeId: cora.id, ...input })).resolves.toMatchObject({ ok: false, error: { code: 'invalid_request' } });
+    }
+    // out of scope, unconfigured, or not the Conductor
+    await expect(conductor.createWorktree({ worktreeId: dave.id, mode: 'new', branch: 'feat' })).resolves.toMatchObject({ ok: false, error: { code: 'not_found' } });
+    await expect(new OrchestrationService(dependencies({ createWorktree })).scoped(() => true, 'conductor-1').createWorktree({ worktreeId: cora.id, mode: 'new', branch: 'feat' })).resolves.toMatchObject({ ok: false, error: { code: 'conflict' } });
+    await expect(new OrchestrationService(dependencies({ config: configured, createWorktree })).createWorktree({ worktreeId: cora.id, mode: 'new', branch: 'feat' })).resolves.toMatchObject({ ok: false, error: { code: 'unavailable' } });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('says why the Conductor\'s Worktree was refused', async () => {
+    const configured = { ...config, projects: [{ id: 'proj' }] as ValidatedConfig['projects'] };
+    const refusing = (status: number, error: string) => new OrchestrationService(dependencies({ config: configured, createWorktree: async () => ({ ok: false, status, error }) })).scoped(() => true, 'conductor-1');
+    await expect(refusing(409, 'branch `feat` already exists').createWorktree({ worktreeId: cora.id, mode: 'new', branch: 'feat' })).resolves.toMatchObject({ ok: false, error: { code: 'conflict', message: 'branch `feat` already exists' } });
+    await expect(refusing(409, forkWithoutAgent).createWorktree({ worktreeId: cora.id, mode: 'pull-request', number: 8 })).resolves.toMatchObject({ ok: false, error: { code: 'conflict', message: 'Pull request #8 is from a fork: you may not check out a fork\'s code.' } });
+    await expect(refusing(404, 'project unavailable').createWorktree({ worktreeId: cora.id, mode: 'new', branch: 'feat' })).resolves.toMatchObject({ ok: false, error: { code: 'not_found' } });
   });
 
   it('scoped to some Worktrees, neither lists nor finds the others', async () => {

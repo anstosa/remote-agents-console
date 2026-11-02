@@ -1803,6 +1803,20 @@ describe('the Conductor\'s dispatches', () => {
     expect(fake.delivered.at(-1)).toContain(`The prompt ${again} you queued to Agent ${target} was interrupted.`);
     await app.close();
   });
+  it('creates a Worktree through the Add dialog\'s path, opening no Agent in it', async () => {
+    const fake = fakeAgent();
+    const added: unknown[][] = [];
+    const worktreeManagement = { add: async (...args: unknown[]) => { added.push(args); return { ok: true, path: '/nowhere/feat' }; } };
+    const { app, headers, call } = await conducting(fake, { deps: { worktreeManagement } });
+    const project = (await app.inject({ method: 'GET', url: '/api/dashboard', headers })).json().projects.find((candidate: { id: string }) => candidate.id !== 'home');
+    const before = fake.grants.length;
+
+    const created = await call('create_worktree', { worktree_id: project.worktrees[0].id, mode: 'pull-request', number: 42 });
+    expect(added).toEqual([[project.id, { mode: 'pull-request', number: 42, refuseFork: true }]]);
+    expect(created).toMatchObject({ ok: true, data: { worktree_id: expect.stringContaining('/nowhere/feat') } });
+    expect(fake.grants.length).toBe(before);
+    await app.close();
+  });
   it('acts only on Agents within its scope: one at a Place with no Workspace, outside any configured Project, is not found', async () => {
     const fake = fakeAgent();
     const { app, headers, call, worker } = await conducting(fake);

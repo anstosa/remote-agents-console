@@ -246,7 +246,7 @@ describe('POST /api/projects/:id/worktrees', () => {
       }
       const response = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'pull-request', number: 7, branch: 'evil', open: 'terminal' } });
       expect(response.statusCode).toBe(201);
-      expect(added).toEqual([{ mode: 'pull-request', number: 7, openAgent: false }]);
+      expect(added).toEqual([{ mode: 'pull-request', number: 7, refuseFork: false }]);
       // discovery names a pr-<number> checkout itself, so no operator label is stored
       expect(await worktreeStore.labels()).toEqual({});
     } finally { await server.close(); }
@@ -255,7 +255,7 @@ describe('POST /api/projects/:id/worktrees', () => {
   it('opens a fork pull request without running setup, and passes an Agent request to the service to refuse', async () => {
     const events: string[] = [];
     const added: unknown[] = [];
-    const worktreeManagement = { add: async (_id: string, input: { openAgent?: boolean }) => { added.push(input); return input.openAgent ? { ok: false, status: 409, error: 'Fork pull requests open without setup or an agent. Choose Terminal or Nothing.' } : { ok: true, path: '/repo/wts/feat', fork: true }; } } as never;
+    const worktreeManagement = { add: async (_id: string, input: { refuseFork?: boolean }) => { added.push(input); return input.refuseFork ? { ok: false, status: 409, error: 'Fork pull requests open without setup or an agent. Choose Terminal or Nothing.' } : { ok: true, path: '/repo/wts/feat', fork: true }; } } as never;
     const launch = { startWorktreeShell: async () => { events.push('shell'); return true; }, launch: async () => { events.push('launch'); return true; } } as never;
     const worktreeCommands = { runSetup: async () => { events.push('setup'); return { ok: true }; } } as never;
     const server = await app({ discovery: discoveryStub(), worktreeManagement, launch, worktreeCommands, worktreeStore: await store() });
@@ -264,7 +264,7 @@ describe('POST /api/projects/:id/worktrees', () => {
       const refused = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'pull-request', number: 8, open: 'agent' } });
       expect(refused.statusCode).toBe(409);
       expect(refused.json()).toEqual({ error: 'Fork pull requests open without setup or an agent. Choose Terminal or Nothing.' });
-      expect(added).toEqual([{ mode: 'pull-request', number: 8, openAgent: true }]);
+      expect(added).toEqual([{ mode: 'pull-request', number: 8, refuseFork: true }]);
       const terminal = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'pull-request', number: 8, open: 'terminal' } });
       expect(terminal.statusCode).toBe(201);
       expect(terminal.json()).toEqual({ worktreeId: 'proj:/repo/wts/feat' });
@@ -338,7 +338,7 @@ describe('unified GitHub worktree mutation API', () => {
       const valid = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'pull-request', number: 7, open: 'empty', context: unheldContext } });
       expect(valid.statusCode).toBe(409);
       expect(valid.json()).toEqual({ error: 'holder changed', refresh: true });
-      expect(added).toEqual([{ mode: 'pull-request', number: 7, openAgent: false, context: { identity: context.identity, targetProjectId: 'proj', expectedHolderWorktreeIds: [] } }]);
+      expect(added).toEqual([{ mode: 'pull-request', number: 7, refuseFork: false, context: { identity: context.identity, targetProjectId: 'proj', expectedHolderWorktreeIds: [] } }]);
       const malformed = await server.inject({ method: 'POST', url: '/api/projects/proj/worktrees', headers: mutationHeaders, payload: { mode: 'pull-request', number: 7, context: { ...unheldContext, identity: { ...context.identity, repositoryKey: 'Acme/Repo' } } } });
       expect(malformed.statusCode).toBe(400);
       expect(added).toHaveLength(1);

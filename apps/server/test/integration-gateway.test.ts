@@ -158,8 +158,8 @@ describe('IntegrationGateway', () => {
       for (const never of ['answer_agent_question', 'launch_worktree_agent', 'launch_scratch_agent']) expect(conductorCallable({ name: never, risk: 'write' })).toBe(false);
       // the Conductor's own tools are never offered to the operator's integrations
       const oauth: IntegrationPrincipal = { ...principal, scopes: ['status:read', 'logs:read', 'stack:operate', 'agents:control'] };
-      expect(gateway.listTools(oauth).map(tool => tool.name)).toEqual(expect.not.arrayContaining(['list_notes', 'get_process_log', 'spawn_agent', 'close_agent']));
-      expect(gateway.listTools(conductor).map(tool => tool.name)).toEqual(expect.arrayContaining(['list_notes', 'get_process_log']));
+      expect(gateway.listTools(oauth).map(tool => tool.name)).toEqual(expect.not.arrayContaining(['list_notes', 'get_process_log', 'spawn_agent', 'close_agent', 'create_worktree']));
+      expect(gateway.listTools(conductor).map(tool => tool.name)).toEqual(expect.arrayContaining(['list_notes', 'get_process_log', 'create_worktree']));
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

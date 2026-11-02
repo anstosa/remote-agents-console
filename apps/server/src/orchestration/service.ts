@@ -12,6 +12,8 @@ import type { StoredReviewTour } from '../review-tour/contracts.js';
 import type { ReviewTourInput } from '../review-tour/contracts.js';
 import type { NewTaskService } from '../new-task/service.js';
 import type { WorktreeNoteService } from '../notes/service.js';
+import { forkWithoutAgent } from '../pull-requests/switch-service.js';
+import type { AddInput, CreatedWorktree } from '../worktrees/management.js';
 import type { Schedule } from '../schedule/types.js';
 import type { WorkspaceFileService, WorkspaceFilePreview } from '../workspace-files/service.js';
 import { configuredWorktreeForWorkspace, projectIdOf, worktreeById } from '../workspaces/resolver.js';
@@ -105,6 +107,8 @@ export type OrchestrationDependencies = {
    * allowed; the Conductor has its cap of live workers; or it could not start).
    */
   spawnWorker?: (placeId: string, conductor: string, kind?: ConductorSpawnKind, model?: string) => Promise<string | { enabled: ConductorSpawnKind[] } | 'not-allowed' | 'at-capacity' | undefined>;
+  /** Create, pin, set up and open a Worktree, as the browser's Add dialog does. */
+  createWorktree?: (projectId: string, input: AddInput, open: 'agent' | 'terminal' | 'empty', issue?: number) => Promise<CreatedWorktree>;
   /** The Notes of a Place (its notes key, the store, deletion and a Schedule aimed at the Conductor), and telling the web they changed. */
   notes?: NoteFacade;
   /** The Watches the Conductor sets (ADR 0019). */
@@ -781,6 +785,33 @@ export class OrchestrationService {
       if (spawned === 'not-allowed') return failure('invalid_request', 'That model is not one of the operator\'s Allowed models.');
       if (spawned === 'at-capacity') return failure('conflict', 'You already have your most live workers: close one first.');
       return spawned === undefined ? failure('operation_failed', 'The worker could not be started.', true) : success({ agent_id: spawned });
+    });
+  }
+
+  // Create a Worktree for the Conductor in the Project of one Worktree in its scope, as the Add dialog
+  // does, opening nothing: it spawns its own workers there. Never a fork pull request's: nothing guards
+  // its code once it is checked out, from a Stack started there or a Claude or Codex worker. The Project must be configured, since an
+  // Implicit Project's Places are in scope only while their Workspaces exist, which a new one's does not.
+  async createWorktree(input: { worktreeId: string; mode: 'new' | 'existing' | 'pull-request'; branch?: string; base?: string; number?: number; issue?: number }): Promise<OrchestrationResult<{ worktree_id: string; setup_error?: string; fetch_error?: string; launch_error?: string }>> {
+    const { conductor, createWorktree, config } = this.dependencies;
+    if (conductor === undefined || createWorktree === undefined) return failure('unavailable', 'Only the Conductor creates Worktrees.');
+    const worktree = this.scopedWorktree(input.worktreeId);
+    if ('ok' in worktree) return worktree;
+    if (!config.projects.some(project => project.id === worktree.projectId)) return failure('conflict', 'That Worktree\'s Project is not configured, so you cannot create Worktrees in it.');
+    const add: AddInput | undefined = input.mode === 'pull-request'
+      ? (input.number === undefined || input.branch !== undefined || input.base !== undefined || input.issue !== undefined ? undefined : { mode: input.mode, number: input.number, refuseFork: true })
+      : (input.branch === undefined || input.number !== undefined || (input.mode === 'existing' && input.base !== undefined) ? undefined : { mode: input.mode, branch: input.branch, ...(input.base === undefined ? {} : { base: input.base }) });
+    if (add === undefined) return failure('invalid_request', 'A pull request takes only its `number`; a new branch takes `branch` and an optional `base` and `issue`; an existing branch takes `branch` and an optional `issue`.');
+    return await this.operation(async () => {
+      const created = await createWorktree(worktree.projectId, add, 'empty', input.issue);
+      if (!created.ok && created.error === forkWithoutAgent) return failure('conflict', `Pull request #${String(input.number)} is from a fork: you may not check out a fork's code.`);
+      if (!created.ok) return failure(created.status === 404 ? 'not_found' : created.status === 400 ? 'invalid_request' : 'conflict', redactIntegrationText(created.error));
+      return success({
+        worktree_id: created.worktreeId,
+        ...(created.setupError === undefined ? {} : { setup_error: created.setupError }),
+        ...(created.fetchError === undefined ? {} : { fetch_error: redactIntegrationText(created.fetchError) }),
+        ...(created.launchError === undefined ? {} : { launch_error: created.launchError })
+      });
     });
   }
 

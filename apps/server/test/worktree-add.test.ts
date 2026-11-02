@@ -437,7 +437,7 @@ describe('WorktreeManagementService.add — from a pull request', () => {
 
   it('refuses a fork pull request asked to open an agent, before fetching or adding anything', async () => {
     const { project, checkout, forkSha } = await pullRequestRepository();
-    const result = await service(project, [{ number: 8, branch: 'main', headSha: forkSha, headOnOrigin: false }]).add('proj', { mode: 'pull-request', number: 8, openAgent: true });
+    const result = await service(project, [{ number: 8, branch: 'main', headSha: forkSha, headOnOrigin: false }]).add('proj', { mode: 'pull-request', number: 8, refuseFork: true });
     expect(result).toEqual({ ok: false, status: 409, error: 'Fork pull requests open without setup or an agent. Choose Terminal or Nothing.' });
     expect((await run('/usr/bin/git', ['-C', checkout, 'rev-parse', '--verify', '--quiet', 'refs/rac/pull/8'])).code).not.toBe(0);
     // match the requested checkout rather than a random parent name

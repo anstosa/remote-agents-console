@@ -31,11 +31,14 @@ const fetchTimeoutMs = 30_000;
 export type BranchOption = { name: string; ref: string; remote: boolean; checkedOut: boolean };
 // `base` is what a new branch starts from unless the operator picks another (see `defaultBase`)
 export type BranchesResult = { ok: true; branches: BranchOption[]; base?: string } | { ok: false; status: number; error: string };
-// `openAgent` asks for an Agent in the new checkout, which a fork pull request refuses
-export type AddInput = { mode: 'new' | 'existing'; branch: string; base?: string } | { mode: 'pull-request'; number: number; openAgent?: boolean; context?: GithubPullMutationContext };
+// `refuseFork` refuses a fork pull request before anything is fetched: an Agent is not to open in its code,
+// nor may the Conductor check one out
+export type AddInput = { mode: 'new' | 'existing'; branch: string; base?: string } | { mode: 'pull-request'; number: number; refuseFork?: boolean; context?: GithubPullMutationContext };
 // `fork` marks a checkout of a fork pull request's code, in which no setup or Agent runs; `fetchError`
 // says why origin's default could not be fetched, so a new branch started from it as last fetched
 export type AddResult = { ok: true; path: string; fork?: true; fetchError?: string } | { ok: false; status: number; error: string; refresh?: true };
+// a created Worktree once pinned, set up and opened (app.ts `createWorktree`): what was opened, and what failed past the checkout
+export type CreatedWorktree = { ok: true; worktreeId: string; agentId?: string; launchError?: string; setupError?: string; fetchError?: string } | { ok: false; status: number; error: string; refresh?: true };
 
 /**
  * The fresh facts the Remove dialog decides with (ADR 0003): the structural flags from
@@ -214,8 +217,8 @@ export class WorktreeManagementService {
       // bind contextual creation to the route project and unheld invariant
       if (input.context !== undefined && (input.context.identity.number !== input.number || input.context.targetProjectId !== project.id || input.context.targetWorktreeId !== undefined || input.context.expectedHolderWorktreeIds.length !== 0 || input.context.expectedSourceWorktreeId !== undefined)) return { ok: false, status: 400, error: 'invalid pull request mutation context' };
       return await this.serialize(projectId, () => input.context === undefined
-        ? this.runPullRequestAdd(project, input.number, input.openAgent === true)
-        : this.runContextualPullRequestAdd(project, input.number, input.openAgent === true, input.context));
+        ? this.runPullRequestAdd(project, input.number, input.refuseFork === true)
+        : this.runContextualPullRequestAdd(project, input.number, input.refuseFork === true, input.context));
     }
     if (input.mode !== 'new' && input.mode !== 'existing') return { ok: false, status: 400, error: 'invalid worktree mode' };
     const branchIssue = invalidBranchReason(input.branch);
@@ -227,12 +230,12 @@ export class WorktreeManagementService {
 
   // check out one open pull request at `pr-<number>`, on the local branch the switch service names
   // for it, from the head it fetched and verified against the listed SHA
-  private async runPullRequestAdd(project: Project, number: number, openAgent: boolean): Promise<AddResult> {
+  private async runPullRequestAdd(project: Project, number: number, refuseFork: boolean): Promise<AddResult> {
     if (this.pullRequestHeads === undefined) return { ok: false, status: 409, error: 'pull request worktrees are unavailable' };
     const leaf = `pr-${number}`;
     const path = worktreePath(project.worktreesDirectory, leaf)!;
     if (await this.pathExists(path)) return { ok: false, status: 409, error: `Pull request #${number} already has a worktree at ${leaf}.` };
-    const head = await this.pullRequestHeads.fetchForWorktree(project.id, number, openAgent);
+    const head = await this.pullRequestHeads.fetchForWorktree(project.id, number, refuseFork);
     if ('error' in head) return { ok: false, status: 409, error: head.error };
     // the switch service's holders come from the cached dashboard, so recheck them live: a fork
     // pull request is also held by a checkout of its earlier head
@@ -250,9 +253,9 @@ export class WorktreeManagementService {
   }
 
   // add an unheld pull request through the switch service's locked structural callback
-  private async runContextualPullRequestAdd(project: Project, number: number, openAgent: boolean, context: GithubPullMutationContext): Promise<AddResult> {
+  private async runContextualPullRequestAdd(project: Project, number: number, refuseFork: boolean, context: GithubPullMutationContext): Promise<AddResult> {
     if (this.pullRequestHeads?.createUnheldWorktree === undefined) return { ok: false, status: 409, error: 'pull request worktrees are unavailable' };
-    const result = await this.pullRequestHeads.createUnheldWorktree(context, openAgent, async head => {
+    const result = await this.pullRequestHeads.createUnheldWorktree(context, refuseFork, async head => {
       const parentScoped = head.repositoryScope !== undefined && head.repositoryScope.baseRepositoryKey !== head.repositoryScope.originRepositoryKey;
       const repositorySuffix = parentScoped ? `-${createHash('sha256').update(head.repositoryScope!.baseRepositoryKey).digest('hex').slice(0, 16)}` : '';
       const leaf = `pr-${number}${repositorySuffix}`;

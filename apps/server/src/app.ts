@@ -41,7 +41,7 @@ import { processActions, WorktreeCommandService } from './worktree-commands/serv
 import { GithubService } from './github/service.js';
 import { githubPullMutationContext, PullRequestSwitchService, type GithubPullMutationContext } from './pull-requests/switch-service.js';
 import { NewTaskService } from './new-task/service.js';
-import { WorktreeManagementService } from './worktrees/management.js';
+import { WorktreeManagementService, type AddInput, type CreatedWorktree } from './worktrees/management.js';
 import { agentAttentionState, AgentNotificationCoordinator, pushNotifications, type AgentNotificationContext } from './notifications.js';
 import { ConsoleEvents } from './events.js';
 import { Watches, type CommandWindows } from './watches/service.js';
@@ -666,7 +666,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
         changed: () => publishNotesRevision()
       },
       watches,
-      ...(config.conductor === undefined ? {} : { spawnWorker })
+      ...(config.conductor === undefined ? {} : { spawnWorker, createWorktree: (projectId, input, open, issue) => createWorktree(projectId, input, open, issue) })
     });
     const federationSecret = process.env.RAC_INTEGRATION_FEDERATION_SECRET?.trim() || instanceStatusSecret;
     const integrationGateway = new IntegrationGateway({ config: integrationConfig, instanceId: config.publicOrigin.origin, orchestration, policy: integrationPolicy, audit: integrationAudit, control: integrationControl, ...(integrationConfig.multiInstance.enabled ? { forward: federationForwarder(config.remoteServers, federationSecret) } : {}) });
@@ -3721,12 +3721,21 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       return { worktreeId: stableWorktreeId, targetResolved: worktree !== undefined, finalizationErrors };
     }
   };
-  // create a Worktree for a new or existing branch, pin it, run the Project's configured
-  // `commands.setup` to prepare the fresh checkout, give it an idle shell, and — unless the
-  // operator opted out — launch the Project's last-used kind in it. The created Worktree
-  // stands even when setup or the agent launch fails, so the response is a 201 carrying the
-  // new Worktree id plus the started agent, a launch error, a setup error, and/or why origin could
-  // not be fetched for a new branch (it started from origin's default as last fetched), never a 504.
+  // create a Worktree for a new or existing branch or a pull request, pin it, run the Project's
+  // configured `commands.setup` to prepare the fresh checkout, and open what `open` names (an Agent
+  // of the Project's last-used kind, an idle shell, or nothing). The created Worktree stands even
+  // when setup or the agent launch fails, so past a refused `git worktree add` this answers the new
+  // Worktree id plus the started agent, a launch error, a setup error, and/or why origin could not
+  // be fetched for a new branch (it started from origin's default as last fetched). The browser's
+  // Add dialog and the Conductor's `create_worktree` share it.
+  const createWorktree = async (projectId: string, input: AddInput, open: 'agent' | 'terminal' | 'empty', issue?: number): Promise<CreatedWorktree> => {
+    // the service refuses an Agent for a fork pull request, which it resolves from its own list
+    const outcome = await worktreeManagement.add(projectId, input.mode === 'pull-request' ? { ...input, refuseFork: input.refuseFork === true || open === 'agent' } : input);
+    if (!outcome.ok) return outcome;
+    const finalized = await finalizeCreatedWorktree({ projectId, path: outcome.path, open, fork: outcome.fork === true, ...(issue === undefined ? {} : { issue }), bounded: false });
+    return { ok: true, worktreeId: finalized.worktreeId, ...(finalized.agentId === undefined ? {} : { agentId: finalized.agentId }), ...(finalized.launchError === undefined ? {} : { launchError: finalized.launchError }), ...(finalized.setupError === undefined ? {} : { setupError: finalized.setupError }), ...(outcome.fetchError === undefined ? {} : { fetchError: outcome.fetchError }) };
+  };
+  // the Add dialog's creation (see `createWorktree`): a 201 whatever happens past `git worktree add`, never a 504
   app.post('/api/projects/:id/worktrees', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
     controlled(request, true);
     const projectId = (request.params as { id: string }).id;
@@ -3750,11 +3759,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       context = githubPullMutationContext(requestBody.context, { number: number as number, targetProjectId: projectId, sourceRequired: false, newWorktree: true });
       if (context === undefined) return reply.code(400).send({ error: 'invalid pull request mutation context' });
     }
-    // the service refuses an Agent for a fork pull request, which it resolves from its own list
-    const outcome = await worktreeManagement.add(projectId, mode === 'pull-request' ? { mode, number: number as number, openAgent: open === 'agent', ...(context === undefined ? {} : { context }) } : { mode, branch: branch as string, ...(typeof base === 'string' ? { base } : {}) });
-    if (!outcome.ok) return reply.code(outcome.status).send({ error: outcome.error, ...(outcome.refresh === true ? { refresh: true } : {}) });
-    const finalized = await finalizeCreatedWorktree({ projectId, path: outcome.path, open: open as 'agent' | 'terminal' | 'empty', fork: outcome.fork === true, ...(issue === undefined ? {} : { issue: issue as number }), bounded: false });
-    return reply.code(201).send({ worktreeId: finalized.worktreeId, ...(finalized.agentId === undefined ? {} : { agentId: finalized.agentId }), ...(finalized.launchError === undefined ? {} : { launchError: finalized.launchError }), ...(finalized.setupError === undefined ? {} : { setupError: finalized.setupError }), ...(outcome.fetchError === undefined ? {} : { fetchError: outcome.fetchError }) });
+    const created = await createWorktree(projectId, mode === 'pull-request' ? { mode, number: number as number, ...(context === undefined ? {} : { context }) } : { mode, branch: branch as string, ...(typeof base === 'string' ? { base } : {}) }, open, issue as number | undefined);
+    if (!created.ok) return reply.code(created.status).send({ error: created.error, ...(created.refresh === true ? { refresh: true } : {}) });
+    const { ok: _ok, ...response } = created;
+    return reply.code(201).send(response);
   });
   // inspect one exact held-pr move across server boots without mutating it
   app.get('/api/projects/:id/worktrees/move-pull-request', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
