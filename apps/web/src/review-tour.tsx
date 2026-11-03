@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom';
-import { type ContextType, lazy, type ReactNode, Suspense, type UIEvent, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type ContextType, type CSSProperties, lazy, type ReactNode, Suspense, type UIEvent, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { PanelExpandContext, PanelHeader, PanelIcon, usePanelExpand, usePhoneLayout } from './panel-header.js';
 import type { CommentAnchor, ReviewDiffComment, ReviewDiffRange, ReviewDiffSide, ReviewDiffSuggestion } from './code-panel/review-diffs.js';
 import { AskThreadView, useLineAsks } from './ask-thread.js';
@@ -1084,7 +1084,7 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   const comparisonLabel = [scopeLabel, includeTests ? 'tests included' : 'tests excluded', includeDocs ? 'docs included' : 'docs excluded', ...(tour?.base ? [`vs ${tour.base}`] : [])].join(' · ');
   // The general Findings, on the first step and the summary: an untriaged one offers Keep and Dismiss,
   // a kept one is an editable note, and a dismissed one a row that restores it.
-  const generalFindings = codeReview !== undefined && codeReview.general.length > 0 && <section className="review-tour-general" aria-label="General findings"><small>General findings</small>{codeReview.general.map(finding => {
+  const generalFindings = codeReview !== undefined && codeReview.general.length > 0 && <section className="review-tour-general" aria-label="General findings" style={{ '--diffs-font-size': `${fontSize}px` } as CSSProperties}><small>General findings</small>{codeReview.general.map(finding => {
     const entry = triage[finding.id];
     if (entry?.state === 'dismissed') return <div key={finding.id} className="review-tour-suggestion dismissed" role="group" aria-label={`Dismissed suggestion: ${finding.title}`}><span>Dismissed · {finding.title}</span><button type="button" onClick={() => restoreFinding(finding.id)}>Restore</button></div>;
     if (entry?.state === 'noted') return <div key={finding.id} className="review-tour-general-note"><label>General note{finding.file === undefined ? '' : ` · ${finding.file}`}<textarea data-note={finding.id} aria-label={`General note: ${finding.title}`} value={entry.note} maxLength={maxFeedback} onChange={event => updateGeneralNote(finding.id, event.target.value)} /></label><div><button type="button" onClick={() => restoreFinding(finding.id)}>Remove</button></div></div>;

@@ -2319,7 +2319,7 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* the diff library owns its own scroll container; give it the remaining height to fill and scroll */
 .review-tour-diff-scroll { min-width: 0; min-height: 0; flex: 1 1 auto; overflow: auto; }
 /* an inline comment renders as a diff annotation: light-DOM content slotted under its line.
-   Annotation text takes the code's --diffs-font-size; the .76rem fallback covers general Findings outside a diff. */
+   Annotation text takes the code's --diffs-font-size, which the general Findings section sets to match the narration. */
 .review-tour-inline-comment { display: grid; gap: .4rem; margin: .35rem .6rem .5rem; padding: .55rem .65rem; border: 1px solid color-mix(in srgb, var(--blue) 45%, var(--surface-1)); border-radius: var(--control-radius); background: var(--mantle); color: var(--text); font: 500 var(--diffs-font-size, .76rem)/1.45 var(--font-mono); white-space: normal; }
 .review-tour-inline-comment > small { color: var(--blue); font: 800 .62rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
 .review-tour-inline-comment > p { margin: 0; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
