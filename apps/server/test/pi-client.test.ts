@@ -3,7 +3,7 @@ import { piClient } from '../src/transports/pi.js';
 import type { LineChannel, StructuredEvent } from '../src/transports/structured.js';
 
 // The Pi client over an in-memory channel: the test plays Pi, feeding it RPC records shaped as
-// Pi 1.4.0 sends them (docs/rpc-extension-ui.md, rpc-commands.md) and reading what it sends back.
+// Pi 1.5.0 sends them (docs/rpc-extension-ui.md, rpc-commands.md) and reading what it sends back.
 function piOverChannel(attached?: { dropped: number }) {
   const sent: Array<Record<string, unknown>> = [];
   const events: StructuredEvent[] = [];
