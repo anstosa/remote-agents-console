@@ -26,7 +26,7 @@ const routeApi = async (page: Page) => {
     // establish the local authenticated session
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // expose one codex agent waiting for an answer
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', kind: 'codex', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Action required', attention: 'question', queuedPromptCount: 0 }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', kind: 'codex', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Action required', attention: 'finished', queuedPromptCount: 0 }], projects: [] } });
     // allow the shared websocket mock to open the dashboard stream
     if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     // disable unrelated push setup

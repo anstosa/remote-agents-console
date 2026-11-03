@@ -598,11 +598,11 @@ test('mouse-open agent menu consumes ordinary keys instead of sending terminal i
   await expect.poll(() => paneInputText(page, 'agent-1')).toBe(inputBefore);
 });
 
-test('Answer notes retains its native context menu without redirecting clipboard actions to agent output', async ({ page }) => {
+test('The question reply box retains its native context menu without redirecting clipboard actions to agent output', async ({ page }) => {
   await mountConsole(page);
   await pushQuestion(page, 'agent-1', { id: 'context-question', text: 'Which option?', field: { kind: 'choice', choices: ['First', 'Second'] }, source: 'structured' });
-  await page.getByRole('button', { name: 'Add notes' }).click();
-  const notes = page.getByRole('textbox', { name: 'Answer notes' });
+  await page.getByRole('button', { name: 'Reply in your own words' }).click();
+  const notes = page.getByRole('textbox', { name: 'Reply' });
   await notes.fill('native notes');
   const inputBefore = await paneInputText(page, 'agent-1');
   const contextEvent = await notes.evaluate(element => {

@@ -1023,6 +1023,8 @@ export class StructuredAgents {
   }
 }
 
-// an answer the question's field takes: one of its choices, text as a prompt would be for a text field, or dismissing it
+// an answer the question's field takes: one of its choices, text as a prompt would be, or dismissing it.
+// Text on a choice field is the operator replying in their own words; the connection refuses it
+// where its dialog cannot carry one
 const answerFits = (question: StructuredQuestion, answer: QuestionAnswer): boolean => typeof answer === 'object'
-  || (question.field.kind === 'choice' ? Number.isInteger(answer) && (answer as number) >= 0 && (answer as number) < question.field.choices.length : typeof answer === 'string' && validPrompt(answer));
+  || (typeof answer === 'string' ? validPrompt(answer) : question.field.kind === 'choice' && Number.isInteger(answer) && answer >= 0 && answer < question.field.choices.length);

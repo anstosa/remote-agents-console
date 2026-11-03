@@ -51,7 +51,7 @@ const maxDialogs = 20;
 const maxChoices = 50;
 // Pi's dialogs as Inline-question fields: `select` a choice, `confirm` a Yes/No choice, `input` one
 // line of text, `editor` several lines with a prefill. A choice shows bounded; its answer is the
-// option itself.
+// option itself, or for `ask_user` a reply in the operator's own words.
 const dialogField = (record: Json): QuestionField | undefined => {
   switch (record.method) {
     case 'select': return { kind: 'choice', choices: strings(record.options).slice(0, maxChoices).map(oneLine) };
@@ -508,6 +508,8 @@ export const piClient: ProtocolClient = (channel, emit, attached) => {
       if (typeof given === 'object') response = { cancelled: true };
       else if (dialog.method === 'confirm' && (given === 0 || given === 1)) response = { confirmed: given === 0 };
       else if (dialog.method === 'select' && typeof given === 'number' && dialog.options[given] !== undefined) response = { value: dialog.options[given] };
+      // only the RAC extension's `ask_user` (the dialogs naming a tool call) takes a reply off its list
+      else if (dialog.method === 'select' && dialog.toolCallId !== undefined && typeof given === 'string') response = { value: given };
       else if ((dialog.method === 'input' || dialog.method === 'editor') && typeof given === 'string') response = { value: given };
       else return false;
       closeDialog(questionId);

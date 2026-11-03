@@ -164,7 +164,9 @@ export default function rac(pi: ExtensionAPI): void {
       const answer = params.choices !== undefined && params.choices.length > 0
         ? await ctx.ui.select(title, params.choices, { signal })
         : await ctx.ui.input(title, undefined, { signal });
-      const text = answer === undefined ? 'The operator dismissed the question without answering.' : answer;
+      const text = answer === undefined ? 'The operator dismissed the question without answering.'
+        : params.choices !== undefined && params.choices.length > 0 && !params.choices.includes(answer) ? `The operator answered in their own words instead of choosing:\n\n${answer}`
+        : answer;
       return { content: [{ type: 'text', text }], details: { answered: answer !== undefined } };
     }
   });

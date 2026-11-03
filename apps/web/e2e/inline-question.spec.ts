@@ -109,11 +109,8 @@ for (const viewport of hookApprovalViewports) {
     await expect(choices.nth(1)).toBeVisible();
     await expect(choices.nth(2)).toBeVisible();
 
-    // toggles never answer the approval
-    await page.getByRole('button', { name: 'Switch to normal prompt mode' }).click();
-    await expect(page.getByRole('button', { name: 'Switch to answer mode' })).toBeVisible();
-    await page.getByRole('button', { name: 'Switch to answer mode' }).click();
-    await expect(question).toBeVisible();
+    // the approval holds the turn, so no normal prompt is offered to queue behind it
+    await expect(page.getByRole('button', { name: 'Switch to normal prompt mode' })).toHaveCount(0);
     expect(state.questionPosts).toEqual([]);
     expect(state.promptPosts).toEqual([]);
 
@@ -151,7 +148,7 @@ test('renders inline questions from the pane stream and answers through one endp
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Action required', attention: 'question' }, { id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/owen', title: 'Ready', attention: 'finished' }], projects: [] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', title: 'Action required', attention: 'finished' }, { id: 'agent-2', sessionId: 'socket:$2', home: '/worktrees/owen', title: 'Ready', attention: 'finished' }], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/agent-[12]\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (/^\/api\/agents\/agent-[12]\/saved-prompts$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
@@ -223,14 +220,14 @@ test('renders inline questions from the pane stream and answers through one endp
   }
 
   // text answers stay attached to the active question rather than queueing a turn
-  const notesToggle = page.getByRole('button', { name: 'Add notes' });
+  const notesToggle = page.getByRole('button', { name: 'Reply in your own words' });
   await expect(notesToggle).toHaveAttribute('aria-expanded', 'false');
   await notesToggle.click();
-  const notes = page.getByRole('textbox', { name: 'Answer notes' });
+  const notes = page.getByRole('textbox', { name: 'Reply' });
   await expect(notes).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Hide notes' })).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('button', { name: 'Hide reply' })).toHaveAttribute('aria-expanded', 'true');
   await notes.fill('Keep the cleanup scoped to the selected option.');
-  await page.getByRole('button', { name: 'Submit notes' }).click();
+  await page.getByRole('button', { name: 'Send reply' }).click();
   await expect(page.getByRole('alert')).toContainText('Unable to send this answer.');
   await expect(notes).toHaveValue('Keep the cleanup scoped to the selected option.');
   await expect(page.getByRole('region', { name: 'Agent question' })).toBeVisible();
@@ -239,7 +236,7 @@ test('renders inline questions from the pane stream and answers through one endp
 
   // a successful retry delivers text directly and clears the accepted draft
   rejectTextAnswer = false;
-  await page.getByRole('button', { name: 'Submit notes' }).click();
+  await page.getByRole('button', { name: 'Send reply' }).click();
   await expect.poll(() => textAnswers).toEqual([{ questionId: strictQuestion.id, text: 'Keep the cleanup scoped to the selected option.' }]);
   await expect(page.getByRole('region', { name: 'Agent question' })).toHaveCount(0);
   await expect(page.getByRole('textbox', { name: 'Prompt' })).toHaveValue('');
@@ -319,7 +316,7 @@ test('renders inline questions from the pane stream and answers through one endp
   await expect(page.getByText('Agent question')).toHaveCount(0);
 });
 
-test('shows reported option descriptions and switches the picker to the normal prompt', async ({ page }) => {
+test('shows reported option descriptions and offers no normal prompt while the question holds the turn', async ({ page }) => {
   await installPaneMock(page);
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
@@ -337,7 +334,6 @@ test('shows reported option descriptions and switches the picker to the normal p
   const choices = page.locator('.question-choice');
   await expect(choices.nth(0).locator('small')).toHaveText('A crisp red fruit');
   await expect(choices.nth(1).locator('small')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Switch to normal prompt mode' }).click();
-  await expect(page.getByText('Agent question')).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Switch to answer mode' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Switch to normal prompt mode' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Reply in your own words' })).toBeVisible();
 });

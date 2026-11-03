@@ -64,6 +64,15 @@ describe('the Pi client', () => {
     expect(responses()).toEqual([{ type: 'extension_ui_response', id: 's2', value: 'Block' }]);
   });
 
+  it('takes a reply in the operator\'s own words on an ask_user select, and on no other extension\'s', async () => {
+    const { connection, pi, responses } = piOverChannel();
+    pi({ type: 'extension_ui_request', id: 'other', method: 'select', title: 'Allow?', options: ['Allow', 'Block'] });
+    pi({ type: 'extension_ui_request', id: 'ask', method: 'select', title: JSON.stringify({ rac: 'dialog', toolCallId: 'call_1', text: 'Which colour?' }), options: ['red', 'blue'] });
+    expect(await connection.answer('other', 'Neither, ask me later')).toBe(false);
+    expect(await connection.answer('ask', 'Why does it matter?')).toBe(true);
+    expect(responses()).toEqual([{ type: 'extension_ui_response', id: 'ask', value: 'Why does it matter?' }]);
+  });
+
   it('closes the questions still open when the Turn settles', () => {
     const { pi, closed } = piOverChannel();
     pi({ type: 'agent_start' });
