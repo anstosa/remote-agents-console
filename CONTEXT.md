@@ -282,7 +282,7 @@ A Pull request by someone else that asks for the operator's review. It is **Re-r
 _Avoid_: Assigned PR, review assignment
 
 **Overview**:
-The app-wide view of the operator's Pull requests, Review requests and assigned Issues across every repository they can access, calling out what needs their attention. It belongs to no Place.
+The app-wide view of the operator's Pull requests, Review requests and assigned Issues across every repository they can access, calling out what needs their attention. It belongs to no Place; the GitHub panel shows it under All repos.
 _Avoid_: Dashboard (the server's WebSocket feed is already called that), inbox, home
 
 **GitHub panel**:
@@ -294,5 +294,5 @@ A Pull request whose next move is the operator's. A Review request is Waiting on
 _Avoid_: Needs attention (an Agent's Attention state), action required
 
 **Seen record**:
-The console's record of which Waiting on me reasons the operator has been shown, on any device. A reason is **new** until a view shows its row, and new again when it recurs (a new comment from someone else on the thread, checks failing on a new head, a new Review request or changes-requested review, conflicts returning after clearing). The Overview button's badge counts the Pull requests holding something new. Only a view showing a row records it; the Conductor's GitHub reads show it whether a reason is new but never record anything.
+The console's record of which Waiting on me reasons the operator has been shown, on any device. A reason is **new** until a view shows its row, and new again when it recurs (a new comment from someone else on the thread, checks failing on a new head, a new Review request or changes-requested review, conflicts returning after clearing). The GitHub button's badge counts the Pull requests holding something new. Only a view showing a row records it; the Conductor's GitHub reads show it whether a reason is new but never record anything.
 _Avoid_: Read/unread (an Agent's completion state), notifications

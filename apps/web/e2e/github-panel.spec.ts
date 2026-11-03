@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { openGithubPanel } from './panel-header';
 
 // The GitHub panel: the shared triage swimlanes filtered to the current repository by default,
 // opened from the Workspace toolbar (the ⋮ on a phone) in a Place whose origin is on github.com.
@@ -162,7 +163,7 @@ test('lists one repository in the same three triage swimlanes without leaking ca
   await expect(toggle).toHaveAttribute('aria-pressed', 'false');
 });
 
-test('the palette opens the GitHub panel and the Overview, and a bound key closes the panel', async ({ page }) => {
+test('the palette opens the GitHub panel, and a bound key closes the panel', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await mount(page, [lists], [], [], { revision: 1 }, [], {}, { ...dashboard, keys: { prefix: { k: 'toggle-github' } } });
   await page.goto('/');
@@ -181,9 +182,6 @@ test('the palette opens the GitHub panel and the Overview, and a bound key close
   await page.keyboard.press('Control+b');
   await page.keyboard.press('k');
   await expect(panel).toHaveCount(0);
-
-  await runCommand('github overview');
-  await expect(panel).toHaveClass(/\bexpanded\b/u);
 });
 
 test('pins a Push and create PR card for a branch with no pull request, and nothing in the main worktree', async ({ page }) => {
@@ -275,7 +273,8 @@ test('keeps a non-Git place browse-only and opens an unknown repository through 
 test('opens a repo-scope issue in rich detail without leaving the owning Workspace', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await mount(page, [lists]);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const panel = page.getByRole('region', { name: 'GitHub', exact: true });
   const row = panel.getByRole('button', { name: /^#11 Launcher search ignores Notes/u });
   await row.click();
@@ -295,7 +294,8 @@ test('opens the pull-request identity selected from a swimlane, not a same-numbe
   await page.setViewportSize({ width: 1280, height: 900 });
   // an Issue with the same number is not the one meant
   await mount(page, [{ ...lists, assigned: [...lists.assigned, issue(90, 'Same number, an Issue')] }]);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const panel = page.getByRole('region', { name: 'GitHub', exact: true });
   await panel.getByRole('button', { name: /^#90 Handle redacted events/u }).click();
   await expect(panel.getByRole('article', { name: 'Pull request #90' })).toBeVisible();
@@ -682,7 +682,8 @@ test('drills down from the list on a phone, the open detail counting as shown', 
   const seen: string[][] = [];
   await mount(page, [lists], [], seen);
   // a triage tap opens straight on the item's detail
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const panel = page.getByRole('region', { name: 'GitHub', exact: true });
   await panel.getByRole('tab', { name: /^Reviews/u }).click();
   await panel.getByRole('button', { name: /^#90 Handle redacted events/u }).click();
@@ -973,7 +974,7 @@ test('keeps A #7 and B #7 detail state and writes in their resolved Projects', a
 
   await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Overview', exact: true }).click();
+  await openGithubPanel(page);
   const github = page.getByRole('region', { name: 'GitHub', exact: true });
   await github.getByRole('button', { name: 'All repos' }).click();
   await github.getByRole('button', { name: '#7 Repository A seven, details' }).click();

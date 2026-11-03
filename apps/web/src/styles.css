@@ -3008,12 +3008,8 @@ body:has(> .open-folder-dialog) > .launch-menu { z-index: calc(var(--layer-dialo
 .streamed-terminal:has(> .streamed-terminal-status.loading:not([hidden])) > :is(.output-link-overlay, .streamed-terminal-jump) { visibility: hidden; }
 
 /* The Overview: replaces the Workspace (panels, composer, toolbar) above the tab row */
-.tabs .overview-button { position: relative; flex: 0 0 auto; display: inline-flex; align-items: center; gap: .45rem; }
-/* match icon-only Overview to the shared square toolbar controls */
-.tabs .overview-button.icon-only { flex: 0 0 var(--standard-control-size); width: var(--standard-control-size); min-width: var(--standard-control-size); height: var(--standard-control-size); padding: 0; justify-content: center; }
-.overview-badge { display: inline-grid; min-width: 1.15rem; height: 1.15rem; place-items: center; padding: 0 .25rem; border-radius: 999px; background: var(--red); color: var(--crust); font-size: .65rem; font-weight: 800; line-height: 1; }
-.overview-badge.corner { position: absolute; top: -.42rem; right: -.42rem; min-width: 1.2rem; height: 1.2rem; box-shadow: 0 0 0 2px var(--crust); }
-.tabs .overview-button.active { border-color: var(--lavender); color: var(--lavender); background: color-mix(in srgb, var(--lavender) 14%, var(--mantle)); }
+.github-badge { display: inline-grid; min-width: 1.15rem; height: 1.15rem; place-items: center; padding: 0 .25rem; border-radius: 999px; background: var(--red); color: var(--crust); font-size: .65rem; font-weight: 800; line-height: 1; }
+.github-badge.corner { position: absolute; top: -.42rem; right: -.42rem; min-width: 1.2rem; height: 1.2rem; box-shadow: 0 0 0 2px var(--crust); }
 .overview-icon { width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .overview { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); min-width: 0; min-height: 0; margin: .375rem .375rem 0; border: 1px solid color-mix(in srgb, var(--lavender) 40%, var(--surface-0)); border-radius: var(--control-radius); background: var(--base); overflow: hidden; }
 .overview-head { display: flex; align-items: center; gap: .75rem; padding: .6rem .8rem; border-bottom: 1px solid var(--surface-0); }

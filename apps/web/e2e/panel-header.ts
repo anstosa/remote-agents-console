@@ -39,3 +39,18 @@ export const expectPanelAction = async (panel: Locator, name: string | RegExp, c
 export const clickPanelAction = async (panel: Locator, name: string | RegExp) => {
   await expect(async () => { await (await panelAction(panel, name)).click({ timeout: 2_000 }); }).toPass({ timeout: 15_000 });
 };
+
+// Open the current Workspace's GitHub panel from its toolbar (the toolbar's ⋮ on a phone) and, with
+// `expand`, fill the Workspace with it.
+export const openGithubPanel = async (page: Page, { expand = true } = {}): Promise<Locator> => {
+  await expect(page.locator('.workspace-toolbar')).toBeVisible();
+  const toggle = page.locator('.workspace-toolbar .github-toggle');
+  if (await toggle.count() > 0) await toggle.click();
+  else {
+    await page.locator('.workspace-toolbar').getByRole('button', { name: 'More options' }).click();
+    await page.locator('.github-panel-row').click();
+  }
+  const panel = page.getByRole('region', { name: 'GitHub', exact: true });
+  if (expand) await clickPanelAction(panel, 'Expand GitHub');
+  return panel;
+};

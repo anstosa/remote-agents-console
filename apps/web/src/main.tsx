@@ -65,7 +65,7 @@ import { ConsoleFullscreenLoader, SettingsRestartNotice, SettingsRuntimeProvider
 import { EmptyWorkspaceIcon, FolderIcon, OpenFolderContext, terminalIconPath, OpenFolderDialog, type FolderAction, type FolderOpened, type ListedFolder } from './open-folder.js';
 import { installProgressAnimationSync, type ProgressKind } from './progress-animation.js';
 import { Skeleton } from './skeleton.js';
-import { icons as githubIcons, issueBranch, OverviewButton, type NewWorktreeFor } from './github-overview.js';
+import { icons as githubIcons, issueBranch, type NewWorktreeFor } from './github-overview.js';
 import { GithubPanel, type GithubFocus, type GithubPanelView, type OpenWorktree, type StripActions } from './github-panel.js';
 import { normalizeGithubRepository, type GithubNewWorktreeContext } from './github-client.js';
 import { CodeLoading } from './code-panel/loading.js';
@@ -974,7 +974,7 @@ const OpenAgentContext = createContext<((agentId: string) => void) | undefined>(
 // open the Remove worktree dialog for a Worktree, as the GitHub panel's cleanup strip does
 const RemoveWorktreeContext = createContext<((worktreeId: string) => void) | undefined>(undefined);
 // refresh open schedules on dashboard advances and closed badges on queued-note additions
-const DashboardGenerationContext = createContext<{ generation?: number; notesRevision?: number; githubRevision?: number; serverStartedAt?: number }>({});
+const DashboardGenerationContext = createContext<{ generation?: number; notesRevision?: number; githubRevision?: number; githubBadge?: number; serverStartedAt?: number }>({});
 type ServerUpdateState = 'queued' | 'running' | 'complete' | 'failed';
 type ServerUpdateAvailability = { available: boolean; commitCount?: number; targetSha?: string };
 type ServerRevision = { sha: string; committedAt: string };
@@ -4916,7 +4916,7 @@ function useStackPanel(worktreeId: string | undefined) {
 }
 // retain one github split per place and consume dashboard-owned open commands once
 type GithubScope = 'repo' | 'all';
-type GithubOpenRequest = { id: number; placeId: string; scope?: GithubScope; focus?: GithubFocus; maximize?: boolean };
+type GithubOpenRequest = { id: number; placeId: string; scope?: GithubScope; focus?: GithubFocus };
 const GithubWorkspaceContext = createContext<{ request?: GithubOpenRequest; consume: (id: number) => void; newWorktree?: NewWorktreeFor; dynamicWorktrees: boolean; feedback: (feedback: Omit<OperationFeedback, 'id'>) => void } | undefined>(undefined);
 const githubPanelKey = (placeId: string) => `rac.github-panel:${placeId}`;
 // What an open GitHub split shows is kept in memory only, like the Stack panel's selection, so a
@@ -4942,7 +4942,6 @@ function useGithubPanel(placeId: string | undefined, defaultScope: GithubScope) 
     if (placeId !== undefined) githubViews.set(placeId, { ...githubViews.get(placeId), ...view });
   };
   const setScope = (next: GithubScope) => { setScopeState(next); remember({ scope: next }); };
-  const [maximizeRequest, setMaximizeRequest] = useState<number>();
   const pending = controller?.request;
   // accept only the command addressed to this mounted place
   useEffect(() => {
@@ -4954,17 +4953,16 @@ function useGithubPanel(placeId: string | undefined, defaultScope: GithubScope) 
     setOpen(true);
     saveGithubPanel(placeId, true);
     pendingWorkspaceJumps.set(placeItemKey(placeId), 'github');
-    setMaximizeRequest(pending.maximize ? pending.id : undefined);
     controller?.consume(pending.id);
   }, [placeId, pending?.id]);
-  // close also consumes transient item and expansion requests
+  // close also consumes a transient item request
   const save = (value: boolean) => {
     setOpen(value);
     // a later ordinary open does not replay an earlier command
-    if (!value) { setFocus(undefined); setMaximizeRequest(undefined); setScopeState(defaultScope); }
+    if (!value) { setFocus(undefined); setScopeState(defaultScope); }
     if (placeId !== undefined) saveGithubPanel(placeId, value);
   };
-  return { open: open && placeId !== undefined, focus, scope, setScope, savedView: placeId === undefined ? undefined : githubViews.get(placeId), saveView: remember, maximizeRequest, didMaximize: () => setMaximizeRequest(undefined), show: () => save(true), toggle: () => save(!open), close: () => save(false) };
+  return { open: open && placeId !== undefined, focus, scope, setScope, savedView: placeId === undefined ? undefined : githubViews.get(placeId), saveView: remember, show: () => save(true), toggle: () => save(!open), close: () => save(false) };
 }
 // fork hints can change holder associations even before github data or branches change
 const githubListsRevision = (serverStartedAt: number | undefined, githubRevision: number | undefined, projects: readonly Project[]) => `${serverStartedAt ?? ''}:${githubRevision ?? ''}:${projects.map(project => `${project.id}@${project.github ?? ''}>${project.githubForkOf ?? ''}`).join(',')}:${projects.flatMap(project => project.worktrees.map(worktree => `${worktree.id}@${worktree.branch ?? ''}`)).join(',')}`;
@@ -6982,15 +6980,6 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
   const openStackPanel = (selection?: StackSelection) => { stackPanel.openOn(selection); pendingWorkspaceJumps.set(key, 'stack'); };
   // open the GitHub panel and bring it into view, or show it when open
   const openGithubPanel = () => { if (githubPanel.open) carousel?.show('github'); else { githubPanel.show(); pendingWorkspaceJumps.set(key, 'github'); } };
-  // wait for the requested split to mount and become visible before phone immersion
-  useLayoutEffect(() => {
-    // ordinary opens never change expansion
-    if (!githubPanel.open || githubPanel.maximizeRequest === undefined || !carousel?.panels.some(panel => panel.key === 'github')) return;
-    // carousel visibility must settle before maximizing
-    if (carousel.visibleKey !== 'github') { carousel.show('github'); return; }
-    expansion.maximize('github');
-    githubPanel.didMaximize();
-  }, [githubPanel.open, githubPanel.maximizeRequest, carousel?.visibleKey, carousel?.panels, expansion.maximize]);
   // share configured-editor terminals between code jumps and files
   const editorConfigured = useContext(EditorConfiguredContext);
   const placeId = place.id;
@@ -7629,7 +7618,7 @@ function RemoveBranchDialog({ worktreeId, branch, onClose, onDeleted }: { worktr
 // the Workspace toolbar's remaining Place actions: panels, folder pin, GitHub Actions and removal
 type PlaceMenuProps = { agentId?: string; worktreeId?: string; git?: boolean; pinned?: boolean; onTogglePin?: () => void; onRemoveWorktree?: () => void; removeDisabledReason?: string };
 // a panel the phone menu opens after it leaves the direct toolbar
-type PlaceMenuPanel = { key: string; label: string; icon: ReactNode; title: string; disabled?: boolean; onSelect: () => void };
+type PlaceMenuPanel = { key: string; label: ReactNode; icon: ReactNode; title: string; disabled?: boolean; onSelect: () => void };
 
 // the toolbar's ⋮ keeps folder pin and worktree removal; GitHub Actions follows the current Place
 function PlaceMenu({ agentId, worktreeId, git = false, pinned, onTogglePin, onRemoveWorktree, removeDisabledReason, panels = [] }: PlaceMenuProps & { panels?: PlaceMenuPanel[] }) {
@@ -8389,12 +8378,13 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
   const hasGit = worktreeId !== undefined || (place?.id === undefined && (place?.branch !== undefined || place?.gitStatus !== undefined));
   // on a phone the ⋮ opens secondary panels or brings an open one into view
   const onGithub = projectOfWorktree(projects, worktreeId)?.github !== undefined;
+  const githubBadge = useContext(DashboardGenerationContext).githubBadge ?? 0;
   const menuPanels: PlaceMenuPanel[] = [];
   if (phone && workspace !== undefined) {
     const { browser, files, code, preview, carousel } = workspace;
     if (browser.homeUrl !== undefined) menuPanels.push({ key: 'browser', label: 'Browser', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{browserGlyph}</svg>, title: 'Show the project in the browser panel', onSelect: () => browser.open ? carousel?.show('browser') : browser.toggle() });
     if (place?.id !== undefined) menuPanels.push({ key: 'files', label: 'Files', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{filesGlyph}</svg>, title: 'Show the host Files panel', onSelect: () => files.open ? carousel?.show('files') : files.show() });
-    if (onGithub) menuPanels.push({ key: 'github', label: 'GitHub', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{githubGlyph}</svg>, title: 'Show the GitHub panel', onSelect: workspace.openGithubPanel });
+    if (onGithub) menuPanels.push({ key: 'github', label: <>GitHub{githubBadge > 0 && <span className="github-badge" aria-label={`${githubBadge} new`}>{githubBadge}</span>}</>, icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{githubGlyph}</svg>, title: 'Show the GitHub panel', onSelect: workspace.openGithubPanel });
     if (worktreeId !== undefined && (place?.stack?.processes?.length ?? 0) > 0) menuPanels.push({ key: 'stack', label: 'Stack', icon: <StackIcon path={stackGlyphs.panel} className="more-menu-icon" />, title: 'Show the Stack panel', onSelect: () => workspace.openStackPanel() });
     if (worktreeId !== undefined) menuPanels.push({ key: 'code', label: 'Code', icon: <svg className="more-menu-icon" viewBox="0 0 24 24" aria-hidden="true">{codeGlyph}</svg>, title: 'Show the working changes in the Code panel', onSelect: () => code.open ? carousel?.show('code') : code.openChanges('working') });
     // expose the transient preview only while it has a file
@@ -8410,7 +8400,7 @@ function WorkspaceToolbar({ workspace, agentCount = 0, launch, onOpenWorktreeSta
     {workspace !== undefined && !phone && <BrowserToggle browser={workspace.browser} />}
     {workspace !== undefined && !phone && place?.id !== undefined && <FilesToggle files={workspace.files} />}
     {workspace !== undefined && !phone && worktreeId !== undefined && <CodeToggle code={workspace.code} />}
-    {workspace !== undefined && !phone && onGithub && <GithubToggle github={workspace.githubPanel} />}
+    {workspace !== undefined && !phone && onGithub && <GithubToggle github={workspace.githubPanel} badge={githubBadge} />}
     <ConfiguredButtonList slot="leftNav" className="configured-left-nav" buttonClassName="toolbar-button" />
     {phone && workspace?.carousel !== undefined && workspace.carousel.panels.length > 1 ? <PanelDots carousel={workspace.carousel} /> : <span className="toolbar-spacer" aria-hidden="true" />}
     <ConfiguredButtonList slot="rightNav" className="configured-right-nav" buttonClassName="toolbar-button" />
@@ -8439,10 +8429,10 @@ function FilesToggle({ files }: { files: WorkspaceState['files'] }) {
   return <button type="button" className={`toolbar-button files-toggle${files.open ? ' panel-open' : ''}`} aria-label="Files" aria-pressed={files.open} title={files.open ? 'Close the Files panel' : 'Open the host Files panel'} onClick={files.toggle}><svg viewBox="0 0 24 24" aria-hidden="true">{filesGlyph}</svg><span className="toolbar-label">Files</span></button>;
 }
 
-// The toolbar's GitHub button: it opens and closes the GitHub panel, with no count (the Overview's
-// badge is the one attention signal). A Place with no github.com origin shows no button.
-function GithubToggle({ github }: { github: WorkspaceState['githubPanel'] }) {
-  return <button type="button" className={`toolbar-button github-toggle${github.open ? ' panel-open' : ''}`} aria-label="GitHub" aria-pressed={github.open} title={github.open ? 'Close the GitHub panel' : 'Open the GitHub panel'} onClick={github.toggle}><svg viewBox="0 0 24 24" aria-hidden="true">{githubGlyph}</svg><span className="toolbar-label">GitHub</span></button>;
+// The toolbar's GitHub button: it opens and closes the GitHub panel, its badge counting the pull
+// requests, in any repository, holding something new. A Place with no github.com origin shows no button.
+function GithubToggle({ github, badge }: { github: WorkspaceState['githubPanel']; badge: number }) {
+  return <button type="button" className={`toolbar-button github-toggle${github.open ? ' panel-open' : ''}`} aria-label={badge > 0 ? `GitHub, ${badge} new` : 'GitHub'} aria-pressed={github.open} title={`${github.open ? 'Close the GitHub panel' : 'Open the GitHub panel'}${badge > 0 ? ` (${badge} new)` : ''}`} onClick={github.toggle}><svg viewBox="0 0 24 24" aria-hidden="true">{githubGlyph}</svg><span className="toolbar-label">GitHub</span>{badge > 0 && <span className="github-badge corner">{badge}</span>}</button>;
 }
 
 // The toolbar's Code button: it opens the Worktree's working changes in the Code panel, or closes it.
@@ -9511,17 +9501,8 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     window.addEventListener('hashchange', openFromHash);
     return () => window.removeEventListener('hashchange', openFromHash);
   }, []);
-  // route overview compatibility links into a workspace-owned split
-  const [overviewFromHash, setOverviewFromHash] = useState(() => location.hash === '#overview');
   const [githubOpenRequest, setGithubOpenRequest] = useState<GithubOpenRequest>();
   const githubOpenSequence = useRef(0);
-  // retain a compatibility command until discovery can supply a real place
-  useEffect(() => {
-    // ordinary workspace hashes do not open github
-    const openFromHash = () => { if (location.hash === '#overview') setOverviewFromHash(true); };
-    window.addEventListener('hashchange', openFromHash);
-    return () => window.removeEventListener('hashchange', openFromHash);
-  }, []);
   // the linked Worktrees whose pull request merged or closed, by id, read each time the
   // launcher opens (the server asks GitHub, so it stays off the dashboard)
   const [closedPullRequestWorktrees, setClosedPullRequestWorktrees] = useState<ReadonlyMap<string, 'merged' | 'closed'>>(() => new Map());
@@ -10170,27 +10151,6 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     history.replaceState(null, '', `${location.pathname}${location.search}#${target}`);
     setActive(index);
   };
-  // prefer the current workspace without inventing a git checkout or agent
-  const overviewOwnerId = items[visibleActive]?.placeId
-    ?? data?.projects.flatMap(project => project.worktrees).find(worktree => worktree.available !== false)?.id
-    ?? data?.places?.find(place => place.adhoc !== true)?.id;
-  // opening github starts with the owning repository when one is available
-  const openOverview = () => {
-    // an empty installation has no workspace to own a split
-    if (overviewOwnerId === undefined) return;
-    saveGithubPanel(overviewOwnerId, true);
-    const repository = projectOfWorktree(data?.projects ?? [], overviewOwnerId)?.github;
-    setGithubOpenRequest({ id: ++githubOpenSequence.current, placeId: overviewOwnerId, scope: repository === undefined ? 'all' : 'repo', maximize: true });
-    openPlace(overviewOwnerId);
-    history.replaceState(null, '', `${location.pathname}${location.search}#worktree=${encodeURIComponent(overviewOwnerId)}`);
-  };
-  // consume an old overview address once discovery has produced a valid owner
-  useEffect(() => {
-    // discovery may still be loading or have no usable places
-    if (!overviewFromHash || overviewOwnerId === undefined) return;
-    openOverview();
-    setOverviewFromHash(false);
-  }, [overviewFromHash, overviewOwnerId]);
   // select one canonical worktree from voice
   const selectVoiceWorktree = (worktreeId: string) => {
     const index = items.findIndex(candidate => candidate.placeId === worktreeId);
@@ -10239,7 +10199,6 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
     'toggle-code': onPanels(view => { if (view.toggleCode === undefined) return false; view.toggleCode(); }),
     'toggle-stack': onPanels(view => { if (view.toggleStack === undefined) return false; view.toggleStack(); }),
     'toggle-github': onPanels(view => { if (view.toggleGithub === undefined) return false; view.toggleGithub(); }),
-    'github-overview': () => { if (overviewOwnerId === undefined) return false; openOverview(); },
     'rename-panel': onPanels((view, _panels, current) => { if (current !== undefined) view.renamePanel(current); }),
     'close-panel': onPanels((view, _panels, current) => {
       const split = view.splits.find(candidate => candidate.key === current);
@@ -11165,10 +11124,10 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
   const tabBar = <><nav className={`tabs${phone ? ' workspace-dropdown-row' : ''}`} ref={node => { /* anchor phone launchers to the visible row instead of the hidden plus */ tabsRef.current = node; if (phone) launcherRef.current = node; }} role="tablist" aria-label="Agents and worktrees"><TabRowLead />{phone ? <WorkspaceDropdown items={items} current={visibleActive} onSelect={index => select(index)} onNewWorkspace={() => setLauncherOpen(true)} onRenameWorktree={setRenameWorktreeId} renameDisabled={creatingAgent} onContextMenu={workspaceContextMenu} onTurnOff={entry => void turnOffWorkspace(entry)} /> : items.map((entry, index) => {
     const { transition, label, className, progress, busy } = tabStatus(entry);
     return <button key={entry.key} id={`tab-${index}`} role="tab" aria-selected={index === visibleActive} aria-controls={`panel-${index}`} tabIndex={index === visibleActive ? 0 : -1} className={`${index === visibleActive ? 'active ' : ''}${className}`} title={label} aria-label={`${entry.label} — ${label}`} aria-busy={busy || undefined} onPointerDownCapture={preserveWorkspacePress} onMouseDownCapture={preserveWorkspacePress} onContextMenu={event => workspaceContextMenu(event, entry)} onAuxClickCapture={event => closeOnMiddleClick(event, () => void turnOffWorkspace(entry))} onClick={() => select(index)}><ProgressRing busy={progress !== undefined} /><TabKindStack entry={entry} />{entry.worktree?.locked === true && <span className="tab-git-lock" aria-hidden="true" title="Git has locked this worktree">🔒</span>}{transition !== undefined ? <span className="tab-transition-label"><span>{entry.label}</span><small>{transition}…</small></span> : <span className="tab-label" aria-hidden="true">{entry.label}</span>}</button>;
-  })}<NotificationControl /><OverviewButton open={false} phone={phone} badge={data.githubBadge ?? 0} disabledReason={overviewOwnerId === undefined ? 'Open a Workspace first' : undefined} onToggle={openOverview} /><span className="launcher" ref={phone ? undefined : launcherRef}><button ref={plusRef} className={`new-agent-tab${progressBorder(creatingAgent, 'blue')}`} type="button" disabled={creatingAgent} aria-busy={creatingAgent || undefined} aria-label={creatingAgent ? 'Starting agent' : 'Launch agent'} data-context-flyout aria-expanded={launcherOpen} onClick={() => { /* toggle the launcher */ if (launcherOpen) closeLauncher(); else setLauncherOpen(true); }}><ProgressRing busy={creatingAgent} /><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button></span>{launcherOpen && <FlyoutPortal onDismiss={closeLauncher}><div className="launcher-menu more-menu flyout-menu" ref={launcherMenuRef} style={launcherStyle} role="group" aria-label="Agent launcher"><div className="launcher-row"><span className="launcher-row-label launcher-symbol-label"><LauncherLabelIcon /><span>Scratch</span></span><button type="button" className="launcher-icon launcher-open-folder" aria-label="Other locations" title="Other locations" onClick={() => showOpenFolder()}><FolderIcon /></button>{launcherPlaceControls(scratchPlace)}{launcherPlaceSplit('~ Scratch', scratchPlace, data.scratchLaunch, '/api/agents/launch', choice => void createAgent(choice))}</div>{data.projects.filter(project => project.implicit !== true).map(launcherProject)}</div></FlyoutPortal>}{plusAlone && <span className="tab-spacer" aria-hidden="true" />}{clientSettings && <ClientSettingsTrigger />}</nav>{agent === undefined && item?.worktree === undefined && renderNotifications()}</>;
+  })}<NotificationControl /><span className="launcher" ref={phone ? undefined : launcherRef}><button ref={plusRef} className={`new-agent-tab${progressBorder(creatingAgent, 'blue')}`} type="button" disabled={creatingAgent} aria-busy={creatingAgent || undefined} aria-label={creatingAgent ? 'Starting agent' : 'Launch agent'} data-context-flyout aria-expanded={launcherOpen} onClick={() => { /* toggle the launcher */ if (launcherOpen) closeLauncher(); else setLauncherOpen(true); }}><ProgressRing busy={creatingAgent} /><span className="flyout-caret" aria-hidden="true" /><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button></span>{launcherOpen && <FlyoutPortal onDismiss={closeLauncher}><div className="launcher-menu more-menu flyout-menu" ref={launcherMenuRef} style={launcherStyle} role="group" aria-label="Agent launcher"><div className="launcher-row"><span className="launcher-row-label launcher-symbol-label"><LauncherLabelIcon /><span>Scratch</span></span><button type="button" className="launcher-icon launcher-open-folder" aria-label="Other locations" title="Other locations" onClick={() => showOpenFolder()}><FolderIcon /></button>{launcherPlaceControls(scratchPlace)}{launcherPlaceSplit('~ Scratch', scratchPlace, data.scratchLaunch, '/api/agents/launch', choice => void createAgent(choice))}</div>{data.projects.filter(project => project.implicit !== true).map(launcherProject)}</div></FlyoutPortal>}{plusAlone && <span className="tab-spacer" aria-hidden="true" />}{clientSettings && <ClientSettingsTrigger />}</nav>{agent === undefined && item?.worktree === undefined && renderNotifications()}</>;
   const consoleClass = `console${davo.enabled && voiceOpen ? ' voice-visible' : ''}`;
-  if (items.length === 0) return withConfiguredButtons(<EditorConfiguredContext.Provider value={data.editor === true}><AdaptersContext.Provider value={data.adapters}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey="dashboard"><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<article className="agent-view cleanup-empty-view">{<section className="log-shell"><div className="log inactive-log"><ResizableLogSplit withSettings empty={<div className="empty-workspace"><h2>No sessions</h2></div>} /></div></section>}{tabBar}{<WorkspaceToolbar cleanupControl={cleanupControl} />}{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</article></main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></AdaptersContext.Provider></EditorConfiguredContext.Provider>);
-  return withConfiguredButtons(<AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><OpenAgentContext.Provider value={setActivateAgentId}><RemoveWorktreeContext.Provider value={setRemoveWorktreeId}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey={activeItemKey ?? 'dashboard'}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{<>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onCloseReview={worktreeId => { /* bulk close already owns the guard or deliberate-empty bypass */ minimizeReview(worktreeId, true); }} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNewWorktree={openNewWorktreeFor(agent.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onOpenGithub={openGithubItem} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNewWorktree={openNewWorktreeFor(item.worktree.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onOpenGithub={openGithubItem} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</>}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></RemoveWorktreeContext.Provider></OpenAgentContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>);
+  if (items.length === 0) return withConfiguredButtons(<EditorConfiguredContext.Provider value={data.editor === true}><AdaptersContext.Provider value={data.adapters}><ProjectsContext.Provider value={data.projects}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, githubBadge: data.githubBadge, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey="dashboard"><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<article className="agent-view cleanup-empty-view">{<section className="log-shell"><div className="log inactive-log"><ResizableLogSplit withSettings empty={<div className="empty-workspace"><h2>No sessions</h2></div>} /></div></section>}{tabBar}{<WorkspaceToolbar cleanupControl={cleanupControl} />}{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</article></main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></ProjectsContext.Provider></AdaptersContext.Provider></EditorConfiguredContext.Provider>);
+  return withConfiguredButtons(<AdaptersContext.Provider value={data.adapters}><EditorConfiguredContext.Provider value={data.editor === true}><ProjectsContext.Provider value={data.projects}><OpenAgentContext.Provider value={setActivateAgentId}><RemoveWorktreeContext.Provider value={setRemoveWorktreeId}><DashboardGenerationContext.Provider value={{ generation: dashboardGeneration, notesRevision: data.notesRevision, githubRevision: data.githubRevision, githubBadge: data.githubBadge, serverStartedAt: data.serverStartedAt }}><VoiceTriggerContext.Provider value={voiceTrigger}><OptionalClientSettingsLayout settings={clientSettings} onOperationFeedback={showOperationFeedback} workspaceKey={activeItemKey ?? 'dashboard'}><GlobalLaunchContext.Provider value={globalLaunch}><main className={consoleClass}>{voiceDialog}<section className="panel" role="tabpanel" id={`panel-${visibleActive}`} aria-labelledby={`tab-${visibleActive}`} tabIndex={0}>{<>{item !== undefined && agent !== undefined && <AgentPlaceCard key={item.key} agent={agent} agents={item.agents} onSelectAgent={agentId => select(visibleActive, agentId)} active={agentState(agent) === 'working'} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} reviewCapability={data.reviewTour} review={activeReview} onCloseReview={worktreeId => { /* bulk close already owns the guard or deliberate-empty bypass */ minimizeReview(worktreeId, true); }} onReview={setReviewStart} onDeleted={refresh} onSelectTarget={selectTarget} onNewWorktree={openNewWorktreeFor(agent.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onOpenGithub={openGithubItem} onPromptFocus={() => viewAgent(agent)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: agent.projectId ?? (activePlace?.kind === 'directory' ? activePlace.projectId : undefined) })} launch={activeLaunch} {...(activeWorktree !== undefined || activePlace === undefined ? {} : { pinned: activePlace.pinned, onTogglePin: () => void togglePin(activePlace) })} {...(activeWorktree === undefined ? {} : { worktreeLabel: activeWorktree.label, ...(activeWorktree.main ? {} : { onRemoveWorktree: () => setRemoveWorktreeId(activeWorktree.id), removeDisabledReason: 'Turn off the agents here before removing this worktree' }) })} />}{item?.worktree !== undefined && agent === undefined && <WorktreeCard key={item.worktree.id} worktree={item.worktree} tabBar={tabBar} renderNotifications={renderNotifications} cleanupControl={cleanupControl} transient={item.transient === true} onLaunched={worktreeLaunched} onOperationFeedback={showOperationFeedback} onNewWorktree={openNewWorktreeFor(item.worktree.projectId)} onNavigateWorktree={navigateToWorktree} onOpenWorktreeStack={openWorktreeStack} onOpenGithub={openGithubItem} onTogglePin={() => void togglePin(item.worktree!)} schedulePrefill={resolveSchedulePrefill({ projectId: item.worktree.projectId })} {...(item.worktree.main ? {} : { onRemove: () => setRemoveWorktreeId(item.worktree!.id), ...(worktreeRemoveDisabledReason(item.worktree, activeProject) === undefined ? {} : { removeDisabledReason: worktreeRemoveDisabledReason(item.worktree, activeProject) }) })} />}{item?.place !== undefined && agent === undefined && <PlaceCard key={item.place.id} place={item.place} tabBar={tabBar} cleanupControl={cleanupControl} transient={item.transient === true} launchDisabled={creatingAgent} launch={placeLaunch(item.place)} onLaunched={worktreeLaunched} onTogglePin={() => void togglePin(item.place!)} onOperationFeedback={showOperationFeedback} schedulePrefill={resolveSchedulePrefill({ projectId: item.place.kind === 'directory' ? item.place.projectId : undefined })} />}{item?.pendingLaunch && <PendingSessionCard key={item.pendingLaunch.id} launch={item.pendingLaunch} tabBar={tabBar} cleanupControl={cleanupControl} retrying={creatingAgent} onRetry={choice => { /* retain the same pending draft on retry */ void runPendingSessionLaunch(item.pendingLaunch!, choice); }} onDiscard={() => { /* discard only the selected failed placeholder */ discardPendingSessionLaunch(item.pendingLaunch!.id); }} onOperationFeedback={showOperationFeedback} />}</>}</section>{cleanupDialog}{worktreeManagementDialogs}{keyboardOverlays}{reviewPanel}{reviewStartSheet}</main></GlobalLaunchContext.Provider></OptionalClientSettingsLayout></VoiceTriggerContext.Provider></DashboardGenerationContext.Provider></RemoveWorktreeContext.Provider></OpenAgentContext.Provider></ProjectsContext.Provider></EditorConfiguredContext.Provider></AdaptersContext.Provider>);
 }
 
 // coordinate console session and update lifecycle

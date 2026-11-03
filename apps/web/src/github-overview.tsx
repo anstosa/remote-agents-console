@@ -257,13 +257,3 @@ export const NoTokenCard = () => <div className="overview-card"><h3>No GitHub to
 
 // when GitHub was last read, coarsely
 export const freshness = (fetchedAt: number, now: number) => now - fetchedAt < 60_000 ? 'updated just now' : `updated ${age(fetchedAt, now)} ago`;
-
-/**
- * The tab row's Overview button: it opens the unified GitHub split, shows active while it is open, and
- * counts the Pull requests holding something the operator has not been shown (a corner badge on a
- * phone).
- */
-export function OverviewButton({ open, phone, badge, disabledReason, onToggle }: { open: boolean; phone: boolean; badge: number; disabledReason?: string; onToggle: () => void }) {
-  // reserve the shared square geometry only while the label is hidden
-  return <button type="button" className={`overview-button${phone ? ' icon-only' : ''}${open ? ' active' : ''}`} aria-pressed={open} aria-label={badge > 0 ? `Overview, ${badge} new` : 'Overview'} title={disabledReason ?? `Overview: pull requests, review requests and issues${badge > 0 ? ` (${badge} new)` : ''}`} disabled={disabledReason !== undefined} onClick={onToggle}><Icon name="pull" />{!phone && <span>Overview</span>}{badge > 0 && <span className={`overview-badge${phone ? ' corner' : ''}`}>{badge}</span>}</button>;
-}

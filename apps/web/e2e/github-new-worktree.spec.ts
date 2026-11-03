@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { openGithubPanel } from './panel-header';
 import { installPaneMock } from './pane-stream-mock';
 
 // New Worktrees from GitHub: the shared triage lanes' and the GitHub detail's branch+ on a row no
@@ -98,7 +99,8 @@ test('a repo-scope row opens the New worktree dialog on a pull request, with a R
   await page.setViewportSize({ width: 1280, height: 900 });
   const posts: { path: string; body: unknown }[] = [];
   await mount(page, { worktree: worktree('repo:/repo/wts/pr-12', 'Repo · pr-12', 'branch-12', false, 2), agentId: 'agent-pr' }, posts);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const ov = page.getByRole('region', { name: 'GitHub', exact: true });
   const branchPlus = ov.getByRole('button', { name: 'Checkout and actions for pull request #12' });
   await branchPlus.click();
@@ -140,7 +142,8 @@ test('creates a fork Worktree for an upstream pull request without rewriting its
   const forkChoices = { pullRequests: [{ ...choice(4978, upstream.title), branch: 'ansel/continueSerialPodcasts', url: upstream.url }], otherPullRequests: [], branches: [], pullRequestsSupported: true };
   const created = worktree('repo:/repo/wts/pr-4978', 'Audiobookshelf · pr-4978', 'ansel/continueSerialPodcasts', false, 2);
   await mount(page, { worktree: created }, posts, { github: 'anstosa/audiobookshelf', githubForkOf: 'advplyr/audiobookshelf', projectLabel: 'Audiobookshelf', overview: forkOverview, switchPrs: forkChoices });
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const github = page.getByRole('region', { name: 'GitHub', exact: true });
   await github.getByRole('button', { name: 'Checkout and actions for pull request #4978' }).click();
   const menu = page.getByRole('group', { name: 'Actions for pull request #4978' });
@@ -158,7 +161,8 @@ test('an Issue\'s branch+ on a phone opens a new branch named for it on origin\'
   const posts: { path: string; body: unknown }[] = [];
   const created = worktree('repo:/repo/wts/7-launcher-search-ignores-notes', 'Repo · 7-launcher-search-ignores-notes', '7-launcher-search-ignores-notes', false, 2);
   await mount(page, { worktree: created, fetchError: 'fatal: unable to access' }, posts);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const ov = page.getByRole('region', { name: 'GitHub', exact: true });
   await ov.getByRole('tab', { name: /^Issues/u }).click();
   await ov.getByRole('button', { name: 'Actions for issue #7' }).click();
@@ -276,7 +280,7 @@ async function mountHeld(page: Page, answer: HeldAnswer, calls: { method: string
 // open the held-new dialog from the unified card action
 async function openHeldDialog(page: Page) {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Overview', exact: true }).click();
+  await openGithubPanel(page);
   const github = page.getByRole('region', { name: 'GitHub', exact: true });
   await github.getByRole('button', { name: 'Checkout and actions for pull request #214' }).click();
   await page.getByRole('group', { name: 'Actions for pull request #214' }).getByRole('button', { name: /^Move checkout to a new Worktree in Repo/u }).click();

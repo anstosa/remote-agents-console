@@ -1,7 +1,8 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { openGithubPanel } from './panel-header';
 
-// The Overview command opens the current Workspace's GitHub split maximized. Repository and
-// all-repository scopes share the operator's pull requests, Review requests and assigned Issues.
+// The GitHub panel, filling the Workspace. Repository and all-repository scopes share the
+// operator's pull requests, Review requests and assigned Issues.
 
 const dashboard = {
   generation: 1,
@@ -171,7 +172,8 @@ for (const width of [390, 1280]) {
   test(`uses equal horizontal split-title spacing at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await mount(page, [busy]);
-    await page.goto('/#overview');
+    await page.goto('/');
+  await openGithubPanel(page);
     const title = page.getByRole('region', { name: 'GitHub', exact: true }).locator('.panel-header-title');
     await expect(title).toBeVisible();
     const spacing = await title.evaluate(element => {
@@ -191,25 +193,16 @@ for (const width of [390, 1280]) {
   });
 }
 
-// preserve mobile launch access while matching the main row's shared icon geometry
-test('hides the mobile plus and keeps Overview icons at the standard control size', async ({ page }, testInfo) => {
-  await mount(page, [busy], [], { revision: 1, badge: 2 });
+// preserve mobile launch access
+test('hides the mobile plus and keeps New Workspace reachable', async ({ page }) => {
+  await mount(page, [busy]);
   await page.goto('/');
-  const overview = page.getByRole('button', { name: 'Overview, 2 new', exact: true });
   const plus = page.locator('.new-agent-tab');
-  const settings = page.locator('.tabs .server-switcher-settings');
   // cover small phones and both sides of the existing mobile breakpoint
   for (const width of [320, 390, 600, 768, 769, 1280]) {
     await page.setViewportSize({ width, height: 844 });
-    // icon mode must neither shrink nor stretch around its badge
     if (width <= 768) {
-      await expect(overview).toHaveText('2');
       await expect(plus).toBeHidden();
-      const [icon, peer] = await Promise.all([overview.boundingBox(), settings.boundingBox()]);
-      expect(icon!.width).toBeCloseTo(peer!.width, 1);
-      expect(icon!.height).toBeCloseTo(peer!.height, 1);
-      expect(icon!.width).toBeCloseTo(icon!.height, 1);
-      await expect(overview.locator('.overview-badge.corner')).toHaveText('2');
       // New Workspace remains reachable without the hidden main plus
       await page.locator('.workspace-dropdown').click();
       await page.getByRole('button', { name: /New Workspace/u }).click();
@@ -221,29 +214,17 @@ test('hides the mobile plus and keeps Overview icons at the standard control siz
       expect(menu!.x + menu!.width).toBeLessThanOrEqual(width);
       await page.keyboard.press('Escape');
       await expect(launcher).toHaveCount(0);
-      // retain the exact breakpoint render for review
-      if (width === 768) await page.screenshot({ path: testInfo.outputPath('overview-toolbar-768.png') });
-    } else {
-      // desktop retains its labeled Overview and direct launch action
-      await expect(plus).toBeVisible();
-      await expect(overview).toHaveText('Overview2');
-      // retain the first desktop-boundary render for review
-      if (width === 769) await page.screenshot({ path: testInfo.outputPath('overview-toolbar-769.png') });
-    }
+    } else await expect(plus).toBeVisible();
   }
 });
 
 // keep both scopes inside the same Workspace-owned github split
-test('opens Overview maximized in repo scope and switches to the identical all-repos swimlanes', async ({ page }) => {
+test('opens expanded in repo scope and switches to the identical all-repos swimlanes', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.addInitScript(() => localStorage.setItem('rac.github-scope:repo:/repo', 'all'));
   await mount(page, [busy]);
   await page.goto('/');
-  const button = page.getByRole('button', { name: 'Overview', exact: true });
-
-  await button.click();
-  await expect(page).toHaveURL(/#worktree=repo%3A%2Frepo$/u);
-  const overview = page.getByRole('region', { name: 'GitHub', exact: true });
+  const overview = await openGithubPanel(page);
   await expect(overview).toHaveClass(/\bexpanded\b/u);
   await expectGithubBodyFillsPanel(page);
   const scope = overview.getByRole('group', { name: 'GitHub scope' });
@@ -356,7 +337,8 @@ test('keeps a long branch below usable title copy in a 1280px swim lane', async 
   };
   await page.setViewportSize({ width: 1280, height: 900 });
   await mount(page, [longBranchOverview]);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
 
   const github = page.getByRole('region', { name: 'GitHub', exact: true });
   const row = github.locator('.overview-row').filter({ hasText: '#220' });
@@ -462,18 +444,15 @@ test('opens same-number repository rows in isolated local detail without conflat
   await expect(github).not.toContainText('Foreign seven');
 });
 
-// consume the old address without resurrecting a standalone page
-test('consumes #overview into the retained GitHub split and ordinary close and reopen stay in the Workspace', async ({ page }) => {
+test('Escape restores the expanded panel, and ordinary close and reopen stay in the Workspace', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await mount(page, [busy]);
-  await page.goto('/#overview');
-  const overview = page.getByRole('region', { name: 'GitHub', exact: true });
-  await expect(overview).toBeVisible();
-  await expect(page).toHaveURL(/#worktree=repo%3A%2Frepo$/u);
+  await page.goto('/');
+  const overview = await openGithubPanel(page);
+  await expect(overview).toHaveClass(/\bexpanded\b/u);
   await page.keyboard.press('Escape');
   await expect(overview).toBeVisible();
   await expect(overview).not.toHaveClass(/\bexpanded\b/u);
-  await expect(page).not.toHaveURL(/#overview$/u);
 
   await overview.getByRole('button', { name: 'Close GitHub panel' }).click();
   await expect(overview).toHaveCount(0);
@@ -483,9 +462,9 @@ test('consumes #overview into the retained GitHub split and ordinary close and r
   await expect(overview).not.toHaveClass(/\bexpanded\b/u);
   await expect(overview.getByRole('button', { name: 'repo', exact: true })).toHaveAttribute('aria-pressed', 'true');
 
-  // a flyout still owns escape before a later overview command
+  // a flyout still owns escape after the panel is restored
   await overview.getByRole('button', { name: 'Close GitHub panel' }).click();
-  await page.getByRole('button', { name: 'Overview', exact: true }).click();
+  await openGithubPanel(page);
   await page.keyboard.press('Escape');
   await page.getByRole('tablist', { name: 'Agents and worktrees' }).getByRole('button', { name: 'Launch agent', exact: true }).click();
   await page.keyboard.press('Escape');
@@ -493,23 +472,11 @@ test('consumes #overview into the retained GitHub split and ordinary close and r
   await expect(overview).toBeVisible();
 });
 
-test('disables Overview when no place can own the GitHub split', async ({ page }) => {
-  await mount(page, [busy], [], { revision: 1 }, { ...dashboard, projects: [] });
-  await page.goto('/#overview');
-  const overview = page.getByRole('button', { name: 'Overview', exact: true });
-  await expect(overview).toBeDisabled();
-  await expect(overview).toHaveAttribute('title', 'Open a Workspace first');
-  await expect(page.getByRole('region', { name: 'GitHub', exact: true })).toHaveCount(0);
-});
-
 test('shows the columns as tabs on a phone, each with its total and how many are waiting on me', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await mount(page, [busy]);
   await page.goto('/');
-  const button = page.getByRole('button', { name: 'Overview', exact: true });
-  await expect(button).toHaveText('');
-  await button.click();
-  const overview = page.getByRole('region', { name: 'GitHub', exact: true });
+  const overview = await openGithubPanel(page);
   await overview.getByRole('button', { name: 'All repos' }).click();
   await expect(page.locator('.tabs')).toBeHidden();
   await expect(page.locator('.workspace-toolbar')).toBeHidden();
@@ -539,7 +506,8 @@ test('keeps empty swim lanes visible in repository and all scope', async ({ page
   await page.setViewportSize({ width: 1280, height: 900 });
   const empty = { mine: [], reviews: [], issues: [], totals: { mine: 0, reviews: 0, issues: 0 }, fetchedAt: Date.now() };
   await mount(page, [empty]);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const overview = page.getByRole('region', { name: 'GitHub', exact: true });
   // changing scope never replaces empty lane shells
   for (const scope of ['repo', 'All repos', 'repo']) {
@@ -558,7 +526,8 @@ test('keeps empty repository lanes while other repositories have items', async (
   await page.setViewportSize({ width: 1280, height: 900 });
   const foreign = { ...busy, mine: busy.mine.filter(item => item.repository === 'acme/web'), reviews: busy.reviews.filter(item => item.repository === 'acme/web'), issues: [], totals: { mine: 1, reviews: 1, issues: 0 } };
   await mount(page, [foreign]);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const overview = page.getByRole('region', { name: 'GitHub', exact: true });
   await expect(overview.locator('.overview-column-body')).toHaveText(['', '', '']);
   await expect(overview.locator('.overview-column-head .overview-count')).toHaveText(['0', '0', '0']);
@@ -575,7 +544,8 @@ test('keeps empty swim-lane tabs available on a phone in both scopes', async ({ 
   await page.setViewportSize({ width: 390, height: 844 });
   const empty = { mine: [], reviews: [], issues: [], totals: { mine: 0, reviews: 0, issues: 0 }, fetchedAt: Date.now() };
   await mount(page, [empty]);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const overview = page.getByRole('region', { name: 'GitHub', exact: true });
   // both scopes retain all three empty tabs
   for (const scope of ['repo', 'All repos']) {
@@ -600,7 +570,8 @@ test('shows skeletons while loading, a card without a token, empty lanes, and a 
   const empty = { mine: [], reviews: [], issues: [], totals: { mine: 0, reviews: 0, issues: 0 }, fetchedAt: Date.now() };
   const noToken = { mine: [], reviews: [], issues: [], totals: { mine: 0, reviews: 0, issues: 0 }, problem: { kind: 'no-token', message: 'GitHub authentication is not configured.' } };
   await mount(page, [stale, empty, noToken], reads);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const overview = page.getByRole('region', { name: 'GitHub', exact: true });
   await overview.getByRole('button', { name: 'All repos' }).click();
   await expect(overview.getByRole('status')).toHaveText('GitHub is unreachable. Showing what was fetched 6m ago.Retry');
@@ -619,7 +590,8 @@ test('shows skeletons while loading, a card without a token, empty lanes, and a 
 test('shows skeleton rows until the first read lands', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await mount(page, ['pending']);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   await expect(page.getByRole('status', { name: 'Loading GitHub' })).toBeVisible();
 });
 
@@ -637,12 +609,12 @@ test('badges the Pull requests with something new, which drops as their rows sho
   const github = { revision: 1, badge: 2, seen: [] as string[][] };
   await mount(page, [fresh, busy], [], github);
   await page.goto('/');
-  const button = page.getByRole('button', { name: /^Overview/u });
-  await expect(button).toHaveAccessibleName('Overview, 2 new');
-  await expect(button).toHaveText('Overview2');
+  const button = page.locator('.workspace-toolbar .github-toggle');
+  await expect(button).toHaveAccessibleName('GitHub, 2 new');
+  await expect(button).toHaveText('GitHub2');
+  await expect(button.locator('.github-badge.corner')).toHaveText('2');
 
-  await button.click();
-  const overview = page.getByRole('region', { name: 'GitHub', exact: true });
+  const overview = await openGithubPanel(page);
   await overview.getByRole('button', { name: 'All repos' }).click();
   const mine = overview.getByRole('region', { name: 'My pull requests' });
   // new rows first among Waiting on me; repositories holding something new first
@@ -654,14 +626,14 @@ test('badges the Pull requests with something new, which drops as their rows sho
   await expect.poll(() => github.seen.flat().sort()).toEqual(['octo/repo#220:conflicts', 'octo/repo#90:review:q']);
   github.badge = 0;
   github.revision = 2;
-  await expect(button).toHaveAccessibleName('Overview', { timeout: 20_000 });
-  await expect(button).toHaveText('Overview');
+  await expect(button).toHaveAccessibleName('GitHub', { timeout: 20_000 });
+  await expect(button).toHaveText('GitHub');
   await expect(overview.locator('.overview-row.new .overview-row-number')).toHaveText(['#220', '#90']);
   expect(github.seen).toHaveLength(1);
 
   // a new visit starts without them
   await overview.getByRole('button', { name: 'Close GitHub panel' }).click();
-  await button.click();
+  await openGithubPanel(page);
   await expect(overview.locator('.overview-row.new')).toHaveCount(0);
 });
 
@@ -670,15 +642,12 @@ test('opens a phone on the first tab holding something new, and reports only the
   const github = { revision: 1, badge: 1, seen: [] as string[][] };
   await mount(page, [unseenRows(busy, { 90: ['octo/repo#90:review:q'] })], [], github);
   await page.goto('/');
-  const button = page.getByRole('button', { name: /^Overview/u });
-  await expect(button).toHaveText('1');
-  await expect(button.locator('.overview-badge.corner')).toBeVisible();
-  // the corner badge sits inside the tab row, not clipped away
-  const [badge, row] = await Promise.all([button.locator('.overview-badge').boundingBox(), page.locator('.tabs').boundingBox()]);
-  expect(badge!.y).toBeGreaterThanOrEqual(row!.y);
+  // a phone's toolbar ⋮ carries the count on its GitHub row
+  await page.locator('.workspace-toolbar').getByRole('button', { name: 'More options' }).click();
+  await expect(page.locator('.github-panel-row .github-badge')).toHaveText('1');
+  await page.keyboard.press('Escape');
 
-  await button.click();
-  const overview = page.getByRole('region', { name: 'GitHub', exact: true });
+  const overview = await openGithubPanel(page);
   await overview.getByRole('button', { name: 'All repos' }).click();
   const tabs = overview.locator('.overview-tabs').getByRole('tab');
   await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true');
@@ -690,7 +659,8 @@ test('leaves rows on a phone tab not yet opened unseen', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const github = { revision: 1, badge: 2, seen: [] as string[][] };
   await mount(page, [unseenRows(busy, { 220: ['octo/repo#220:conflicts'], 90: ['octo/repo#90:review:q'] })], [], github);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const overview = page.getByRole('region', { name: 'GitHub', exact: true });
   await overview.getByRole('button', { name: 'All repos' }).click();
   const tabs = overview.locator('.overview-tabs').getByRole('tab');
@@ -709,7 +679,8 @@ test('marks nothing seen while the page is hidden', async ({ page }) => {
   const github = { revision: 1, badge: 1, seen: [] as string[][] };
   await page.addInitScript(() => { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (window as { shown?: boolean }).shown === true ? 'visible' : 'hidden' }); });
   await mount(page, [fresh], [], github);
-  await page.goto('/#overview');
+  await page.goto('/');
+  await openGithubPanel(page);
   const overview = page.getByRole('region', { name: 'GitHub', exact: true });
   await expect(overview.getByRole('button', { name: '#220 Bottom status bar, new, details' })).toBeVisible();
   await page.waitForTimeout(1_500);

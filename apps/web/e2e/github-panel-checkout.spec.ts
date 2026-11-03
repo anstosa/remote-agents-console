@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { openGithubPanel } from './panel-header';
 
 // The GitHub panel's Worktree strip: checking a pull request out here, moving it here from the
 // Worktree holding it, and removing a merged or closed pull request's Worktree through the Remove
@@ -183,7 +184,7 @@ async function mountMatrix(page: Page, { destination = { kind: 'project' as cons
 // open all repositories from alpha
 async function showMatrix(page: Page) {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Overview', exact: true }).click();
+  await openGithubPanel(page);
   const github = panel(page);
   await github.getByRole('button', { name: 'All repos' }).click();
   await expect(github.getByRole('button', { name: 'All repos' })).toHaveAttribute('aria-pressed', 'true');
