@@ -59,8 +59,8 @@ export function agentPresentationAttentionState(agent: Pick<Agent, 'attention' |
 export const agentNotificationTag = (agent: Pick<Agent, 'id' | 'worktreeId'>) => agent.worktreeId === undefined ? `agent-status-${agent.id}` : `worktree-status-${agent.worktreeId}`;
 
 // build one review-ready push payload
-export function reviewNotification(agentId: string, worktreeId: string, projectName: string, worktreeName: string): ReviewNotification {
-  return { kind: 'review', title: `Review ready in ${projectName}`, body: `${worktreeName} is ready for review`, tag: `review-ready-${worktreeId}`, url: `/#agent=${encodeURIComponent(agentId)}`, worktreeId };
+export function reviewNotification(worktreeId: string, projectName: string, worktreeName: string): ReviewNotification {
+  return { kind: 'review', title: `Review ready in ${projectName}`, body: `${worktreeName} is ready for review`, tag: `review-ready-${worktreeId}`, url: `/#worktree=${encodeURIComponent(worktreeId)}`, worktreeId };
 }
 
 // build one skipped/failed scheduled-Run push payload. The url deep-links to the agent when the Run has a
@@ -231,6 +231,6 @@ export function pushNotifications(events: ConsoleEvents, coordinator: AgentNotif
     for (const { agent, queued, context, quiet } of agents) coordinator.observe(agent, queued, context, quiet);
     coordinator.retain(agents.map(({ agent }) => agent));
   });
-  events.on('review-ready', ({ agentId, worktreeId, projectName, worktreeName }) => send(reviewNotification(agentId, worktreeId, projectName, worktreeName)));
+  events.on('review-ready', ({ worktreeId, projectName, worktreeName }) => send(reviewNotification(worktreeId, projectName, worktreeName)));
   events.on('schedule-run', ({ type: _type, ...run }) => send(scheduleNotification(run)));
 }

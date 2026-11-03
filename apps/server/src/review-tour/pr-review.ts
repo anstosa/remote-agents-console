@@ -18,7 +18,7 @@ import { diffRows, type DiffRow } from './diff-rows.js';
 // against the draft before posting and read back after a lost response, so a retry or a second
 // submit skips what the draft already holds instead of adding it again.
 
-type Capture = (agentId: string, input: ReviewTourInput) => Promise<ReviewComparison>;
+type Capture = (worktreeId: string, input: ReviewTourInput) => Promise<ReviewComparison>;
 
 // 200 comments of 4,000 characters and 40,000 characters of sections, at up to three UTF-8 bytes a
 // character; the web caps a tour's notes at 20,000 characters of raw text, far below this
@@ -200,8 +200,8 @@ export class PullRequestReviewService {
   constructor(private readonly capture: Capture, private readonly command: Command = run, private readonly github: Pick<GithubService, 'client' | 'token' | 'repositoryAt' | 'changed'> = new GithubService()) {}
 
   // post a tour's feedback as the operator's draft review on the chosen pull request
-  async post(agentId: string, input: PullRequestReviewInput): Promise<PullRequestReviewResult> {
-    const comparison = await this.capture(agentId, { scope: input.scope, includeTests: input.includeTests, includeDocs: input.includeDocs });
+  async post(worktreeId: string, input: PullRequestReviewInput): Promise<PullRequestReviewResult> {
+    const comparison = await this.capture(worktreeId, { scope: input.scope, includeTests: input.includeTests, includeDocs: input.includeDocs });
     // the comments' change ids and line numbers belong to the tour's Comparison
     if (comparison.fingerprint !== input.fingerprint) throw new PullRequestReviewError('stale', false, 'The worktree has changed since this tour was built. Rebuild the tour, then post again.');
     const previous = this.posting.get(comparison.workspace) ?? Promise.resolve();

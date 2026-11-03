@@ -35,7 +35,6 @@ export type ReviewChange = {
   patch: string;
 };
 export type ReviewComparison = {
-  agentId: string;
   worktreeId: string;
   workspace: string;
   branch?: string;

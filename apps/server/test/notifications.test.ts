@@ -69,12 +69,12 @@ describe('agent notifications', () => {
   });
 
   it('builds a project-scoped guided review notification', () => {
-    expect(reviewNotification('agent-1', 'eric', 'Remote Agents', 'Eric')).toEqual({
+    expect(reviewNotification('eric', 'Remote Agents', 'Eric')).toEqual({
       kind: 'review',
       title: 'Review ready in Remote Agents',
       body: 'Eric is ready for review',
       tag: 'review-ready-eric',
-      url: '/#agent=agent-1',
+      url: '/#worktree=eric',
       worktreeId: 'eric'
     });
   });

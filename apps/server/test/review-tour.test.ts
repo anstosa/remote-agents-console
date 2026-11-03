@@ -9,8 +9,8 @@ const implementationChange = { id: 'chg_12345678', file: 'src/feature.ts', categ
 
 // build one stable prepared Comparison
 function prepared(worktreeId = 'cora'): PreparedReviewTour {
-  const comparison: ReviewComparison = { agentId: `agent-${worktreeId}`, worktreeId, workspace: `/worktrees/${worktreeId}`, branch: 'feature/review-tour', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: `fingerprint-${worktreeId}`, changes: [implementationChange] };
-  return { comparison, resolved: { workspace: comparison.workspace, agent: { id: comparison.agentId, pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: comparison.workspace, branch: comparison.branch, title: 'Ready' }, worktree: { id: worktreeId, label: worktreeId, path: comparison.workspace, identity: comparison.workspace, available: true, pinned: false } } };
+  const comparison: ReviewComparison = { worktreeId, workspace: `/worktrees/${worktreeId}`, branch: 'feature/review-tour', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: `fingerprint-${worktreeId}`, changes: [implementationChange] };
+  return { comparison, resolved: { workspace: comparison.workspace, branch: comparison.branch, worktree: { id: worktreeId, label: worktreeId, path: comparison.workspace, identity: comparison.workspace, available: true, pinned: false } } };
 }
 
 // complete a deferred operation
@@ -76,9 +76,9 @@ describe('review tour jobs', () => {
     const saved: Array<{ worktreeId: string; branch: string; tour: ReviewTour }> = [];
     const completed: string[] = [];
     const store = { save: async (worktreeId: string, branch: string, tour: ReviewTour) => { saved.push({ worktreeId, branch, tour }); return { worktreeId, branch, savedAt: new Date().toISOString(), tour }; } };
-    const jobs = new ReviewTourJobs(service, store as never, review => { completed.push(`${review.agentId}:${review.worktreeId}:${review.tour.title}`); });
+    const jobs = new ReviewTourJobs(service, store as never, review => { completed.push(`${review.worktreeId}:${review.tour.title}`); });
     try {
-      const started = await jobs.start('owner-a', 'agent-cora', { scope: 'working', includeTests: false, includeDocs: false });
+      const started = await jobs.start('owner-a', 'cora', { scope: 'working', includeTests: false, includeDocs: false });
       expect(started.kind).toBe('pending');
       // require a pending job id
       if (started.kind !== 'pending') throw new Error('expected pending job');
@@ -87,7 +87,7 @@ describe('review tour jobs', () => {
       await viWait();
       expect(jobs.get('owner-a', started.job.id)?.state.kind).toBe('ready');
       expect(saved).toMatchObject([{ worktreeId: 'cora', branch: 'feature/review-tour' }]);
-      expect(completed).toEqual(['agent-cora:cora:Tour']);
+      expect(completed).toEqual(['cora:Tour']);
     } finally { jobs.close(); }
   });
 
@@ -101,13 +101,13 @@ describe('review tour jobs', () => {
     const jobs = new ReviewTourJobs(service);
     try {
       const input = { scope: 'working' as const, includeTests: false, includeDocs: false };
-      const first = await jobs.start('owner-a', 'agent-cora', input, 'review-start_1234567890');
-      const replay = await jobs.start('owner-a', 'agent-cora', input, 'review-start_1234567890');
+      const first = await jobs.start('owner-a', 'cora', input, 'review-start_1234567890');
+      const replay = await jobs.start('owner-a', 'cora', input, 'review-start_1234567890');
       expect(replay).toEqual(first);
       expect(prepares).toBe(1);
       expect(generations).toBe(1);
-      await expect(jobs.start('owner-a', 'agent-cora', { ...input, includeTests: true }, 'review-start_1234567890')).rejects.toMatchObject({ code: 'invalid_request', retryable: false });
-      await expect(jobs.start('owner-a', 'agent-cora', { ...input, effort: 'high' }, 'review-start_1234567890')).rejects.toMatchObject({ code: 'invalid_request', retryable: false });
+      await expect(jobs.start('owner-a', 'cora', { ...input, includeTests: true }, 'review-start_1234567890')).rejects.toMatchObject({ code: 'invalid_request', retryable: false });
+      await expect(jobs.start('owner-a', 'cora', { ...input, effort: 'high' }, 'review-start_1234567890')).rejects.toMatchObject({ code: 'invalid_request', retryable: false });
     } finally { jobs.close(); }
   });
 
@@ -122,8 +122,8 @@ describe('review tour jobs', () => {
     } as unknown as ReviewTourService;
     const jobs = new ReviewTourJobs(service);
     try {
-      const first = await jobs.start('owner-a', 'agent-cora', { scope: 'working', includeTests: false, includeDocs: false });
-      const second = await jobs.start('owner-a', 'agent-cora', { scope: 'working', includeTests: true, includeDocs: false });
+      const first = await jobs.start('owner-a', 'cora', { scope: 'working', includeTests: false, includeDocs: false });
+      const second = await jobs.start('owner-a', 'cora', { scope: 'working', includeTests: true, includeDocs: false });
       // require pending job descriptors
       if (first.kind !== 'pending' || second.kind !== 'pending') throw new Error('expected pending jobs');
       expect(jobs.get('owner-a', first.job.id)?.state).toEqual({ kind: 'gone', code: 'job_superseded' });
@@ -138,8 +138,8 @@ describe('review tour jobs', () => {
     const service = { prepare: async () => prepared(), generate: async () => await new Promise<ReviewTour>(() => {}) } as unknown as ReviewTourService;
     const jobs = new ReviewTourJobs(service);
     try {
-      const first = await jobs.start('owner-a', 'agent-cora', { scope: 'working', includeTests: false, includeDocs: false });
-      const second = await jobs.start('owner-b', 'agent-cora', { scope: 'working', includeTests: false, includeDocs: false });
+      const first = await jobs.start('owner-a', 'cora', { scope: 'working', includeTests: false, includeDocs: false });
+      const second = await jobs.start('owner-b', 'cora', { scope: 'working', includeTests: false, includeDocs: false });
       // require pending job descriptors
       if (first.kind !== 'pending' || second.kind !== 'pending') throw new Error('expected pending jobs');
       expect(jobs.get('owner-a', first.job.id)?.state.kind).toBe('pending');
@@ -157,11 +157,11 @@ describe('review tour effort', () => {
 
   it('refuses an effort the tour agent does not accept before touching the Worktree', async () => {
     let targets = 0;
-    const discovery = { target: async () => { targets += 1; return undefined; } };
+    const discovery = { worktreesNow: () => { targets += 1; return []; } };
     const service = new ReviewTourService(discovery as never, generator([]));
-    await expect(service.prepare('agent-cora', { scope: 'working', includeTests: false, includeDocs: false, effort: 'max' })).rejects.toMatchObject({ code: 'invalid_request', retryable: false });
+    await expect(service.prepare('cora', { scope: 'working', includeTests: false, includeDocs: false, effort: 'max' })).rejects.toMatchObject({ code: 'invalid_request', retryable: false });
     expect(targets).toBe(0);
-    await expect(service.prepare('agent-cora', { scope: 'working', includeTests: false, includeDocs: false, effort: 'minimal' })).rejects.toMatchObject({ code: 'target_unavailable' });
+    await expect(service.prepare('cora', { scope: 'working', includeTests: false, includeDocs: false, effort: 'minimal' })).rejects.toMatchObject({ code: 'target_unavailable' });
     expect(targets).toBe(1);
   });
 

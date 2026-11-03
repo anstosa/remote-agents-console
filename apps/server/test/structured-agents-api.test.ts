@@ -2044,7 +2044,7 @@ describe('the Conductor\'s dispatches', () => {
     const outcomes = [async () => ({ title: 'Parser review', steps: [] }), async () => { throw new Error('model gone'); }];
     const reviewTours = {
       capability: async () => ({ available: true }),
-      prepare: async (agentId: string) => ({ comparison: { agentId, worktreeId: 'proj:repo', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'f', changes: [{ path: 'parser.ts' }] }, resolved: {} }),
+      prepare: async (worktreeId: string) => ({ comparison: { worktreeId, scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'f', changes: [{ path: 'parser.ts' }] }, resolved: {} }),
       generate: async () => await outcomes.shift()!()
     };
     const fake = fakeAgent();

@@ -1,7 +1,9 @@
-import type { Agent, Dashboard, Worktree } from '../domain/models.js';
+import type { Dashboard, Worktree } from '../domain/models.js';
 import type { DiscoveryService } from '../discovery/service.js';
 
-export type ResolvedWorkspace = { agent: Agent; worktree: Worktree; workspace: string };
+// a Worktree as a review sees it: its checkout, the branch its stored tour is filed under, and the
+// merge target the dashboard resolved for it
+export type ResolvedWorkspace = { worktree: Worktree; workspace: string; branch?: string; prBase?: string };
 
 // whether a folder is exactly this Worktree — the console path (`identity`), or the host path
 // (`hostPath`) under the bridge — never a prefix. An Agent's `home` is already its Place's
@@ -78,24 +80,23 @@ export function configuredWorktreeForWorkspace(worktrees: Worktree[], workspace:
   return matches.length === 1 ? matches[0] : undefined;
 }
 
-// resolve the discovered Worktree an Agent belongs to, enriched with dashboard comparison
-// metadata. Worktrees come from discovery, which owns `git worktree list` (ADR 0003).
-export async function resolveConfiguredWorkspace(discovery: DiscoveryService, agentId: string): Promise<ResolvedWorkspace | undefined> {
-  const target = await discovery.target(agentId);
-  // require a current agent target
-  if (target === undefined) return undefined;
-  const worktree = configuredWorktreeForWorkspace(discovery.worktreesNow(), target.agent.home);
-  // exclude scratch agents
-  if (worktree === undefined) return undefined;
-  const dashboard = await discovery.dashboard();
-  const enriched = dashboard.agents.find(candidate => candidate.id === target.agent.id && candidate.worktreeId === worktree.id);
-  // retain comparison metadata from dashboard enrichment
-  return { agent: enriched ?? target.agent, worktree, workspace: worktree.identity };
+// the branch a Worktree is on: its live Agent's, else the idle Worktree view's
+export function worktreeBranch(dashboard: Dashboard, worktreeId: string): string | undefined {
+  return dashboard.agents.find(agent => agent.worktreeId === worktreeId)?.branch ?? dashboard.projects.flatMap(project => project.worktrees).find(worktree => worktree.id === worktreeId)?.branch;
 }
 
-// revalidate agent identity before publishing
-export async function sameConfiguredWorkspace(discovery: DiscoveryService, agentId: string, expected: ResolvedWorkspace): Promise<boolean> {
-  const current = await resolveConfiguredWorkspace(discovery, agentId);
-  // reject replacement agents and path drift
-  return current !== undefined && current.agent.id === expected.agent.id && current.worktree.id === expected.worktree.id && current.workspace === expected.workspace;
+// resolve one discovered Worktree by id, enriched with the dashboard's branch and merge target.
+// Worktrees come from discovery, which owns `git worktree list` (ADR 0003).
+export async function resolveConfiguredWorkspace(discovery: DiscoveryService, worktreeId: string): Promise<ResolvedWorkspace | undefined> {
+  const worktree = worktreeById(discovery.worktreesNow(), worktreeId);
+  if (worktree === undefined) return undefined;
+  const dashboard = await discovery.dashboard();
+  const branch = worktreeBranch(dashboard, worktree.id);
+  const prBase = worktreePrBase(dashboard, worktree.id) ?? undefined;
+  return { worktree, workspace: worktree.identity, ...(branch === undefined ? {} : { branch }), ...(prBase === undefined ? {} : { prBase }) };
+}
+
+// whether the Worktree is still discovered at the same checkout, before publishing
+export function sameConfiguredWorkspace(discovery: DiscoveryService, expected: ResolvedWorkspace): boolean {
+  return worktreeById(discovery.worktreesNow(), expected.worktree.id)?.identity === expected.workspace;
 }

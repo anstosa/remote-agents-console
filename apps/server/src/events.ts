@@ -12,7 +12,7 @@ export type ObservedAgent = { agent: Agent; queued: boolean; context: AgentNotif
 export type ConsoleEvent =
   | { type: 'agents'; agents: ObservedAgent[] }
   | { type: 'stack'; worktrees: Array<{ worktreeId: string; processes: StackProcessState[] }> }
-  | { type: 'review-ready'; agentId: string; worktreeId: string; projectName: string; worktreeName: string }
+  | { type: 'review-ready'; worktreeId: string; projectName: string; worktreeName: string }
   | { type: 'schedule-run'; status: 'skipped' | 'failed' | 'needs-input' | 'timed-out'; targetLabel: string; noteId: string; noteTitle?: string; detail?: string; agentId?: string; worktreeId?: string };
 
 type Listener<T extends ConsoleEvent['type']> = (event: Extract<ConsoleEvent, { type: T }>) => void;

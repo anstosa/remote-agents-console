@@ -14,8 +14,8 @@ type ReadyJob = { kind: 'ready'; review: CodeReview };
 type FailedJob = { kind: 'error'; code: ReviewErrorCode; retryable: boolean };
 type GoneJob = { kind: 'gone'; code: 'job_cancelled' | 'job_superseded' | 'job_expired' };
 export type CodeReviewJobState = PendingJob | ReadyJob | FailedJob | GoneJob;
-export type StoredCodeReviewJob = { id: string; owner: string; agentId: string; worktreeId: string; fingerprint: string; generation?: number; startedAt: number; expiresAt: number; state: CodeReviewJobState; expiry: NodeJS.Timeout; removal?: NodeJS.Timeout };
-export type SettledCodeReviewJob = Pick<StoredCodeReviewJob, 'agentId' | 'worktreeId' | 'fingerprint' | 'state'>;
+export type StoredCodeReviewJob = { id: string; owner: string; worktreeId: string; fingerprint: string; generation?: number; startedAt: number; expiresAt: number; state: CodeReviewJobState; expiry: NodeJS.Timeout; removal?: NodeJS.Timeout };
+export type SettledCodeReviewJob = Pick<StoredCodeReviewJob, 'worktreeId' | 'fingerprint' | 'state'>;
 type CodeReviewStore = Pick<ReviewTourStore, 'beginCodeReview' | 'saveCodeReviewIfCurrent' | 'storedTour'>;
 
 // one Code review job per owner and Worktree, latest wins; a new tour supersedes every one for
@@ -30,7 +30,7 @@ export class CodeReviewJobs {
   async validate(options: CodeReviewOptions): Promise<void> { await this.reviewer.resolve(options); }
 
   // start one review of a prepared Comparison
-  async start(owner: string, agentId: string, prepared: PreparedReviewTour, options: CodeReviewOptions): Promise<StartedReviewJob> {
+  async start(owner: string, prepared: PreparedReviewTour, options: CodeReviewOptions): Promise<StartedReviewJob> {
     const resolved = await this.reviewer.resolve(options);
     // an empty selection has nothing to review
     if (prepared.comparison.changes.length === 0) throw new ReviewTourError('invalid_request', false);
@@ -43,7 +43,7 @@ export class CodeReviewJobs {
     const expiresAt = startedAt + CODE_REVIEW_JOB_TTL_MS;
     const controller = new AbortController();
     const generation = this.store?.beginCodeReview(worktreeId);
-    const job: StoredCodeReviewJob = { id, owner, agentId, worktreeId, fingerprint: prepared.comparison.fingerprint, ...(generation === undefined ? {} : { generation }), startedAt, expiresAt, state: { kind: 'pending', controller }, expiry: setTimeout(() => this.expire(id), CODE_REVIEW_JOB_TTL_MS) };
+    const job: StoredCodeReviewJob = { id, owner, worktreeId, fingerprint: prepared.comparison.fingerprint, ...(generation === undefined ? {} : { generation }), startedAt, expiresAt, state: { kind: 'pending', controller }, expiry: setTimeout(() => this.expire(id), CODE_REVIEW_JOB_TTL_MS) };
     job.expiry.unref?.();
     this.jobs.set(id, job);
     this.latestByWorktree.set(this.latestKey(owner, worktreeId), id);
@@ -76,13 +76,13 @@ export class CodeReviewJobs {
       job.state = { kind: 'error', code: typed.code, retryable: typed.retryable };
     }
     // publish the settled state
-    await Promise.resolve(this.onSettled?.({ agentId: job.agentId, worktreeId: job.worktreeId, fingerprint: job.fingerprint, state: job.state })).catch(() => undefined);
+    await Promise.resolve(this.onSettled?.({ worktreeId: job.worktreeId, fingerprint: job.fingerprint, state: job.state })).catch(() => undefined);
   }
 
   // Finish a review a server restart orphaned, from the recovery its run left. Its reply joins the
   // stored tour while that is still the reviewed Comparison and nothing has begun or cleared a
   // review of the Worktree since the restart. The job itself is gone: no pending state, no polling.
-  async recover(value: unknown, agentId: string): Promise<OrphanRecovery | undefined> {
+  async recover(value: unknown): Promise<OrphanRecovery | undefined> {
     const run = parseCodeReviewRecovery(value);
     const store = this.store;
     if (run === undefined || store === undefined) return undefined;
@@ -94,7 +94,7 @@ export class CodeReviewJobs {
       save: async (output, conversation) => {
         const review = codeReviewFrom(output, stored.tour.changes, reviewed, conversation);
         if (review === undefined || !await store.saveCodeReviewIfCurrent(worktreeId, branch, review, 0)) return false;
-        await Promise.resolve(this.onSettled?.({ agentId, worktreeId, fingerprint: review.fingerprint, state: { kind: 'ready', review } })).catch(() => undefined);
+        await Promise.resolve(this.onSettled?.({ worktreeId, fingerprint: review.fingerprint, state: { kind: 'ready', review } })).catch(() => undefined);
         return true;
       }
     };

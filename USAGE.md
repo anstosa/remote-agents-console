@@ -246,8 +246,12 @@ The tour itself is explanatory: it does not produce findings, verdicts, or
 patches. The optional Code review proposes findings that you **Keep** as editable
 comments or **Dismiss**; untriaged findings are not sent. Visit or skip every
 logical step, add feedback where useful, then optionally send one editable
-consolidated change request to the active agent. Generation runs as a bounded,
+consolidated change request to an agent in the worktree. Generation runs as a bounded,
 cancellable job and the tour requires regeneration if the underlying changes move.
+
+A review belongs to its worktree, not to an agent. It can be started, read and
+posted to a pull request with no agent running, and it stays open when the
+worktree's last agent exits. Only sending the change request needs one.
 
 Use **Ask reviewer** on a supported anchored finding, or **Ask guide** on selected
 diff lines, to ask a follow-up in the original agent conversation. These turns

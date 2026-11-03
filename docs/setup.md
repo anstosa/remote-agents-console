@@ -981,13 +981,13 @@ A branch's checkout is created under the Project's `worktreesDirectory` at a lea
 The console pins the new Worktree so it keeps its tab, runs the Project's [`commands.setup`](#projects) (when configured) to prepare the checkout, then opens what you chose under **Open** (the dialog remembers the last choice per Project):
 
 - **Agent** (the default) — an idle shell plus the Project's last-used kind.
-- **Review** — an Agent as above, then the guided review start sheet for it.
+- **Review** — no shell or agent; the Worktree's tab opens with the guided review start sheet.
 - **Terminal** — the idle shell only.
 - **Nothing** — no shell or agent; the pin keeps its tab.
 
-Setup runs in every mode, to completion, before anything opens, and gates the agent: the dialog shows that it is preparing the Worktree while it runs, and a setup failure under Agent or Review leaves the Worktree with its idle shell but launches no agent. The Worktree is created even if setup or the launch fails; the error is reported and the tab stands. Refusals (an existing branch name, an unresolvable base, a branch already checked out elsewhere, a pull request that is held, closed, or changed, or a target path that exists) are reported before git creates the checkout.
+Setup runs in every mode, to completion, before anything opens, and gates the agent: the dialog shows that it is preparing the Worktree while it runs, and a setup failure under Agent leaves the Worktree with its idle shell but launches no agent. The Worktree is created even if setup or the launch fails; the error is reported and the tab stands. Refusals (an existing branch name, an unresolvable base, a branch already checked out elsewhere, a pull request that is held, closed, or changed, or a target path that exists) are reported before git creates the checkout.
 
-**Fork pull requests run no setup and no agent.** Their code comes from outside the repository, so a Worktree created from one opens only **Terminal** or **Nothing**, and setup never runs in it. The dialog marks fork pull requests **Fork** (as the git flyout does), disables Agent and Review when one is selected, and falls back to Terminal; the server enforces this itself from the resolved pull request and refuses an Agent or Review request with a 409. Checking a fork pull request out into the current Worktree from the git flyout is not affected: an Agent already running there keeps running, now in the fork's code.
+**Fork pull requests run no setup and no agent.** Their code comes from outside the repository, so a Worktree created from one opens only **Terminal** or **Nothing**, and setup never runs in it. The dialog marks fork pull requests **Fork** (as the git flyout does), disables Agent and Review when one is selected, and falls back to Terminal; the server enforces this itself from the resolved pull request and refuses an Agent request with a 409. Review stays disabled too, since a review's run reads the fork's code with an agent. Checking a fork pull request out into the current Worktree from the git flyout is not affected: an Agent already running there keeps running, now in the fork's code.
 
 ### Removing Worktrees
 

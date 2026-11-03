@@ -84,7 +84,7 @@ async function mount(page: Page, created: Created, posts: { path: string; body: 
       made = true;
       return route.fulfill({ status: 201, json: { worktreeId: created.worktree.id, ...(created.agentId === undefined ? {} : { agentId: created.agentId }), ...(created.fetchError === undefined ? {} : { fetchError: created.fetchError }) } });
     }
-    if (path === `/api/agents/${created.agentId}/review-tour/jobs` && request.method() === 'POST') {
+    if (path === `/api/worktrees/${created.worktree.id}/review-tour/jobs` && request.method() === 'POST') {
       posts.push({ path, body: request.postDataJSON() });
       return route.fulfill({ status: 503, json: { error: 'not in this test' } });
     }
@@ -116,22 +116,43 @@ test('a repo-scope row opens the New worktree dialog on a pull request, with a R
   await expect(dialog.getByRole('radio', { name: 'Select #12' })).toBeChecked();
   const tour = dialog.getByRole('checkbox', { name: 'Start a Review tour' });
   await expect(tour).not.toBeChecked();
-  // the tour runs beside an Agent, so the other openings wait until it is unticked
+  // the tour starts on its own, so only Review's start sheet waits until it is unticked
   const open = dialog.getByRole('radiogroup', { name: 'Open in the new worktree' });
   await tour.check();
   await expect(open.getByRole('radio', { name: 'Agent' })).toBeChecked();
-  await expect(open.getByRole('radio', { name: 'Terminal' })).toBeDisabled();
-  await tour.uncheck();
   await expect(open.getByRole('radio', { name: 'Terminal' })).toBeEnabled();
+  await expect(open.getByRole('radio', { name: 'Review' })).toBeDisabled();
+  await tour.uncheck();
+  await expect(open.getByRole('radio', { name: 'Review' })).toBeEnabled();
   await tour.check();
   await dialog.getByRole('button', { name: 'Create worktree' }).click();
 
-  await expect.poll(() => posts.map(post => post.path)).toEqual(['/api/projects/repo/worktrees', '/api/agents/agent-pr/review-tour/jobs']);
+  await expect.poll(() => posts.map(post => post.path)).toEqual(['/api/projects/repo/worktrees', '/api/worktrees/repo:/repo/wts/pr-12/review-tour/jobs']);
   expect(posts[0]!.body).toEqual({ mode: 'pull-request', number: 12, open: 'agent', context: { identity: { repositoryKey: 'octo/repo', kind: 'pull', number: 12 }, targetProjectId: 'repo', expectedHolderWorktreeIds: [] } });
   expect(posts[1]!.body).toMatchObject({ scope: 'pr' });
   await expect(page.getByRole('tab', { name: /^Repo · pr-12/u })).toHaveAttribute('aria-selected', 'true');
   const panel = page.getByRole('region', { name: 'GitHub', exact: true });
   await expect(panel.getByRole('article', { name: 'Pull request #12' })).toBeVisible();
+});
+
+test('a Review tour starts in a new worktree that opens no Agent', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const posts: { path: string; body: unknown }[] = [];
+  await mount(page, { worktree: worktree('repo:/repo/wts/pr-12', 'Repo · pr-12', 'branch-12', false, 2) }, posts);
+  await page.goto('/');
+  await openGithubPanel(page);
+  const ov = page.getByRole('region', { name: 'GitHub', exact: true });
+  await ov.getByRole('button', { name: 'Checkout and actions for pull request #12' }).click();
+  await page.getByRole('group', { name: 'Actions for pull request #12' }).getByRole('button', { name: /^Checkout in a new Worktree in Repo/u }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'New worktree' });
+  await dialog.getByRole('checkbox', { name: 'Start a Review tour' }).check();
+  await dialog.getByRole('radiogroup', { name: 'Open in the new worktree' }).getByRole('radio', { name: 'Nothing' }).check();
+  await dialog.getByRole('button', { name: 'Create worktree' }).click();
+
+  await expect.poll(() => posts.map(post => post.path)).toEqual(['/api/projects/repo/worktrees', '/api/worktrees/repo:/repo/wts/pr-12/review-tour/jobs']);
+  expect(posts[0]!.body).toMatchObject({ open: 'empty' });
+  await expect(page.getByRole('tab', { name: /^Repo · pr-12/u })).toHaveAttribute('aria-selected', 'true');
 });
 
 test('creates a fork Worktree for an upstream pull request without rewriting its identity', async ({ page }) => {

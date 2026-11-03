@@ -19,7 +19,7 @@ const tourOf = (comparison: ReviewComparison): ReviewTour => ({ title: 'Route to
 
 // build one prepared Comparison on a branch
 function prepared(fingerprint = 'fingerprint-1234567890'): PreparedReviewTour {
-  const comparison: ReviewComparison = { agentId: 'agent-cora', worktreeId: 'cora', workspace: '/worktrees/cora', branch: 'feature/review', scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint, changes: [change] };
+  const comparison: ReviewComparison = { worktreeId: 'cora', workspace: '/worktrees/cora', branch: 'feature/review', scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint, changes: [change] };
   return { comparison, resolved: {} as never };
 }
 
@@ -59,7 +59,7 @@ describe('code review jobs', () => {
     const jobs = new CodeReviewJobs(new CodeReviewer(runner, { presets: [preset], defaultPreset: preset.id }), reviewStore, job => { settled.push(job); });
     try {
       const generation = await reviewStore.invalidate('cora', 'feature/review');
-      const started = await jobs.start('owner-a', 'agent-cora', prepared(), { preset: preset.id });
+      const started = await jobs.start('owner-a', prepared(), { preset: preset.id });
       expect(started.retryAfterMs).toBe(1_000);
       expect(Date.parse(started.expiresAt) - Date.now()).toBeGreaterThan(29 * 60_000);
       expect(jobs.get('owner-b', started.id)).toBeUndefined();
@@ -94,7 +94,7 @@ describe('code review jobs', () => {
     const settled: SettledCodeReviewJob[] = [];
     const jobs = new CodeReviewJobs(new CodeReviewer(runner, { presets: [preset], defaultPreset: preset.id }), undefined, job => { settled.push(job); });
     try {
-      const started = await jobs.start('owner-a', 'agent-cora', prepared(), { preset: preset.id, effort: 'low' });
+      const started = await jobs.start('owner-a', prepared(), { preset: preset.id, effort: 'low' });
       expect(runs[0]!.request.effort).toBe('low');
       runs[0]!.reject(new ReviewRunError('timed_out', true));
       // wait for the observable failure before checking its details
@@ -109,8 +109,8 @@ describe('code review jobs', () => {
     const { runner, runs } = controlledRunner();
     const jobs = new CodeReviewJobs(new CodeReviewer(runner, { presets: [preset], defaultPreset: preset.id }));
     try {
-      await expect(jobs.start('owner-a', 'agent-cora', prepared(), { preset: 'missing' })).rejects.toMatchObject({ code: 'invalid_request' });
-      await expect(jobs.start('owner-a', 'agent-cora', prepared(), { preset: preset.id, effort: 'max' })).rejects.toMatchObject({ code: 'invalid_request' });
+      await expect(jobs.start('owner-a', prepared(), { preset: 'missing' })).rejects.toMatchObject({ code: 'invalid_request' });
+      await expect(jobs.start('owner-a', prepared(), { preset: preset.id, effort: 'max' })).rejects.toMatchObject({ code: 'invalid_request' });
       expect(runs).toHaveLength(0);
     } finally { jobs.close(); }
   });
@@ -120,8 +120,8 @@ describe('code review jobs', () => {
     const { store: reviewStore } = await store();
     const jobs = new CodeReviewJobs(new CodeReviewer(runner, { presets: [preset], defaultPreset: preset.id }), reviewStore);
     try {
-      const first = await jobs.start('owner-a', 'agent-cora', prepared(), { preset: preset.id });
-      const second = await jobs.start('owner-a', 'agent-cora', prepared(), { preset: preset.id, focus: 'retries' });
+      const first = await jobs.start('owner-a', prepared(), { preset: preset.id });
+      const second = await jobs.start('owner-a', prepared(), { preset: preset.id, focus: 'retries' });
       expect(jobs.get('owner-a', first.id)?.state).toEqual({ kind: 'gone', code: 'job_superseded' });
       expect(runs[0]!.signal.aborted).toBe(true);
       // a superseded run that still answers is never stored
@@ -152,7 +152,7 @@ describe('tour starts with a code review', () => {
     const jobs = new ReviewTourJobs(tours.service, reviewStore, undefined, codeReviews);
     try {
       const input = { scope: 'pr' as const, includeTests: false, includeDocs: false };
-      const started = await jobs.start('owner-a', 'agent-cora', input, undefined, { preset: preset.id });
+      const started = await jobs.start('owner-a', 'cora', input, undefined, { preset: preset.id });
       // require a pending start with a review
       if (started.kind !== 'pending' || started.codeReview === undefined) throw new Error('expected a pending tour and review');
       expect(tours.prepares()).toBe(1);
@@ -160,7 +160,7 @@ describe('tour starts with a code review', () => {
       const reviewJob = started.codeReview.job.id;
       // a completed earlier review is cleared by the next tour too
       await reviewStore.saveCodeReviewIfCurrent('cora', 'feature/review', { fingerprint: 'fingerprint-1234567890', preset: { id: 'correctness', label: 'Correctness', agent: 'codex' }, findings: [], general: [], completedAt: new Date().toISOString() }, reviewStore.beginCodeReview('cora'));
-      const again = await jobs.start('owner-a', 'agent-cora', input);
+      const again = await jobs.start('owner-a', 'cora', input);
       expect(again).toMatchObject({ kind: 'pending' });
       expect(again).not.toHaveProperty('codeReview');
       expect(codeReviews.get('owner-a', reviewJob)?.state).toEqual({ kind: 'gone', code: 'job_superseded' });
@@ -176,12 +176,12 @@ describe('tour starts with a code review', () => {
     const jobs = new ReviewTourJobs(tours.service, undefined, undefined, codeReviews);
     try {
       const input = { scope: 'pr' as const, includeTests: false, includeDocs: false };
-      await expect(jobs.start('owner-a', 'agent-cora', input, undefined, { preset: 'missing' })).rejects.toMatchObject({ code: 'invalid_request', retryable: false });
+      await expect(jobs.start('owner-a', 'cora', input, undefined, { preset: 'missing' })).rejects.toMatchObject({ code: 'invalid_request', retryable: false });
       expect(tours.prepares()).toBe(0);
-      const first = await jobs.start('owner-a', 'agent-cora', input, 'review-start_1234567890', { preset: preset.id, focus: 'cache' });
-      expect(await jobs.start('owner-a', 'agent-cora', input, 'review-start_1234567890', { preset: preset.id, focus: 'cache' })).toEqual(first);
-      await expect(jobs.start('owner-a', 'agent-cora', input, 'review-start_1234567890', { preset: preset.id })).rejects.toMatchObject({ code: 'invalid_request' });
-      await expect(jobs.start('owner-a', 'agent-cora', input, 'review-start_1234567890')).rejects.toMatchObject({ code: 'invalid_request' });
+      const first = await jobs.start('owner-a', 'cora', input, 'review-start_1234567890', { preset: preset.id, focus: 'cache' });
+      expect(await jobs.start('owner-a', 'cora', input, 'review-start_1234567890', { preset: preset.id, focus: 'cache' })).toEqual(first);
+      await expect(jobs.start('owner-a', 'cora', input, 'review-start_1234567890', { preset: preset.id })).rejects.toMatchObject({ code: 'invalid_request' });
+      await expect(jobs.start('owner-a', 'cora', input, 'review-start_1234567890')).rejects.toMatchObject({ code: 'invalid_request' });
       expect(tours.prepares()).toBe(1);
     } finally { jobs.close(); codeReviews.close(); }
   });
@@ -193,7 +193,7 @@ describe('tour starts with a code review', () => {
     const tour = prepared();
     await before.save('cora', 'feature/review', tourOf(tour.comparison));
     const running = new CodeReviewJobs(reviewer, before);
-    await running.start('owner-a', 'agent-cora', tour, { preset: preset.id });
+    await running.start('owner-a', tour, { preset: preset.id });
     await settle();
     // the recovery the run's request carried, as the runner's file hands it back after a restart
     const left = JSON.parse(JSON.stringify(runs[0]!.request.recovery)) as Record<string, unknown>;
@@ -204,18 +204,18 @@ describe('tour starts with a code review', () => {
     const after = restarted();
     const settled: SettledCodeReviewJob[] = [];
     const jobs = new CodeReviewJobs(reviewer, after, job => { settled.push(job); });
-    await expect(jobs.recover({ ...left, fingerprint: 'fingerprint-of-a-newer-tour' }, 'agent-orphan')).resolves.toBeUndefined();
-    await expect(jobs.recover({ ...left, branch: 'other' }, 'agent-orphan')).resolves.toBeUndefined();
-    const recovery = await jobs.recover(left, 'agent-orphan');
+    await expect(jobs.recover({ ...left, fingerprint: 'fingerprint-of-a-newer-tour' })).resolves.toBeUndefined();
+    await expect(jobs.recover({ ...left, branch: 'other' })).resolves.toBeUndefined();
+    const recovery = await jobs.recover(left);
     expect(recovery?.validate?.({ findings: 'none' })).toEqual(expect.any(String));
     const conversation = '6f1c2a90-1111-4222-8333-444455556666';
     await expect(recovery!.save(output, conversation)).resolves.toBe(true);
     // the orphan's review keeps the conversation the sweep read from its pane
     expect(await after.codeReview('cora', 'feature/review', tour.comparison.fingerprint)).toMatchObject({ preset: { id: preset.id }, effort: 'high', findings: [{ changeId: change.id, title: 'Unchecked value' }], general: [{ title: 'No test' }], conversation });
-    expect(settled).toMatchObject([{ agentId: 'agent-orphan', worktreeId: 'cora', state: { kind: 'ready' } }]);
+    expect(settled).toMatchObject([{ worktreeId: 'cora', state: { kind: 'ready' } }]);
     // a review begun since the restart supersedes the orphan's
     const later = restarted();
-    const recovering = await new CodeReviewJobs(reviewer, later).recover(left, 'agent-orphan');
+    const recovering = await new CodeReviewJobs(reviewer, later).recover(left);
     later.beginCodeReview('cora');
     await expect(recovering!.save(output)).resolves.toBe(false);
   });

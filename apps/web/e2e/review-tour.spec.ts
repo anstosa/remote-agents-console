@@ -78,7 +78,7 @@ test('guides a human through active-scope implementation changes and sends conso
     // serve common agent dependencies
     if (await fulfillAgentSupport(route, url.pathname)) return;
     // start one bounded tour job
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') {
+    if (url.pathname === '/api/worktrees/cora/review-tour/jobs' && request.method() === 'POST') {
       jobRequests.push(request.postDataJSON() as typeof jobRequests[number]);
       return route.fulfill({ status: 202, json: { status: 'pending', job: { id: `job-${jobRequests.length}`, expiresAt: '2026-08-07T20:00:00.000Z', retryAfterMs: 10 } } });
     }
@@ -89,7 +89,7 @@ test('guides a human through active-scope implementation changes and sends conso
       return route.fulfill({ json: { status: 'ready', tour: { title: 'Mobile layout', overview: 'Follow the request from the route into the service.', scope: 'pr', base: 'origin/main', includeTests: jobRequests.at(-1)?.includeTests ?? false, includeDocs: jobRequests.at(-1)?.includeDocs ?? false, fingerprint: comparisonFingerprint, changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: longPatch }, { id: 'chg_service01', file: 'src/service.ts', category: 'implementation', kind: 'hunk', patch: 'diff --git a/src/service.ts b/src/service.ts\nindex 3333333..4444444 100644\n--- a/src/service.ts\n+++ b/src/service.ts\n@@ -4 +4 @@\n-old service\n+new service\n' }], steps: [{ id: 'route', title: 'Accept the request', explanation: 'The route validates input before delegating.', changeIds: ['chg_route0001'] }, { id: 'service', title: 'Apply the operation', explanation: 'The service performs the requested state transition.', changeIds: ['chg_service01'] }] } } });
     }
     if (/^\/api\/review-tour\/jobs\/job-\d+$/u.test(url.pathname) && request.method() === 'DELETE') return route.fulfill({ status: 204 });
-    if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') {
+    if (url.pathname === '/api/worktrees/cora/review-tour/fingerprint') {
       fingerprintRequests += 1;
       return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: comparisonFingerprint } } });
     }
@@ -165,7 +165,7 @@ test('guides a human through active-scope implementation changes and sends conso
   await expect(branchButton.locator('.git-branch-icon')).toBeVisible();
   await expect.poll(async () => await page.evaluate(() => (
     window as unknown as { __testNotifications: Array<{ title: string; options?: NotificationOptions }> }
-  ).__testNotifications.map(notification => ({ title: notification.title, body: notification.options?.body, tag: notification.options?.tag, data: notification.options?.data })))).toEqual([{ title: 'Review ready in Remote Agents', body: 'Cora is ready for review', tag: 'review-ready-cora', data: { url: '/#agent=agent-1', kind: 'system', worktreeId: 'cora' } }]);
+  ).__testNotifications.map(notification => ({ title: notification.title, body: notification.options?.body, tag: notification.options?.tag, data: notification.options?.data })))).toEqual([{ title: 'Review ready in Remote Agents', body: 'Cora is ready for review', tag: 'review-ready-cora', data: { url: '/#worktree=cora', kind: 'system', worktreeId: 'cora' } }]);
   await branchButton.click();
   await statusPanel.getByRole('button', { name: 'Open Review' }).click();
   const dialog = page.getByRole('region', { name: 'Implementation walkthrough' });
@@ -345,11 +345,11 @@ test('renders a placeholder for a binary or unparseable change', async ({ page }
     // serve the review console fixture
     if (await fulfillReviewConsole(route, url.pathname)) return;
     // return the ready binary-change tour
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-binary', expiresAt: '2099-08-24T23:00:00.000Z', retryAfterMs: 10 } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-binary', expiresAt: '2099-08-24T23:00:00.000Z', retryAfterMs: 10 } } });
     if (url.pathname === '/api/review-tour/jobs/job-binary' && request.method() === 'GET') return route.fulfill({ json: { status: 'ready', tour } });
     if (url.pathname === '/api/review-tour/jobs/job-binary' && request.method() === 'DELETE') return route.fulfill({ status: 204 });
     // keep the loaded tour fresh
-    if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -393,10 +393,10 @@ async function openCommentTour(page: Page, { editor = false, second = false, exp
       const content = files[path];
       return content === undefined ? route.fulfill({ status: 404, json: { error: 'file unavailable' } }) : route.fulfill({ json: { path, base: null, working: { path, size: content.length, binary: false, truncated: false, content } } });
     }
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-comment', expiresAt: '2099-08-24T23:00:00.000Z', retryAfterMs: 10 } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-comment', expiresAt: '2099-08-24T23:00:00.000Z', retryAfterMs: 10 } } });
     if (url.pathname === '/api/review-tour/jobs/job-comment' && request.method() === 'GET') return route.fulfill({ json: { status: 'ready', tour } });
     if (url.pathname === '/api/review-tour/jobs/job-comment' && request.method() === 'DELETE') return route.fulfill({ status: 204 });
-    if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
     // capture the change request
     if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') { prompts.push((request.postDataJSON() as { prompt: string }).prompt); return route.fulfill({ status: 204 }); }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -778,7 +778,7 @@ test('explains when the server Codex login expires', async ({ page }) => {
     // serve the review console fixture
     if (await fulfillReviewConsole(route, url.pathname)) return;
     // start one bounded tour job
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-auth', expiresAt: '2026-08-17T23:00:00.000Z', retryAfterMs: 10 } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-auth', expiresAt: '2026-08-17T23:00:00.000Z', retryAfterMs: 10 } } });
     // report the expired generator login
     if (url.pathname === '/api/review-tour/jobs/job-auth' && request.method() === 'GET') return route.fulfill({ status: 503, json: { status: 'error', jobId: 'job-auth', error: { code: 'authentication_required', retryable: false } } });
     // reap obsolete jobs
@@ -809,7 +809,7 @@ test('keeps polling through temporary console failures', async ({ page }) => {
     // serve the review console fixture
     if (await fulfillReviewConsole(route, url.pathname)) return;
     // start one bounded tour job
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-recovered', expiresAt: '2099-08-24T23:00:00.000Z', retryAfterMs: 10 } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-recovered', expiresAt: '2099-08-24T23:00:00.000Z', retryAfterMs: 10 } } });
     // recover after repeated transient poll failures
     if (url.pathname === '/api/review-tour/jobs/job-recovered' && request.method() === 'GET') {
       polls += 1;
@@ -864,7 +864,7 @@ test('retries temporary failures while starting a tour', async ({ page }) => {
     // serve the review console fixture
     if (await fulfillReviewConsole(route, url.pathname)) return;
     // recover after two transient start failures
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') {
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') {
       starts += 1;
       requestIds.push(request.headers()['idempotency-key'] ?? '');
       // simulate lost start acknowledgements
@@ -904,7 +904,7 @@ test('does not retry a tour start after cancellation', async ({ page }) => {
     // serve the review console fixture
     if (await fulfillReviewConsole(route, url.pathname)) return;
     // leave one retry waiting in backoff
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') {
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') {
       starts += 1;
       // hold the first response until the dialog opens
       if (starts === 1) await startFailure;
@@ -922,7 +922,7 @@ test('does not retry a tour start after cancellation', async ({ page }) => {
   await branchButton.click();
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Generating…' }).click();
   const dialog = page.getByRole('region', { name: 'Generating change tour' });
-  const failedStart = page.waitForResponse(response => new URL(response.url()).pathname === '/api/agents/agent-1/review-tour/jobs' && response.status() === 503);
+  const failedStart = page.waitForResponse(response => new URL(response.url()).pathname === '/api/worktrees/owen/review-tour/jobs' && response.status() === 503);
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   releaseStartFailure();
   await failedStart;
@@ -940,7 +940,7 @@ test('explains when another browser controls the console', async ({ page }) => {
     // serve the review console fixture
     if (await fulfillReviewConsole(route, url.pathname)) return;
     // reject a generation after control moves elsewhere
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 423, json: { error: 'another client is active' } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 423, json: { error: 'another client is active' } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -972,8 +972,8 @@ test('restores the worktree review after reload and dismisses it when stale', as
     // restore the durable artifact
     if (url.pathname === '/api/worktrees/cora/review-tour' && request.method() === 'GET') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'cora', branch: 'feature/review-tour', savedAt: '2026-08-08T18:00:00.000Z', tour } } });
     if (url.pathname === '/api/worktrees/cora/review-tour' && request.method() === 'DELETE') { reviewStored = false; return route.fulfill({ status: 204 }); }
-    if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'newer-fingerprint-123456' } } });
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs') { generationRequests += 1; return route.fulfill({ status: 500 }); }
+    if (url.pathname === '/api/worktrees/cora/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'newer-fingerprint-123456' } } });
+    if (url.pathname === '/api/worktrees/cora/review-tour/jobs') { generationRequests += 1; return route.fulfill({ status: 500 }); }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -1002,6 +1002,74 @@ test('restores the worktree review after reload and dismisses it when stale', as
   expect(generationRequests).toBe(0);
 });
 
+// A guided review is the Worktree's, not an Agent's: it stays open, and holds its tab, when the
+// Worktree's last Agent exits. With no Agent there, its change request has nowhere to go.
+test('keeps a guided review open after the Worktree\'s last Agent exits', async ({ page }) => {
+  let agentRunning = true;
+  let dashboardRequests = 0;
+  const tour = { title: 'Mobile layout', overview: 'Resume the saved implementation walkthrough.', scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'stored-fingerprint-123456', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch: '@@ -1 +1 @@\n-old\n+new' }], steps: [{ id: 'route', title: 'Accept the request', explanation: 'The route delegates to the service.', changeIds: ['chg_route0001'] }] };
+  const gitStatus = { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0 };
+  const gitPrStatus = { base: 'origin/main', files: 1 };
+  const agent = { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', branch: 'feature/review-tour', title: 'Ready', gitStatus, gitPrStatus };
+  const view = { id: 'cora', projectId: 'remote-agents', label: 'Cora', path: '/worktrees/cora', available: true, pinned: false, main: false, detached: false, locked: false, order: 0, branch: 'feature/review-tour', gitStatus, gitPrStatus };
+  const stored = { worktreeId: 'cora', branch: 'feature/review-tour', savedAt: '2026-08-08T18:00:00.000Z', title: tour.title, scope: tour.scope, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint };
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') { dashboardRequests += 1; return route.fulfill({ json: { generation: dashboardRequests, reviewTour: { available: true }, reviews: [stored], agents: agentRunning ? [agent] : [], projects: [{ id: 'remote-agents', label: 'Remote Agents', available: true, worktrees: [view] }] } }); }
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname === '/api/worktrees/cora/review-tour' && request.method() === 'GET') return route.fulfill({ json: { status: 'ready', review: { ...stored, tour } } });
+    if (url.pathname === '/api/worktrees/cora/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/cora/review-tour/asks') return route.fulfill({ json: { status: 'ready', threads: [], pending: [] } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  const dialog = page.getByRole('region', { name: 'Implementation walkthrough' });
+  await expect(dialog.getByRole('button', { name: 'Start tour' })).toBeVisible();
+
+  agentRunning = false;
+  const before = dashboardRequests;
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(() => dashboardRequests).toBeGreaterThan(before);
+  await expect(page.getByRole('button', { name: 'Launch agent' }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Switch Agent at Cora' })).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: /Cora/u })).toBeVisible();
+
+  await dialog.getByRole('button', { name: 'Start tour' }).click();
+  await dialog.getByLabel('Feedback for this change').fill('Validate the request first.');
+  await dialog.getByRole('button', { name: 'Review summary' }).click();
+  await expect(dialog.getByRole('heading', { name: 'Review complete' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Send change request' })).toBeDisabled();
+});
+
+// a Worktree with no Agent starts a guided review from its git status
+test('starts a guided review in a Worktree with no Agent', async ({ page }) => {
+  const starts: string[] = [];
+  const gitStatus = { files: 1, staged: 0, unstaged: 1, untracked: 0, conflicted: 0 };
+  const view = { id: 'cora', projectId: 'remote-agents', label: 'Cora', path: '/worktrees/cora', available: true, pinned: true, main: false, detached: false, locked: false, order: 0, branch: 'feature/review-tour', gitStatus, gitPrStatus: { base: 'origin/main', files: 1 } };
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, reviewTour: { available: true }, agents: [], projects: [{ id: 'remote-agents', label: 'Remote Agents', available: true, worktrees: [view] }] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname.endsWith('/review-tour/jobs') && request.method() === 'POST') { starts.push(url.pathname); return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } }); }
+    if (url.pathname === '/api/review-tour/jobs/job-1') return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await startReview(page);
+  await expect.poll(() => starts).toEqual(['/api/worktrees/cora/review-tour/jobs']);
+});
+
 // the dashboard capabilities a configured Claude tour with Review presets reports
 const claudeReviewCapabilities = {
   reviewTour: { available: true, agent: 'claude', effort: 'low', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
@@ -1022,7 +1090,7 @@ test('starts a tour with the chosen comparison, tour effort and AI code review',
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, agents: [startSheetAgent], projects: [] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') {
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') {
       jobRequests.push(request.postDataJSON());
       return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-1', expiresAt: '2099-01-01T00:00:00.000Z', retryAfterMs: 1_000 }, codeReview: { job: { id: 'review-1', expiresAt: '2099-01-01T00:00:00.000Z', retryAfterMs: 1_000 } } } });
     }
@@ -1106,7 +1174,7 @@ test('saves a picked All PR base only when the tour starts', async ({ page }) =>
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/merge-base' && request.method() === 'GET') return route.fulfill({ json: { branch: 'feature/review-tour', branches: ['main', 'stack/parent'] } });
     if (url.pathname === '/api/worktrees/owen/merge-base' && request.method() === 'PUT') { calls.push(`PUT ${request.postData()}`); return route.fulfill({ status: 204 }); }
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') { calls.push('start'); return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } }); }
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') { calls.push('start'); return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } }); }
     if (/^\/api\/review-tour\/jobs\/[\w-]+$/u.test(url.pathname)) return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -1150,7 +1218,7 @@ test('offers to save a base over a pull request\'s base', async ({ page }) => {
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/merge-base' && request.method() === 'GET') return route.fulfill({ json: { branch: 'feature/review-tour', branches: ['main', 'stack/parent'] } });
     if (url.pathname === '/api/worktrees/owen/merge-base' && request.method() === 'PUT') { calls.push(`PUT ${request.postData()}`); return route.fulfill({ status: 204 }); }
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') { calls.push('start'); return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } }); }
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') { calls.push('start'); return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } }); }
     if (/^\/api\/review-tour\/jobs\/[\w-]+$/u.test(url.pathname)) return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-1') } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -1186,13 +1254,13 @@ test('follows the AI review started with the tour, and cancels it with the tour'
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, agents: [startSheetAgent], projects: [] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (request.method() === 'DELETE') { deleted.push(url.pathname); return route.fulfill({ status: 204 }); }
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs') {
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs') {
       tourStarts.push(request.postDataJSON());
       return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob(`job-${tourStarts.length}`), codeReview: { job: pendingJob(`review-${tourStarts.length}`) } } });
     }
     if (url.pathname.startsWith('/api/review-tour/jobs/')) return tourReady ? route.fulfill({ json: { status: 'ready', tour: chipTour } }) : route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job') } });
     if (url.pathname.startsWith('/api/code-review/jobs/')) return reviewReady ? route.fulfill({ json: { status: 'ready', review: chipReview } }) : route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('review') } });
-    if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: chipTour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: chipTour.fingerprint } } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
 
@@ -1241,8 +1309,8 @@ test('adds an AI review to a restored tour and retries a failed one', async ({ p
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: chipTour.title, scope: 'pr', includeTests: false, includeDocs: false, fingerprint: chipTour.fingerprint }], agents: [startSheetAgent], projects: [] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour: chipTour } } });
-    if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: chipTour.fingerprint } } });
-    if (url.pathname === '/api/agents/agent-1/code-review/jobs' && request.method() === 'POST') {
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: chipTour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/code-review/jobs' && request.method() === 'POST') {
       reviewStarts.push(request.postDataJSON());
       if (reviewStarts.length === 1) return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('review-1') } });
       return route.fulfill({ status: 409, json: { status: 'error', error: { code: 'stale_during_generation', retryable: true } } });
@@ -1294,7 +1362,7 @@ test('resumes a stored AI review and a running one with the restored tour', asyn
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (request.method() === 'DELETE') { deleted.push(url.pathname); return route.fulfill({ status: 204 }); }
     if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour: chipTour, ...stored } } });
-    if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'moved-fingerprint-123456' } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'moved-fingerprint-123456' } } });
     if (url.pathname === '/api/code-review/jobs/review-9') return reviewReady ? route.fulfill({ json: { status: 'ready', review: { ...chipReview, general: [] } } }) : route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('review-9') } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
@@ -1361,7 +1429,7 @@ async function openTriageTour(page: Page, { tour = triageTour as Record<string, 
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: triageTour.title, scope: 'working', includeTests: false, includeDocs: false, fingerprint: triageTour.fingerprint }], agents: [startSheetAgent, { ...startSheetAgent, id: 'agent-review', sessionId: 'socket:$2', title: 'Review · Correctness' }], projects: [] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour, ...stored } } });
-    if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: triageTour.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: triageTour.fingerprint } } });
     if (url.pathname.startsWith('/api/code-review/jobs/') && codeReviewPoll !== undefined) return codeReviewPoll(route);
     if (extra !== undefined && await extra(route, url)) return;
     if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') { prompts.push((request.postDataJSON() as { prompt: string }).prompt); return route.fulfill({ status: 204 }); }
@@ -1714,7 +1782,7 @@ test('links a tour run waiting on the operator to its pane', async ({ page }) =>
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, agents: [startSheetAgent, { ...startSheetAgent, id: 'agent-tour', sessionId: 'socket:$2', title: 'Tour · feature/review-tour' }], projects: [] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs') return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-run') } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs') return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-run') } });
     if (url.pathname === '/api/review-tour/jobs/job-run' && request.method() === 'GET') return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-run'), run: { agentId: 'agent-tour', needsInput: true } } });
     if (request.method() === 'DELETE') return route.fulfill({ status: 204 });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -1732,7 +1800,7 @@ test('links a tour run waiting on the operator to its pane', async ({ page }) =>
   await expect(page).toHaveURL(/#agent=agent-tour$/u);
 });
 
-test('binds a guided review started from a Review run\'s pane to the Worktree\'s own agent', async ({ page }) => {
+test('starts the Worktree\'s guided review from a Review run\'s pane', async ({ page }) => {
   const jobPaths: string[] = [];
   const reviewer = { ...startSheetAgent, id: 'agent-review', sessionId: 'socket:$2', title: 'Review · Correctness', reviewRun: 'run_abcdefgh1234' };
   await installAgentWebSocket(page);
@@ -1750,8 +1818,8 @@ test('binds a guided review started from a Review run\'s pane to the Worktree\'s
   await page.goto('/#agent=agent-review');
   await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
   await startReview(page);
-  // the read-only reviewer, which closes with its run, never becomes the review's agent
-  await expect.poll(() => jobPaths).toEqual(['/api/agents/agent-1/review-tour/jobs']);
+  // the review is the Worktree's, whichever of its Agents is shown
+  await expect.poll(() => jobPaths).toEqual(['/api/worktrees/owen/review-tour/jobs']);
 });
 
 // An All PR tour whose route hunk has an added line above a later removed one: `+const x` is new 5
@@ -1787,10 +1855,10 @@ async function openPostTour(page: Page, { scope = 'pr', pullRequest = openPullRe
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, ...(pullRequest === null ? {} : { pullRequest }) }], projects: detail === undefined ? [] : [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
     if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour, ...stored } } });
-    if (url.pathname === '/api/agents/agent-1/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope, base: tour.base, includeTests: false, includeDocs: false, fingerprint: comparison.fingerprint } } });
-    if (url.pathname === '/api/agents/agent-1/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-regen') } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope, base: tour.base, includeTests: false, includeDocs: false, fingerprint: comparison.fingerprint } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob('job-regen') } });
     if (url.pathname === '/api/review-tour/jobs/job-regen') return request.method() === 'DELETE' ? route.fulfill({ status: 204 }) : route.fulfill({ json: { status: 'ready', tour: { ...tour, fingerprint: comparison.fingerprint } } });
-    if (url.pathname === '/api/agents/agent-1/review-tour/pr-review' && request.method() === 'POST') { const post = request.postDataJSON() as PrReviewPost; posts.push(post); return respond(post, route); }
+    if (url.pathname === '/api/worktrees/owen/review-tour/pr-review' && request.method() === 'POST') { const post = request.postDataJSON() as PrReviewPost; posts.push(post); return respond(post, route); }
     if (url.pathname === '/api/agents/agent-1/prompt' && request.method() === 'POST') { prompts.push((request.postDataJSON() as { prompt: string }).prompt); return route.fulfill({ status: 204 }); }
     if (url.pathname === '/api/projects/repo/github/pulls/123' && detail !== undefined) return route.fulfill({ json: detail });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
@@ -1835,7 +1903,7 @@ test('resumes a tour\'s notes, comments and step after a reload', async ({ page 
 test('keeps one review per Worktree while another generates', async ({ page }) => {
   const deleted: string[] = [];
   let deltaReady = false;
-  const tours: Record<string, object> = { 'agent-1': { ...postTour, title: 'Owen tour', scope: 'working', base: 'HEAD', fingerprint: 'owen-fingerprint-123456' }, 'agent-2': { ...postTour, title: 'Delta tour', scope: 'working', base: 'HEAD', fingerprint: 'delta-fingerprint-123456' } };
+  const tours: Record<string, object> = { owen: { ...postTour, title: 'Owen tour', scope: 'working', base: 'HEAD', fingerprint: 'owen-fingerprint-123456' }, delta: { ...postTour, title: 'Delta tour', scope: 'working', base: 'HEAD', fingerprint: 'delta-fingerprint-123456' } };
   const agent = (id: string, worktreeId: string, worktreeLabel: string, worktreeOrder: number) => ({ ...startSheetAgent, id, sessionId: `socket:$${worktreeOrder + 1}`, home: `/worktrees/${worktreeId}`, worktreeId, worktreeLabel, worktreeOrder });
   await installAgentWebSocket(page);
   await page.route('**/api/**', async route => {
@@ -1844,12 +1912,12 @@ test('keeps one review per Worktree while another generates', async ({ page }) =
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, agents: [agent('agent-1', 'owen', 'Owen', 0), agent('agent-2', 'delta', 'Delta', 1)], projects: [] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
-    const started = /^\/api\/agents\/(agent-[12])\/review-tour\/jobs$/u.exec(url.pathname)?.[1];
+    const started = /^\/api\/worktrees\/(owen|delta)\/review-tour\/jobs$/u.exec(url.pathname)?.[1];
     if (started !== undefined && request.method() === 'POST') return route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob(`job-${started}`) } });
-    const polled = /^\/api\/review-tour\/jobs\/job-(agent-[12])$/u.exec(url.pathname)?.[1];
+    const polled = /^\/api\/review-tour\/jobs\/job-(owen|delta)$/u.exec(url.pathname)?.[1];
     if (polled !== undefined && request.method() === 'DELETE') { deleted.push(url.pathname); return route.fulfill({ status: 204 }); }
-    if (polled !== undefined) return polled === 'agent-2' && !deltaReady ? route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob(`job-${polled}`) } }) : route.fulfill({ json: { status: 'ready', tour: tours[polled] } });
-    const checked = /^\/api\/agents\/(agent-[12])\/review-tour\/fingerprint$/u.exec(url.pathname)?.[1];
+    if (polled !== undefined) return polled === 'delta' && !deltaReady ? route.fulfill({ status: 202, json: { status: 'pending', job: pendingJob(`job-${polled}`) } }) : route.fulfill({ json: { status: 'ready', tour: tours[polled] } });
+    const checked = /^\/api\/worktrees\/(owen|delta)\/review-tour\/fingerprint$/u.exec(url.pathname)?.[1];
     if (checked !== undefined) return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: (tours[checked] as { fingerprint: string }).fingerprint } } });
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });

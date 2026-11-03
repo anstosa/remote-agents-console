@@ -1514,7 +1514,7 @@ describe('agent GitHub Actions route', () => {
 describe('guided review API boundary', () => {
   it('normalizes malformed and oversized requests while accepting the exact request shape', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
-    const comparison = { agentId: 'agent-1', worktreeId: 'cora', workspace: '/worktrees/cora', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'empty-fingerprint', changes: [] };
+    const comparison = { worktreeId: 'cora', workspace: '/worktrees/cora', scope: 'working', base: 'HEAD', includeTests: false, includeDocs: false, fingerprint: 'empty-fingerprint', changes: [] };
     let prepares = 0;
     const reviewTours = {
       capability: async () => ({ available: true }),
@@ -1534,15 +1534,15 @@ describe('guided review API boundary', () => {
       const boot = await reviewApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
       const login = await reviewApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
       const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken, 'content-type': 'application/json' };
-      const malformed = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/review-tour/jobs', headers, payload: '{"scope":' });
-      const oversized = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/review-tour/jobs', headers, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false, padding: 'x'.repeat(9_000) }) });
-      const unexpected = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/review-tour/jobs', headers, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false, unexpected: true }) });
+      const malformed = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers, payload: '{"scope":' });
+      const oversized = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false, padding: 'x'.repeat(9_000) }) });
+      const unexpected = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false, unexpected: true }) });
       const idempotentHeaders = { ...headers, 'idempotency-key': 'review-start_1234567890' };
-      const invalidRequestId = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/review-tour/jobs', headers: { ...headers, 'idempotency-key': 'short' }, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false }) });
-      const valid = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/review-tour/jobs', headers: idempotentHeaders, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false }) });
-      const replay = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/review-tour/jobs', headers: idempotentHeaders, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false }) });
-      const invalidFingerprint = await reviewApp.inject({ method: 'GET', url: '/api/agents/agent-1/review-tour/fingerprint?scope=working&includeTests=maybe&includeDocs=false', headers: { host: headers.host, cookie: headers.cookie } });
-      const fingerprint = await reviewApp.inject({ method: 'GET', url: '/api/agents/agent-1/review-tour/fingerprint?scope=working&includeTests=false&includeDocs=false', headers: { host: headers.host, cookie: headers.cookie } });
+      const invalidRequestId = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers: { ...headers, 'idempotency-key': 'short' }, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false }) });
+      const valid = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers: idempotentHeaders, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false }) });
+      const replay = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers: idempotentHeaders, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false }) });
+      const invalidFingerprint = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/fingerprint?scope=working&includeTests=maybe&includeDocs=false', headers: { host: headers.host, cookie: headers.cookie } });
+      const fingerprint = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/fingerprint?scope=working&includeTests=false&includeDocs=false', headers: { host: headers.host, cookie: headers.cookie } });
       const maximumPrompt = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/prompt', headers, payload: JSON.stringify({ prompt: 'x'.repeat(32_000), attachments: [] }) });
       const oversizedPrompt = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/prompt', headers, payload: JSON.stringify({ prompt: 'x'.repeat(32_001), attachments: [] }) });
       expect(malformed.statusCode).toBe(400);
@@ -1699,7 +1699,7 @@ describe('code review API', () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const worktree = { id: 'cora', projectId: 'cora', label: 'Cora', path: '/worktrees/cora', identity: '/worktrees/cora', available: true, pinned: false };
     const change = { id: 'chg_route0001', file: 'src/route.ts', category: 'implementation' as const, kind: 'hunk' as const, oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, patch: '@@ -1 +1,2 @@\n-old\n+new\n+more' };
-    const comparison = { agentId: 'agent-1', worktreeId: 'cora', workspace: '/worktrees/cora', branch: 'feature/review', scope: 'pr' as const, base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'review-fingerprint-1234', changes: [change] };
+    const comparison = { worktreeId: 'cora', workspace: '/worktrees/cora', branch: 'feature/review', scope: 'pr' as const, base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: 'review-fingerprint-1234', changes: [change] };
     const tour: ReviewTour = { title: 'Route tour', overview: 'Follow the route.', steps: [{ id: 'route', title: 'Route', explanation: 'The route changes.', changeIds: [change.id] }], scope: 'pr', base: 'origin/main', includeTests: false, includeDocs: false, fingerprint: comparison.fingerprint, changes: [change] };
     let prepares = 0;
     let finishTour!: (tour: ReviewTour) => void;
@@ -1728,14 +1728,14 @@ describe('code review API', () => {
       const mutationHeaders = { ...deleteHeaders, 'content-type': 'application/json' };
       const scope = { scope: 'pr', includeTests: false, includeDocs: false };
 
-      const unknownPreset = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/review-tour/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, codeReview: { preset: 'missing' } }) });
-      const badEffort = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/review-tour/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, codeReview: { preset: 'correctness', effort: 'max' } }) });
-      const longFocus = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/review-tour/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, codeReview: { preset: 'correctness', focus: 'x'.repeat(2_001) } }) });
+      const unknownPreset = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, codeReview: { preset: 'missing' } }) });
+      const badEffort = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, codeReview: { preset: 'correctness', effort: 'max' } }) });
+      const longFocus = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, codeReview: { preset: 'correctness', focus: 'x'.repeat(2_001) } }) });
       expect([unknownPreset.statusCode, badEffort.statusCode, longFocus.statusCode]).toEqual([400, 400, 400]);
       expect(unknownPreset.json()).toEqual({ status: 'error', error: { code: 'invalid_request', retryable: false } });
       expect(prepares).toBe(0);
 
-      const started = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/review-tour/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, effort: 'low', codeReview: { preset: 'correctness', focus: 'ナ'.repeat(2_000) } }) });
+      const started = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, effort: 'low', codeReview: { preset: 'correctness', focus: 'ナ'.repeat(2_000) } }) });
       expect(started.statusCode).toBe(202);
       expect(started.json()).toMatchObject({ status: 'pending', job: { id: expect.any(String), startedAt: expect.any(String) }, codeReview: { job: { id: expect.any(String), expiresAt: expect.any(String), retryAfterMs: 1_000, startedAt: expect.any(String) } } });
       // an interactive tour run names its Agent and its question state on the pending poll
@@ -1802,12 +1802,12 @@ describe('code review API', () => {
       runs.splice(1, 1);
 
       // "Add AI review" to the stored tour
-      const stale = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/code-review/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, fingerprint: 'other-fingerprint-1234', preset: 'security' }) });
+      const stale = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/code-review/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, fingerprint: 'other-fingerprint-1234', preset: 'security' }) });
       expect(stale.statusCode).toBe(409);
       expect(stale.json()).toEqual({ status: 'error', error: { code: 'stale_during_generation', retryable: true } });
-      const invalidAdd = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/code-review/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, fingerprint: comparison.fingerprint, preset: 'missing' }) });
+      const invalidAdd = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/code-review/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, fingerprint: comparison.fingerprint, preset: 'missing' }) });
       expect(invalidAdd.statusCode).toBe(400);
-      const added = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/code-review/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, fingerprint: comparison.fingerprint, preset: 'security', effort: 'xhigh' }) });
+      const added = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/code-review/jobs', headers: mutationHeaders, payload: JSON.stringify({ ...scope, fingerprint: comparison.fingerprint, preset: 'security', effort: 'xhigh' }) });
       expect(added.statusCode).toBe(202);
       expect(added.json()).toMatchObject({ status: 'pending', job: { id: expect.any(String), retryAfterMs: 1_000 } });
       expect(runs[1]!.request).toMatchObject({ label: '🔍 Review · Security', effort: 'xhigh' });

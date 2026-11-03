@@ -30,7 +30,7 @@ function atomicPatches(patch: string, fallbackKind: ReviewChangeKind): Array<{ p
 async function comparison(resolved: ResolvedWorkspace, input: ReviewTourInput): Promise<{ base: string; gitBase: string; head?: string; changes: GitStatusChange[] }> {
   const kind: ComparisonKind = input.scope === 'working' ? 'working' : 'pr';
   // the dashboard's resolved merge target is the only PR base; a working snapshot needs none
-  const preferred = resolved.agent.gitPrStatus?.base;
+  const preferred = resolved.prBase;
   const candidates = kind === 'pr' && preferred !== undefined ? [preferred] : [];
   const result = input.scope === 'commit' ? await resolveCommitComparison(resolved.workspace, input.commit ?? '') : await resolveComparison(resolved.workspace, kind, candidates);
   // map the module's failure reasons onto the tour's typed errors
@@ -79,5 +79,5 @@ export async function captureReviewComparison(resolved: ResolvedWorkspace, input
     }
   }
   const fingerprint = digest(JSON.stringify({ scope: input.scope, commit: input.commit, base: current.base, gitBase: current.gitBase, includeTests: input.includeTests, includeDocs: input.includeDocs, changes }));
-  return { agentId: resolved.agent.id, worktreeId: resolved.worktree.id, workspace: resolved.workspace, ...(resolved.agent.branch === undefined ? {} : { branch: resolved.agent.branch }), scope: input.scope, ...(input.commit === undefined ? {} : { commit: input.commit }), base: current.base, includeTests: input.includeTests, includeDocs: input.includeDocs, fingerprint, changes };
+  return { worktreeId: resolved.worktree.id, workspace: resolved.workspace, ...(resolved.branch === undefined ? {} : { branch: resolved.branch }), scope: input.scope, ...(input.commit === undefined ? {} : { commit: input.commit }), base: current.base, includeTests: input.includeTests, includeDocs: input.includeDocs, fingerprint, changes };
 }

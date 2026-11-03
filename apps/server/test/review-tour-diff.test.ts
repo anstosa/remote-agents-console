@@ -40,7 +40,6 @@ async function fixture(): Promise<ResolvedWorkspace> {
   ]);
   return {
     workspace: root,
-    agent: { id: 'agent-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: root, title: 'Ready' },
     worktree: { id: 'cora', projectId: 'cora', label: 'Cora', path: root, identity: root, available: true, pinned: false, main: true, detached: false, locked: false }
   };
 }
@@ -87,20 +86,18 @@ describe('review Comparison capture', () => {
     ]);
   });
 
-  it('retains the dashboard comparison when resolving a PR snapshot', async () => {
+  it('resolves a Worktree with no Agent to its idle view\'s branch and merge target', async () => {
     const raw = await fixture();
-    const enriched = { ...raw.agent, branch: 'feature/review-tour', worktreeId: raw.worktree.id, gitPrStatus: { base: 'main', files: 3, changes: [] } };
+    const view = { id: raw.worktree.id, branch: 'feature/review-tour', gitPrStatus: { base: 'main', files: 3, changes: [] } };
     const discovery = {
-      // serve fast target metadata
-      target: async () => ({ agent: raw.agent, socket: {} }),
       worktreesNow: () => [raw.worktree],
-      // serve enriched comparison metadata
-      dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [enriched], projects: [] })
+      dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [{ id: 'cora', worktrees: [view] }] })
     };
 
-    const resolved = await resolveConfiguredWorkspace(discovery as never, raw.agent.id);
+    const resolved = await resolveConfiguredWorkspace(discovery as never, raw.worktree.id);
 
-    expect(resolved?.agent.gitPrStatus?.base).toBe('main');
+    expect(resolved).toMatchObject({ branch: 'feature/review-tour', prBase: 'main', workspace: raw.workspace });
+    await expect(resolveConfiguredWorkspace(discovery as never, 'missing')).resolves.toBeUndefined();
     await expect(captureReviewComparison(resolved!, { scope: 'pr', includeTests: false, includeDocs: false })).resolves.toMatchObject({
       scope: 'pr',
       base: 'main',

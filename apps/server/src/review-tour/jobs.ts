@@ -14,13 +14,13 @@ type EmptyJob = { kind: 'empty'; comparison: PublicReviewComparison };
 type FailedJob = { kind: 'error'; code: ReviewErrorCode; retryable: boolean };
 type GoneJob = { kind: 'gone'; code: 'job_cancelled' | 'job_superseded' | 'job_expired' };
 export type ReviewJobState = PendingJob | ReadyJob | EmptyJob | FailedJob | GoneJob;
-export type StoredReviewJob = { id: string; owner: string; agentId: string; worktreeId: string; persistenceVersion: number; startedAt: number; expiresAt: number; state: ReviewJobState; expiry: NodeJS.Timeout; removal?: NodeJS.Timeout };
+export type StoredReviewJob = { id: string; owner: string; worktreeId: string; persistenceVersion: number; startedAt: number; expiresAt: number; state: ReviewJobState; expiry: NodeJS.Timeout; removal?: NodeJS.Timeout };
 // a pending job's descriptor; `startedAt` lets a reloaded client keep counting the run's time
 export type StartedReviewJob = { id: string; expiresAt: string; retryAfterMs: number; startedAt: string };
 // a pending start carries the Code review job started beside the tour, when one was requested
 type ReviewJobStart = { kind: 'empty'; comparison: PublicReviewComparison } | { kind: 'pending'; job: StartedReviewJob; codeReview?: { job: StartedReviewJob } };
-type IdempotentStart = { agentId: string; input: ReviewTourInput; codeReview?: CodeReviewOptions; promise: Promise<ReviewJobStart>; expiry?: NodeJS.Timeout };
-export type CompletedReviewJob = { agentId: string; worktreeId: string; prepared: PreparedReviewTour; tour: ReviewTour };
+type IdempotentStart = { worktreeId: string; input: ReviewTourInput; codeReview?: CodeReviewOptions; promise: Promise<ReviewJobStart>; expiry?: NodeJS.Timeout };
+export type CompletedReviewJob = { worktreeId: string; prepared: PreparedReviewTour; tour: ReviewTour };
 
 // the descriptor of a stored tour or Code review job
 export function startedReviewJob(job: { id: string; startedAt: number; expiresAt: number }): StartedReviewJob {
@@ -47,19 +47,19 @@ export class ReviewTourJobs {
   constructor(private readonly service: ReviewTourService, private readonly store?: ReviewTourStore, private readonly onStored?: (review: CompletedReviewJob) => void | Promise<void>, private readonly codeReviews?: CodeReviewJobs, private readonly asks?: Pick<AskJobs, 'supersedeWorktree'>) {}
 
   // start one latest-wins generation, with a Code review of the same Comparison when requested
-  async start(owner: string, agentId: string, input: ReviewTourInput, requestId?: string, codeReview?: CodeReviewOptions): Promise<ReviewJobStart> {
+  async start(owner: string, worktreeId: string, input: ReviewTourInput, requestId?: string, codeReview?: CodeReviewOptions): Promise<ReviewJobStart> {
     // preserve legacy callers without retry identity
-    if (requestId === undefined) return await this.create(owner, agentId, input, codeReview);
+    if (requestId === undefined) return await this.create(owner, worktreeId, input, codeReview);
     const key = `${owner}\0${requestId}`;
     const existing = this.idempotentStarts.get(key);
     // replay only the same logical request
     if (existing !== undefined) {
       // reject request-key reuse across inputs
-      if (existing.agentId !== agentId || !this.sameInput(existing.input, input) || !sameCodeReviewOptions(existing.codeReview, codeReview)) throw new ReviewTourError('invalid_request', false);
+      if (existing.worktreeId !== worktreeId || !this.sameInput(existing.input, input) || !sameCodeReviewOptions(existing.codeReview, codeReview)) throw new ReviewTourError('invalid_request', false);
       return await existing.promise;
     }
-    const promise = this.create(owner, agentId, input, codeReview);
-    const retained: IdempotentStart = { agentId, input, ...(codeReview === undefined ? {} : { codeReview }), promise };
+    const promise = this.create(owner, worktreeId, input, codeReview);
+    const retained: IdempotentStart = { worktreeId, input, ...(codeReview === undefined ? {} : { codeReview }), promise };
     this.idempotentStarts.set(key, retained);
     try {
       const started = await promise;
@@ -77,13 +77,13 @@ export class ReviewTourJobs {
   }
 
   // create one latest-wins generation
-  private async create(owner: string, agentId: string, input: ReviewTourInput, codeReview?: CodeReviewOptions): Promise<ReviewJobStart> {
+  private async create(owner: string, worktreeId: string, input: ReviewTourInput, codeReview?: CodeReviewOptions): Promise<ReviewJobStart> {
     // refuse an unusable Code review before anything starts
     if (codeReview !== undefined) {
       if (this.codeReviews === undefined) throw new ReviewTourError('capability_unavailable', false);
       await this.codeReviews.validate(codeReview);
     }
-    const prepared = await this.service.prepare(agentId, input);
+    const prepared = await this.service.prepare(worktreeId, input);
     const storeWithCurrency = this.store as (ReviewTourStore & { invalidate?: ReviewTourStore['invalidate']; saveIfCurrent?: ReviewTourStore['saveIfCurrent'] }) | undefined;
     const persistenceVersion = await storeWithCurrency?.invalidate?.(prepared.comparison.worktreeId, prepared.comparison.branch) ?? (this.persistenceVersions.get(prepared.comparison.worktreeId) ?? 0) + 1;
     this.persistenceVersions.set(prepared.comparison.worktreeId, persistenceVersion);
@@ -97,13 +97,13 @@ export class ReviewTourJobs {
     const startedAt = Date.now();
     const expiresAt = startedAt + REVIEW_JOB_TTL_MS;
     const controller = new AbortController();
-    const job: StoredReviewJob = { id, owner, agentId, worktreeId: prepared.comparison.worktreeId, persistenceVersion, startedAt, expiresAt, state: { kind: 'pending', controller }, expiry: setTimeout(() => this.expire(id), REVIEW_JOB_TTL_MS) };
+    const job: StoredReviewJob = { id, owner, worktreeId: prepared.comparison.worktreeId, persistenceVersion, startedAt, expiresAt, state: { kind: 'pending', controller }, expiry: setTimeout(() => this.expire(id), REVIEW_JOB_TTL_MS) };
     job.expiry.unref?.();
     this.jobs.set(id, job);
     this.latestByWorktree.set(this.latestKey(owner, job.worktreeId), id);
     void this.run(job, prepared);
     // review the very Comparison the tour narrates
-    const review = codeReview === undefined || this.codeReviews === undefined ? undefined : await this.codeReviews.start(owner, agentId, prepared, codeReview);
+    const review = codeReview === undefined || this.codeReviews === undefined ? undefined : await this.codeReviews.start(owner, prepared, codeReview);
     return { kind: 'pending', job: startedReviewJob(job), ...(review === undefined ? {} : { codeReview: { job: review } }) };
   }
 
@@ -133,7 +133,7 @@ export class ReviewTourJobs {
       retained.state = { kind: 'ready', tour };
       this.settled(retained);
       // publish the new footer state
-      await this.onStored?.({ agentId: job.agentId, worktreeId: job.worktreeId, prepared, tour });
+      await this.onStored?.({ worktreeId: job.worktreeId, prepared, tour });
     } catch (error) {
       const current = this.jobs.get(job.id);
       // ignore cancelled or removed jobs

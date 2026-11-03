@@ -163,7 +163,7 @@ const general = { key: 'general', markdown: 'Overall looks good.' };
 
 // a service over a fake Comparison, git and a stateful GitHub holding at most one draft review
 function harness(scenario: Scenario = {}) {
-  const comparison: ReviewComparison = { agentId: 'agent-1', worktreeId: 'cora', workspace: '/worktrees/cora', branch: 'feature/x', scope: 'pr', base: 'origin/main', includeTests: true, includeDocs: false, fingerprint, changes: [
+  const comparison: ReviewComparison = { worktreeId: 'cora', workspace: '/worktrees/cora', branch: 'feature/x', scope: 'pr', base: 'origin/main', includeTests: true, includeDocs: false, fingerprint, changes: [
     { id: 'chg_feature01', file: 'src/feature.ts', category: 'implementation', kind: 'hunk', oldStart: 10, oldLines: 5, newStart: 10, newLines: 6, patch: tourPatch },
     { id: 'chg_missing1', file: 'src/missing.ts', category: 'implementation', kind: 'hunk', patch: '@@ -1 +1 @@\n-a\n+b' },
     { id: 'chg_swapped01', file: 'src/swap.ts', category: 'implementation', kind: 'hunk', patch: `diff --git a/src/swap.ts b/src/swap.ts\n--- a/src/swap.ts\n+++ b/src/swap.ts\n${swapPatch}` }
@@ -237,9 +237,9 @@ function harness(scenario: Scenario = {}) {
     }
     return json({ message: 'Not Found' }, 404);
   } });
-  const service = new PullRequestReviewService(async (agentId, input) => {
+  const service = new PullRequestReviewService(async (worktreeId, input) => {
     // the tour's own Comparison choices reach the capture
-    expect(agentId).toBe('agent-1');
+    expect(worktreeId).toBe('cora');
     expect(input).toEqual({ scope: 'pr', includeTests: true, includeDocs: false });
     return comparison;
   }, command, github);
@@ -261,16 +261,16 @@ describe('pull request review service', () => {
   it('tells the GitHub module the pull request changed once something was posted', async () => {
     const { service, github } = harness();
     const changed = vi.spyOn(github, 'changed');
-    await service.post('agent-1', request([], []));
+    await service.post('cora', request([], []));
     expect(changed).not.toHaveBeenCalled();
-    await service.post('agent-1', request([comment()]));
+    await service.post('cora', request([comment()]));
     expect(changed).toHaveBeenCalledWith({ owner: 'octo', name: 'repo' }, 7);
   });
 
   it('tells the GitHub module of a post that failed once it had tried to write', async () => {
     const { service, github, mutations } = harness({ reviewFailure: 'unapplied' });
     const changed = vi.spyOn(github, 'changed');
-    await expect(service.post('agent-1', request([comment()]))).rejects.toBeInstanceOf(PullRequestReviewError);
+    await expect(service.post('cora', request([comment()]))).rejects.toBeInstanceOf(PullRequestReviewError);
     expect(mutations('addPullRequestReview')).toHaveLength(1);
     expect(changed).toHaveBeenCalledWith({ owner: 'octo', name: 'repo' }, 7);
   });
@@ -284,7 +284,7 @@ describe('pull request review service', () => {
       comment({ id: 'unknown', changeId: 'chg_unknown1' }),
       comment({ id: 'absent', changeId: 'chg_missing1', startLine: 1, endLine: 1 })
     ];
-    const result = await service.post('agent-1', request(comments));
+    const result = await service.post('cora', request(comments));
     expect(result).toEqual({ status: 'ok', review: { url: 'https://github.com/octo/repo/pull/7/files', pullRequest: { number: 7, url: 'https://github.com/octo/repo/pull/7' } }, sections: [{ key: 'general', posted: true }], comments: [
       { id: 'line', result: 'line' },
       // refused on its lines and again on its file
@@ -311,7 +311,7 @@ describe('pull request review service', () => {
 
   it('puts a line range GitHub refuses on its file, but not a forbidden one', async () => {
     const { service, mutations, state } = harness({ refuseLine: ['c1'], forbid: ['c2'] });
-    const result = await service.post('agent-1', request([comment(), comment({ id: 'c2' })], []));
+    const result = await service.post('cora', request([comment(), comment({ id: 'c2' })], []));
     expect(result.comments).toEqual([{ id: 'c1', result: 'file', reason: 'GitHub refused the line range: Line could not be resolved' }, { id: 'c2', result: 'failed', reason: 'No access' }]);
     expect(mutations('addPullRequestReviewThread').map(entry => Object.keys(entry.variables!).length)).toEqual([2, 1]);
     expect(state.review!.comments).toEqual([{ path: 'src/feature.ts', subjectType: 'FILE', body: marked('**Lines 11–12 (new)**\n\n```diff\n+new11\n+new12\n```\n\nRename these.', 'c1') }]);
@@ -319,7 +319,7 @@ describe('pull request review service', () => {
 
   it('places a range whose ends run backwards through the hunk', async () => {
     const { service, mutations } = harness();
-    const result = await service.post('agent-1', request([comment({ id: 'rev', changeId: 'chg_swapped01', startSide: 'deletions', startLine: 6, endSide: 'additions', endLine: 6 })], []));
+    const result = await service.post('cora', request([comment({ id: 'rev', changeId: 'chg_swapped01', startSide: 'deletions', startLine: 6, endSide: 'additions', endLine: 6 })], []));
     expect(result.comments).toEqual([{ id: 'rev', result: 'line' }]);
     expect(mutations('addPullRequestReviewThread')[0]?.variables).toEqual({ i0: { pullRequestReviewId: 'PRR_new', path: 'src/swap.ts', body: marked('Rename these.', 'rev'), line: 6, side: 'LEFT', startLine: 6, startSide: 'RIGHT', subjectType: 'LINE' } });
   });
@@ -327,7 +327,7 @@ describe('pull request review service', () => {
   it('posts notes alone, without comments', async () => {
     const { service, requests, commands, mutations } = harness();
     const step = { key: 'step:1', markdown: '## Step one\n\nLooks right.' };
-    const result = await service.post('agent-1', request([], [general, step]));
+    const result = await service.post('cora', request([], [general, step]));
     expect(result.sections).toEqual([{ key: 'general', posted: true }, { key: 'step:1', posted: true }]);
     expect(result.comments).toEqual([]);
     expect(mutations('addPullRequestReview')[0]?.variables).toMatchObject({ input: { body: `${sectionText(general)}\n\n${sectionText(step)}` } });
@@ -342,12 +342,12 @@ describe('pull request review service', () => {
     const added = { key: 'step:2', markdown: 'Another step' };
     const existing = `Mine.\n\n${sectionText(general)}\n\n${sectionText(oldStep)}`;
     const { service, mutations, state } = harness({ pending: { commit: head, body: existing } });
-    const result = await service.post('agent-1', request([comment()], [general, newStep, added]));
+    const result = await service.post('cora', request([comment()], [general, newStep, added]));
     expect(result.sections).toEqual([{ key: 'general', posted: true }, { key: 'step:1', posted: true }, { key: 'step:2', posted: true }]);
     expect(mutations('addPullRequestReview')).toHaveLength(0);
     expect(mutations('updatePullRequestReview')[0]?.variables).toEqual({ input: { pullRequestReviewId: 'PRR_old', body: `${existing}\n\n${sectionText(newStep)}\n\n${sectionText(added)}` } });
     // posting the same sections again leaves the body alone
-    const again = await service.post('agent-1', request([comment()], [general, newStep, added]));
+    const again = await service.post('cora', request([comment()], [general, newStep, added]));
     expect(again.sections.every(section => section.posted)).toBe(true);
     expect(mutations('updatePullRequestReview')).toHaveLength(1);
     expect(state.review!.body.match(/rac-section:/gu)).toHaveLength(4);
@@ -355,7 +355,7 @@ describe('pull request review service', () => {
 
   it('reads back a body update whose response was lost', async () => {
     const { service, mutations } = harness({ pending: { commit: head, body: '' }, updateFailure: 'lost' });
-    const result = await service.post('agent-1', request([comment()]));
+    const result = await service.post('cora', request([comment()]));
     expect(result.sections).toEqual([{ key: 'general', posted: true }]);
     expect(result.comments).toEqual([{ id: 'c1', result: 'line' }]);
     expect(mutations('updatePullRequestReview')).toHaveLength(1);
@@ -365,7 +365,7 @@ describe('pull request review service', () => {
     const others = Array.from({ length: 4 }, (_, index) => ({ body: `A colleague's note ${index}`, subjectType: 'LINE', path: 'src/feature.ts' }));
     // the markers sit past the first page of the review's comments
     const { service, mutations, state } = harness({ pending: { commit: head, body: '', comments: [...others, { body: marked('Rename these.', 'c1'), subjectType: 'LINE', path: 'src/feature.ts' }, { body: marked('**Line 30 (new)**\n\nOff.', 'c2'), subjectType: 'FILE', path: 'src/feature.ts' }] } });
-    const result = await service.post('agent-1', request([comment(), comment({ id: 'c2', startLine: 30, endLine: 30, body: 'Off.' }), comment({ id: 'c3' })], []));
+    const result = await service.post('cora', request([comment(), comment({ id: 'c2', startLine: 30, endLine: 30, body: 'Off.' }), comment({ id: 'c3' })], []));
     expect(result.comments).toEqual([{ id: 'c1', result: 'line' }, { id: 'c2', result: 'file', reason: 'The commented lines are not in the tour\'s diff.' }, { id: 'c3', result: 'line' }]);
     expect(mutations()).toHaveLength(1);
     expect(Object.keys(mutations('addPullRequestReviewThread')[0]!.variables!)).toEqual(['i0']);
@@ -375,7 +375,7 @@ describe('pull request review service', () => {
   it('posts a concurrent double submit only once', async () => {
     const { service, mutations, state } = harness();
     const comments = [comment(), comment({ id: 'c2' }), comment({ id: 'c3' })];
-    const [first, second] = await Promise.all([service.post('agent-1', request(comments)), service.post('agent-1', request(comments))]);
+    const [first, second] = await Promise.all([service.post('cora', request(comments)), service.post('cora', request(comments))]);
     expect(first.comments.map(entry => entry.result)).toEqual(['line', 'line', 'line']);
     expect(second).toEqual(first);
     expect(state.review!.comments).toHaveLength(3);
@@ -387,7 +387,7 @@ describe('pull request review service', () => {
   it('indexes results across batches of ten', async () => {
     const { service, mutations, state } = harness({ refuse: ['k12'] });
     const comments = Array.from({ length: 23 }, (_, index) => comment({ id: `k${index}` }));
-    const result = await service.post('agent-1', request(comments));
+    const result = await service.post('cora', request(comments));
     expect(result.comments.map(entry => entry.id)).toEqual(comments.map(entry => entry.id));
     expect(result.comments.filter(entry => entry.result === 'failed')).toEqual([{ id: 'k12', result: 'failed', reason: 'Validation failed' }]);
     // three batches, then k12's file-level fallback
@@ -397,45 +397,45 @@ describe('pull request review service', () => {
 
   it('reconciles a lost batch response from the review without retrying the mutation', async () => {
     const { service, mutations, state } = harness({ threadFailure: 'lost' });
-    const result = await service.post('agent-1', request([comment({ id: 'a' }), comment({ id: 'b' }), comment({ id: 'c' })]));
+    const result = await service.post('cora', request([comment({ id: 'a' }), comment({ id: 'b' }), comment({ id: 'c' })]));
     expect(result.comments).toEqual([{ id: 'a', result: 'line' }, { id: 'b', result: 'failed', reason: 'GitHub could not add the comments (502): Bad Gateway' }, { id: 'c', result: 'line' }]);
     expect(mutations('addPullRequestReviewThread')).toHaveLength(1);
     // the client's retry of the failed one posts just that one
-    const retried = await service.post('agent-1', request([comment({ id: 'a' }), comment({ id: 'b' }), comment({ id: 'c' })], []));
+    const retried = await service.post('cora', request([comment({ id: 'a' }), comment({ id: 'b' }), comment({ id: 'c' })], []));
     expect(retried.comments.map(entry => entry.result)).toEqual(['line', 'line', 'line']);
     expect(state.review!.comments.map(entry => markerId(entry.body))).toEqual(['a', 'c', 'b']);
   });
 
   it('reconciles a broken batch and fails a refused one outright', async () => {
     const broken = harness({ threadFailure: 'broken' });
-    expect((await broken.service.post('agent-1', request([comment()]))).comments).toEqual([{ id: 'c1', result: 'failed', reason: 'GitHub could not add the comments: Something went wrong while executing your query.' }]);
+    expect((await broken.service.post('cora', request([comment()]))).comments).toEqual([{ id: 'c1', result: 'failed', reason: 'GitHub could not add the comments: Something went wrong while executing your query.' }]);
     expect(broken.requests.filter(entry => entry.query?.includes('node(id:'))).toHaveLength(1);
     const forbidden = harness({ threadFailure: 'forbidden' });
-    expect((await forbidden.service.post('agent-1', request([comment()]))).comments).toEqual([{ id: 'c1', result: 'failed', reason: 'GitHub could not add the comments (403): Resource not accessible by integration' }]);
+    expect((await forbidden.service.post('cora', request([comment()]))).comments).toEqual([{ id: 'c1', result: 'failed', reason: 'GitHub could not add the comments (403): Resource not accessible by integration' }]);
     expect(forbidden.requests.some(entry => entry.query?.includes('node(id:'))).toBe(false);
     expect(forbidden.mutations('addPullRequestReviewThread')).toHaveLength(1);
   });
 
   it('recovers a draft whose opening response was lost, and fails one that never opened', async () => {
     const lost = harness({ reviewFailure: 'lost' });
-    const recovered = await lost.service.post('agent-1', request([comment()]));
+    const recovered = await lost.service.post('cora', request([comment()]));
     expect(recovered.sections).toEqual([{ key: 'general', posted: true }]);
     expect(recovered.comments).toEqual([{ id: 'c1', result: 'line' }]);
     expect(lost.mutations('addPullRequestReview')).toHaveLength(1);
     expect(lost.mutations('updatePullRequestReview')).toHaveLength(0);
     const unapplied = harness({ reviewFailure: 'unapplied' });
-    const error = await refusal(unapplied.service.post('agent-1', request([comment()])));
+    const error = await refusal(unapplied.service.post('cora', request([comment()])));
     expect([error.code, error.retryable, error.httpStatus, error.message]).toEqual(['github_failed', true, 502, 'GitHub could not start a draft review (502): Bad Gateway']);
     expect(unapplied.mutations()).toHaveLength(1);
   });
 
   it('retries a query but maps refused credentials to a non-retryable error', async () => {
     const flaky = harness({ queryFailure: 502 });
-    expect((await flaky.service.post('agent-1', request([comment()]))).comments).toEqual([{ id: 'c1', result: 'line' }]);
+    expect((await flaky.service.post('cora', request([comment()]))).comments).toEqual([{ id: 'c1', result: 'line' }]);
     expect(flaky.requests.filter(entry => entry.query?.includes('pullRequest(number:'))).toHaveLength(2);
-    const refused = await refusal(harness({ queryFailure: 401 }).service.post('agent-1', request([comment()])));
+    const refused = await refusal(harness({ queryFailure: 401 }).service.post('cora', request([comment()])));
     expect([refused.code, refused.retryable, refused.message, refused.details]).toEqual(['github_forbidden', false, 'GitHub could not load the pull request (401): Bad credentials', { githubStatus: 401 }]);
-    const scoped = await refusal(harness({ queryFailure: 'graphql-forbidden' }).service.post('agent-1', request([comment()])));
+    const scoped = await refusal(harness({ queryFailure: 'graphql-forbidden' }).service.post('cora', request([comment()])));
     expect([scoped.code, scoped.retryable, scoped.message]).toEqual(['github_forbidden', false, 'GitHub could not load the pull request: Resource not accessible by integration']);
   });
 
@@ -448,7 +448,7 @@ describe('pull request review service', () => {
     ];
     for (const [pull, message] of cases) {
       const { service, mutations } = harness({ pull });
-      const error = await refusal(service.post('agent-1', request([comment()])));
+      const error = await refusal(service.post('cora', request([comment()])));
       expect([error.code, error.retryable, error.httpStatus, error.message, error.details]).toEqual(['pull_request_mismatch', false, 409, message, { pullRequestNumber: 7 }]);
       expect(mutations()).toHaveLength(0);
     }
@@ -456,7 +456,7 @@ describe('pull request review service', () => {
 
   it('refuses a draft review on an older commit', async () => {
     const { service, mutations } = harness({ pending: { commit: 'b'.repeat(40), body: '' } });
-    const error = await refusal(service.post('agent-1', request([comment()])));
+    const error = await refusal(service.post('cora', request([comment()])));
     expect(error.code).toBe('pending_review_outdated');
     expect(error.message).toMatch(/^You have a draft review \(GitHub shows it as Pending\) on an older commit/u);
     expect(error.details).toEqual({ pendingReviewCommit: 'b'.repeat(40), head });
@@ -465,7 +465,7 @@ describe('pull request review service', () => {
 
   it('refuses a local head that is not the pull request head', async () => {
     const { service, mutations } = harness({ localHead: 'c'.repeat(40) });
-    const error = await refusal(service.post('agent-1', request([comment()])));
+    const error = await refusal(service.post('cora', request([comment()])));
     expect(error.code).toBe('head_mismatch');
     expect(error.httpStatus).toBe(409);
     expect(error.details).toEqual({ localHead: 'c'.repeat(40), pullRequestHead: head });
@@ -474,15 +474,15 @@ describe('pull request review service', () => {
 
   it('refuses commented files that differ from HEAD before asking GitHub', async () => {
     const { service, requests } = harness({ dirty: 'src/feature.ts' });
-    const error = await refusal(service.post('agent-1', request([comment()])));
+    const error = await refusal(service.post('cora', request([comment()])));
     expect(error.code).toBe('uncommitted');
     expect(error.details).toEqual({ files: ['src/feature.ts'] });
     expect(requests).toHaveLength(0);
   });
 
   it('refuses a stale tour and missing credentials', async () => {
-    expect((await refusal(harness().service.post('agent-1', { ...request([comment()]), fingerprint: 'another-fingerprint-1' }))).code).toBe('stale');
-    expect((await refusal(harness({ token: null }).service.post('agent-1', request([comment()])))).code).toBe('no_github_token');
+    expect((await refusal(harness().service.post('cora', { ...request([comment()]), fingerprint: 'another-fingerprint-1' }))).code).toBe('stale');
+    expect((await refusal(harness({ token: null }).service.post('cora', request([comment()])))).code).toBe('no_github_token');
   });
 });
 
@@ -494,15 +494,15 @@ describe('pull request review API', () => {
     const posted: string[] = [];
     let failure: unknown;
     const pullRequestReviews = {
-      post: async (agentId: string) => {
-        posted.push(agentId);
+      post: async (worktreeId: string) => {
+        posted.push(worktreeId);
         if (failure !== undefined) throw failure;
         return { status: 'ok', review: { url: 'https://github.com/octo/repo/pull/7/files', pullRequest: { number: 7, url: 'https://github.com/octo/repo/pull/7' } }, sections: [{ key: 'general', posted: true }], comments: [{ id: 'c1', result: 'line' }] };
       }
     };
     app = await buildApp(testConfig(), { auth: await testAuthService(), pullRequestReviews: pullRequestReviews as never, discovery: { worktreesNow: () => [] } as never });
     const headers = { ...await authenticatedHeaders(app), 'content-type': 'application/json' };
-    const url = '/api/agents/agent-1/review-tour/pr-review';
+    const url = '/api/worktrees/cora/review-tour/pr-review';
     const payload = JSON.stringify({ scope: 'pr', includeTests: false, includeDocs: false, fingerprint, pullRequestNumber: 7, sections: [general], comments: [comment()] });
     const send = async () => await app!.inject({ method: 'POST', url, headers, payload });
     const working = await app.inject({ method: 'POST', url, headers, payload: JSON.stringify({ ...JSON.parse(payload), scope: 'working' }) });
@@ -529,6 +529,6 @@ describe('pull request review API', () => {
     expect(unexpected.statusCode).toBe(500);
     expect(unexpected.json()).toEqual({ status: 'error', error: { code: 'post_failed', retryable: true } });
     // the refused requests never reached the service
-    expect(posted).toEqual(['agent-1', 'agent-1', 'agent-1', 'agent-1']);
+    expect(posted).toEqual(['cora', 'cora', 'cora', 'cora']);
   });
 });

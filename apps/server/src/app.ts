@@ -84,7 +84,7 @@ import { parsePullRequestReviewInput, PR_REVIEW_REQUEST_BODY_BYTES, PullRequestR
 import { ReviewTourJobs, startedReviewJob } from './review-tour/jobs.js';
 import { ReviewTourStore } from './review-tour/store.js';
 import { INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS, parseReviewRequestId, parseReviewTourInput, REVIEW_GENERATION_TIMEOUT_MS, REVIEW_REQUEST_BODY_BYTES, ReviewTourError, type ReviewErrorCode, type ReviewTourInput, type StoredReviewTourSummary } from './review-tour/contracts.js';
-import { configuredWorktreeForWorkspace, projectIdOf, worktreeById, worktreeHostRoot, worktreeMatchesWorkspace, worktreePathOf, worktreePrBase, worktreeWireId } from './workspaces/resolver.js';
+import { configuredWorktreeForWorkspace, projectIdOf, worktreeBranch, worktreeById, worktreeHostRoot, worktreeMatchesWorkspace, worktreePathOf, worktreePrBase, worktreeWireId } from './workspaces/resolver.js';
 import { previewFileBytes, WorkspaceFileService } from './workspace-files/service.js';
 import { ComparisonService, type ComparisonScope } from './git/comparison-service.js';
 import { mergeBaseChoices, saveMergeBase } from './git/comparison.js';
@@ -253,7 +253,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // create Files lazily so missing host prerequisites affect only Files requests
   const hostFiles = deps.hostFiles ?? createRuntimeHostFiles(config);
   // posts a tour's feedback to the branch's pull request against the tour's current Comparison
-  const pullRequestReviews = deps.pullRequestReviews ?? new PullRequestReviewService(async (agentId, input) => await reviewTours.current(agentId, input), undefined, github);
+  const pullRequestReviews = deps.pullRequestReviews ?? new PullRequestReviewService(async (worktreeId, input) => await reviewTours.current(worktreeId, input), undefined, github);
   // freeze the checkout identity serving this process
   const deployedRevision = serverAdmin.revision();
   // a settled Code review refreshes the dashboard so its indicator follows
@@ -268,7 +268,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const reviewJobs = new ReviewTourJobs(reviewTours, reviewStore, async review => {
     const worktree = review.prepared.resolved.worktree;
     const projectName = discovery.projectsNow().find(project => project.id === worktree.projectId)?.label ?? worktree.label;
-    events.emit({ type: 'review-ready', agentId: review.agentId, worktreeId: review.worktreeId, projectName, worktreeName: worktree.label });
+    events.emit({ type: 'review-ready', worktreeId: review.worktreeId, projectName, worktreeName: worktree.label });
     await dashboardUpdates.refresh().then(() => undefined).catch(() => undefined);
   }, codeReviews, asks);
   const reviewTourCapability = await reviewTours.capability();
@@ -649,9 +649,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       loadReview: (worktreeId, branch) => reviewStore.current(worktreeId, branch),
       // a review the Conductor started is reported back to it, ready or failed
       startReview: async (agentId, input, conductor) => {
-        const started = await reviewJobs.start('integration-gateway', agentId, input);
+        const agent = (await discovery.dashboard()).agents.find(candidate => candidate.id === agentId);
+        if (agent === undefined) throw new ReviewTourError('target_unavailable', true);
+        const worktreeId = agent.worktreeId;
+        if (worktreeId === undefined) throw new ReviewTourError('configured_worktree_required', false);
+        const started = await reviewJobs.start('integration-gateway', worktreeId, input);
         if (conductor !== undefined && started.kind === 'pending') reviewJobs.watch(started.job.id, state => {
-          const worktreeId = reviewJobs.get('integration-gateway', started.job.id)?.worktreeId ?? '';
           const text = reviewReportText(agentId, worktreeId, state.kind === 'ready' ? 'ready' : { failed: 'code' in state ? state.code : state.kind });
           void prompts.submitFrom(conductor, text, { label: 'report' }).catch(() => undefined);
         });
@@ -1316,10 +1319,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return await createQueuedPromptNote(persistence, prompt) !== undefined;
   };
   // resolve the observed branch for one configured worktree
-  const reviewBranch = async (id: string): Promise<string | undefined> => {
-    const discovered = await discovery.dashboard();
-    return discovered.agents.find(agent => agent.worktreeId === id)?.branch ?? discovered.projects.flatMap(project => project.worktrees).find(worktree => worktree.id === id)?.branch;
-  };
+  const reviewBranch = async (id: string): Promise<string | undefined> => worktreeBranch(await discovery.dashboard(), id);
   app.get('/api/worktrees/:id/notes', async (request, reply) => { controlled(request); const id = (request.params as { id: string }).id; const saveKey = await placeSaveKey(id); if (saveKey === undefined) return reply.code(404).send({ error: 'place unavailable' }); const stored = await notes.list(saveKey); return stored === undefined ? reply.code(400).send({ error: 'invalid place' }) : { notes: decorateNotes(stored) }; });
   // pin or unpin one Place so it keeps (or drops) its tab while idle; the override is stored in
   // `.data` under the Place id, discovery re-reads it on the next tick
@@ -2462,7 +2462,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // leave a tmux mode holding the Agent's pane (a picker opened by a hook): input is refused
   // there, so prompts sit queued until it closes; the queue drains on the next observe
   app.post('/api/agents/:id/pane-mode/exit', async (request, reply) => { controlled(request, true); const exited = await transport.exitPaneMode((request.params as { id: string }).id); if (exited === undefined) return reply.code(404).send({ error: 'target unavailable' }); if (!exited) return reply.code(503).send({ error: 'Unable to leave the pane mode.' }); await dashboardUpdates.refresh().catch(() => undefined); return reply.code(204).send(); });
-  app.post('/api/agents/:id/review-tour/jobs', { bodyLimit: REVIEW_REQUEST_BODY_BYTES }, async (request, reply) => {
+  app.post('/api/worktrees/:id/review-tour/jobs', { bodyLimit: REVIEW_REQUEST_BODY_BYTES }, async (request, reply) => {
     const owner = controlled(request, true).id;
     const start = parseReviewTourStart(request.body);
     const requestIdHeader = request.headers['idempotency-key'];
@@ -2477,19 +2477,19 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     } catch (error) { return reviewFailure(reply, error); }
   });
   // add a Code review to a current stored tour: the Comparison is captured again and must match
-  app.post('/api/agents/:id/code-review/jobs', { bodyLimit: REVIEW_REQUEST_BODY_BYTES }, async (request, reply) => {
+  app.post('/api/worktrees/:id/code-review/jobs', { bodyLimit: REVIEW_REQUEST_BODY_BYTES }, async (request, reply) => {
     const owner = controlled(request, true).id;
     const add = parseCodeReviewAdd(request.body);
     // reject malformed review requests
     if (add === undefined) return reply.code(400).send({ status: 'error', error: { code: 'invalid_request', retryable: false } });
-    const agentId = (request.params as { id: string }).id;
+    const worktreeId = (request.params as { id: string }).id;
     try {
       // refuse an unusable preset before capturing anything
       await codeReviews.validate(add.options);
-      const prepared = await reviewTours.prepare(agentId, add.input);
+      const prepared = await reviewTours.prepare(worktreeId, add.input);
       // refuse a review of a Comparison the tour no longer narrates
       if (prepared.comparison.fingerprint !== add.fingerprint) throw new ReviewTourError('stale_during_generation', true);
-      return reply.code(202).send({ status: 'pending', job: await codeReviews.start(owner, agentId, prepared, add.options) });
+      return reply.code(202).send({ status: 'pending', job: await codeReviews.start(owner, prepared, add.options) });
     } catch (error) { return reviewFailure(reply, error); }
   });
   app.get('/api/code-review/jobs/:jobId', async (request, reply) => {
@@ -2510,7 +2510,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     return codeReviews.cancel(owner, (request.params as { jobId: string }).jobId) ? reply.code(204).send() : reply.code(404).send({ status: 'error', error: { code: 'target_unavailable', retryable: false } });
   });
   // post a tour's feedback to the branch's pull request as the operator's draft review
-  app.post('/api/agents/:id/review-tour/pr-review', { bodyLimit: PR_REVIEW_REQUEST_BODY_BYTES }, async (request, reply) => {
+  app.post('/api/worktrees/:id/review-tour/pr-review', { bodyLimit: PR_REVIEW_REQUEST_BODY_BYTES }, async (request, reply) => {
     controlled(request, true);
     const input = parsePullRequestReviewInput(request.body);
     // reject malformed post requests, a Working tour included
@@ -2525,7 +2525,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       return reply.code(500).send({ status: 'error', error: { code: 'post_failed', retryable: true } });
     }
   });
-  app.get('/api/agents/:id/review-tour/fingerprint', async (request, reply) => {
+  app.get('/api/worktrees/:id/review-tour/fingerprint', async (request, reply) => {
     controlled(request);
     const input = reviewQuery(request.query);
     // reject malformed fingerprint queries
@@ -2607,8 +2607,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const tour = (await reviewStore.current(worktreeId, branch))?.tour;
     const sameScope = typeof scope === 'object' ? tour?.scope === 'commit' && tour.commit === scope.commit : tour?.scope === scope;
     if (tour?.guide === undefined || !sameScope || !tour.changes.some(change => change.file === file)) return undefined;
-    const agent = (await discovery.dashboard()).agents.find(candidate => candidate.worktreeId === worktreeId);
-    const current = agent === undefined ? undefined : await reviewTours.current(agent.id, { scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), includeTests: tour.includeTests, includeDocs: tour.includeDocs }).catch(() => undefined);
+    const current = await reviewTours.current(worktreeId, { scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), includeTests: tour.includeTests, includeDocs: tour.includeDocs }).catch(() => undefined);
     return current?.fingerprint === tour.fingerprint ? tour.guide : undefined;
   };
   // ask about lines of a Code panel's Comparison (the query's `kind`, and `commit`): a job polled to its answer
@@ -2820,7 +2819,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       beginTurn: (agent, maxBytes) => beginReplyTurn(discovery, agent, maxBytes),
       latestReply: (agent, maxBytes) => latestReply(discovery, agent, maxBytes),
       // only a Code review leaves a recovery; an orphaned tour is handed back
-      recover: async (recovery, agentId) => await codeReviews.recover(recovery, agentId),
+      recover: async recovery => await codeReviews.recover(recovery),
       submit: (agentId, text) => submitConfirmed(agentId, text),
       // the reported id, else the Adapter's own discovery (Codex reports none)
       conversationId: agentId => discovery.conversationId(agentId),
