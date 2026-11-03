@@ -68,7 +68,7 @@ async function fixtureSession(): Promise<{ socket: SocketRef; socketPath: string
   const root = await mkdtempAsync(join(tmpdir(), 'rac-console-shell-'));
   const socketPath = join(root, 'default');
   fixtures.push({ root, socket: socketPath });
-  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'fixture', '-x', '80', '-y', '24', '-c', root, 'cat'])).code).toBe(0);
+  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'fixture', '-x', '80', '-y', '24', '-c', root, 'cat', '-'])).code).toBe(0);
   return { socket: { fingerprint: 'fixture', path: socketPath, device: 0, inode: 0 }, socketPath, session: 'fixture', worktreeDir: root };
 }
 

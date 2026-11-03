@@ -1841,7 +1841,7 @@ describe('bridged structured sandbox boundaries', () => {
     await mkdir(bin, { recursive: true });
     await writeFile(node, 'trusted runtime');
     process.env.RAC_HOST_TMUX_DIR = '/host-tmux';
-    await mkdir(join(root, 'console'));
+    await mkdir(join(root, 'console'), { mode: 0o755 });
     process.env.RAC_HOST_REPOSITORY = join(root, 'console');
     process.env.RAC_HOST_NODE_BIN = node;
     process.env.RAC_ADAPTER_FILES_DIR = join(root, 'console/.data/rendered');

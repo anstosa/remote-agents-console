@@ -89,7 +89,7 @@ async function workspace(env: Record<string, string> = {}) {
   const socketPath = join(root, 'tmux');
   roots.push({ root, socket: socketPath });
   const place = adhocScratchPlace(home);
-  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-x', '80', '-y', '24', '-c', home, 'cat'])).code).toBe(0);
+  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-x', '80', '-y', '24', '-c', home, 'cat', '-'])).code).toBe(0);
   expect((await run(tmux, ['-S', socketPath, 'set-option', '-t', 'work', '@rac_place', place.id])).code).toBe(0);
   const socket: SocketRef = { fingerprint: 'work', path: socketPath, device: 0, inode: 0 };
   const launch = new LaunchService(testConfig(), socketFinder([socket]), new TmuxAdapter(), undefined, undefined, () => [], () => new Set(), async () => ({ socket, session: 'work' }), join(root, 'private'));

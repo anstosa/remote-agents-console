@@ -135,7 +135,7 @@ async function fixtureSession(): Promise<{ ref: SocketRef; socket: string; pane:
   const root = await mkdtempAsync(join(tmpdir(), 'rac-control-'));
   const socket = join(root, 'tmux.sock');
   fixtures.push({ root, socket });
-  expect((await run(tmux, ['-f', '/dev/null', '-S', socket, 'new-session', '-d', '-s', 'fixture', '-x', '80', '-y', '24', 'cat'])).code).toBe(0);
+  expect((await run(tmux, ['-f', '/dev/null', '-S', socket, 'new-session', '-d', '-s', 'fixture', '-x', '80', '-y', '24', 'cat', '-'])).code).toBe(0);
   const paneOut = await run(tmux, ['-S', socket, 'display-message', '-p', '-t', 'fixture', '#{pane_id}']);
   const pane = paneOut.stdout.trim();
   expect(pane).toMatch(/^%\d+$/);
@@ -266,7 +266,7 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
       expect(viewers.size).toBe(0);
       expect(await adapter.listPanes(ref)).toHaveLength(1);
       // closing the bootstrap session moves the command client to a surviving session
-      await run(tmux, ['-S', socket, 'new-session', '-d', '-s', 'survivor', 'cat']);
+      await run(tmux, ['-S', socket, 'new-session', '-d', '-s', 'survivor', 'cat', '-']);
       await run(tmux, ['-S', socket, 'kill-session', '-t', 'fixture']);
       expect(await adapter.listPanes(ref)).toMatchObject([{ sessionName: 'survivor' }]);
     } finally {
@@ -322,7 +322,7 @@ describe.skipIf(!tmuxSocketsWork)('tmux control client (real tmux)', () => {
     try {
       expect(await adapter.listPanes(ref)).toHaveLength(1);
       await run(tmux, ['-S', socket, 'kill-server']);
-      await run(tmux, ['-f', '/dev/null', '-S', socket, 'new-session', '-d', '-s', 'replacement', 'cat']);
+      await run(tmux, ['-f', '/dev/null', '-S', socket, 'new-session', '-d', '-s', 'replacement', 'cat', '-']);
       const info = await lstat(socket);
       const replacement = { ...ref, fingerprint: 'replacement', device: info.dev, inode: info.ino };
       // model an old identity even if the filesystem happened to recycle its inode

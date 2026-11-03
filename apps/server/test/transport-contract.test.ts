@@ -113,7 +113,7 @@ async function launched(client: ContractClient, { sandboxed = false, replies, to
   vi.stubEnv('RAC_ADAPTER_FILES_DIR', join(root, 'files'));
   cleanups.push(async () => { await provider.close(); await run(tmux, ['-S', socketPath, 'kill-server']); await rm(root, { recursive: true, force: true }); });
   const place = adhocScratchPlace(home);
-  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-c', home, 'cat'])).code).toBe(0);
+  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-c', home, 'cat', '-'])).code).toBe(0);
   expect((await run(tmux, ['-S', socketPath, 'set-option', '-t', 'work', '@rac_place', place.id])).code).toBe(0);
   const socket: SocketRef = { fingerprint: 'work', path: socketPath, device: 0, inode: 0 };
   const stub = await client.stub(provider.baseUrl, state);

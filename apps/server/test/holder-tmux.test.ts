@@ -73,7 +73,7 @@ async function workspace() {
   const socketPath = join(root, 'tmux');
   roots.push({ root, socket: socketPath });
   const place = adhocScratchPlace(root);
-  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-x', '80', '-y', '24', '-c', root, 'cat'])).code).toBe(0);
+  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-x', '80', '-y', '24', '-c', root, 'cat', '-'])).code).toBe(0);
   expect((await run(tmux, ['-S', socketPath, 'set-option', '-t', 'work', '@rac_place', place.id])).code).toBe(0);
   const socket: SocketRef = { fingerprint: 'work', path: socketPath, device: 0, inode: 0 };
   const panes = new TmuxAdapter();
@@ -93,7 +93,7 @@ async function bridgedWorkspace() {
   const holder = fileURLToPath(new URL('../src/transports/holder.ts', import.meta.url));
   hostPiRuntime.mockReturnValue({ node: process.execPath, cli: '/unused/pi.js', extension: '/unused/extension.js', holder, command: '/unused/command.js', fingerprint: 'a'.repeat(64) });
   const place = adhocScratchPlace(root);
-  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-x', '80', '-y', '24', '-c', root, 'cat'])).code).toBe(0);
+  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'work', '-x', '80', '-y', '24', '-c', root, 'cat', '-'])).code).toBe(0);
   expect((await run(tmux, ['-S', socketPath, 'set-option', '-t', 'work', '@rac_place', place.id])).code).toBe(0);
   const socket: SocketRef = { fingerprint: 'host-work', path: socketPath, device: 0, inode: 0 };
   const panes = new TmuxAdapter();

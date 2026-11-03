@@ -55,7 +55,7 @@ async function fixture(command: string) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rac-sp-worktree-')));
   roots.push(root);
   const socket = join(root, 'default');
-  expect((await run(tmux, ['-f', '/dev/null', '-S', socket, 'new-session', '-d', '-s', 'fixture', 'cat'])).code).toBe(0);
+  expect((await run(tmux, ['-f', '/dev/null', '-S', socket, 'new-session', '-d', '-s', 'fixture', 'cat', '-'])).code).toBe(0);
   process.env.RAC_HOST_TMUX_DIR = root;
   process.env.RAC_TMUX_BIN = tmux;
   delete process.env.RAC_HOST_PATH;

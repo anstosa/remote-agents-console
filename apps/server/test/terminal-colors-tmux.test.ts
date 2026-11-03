@@ -63,7 +63,7 @@ async function execute(argv: readonly string[], env: NodeJS.ProcessEnv): Promise
 async function fixture(): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'rac-terminal-colors-'));
   const socket = join(root, 'tmux.sock');
-  const started = await run(tmux, ['-f', '/dev/null', '-S', socket, 'new-session', '-d', '-s', 'fixture', '-x', '80', '-y', '24', 'cat']);
+  const started = await run(tmux, ['-f', '/dev/null', '-S', socket, 'new-session', '-d', '-s', 'fixture', '-x', '80', '-y', '24', 'cat', '-']);
   expect(started.code).toBe(0);
   const pane = (await run(tmux, ['-S', socket, 'display-message', '-p', '-t', 'fixture', '#{pane_id}'])).stdout.trim();
   expect(pane).toMatch(/^%\d+$/u);

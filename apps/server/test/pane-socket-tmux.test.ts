@@ -60,7 +60,7 @@ async function fixtureSession(): Promise<{ socket: { fingerprint: string; path: 
   const root = await mkdtempAsync(join(tmpdir(), 'rac-pane-tmux-'));
   const socketPath = join(root, 'tmux.sock');
   fixtures.push({ root, socket: socketPath });
-  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'fixture', '-x', '80', '-y', '24', 'cat'])).code).toBe(0);
+  expect((await run(tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', 'fixture', '-x', '80', '-y', '24', 'cat', '-'])).code).toBe(0);
   const paneOut = await run(tmux, ['-S', socketPath, 'display-message', '-p', '-t', 'fixture', '#{pane_id}']);
   const pane = paneOut.stdout.trim();
   expect(pane).toMatch(/^%\d+$/);
