@@ -4,7 +4,9 @@ import { installPaneMock, seedPaneSize, pushBytes } from './pane-stream-mock.js'
 // A console whose one agent renders a Live log, so both the terminal and the
 // Global settings are on screen. `stored` seeds the localStorage key before
 // the app loads, which is how the seeded-Latte case stages the persisted choice.
-async function openConsole(page: Page, stored?: string) {
+// It returns the themes the app has sent to colour the tmux panes, in order.
+async function openConsole(page: Page, stored?: string): Promise<string[]> {
+  const paneThemes: string[] = [];
   await page.setViewportSize({ width: 1280, height: 800 });
   await installPaneMock(page);
   await page.addInitScript(seed => { if (seed !== null) localStorage.setItem('rac.color-theme', seed); }, stored ?? null);
@@ -16,6 +18,10 @@ async function openConsole(page: Page, stored?: string) {
       { id: 'agent-1', sessionId: 'socket:$1', home: '/worktrees/cora', worktreeId: 'cora', worktreeLabel: 'Cora', title: 'Ready' }
     ], projects: [] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
+    if (url.pathname === '/api/console/theme' && request.method() === 'PUT') {
+      paneThemes.push((request.postDataJSON() as { theme: string }).theme);
+      return route.fulfill({ status: 204 });
+    }
     if (url.pathname === '/api/agents/agent-1/tickets') return route.fulfill({ json: { ticket: 'pane-ticket' } });
     if (url.pathname === '/api/agents/agent-1/saved-prompts') return route.fulfill({ json: { prompts: [] } });
     if (url.pathname === '/api/worktrees/cora/notes') return route.fulfill({ json: { notes: [] } });
@@ -26,6 +32,7 @@ async function openConsole(page: Page, stored?: string) {
   // Bring the pane live so the open terminal is mounted and painted.
   await seedPaneSize(page, 'agent-1', 80, 24);
   await pushBytes(page, 'agent-1', 'agent-1 output line\r\nagent-1 second line\r\n');
+  return paneThemes;
 }
 
 // The document's flavour attribute: 'latte' when set, undefined when absent (Mocha).
@@ -92,6 +99,16 @@ test('the toggle flips the whole UI between Dark and Light', async ({ page }) =>
   await expect.poll(() => themeAttr(page), { timeout: 5_000 }).toBeUndefined();
   expect(await rootBackground(page)).toBe(mochaBackground);
   expect(await metaThemeColor(page)).toBe('#1e1e2e');
+});
+
+test('the browser in control sends its theme for the tmux panes', async ({ page }) => {
+  test.setTimeout(60_000);
+  const paneThemes = await openConsole(page);
+  await expect.poll(() => paneThemes).toEqual(['mocha']);
+  await openSettings(page);
+  await page.getByRole('radio', { name: 'Light theme' }).click();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect.poll(() => paneThemes).toEqual(['mocha', 'latte']);
 });
 
 test('the choice persists across a reload', async ({ page }) => {

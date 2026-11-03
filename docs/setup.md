@@ -307,14 +307,7 @@ fish paths are supported; each loads the operator's normal configuration
 agent command itself always runs as POSIX shell, so operator `setup`/`teardown`
 and `newTask` snippets stay in POSIX syntax regardless of the interactive shell.
 
-New console-created headless panes with default tmux styles receive Mocha default
-foreground/background colors before their shell or agent starts. This lets programs
-such as Codex query both terminal colors during startup instead of falling back to
-monochrome output or a gradient blended against the wrong background. Existing
-panes, custom tmux styles, and sessions with an attached real terminal are not
-restyled. Browser-local Light/Dark appearance does not change this shared startup
-fallback. Programs that already cached missing terminal colors retain that state
-until a new session starts.
+New console-created headless panes with default tmux styles receive the console theme's default foreground/background colors (Catppuccin Mocha for Dark, Latte for Light) before their shell or agent starts. This lets programs such as Codex query both terminal colors during startup instead of falling back to monochrome output or a gradient blended against the wrong background, and lets programs that ask tmux for the light/dark theme (`CSI ? 996 n`) see the console's choice. The console theme is the Light/Dark setting of the browser in control: it is sent when that browser takes control and on every toggle, and defaults to Dark until a browser sends it. A toggle also recolors the panes the console colored, so programs that enabled theme update reports (mode 2031), such as Neovim, follow it live. Panes with default or custom tmux styles, and sessions with an attached real terminal, are not restyled. Programs that read the colors only at startup keep them until they restart.
 Set `RAC_HOST_PATH` to a complete PATH when host commands require executables
 outside the host shell's normal startup environment.
 

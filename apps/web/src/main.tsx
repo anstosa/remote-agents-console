@@ -33,7 +33,7 @@ import { StackIcon, stackGlyphs, type ProcessAction, type StackHandlers } from '
 import { isPromptKeyboardTarget, useWorkspaceCycleKeys } from './tab-navigation.js';
 import { confirmKey, KeyboardLayer, KeyPicker, keyTarget, shortcutSettingsNavigationEvent, terminalBindingAction, useKeyAction, useKeyActions, type KeyPickerOption } from './keyboard.js';
 import type { KeysConfig } from '../../server/src/config/keys.js';
-import { applyColorTheme } from './color-theme.js';
+import { applyColorTheme, useColorTheme } from './color-theme.js';
 import { useDynamicWorktrees } from './dynamic-worktrees.js';
 import { useUsagePace } from './usage-pace.js';
 import { applyReducedMotion } from './reduced-motion.js';
@@ -11164,6 +11164,12 @@ function App() {
   const announcedServerUpdateTarget = useRef<string | undefined>(undefined);
   const [reconnecting, setReconnecting] = useState(!consoleReachable);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const colorTheme = useColorTheme();
+  // the controlling browser's theme colours the console's tmux panes; post it on gaining control,
+  // on every toggle, and on each session refresh, so a restarted server (back on Mocha) relearns it
+  useEffect(() => {
+    if (state === 'ready') void request('/api/console/theme', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ theme: colorTheme }) });
+  }, [colorTheme, sessionInfo, state]);
   const applySession = useCallback((current: SessionInfo) => {
     csrf = current.csrfToken;
     // retain validated server identity

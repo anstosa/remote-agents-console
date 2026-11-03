@@ -53,6 +53,7 @@ import { CommandCatalogService } from './commands/service.js';
 import { LatestViewportScheduler, PaneViewportCoordinator } from './logs/viewport-scheduler.js';
 import { boundedViewport } from './logs/viewport.js';
 import { PaneStreamRegistry, type PaneStreamProvider } from './tmux/control.js';
+import { isPaneTheme } from './tmux/terminal-colors.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from './dashboard/updates.js';
 import { WorktreeNoteService, type NoteAuthor, type WorktreeNote } from './notes/service.js';
 import { promptNoteContent } from './notes/from-prompt.js';
@@ -879,6 +880,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // push fresh launch resolutions without rolling back a successful preference write
     await dashboardUpdates.refresh().catch(() => undefined);
     return { defaultAgent: kind };
+  });
+  // the controlling browser's Light/Dark choice colours the console's tmux panes
+  app.put('/api/console/theme', async (request, reply) => {
+    controlled(request, true);
+    const theme = body(request).theme;
+    if (!isPaneTheme(theme)) return reply.code(400).send({ error: 'Choose the mocha or latte theme.' });
+    await launch.setPaneTheme(theme);
+    return reply.code(204).send();
   });
   // publish cached current and upstream agent versions
   app.get('/api/agents/updates', async request => {

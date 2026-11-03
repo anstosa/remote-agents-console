@@ -1,9 +1,18 @@
-const fallbackStyle = 'fg=#cdd6f4,bg=#1e1e2e';
+import { run } from './command.js';
+
+// the console's Light/Dark choice; tmux answers a pane's theme query (`CSI ? 996 n`) and its
+// OSC 10/11 colour queries from window-style, so this pair is what programs in the pane see
+export type PaneTheme = 'mocha' | 'latte';
+const paneStyles: Record<PaneTheme, string> = { mocha: 'fg=#cdd6f4,bg=#1e1e2e', latte: 'fg=#4c4f69,bg=#eff1f5' };
+export const isPaneTheme = (value: unknown): value is PaneTheme => value === 'mocha' || value === 'latte';
+// one client per line; the wrapper and the recolour pass read real terminals from it alike
+const clientFormat = '#{session_id}|#{client_control_mode}|#{client_suspended}';
 
 const terminalColorFallbackScript = `
 # validate the pane identity before querying tmux
 tmux_bin=$1
-shift
+pane_style=$2
+shift 2
 tmux_value=\${TMUX-}
 pane=\${TMUX_PANE-}
 tmux_index=\${tmux_value##*,}
@@ -51,7 +60,7 @@ if [ "$valid_tmux" = 1 ]; then
 
   # fail closed when client detection is unavailable
   if [ "$session_status" -eq 0 ]; then
-    clients=$("$tmux_bin" list-clients -F '#{session_id}|#{client_control_mode}|#{client_suspended}' 2>/dev/null)
+    clients=$("$tmux_bin" list-clients -F '${clientFormat}' 2>/dev/null)
     clients_status=$?
     clients_valid=1
     real_client=0
@@ -94,8 +103,8 @@ EOF
       active_style_status=$?
       # preserve every custom or partially custom pair
       if [ "$window_style_status" -eq 0 ] && [ "$active_style_status" -eq 0 ] && [ "$window_style" = default ] && [ "$active_style" = default ]; then
-        "$tmux_bin" set-option -p -t "$pane" window-style '${fallbackStyle}' >/dev/null 2>&1 || :
-        "$tmux_bin" set-option -p -t "$pane" window-active-style '${fallbackStyle}' >/dev/null 2>&1 || :
+        "$tmux_bin" set-option -p -t "$pane" window-style "$pane_style" >/dev/null 2>&1 || :
+        "$tmux_bin" set-option -p -t "$pane" window-active-style "$pane_style" >/dev/null 2>&1 || :
       fi
     fi
   fi
@@ -106,6 +115,21 @@ exec "$@"
 `;
 
 // prepend the best-effort tmux color fallback without interpolating caller input
-export function terminalColorFallbackArgv(tmuxBinary: string, argv: readonly string[]): string[] {
-  return ['/bin/sh', '-c', terminalColorFallbackScript, 'rac-terminal-colors', tmuxBinary, ...argv];
+export function terminalColorFallbackArgv(tmuxBinary: string, theme: PaneTheme, argv: readonly string[]): string[] {
+  return ['/bin/sh', '-c', terminalColorFallbackScript, 'rac-terminal-colors', tmuxBinary, paneStyles[theme], ...argv];
+}
+
+// recolour one server's panes the fallback coloured (both styles exactly one theme's pair),
+// outside sessions a real terminal is attached to; a window-style change makes tmux send
+// `CSI ? 997 ; 1|2 n` to mode-2031 programs, which a `refresh-client -r` colour report does not,
+// and that report would also override every pane's theme while any control client is attached
+export async function recolorConsolePanes(tmuxBinary: string, socketPath: string, theme: PaneTheme): Promise<void> {
+  const clients = await run(tmuxBinary, ['-S', socketPath, 'list-clients', '-F', clientFormat]);
+  const panes = await run(tmuxBinary, ['-S', socketPath, 'list-panes', '-a', '-F', '#{session_id}|#{pane_id}|#{window-style}|#{window-active-style}']);
+  if (clients.code !== 0 || panes.code !== 0) return;
+  const watched = new Set(clients.stdout.split('\n').map(line => line.split('|')).filter(([, control, suspended]) => control === '0' && suspended !== '1').map(([session]) => session));
+  const style = paneStyles[theme];
+  const consoleStyles = new Set<string>(Object.values(paneStyles));
+  const targets = panes.stdout.split('\n').map(line => line.split('|')).filter(([session, pane, normal, active]) => pane !== undefined && !watched.has(session) && normal === active && normal !== style && consoleStyles.has(normal ?? ''));
+  await Promise.all(targets.map(([, pane]) => run(tmuxBinary, ['-S', socketPath, 'set-option', '-p', '-t', pane!, 'window-style', style, ';', 'set-option', '-p', '-t', pane!, 'window-active-style', style])));
 }

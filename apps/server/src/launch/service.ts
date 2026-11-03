@@ -6,7 +6,7 @@ import { run, tmuxFormatLiteral, tmuxLiteralArg } from '../tmux/command.js';
 import { TmuxAdapter } from '../tmux/adapter.js';
 import { hostCommand, hostInteractiveShellPath, interactiveShellBootstrap, interactiveShellName, interactiveShellPath } from '../tmux/interactive-shell.js';
 import { availableSessionName, worktreeSessionName } from '../tmux/session-name.js';
-import { terminalColorFallbackArgv } from '../tmux/terminal-colors.js';
+import { recolorConsolePanes, terminalColorFallbackArgv, type PaneTheme } from '../tmux/terminal-colors.js';
 import { holderAgentOption, holderPaneRole, processPaneRole } from '../tmux/stack-sessions.js';
 import { ProcSocketFinder, workspaceRoot, type SocketFinder } from '../discovery/service.js';
 import { projectIdOf, worktreeHostRoot, worktreeMatchesWorkspace } from '../workspaces/resolver.js';
@@ -136,6 +136,10 @@ export class LaunchService implements HolderWindows {
   // the configured Scratch folder's realpath, resolved once
   private scratchHomeValue?: Promise<string>;
   private readonly tmux = process.env.RAC_TMUX_BIN ?? '/usr/bin/tmux'; private readonly hostSocket = process.env.RAC_HOST_TMUX_DIR === undefined ? undefined : join(process.env.RAC_HOST_TMUX_DIR, 'default');
+  // the controlling browser's Light/Dark choice, which new panes start in; in memory, as that
+  // browser posts it again whenever it reconnects
+  private paneTheme: PaneTheme = 'mocha';
+  private recolouring = Promise.resolve();
   private readonly localShell = interactiveShellPath();
   private readonly localShellName = interactiveShellName(this.localShell);
   private readonly hostShell = hostInteractiveShellPath();
@@ -147,6 +151,17 @@ export class LaunchService implements HolderWindows {
   // open as a Terminal (a live pane-socket subscriber); Remove's blind kill skips them.
   // `placeAgentSession` finds the session of a live Agent at a Place, which a Place launch joins.
   constructor(private readonly config: ValidatedConfig, private readonly finder: SocketFinder = new ProcSocketFinder(), private readonly panes: TmuxAdapter = new TmuxAdapter(), private readonly paneRoot: (path: string) => Promise<string> = workspaceRoot, private readonly worktreeStore: WorktreeLaunchStore = new WorktreeLaunchStore(), private readonly discoveredWorktrees: () => Worktree[] = () => [], private readonly openTerminals: () => ReadonlySet<string> = () => new Set(), private readonly placeAgentSession: (placeId: string) => Promise<TmuxSession | undefined> = async () => undefined, private readonly root = `/tmp/remote-agent-console-${process.getuid?.() ?? 0}`, private readonly launchStructured: (place: Place, kind: AgentKind, options: StructuredLaunchOptions) => Promise<boolean> = async () => false) {}
+
+  // start new panes in `theme` and recolour the panes already started in the other one; passes
+  // run one at a time, each in the latest theme, so a quick double toggle cannot end mismatched
+  async setPaneTheme(theme: PaneTheme): Promise<void> {
+    this.paneTheme = theme;
+    this.recolouring = this.recolouring.then(async () => {
+      const sockets = await this.finder.find().catch(() => []);
+      await Promise.all(sockets.map(socket => recolorConsolePanes(this.tmux, socket.path, this.paneTheme).catch(() => undefined)));
+    });
+    await this.recolouring;
+  }
 
   // a pane the operator currently has open as a Terminal (a live pane-socket subscriber)
   private paneHasOpenTerminal(pane: Pane): boolean {
@@ -561,7 +576,7 @@ export class LaunchService implements HolderWindows {
   private async openLaunchPane(site: LaunchSite, command: string, id: string, at: TmuxSession | string, logName: string): Promise<string | undefined> {
     if (this.hostSocket !== undefined) return await this.openPane(at, site.cwd, this.hostShellArgv(expandHomeCommand(command, site.cwd), site.home), logName);
     const { descriptor, runner } = await this.writeLaunchDescriptor(id, command, site);
-    const pane = await this.openPane(at, undefined, terminalColorFallbackArgv(this.tmux, [process.execPath, runner, descriptor]), logName);
+    const pane = await this.openPane(at, undefined, terminalColorFallbackArgv(this.tmux, this.paneTheme, [process.execPath, runner, descriptor]), logName);
     // clean failed launch descriptors
     if (pane === undefined) await unlink(descriptor).catch(() => {});
     return pane;
@@ -586,7 +601,7 @@ export class LaunchService implements HolderWindows {
   // HOME and PATH, or with no command the interactive shell itself under that HOME; colors are
   // established before the shell or the command starts
   private hostShellArgv(command: string, home: string): string[] {
-    return terminalColorFallbackArgv('tmux', [this.hostShell, '-lc', interactiveShellBootstrap(command === '' ? '' : hostCommand(command, home), home, this.hostShell)]);
+    return terminalColorFallbackArgv('tmux', this.paneTheme, [this.hostShell, '-lc', interactiveShellBootstrap(command === '' ? '' : hostCommand(command, home), home, this.hostShell)]);
   }
 
   // where a worktree launch runs: its host root with its Project's account home on the bridge,
@@ -793,7 +808,7 @@ export class LaunchService implements HolderWindows {
   // through the interactive bootstrap, so the pane ends with it.
   private consoleShellCommand(place: ConsoleShellPlace, command: string): { cwd: string; argv: string[] } {
     // color setup precedes even operator login-shell startup files
-    if (this.hostSocket === undefined) return { cwd: place.home, argv: terminalColorFallbackArgv(this.tmux, command === '' ? [this.localShell, '-l'] : [this.localShell, '-lc', interactiveShellBootstrap(command, '$HOME', this.localShell)]) };
+    if (this.hostSocket === undefined) return { cwd: place.home, argv: terminalColorFallbackArgv(this.tmux, this.paneTheme, command === '' ? [this.localShell, '-l'] : [this.localShell, '-lc', interactiveShellBootstrap(command, '$HOME', this.localShell)]) };
     // a Worktree launch exports its Project's account home; directory and Scratch launches the default one
     const home = this.agentHome(place.kind === 'worktree' ? place.projectId : undefined);
     return { cwd: placeHostRoot(place), argv: this.hostShellArgv(command, home) };

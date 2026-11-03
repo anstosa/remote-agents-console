@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { run } from '../src/tmux/command.js';
-import { terminalColorFallbackArgv } from '../src/tmux/terminal-colors.js';
+import { recolorConsolePanes, terminalColorFallbackArgv } from '../src/tmux/terminal-colors.js';
 
 const fallbackStyle = 'fg=#cdd6f4,bg=#1e1e2e';
+const latteStyle = 'fg=#4c4f69,bg=#eff1f5';
 const tmux = execFileSync('/bin/sh', ['-c', 'command -v tmux || true'], { encoding: 'utf8' }).trim();
 const python = execFileSync('/bin/sh', ['-c', 'command -v python3 || true'], { encoding: 'utf8' }).trim();
 const script = execFileSync('/bin/sh', ['-c', 'command -v script || true'], { encoding: 'utf8' }).trim();
@@ -82,7 +83,7 @@ async function styles(socket: string, pane: string): Promise<[string, string]> {
 
 // split one pane whose pre-exec wrapper stays alive for inspection
 async function splitWrapped(f: Fixture): Promise<string> {
-  const created = await run(tmux, ['-S', f.socket, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', f.pane, '--', ...terminalColorFallbackArgv(tmux, ['/bin/sleep', '30'])]);
+  const created = await run(tmux, ['-S', f.socket, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', f.pane, '--', ...terminalColorFallbackArgv(tmux, 'mocha', ['/bin/sleep', '30'])]);
   expect(created.code).toBe(0);
   const pane = created.stdout.trim();
   expect(pane).toMatch(/^%\d+$/u);
@@ -105,7 +106,7 @@ describe('terminal color fallback argv', () => {
     const hostile = `value with spaces ' " $(touch ${sentinel}); #`;
     const original = [process.execPath, '-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', hostile, '--second'];
     const binary = additions.TMUX === '/tmp/missing,12,0' ? '/missing/tmux binary' : tmux;
-    const wrapped = terminalColorFallbackArgv(binary, original);
+    const wrapped = terminalColorFallbackArgv(binary, 'mocha', original);
     const result = await execute(wrapped, { PATH: process.env.PATH, ...additions });
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual([hostile, '--second']);
@@ -118,7 +119,7 @@ describe.skipIf(!tmuxSocketsWork)('terminal color fallback (real tmux)', () => {
   // resolve bridge probes from the live server before host path restoration
   it.each(['', '/rac-missing-path'])('initializes headless colors with host PATH=%j', async path => {
     const f = await fixture();
-    const created = await run(tmux, ['-S', f.socket, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', f.pane, '--', '/usr/bin/env', `PATH=${path}`, ...terminalColorFallbackArgv('tmux', ['/bin/sleep', '30'])]);
+    const created = await run(tmux, ['-S', f.socket, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', f.pane, '--', '/usr/bin/env', `PATH=${path}`, ...terminalColorFallbackArgv('tmux', 'mocha', ['/bin/sleep', '30'])]);
     expect(created.code).toBe(0);
     await waitForStyles(f.socket, created.stdout.trim(), [fallbackStyle, fallbackStyle]);
     expect(await styles(f.socket, f.pane)).toEqual(['default', 'default']);
@@ -144,7 +145,7 @@ describe.skipIf(!tmuxSocketsWork)('terminal color fallback (real tmux)', () => {
       "with open(sys.argv[1], 'w') as target: json.dump({'hex': data.hex()}, target)",
       'time.sleep(30)'
     ].join('\n');
-    const created = await run(tmux, ['-S', f.socket, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', f.pane, '--', ...terminalColorFallbackArgv(tmux, [python, '-c', query, output])]);
+    const created = await run(tmux, ['-S', f.socket, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', f.pane, '--', ...terminalColorFallbackArgv(tmux, 'mocha', [python, '-c', query, output])]);
     expect(created.code).toBe(0);
     const pane = created.stdout.trim();
     await vi.waitFor(async () => { expect(existsSync(output)).toBe(true); }, { timeout: 2_000, interval: 20 });
@@ -163,9 +164,30 @@ describe.skipIf(!tmuxSocketsWork)('terminal color fallback (real tmux)', () => {
     const f = await fixture();
     const pane = (await run(tmux, ['-S', f.socket, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', f.pane, 'sleep', '30'])).stdout.trim();
     expect((await run(tmux, ['-S', f.socket, 'set-option', '-p', '-t', pane, option, custom])).code).toBe(0);
-    expect((await run(tmux, ['-S', f.socket, 'respawn-pane', '-k', '-t', pane, '--', ...terminalColorFallbackArgv(tmux, ['/bin/sleep', '30'])])).code).toBe(0);
+    expect((await run(tmux, ['-S', f.socket, 'respawn-pane', '-k', '-t', pane, '--', ...terminalColorFallbackArgv(tmux, 'mocha', ['/bin/sleep', '30'])])).code).toBe(0);
     const expected: [string, string] = option === 'window-style' ? [custom, 'default'] : ['default', custom];
     await waitForStyles(f.socket, pane, expected);
+  });
+
+  it('starts a pane in the requested theme', async () => {
+    const f = await fixture();
+    const created = await run(tmux, ['-S', f.socket, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', f.pane, '--', ...terminalColorFallbackArgv(tmux, 'latte', ['/bin/sleep', '30'])]);
+    expect(created.code).toBe(0);
+    await waitForStyles(f.socket, created.stdout.trim(), [latteStyle, latteStyle]);
+  });
+
+  it('recolours console-coloured panes and leaves default and custom ones', async () => {
+    const f = await fixture();
+    const coloured = await splitWrapped(f);
+    await waitForStyles(f.socket, coloured, [fallbackStyle, fallbackStyle]);
+    const custom = (await run(tmux, ['-S', f.socket, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', f.pane, 'sleep', '30'])).stdout.trim();
+    expect((await run(tmux, ['-S', f.socket, 'set-option', '-p', '-t', custom, 'window-style', 'fg=#f5c2e7,bg=#11111b', ';', 'set-option', '-p', '-t', custom, 'window-active-style', 'fg=#f5c2e7,bg=#11111b'])).code).toBe(0);
+    await recolorConsolePanes(tmux, f.socket, 'latte');
+    expect(await styles(f.socket, coloured)).toEqual([latteStyle, latteStyle]);
+    expect(await styles(f.socket, custom)).toEqual(['fg=#f5c2e7,bg=#11111b', 'fg=#f5c2e7,bg=#11111b']);
+    expect(await styles(f.socket, f.pane)).toEqual(['default', 'default']);
+    await recolorConsolePanes(tmux, f.socket, 'mocha');
+    expect(await styles(f.socket, coloured)).toEqual([fallbackStyle, fallbackStyle]);
   });
 
   it('treats a control-mode observer as headless', async () => {
