@@ -9191,7 +9191,9 @@ function NewWorktreeDialog({ project, request, initial, initialRecovery, onRecov
       if (checkoutable !== undefined) setExistingRef(current => current === '' ? checkoutable.ref : current);
     })();
     void (async () => {
-      const response = await request(`/api/projects/${encodeURIComponent(project.id)}/switch-prs${repositoryQuery}`).catch(() => undefined);
+      // the pull request the dialog opened on is listed even when older than the list's page
+      const pull = pullInitial === undefined ? '' : `${repositoryQuery === '' ? '?' : '&'}pull=${pullInitial.number}`;
+      const response = await request(`/api/projects/${encodeURIComponent(project.id)}/switch-prs${repositoryQuery}${pull}`).catch(() => undefined);
       const list = response?.ok ? repositoryBranchList(await response.json().catch(() => undefined)) : undefined;
       if (cancelled) return;
       // a 404 is a Project with no GitHub repository to list; any other failure may pass

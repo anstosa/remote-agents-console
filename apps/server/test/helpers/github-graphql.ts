@@ -172,7 +172,7 @@ export function answer(world: World, call: GraphqlCall): Record<string, unknown>
     // each field of the repository and the text of its selection
     const fields = section.split(/(?=\b(?:open|issues|b\d+):?[a-zA-Z]*\()/u);
     const open = fields.find(field => field.startsWith('open:pullRequests('));
-    if (open !== undefined) node.open = { nodes: pulls.filter(pull => !open.includes('states:OPEN') || (pull.state ?? 'OPEN') === 'OPEN').map(pull => pullNode(name, pull, open)) };
+    if (open !== undefined) node.open = { nodes: pulls.filter(pull => !open.includes('states:OPEN') || (pull.state ?? 'OPEN') === 'OPEN').slice(0, Number(/first:(\d+)/u.exec(open)?.[1] ?? Infinity)).map(pull => pullNode(name, pull, open)) };
     const issueField = fields.find(field => field.startsWith('issues('));
     if (issueField !== undefined) node.issues = { nodes: issues.map(issue => issueNode(name, issue, issueField)) };
     for (const field of fields) {

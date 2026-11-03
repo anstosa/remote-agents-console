@@ -290,7 +290,8 @@ describe('GET /api/projects/:id/switch-prs', () => {
   it('serves the repository list and limits it to 30 reads a minute', async () => {
     const list = { pullRequests: [], otherPullRequests: [], branches: [], pullRequestsSupported: true };
     const requested: unknown[] = [];
-    const prSwitch = { branchList: async (id: string, repository?: unknown) => { requested.push(repository); return id === 'proj' ? list : undefined; } } as never;
+    const included: unknown[] = [];
+    const prSwitch = { branchList: async (id: string, repository?: unknown, include?: number) => { requested.push(repository); included.push(include); return id === 'proj' ? list : undefined; } } as never;
     const server = await app({ discovery: discoveryStub(), prSwitch, worktreeStore: await store() });
     try {
       expect((await server.inject({ method: 'GET', url: '/api/projects/absent/switch-prs', headers: readHeaders })).statusCode).toBe(404);
@@ -300,8 +301,11 @@ describe('GET /api/projects/:id/switch-prs', () => {
       expect((await server.inject({ method: 'GET', url: '/api/projects/proj/switch-prs?repository=advplyr%2Faudiobookshelf', headers: readHeaders })).statusCode).toBe(200);
       expect(requested.at(-1)).toEqual({ owner: 'advplyr', name: 'audiobookshelf' });
       expect((await server.inject({ method: 'GET', url: '/api/projects/proj/switch-prs?repository=not-a-repository', headers: readHeaders })).statusCode).toBe(400);
+      expect((await server.inject({ method: 'GET', url: '/api/projects/proj/switch-prs?pull=2229', headers: readHeaders })).statusCode).toBe(200);
+      expect(included.at(-1)).toBe(2229);
+      expect((await server.inject({ method: 'GET', url: '/api/projects/proj/switch-prs?pull=0', headers: readHeaders })).statusCode).toBe(400);
       const statuses: number[] = [];
-      for (let index = 0; index < 27; index += 1) statuses.push((await server.inject({ method: 'GET', url: '/api/projects/proj/switch-prs', headers: readHeaders })).statusCode);
+      for (let index = 0; index < 25; index += 1) statuses.push((await server.inject({ method: 'GET', url: '/api/projects/proj/switch-prs', headers: readHeaders })).statusCode);
       expect(statuses.at(-1)).toBe(429);
     } finally { await server.close(); }
   });

@@ -232,6 +232,16 @@ describe('a repository\'s open pull requests and issues', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('includes an open pull request older than the list\'s page, read by number', async () => {
+    const recent = Array.from({ length: 50 }, (_, index) => ({ number: 100 + index, branch: `recent-${index}` }));
+    const { service } = polled({ 'octo/repo': { pulls: [...recent, { number: 9, branch: 'older' }, { number: 10, branch: 'gone', state: 'CLOSED' }] } });
+    expect((await service.repository(octo)).others.map(pull => pull.number)).not.toContain(9);
+    expect((await service.repository(octo, { include: 9 })).others.at(-1)).toMatchObject({ number: 9, branch: 'older' });
+    // a closed one, or one already on the page, is not added
+    expect((await service.repository(octo, { include: 10 })).others).toHaveLength(50);
+    expect((await service.repository(octo, { include: 100 })).others).toHaveLength(50);
+  });
+
   it('waits on GitHub only for a repository it never read, and then for that repository alone', async () => {
     const { service, calls } = polled({ ...world, 'acme/other': {} }, { repositories: ['octo/repo', 'acme/other'] });
     await service.branch(octo, 'feature/draft', true);

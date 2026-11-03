@@ -740,11 +740,14 @@ export class GithubService {
    * One repository's open pull requests (the viewer's own, with their checks and issues, apart
    * from others') and first page of open issues. Answers from what the poll read; data older than a
    * minute is refreshed behind the answer, unless the reader waits (`wait`, as before acting on
-   * the list) or the repository was never read.
+   * the list) or the repository was never read. The list holds only the most recently updated
+   * `openPage`; `include` adds that open pull request when it is older than the page.
    */
-  async repository(repository: GithubRepository, { wait = false }: { wait?: boolean } = {}): Promise<RepositoryPullRequests> {
+  async repository(repository: GithubRepository, { wait = false, include }: { wait?: boolean; include?: number } = {}): Promise<RepositoryPullRequests> {
     const entry = await this.listed(repository, { wait });
-    const open = entry.open ?? [];
+    const listed = entry.open ?? [];
+    const extra = include === undefined || listed.some(pull => pull.number === include) ? undefined : (await this.pullEntry(repository, include, { fresh: wait }).catch(() => undefined))?.entry.data;
+    const open = extra?.state === 'open' ? [...listed, { ...extra, conflicts: extra.mergeable === 'conflicting' }] : listed;
     return { own: open.filter(pull => pull.mine).map(choice), others: open.filter(pull => !pull.mine).map(choice), issues: entry.issues ?? [], ...fetched(entry) };
   }
 

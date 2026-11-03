@@ -2134,12 +2134,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   // the same list for the whole repository, with no worktree's checkout overlaid; it asks GitHub, so it shares the branch list's budget
   app.get('/api/projects/:id/switch-prs', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
     controlled(request);
-    const requested = (request.query as { repository?: unknown }).repository;
+    const { repository: requested, pull } = request.query as { repository?: unknown; pull?: unknown };
     // reject malformed upstream repository assertions
     if (requested !== undefined && (typeof requested !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}$/u.test(requested))) return reply.code(400).send({ error: 'invalid repository' });
+    // `pull` names the pull request the dialog opened on, listed even when older than the page
+    if (pull !== undefined && (typeof pull !== 'string' || !/^[1-9]\d{0,9}$/u.test(pull))) return reply.code(400).send({ error: 'invalid pull request' });
     const [owner, name] = typeof requested === 'string' ? requested.split('/') : [];
     const repository = owner === undefined || name === undefined ? undefined : { owner, name };
-    const list = await prSwitch.branchList((request.params as { id: string }).id, repository);
+    const list = await prSwitch.branchList((request.params as { id: string }).id, repository, pull === undefined ? undefined : Number(pull));
     return list === undefined ? reply.code(404).send({ error: 'repository branch list unavailable' }) : list;
   });
   // the Overview's lists from the module's cache; `refresh` (Refresh, Retry) reads GitHub again first

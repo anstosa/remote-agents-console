@@ -611,6 +611,17 @@ describe('pull request switching', () => {
     await expect(service.branchList('absent')).resolves.toBeUndefined();
   });
 
+  it('asks GitHub to include the pull request a dialog opened on or a checkout names, however old', async () => {
+    const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], agents: [], projects: [] }) };
+    const asked: unknown[] = [];
+    const pulls = { repositoryAt: async () => octo, repository: async (_repository: unknown, options: unknown) => { asked.push(options); return { own: [], others: [] }; } };
+    const service = new PullRequestSwitchService(config, discovery as never, pulls as never, branchListingCommand(''));
+
+    await service.branchList('cora', undefined, 2229);
+    await service.fetchForWorktree('cora', 2230);
+    expect(asked).toEqual([{ wait: false, include: 2229 }, { wait: true, include: 2230 }]);
+  });
+
   it('marks a pull request held by its pr-<number> worktree or by an older checkout of the same fork pull request', async () => {
     const forkSha = 'b'.repeat(40);
     const fork = { number: 8, title: 'Fork work', branch: 'main', headSha: forkSha, headOnOrigin: false, draft: false, url: 'https://github.com/octo/repo/pull/8' };
