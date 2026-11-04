@@ -21,7 +21,7 @@ unreadable records prevent startup rather than silently forgetting ownership.
 
 ## Prerequisites
 
-Linux with `/proc`, tmux, Node 22+ (Node 24 is supported), pnpm, a C/C++ build toolchain for the native `argon2` dependency, and an existing agent CLI (Codex by default). Configure each CLI the console launches under [`adapters`](#adapters).
+Linux with `/proc`, tmux 3.5 or newer, Node 22+ (Node 24 is supported), pnpm, a C/C++ build toolchain for the native `argon2` dependency, and an existing agent CLI (Codex by default). Configure each CLI the console launches under [`adapters`](#adapters).
 
 ```bash
 pnpm install

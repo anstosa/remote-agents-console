@@ -57,7 +57,8 @@ request is opened, updated, or reopened, and on manual dispatch. GitHub-hosted
 Ubuntu runners use Node 22 and the pnpm version pinned in `package.json`.
 
 - Lint and typecheck cover both applications.
-- Server tests install and probe tmux, with the shell and native-build tools
+- Server tests install a pinned static tmux 3.7b (Ubuntu's 3.4 is below the
+  supported 3.5) and probe it, with the shell and native-build tools
   needed to run the real-terminal suites instead of silently skipping them, and
   bubblewrap, socat and ripgrep, so the Sandboxed Pi cases run too.
 - Settings script tests run independently of the server suite. `pnpm test`

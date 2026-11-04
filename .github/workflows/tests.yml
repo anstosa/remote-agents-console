@@ -59,7 +59,14 @@ jobs:
       - name: Install and verify terminal prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends g++ make python3 git tmux zsh util-linux bubblewrap socat ripgrep
+          sudo apt-get install --yes --no-install-recommends g++ make python3 git zsh util-linux bubblewrap socat ripgrep
+          # Ubuntu 24.04 ships tmux 3.4, whose command-line run-shell never prints to stdout;
+          # install a pinned static build of the version the console runs against instead
+          curl -fsSL -o "$RUNNER_TEMP/tmux.gz" https://github.com/mjakob-gh/build-static-tmux/releases/download/v3.7b/tmux.linux-amd64.stripped.gz
+          echo "92ac102a1f9b33b21d891a836b4b5b5c8c5d2eeac4bae4dfd34d565bbed598bf  $RUNNER_TEMP/tmux.gz" | sha256sum --check --strict
+          gunzip "$RUNNER_TEMP/tmux.gz"
+          sudo install -m 0755 "$RUNNER_TEMP/tmux" /usr/bin/tmux
+          test "$(tmux -V)" = 'tmux 3.7b'
           tmux -S "$RUNNER_TEMP/test-probe.sock" new-session -d -s probe
           tmux -S "$RUNNER_TEMP/test-probe.sock" kill-server
           # the Pi sandbox's bwrap needs unprivileged user namespaces, which Ubuntu 24.04's
