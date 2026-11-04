@@ -3,7 +3,7 @@ import { resolveConfiguredWorkspace, sameConfiguredWorkspace, type ResolvedWorks
 import { captureReviewComparison } from './diff.js';
 import type { ReviewRunProgress } from '../review-runs/runner.js';
 import type { ReviewTourGenerator } from './generator.js';
-import { publicReviewComparison, ReviewTourError, type PublicReviewComparison, type ReviewComparison, type ReviewTour, type ReviewTourCapability, type ReviewTourInput } from './contracts.js';
+import { publicReviewComparison, reviewScope, ReviewTourError, type PublicReviewComparison, type ReviewComparison, type ReviewTour, type ReviewTourCapability, type ReviewTourInput } from './contracts.js';
 
 // `effort` is the run's requested effort, absent for the configured one
 export type PreparedReviewTour = { resolved: ResolvedWorkspace; comparison: ReviewComparison; effort?: string };
@@ -33,12 +33,12 @@ export class ReviewTourService {
     const generated = await this.generator.generate(prepared.comparison, signal, prepared.effort, progress);
     // preserve caller cancellation
     if (signal.aborted) throw new ReviewTourError('cancelled', true);
-    const current = await captureReviewComparison(prepared.resolved, { scope: prepared.comparison.scope, ...(prepared.comparison.commit === undefined ? {} : { commit: prepared.comparison.commit }), includeTests: prepared.comparison.includeTests, includeDocs: prepared.comparison.includeDocs });
+    const current = await captureReviewComparison(prepared.resolved, { ...reviewScope(prepared.comparison), includeTests: prepared.comparison.includeTests, includeDocs: prepared.comparison.includeDocs });
     // reject stale narration before publication
     if (current.fingerprint !== prepared.comparison.fingerprint || current.branch !== prepared.comparison.branch) throw new ReviewTourError('stale_during_generation', true);
     // reject a moved or removed Worktree before publication
     if (!sameConfiguredWorkspace(this.discovery, prepared.resolved)) throw new ReviewTourError('target_unavailable', true);
-    return { ...generated, scope: prepared.comparison.scope, ...(prepared.comparison.commit === undefined ? {} : { commit: prepared.comparison.commit }), base: prepared.comparison.base, includeTests: prepared.comparison.includeTests, includeDocs: prepared.comparison.includeDocs, fingerprint: prepared.comparison.fingerprint, changes: prepared.comparison.changes };
+    return { ...generated, ...reviewScope(prepared.comparison), base: prepared.comparison.base, includeTests: prepared.comparison.includeTests, includeDocs: prepared.comparison.includeDocs, fingerprint: prepared.comparison.fingerprint, changes: prepared.comparison.changes };
   }
 
   // capture the Worktree's current Comparison without generation

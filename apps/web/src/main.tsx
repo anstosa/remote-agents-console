@@ -44,7 +44,7 @@ import { applyFlyoutMarkers } from './flyout-markers.js';
 import { readNotificationSounds } from './notification-sounds.js';
 import { UpstreamRebaseNotification, type GitUpstreamSummary } from './upstream-rebase.js';
 import { useViewportFlyout } from './viewport-flyout.js';
-import { isReviewTour, ReviewPanelColumn, ReviewTourPanel, type ReviewLaunch, type ReviewPanelSlot, type ReviewScope, type ReviewTarget, type ReviewTour, type ReviewTourIndicator } from './review-tour.js';
+import { isReviewScope, isReviewTour, ReviewPanelColumn, reviewScope, ReviewTourPanel, type ReviewLaunch, type ReviewPanelSlot, type ReviewScope, type ReviewTarget, type ReviewTour, type ReviewTourIndicator } from './review-tour.js';
 import { ReviewStartSheet, reviewTourUnavailableText, type ReviewTourCapability } from './review-start.js';
 import { codeReviewCapability, codeReviewFrom, type CodeReview, type CodeReviewCapability } from './code-review.js';
 import { isReviewJob, type ReviewJob, type ReviewRunLink } from './review-jobs.js';
@@ -169,7 +169,7 @@ type Project = { id: string; implicit?: true; label: string; mode?: 'repository'
 type BranchOption = { name: string; ref: string; remote: boolean; checkedOut: boolean };
 // the fresh facts the Remove dialog decides with (GET /api/worktrees/:id/removal)
 type RemovalFacts = { main: boolean; detached: boolean; locked: boolean; lockedReason?: string; branch?: string; dirtyCount: number; pushed: boolean; merged: boolean; ahead?: number; behind?: number; blockers: string[]; stopsProcesses: string[] };
-type StoredReviewSummary = { worktreeId: string; branch: string; savedAt: string; title: string; scope: ReviewScope; commit?: string; includeTests: boolean; includeDocs: boolean; fingerprint: string };
+type StoredReviewSummary = ReviewScope & { worktreeId: string; branch: string; savedAt: string; title: string; includeTests: boolean; includeDocs: boolean; fingerprint: string };
 // The Review button's state where a review is held. While the review's panel is open in this
 // Worktree, `panel` is its split column and `onMinimize` closes it.
 type ReviewButtonState = ReviewTourIndicator & { onOpen: () => void; panel?: ReactNode };
@@ -234,7 +234,7 @@ const isStoredReviewSummary = (value: unknown): value is StoredReviewSummary => 
   && typeof (value as StoredReviewSummary).branch === 'string'
   && typeof (value as StoredReviewSummary).savedAt === 'string'
   && typeof (value as StoredReviewSummary).title === 'string'
-  && ['working', 'pr', 'commit'].includes((value as StoredReviewSummary).scope)
+  && isReviewScope(value as StoredReviewSummary)
   && typeof (value as StoredReviewSummary).includeTests === 'boolean'
   && typeof (value as StoredReviewSummary).includeDocs === 'boolean'
   && typeof (value as StoredReviewSummary).fingerprint === 'string';
@@ -6514,7 +6514,7 @@ function GitCommitSections({ log, error, uncommitted, collapsed, onToggle, messa
 }
 // render working changes, current pr controls, and repository switchers
 // show repository changes in a content-sized flyout
-function GitStatus({ worktreeId, branch, summary, prSummary, attention, pullRequest, expanded = false, onToggle, onOpenFile, onViewChanges, onViewCommit, onReview, onReviewCommit, review, reviewUnavailable, onSelectTarget, onNewWorktree, onOperationFeedback }: { worktreeId?: string; branch?: string; summary?: GitStatusSummary; prSummary?: GitComparisonSummary; attention?: string; pullRequest?: PullRequestSummary; expanded?: boolean; onToggle?: () => void; onOpenFile: (path: string, mode: CodePanelMode) => void; onViewChanges?: (mode: CodePanelMode) => void; onViewCommit?: (commit: CodePanelCommit) => void; onReview?: (scope: ReviewScope) => void; onReviewCommit?: (commit: CodePanelCommit) => void; review?: ReviewTourIndicator; reviewUnavailable?: string; onSelectTarget?: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+function GitStatus({ worktreeId, branch, summary, prSummary, attention, pullRequest, expanded = false, onToggle, onOpenFile, onViewChanges, onViewCommit, onReview, onReviewCommit, review, reviewUnavailable, onSelectTarget, onNewWorktree, onOperationFeedback }: { worktreeId?: string; branch?: string; summary?: GitStatusSummary; prSummary?: GitComparisonSummary; attention?: string; pullRequest?: PullRequestSummary; expanded?: boolean; onToggle?: () => void; onOpenFile: (path: string, mode: CodePanelMode) => void; onViewChanges?: (mode: CodePanelMode) => void; onViewCommit?: (commit: CodePanelCommit) => void; onReview?: (scope: 'working' | 'pr') => void; onReviewCommit?: (commit: CodePanelCommit) => void; review?: ReviewTourIndicator; reviewUnavailable?: string; onSelectTarget?: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
   const wrapRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
@@ -10786,7 +10786,7 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       // resume the stored Code review, or poll the job still running one
       const storedCodeReview = codeReviewFrom(review.codeReview);
       const initialCodeReview = { ...(storedCodeReview === undefined ? {} : { review: storedCodeReview }), ...(isReviewJob(review.codeReviewJob) ? { job: review.codeReviewJob } : {}) };
-      const launch: ReviewLaunch = { worktreeId: stored.worktreeId, scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), includeTests: tour.includeTests, includeDocs: tour.includeDocs };
+      const launch: ReviewLaunch = { worktreeId: stored.worktreeId, ...reviewScope(tour), includeTests: tour.includeTests, includeDocs: tour.includeDocs };
       // keep the restored review cached but hidden after a newer close-all
       setReviewSessions(current => ({ ...current, [stored.worktreeId]: { launch, start: 0, initialTour: tour, initialCodeReview, minimized: !workspaceOpenStillCurrent(key, generation), indicator: { generating: false, stale: false } } }));
     } catch {

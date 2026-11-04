@@ -67,6 +67,14 @@ describe('review tour contracts', () => {
     // OpenRouter's rolling ids start with `~`
     expect(parseReviewTour({ ...tour, guide: { ...guide, model: 'openrouter/~anthropic/claude-opus-latest' } })?.guide?.model).toBe('openrouter/~anthropic/claude-opus-latest');
   });
+
+  it('loads a stored tour with exactly its scope\'s pinned data', () => {
+    const tour = { title: 'One commit', overview: 'Walk through one commit.', steps: [{ id: 'commit', title: 'The commit', explanation: 'It changes the feature.', changeIds: [implementationChange.id] }], base: 'aaaaaaa^', includeTests: false, includeDocs: false, fingerprint: 'fingerprint-1234567890', changes: [implementationChange] };
+    const commit = 'a'.repeat(40);
+    expect(parseReviewTour({ ...tour, scope: 'commit', commit })).toEqual({ ...tour, scope: 'commit', commit });
+    expect(parseReviewTour({ ...tour, scope: 'commit' })).toBeUndefined();
+    expect(parseReviewTour({ ...tour, scope: 'working', commit })).toBeUndefined();
+  });
 });
 
 describe('review tour jobs', () => {

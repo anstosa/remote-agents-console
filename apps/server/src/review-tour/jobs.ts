@@ -3,7 +3,7 @@ import { sameCodeReviewOptions, type CodeReviewOptions } from '../code-review/co
 import type { AskJobs } from '../asks/jobs.js';
 import type { CodeReviewJobs } from '../code-review/jobs.js';
 import type { ReviewRunInfo, ReviewRunProgress } from '../review-runs/runner.js';
-import { publicReviewComparison, REVIEW_JOB_POLL_MS, REVIEW_JOB_TTL_MS, ReviewTourError, type PublicReviewComparison, type ReviewErrorCode, type ReviewTour, type ReviewTourInput } from './contracts.js';
+import { publicReviewComparison, REVIEW_JOB_POLL_MS, REVIEW_JOB_TTL_MS, ReviewTourError, sameReviewScope, type PublicReviewComparison, type ReviewErrorCode, type ReviewTour, type ReviewTourInput } from './contracts.js';
 import type { PreparedReviewTour, ReviewTourService } from './service.js';
 import type { ReviewTourStore } from './store.js';
 
@@ -254,6 +254,6 @@ export class ReviewTourJobs {
 
   // compare one fixed generation request
   private sameInput(left: ReviewTourInput, right: ReviewTourInput): boolean {
-    return left.scope === right.scope && left.commit === right.commit && left.includeTests === right.includeTests && left.includeDocs === right.includeDocs && left.effort === right.effort;
+    return sameReviewScope(left, right) && left.includeTests === right.includeTests && left.includeDocs === right.includeDocs && left.effort === right.effort;
   }
 }

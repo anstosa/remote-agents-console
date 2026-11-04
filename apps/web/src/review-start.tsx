@@ -1,7 +1,7 @@
 import { createPortal } from 'react-dom';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { PanelIcon, panelIcons } from './panel-header.js';
-import type { ReviewLaunch, ReviewScope, ReviewTarget } from './review-tour.js';
+import type { ReviewLaunch, ReviewTarget } from './review-tour.js';
 import { initialEffort, initialPreset, maxCodeReviewFocus, saveCodeReviewChoice, type CodeReviewCapability, type CodeReviewOptions } from './code-review.js';
 
 // The dashboard's `reviewTour`: whether the tour's agent can run, which agent narrates, and the
@@ -125,7 +125,8 @@ type MergeBaseChoices = { branch?: string; configured?: string; branches: string
 // which outranks a pull request's base, before launching. Cancel saves nothing.
 // Tests, Docs and the AI Code review open as last started; `codeReview` absent hides the review.
 export function ReviewStartSheet({ target, prBase, request, tour, codeReview, onStart, onCancel }: { target: ReviewTarget; prBase?: string; request: (url: string, init?: RequestInit) => Promise<Response>; tour?: ReviewTourCapability; codeReview?: CodeReviewCapability; onStart: (launch: ReviewLaunch) => void; onCancel: () => void }) {
-  const [scope, setScope] = useState<ReviewScope>(target.scope === 'commit' ? 'commit' : target.scope === 'pr' && prBase !== undefined ? 'pr' : 'working');
+  // a commit target fixes its scope; this is the operator's pick otherwise
+  const [scope, setScope] = useState<'working' | 'pr'>(target.scope === 'pr' && prBase !== undefined ? 'pr' : 'working');
   // a just-launched Agent's PR base can arrive after the sheet opens; take the asked-for All PR then
   const awaitingPrBase = useRef(target.scope === 'pr' && prBase === undefined);
   useEffect(() => {
@@ -134,7 +135,7 @@ export function ReviewStartSheet({ target, prBase, request, tour, codeReview, on
     setScope(current => current === 'working' ? 'pr' : current);
   }, [prBase]);
   // a scope the operator picks outranks the late switch to All PR
-  const chooseScope = (next: ReviewScope) => {
+  const chooseScope = (next: 'working' | 'pr') => {
     awaitingPrBase.current = false;
     setScope(next);
   };
@@ -194,10 +195,10 @@ export function ReviewStartSheet({ target, prBase, request, tour, codeReview, on
     if (reviewOptions !== undefined) choice.remember();
     // a hidden review box keeps its remembered state
     saveStartChecks({ tests: includeTests, docs: includeDocs, codeReview: codeReview === undefined ? remembered.codeReview : reviewEnabled });
-    onStart({ worktreeId: target.worktreeId, scope, ...(scope === 'commit' && target.commit !== undefined ? { commit: target.commit } : {}), includeTests, includeDocs, ...(tourEffort === '' ? {} : { effort: tourEffort }), ...(reviewOptions === undefined ? {} : { codeReview: reviewOptions }) });
+    onStart({ worktreeId: target.worktreeId, ...(target.scope === 'commit' ? { scope: 'commit', commit: target.commit } : { scope }), includeTests, includeDocs, ...(tourEffort === '' ? {} : { effort: tourEffort }), ...(reviewOptions === undefined ? {} : { codeReview: reviewOptions }) });
   };
   return <StartSheetFrame title="Start guided review" eyebrow="Guided review" submitLabel="Start" submitDisabled={(reviewEnabled && reviewOptions === undefined) || (scope === 'pr' && !prReady)} pending={saving} {...(saveError === undefined ? {} : { error: saveError })} onSubmit={() => void start()} onCancel={onCancel}>
-    {scope === 'commit' ? <div className="review-start-row"><span>Commit</span><span className="review-start-commit" title={target.commit}><code>{target.commit?.slice(0, 7)}</code>{target.commitSubject}</span></div> : <div className="review-start-row"><span id="review-start-scope">Scope</span><span className="git-status-mode" role="group" aria-labelledby="review-start-scope"><button type="button" aria-pressed={scope === 'working'} onClick={() => chooseScope('working')}>Working</button><button type="button" aria-pressed={scope === 'pr'} disabled={prBase === undefined && !pickable} title={prBase === undefined ? pickable ? 'Pick a base to compare with' : 'Merge target unavailable' : `Compare with ${prBase}`} onClick={() => chooseScope('pr')}>All PR</button></span></div>}
+    {target.scope === 'commit' ? <div className="review-start-row"><span>Commit</span><span className="review-start-commit" title={target.commit}><code>{target.commit.slice(0, 7)}</code>{target.commitSubject}</span></div> : <div className="review-start-row"><span id="review-start-scope">Scope</span><span className="git-status-mode" role="group" aria-labelledby="review-start-scope"><button type="button" aria-pressed={scope === 'working'} onClick={() => chooseScope('working')}>Working</button><button type="button" aria-pressed={scope === 'pr'} disabled={prBase === undefined && !pickable} title={prBase === undefined ? pickable ? 'Pick a base to compare with' : 'Merge target unavailable' : `Compare with ${prBase}`} onClick={() => chooseScope('pr')}>All PR</button></span></div>}
     {scope === 'pr' && <div className={`review-start-base${choices === undefined ? ' progress-border progress-blue progress-loading' : ''}`} aria-busy={choices === undefined || undefined}>{choices === undefined && <span className="update-progress-ring" aria-hidden="true" />}<label htmlFor="review-start-base">Compare with</label>{pickable
       ? <select id="review-start-base" value={base} aria-describedby={baseNote === undefined ? undefined : 'review-start-base-note'} onChange={event => setBase(event.target.value)}><option value="">{loaded?.configured === undefined && prBase !== undefined ? `Default (${prBase})` : 'Default'}</option>{baseOptions.map(name => <option key={name} value={name}>origin/{name}</option>)}</select>
       : <select id="review-start-base" value="" disabled aria-describedby="review-start-base-note"><option value="">{prBase ?? 'No base'}</option></select>}{baseNote !== undefined && <p id="review-start-base-note" className="review-start-base-note">{baseNote}</p>}</div>}

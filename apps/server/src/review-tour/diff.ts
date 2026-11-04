@@ -3,7 +3,7 @@ import { capturePatch, digest, resolveCommitComparison, resolveComparison, synth
 import type { ComparisonKind } from '../git/comparison.js';
 import type { GitStatusChange } from '../domain/models.js';
 import type { ResolvedWorkspace } from '../workspaces/resolver.js';
-import { MAX_REVIEW_CHANGES, MAX_REVIEW_DIFF_BYTES, MAX_REVIEW_FILES, MAX_REVIEW_FILE_BYTES, ReviewTourError, type ReviewChange, type ReviewChangeKind, type ReviewComparison, type ReviewTourInput } from './contracts.js';
+import { MAX_REVIEW_CHANGES, MAX_REVIEW_DIFF_BYTES, MAX_REVIEW_FILES, MAX_REVIEW_FILE_BYTES, ReviewTourError, reviewScope, type ReviewChange, type ReviewChangeKind, type ReviewComparison, type ReviewTourInput } from './contracts.js';
 
 // split one file patch into trusted atomic units
 function atomicPatches(patch: string, fallbackKind: ReviewChangeKind): Array<{ patch: string; kind: ReviewChangeKind; oldStart?: number; oldLines?: number; newStart?: number; newLines?: number }> {
@@ -32,7 +32,7 @@ async function comparison(resolved: ResolvedWorkspace, input: ReviewTourInput): 
   // the dashboard's resolved merge target is the only PR base; a working snapshot needs none
   const preferred = resolved.prBase;
   const candidates = kind === 'pr' && preferred !== undefined ? [preferred] : [];
-  const result = input.scope === 'commit' ? await resolveCommitComparison(resolved.workspace, input.commit ?? '') : await resolveComparison(resolved.workspace, kind, candidates);
+  const result = input.scope === 'commit' ? await resolveCommitComparison(resolved.workspace, input.commit) : await resolveComparison(resolved.workspace, kind, candidates);
   // map the module's failure reasons onto the tour's typed errors
   if (!result.ok) throw new ReviewTourError(result.reason === 'conflicted' ? 'conflicted_unavailable' : 'scope_unavailable', true);
   return { base: result.comparison.base, gitBase: result.comparison.gitBase, ...(result.comparison.head === undefined ? {} : { head: result.comparison.head }), changes: result.comparison.changes };
@@ -78,6 +78,6 @@ export async function captureReviewComparison(resolved: ResolvedWorkspace, input
       changes.push({ id: `chg_${digest(key).slice(0, 28)}`, file: change.path, ...(change.originalPath === undefined ? {} : { originalFile: change.originalPath }), category, kind: unit.kind, ...(unit.oldStart === undefined ? {} : { oldStart: unit.oldStart, oldLines: unit.oldLines, newStart: unit.newStart, newLines: unit.newLines }), patch: unit.patch });
     }
   }
-  const fingerprint = digest(JSON.stringify({ scope: input.scope, commit: input.commit, base: current.base, gitBase: current.gitBase, includeTests: input.includeTests, includeDocs: input.includeDocs, changes }));
-  return { worktreeId: resolved.worktree.id, workspace: resolved.workspace, ...(resolved.branch === undefined ? {} : { branch: resolved.branch }), scope: input.scope, ...(input.commit === undefined ? {} : { commit: input.commit }), base: current.base, includeTests: input.includeTests, includeDocs: input.includeDocs, fingerprint, changes };
+  const fingerprint = digest(JSON.stringify({ ...reviewScope(input), base: current.base, gitBase: current.gitBase, includeTests: input.includeTests, includeDocs: input.includeDocs, changes }));
+  return { worktreeId: resolved.worktree.id, workspace: resolved.workspace, ...(resolved.branch === undefined ? {} : { branch: resolved.branch }), ...reviewScope(input), base: current.base, includeTests: input.includeTests, includeDocs: input.includeDocs, fingerprint, changes };
 }

@@ -86,7 +86,7 @@ import { ReviewTourService } from './review-tour/service.js';
 import { parsePullRequestReviewInput, PR_REVIEW_REQUEST_BODY_BYTES, PullRequestReviewError, PullRequestReviewService } from './review-tour/pr-review.js';
 import { ReviewTourJobs, startedReviewJob } from './review-tour/jobs.js';
 import { ReviewTourStore } from './review-tour/store.js';
-import { INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS, parseReviewRequestId, parseReviewTourInput, REVIEW_GENERATION_TIMEOUT_MS, REVIEW_REQUEST_BODY_BYTES, ReviewTourError, type ReviewErrorCode, type ReviewTourInput, type StoredReviewTourSummary } from './review-tour/contracts.js';
+import { INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS, parseReviewRequestId, parseReviewTourInput, REVIEW_GENERATION_TIMEOUT_MS, REVIEW_REQUEST_BODY_BYTES, reviewScope, ReviewTourError, type ReviewErrorCode, type ReviewTourInput, type StoredReviewTourSummary } from './review-tour/contracts.js';
 import { configuredWorktreeForWorkspace, projectIdOf, worktreeBranch, worktreeById, worktreeHostRoot, worktreeMatchesWorkspace, worktreePathOf, worktreePrBase, worktreeWireId } from './workspaces/resolver.js';
 import { previewFileBytes, WorkspaceFileService } from './workspace-files/service.js';
 import { ComparisonService, type ComparisonScope } from './git/comparison-service.js';
@@ -2795,7 +2795,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     const tour = (await reviewStore.current(worktreeId, branch))?.tour;
     const sameScope = typeof scope === 'object' ? tour?.scope === 'commit' && tour.commit === scope.commit : tour?.scope === scope;
     if (tour?.guide === undefined || !sameScope || !tour.changes.some(change => change.file === file)) return undefined;
-    const current = await reviewTours.current(worktreeId, { scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), includeTests: tour.includeTests, includeDocs: tour.includeDocs }).catch(() => undefined);
+    const current = await reviewTours.current(worktreeId, { ...reviewScope(tour), includeTests: tour.includeTests, includeDocs: tour.includeDocs }).catch(() => undefined);
     return current?.fingerprint === tour.fingerprint ? tour.guide : undefined;
   };
   // ask about lines of a Code panel's Comparison (the query's `kind`, and `commit`): a job polled to its answer

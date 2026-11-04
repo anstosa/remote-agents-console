@@ -90,6 +90,8 @@ describe('code review requests', () => {
     expect(parseReviewTourStart({ scope: 'pr', includeTests: false, includeDocs: false, codeReview: null })).toBeUndefined();
     expect(parseCodeReviewAdd({ scope: 'working', includeTests: true, includeDocs: false, fingerprint: 'fingerprint-1234567890', preset: 'correctness', effort: 'max' })).toEqual({ input: { scope: 'working', includeTests: true, includeDocs: false }, fingerprint: 'fingerprint-1234567890', options: { preset: 'correctness', effort: 'max' } });
     expect(parseCodeReviewAdd({ scope: 'working', includeTests: true, includeDocs: false, preset: 'correctness' })).toBeUndefined();
+    expect(parseCodeReviewAdd({ scope: 'commit', commit: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'fingerprint-1234567890', preset: 'correctness' })).toEqual({ input: { scope: 'commit', commit: 'b'.repeat(40), includeTests: false, includeDocs: false }, fingerprint: 'fingerprint-1234567890', options: { preset: 'correctness' } });
+    expect(parseCodeReviewAdd({ scope: 'pr', commit: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'fingerprint-1234567890', preset: 'correctness' })).toBeUndefined();
     expect(sameCodeReviewOptions({ preset: 'a', focus: 'x' }, { preset: 'a', focus: 'x' })).toBe(true);
     expect(sameCodeReviewOptions({ preset: 'a' }, { preset: 'a', effort: 'high' })).toBe(false);
     expect(sameCodeReviewOptions(undefined, undefined)).toBe(true);

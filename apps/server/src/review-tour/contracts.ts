@@ -19,8 +19,8 @@ export const INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS = 600_000;
 export const REVIEW_JOB_TTL_MS = 900_000;
 export const REVIEW_JOB_POLL_MS = 1_000;
 
-// `commit` narrates one commit of HEAD's history, named by the Comparison's `commit`
-export type ReviewScope = 'working' | 'pr' | 'commit';
+// A Comparison's scope with the data it pins: `commit` narrates one commit of HEAD's history
+export type ReviewScope = { scope: 'working' } | { scope: 'pr' } | { scope: 'commit'; commit: string };
 export type ReviewChangeKind = 'hunk' | 'binary' | 'rename' | 'metadata' | 'untracked';
 export type ReviewChange = {
   id: string;
@@ -34,12 +34,10 @@ export type ReviewChange = {
   newLines?: number;
   patch: string;
 };
-export type ReviewComparison = {
+export type ReviewComparison = ReviewScope & {
   worktreeId: string;
   workspace: string;
   branch?: string;
-  scope: ReviewScope;
-  commit?: string;
   base: string;
   includeTests: boolean;
   includeDocs: boolean;
@@ -52,26 +50,42 @@ export type GeneratedReviewTour = { title: string; overview: string; steps: Gene
 // about the tour's lines resumes that conversation (ADR 0013)
 export type TourGuide = { agent: ReviewAgentKind; conversation: string; model?: string; effort?: string };
 // `guide` is absent for a tour whose run kept no conversation
-export type ReviewTour = GeneratedReviewTour & Pick<ReviewComparison, 'scope' | 'commit' | 'base' | 'includeTests' | 'includeDocs' | 'fingerprint' | 'changes'> & { guide?: TourGuide };
+export type ReviewTour = GeneratedReviewTour & ReviewScope & Pick<ReviewComparison, 'base' | 'includeTests' | 'includeDocs' | 'fingerprint' | 'changes'> & { guide?: TourGuide };
 // `effort` picks one of the tour agent's levels for this run; absent, the configured one applies
-export type ReviewTourInput = { scope: ReviewScope; commit?: string; includeTests: boolean; includeDocs: boolean; effort?: string };
+export type ReviewTourInput = ReviewScope & { includeTests: boolean; includeDocs: boolean; effort?: string };
 // whether the tour's configured agent can run, with its configured effort and every level it accepts
 export type ReviewTourCapability = ReviewRunCapability & { agent: ReviewAgentKind; effort?: string; efforts: string[] };
 export type StoredReviewTour = { worktreeId: string; branch: string; savedAt: string; tour: ReviewTour };
 // `codeReview` reports the tour's Code review (running, ready with `findings` counted, or failed)
-export type StoredReviewTourSummary = Pick<StoredReviewTour, 'worktreeId' | 'branch' | 'savedAt'> & Pick<ReviewTour, 'title' | 'scope' | 'commit' | 'includeTests' | 'includeDocs' | 'fingerprint'> & { codeReview?: 'running' | 'ready' | 'failed'; findings?: number };
+export type StoredReviewTourSummary = Pick<StoredReviewTour, 'worktreeId' | 'branch' | 'savedAt'> & ReviewScope & Pick<ReviewTour, 'title' | 'includeTests' | 'includeDocs' | 'fingerprint'> & { codeReview?: 'running' | 'ready' | 'failed'; findings?: number };
 export type ReviewErrorCode = 'invalid_request' | 'capability_unavailable' | 'authentication_required' | 'target_unavailable' | 'configured_worktree_required' | 'scope_unavailable' | 'conflicted_unavailable' | 'too_large' | 'generation_failed' | 'malformed_result' | 'generation_rejected' | 'timed_out' | 'cancelled' | 'stale_during_generation' | 'busy' | 'agent_busy' | 'conversation_unavailable';
-export type PublicReviewComparison = Pick<ReviewComparison, 'scope' | 'commit' | 'base' | 'fingerprint' | 'includeTests' | 'includeDocs'>;
+export type PublicReviewComparison = ReviewScope & Pick<ReviewComparison, 'base' | 'fingerprint' | 'includeTests' | 'includeDocs'>;
 
 export class ReviewTourError extends Error {
   // retain typed review failures
   constructor(public readonly code: ReviewErrorCode, public readonly retryable: boolean) { super(code); }
 }
 
-// a Comparison's scope and, for exactly the commit scope, the full object id it narrates
-export const reviewScopeShape = { scope: z.enum(['working', 'pr', 'commit']), commit: z.string().regex(objectId).optional() };
-export const commitMatchesScope = (value: { scope: ReviewScope; commit?: string }) => (value.scope === 'commit') === (value.commit !== undefined);
-const inputSchema = z.object({ ...reviewScopeShape, includeTests: z.boolean(), includeDocs: z.boolean(), effort: z.string().min(1).max(20).optional() }).strict().refine(commitMatchesScope);
+// `fields` once per scope, each case strict with exactly its scope's pinned data
+export function scopedSchema<T extends z.ZodRawShape>(fields: z.ZodObject<T, 'strict'>) {
+  return z.discriminatedUnion('scope', [
+    fields.extend({ scope: z.literal('working') }),
+    fields.extend({ scope: z.literal('pr') }),
+    fields.extend({ scope: z.literal('commit'), commit: z.string().regex(objectId) })
+  ]);
+}
+
+// only a value's scope and the data that scope pins
+export function reviewScope(value: ReviewScope): ReviewScope {
+  return value.scope === 'commit' ? { scope: 'commit', commit: value.commit } : { scope: value.scope };
+}
+
+// whether two values name the same scope with the same pinned data
+export function sameReviewScope(left: ReviewScope, right: ReviewScope): boolean {
+  return left.scope === 'commit' ? right.scope === 'commit' && left.commit === right.commit : left.scope === right.scope;
+}
+
+const inputSchema = scopedSchema(z.object({ includeTests: z.boolean(), includeDocs: z.boolean(), effort: z.string().min(1).max(20).optional() }).strict());
 const requestIdSchema = z.string().min(16).max(128).regex(/^[A-Za-z0-9_-]+$/u);
 const generatedStepSchema = z.object({ id: z.string().min(1).max(80), title: z.string().trim().min(1).max(240), explanation: z.string().trim().min(1).max(4_000), changeIds: z.array(z.string().min(8).max(100)).min(1).max(MAX_REVIEW_CHANGES) }).strict();
 const generatedTourSchema = z.object({ title: z.string().trim().min(1).max(240), overview: z.string().trim().min(1).max(2_000), steps: z.array(generatedStepSchema).min(1).max(MAX_REVIEW_CHANGES) }).strict();
@@ -82,7 +96,7 @@ export function parseTourGuide(value: unknown): TourGuide | undefined {
   const parsed = guideSchema.safeParse(value);
   return parsed.success ? parsed.data as TourGuide : undefined;
 }
-const reviewTourSchema = generatedTourSchema.extend({ ...reviewScopeShape, base: z.string().min(1).max(4_096), includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), changes: z.array(reviewChangeSchema).min(1).max(MAX_REVIEW_CHANGES), guide: guideSchema.optional() }).strict().refine(commitMatchesScope);
+const reviewTourSchema = scopedSchema(generatedTourSchema.extend({ base: z.string().min(1).max(4_096), includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), changes: z.array(reviewChangeSchema).min(1).max(MAX_REVIEW_CHANGES), guide: guideSchema.optional() }).strict());
 const prohibitedPrefix = /^(?:finding|findings|warning|warnings|issue|issues|recommendation|recommendations|severity|verdict|approval|approved|rejection|rejected)\s*[:\-–—]/iu;
 
 // parse the fixed review request
@@ -156,12 +170,12 @@ export function parseReviewTour(value: unknown): ReviewTour | undefined {
   if (patchBytes > MAX_REVIEW_DIFF_BYTES) return undefined;
   const generated = parseGeneratedReviewTour({ title: tour.title, overview: tour.overview, steps: tour.steps }, tour.changes);
   // retain only exact change assignments
-  return generated === undefined ? undefined : { ...generated, scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), base: tour.base, includeTests: tour.includeTests, includeDocs: tour.includeDocs, fingerprint: tour.fingerprint, changes: tour.changes, ...(tour.guide === undefined ? {} : { guide: tour.guide as TourGuide }) };
+  return generated === undefined ? undefined : { ...generated, ...reviewScope(tour), base: tour.base, includeTests: tour.includeTests, includeDocs: tour.includeDocs, fingerprint: tour.fingerprint, changes: tour.changes, ...(tour.guide === undefined ? {} : { guide: tour.guide as TourGuide }) };
 }
 
 // expose only Comparison identity fields
 export function publicReviewComparison(comparison: ReviewComparison): PublicReviewComparison {
-  return { scope: comparison.scope, ...(comparison.commit === undefined ? {} : { commit: comparison.commit }), base: comparison.base, fingerprint: comparison.fingerprint, includeTests: comparison.includeTests, includeDocs: comparison.includeDocs };
+  return { ...reviewScope(comparison), base: comparison.base, fingerprint: comparison.fingerprint, includeTests: comparison.includeTests, includeDocs: comparison.includeDocs };
 }
 
 export const generatedReviewTourJsonSchema = {

@@ -7,7 +7,7 @@ import { developerFailure, developerSuccess, type DeveloperResult } from './deve
 import type { AgentToolName, AgentToolPorts } from './agent-tools.js';
 import { digest, type IntegrationPolicyService, type LifecycleCommandRecord } from '../policy/service.js';
 import type { ReviewTourService, PreparedReviewTour } from '../../review-tour/service.js';
-import { ReviewTourError, type ReviewTour, type ReviewTourInput } from '../../review-tour/contracts.js';
+import { ReviewTourError, reviewScope, type ReviewScope, type ReviewTour, type ReviewTourInput } from '../../review-tour/contracts.js';
 import { startedReviewJob, type ReviewTourJobs } from '../../review-tour/jobs.js';
 import type { ReviewTourStore } from '../../review-tour/store.js';
 import type { CodeReviewJobs, StoredCodeReviewJob } from '../../code-review/jobs.js';
@@ -243,9 +243,14 @@ function pendingJob(job: { id: string; startedAt: number; expiresAt: number }, s
   return { job_id: job.id, state: 'pending', status_tool: statusTool, started_at: new Date(job.startedAt).toISOString(), expires_at: new Date(job.expiresAt).toISOString(), retry_after_ms: 1_000, ...(run === undefined ? {} : { run: { agent_id: run.agentId, needs_input: run.needsInput } }) };
 }
 
+// MCP names only the working, pr, and commit scopes, which the tool schemas already checked
+function mcpReviewScope(scope: unknown, commit: unknown): ReviewScope {
+  return scope === 'commit' ? { scope: 'commit', commit: commit as string } : { scope: scope as 'working' | 'pr' };
+}
+
 // project the public comparison arm without source-only fields
 function publicReviewComparison(comparison: PreparedReviewTour['comparison']): Record<string, unknown> {
-  return { scope: comparison.scope, ...(comparison.commit === undefined ? {} : { commit: comparison.commit }), base: comparison.base, fingerprint: comparison.fingerprint, include_tests: comparison.includeTests, include_docs: comparison.includeDocs };
+  return { scope: comparison.scope, ...(comparison.scope === 'commit' ? { commit: comparison.commit } : {}), base: comparison.base, fingerprint: comparison.fingerprint, include_tests: comparison.includeTests, include_docs: comparison.includeDocs };
 }
 
 // project one bounded tour result page
@@ -253,7 +258,7 @@ function tourResult(source: Record<string, unknown>, tour: ReviewTour, cursor: u
   const rows = tour.steps.map(step => ({ id: step.id, title: step.title, explanation: redactIntegrationText(step.explanation).slice(0, 4_000), change_ids: step.changeIds.slice(0, 100), change_ids_total: step.changeIds.length, change_ids_truncated: step.changeIds.length > 100 }));
   const paged = page(rows, cursor, Math.min(typeof limit === 'number' ? limit : 20, 20));
   if (paged === undefined) return undefined;
-  return { ...source, kind: 'tour', fingerprint: tour.fingerprint, scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), base: tour.base, include_tests: tour.includeTests, include_docs: tour.includeDocs, title: tour.title, overview: redactIntegrationText(tour.overview).slice(0, 2_000), items: paged.items, total_items: rows.length, ...(paged.next_cursor === undefined ? {} : { next_cursor: paged.next_cursor }), truncated: paged.truncated };
+  return { ...source, kind: 'tour', fingerprint: tour.fingerprint, scope: tour.scope, ...(tour.scope === 'commit' ? { commit: tour.commit } : {}), base: tour.base, include_tests: tour.includeTests, include_docs: tour.includeDocs, title: tour.title, overview: redactIntegrationText(tour.overview).slice(0, 2_000), items: paged.items, total_items: rows.length, ...(paged.next_cursor === undefined ? {} : { next_cursor: paged.next_cursor }), truncated: paged.truncated };
 }
 
 // project one bounded code-review result page
@@ -292,7 +297,7 @@ function askJobView(job: ReturnType<AskJobs['get']> | GeneralAskJob): Record<str
 // build review-only context without raw patches or private conversations
 function storedReviewContext(tour: ReviewTour, codeReview?: CodeReview): string {
   const serialized = JSON.stringify({
-    tour: { title: tour.title, overview: tour.overview, scope: tour.scope, ...(tour.commit === undefined ? {} : { commit: tour.commit }), base: tour.base, steps: tour.steps },
+    tour: { title: tour.title, overview: tour.overview, scope: tour.scope, ...(tour.scope === 'commit' ? { commit: tour.commit } : {}), base: tour.base, steps: tour.steps },
     ...(codeReview === undefined ? {} : { code_review: { preset: codeReview.preset, ...(codeReview.effort === undefined ? {} : { effort: codeReview.effort }), findings: codeReview.findings, general: codeReview.general } })
   });
   return boundedText(serialized, 200_000).text ?? '';
@@ -300,7 +305,7 @@ function storedReviewContext(tour: ReviewTour, codeReview?: CodeReview): string 
 
 // build bounded whole-comparison context for an unanchored general question
 function comparisonAskContext(comparison: PreparedReviewTour['comparison']): string {
-  const serialized = JSON.stringify({ scope: comparison.scope, ...(comparison.commit === undefined ? {} : { commit: comparison.commit }), base: comparison.base, fingerprint: comparison.fingerprint, changes: comparison.changes.map(change => ({ id: change.id, file: change.file, category: change.category, kind: change.kind, patch: change.patch })) });
+  const serialized = JSON.stringify({ scope: comparison.scope, ...(comparison.scope === 'commit' ? { commit: comparison.commit } : {}), base: comparison.base, fingerprint: comparison.fingerprint, changes: comparison.changes.map(change => ({ id: change.id, file: change.file, category: change.category, kind: change.kind, patch: change.patch })) });
   return boundedText(serialized, 200_000).text ?? '';
 }
 
@@ -483,7 +488,7 @@ export function createAgentOperations(deps: AgentOperationDependencies): AgentTo
       const resolved = await deps.resolveAgent(principal, input.agent_id as string, 'mutate');
       if (resolved?.worktree === undefined) return developerFailure('not_found', 'Configured worktree not found.');
       if (input.preset !== undefined && input.preset !== 'tour') return developerFailure('invalid_request', 'The selected Review Tour preset is unavailable.');
-      const reviewInput: ReviewTourInput = { scope: input.scope as ReviewTourInput['scope'], ...(typeof input.commit === 'string' ? { commit: input.commit } : {}), includeTests: true, includeDocs: true };
+      const reviewInput: ReviewTourInput = { ...mcpReviewScope(input.scope, input.commit), includeTests: true, includeDocs: true };
       try {
         const prepared = await review.tours.prepare(resolved.worktree.id, reviewInput);
         if (prepared.comparison.fingerprint !== input.fingerprint) return developerFailure('stale_during_generation', 'The comparison changed before review start.', true);
@@ -501,7 +506,7 @@ export function createAgentOperations(deps: AgentOperationDependencies): AgentTo
     direct.start_code_review = async (input, principal) => {
       const resolved = await deps.resolveAgent(principal, input.agent_id as string, 'mutate');
       if (resolved?.worktree === undefined) return developerFailure('not_found', 'Configured worktree not found.');
-      const reviewInput: ReviewTourInput = { scope: input.scope as ReviewTourInput['scope'], ...(typeof input.commit === 'string' ? { commit: input.commit } : {}), includeTests: input.include_tests as boolean, includeDocs: input.include_docs as boolean };
+      const reviewInput: ReviewTourInput = { ...mcpReviewScope(input.scope, input.commit), includeTests: input.include_tests as boolean, includeDocs: input.include_docs as boolean };
       try {
         const [prepared, capability] = await Promise.all([review.tours.prepare(resolved.worktree.id, reviewInput), review.codeJobs.capability()]);
         if (prepared.comparison.fingerprint !== input.fingerprint) return developerFailure('stale_during_generation', 'The comparison changed before review start.', true);
@@ -559,7 +564,7 @@ export function createAgentOperations(deps: AgentOperationDependencies): AgentTo
           if (branch === undefined) return undefined;
           const stored = await review.store.current(worktree.id, branch);
           if (stored === undefined || stored.tour.fingerprint !== handle.fingerprint) return undefined;
-          const current = await review.tours.current(worktree.id, { scope: stored.tour.scope, ...(stored.tour.commit === undefined ? {} : { commit: stored.tour.commit }), includeTests: stored.tour.includeTests, includeDocs: stored.tour.includeDocs }).catch(() => undefined);
+          const current = await review.tours.current(worktree.id, { ...reviewScope(stored.tour), includeTests: stored.tour.includeTests, includeDocs: stored.tour.includeDocs }).catch(() => undefined);
           if (current?.fingerprint !== handle.fingerprint) return undefined;
           const code = await review.store.codeReview(worktree.id, stored.branch, stored.tour.fingerprint);
           return { worktreeId: worktree.id, workspace: worktree.identity, label: 'Stored review', context: storedReviewContext(stored.tour, code) };
@@ -572,9 +577,8 @@ export function createAgentOperations(deps: AgentOperationDependencies): AgentTo
     direct.ask_comparison = async (input, principal) => {
       const resolved = await deps.resolveAgent(principal, input.agent_id as string, 'mutate');
       if (resolved?.worktree === undefined) return developerFailure('not_found', 'Configured worktree not found.');
-      const scope = input.mode === 'pull_request' ? 'pr' : input.mode as ReviewTourInput['scope'];
       try {
-        const comparison = await review.tours.current(resolved.worktree.id, { scope, ...(typeof input.commit === 'string' ? { commit: input.commit } : {}), includeTests: true, includeDocs: true });
+        const comparison = await review.tours.current(resolved.worktree.id, { ...mcpReviewScope(input.mode === 'pull_request' ? 'pr' : input.mode, input.commit), includeTests: true, includeDocs: true });
         const job = await review.generalAsks.askComparison(principalKey(principal), { worktreeId: resolved.worktree.id, workspace: resolved.worktree.identity, label: 'Comparison', context: comparisonAskContext(comparison) }, input.question as string);
         return developerSuccess(pendingJob(job, 'get_ask_job', job.state.kind === 'pending' ? job.state.run : undefined));
       } catch (error) {

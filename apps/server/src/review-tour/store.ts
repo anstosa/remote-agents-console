@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { MAX_ASK_THREADS, MAX_ASK_TURNS, parseAskThread, type AskThread, type AskTurn } from '../asks/contracts.js';
 import { parseCodeReview, type CodeReview } from '../code-review/contracts.js';
-import { parseReviewTour, type ReviewTour, type StoredReviewTour, type StoredReviewTourSummary } from './contracts.js';
+import { parseReviewTour, reviewScope, type ReviewTour, type StoredReviewTour, type StoredReviewTourSummary } from './contracts.js';
 
 type StoredReviews = Record<string, StoredReviewTour>;
 // a completed Code review, kept beside (not inside) the tour record: it may finish before its tour
@@ -71,7 +71,7 @@ function threadApplies(thread: Pick<AskThread, 'target' | 'kind' | 'conversation
 
 // copy a safe dashboard summary, counting a joined Code review's findings
 function summary(stored: StoredReviewTour, codeReview: CodeReview | undefined): StoredReviewTourSummary {
-  return { worktreeId: stored.worktreeId, branch: stored.branch, savedAt: stored.savedAt, title: stored.tour.title, scope: stored.tour.scope, ...(stored.tour.commit === undefined ? {} : { commit: stored.tour.commit }), includeTests: stored.tour.includeTests, includeDocs: stored.tour.includeDocs, fingerprint: stored.tour.fingerprint, ...(codeReview === undefined ? {} : { codeReview: 'ready' as const, findings: codeReview.findings.length + codeReview.general.length }) };
+  return { worktreeId: stored.worktreeId, branch: stored.branch, savedAt: stored.savedAt, title: stored.tour.title, ...reviewScope(stored.tour), includeTests: stored.tour.includeTests, includeDocs: stored.tour.includeDocs, fingerprint: stored.tour.fingerprint, ...(codeReview === undefined ? {} : { codeReview: 'ready' as const, findings: codeReview.findings.length + codeReview.general.length }) };
 }
 
 // a file beside the tour file, so the tour file keeps its format
