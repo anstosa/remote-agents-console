@@ -7,7 +7,7 @@ import { openGithubPanel } from './panel-header';
 
 const clean = { files: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 };
 const worktree = (id: string, label: string, branch: string, extra: Record<string, unknown> = {}) => ({ id: `repo:/repo/wts/${id}`, projectId: 'repo', label, path: `/repo/wts/${id}`, main: false, detached: false, locked: false, available: true, pinned: true, order: 1, branch, gitStatus: clean, ...extra });
-// an Agent in the feature Worktree, which a guided review needs
+// an Agent in the feature Worktree, which reports the same PR changes as the Worktree
 const agent = { id: 'agent-1', sessionId: 'socket:$1', home: '/repo/wts/feature', projectId: 'repo', worktreeId: 'repo:/repo/wts/feature', worktreeLabel: 'feature', branch: 'feature', title: 'Ready', gitStatus: clean, gitPrStatus: { base: 'origin/main', files: 1, changes: [{ code: 'M ', path: 'src/route.ts', additions: 2, deletions: 1, category: 'implementation' }] } };
 const dashboard = (dirty: boolean, withAgent: boolean) => ({
   generation: 1,
@@ -18,7 +18,7 @@ const dashboard = (dirty: boolean, withAgent: boolean) => ({
   projects: [{
     id: 'repo', label: 'Repo', github: 'octo/repo', available: true, worktrees: [
       { ...worktree('main', 'Repo', 'main'), id: 'repo:/repo', path: '/repo', main: true, order: 0 },
-      worktree('feature', 'feature', 'feature', dirty ? { gitStatus: { ...clean, files: 2, unstaged: 2 } } : {}),
+      worktree('feature', 'feature', 'feature', { gitPrStatus: agent.gitPrStatus, ...dirty ? { gitStatus: { ...clean, files: 2, unstaged: 2 } } : {} }),
       worktree('other', 'other', 'branch-90', { order: 2 }),
       worktree('shipped', 'shipped', 'branch-203', { order: 3 })
     ]
@@ -491,18 +491,17 @@ test('disables other-clone moves and View in the exact holder performs no POST',
   expect(calls).toEqual([]);
 });
 
-test('offers a Review tour only on the pull request checked out here, once an Agent can run it', async ({ page }) => {
+// a guided review is keyed by the Worktree, so it needs no Agent running there
+test('offers a Review tour only on the pull request checked out here', async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 1000 });
   await mount(page);
   await show(page, /^feature/u, 214);
   await panel(page).getByRole('button', { name: 'Checkout and actions for pull request #214' }).click();
   const cardReview = page.getByRole('group', { name: 'Actions for pull request #214' }).getByRole('button', { name: 'Start Review tour' });
-  await expect(cardReview).toBeDisabled();
-  await expect(cardReview).toHaveAttribute('title', 'Launch agent to review');
+  await expect(cardReview).toBeEnabled();
   await page.keyboard.press('Escape');
   await expect(strip(page)).toHaveText('Checked out here, in feature.Start Review tour');
-  await expect(strip(page).getByRole('button', { name: 'Start Review tour' })).toBeDisabled();
-  await expect(strip(page).getByRole('button', { name: 'Start Review tour' })).toHaveAttribute('title', 'Launch agent to review');
+  await expect(strip(page).getByRole('button', { name: 'Start Review tour' })).toBeEnabled();
   // nowhere else
   await panel(page).getByRole('tab', { name: /^Reviews/u }).click();
   await panel(page).getByRole('button', { name: /^#90 Handle redacted events/u }).click();

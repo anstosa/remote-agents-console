@@ -74,7 +74,7 @@ test('opens the Code view full screen for a Worktree with no running agent', asy
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [], projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [worktree] }] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, reviewTour: { available: true }, agents: [], projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [worktree] }] } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/worktrees\/cora\/notes$/u.test(url.pathname)) return route.fulfill({ json: { notes: [] } });
     if (/^\/api\/worktrees\/cora\/panes$/u.test(url.pathname)) return route.fulfill({ json: { panes: [] } });
@@ -95,10 +95,8 @@ test('opens the Code view full screen for a Worktree with no running agent', asy
   await expect(codePanel(page)).toHaveClass(/\bexpanded\b/u);
   await expect(codePanel(page).getByRole('button', { name: 'Restore code panel' })).toHaveAttribute('aria-pressed', 'true');
   await expect(empty).toHaveCount(0);
-  // with no Agent the review is offered but disabled, with the reason
-  const review = codePanel(page).getByRole('button', { name: 'Review', exact: true });
-  await expect(review).toBeDisabled();
-  await expect(review).toHaveAttribute('title', 'Launch agent to review');
+  // a guided review is keyed by the Worktree, so it is offered with no Agent running
+  await expect(codePanel(page).getByRole('button', { name: 'Review', exact: true })).toBeEnabled();
 
   // and it restores to the split like any other panel
   await codePanel(page).getByRole('button', { name: 'Restore code panel' }).click();

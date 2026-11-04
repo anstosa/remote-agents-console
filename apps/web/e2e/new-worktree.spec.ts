@@ -202,25 +202,26 @@ test('names the Terminal when it fails to open', async ({ page }) => {
   await expect(page.getByText('Worktree created, terminal did not open')).toBeVisible();
 });
 
-test('Review launches an agent, then opens the guided review start sheet for it', async ({ page }) => {
+test('Review opens nothing, then opens the guided review start sheet for the new worktree', async ({ page }) => {
   let created: unknown;
   await stub(page, () => {});
   await page.route('**/api/projects/repo/worktrees', async route => {
     if (route.request().method() !== 'POST') return route.fallback();
     created = route.request().postDataJSON();
-    return route.fulfill({ status: 201, json: { worktreeId: 'repo:/repo/wts/feature-login', agentId: 'agent-new' } });
+    return route.fulfill({ status: 201, json: { worktreeId: 'repo:/repo/wts/feature' } });
   });
-  // once created, the dashboard lists the new Agent with its PR base
-  const agent = { id: 'agent-new', sessionId: 'socket:$9', home: '/repo/wts/feature', projectId: 'repo', worktreeId: 'repo:/repo/wts/feature', worktreeLabel: 'feature', branch: 'feature', title: 'Ready', gitPrStatus: { base: 'origin/main', files: 1 } };
-  await page.route('**/api/dashboard', route => route.fulfill({ json: created === undefined ? dashboard : { ...dashboard, agents: [agent] } }));
+  // once created, the dashboard lists the new Worktree with its PR base
+  const worktree = { id: 'repo:/repo/wts/feature', projectId: 'repo', label: 'feature', path: '/repo/wts/feature', main: false, detached: false, locked: false, available: true, pinned: true, order: 1, branch: 'feature', gitPrStatus: { base: 'origin/main', files: 1 } };
+  const [repo, ...others] = dashboard.projects;
+  await page.route('**/api/dashboard', route => route.fulfill({ json: created === undefined ? dashboard : { ...dashboard, projects: [{ ...repo!, worktrees: [...repo!.worktrees, worktree] }, ...others] } }));
   await page.goto('/');
   const dialog = await openNewWorktree(page);
   await dialog.getByRole('tab', { name: 'Existing branch' }).click();
   await dialog.getByRole('radio', { name: 'Review' }).click();
   await dialog.getByRole('button', { name: 'Create worktree' }).click();
 
-  // a guided review is bound to an agent, so Review asks the server for one
-  await expect.poll(() => created).toEqual({ mode: 'existing', branch: 'feature', open: 'agent' });
+  // a guided review is keyed by the Worktree, so Review asks the server to open nothing in it
+  await expect.poll(() => created).toEqual({ mode: 'existing', branch: 'feature', open: 'empty' });
   const sheet = page.getByRole('dialog', { name: 'Start guided review' });
   await expect(sheet).toBeVisible();
   // a PR worktree is reviewed against its base, not as working changes
