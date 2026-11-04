@@ -49,7 +49,7 @@ exec "$node" -p 'process.versions.node'`;
   const [canonical, digest, observed] = result.stdout.trim().split('\n');
   const version = /^(\d+)\.(\d+)\.(\d+)$/u.exec(observed ?? '');
   // reject hard-link aliases and writable canonical targets before executing any Node code
-  if (result.code !== 0 || canonical === undefined || !isAbsolute(canonical) || !/^[a-f0-9]{64}$/u.test(digest ?? '') || version === null || Number(version[1]) < 22 || Number(version[1]) === 22 && Number(version[2]) < 19) throw new Error(`Pi host bridge requires single-link Node.js >=22.19.0 outside writable Places and sandbox roots (observed ${version?.[0] ?? 'unavailable'})`);
+  if (result.code !== 0 || canonical === undefined || !isAbsolute(canonical) || !/^[a-f0-9]{64}$/u.test(digest ?? '') || version === null || Number(version[1]) < 22 || Number(version[1]) === 22 && Number(version[2]) < 19) throw new Error(`Pi host bridge requires single-link Node.js >=22.19.0 outside writable Places and sandbox roots (observed ${version?.[0] ?? 'unavailable'}; exit ${result.code}${result.timedOut === true ? ', timed out' : ''}: ${`${result.stdout}${result.stderr}`.trim().slice(-500)})`);
   return createHash('sha256').update(JSON.stringify([canonical, digest, observed])).digest('hex');
 }
 
