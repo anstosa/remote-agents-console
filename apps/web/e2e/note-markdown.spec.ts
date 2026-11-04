@@ -29,6 +29,16 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
     'const ready = true;',
     '```',
     '',
+    '```mermaid',
+    'flowchart LR',
+    '  Draft["<img src=x onerror=window.__diagramScriptRan=true>"] --> Ship',
+    '```',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    '  A --> B[unclosed',
+    '```',
+    '',
     '<script>window.__noteScriptRan = true</script>',
     '',
     ' Area                 Your console        Competitive',
@@ -119,7 +129,14 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
   await expect(preview).toContainText('Keep ~literal tildes~ outside lists.');
   await expect(preview.getByRole('checkbox')).toBeChecked();
   await expect(preview.locator('blockquote')).toHaveText('Important');
-  await expect(preview.locator('pre code')).toHaveText('const ready = true;');
+  await expect(preview.locator('pre code[data-language="ts"]')).toHaveText('const ready = true;');
+  // a mermaid fence is drawn with HTML in its labels dropped; one that does not parse stays a code block
+  await expect(preview.locator('.mermaid-diagram svg')).toHaveCount(1);
+  await expect(preview.locator('.mermaid-diagram svg')).toContainText('Ship');
+  expect(await preview.locator('.mermaid-diagram:has(svg)').innerHTML()).not.toContain('onerror');
+  await expect(preview.locator('.mermaid-diagram img')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as Window & { __diagramScriptRan?: boolean }).__diagramScriptRan)).toBeUndefined();
+  await expect(preview.locator('pre code[data-language="mermaid"]')).toHaveText('flowchart LR\n  A --> B[unclosed');
   await expect(preview).toContainText('<script>window.__noteScriptRan = true</script>');
   await expect(page.locator('.note-markdown script')).toHaveCount(0);
   expect(await page.evaluate(() => (window as unknown as { __noteScriptRan?: boolean }).__noteScriptRan)).toBeUndefined();

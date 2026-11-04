@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, type Ref } from 'react';
+import { Fragment, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 
 // a `#` link is one of the console's own addresses (`#worktree=<id>` opens that Workspace), so it stays in this tab
 const safeLink = (value: string) => /^(?:https?:|mailto:|#)/iu.test(value) ? value : undefined;
@@ -257,6 +257,30 @@ const renderList = (list: ParsedList, key: string): ReactNode => {
   return list.ordered ? <ol key={key} start={list.start}>{items}</ol> : <ul key={key}>{items}</ul>;
 };
 
+// A ```mermaid fence drawn by Pele, loaded on first use. Until the source parses (a diagram still
+// streaming in, or a malformed one) it reads as the code block it was. Images stay off so a diagram
+// cannot fetch remote URLs.
+function MermaidDiagram({ source }: { source: string }) {
+  const host = useRef<HTMLDivElement>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    const element = host.current;
+    if (element === null) return;
+    let live = true;
+    let mounted: { destroy(): void } | undefined;
+    const options = { images: false, onRender: () => { if (live) setFailed(false); }, onError: () => { if (live) setFailed(true); } };
+    void import('pele/lazy').then(pele => pele.mountAsync(element, source, options)).then(
+      result => { if (live) mounted = result; else result.destroy(); },
+      () => { if (live) setFailed(true); }
+    );
+    return () => { live = false; mounted?.destroy(); };
+  }, [source]);
+  return <>
+    <div ref={host} className="mermaid-diagram" hidden={failed} />
+    {failed && <pre><code data-language="mermaid">{source}</code></pre>}
+  </>;
+}
+
 // render note markdown blocks
 // render recognized blocks while preserving paragraph boundaries
 export function MarkdownBlocks({ text }: { text: string }) {
@@ -281,11 +305,12 @@ export function MarkdownBlocks({ text }: { text: string }) {
     }
     const fence = /^```([^\s`]*)\s*$/u.exec(line);
     if (fence) {
+      const start = index;
       const code: string[] = [];
       index += 1;
       while (index < lines.length && !/^```\s*$/u.test(lines[index]!)) code.push(lines[index++]!);
       if (index < lines.length) index += 1;
-      blocks.push(<pre key={`code-${index}`}><code data-language={fence[1] || undefined}>{code.join('\n')}</code></pre>);
+      blocks.push(fence[1]?.toLowerCase() === 'mermaid' ? <MermaidDiagram key={`code-${start}`} source={code.join('\n')} /> : <pre key={`code-${start}`}><code data-language={fence[1] || undefined}>{code.join('\n')}</code></pre>);
       continue;
     }
     const heading = /^(#{1,6})\s+(.+)$/u.exec(line);

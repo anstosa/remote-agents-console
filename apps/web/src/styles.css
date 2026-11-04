@@ -975,6 +975,8 @@ button.schedule-slot:disabled { cursor: default; opacity: .7; }
 .note-markdown pre code { padding: 0; background: transparent; color: var(--text); white-space: pre; }
 .note-markdown a { color: var(--blue); text-decoration: underline; text-underline-offset: .16em; }
 .note-markdown del { text-decoration: line-through; }
+/* a Mermaid diagram (Pele) in the console's theme; zoom controls appear when it is wider than the column */
+.note-markdown .mermaid-diagram { margin: 0 0 .85em; overflow: hidden; border: 1px solid var(--surface-1); border-radius: var(--control-radius); padding: .7rem; background: var(--crust); --pele-bg: var(--crust); --pele-fg: var(--text); --pele-muted: var(--subtext-0); --pele-line: var(--overlay-2); --pele-surface: var(--surface-0); --pele-surface-alt: var(--surface-1); --pele-border: var(--surface-2); --pele-accent: var(--blue); --pele-error: var(--red); --pele-radius: var(--control-radius); }
 .note-markdown hr { margin: 1rem 0; border: 0; border-top: 1px solid var(--surface-1); }
 .note-table-scroll { max-width: 100%; overflow-x: auto; margin: 0 0 .85em; border: 1px solid var(--surface-1); border-radius: var(--control-radius); }
 .note-markdown table { width: 100%; min-width: 34rem; border-collapse: collapse; background: color-mix(in srgb, var(--mantle) 82%, transparent); }
