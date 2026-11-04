@@ -20,6 +20,7 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
     '',
     'Bare links work at https://example.com/bare and www.example.org/docs.',
     'Open [the worktree](#worktree=wt%3A1) here.',
+    '**Start with [PR #7](https://example.com/pr/7).** See https://example.com/a_b_c, [`notes.md`](notes.md) and [https://example.com/label](https://example.com/label).',
     'Keep ~literal tildes~ outside lists.',
     '',
     '> Important',
@@ -91,12 +92,19 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
   await expect(preview).toHaveCSS('font-size', outputFontSize);
   await expect(page.getByRole('textbox', { name: 'Note content' })).toHaveCount(0);
   await expect(preview.getByRole('heading', { name: 'Release notes', level: 1 })).toBeVisible();
-  await expect(preview.locator('strong')).toHaveText('carefully');
+  await expect(preview.locator('strong').first()).toHaveText('carefully');
   await expect(preview.getByRole('link', { name: 'the guide' })).toHaveAttribute('href', 'https://example.com/docs');
   await expect(preview.getByRole('link', { name: 'https://example.com/bare' })).toHaveAttribute('href', 'https://example.com/bare');
   await expect(preview.getByRole('link', { name: 'www.example.org/docs' })).toHaveAttribute('href', 'https://www.example.org/docs');
   await expect(preview.getByRole('link', { name: 'the worktree' })).toHaveAttribute('href', '#worktree=wt%3A1');
   await expect(preview.getByRole('link', { name: 'the worktree' })).not.toHaveAttribute('target');
+  // emphasis and link labels hold inline markdown; underscores inside a bare URL are not emphasis
+  await expect(preview.locator('strong').getByRole('link', { name: 'PR #7' })).toHaveAttribute('href', 'https://example.com/pr/7');
+  await expect(preview.getByRole('link', { name: 'https://example.com/a_b_c' })).toHaveAttribute('href', 'https://example.com/a_b_c');
+  await expect(preview.locator('code', { hasText: 'notes.md' })).toBeVisible();
+  await expect(preview.getByRole('link', { name: 'notes.md' })).toHaveCount(0);
+  await expect(preview.getByRole('link', { name: 'https://example.com/label' })).toHaveCount(1);
+  await expect(preview.locator('a a')).toHaveCount(0);
   await expect(preview.locator(':scope > ul > li')).toHaveCount(2);
   await expect(preview.locator(':scope > ol')).toHaveCount(1);
   await expect(preview.locator(':scope > ol > li')).toHaveText([

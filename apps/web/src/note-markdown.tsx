@@ -2,8 +2,8 @@ import { Fragment, type ReactNode, type Ref } from 'react';
 
 // a `#` link is one of the console's own addresses (`#worktree=<id>` opens that Workspace), so it stays in this tab
 const safeLink = (value: string) => /^(?:https?:|mailto:|#)/iu.test(value) ? value : undefined;
-const inlinePattern = /(`([^`\n]+)`|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|\*([^*\n]+)\*|_([^_\n]+)_)/gu;
-const bareLinkPattern = /(?:https?:\/\/|mailto:|www\.)[^\s<]+/giu;
+// a bare URL is one more token, so emphasis cannot match inside it (`https://a.com/x_y_z`)
+const inlinePattern = /(`([^`\n]+)`|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|\*([^*\n]+)\*|_([^_\n]+)_|(?:https?:\/\/|mailto:|www\.)[^\s<]+)/giu;
 const singleTildeListStrike = /(^|[^~])~([^~\n]+)~(?!~)/gu;
 
 const trimLinkSuffix = (value: string) => {
@@ -15,38 +15,32 @@ const trimLinkSuffix = (value: string) => {
   return [value.slice(0, end), value.slice(end)] as const;
 };
 
-const linkifyText = (text: string, key: string): ReactNode[] => {
-  const content: ReactNode[] = [];
-  let cursor = 0;
-  for (const match of text.matchAll(bareLinkPattern)) {
-    const index = match.index ?? 0;
-    if (index > cursor) content.push(text.slice(cursor, index));
-    const [label, suffix] = trimLinkSuffix(match[0]);
-    const href = label.startsWith('www.') ? `https://${label}` : label;
-    content.push(<a key={`${key}-link-${index}`} href={href} target="_blank" rel="noreferrer">{label}</a>);
-    if (suffix) content.push(suffix);
-    cursor = index + match[0].length;
-  }
-  if (cursor < text.length) content.push(text.slice(cursor));
-  return content;
-};
-
-const inlineMarkdown = (text: string, key: string): ReactNode[] => {
+// Emphasis and link labels are parsed again, so `**[PR](url)**` links; `links` is off inside a
+// label, so an anchor never nests another.
+const inlineMarkdown = (text: string, key: string, links = true): ReactNode[] => {
   const content: ReactNode[] = [];
   let cursor = 0;
   for (const match of text.matchAll(inlinePattern)) {
     const index = match.index ?? 0;
-    if (index > cursor) content.push(...linkifyText(text.slice(cursor, index), `${key}-${cursor}`));
-    if (match[2] !== undefined) content.push(<code key={`${key}-${index}`}>{match[2]}</code>);
+    const at = `${key}-${index}`;
+    if (index > cursor) content.push(text.slice(cursor, index));
+    if (match[2] !== undefined) content.push(<code key={at}>{match[2]}</code>);
     else if (match[3] !== undefined && match[4] !== undefined) {
-      const href = safeLink(match[4]);
-      content.push(href === undefined ? match[3] : href.startsWith('#') ? <a key={`${key}-${index}`} href={href}>{match[3]}</a> : <a key={`${key}-${index}`} href={href} target="_blank" rel="noreferrer">{match[3]}</a>);
-    } else if (match[5] !== undefined || match[6] !== undefined) content.push(<strong key={`${key}-${index}`}>{match[5] ?? match[6]}</strong>);
-    else if (match[7] !== undefined) content.push(<del key={`${key}-${index}`}>{match[7]}</del>);
-    else content.push(<em key={`${key}-${index}`}>{match[8] ?? match[9]}</em>);
+      const href = links ? safeLink(match[4]) : undefined;
+      const label = inlineMarkdown(match[3], at, false);
+      content.push(href === undefined ? <Fragment key={at}>{label}</Fragment> : href.startsWith('#') ? <a key={at} href={href}>{label}</a> : <a key={at} href={href} target="_blank" rel="noreferrer">{label}</a>);
+    } else if (match[5] !== undefined || match[6] !== undefined) content.push(<strong key={at}>{inlineMarkdown(match[5] ?? match[6]!, at, links)}</strong>);
+    else if (match[7] !== undefined) content.push(<del key={at}>{inlineMarkdown(match[7], at, links)}</del>);
+    else if (match[8] !== undefined || match[9] !== undefined) content.push(<em key={at}>{inlineMarkdown(match[8] ?? match[9]!, at, links)}</em>);
+    else if (!links) content.push(match[0]);
+    else {
+      const [label, suffix] = trimLinkSuffix(match[0]);
+      content.push(<a key={at} href={label.startsWith('www.') ? `https://${label}` : label} target="_blank" rel="noreferrer">{label}</a>);
+      if (suffix) content.push(suffix);
+    }
     cursor = index + match[0].length;
   }
-  if (cursor < text.length) content.push(...linkifyText(text.slice(cursor), `${key}-${cursor}`));
+  if (cursor < text.length) content.push(text.slice(cursor));
   return content;
 };
 
