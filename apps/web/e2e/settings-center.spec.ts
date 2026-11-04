@@ -77,6 +77,21 @@ async function selectSettingsSection(
   }
 }
 
+// expand one configured Agent card through its summary control
+async function openAgentSettingsCard(
+  settings: Locator,
+  kind: "codex" | "omx" | "claude",
+) {
+  const card = settings.locator(
+    `details[data-settings-path="adapters.${kind}"]`,
+  );
+  await expect(card).toBeVisible();
+  // preserve an already-open card across responsive assertions
+  if ((await card.getAttribute("open")) === null)
+    await card.locator(":scope > summary").click();
+  await expect(card).toHaveAttribute("open", "");
+}
+
 // verify every split slot uses its concise product label
 async function expectSplitButtonLabels(container: Locator) {
   const labels = [
@@ -3985,7 +4000,7 @@ test("hides Environment rows represented by active structured settings", async (
 // keep launch arguments directly editable while preserving ordered argv values
 for (const width of [390, 1440]) {
   // apply the same inline editor contract to each supported agent
-  for (const adapter of ["codex", "omx", "claude"]) {
+  for (const adapter of ["codex", "omx", "claude"] as const) {
     test(`edits ${adapter} args inline at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       const { settings, sources, state } = await setupSettings(page);
@@ -3996,6 +4011,7 @@ for (const width of [390, 1440]) {
       app.schema = { ...schema, properties: { ...schema.properties, adapters: applicationSettingsSchema().properties!.adapters! } };
       await settings.getByRole("button", { name: "Refresh files", exact: true }).click();
       await selectSettingsSection(settings, "agents", "Agents");
+      await openAgentSettingsCard(settings, adapter);
 
       const args = settings.locator(`[data-settings-path="adapters.${adapter}.args"]`);
       const first = args.getByRole("textbox", { name: "Arg 1", exact: true });
@@ -4024,6 +4040,9 @@ for (const width of [390, 1440]) {
       await settings.getByRole("button", { name: "Save changes", exact: true }).click();
       await expect.poll(() => state.saves.length).toBe(1);
       expect((app.value as { adapters: Record<string, { args: string[] }> }).adapters[adapter]!.args).toEqual([argument, "--added"]);
+      // reopen only after the saved revision has refreshed its cards
+      await expect(page.getByRole("status").filter({ hasText: "Settings updated." })).toBeVisible();
+      await openAgentSettingsCard(settings, adapter);
       await expect(first).toBeEditable();
       await expect(first).toHaveValue(argument);
 
@@ -4072,6 +4091,8 @@ test("moves adapter settings into Agents and saves both backing sources together
   await expect(
     settings.getByRole("heading", { name: "Agents", exact: true, level: 2 }),
   ).toBeVisible();
+  await openAgentSettingsCard(settings, "codex");
+  await openAgentSettingsCard(settings, "claude");
   await expect(
     settings.getByRole("textbox", { name: "Codex program", exact: true }),
   ).toHaveValue("/usr/bin/codex");
@@ -4218,6 +4239,7 @@ test("hides Agents environment controls without a renderable owning adapter", as
     );
 
   await selectSettingsSection(settings, "agents", "Agents");
+  await openAgentSettingsCard(settings, "claude");
   await expect(
     settings.locator('[data-settings-path="adapters.codex.program"]'),
   ).toHaveCount(0);
@@ -4235,6 +4257,7 @@ test("hides Agents environment controls without a renderable owning adapter", as
     .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   await selectSettingsSection(settings, "agents", "Agents");
+  await openAgentSettingsCard(settings, "claude");
   await expect(
     settings.getByRole("textbox", { name: "RAC_CLAUDE_BIN", exact: true }),
   ).toBeEditable();
@@ -4277,6 +4300,7 @@ test("keeps Agents environment controls editable when application adapters are r
       0,
     );
   await selectSettingsSection(settings, "agents", "Agents");
+  await openAgentSettingsCard(settings, "codex");
   await expect(
     settings.getByRole("textbox", { name: "Codex program", exact: true }),
   ).toBeDisabled();
@@ -4301,6 +4325,7 @@ test("keeps Agents source locks independent across raw and read-only states", as
     .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   await selectSettingsSection(settings, "agents", "Agents");
+  await openAgentSettingsCard(settings, "codex");
   await expect(
     settings.getByRole("textbox", { name: "Codex program", exact: true }),
   ).toBeDisabled();
@@ -4317,6 +4342,7 @@ test("keeps Agents source locks independent across raw and read-only states", as
     .getByRole("button", { name: "Edit whole source", exact: true })
     .click();
   await selectSettingsSection(settings, "agents", "Agents");
+  await openAgentSettingsCard(settings, "codex");
   await expect(
     settings.getByRole("textbox", { name: "Codex program", exact: true }),
   ).toBeEditable();
@@ -4334,6 +4360,7 @@ test("keeps Agents source locks independent across raw and read-only states", as
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
   await selectSettingsSection(settings, "agents", "Agents");
+  await openAgentSettingsCard(settings, "codex");
   await expect(
     settings.getByRole("textbox", { name: "Codex program", exact: true }),
   ).toBeEditable();
@@ -4383,6 +4410,8 @@ test("uses the active installation mode when hiding Environment rows", async ({
       settings.locator(`[data-settings-path="${key}"]`),
     ).toHaveCount(0);
   await selectSettingsSection(settings, "agents", "Agents");
+  await openAgentSettingsCard(settings, "codex");
+  await openAgentSettingsCard(settings, "claude");
   for (const key of agentEnvironmentKeys.filter(
     (candidate) => candidate !== "CODEX_VERSION",
   ))
@@ -12438,6 +12467,7 @@ test("renders MCP and OMX labels while preserving their lowercase application va
   ).toBeVisible();
 
   await selectSettingsSection(settings, "agents", "Agents");
+  await openAgentSettingsCard(settings, "omx");
   await expect(
     settings.getByRole("heading", { name: "OMX", exact: true, level: 3 }),
   ).toBeVisible();
@@ -12895,6 +12925,7 @@ for (const width of [1440, 375]) {
         settings.locator(`[data-settings-path="${key}"]`),
       ).toHaveCount(0);
     await selectSettingsSection(settings, "agents", "Agents");
+    await openAgentSettingsCard(settings, "codex");
     // keep account-spend configuration with the agent accounts that consume it
     for (const key of ["RAC_OPENAI_ADMIN_KEY", "RAC_OPENAI_API_KEY_IDS"])
       await expect(

@@ -191,6 +191,9 @@ async function setupShellSettings(page: Page) {
       return route.fulfill({ json: { ticket: "shell-settings-ticket" } });
     if (path === "/api/push/public-key") return route.fulfill({ json: {} });
     if (path === "/api/console/theme") return route.fulfill({ status: 204 });
+    // keep model discovery read-only in the shell editor fixture
+    if (path === "/api/launch/options" && request.method() === "POST")
+      return route.fulfill({ json: { kinds: [] } });
     if (path === "/api/agents/updates")
       return route.fulfill({ json: { agents: [] } });
     if (path === "/api/server/update-available")
@@ -360,6 +363,8 @@ test("edits only executable application values as shell code", async ({
   await expect(editorInput).not.toHaveValue(/\n/u);
 
   await selectSection(settings, "Agents");
+  // expand the adapter before exercising its executable fields
+  await settings.locator('summary[aria-label="Codex adapter"]').click();
   for (const path of [
     "adapters.codex.setup",
     "adapters.codex.teardown",

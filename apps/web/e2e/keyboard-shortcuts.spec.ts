@@ -388,6 +388,8 @@ test('the palette and a bound key launch the toolbar Launch\'s resolved kind', a
   await page.keyboard.press('Enter');
   await expect.poll(() => launches).toEqual([{ kind: 'codex', sandboxed: false }]);
   await expect(page.locator('.launch-menu')).toHaveCount(0);
+  // wait for the first operation to release its duplicate-launch guard
+  await expect(page.locator('.workspace-toolbar-actions').getByRole('button', { name: 'Launch Codex', exact: true })).toBeEnabled();
 
   await page.keyboard.press('Control+b');
   await page.keyboard.press('a');

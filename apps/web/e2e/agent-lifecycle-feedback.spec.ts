@@ -82,7 +82,8 @@ test('keeps agent on/off progress visible across lifecycle transitions', async (
   await expect(page.locator('.tabs > .tab-row-lead .server-selector')).toBeVisible();
 
   await page.locator('.workspace-toolbar-actions').getByRole('button', { name: 'Choose agent' }).click();
-  await page.getByRole('menu', { name: 'Choose agent' }).getByRole('menuitem', { name: /^OMX/u }).click();
+  // use the explicit action instead of clicking the static agent summary
+  await page.getByRole('menu', { name: 'Choose agent' }).getByRole('group', { name: 'OMX agent' }).getByRole('menuitem', { name: 'Launch OMX', exact: true }).click();
   const pendingLaunch = page.getByRole('status').filter({ hasText: 'Starting Cora' });
   await expect(pendingLaunch).toContainText('waiting for the agent session to become ready');
   await expect(pendingLaunch.locator('.toast-timer-bar')).toHaveCount(0);

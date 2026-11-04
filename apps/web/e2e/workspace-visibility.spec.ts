@@ -538,6 +538,24 @@ test('restoring Agent after Close all suppresses an older shell completion', asy
   expect(await isIntentionallyEmpty(page, owenId)).toBe(false);
 });
 
+// retain ordinary deep-link restoration without weakening deliberate close-all intent
+test('agent links still reveal ordinarily minimized output', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mountWorkspace(page, coraId, {
+    [`rac.hidden-agent:place-${coraId}`]: '1',
+    [`rac.terminals:${coraId}`]: JSON.stringify([{ paneId: '%5', name: 'build' }])
+  });
+  await expect(page.locator('.agent-panel')).toHaveCount(0);
+  await expect(page.locator('.terminal-pane')).toBeVisible();
+  // navigate away so the return link emits a real hashchange
+  await page.evaluate(() => { location.hash = '#agent=agent-owen'; });
+  await expect(page.getByRole('tab', { name: /^Owen —/u })).toHaveAttribute('aria-selected', 'true');
+  // a linked agent remains an explicit destination in an otherwise ordinary layout
+  await page.evaluate(() => { location.hash = '#agent=agent-cora'; });
+  await expect(page.locator('.agent-panel')).toBeVisible();
+  expect(await isIntentionallyEmpty(page, coraId)).toBe(false);
+});
+
 // preserve deliberate emptiness until an explicit restore clears it
 test('Close all remains empty across switching and reload until restore reactivates the guard', async ({ page }) => {
   test.setTimeout(60_000);

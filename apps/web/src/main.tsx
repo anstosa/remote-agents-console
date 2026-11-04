@@ -10142,8 +10142,12 @@ function DashboardView({ onUnauthorized, onInactive, updateError, onDismissUpdat
       const linkedItem = items[linked]!;
       // keep linked navigation aligned with the stable selection key
       selectedItemKey.current = linkedItem.key;
-      // reveal the requested output even when this workspace previously hid its agent split
-      if (linkedAgentId !== undefined) { chooseAgent(linkedItem.key, linkedAgentId); setAgentSplitHidden(linkedItem.key, false); }
+      // select linked agents without undoing a deliberately empty workspace
+      if (linkedAgentId !== undefined) {
+        chooseAgent(linkedItem.key, linkedAgentId);
+        // passive URL activation must not clear close-all intent on reload
+        if (!workspaceIntentionallyEmpty(linkedItem.key)) setAgentSplitHidden(linkedItem.key, false);
+      }
       setActive(linked);
       // clear the selected notification state
       const viewed = linkedItem.agents.find(agent => agent.id === linkedAgentId) ?? currentAgentOf(linkedItem);

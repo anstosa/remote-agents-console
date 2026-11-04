@@ -280,6 +280,8 @@ test('chooses the default from selected-model stars without changing membership 
     { model: 'openai/gpt-5.1-codex', effort: 'high' }
   ]);
 
+  // wait for the saved revision before deciding whether its card needs reopening
+  await expect(page.getByRole('status').filter({ hasText: 'Settings updated.' })).toBeVisible();
   const adapter = settings.locator('details[data-settings-path="adapters.pi"]');
   // saved settings remount with adapter cards collapsed
   if (await adapter.getAttribute('open') === null) await adapter.locator('summary').click();

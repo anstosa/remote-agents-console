@@ -346,6 +346,15 @@ function adapterSection(settings: Locator, kind: string) {
   return settings.locator(`[data-settings-path="adapters.${kind}"]`);
 }
 
+// open only the adapter whose nested controls the scenario exercises
+async function openAdapter(settings: Locator, kind: string) {
+  const adapter = adapterSection(settings, kind);
+  // preserve collapsed-by-default coverage while making the interaction explicit
+  if ((await adapter.getAttribute("open")) === null)
+    await adapter.locator("summary").click();
+  return adapter;
+}
+
 // locate one exact saved source change
 function savedChange(
   state: AgentEnvFixtureState,
@@ -362,12 +371,16 @@ test("shows permanent lifecycle and Environment & keys only inside configured ad
 
   const codex = adapterSection(settings, "codex");
   const omx = adapterSection(settings, "omx");
+  await expect(settings.locator(".settings-adapter-card[open]")).toHaveCount(0);
   await expect(
     codex.getByRole("heading", { name: "Codex", exact: true, level: 3 }),
   ).toBeVisible();
   await expect(
     omx.getByRole("heading", { name: "OMX", exact: true, level: 3 }),
   ).toBeVisible();
+  await openAdapter(settings, "codex");
+  await openAdapter(settings, "omx");
+  await openAdapter(settings, "claude");
   await expect(
     settings.getByRole("button", { name: "Add Claude", exact: true }),
   ).toBeVisible();
@@ -467,6 +480,7 @@ test("reveals Environment & keys only while an adapter is configured", async ({
   });
 
   await expect(environment).toHaveCount(0);
+  await openAdapter(settings, "claude");
   await add.click();
   await expect(environment).toBeVisible();
   await expect(
@@ -497,7 +511,7 @@ test("sets and clears permanent lifecycle fields without authoring blank default
 }) => {
   const { settings, sources, state } = await setupAgentEnv(page);
   await selectSection(settings, "agents", "Agents");
-  const codex = adapterSection(settings, "codex");
+  const codex = await openAdapter(settings, "codex");
   const setup = codex.getByRole("textbox", { name: "Setup", exact: true });
   const teardown = codex.getByRole("textbox", {
     name: "Teardown",
@@ -540,6 +554,7 @@ test("sets and clears permanent lifecycle fields without authoring blank default
   await settings
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
+  await openAdapter(settings, "codex");
   await codex.getByRole("textbox", { name: "Setup", exact: true }).fill("");
   await codex
     .getByRole("textbox", { name: "Teardown", exact: true })
@@ -567,7 +582,7 @@ test("saves nested launch variables and dotenv keys to their owning sources", as
 }) => {
   const { settings, state } = await setupAgentEnv(page);
   await selectSection(settings, "agents", "Agents");
-  const codexEnv = adapterSection(settings, "codex").getByRole("region", {
+  const codexEnv = (await openAdapter(settings, "codex")).getByRole("region", {
     name: "Codex Environment & keys",
     exact: true,
   });
@@ -654,7 +669,7 @@ test("remasks deleted launch secrets and preserves protected add-field semantics
 }) => {
   const { settings, sources, state } = await setupAgentEnv(page);
   await selectSection(settings, "agents", "Agents");
-  const codexEnv = adapterSection(settings, "codex").getByRole("region", {
+  const codexEnv = (await openAdapter(settings, "codex")).getByRole("region", {
     name: "Codex Environment & keys",
     exact: true,
   });
@@ -709,10 +724,13 @@ test("remasks deleted launch secrets and preserves protected add-field semantics
   await settings
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
-  const claudeEnv = adapterSection(settings, "claude").getByRole("region", {
-    name: "Claude Environment & keys",
-    exact: true,
-  });
+  const claudeEnv = (await openAdapter(settings, "claude")).getByRole(
+    "region",
+    {
+      name: "Claude Environment & keys",
+      exact: true,
+    },
+  );
   await claudeEnv
     .getByRole("button", { name: "Add environment variable", exact: true })
     .click();
@@ -760,7 +778,7 @@ test("revokes accepted nested and dotenv secrets when an adapter is removed", as
 }) => {
   const { settings, state } = await setupAgentEnv(page);
   await selectSection(settings, "agents", "Agents");
-  const codex = adapterSection(settings, "codex");
+  const codex = await openAdapter(settings, "codex");
   const codexEnv = codex.getByRole("region", {
     name: "Codex Environment & keys",
     exact: true,
@@ -811,7 +829,7 @@ test("revokes late nested and dotenv secret responses after adapter removal", as
 }) => {
   const { settings, state } = await setupAgentEnv(page);
   await selectSection(settings, "agents", "Agents");
-  const codex = adapterSection(settings, "codex");
+  const codex = await openAdapter(settings, "codex");
   const codexEnv = codex.getByRole("region", {
     name: "Codex Environment & keys",
     exact: true,
@@ -869,7 +887,7 @@ test("clears accepted and pending protected lifecycle commands through blank val
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
   await selectSection(settings, "agents", "Agents");
-  const codex = adapterSection(settings, "codex");
+  const codex = await openAdapter(settings, "codex");
 
   const setup = codex.locator('[data-settings-path="adapters.codex.setup"]');
   await setup
@@ -897,6 +915,9 @@ test("clears accepted and pending protected lifecycle commands through blank val
     ]),
   );
 
+  // wait for the saved revision to remount before reopening its card
+  await expect(page.getByRole("status").filter({ hasText: "Settings updated." })).toBeVisible();
+  await openAdapter(settings, "codex");
   const teardown = codex.locator(
     '[data-settings-path="adapters.codex.teardown"]',
   );
@@ -934,7 +955,7 @@ test("keeps Args and Updates visible without materializing defaults", async ({
 }) => {
   const { settings, state } = await setupAgentEnv(page);
   await selectSection(settings, "agents", "Agents");
-  const codex = adapterSection(settings, "codex");
+  const codex = await openAdapter(settings, "codex");
   const args = codex.locator('[data-settings-path="adapters.codex.args"]');
   const updates = codex.locator(
     '[data-settings-path="adapters.codex.updates"]',
@@ -983,7 +1004,7 @@ test("retains incomplete Update commands for server validation", async ({
 }) => {
   const { settings, state } = await setupAgentEnv(page);
   await selectSection(settings, "agents", "Agents");
-  const updates = adapterSection(settings, "codex").locator(
+  const updates = (await openAdapter(settings, "codex")).locator(
     '[data-settings-path="adapters.codex.updates"]',
   );
   await updates
@@ -1030,7 +1051,7 @@ test("clears a masked Update triplet as one optional object", async ({
     .getByRole("button", { name: "Refresh files", exact: true })
     .click();
   await selectSection(settings, "agents", "Agents");
-  const updates = adapterSection(settings, "codex").locator(
+  const updates = (await openAdapter(settings, "codex")).locator(
     '[data-settings-path="adapters.codex.updates"]',
   );
   await expect(
@@ -1117,7 +1138,7 @@ test("locks only the adapter Environment & keys rows owned by each raw source", 
     .getByRole("button", { name: "Edit base file", exact: true })
     .click();
   await selectSection(settings, "agents", "Agents");
-  let codexEnv = adapterSection(settings, "codex").getByRole("region", {
+  let codexEnv = (await openAdapter(settings, "codex")).getByRole("region", {
     name: "Codex Environment & keys",
     exact: true,
   });
@@ -1135,7 +1156,7 @@ test("locks only the adapter Environment & keys rows owned by each raw source", 
     .getByRole("button", { name: "Edit whole source", exact: true })
     .click();
   await selectSection(settings, "agents", "Agents");
-  codexEnv = adapterSection(settings, "codex").getByRole("region", {
+  codexEnv = (await openAdapter(settings, "codex")).getByRole("region", {
     name: "Codex Environment & keys",
     exact: true,
   });
@@ -1151,7 +1172,7 @@ test("keeps merged adapter Environment & keys controls inside the mobile Setting
 }) => {
   const { settings, state } = await setupAgentEnv(page, 390);
   await selectSection(settings, "agents", "Agents");
-  const codex = adapterSection(settings, "codex");
+  const codex = await openAdapter(settings, "codex");
   const codexEnv = codex.getByRole("region", {
     name: "Codex Environment & keys",
     exact: true,
