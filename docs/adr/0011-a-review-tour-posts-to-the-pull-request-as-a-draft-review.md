@@ -35,3 +35,5 @@ We chose to post an All PR tour's feedback to one Pull request, which the operat
 - **Unpushed or uncommitted work blocks a post.** The operator commits and pushes first. This is deliberate: line numbers must name content GitHub has.
 - **A file-level thread is a weaker anchor.** GitHub shows it at the top of the file, not on the line. The quoted rows and the location label carry the position instead.
 - **The markers are visible in the review's raw Markdown** and in API responses, though GitHub does not render them. Editing a thread or the body on GitHub can remove a marker, after which a retry would post that item again.
+
+*Amended by ADR 0020 (2026-11-04):* Since my review tours post too, under the same rules, and can add replies to the operator's earlier Review threads to the Draft review. Replies carry a third marker kind, `<!-- rac-reply:<thread id>:<digest of its text> -->`.

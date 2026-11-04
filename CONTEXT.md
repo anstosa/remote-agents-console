@@ -224,7 +224,7 @@ One changed path in a Comparison, carrying its status code and, where git report
 _Avoid_: File change, diff entry, hunk (a hunk is one span inside a Change)
 
 **Comparison**:
-A base, a head, and the Changes between them. Working is HEAD versus the working tree, staged and unstaged folded together, untracked included. All PR is the merge base of HEAD and the branch's target versus the working tree. Commit is one commit of HEAD's history versus its first parent. Since my review, offered by the Review tour once the operator has submitted a review on the Worktree's Pull request and HEAD is that Pull request's head, is what HEAD changed since the commit that review was made on: the reviewed commit's changes are replayed onto HEAD's current merge base, so upstream changes a rebase brought in drop out, and when the replay conflicts the reviewed commit itself is the base. When HEAD is behind that head, the start sheet offers Update to PR head, which fast-forwards the branch, or after a force-push resets it, only while the working tree is clean and no commit on the branch exists only in this checkout. The base is always a parameter, so new Comparisons stay cheap to add.
+A base, a head, and the Changes between them. Working is HEAD versus the working tree, staged and unstaged folded together, untracked included. All PR is the merge base of HEAD and the branch's target versus the working tree. Commit is one commit of HEAD's history versus its first parent. Since my review, offered by the Review tour once the operator has submitted a review on the Worktree's Pull request and HEAD is that Pull request's head, is what HEAD changed since the commit that review was made on: the reviewed commit's changes are replayed onto HEAD's current merge base, so upstream changes a rebase brought in drop out, and when the replay conflicts, or the two share no history, the reviewed commit itself is the base. When HEAD is behind that head, the start sheet offers Update to PR head, which fast-forwards the branch, or after a force-push resets it, only while the working tree is clean and no commit on the branch exists only in this checkout. The base is always a parameter, so new Comparisons stay cheap to add.
 _Avoid_: Diff, scope, snapshot
 
 **Code panel**:
@@ -256,7 +256,7 @@ One turn sent to an agent in a Worktree, in a new Conversation or a resumed one,
 _Avoid_: Review job (a job is the server's tracking of one run's result)
 
 **Ask**:
-A question about changed code, sent as a Review run that resumes the Conversation of the run being asked: the reviewer's about one of its Findings, or the tour guide's (the agent that narrated the tour) about some of its diff lines. In the Code panel it goes to the tour guide while the stored tour covers the panel's Comparison and the asked-about file, and otherwise to that Comparison's diff conversation, which its first question starts on the tour's agent. The questions about one Finding, or one set of picked lines, form an Ask thread, stored with the tour, or for the Code panel per Worktree and scope.
+A question about changed code, sent as a Review run that resumes the Conversation of the run being asked: the reviewer's about one of its Findings or about one of the operator's earlier Review threads it judged, or the tour guide's (the agent that narrated the tour) about some of its diff lines. In the Code panel it goes to the tour guide while the stored tour covers the panel's Comparison and the asked-about file, and otherwise to that Comparison's diff conversation, which its first question starts on the tour's agent. The questions about one Finding, one earlier Review thread, or one set of picked lines, form an Ask thread, stored with the tour, or for the Code panel per Worktree and scope.
 _Avoid_: Chat (a Conversation is the agent's own transcript)
 
 **Pull request**:
@@ -264,7 +264,7 @@ Any GitHub pull request, whether or not a local Worktree holds its branch. A Wor
 _Avoid_: PR (fine as a UI label), merge request
 
 **Draft review**:
-The operator's unsubmitted GitHub review on a Pull request, which a Review tour's notes and inline comments can be posted to. The console only ever creates or adds to it; the operator submits or discards it on GitHub. GitHub's API calls it a pending review.
+The operator's unsubmitted GitHub review on a Pull request, which a Review tour's notes and inline comments, and a Since my review tour's replies to the operator's earlier Review threads, can be posted to. The console only ever creates or adds to it; the operator submits or discards it on GitHub. GitHub's API calls it a pending review.
 _Avoid_: Pending review, review draft, submitted review
 
 **Review thread**:
