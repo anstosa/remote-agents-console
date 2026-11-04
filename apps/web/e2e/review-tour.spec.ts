@@ -1196,6 +1196,81 @@ test('offers Since my review once I have reviewed the pull request, and names th
   expect(availabilityReads).toBe(1);
 });
 
+test('shows my earlier threads on the first step and beside the lines they sit on, and resolves one on GitHub', async ({ page }) => {
+  const reviewedCommit = `a1b2c3d${'0'.repeat(33)}`;
+  const comment = (id: string, author: string, body: string) => ({ id, author, bot: false, ...(author === 'octocat' ? { mine: true } : {}), body, createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/owner/repo/pull/7#discussion_${id}` });
+  // new lines 4-7 of src/route.ts are the tour's hunk
+  const patch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -4,4 +4,4 @@\n const a = 1;\n-const x = 8;\n+const x = 9;\n const b = 2;\n const c = 3;\n';
+  const earlierThreads = { pullRequest: 7, partial: true, threads: [
+    { id: 'T1', path: 'src/route.ts', line: 5, resolved: false, outdated: false, diffHunk: '@@ -4 +4 @@', comments: [comment('C1', 'octocat', 'Why eight?'), comment('C2', 'mona', 'Changed it to nine.')] },
+    { id: 'T2', path: 'src/old.ts', line: 3, resolved: false, outdated: true, diffHunk: '@@ -3 +3 @@', comments: [comment('C3', 'octocat', 'Drop this file.')] },
+    { id: 'T3', path: 'src/route.ts', line: 40, startLine: 38, resolved: true, resolvedBy: { login: 'mona' }, outdated: false, diffHunk: '@@ -38 +38 @@', comments: [comment('C4', 'octocat', 'Rename these.')] },
+    // on line 5 too, but of the removed side, or of code since changed: neither sits on the new line 5
+    { id: 'T4', path: 'src/route.ts', line: 5, leftSide: true, resolved: false, outdated: false, diffHunk: '@@ -5 +5 @@', comments: [comment('C5', 'octocat', 'Removed-side note.')] },
+    { id: 'T5', path: 'src/route.ts', line: 5, resolved: false, outdated: true, diffHunk: '@@ -5 +5 @@', comments: [comment('C6', 'octocat', 'Outdated note.')] }
+  ] };
+  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
+  const resolves: string[] = [];
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    // GitHub refuses the first resolve
+    if (url.pathname.startsWith('/api/projects/repo/github/pulls/7/threads/') && request.method() === 'POST') { resolves.push(url.pathname); return resolves.length === 1 ? route.fulfill({ status: 502, json: { error: 'GitHub is unavailable.' } }) : route.fulfill({ status: 204 }); }
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  const panel = page.getByRole('region', { name: 'Review fixes' });
+  await panel.getByRole('button', { name: 'Start tour' }).click();
+
+  // every thread I opened, as the tour started, with my first comment and the latest reply
+  const earlier = panel.getByRole('region', { name: 'Your earlier comments (5)' });
+  await expect(earlier.getByText('Some older threads may be missing')).toBeVisible();
+  const first = earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts line 5' }).filter({ hasText: 'Why eight?' });
+  await expect(earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts old line 5' })).toContainText('Removed-side note.');
+  await expect(first).toContainText('Why eight?');
+  await expect(first).toContainText('@mona: Changed it to nine.');
+  await expect(earlier.getByRole('group', { name: 'Your earlier comment on src/old.ts line 3' })).toContainText('outdated');
+  const resolved = earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts lines 38-40' });
+  await expect(resolved).toContainText('resolved by @mona');
+  await expect(resolved.getByRole('button', { name: 'Resolve' })).toHaveCount(0);
+
+  // only the current thread inside the step's hunk also sits on its lines
+  const diffs = panel.getByLabel('Relevant changes');
+  await expect(diffs.locator('.review-tour-earlier')).toHaveCount(1);
+  await expect(diffs.locator('.review-tour-earlier')).toContainText('Why eight?');
+
+  // Resolve asks first; declining sends nothing
+  page.once('dialog', dialog => void dialog.dismiss());
+  await first.getByRole('button', { name: 'Resolve' }).click();
+  await expect(first.getByRole('button', { name: 'Resolve' })).toBeEnabled();
+  expect(resolves).toEqual([]);
+  // a refused resolve says why and leaves the thread open
+  page.once('dialog', dialog => void dialog.accept());
+  await first.getByRole('button', { name: 'Resolve' }).click();
+  await expect(first.getByRole('alert')).toHaveText('GitHub is unavailable.');
+  await expect(first).toContainText('open');
+  page.once('dialog', dialog => void dialog.accept());
+  await first.getByRole('button', { name: 'Resolve' }).click();
+  await expect(first).toContainText('resolved by you');
+  await expect(first.getByRole('button', { name: 'Resolve' })).toHaveCount(0);
+  await expect(diffs.locator('.review-tour-earlier')).toContainText('resolved by you');
+  expect(resolves).toEqual(['/api/projects/repo/github/pulls/7/threads/T1/resolve', '/api/projects/repo/github/pulls/7/threads/T1/resolve']);
+
+  // the tour's draft keeps it resolved across a reload
+  await page.reload();
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  await expect(first).toContainText('resolved by you');
+});
+
 test('updates a Worktree behind its pull request to the head, then offers Since my review', async ({ page }) => {
   await installAgentWebSocket(page);
   const reviewedCommit = 'a1b2c3d'.padEnd(40, '0');

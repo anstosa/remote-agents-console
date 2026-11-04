@@ -25,8 +25,11 @@ export type PullRequestSummary = { number: number; title: string; status: 'draft
 // `mine` the viewer
 export type PullRequestComment = { id: string; author: string; bot: boolean; mine?: true; body: string; createdAt: string; url: string };
 // A Review thread: comments anchored to lines of one file; `line`/`startLine` fall back to the
-// original lines once the thread is outdated, and `diffHunk` is the code the first comment was on
-export type PullRequestReviewThread = { id: string; path: string; line?: number; startLine?: number; resolved: boolean; outdated: boolean; diffHunk: string; comments: PullRequestComment[] };
+// original lines once the thread is outdated, and count on the base (removed lines) with `leftSide`.
+// `comments` opens with the thread's first comment, then its latest (a long thread's middle is not
+// read); `diffHunk` is the code the first comment was on; `resolvedBy` is who resolved it, `mine`
+// when the viewer did. A `pending` thread opens the viewer's unsubmitted Draft review.
+export type PullRequestReviewThread = { id: string; path: string; line?: number; startLine?: number; leftSide?: true; pending?: true; resolved: boolean; resolvedBy?: { login: string; mine?: true }; outdated: boolean; diffHunk: string; comments: PullRequestComment[] };
 export type PullRequestReviewSummary = PullRequestComment & { state: string };
 // `description` is the pull request's own body, the comment its author opened it with
 export type PullRequestComments = { number: number; url: string; description?: PullRequestComment; threads: PullRequestReviewThread[]; reviews: PullRequestReviewSummary[]; comments: PullRequestComment[] };

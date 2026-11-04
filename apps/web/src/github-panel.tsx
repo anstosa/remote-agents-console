@@ -143,7 +143,7 @@ type DetailProps = { identity: GithubItemIdentity; now: number; worktreeId?: str
 /** Send one write to the shown pull request (a path under it, and a JSON body); its result or why it failed. */
 type Write = (path: string, body?: unknown) => Promise<{ result?: unknown; error?: string }>;
 // why the console did not do what was asked: the server's own message, else its status
-const refusal = async (response: Response, action: string) => {
+export const refusal = async (response: Response, action: string) => {
   const error = (await response.json().catch(() => undefined) as { error?: unknown } | undefined)?.error;
   return typeof error === 'string' ? error : `The console could not ${action} (${response.status}).`;
 };
@@ -318,7 +318,7 @@ function GithubItemActions({ item, context, request, dynamicWorktrees, ownerNotR
   return variant === 'card' ? <div className="github-direct-actions">{directView}{direct}{menu}</div> : direct === undefined ? menu : <div className="github-direct-actions">{direct}{menu}</div>;
 }
 // a write's button, its border travelling while the write is in flight
-const WriteButton = ({ busy, className, children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { busy: boolean }) => <button type="button" className={`github-button${className === undefined ? '' : ` ${className}`}${busy ? ' progress-border progress-blue' : ''}`} aria-busy={busy || undefined} {...props}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{children}</button>;
+export const WriteButton = ({ busy, className, children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { busy: boolean }) => <button type="button" className={`github-button${className === undefined ? '' : ` ${className}`}${busy ? ' progress-border progress-blue' : ''}`} aria-busy={busy || undefined} {...props}>{busy && <span className="update-progress-ring" aria-hidden="true" />}{children}</button>;
 
 // a thread's foot: who spoke last, Reply (a box inside the card, open while `draft` is set) and
 // Resolve, and how the last write went

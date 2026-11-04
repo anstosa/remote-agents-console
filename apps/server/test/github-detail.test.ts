@@ -108,6 +108,34 @@ describe('a pull request\'s detail', () => {
     expect(pullRequest?.comments).toEqual([{ id: 'I1', author: 'codecov', bot: true, body: 'Coverage 80%', createdAt: '2026-10-01T03:00:00Z', url: 'https://github.com/octo/repo/pull/9#issuecomment-1' }]);
   });
 
+  it('reads who resolved each thread, the opener of a thread longer than its page, a thread on removed lines, and one in my Draft review', async () => {
+    const comment = (id: string, login: string, mine: boolean) => ({ id, author: author(login), body: `${id} text`, createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/octo/repo/pull/9#discussion_${id}`, diffHunk: `@@ hunk of ${id} @@`, viewerDidAuthor: mine });
+    const threads = { nodes: [
+      // a long thread: the page holds only its latest comments, so its opener is read on its own
+      { id: 'T1', isResolved: true, isOutdated: false, path: 'src/a.ts', line: 5, diffSide: 'RIGHT', resolvedBy: { login: 'octocat', isViewer: true }, opener: { nodes: [comment('C0', 'octocat', true)] }, comments: { nodes: [comment('C8', 'mona', false), comment('C9', 'octocat', true)] } },
+      { id: 'T2', isResolved: true, isOutdated: false, path: 'src/a.ts', line: 7, diffSide: 'LEFT', resolvedBy: { login: 'mona', isViewer: false }, opener: { nodes: [comment('C1', 'octocat', true)] }, comments: { nodes: [comment('C1', 'octocat', true)] } },
+      // one in my unsubmitted Draft review
+      { id: 'T3', isResolved: false, isOutdated: false, path: 'src/a.ts', line: 9, diffSide: 'RIGHT', resolvedBy: null, opener: { nodes: [{ ...comment('C2', 'octocat', true), state: 'PENDING' }] }, comments: { nodes: [comment('C2', 'octocat', true)] } }
+    ] };
+    const queries: string[] = [];
+    const { service } = polled({}, { request: async (_url, init) => { queries.push(String(init?.body)); return reply({ data: { repository: { pullRequest: { ...detailPayload.data.repository.pullRequest, reviewThreads: threads } } } }); } });
+    const { pullRequest } = await service.pullRequestDetail(repo, 9);
+    for (const field of ['resolvedBy{login isViewer}', 'opener:comments(first:1)', 'diffSide']) expect(queries[0]).toContain(field);
+    expect(pullRequest?.threads).toEqual([
+      { id: 'T1', path: 'src/a.ts', line: 5, resolved: true, resolvedBy: { login: 'octocat', mine: true }, outdated: false, diffHunk: '@@ hunk of C0 @@', comments: [
+        { id: 'C0', author: 'octocat', bot: false, mine: true, body: 'C0 text', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_C0' },
+        { id: 'C8', author: 'mona', bot: false, body: 'C8 text', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_C8' },
+        { id: 'C9', author: 'octocat', bot: false, mine: true, body: 'C9 text', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_C9' }
+      ] },
+      { id: 'T2', path: 'src/a.ts', line: 7, leftSide: true, resolved: true, resolvedBy: { login: 'mona' }, outdated: false, diffHunk: '@@ hunk of C1 @@', comments: [
+        { id: 'C1', author: 'octocat', bot: false, mine: true, body: 'C1 text', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_C1' }
+      ] },
+      { id: 'T3', path: 'src/a.ts', line: 9, pending: true, resolved: false, outdated: false, diffHunk: '@@ hunk of C2 @@', comments: [
+        { id: 'C2', author: 'octocat', bot: false, mine: true, body: 'C2 text', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/9#discussion_C2' }
+      ] }
+    ]);
+  });
+
   it('reuses the detail while a fresh list shows the pull request unchanged, and reads it again once it moves', async () => {
     const pull = { number: 1, branch: 'feature', mine: true, updatedAt: '2026-10-30T10:00:00Z', sha: sha('a'), checks: 'SUCCESS' as 'SUCCESS' | 'FAILURE' | 'PENDING', threads: [{ isResolved: false, isOutdated: false }] };
     const { service, calls, clock } = polled(() => ({ 'octo/repo': { pulls: [{ ...pull }] } }));

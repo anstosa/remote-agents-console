@@ -241,7 +241,7 @@ const detailQuery = `query PullRequestDetail($owner:String!,$name:String!,$numbe
   reviewRequests(first:${detailPageLimits.reviewers}){nodes{requestedReviewer{__typename ...on User{login id} ...on Bot{login id} ...on Mannequin{login} ...on Team{slug id}}}}
   latestReviews(first:${detailPageLimits.reviewers}){nodes{author{login __typename ...on User{id} ...on Bot{id}} state commit{oid}}}
   closingIssuesReferences(first:10){nodes{number title url state repository{nameWithOwner}}}
-  reviewThreads(last:${detailPageLimits.threads}){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine comments(last:${detailPageLimits.threadComments}){nodes{${commentFields} diffHunk}}}}
+  reviewThreads(last:${detailPageLimits.threads}){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine diffSide resolvedBy{login isViewer} opener:comments(first:1){nodes{${commentFields} diffHunk state}} comments(last:${detailPageLimits.threadComments}){nodes{${commentFields} diffHunk}}}}
   reviews(last:${detailPageLimits.reviews}){nodes{id author{login __typename} state body submittedAt url viewerDidAuthor commit{oid} comments(first:1){totalCount nodes{replyTo{id}}}}}
   comments(last:${detailPageLimits.comments}){nodes{${commentFields}}}
 }}}`;
@@ -1618,13 +1618,19 @@ function readDetail(repository: GithubRepository, node: unknown): { data: PullRe
   const pull = readPull(node);
   if (pull === undefined) return undefined;
   const threads = nodes(at(node, 'reviewThreads')).flatMap((thread): PullRequestReviewThread[] => {
-    const comments = nodes(at(thread, 'comments')).flatMap(prComment);
+    // a thread longer than the page of its latest comments still opens with its first
+    const [openerNode] = nodes(at(thread, 'opener'));
+    const [opener] = prComment(openerNode);
+    const latest = nodes(at(thread, 'comments')).flatMap(prComment);
+    const comments = opener === undefined || latest.some(comment => comment.id === opener.id) ? latest : [opener, ...latest];
     const [id, path] = [at(thread, 'id'), at(thread, 'path')];
     if (typeof id !== 'string' || typeof path !== 'string' || comments.length === 0) return [];
     const line = positive(at(thread, 'line')) ?? positive(at(thread, 'originalLine'));
     const startLine = positive(at(thread, 'startLine')) ?? positive(at(thread, 'originalStartLine'));
-    const diffHunk = at(nodes(at(thread, 'comments'))[0], 'diffHunk');
-    return [{ id, path, ...(line === undefined ? {} : { line }), ...(startLine === undefined || startLine === line ? {} : { startLine }), resolved: at(thread, 'isResolved') === true, outdated: at(thread, 'isOutdated') === true, diffHunk: typeof diffHunk === 'string' ? diffHunk : '', comments }];
+    const diffHunk = at(openerNode ?? nodes(at(thread, 'comments'))[0], 'diffHunk');
+    const resolver = at(thread, 'resolvedBy', 'login');
+    const resolvedBy = typeof resolver === 'string' ? { login: resolver, ...(at(thread, 'resolvedBy', 'isViewer') === true ? { mine: true as const } : {}) } : undefined;
+    return [{ id, path, ...(line === undefined ? {} : { line }), ...(startLine === undefined || startLine === line ? {} : { startLine }), ...(at(thread, 'diffSide') === 'LEFT' ? { leftSide: true as const } : {}), ...(at(openerNode, 'state') === 'PENDING' ? { pending: true as const } : {}), resolved: at(thread, 'isResolved') === true, ...(resolvedBy === undefined ? {} : { resolvedBy }), outdated: at(thread, 'isOutdated') === true, diffHunk: typeof diffHunk === 'string' ? diffHunk : '', comments }];
   });
   // a review with no summary text is only its inline threads; a pending one is the viewer's unsent draft
   const reviews = nodes(at(node, 'reviews')).flatMap(review => {

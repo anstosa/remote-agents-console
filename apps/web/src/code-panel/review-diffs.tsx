@@ -24,8 +24,9 @@ import { orderedRange } from './patch-rows.js';
 // what a thread can sit under: an inline comment, a suggested comment (an untriaged or dismissed
 // Finding), or lines asked about on their own (`askId`, a ReviewDiffAsk)
 export type CommentAnchor = { commentId: string } | { suggestionId: string } | { askId: string };
-// an annotation is one of those, or the choice the gutter "+" offers on picked lines
-type Annotation = CommentAnchor | { choice: true };
+// an annotation is one of those, a caller's note (`noteId`, a ReviewDiffNote), or the choice the
+// gutter "+" offers on picked lines
+type Annotation = CommentAnchor | { noteId: string } | { choice: true };
 type ReviewItem = CodeViewItem<Annotation>;
 type ReviewOptions = CodeViewReactOptions<Annotation, undefined>;
 
@@ -54,6 +55,9 @@ export type ReviewDiffRange = Pick<ReviewDiffComment, 'changeId' | 'startSide' |
 // the range's last line.
 export type ReviewDiffAsk = { id: string; changeId: string; side: ReviewDiffSide; endLine: number };
 
+// Something of the caller's that sits under a line of one Change, rendered through `renderNote`.
+export type ReviewDiffNote = { id: string; changeId: string; side: ReviewDiffSide; endLine: number };
+
 // The longest one inline comment may grow; the caller enforces the shared aggregate cap on top.
 export const MAX_INLINE_COMMENT = 4_000;
 
@@ -78,6 +82,9 @@ type ReviewDiffsProps = {
   threadFor?: (anchor: CommentAnchor) => ReactNode;
   // the lines with an Ask thread of their own
   asks?: ReviewDiffAsk[];
+  // the caller's notes on lines, and what each shows
+  notes?: ReviewDiffNote[];
+  renderNote?: (id: string) => ReactNode;
   // When given, the gutter "+" offers Comment or Ask on the picked lines, and Ask reports them;
   // otherwise it starts a comment directly.
   onAskStart?: (range: ReviewDiffRange) => void;
@@ -232,7 +239,7 @@ function SuggestedComment({ suggestion, onKeep, onDismiss, onRestore }: { sugges
 }
 
 // render one tour step with current display settings
-export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, threadFor, asks = [], onAskStart, askLabel = 'Ask', onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll, expandedLines }: ReviewDiffsProps) {
+export default function ReviewDiffs({ changes, comments, openCommentIds, onCommentAdd, onCommentChange, onCommentOpen, onCommentClose, onCommentDelete, suggestions = [], onSuggestionKeep, onSuggestionDismiss, onSuggestionRestore, threadFor, asks = [], notes = [], renderNote, onAskStart, askLabel = 'Ask', onOpenInEditor, loadFile, onExpandError, scrollTop, onScroll, expandedLines }: ReviewDiffsProps) {
   const theme = useColorTheme();
   const codeView = useRef<CodeViewHandle<Annotation, undefined>>(null);
   // the lines the gutter "+" was last clicked on, while they show the choice of a comment or a question
@@ -271,8 +278,9 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
     ...suggestions.map(suggestion => ({ changeId: suggestion.changeId, side: suggestion.side, endLine: suggestion.endLine, metadata: { suggestionId: suggestion.id } as Annotation, key: `s:${suggestion.id}` })),
     ...comments.map(comment => ({ changeId: comment.changeId, side: comment.endSide, endLine: comment.endLine, metadata: { commentId: comment.id } as Annotation, key: `c:${comment.id}` })),
     ...asks.map(ask => ({ changeId: ask.changeId, side: ask.side, endLine: ask.endLine, metadata: { askId: ask.id } as Annotation, key: `a:${ask.id}` })),
+    ...notes.map(note => ({ changeId: note.changeId, side: note.side, endLine: note.endLine, metadata: { noteId: note.id } as Annotation, key: `n:${note.id}` })),
     ...(choice === undefined ? [] : [{ changeId: choice.changeId, side: choice.endSide, endLine: choice.endLine, metadata: { choice: true } as Annotation, key: 'choice' }])
-  ], [suggestions, comments, asks, choice]);
+  ], [suggestions, comments, asks, notes, choice]);
   const anchorKey = anchors.map(anchor => `${anchor.key}@${anchor.changeId}:${anchor.side}:${anchor.endLine}`).join('|');
   const items = useMemo(() => [...baseItems.values()].map(({ item, view }): ReviewItem => {
     const inView = (changeId: string) => view.changeId === changeId || view.hunks.some(hunk => hunk.changeId === changeId);
@@ -363,6 +371,7 @@ export default function ReviewDiffs({ changes, comments, openCommentIds, onComme
     }
     // lines asked about on their own
     if (annotation.metadata !== undefined && 'askId' in annotation.metadata) return threadFor?.(annotation.metadata) ?? null;
+    if (annotation.metadata !== undefined && 'noteId' in annotation.metadata) return renderNote?.(annotation.metadata.noteId) ?? null;
     // a suggested comment
     if (annotation.metadata !== undefined && 'suggestionId' in annotation.metadata) {
       const suggestion = suggestionsById.get(annotation.metadata.suggestionId);

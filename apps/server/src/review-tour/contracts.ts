@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ReviewCategory } from '../git/change-classification.js';
 import { objectId } from '../git/comparison.js';
+import type { PullRequestReviewThread } from '../domain/models.js';
 import { agentChoiceShape } from '../launch/agent-choice.js';
 import { reviewAgentKinds, validConversationId, type ReviewAgentKind } from '../review-runs/kinds.js';
 import type { ReviewRunCapability } from '../review-runs/runner.js';
@@ -54,8 +55,13 @@ export type GeneratedReviewTour = { title: string; overview: string; steps: Gene
 // The agent that narrated a tour, in its own conversation, with the model and effort it ran on; an Ask
 // about the tour's lines resumes that conversation (ADR 0013)
 export type TourGuide = { agent: ReviewAgentKind; conversation: string; model?: string; effort?: string };
-// `guide` is absent for a tour whose run kept no conversation
-export type ReviewTour = GeneratedReviewTour & ReviewScope & Pick<ReviewComparison, 'base' | 'includeTests' | 'includeDocs' | 'fingerprint' | 'changes'> & SinceReviewBase & { guide?: TourGuide };
+// The Review threads I opened on a Since my review tour's Pull request `pullRequest`, as GitHub had
+// them when the tour started, so the tour shows the threads as they were then; `partial` when GitHub's
+// page of threads was full, so older ones may be missing
+export type EarlierThreads = { pullRequest: number; threads: PullRequestReviewThread[]; partial?: true };
+// `guide` is absent for a tour whose run kept no conversation; only a Since my review tour has
+// `earlierThreads`
+export type ReviewTour = GeneratedReviewTour & ReviewScope & Pick<ReviewComparison, 'base' | 'includeTests' | 'includeDocs' | 'fingerprint' | 'changes'> & SinceReviewBase & { guide?: TourGuide; earlierThreads?: EarlierThreads };
 // `effort` picks one of the tour agent's levels for this run; absent, the configured one applies
 export type ReviewTourInput = ReviewScope & { includeTests: boolean; includeDocs: boolean; effort?: string };
 // whether the tour's configured agent can run, with its configured effort and every level it accepts
@@ -105,9 +111,31 @@ export function parseTourGuide(value: unknown): TourGuide | undefined {
   const parsed = guideSchema.safeParse(value);
   return parsed.success ? parsed.data as TourGuide : undefined;
 }
-// a Since my review tour, and only that, records its base tree
-const reviewTourSchema = scopedSchema(generatedTourSchema.extend({ base: z.string().min(1).max(4_096), includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), changes: z.array(reviewChangeSchema).min(1).max(MAX_REVIEW_CHANGES), guide: guideSchema.optional(), baseTree: z.string().regex(objectId).optional(), fallback: z.literal(true).optional() }).strict())
-  .refine(tour => (tour.scope === 'since-review') === (tour.baseTree !== undefined) && (tour.fallback === undefined || tour.baseTree !== undefined));
+// A snapshot is bounded whatever other participants write on my threads: the threads of one detail
+// page, each its first comment and latest replies with their text cut short ("View on GitHub" has the
+// rest), and the end of its hunk, the code the first comment sits on. Every snapshot taken loads again.
+const MAX_EARLIER_THREADS = 100;
+const MAX_EARLIER_REPLIES = 5;
+const MAX_EARLIER_COMMENT = 4_000;
+const MAX_EARLIER_HUNK_LINES = 20;
+const MAX_EARLIER_HUNK = 8_000;
+const threadCommentSchema = z.object({ id: z.string().min(1).max(200), author: z.string().min(1).max(100), bot: z.boolean(), mine: z.literal(true).optional(), body: z.string().max(MAX_EARLIER_COMMENT), createdAt: z.string().max(64), url: z.string().max(2_048) }).strict();
+const lineSchema = z.number().int().positive();
+const threadSchema = z.object({ id: z.string().min(1).max(200), path: z.string().min(1).max(4_096), line: lineSchema.optional(), startLine: lineSchema.optional(), leftSide: z.literal(true).optional(), pending: z.literal(true).optional(), resolved: z.boolean(), resolvedBy: z.object({ login: z.string().min(1).max(100), mine: z.literal(true).optional() }).strict().optional(), outdated: z.boolean(), diffHunk: z.string().max(MAX_EARLIER_HUNK), comments: z.array(threadCommentSchema).min(1).max(1 + MAX_EARLIER_REPLIES) }).strict();
+const earlierThreadsSchema = z.object({ pullRequest: z.number().int().positive(), threads: z.array(threadSchema).max(MAX_EARLIER_THREADS), partial: z.literal(true).optional() }).strict();
+
+// threads as a tour keeps them, within what a stored tour loads
+export function earlierThreadsSnapshot(threads: PullRequestReviewThread[]): PullRequestReviewThread[] {
+  return threads.slice(-MAX_EARLIER_THREADS).map(thread => {
+    const [opener, ...replies] = thread.comments;
+    const kept = opener === undefined ? [] : [opener, ...replies.slice(-MAX_EARLIER_REPLIES)];
+    return { ...thread, diffHunk: thread.diffHunk.split('\n').slice(-MAX_EARLIER_HUNK_LINES).join('\n').slice(-MAX_EARLIER_HUNK), comments: kept.map(comment => ({ ...comment, body: comment.body.slice(0, MAX_EARLIER_COMMENT) })) };
+  });
+}
+
+// a Since my review tour, and only that, records its base tree and my earlier threads
+const reviewTourSchema = scopedSchema(generatedTourSchema.extend({ base: z.string().min(1).max(4_096), includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), changes: z.array(reviewChangeSchema).min(1).max(MAX_REVIEW_CHANGES), guide: guideSchema.optional(), baseTree: z.string().regex(objectId).optional(), fallback: z.literal(true).optional(), earlierThreads: earlierThreadsSchema.optional() }).strict())
+  .refine(tour => (tour.scope === 'since-review') === (tour.baseTree !== undefined) && (tour.fallback === undefined || tour.baseTree !== undefined) && (tour.earlierThreads === undefined || tour.scope === 'since-review'));
 const prohibitedPrefix = /^(?:finding|findings|warning|warnings|issue|issues|recommendation|recommendations|severity|verdict|approval|approved|rejection|rejected)\s*[:\-–—]/iu;
 
 // parse the fixed review request
@@ -181,7 +209,7 @@ export function parseReviewTour(value: unknown): ReviewTour | undefined {
   if (patchBytes > MAX_REVIEW_DIFF_BYTES) return undefined;
   const generated = parseGeneratedReviewTour({ title: tour.title, overview: tour.overview, steps: tour.steps }, tour.changes);
   // retain only exact change assignments
-  return generated === undefined ? undefined : { ...generated, ...reviewScope(tour), base: tour.base, includeTests: tour.includeTests, includeDocs: tour.includeDocs, fingerprint: tour.fingerprint, changes: tour.changes, ...sinceReviewBase(tour), ...(tour.guide === undefined ? {} : { guide: tour.guide as TourGuide }) };
+  return generated === undefined ? undefined : { ...generated, ...reviewScope(tour), base: tour.base, includeTests: tour.includeTests, includeDocs: tour.includeDocs, fingerprint: tour.fingerprint, changes: tour.changes, ...sinceReviewBase(tour), ...(tour.guide === undefined ? {} : { guide: tour.guide as TourGuide }), ...(tour.earlierThreads === undefined ? {} : { earlierThreads: tour.earlierThreads as EarlierThreads }) };
 }
 
 // only a Since my review base's fields, when a value has them

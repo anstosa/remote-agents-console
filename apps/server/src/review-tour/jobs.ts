@@ -83,9 +83,10 @@ export class ReviewTourJobs {
       if (this.codeReviews === undefined) throw new ReviewTourError('capability_unavailable', false);
       await this.codeReviews.validate(codeReview);
     }
-    // a Since my review tour starts only on a Pull request I reviewed whose head is HEAD
-    if (input.scope === 'since-review') await this.service.startSinceReview(worktreeId, input.reviewedCommit);
-    const prepared = await this.service.prepare(worktreeId, input);
+    // a Since my review tour starts only on a Pull request I reviewed whose head is HEAD, and keeps
+    // my earlier threads as they are now
+    const earlierThreads = input.scope === 'since-review' ? await this.service.startSinceReview(worktreeId, input.reviewedCommit) : undefined;
+    const prepared = await this.service.prepare(worktreeId, input, earlierThreads);
     return await this.createPrepared(owner, prepared, codeReview);
   }
 

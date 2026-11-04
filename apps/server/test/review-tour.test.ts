@@ -88,6 +88,16 @@ describe('review tour contracts', () => {
     expect(parseReviewTour({ ...tour, scope: 'pr', baseTree })).toBeUndefined();
     expect(parseReviewTour({ ...tour, scope: 'pr', fallback: true })).toBeUndefined();
   });
+
+  it('loads a Since my review tour\'s snapshot of my earlier threads, and no other tour with one', () => {
+    const tour = { title: 'Since my review', overview: 'Walk through the fixes.', steps: [{ id: 'fixes', title: 'The fixes', explanation: 'It answers the review.', changeIds: [implementationChange.id] }], base: 'aaaaaaa (rebased)', includeTests: false, includeDocs: false, fingerprint: 'fingerprint-1234567890', changes: [implementationChange] };
+    const comment = { id: 'C1', author: 'octocat', bot: false, mine: true, body: 'Back off first', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/7#discussion_r1' };
+    const earlierThreads = { pullRequest: 7, partial: true, threads: [{ id: 'T1', path: 'src/feature.ts', line: 3, startLine: 1, resolved: true, resolvedBy: { login: 'mona' }, outdated: false, diffHunk: '@@ -1 +1 @@', comments: [comment] }] };
+    const since = { ...tour, scope: 'since-review', reviewedCommit: 'a'.repeat(40), baseTree: 'b'.repeat(40) };
+    expect(parseReviewTour({ ...since, earlierThreads })).toEqual({ ...since, earlierThreads });
+    expect(parseReviewTour({ ...tour, scope: 'pr', earlierThreads })).toBeUndefined();
+    expect(parseReviewTour({ ...since, earlierThreads: { ...earlierThreads, threads: [{ ...earlierThreads.threads[0], comments: [] }] } })).toBeUndefined();
+  });
 });
 
 describe('review tour jobs', () => {
@@ -177,6 +187,17 @@ describe('a Since my review start', () => {
     try {
       await expect(jobs.start('owner-a', 'cora', { scope: 'since-review', reviewedCommit: 'a'.repeat(40), includeTests: false, includeDocs: false })).rejects.toMatchObject({ code: 'head_behind_pull_request' });
       expect(prepared).toBe(0);
+    } finally { jobs.close(); }
+  });
+
+  it('prepares the tour with the thread snapshot the start took', async () => {
+    const earlierThreads = { pullRequest: 7, threads: [] };
+    const handed: unknown[] = [];
+    const service = { startSinceReview: async () => earlierThreads, prepare: async (_worktreeId: string, _input: unknown, snapshot: unknown) => { handed.push(snapshot); return prepared(); }, generate: async () => await new Promise<ReviewTour>(() => {}) } as unknown as ReviewTourService;
+    const jobs = new ReviewTourJobs(service);
+    try {
+      await jobs.start('owner-a', 'cora', { scope: 'since-review', reviewedCommit: 'a'.repeat(40), includeTests: false, includeDocs: false });
+      expect(handed).toEqual([earlierThreads]);
     } finally { jobs.close(); }
   });
 });

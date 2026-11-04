@@ -2402,6 +2402,20 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-general .review-tour-suggestion { margin: 0; }
 .review-tour-summary .review-tour-general { margin-top: .9rem; }
 .review-tour-general-note { display: grid; gap: .35rem; }
+/* my earlier Review threads on a Since my review tour: listed on the first step, and under the lines they sit on */
+.review-tour-earlier { display: grid; gap: .35rem; margin: .35rem .6rem .5rem; padding: .55rem .65rem; border: 1px solid color-mix(in srgb, var(--blue) 45%, var(--surface-2)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--blue) 6%, var(--mantle)); color: var(--text); font: 500 var(--diffs-font-size, .76rem)/1.45 var(--font-mono); white-space: normal; }
+.review-tour-general .review-tour-earlier { margin: 0; }
+.review-tour-earlier-head { display: flex; flex-wrap: wrap; min-width: 0; align-items: baseline; justify-content: space-between; gap: .1rem .5rem; }
+.review-tour-earlier-head strong { min-width: 0; overflow-wrap: anywhere; font-weight: 800; }
+.review-tour-earlier-head span { flex: none; color: var(--overlay-1); font: 700 .62rem var(--font-mono); }
+.review-tour-earlier > p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-tour-earlier > .review-tour-earlier-reply { padding-left: .6rem; border-left: 2px solid var(--surface-2); color: var(--subtext-1); }
+.review-tour-earlier > div:last-child { display: flex; align-items: center; justify-content: flex-end; gap: .6rem; }
+.review-tour-earlier a { color: var(--blue); font-size: .68rem; }
+.review-tour-earlier button { padding: .3rem .65rem; font-size: .68rem; box-shadow: none; }
+.review-tour-earlier-threads > small { color: var(--blue); }
+.review-tour-earlier-note { margin: 0; color: var(--subtext-0); font-size: .72rem; }
+@media (pointer: coarse) { .review-tour-earlier button { min-height: 2.2rem; padding-inline: .9rem; } }
 .review-tour-narration .review-tour-general-note label, .review-tour-summary .review-tour-general-note label { margin-top: 0; }
 .review-tour-narration .review-tour-general-note textarea, .review-tour-summary .review-tour-general-note textarea { min-height: 5rem; }
 .review-tour-general-note > div { display: flex; justify-content: flex-end; }

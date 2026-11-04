@@ -4,9 +4,10 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { MAX_REVIEW_FILE_BYTES } from '../src/review-tour/contracts.js';
+import { MAX_REVIEW_FILE_BYTES, parseReviewTour } from '../src/review-tour/contracts.js';
 import { captureReviewComparison } from '../src/review-tour/diff.js';
 import { ReviewTourService } from '../src/review-tour/service.js';
+import type { PullRequestReviewThread } from '../src/domain/models.js';
 import { resolveConfiguredWorkspace } from '../src/workspaces/resolver.js';
 import type { ResolvedWorkspace } from '../src/workspaces/resolver.js';
 
@@ -242,9 +243,9 @@ describe('Since my review Comparison capture', () => {
 });
 
 describe('Since my review availability and start', () => {
-  type Detail = { headSha: string; viewerReviewCommit?: string; baseBranch?: string; headOnOrigin?: boolean };
+  type Detail = { headSha: string; viewerReviewCommit?: string; baseBranch?: string; headOnOrigin?: boolean; threads?: PullRequestReviewThread[]; pageFull?: { threads?: true } };
   // a service over the Worktree at `root` (branch `feature`) whose Pull request #7 GitHub reads as `detail`
-  const service = (root: string, pull: { number: number; status: 'open' | 'merged' } | undefined, detail: Detail | undefined, prBase = 'main', problem?: object) => {
+  const service = (root: string, pull: { number: number; status: 'open' | 'merged' } | undefined, detail: Detail | undefined, prBase = 'main', problem?: object, generator: object = {}) => {
     const worktree = sinceReviewWorkspace(root, prBase).worktree;
     const view = { id: worktree.id, branch: 'feature', gitPrStatus: { base: prBase, files: 1, changes: [] } };
     const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [{ id: 'cora', worktrees: [view] }] }) };
@@ -253,9 +254,9 @@ describe('Since my review availability and start', () => {
     const github = {
       repositoryAt: async (path: string) => path === root ? repository : undefined,
       branch: async (asked: unknown, name: string) => ({ ...(pull === undefined || asked !== repository || name !== 'feature' ? {} : { pullRequest: { ...pull, title: 'Fixes', url: 'https://github.com/octo/repo/pull/7' } }) }),
-      pullRequestDetail: async (_repository: unknown, number: number, options: unknown) => { reads.push([number, options]); return { ...(detail === undefined || number !== 7 ? {} : { pullRequest: { branch: 'feature', headOnOrigin: true, state: 'open', ...detail } }), ...(problem === undefined ? {} : { problem }) }; }
+      pullRequestDetail: async (_repository: unknown, number: number, options: unknown) => { reads.push([number, options]); return { ...(detail === undefined || number !== 7 ? {} : { pullRequest: { number, threads: [], branch: 'feature', headOnOrigin: true, state: 'open', ...detail } }), ...(problem === undefined ? {} : { problem }) }; }
     };
-    return { reads, service: new ReviewTourService(discovery as never, {} as never, github as never) };
+    return { reads, service: new ReviewTourService(discovery as never, generator as never, github as never) };
   };
 
   it('names the commit of my latest submitted review, read fresh, while HEAD is the pull request\'s head', async () => {
@@ -350,6 +351,52 @@ describe('Since my review availability and start', () => {
     expect(comparison.changes[0]!.patch).toContain('-feature 2\n+amended 2');
     expect(comparison.changes[0]!.patch).toContain('-line 5\n+fixed 5');
     expect(comparison.changes[0]!.patch).not.toContain('+upstream 8');
+  });
+
+  it('starts with a snapshot of the threads I opened and submitted, except those I resolved myself', async () => {
+    const { root, reviewed } = await reviewedRepository();
+    const head = await commitLines(root, 'address review', lines({ 2: 'feature 2', 5: 'fixed 5' }));
+    const comment = (id: string, mine: boolean) => ({ id, author: mine ? 'octocat' : 'mona', bot: false, ...(mine ? { mine: true as const } : {}), body: `${id} text`, createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/octo/repo/pull/7#discussion_${id}` });
+    const thread = (id: string, first: boolean, extra: Partial<PullRequestReviewThread> = {}): PullRequestReviewThread => ({ id, path: 'src/lines.ts', line: 5, resolved: false, outdated: false, diffHunk: '@@ -5 +5 @@', comments: [comment(`${id}-1`, first), comment(`${id}-2`, !first)], ...extra });
+    const threads = [
+      thread('open-mine', true),
+      // the author resolved it: kept, so a resolve without a fix is caught
+      thread('resolved-by-author', true, { resolved: true, resolvedBy: { login: 'mona' } }),
+      thread('resolved-by-me', true, { resolved: true, resolvedBy: { login: 'octocat', mine: true } }),
+      thread('outdated-mine', true, { outdated: true }),
+      // still in my unsubmitted Draft review
+      thread('pending-mine', true, { pending: true }),
+      // someone else opened it, though I replied
+      thread('theirs', false)
+    ];
+    const start = async (pageFull?: { threads?: true }) => await service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed, threads, ...(pageFull === undefined ? {} : { pageFull }) }).service.startSinceReview('cora', reviewed);
+
+    expect(await start()).toEqual({ pullRequest: 7, threads: [threads[0], threads[1], threads[3]] });
+    // GitHub gave a full page of threads, so older ones may be missing
+    expect(await start({ threads: true })).toEqual({ pullRequest: 7, threads: [threads[0], threads[1], threads[3]], partial: true });
+  });
+
+  it('keeps a snapshot of a long, chatty thread that the stored tour loads again', async () => {
+    const { root, reviewed } = await reviewedRepository();
+    const head = await commitLines(root, 'address review', lines({ 2: 'feature 2', 5: 'fixed 5' }));
+    const comment = (index: number) => ({ id: `C${index}`, author: index === 0 ? 'octocat' : 'mona', bot: false, ...(index === 0 ? { mine: true as const } : {}), body: `${index} ${'x'.repeat(70_000)}`, createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/octo/repo/pull/7#discussion_C${index}` });
+    const thread: PullRequestReviewThread = { id: 'T1', path: 'src/lines.ts', line: 5, resolved: false, outdated: false, diffHunk: Array.from({ length: 300 }, (_, index) => `+line ${index}`).join('\n'), comments: Array.from({ length: 51 }, (_, index) => comment(index)) };
+    // a generator that narrates every Change in one step
+    const generator = {
+      capability: async () => ({ available: true, agent: 'claude', efforts: [] }),
+      generate: async (comparison: { changes: { id: string }[] }) => ({ title: 'Fixes', overview: 'The author answered the review.', steps: [{ id: 'fixes', title: 'The fixes', explanation: 'Line 5 is fixed.', changeIds: comparison.changes.map(change => change.id) }] })
+    };
+    const { service: ready } = service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed, threads: [thread] }, 'main', undefined, generator);
+    const input = { scope: 'since-review' as const, reviewedCommit: reviewed, includeTests: false, includeDocs: false };
+
+    const tour = await ready.generate(await ready.prepare('cora', input, await ready.startSinceReview('cora', reviewed)), new AbortController().signal);
+
+    // the opener and the latest replies, each cut short, under the end of the hunk
+    const [kept] = tour.earlierThreads!.threads;
+    expect(kept!.comments.map(entry => entry.id)).toEqual(['C0', 'C46', 'C47', 'C48', 'C49', 'C50']);
+    expect(kept!.comments[0]!.body).toHaveLength(4_000);
+    expect(kept!.diffHunk.split('\n')).toEqual(Array.from({ length: 20 }, (_, index) => `+line ${index + 280}`));
+    expect(parseReviewTour(tour)).toEqual(tour);
   });
 
   it('refuses a start whose reviewed commit origin cannot serve', async () => {
