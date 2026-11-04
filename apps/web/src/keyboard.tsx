@@ -465,9 +465,13 @@ function useKeyIndicatorPosition(target: Element | null) {
       // move observations when a shortcut focuses a different split
       if (scope !== observedPanel) {
         observer.disconnect();
+        children.disconnect();
         observedPanel = scope;
         // keep global shortcuts aligned when the workspace resizes
-        if (scope !== null) observer.observe(scope);
+        if (scope !== null) {
+          observer.observe(scope);
+          children.observe(scope, { childList: true });
+        }
         controls.forEach(control => observer.observe(control));
       }
       const viewport = window.visualViewport;
@@ -486,6 +490,8 @@ function useKeyIndicatorPosition(target: Element | null) {
       setPosition({ right: Math.max(12, window.innerWidth - panelRight + 12), bottom: Math.max(12, window.innerHeight - Math.max(top + 72, anchor) + 12), maxWidth: `${Math.max(0, Math.min(512, panelRight - Math.max(viewport?.offsetLeft ?? 0, rect?.left ?? 0) - 24))}px` });
     };
     const observer = new ResizeObserver(update);
+    // a phone mounts a Terminal's keys once its panel scrolls into view, which does not resize the panel
+    const children = new MutationObserver(() => { observedPanel = undefined; update(); });
     window.addEventListener('focusin', update);
     window.addEventListener('resize', update);
     window.addEventListener('scroll', update, true);
@@ -495,6 +501,7 @@ function useKeyIndicatorPosition(target: Element | null) {
     // release geometry listeners when the feedback disappears
     return () => {
       observer.disconnect();
+      children.disconnect();
       window.removeEventListener('focusin', update);
       window.removeEventListener('resize', update);
       window.removeEventListener('scroll', update, true);
