@@ -59,7 +59,7 @@ jobs:
       - name: Install and verify terminal prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends g++ make python3 git tmux zsh util-linux bubblewrap socat
+          sudo apt-get install --yes --no-install-recommends g++ make python3 git tmux zsh util-linux bubblewrap socat ripgrep
           tmux -S "$RUNNER_TEMP/test-probe.sock" new-session -d -s probe
           tmux -S "$RUNNER_TEMP/test-probe.sock" kill-server
           # the Pi sandbox's bwrap needs unprivileged user namespaces, which Ubuntu 24.04's

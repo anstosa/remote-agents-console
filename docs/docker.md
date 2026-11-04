@@ -135,7 +135,7 @@ pnpm --filter @rac/server build
 docker compose up -d --build
 ```
 
-The host needs Node.js 22.19 or newer, `bubblewrap`, and `socat`. In the ignored
+The host needs Node.js 22.19 or newer, `bubblewrap`, `socat`, and `ripgrep`. In the ignored
 Compose override, set `RAC_HOST_NODE_BIN` to the host's absolute Node executable,
 `RAC_HOST_REPOSITORY` to this checkout, and `PI_CODING_AGENT_DIR` to a private
 directory shared at the **same absolute path** on the host and in the container.

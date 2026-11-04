@@ -44,7 +44,7 @@ const clients: ContractClient[] = [{
 
 const tmux = execFileSync('/bin/sh', ['-c', 'command -v tmux || true'], { encoding: 'utf8' }).trim();
 // the sandbox runtime's tools, without which a Sandboxed launch cannot engage its sandbox
-const sandboxRuns = ['bwrap', 'socat'].every(tool => execFileSync('/bin/sh', ['-c', `command -v ${tool} || true`], { encoding: 'utf8' }).trim() !== '');
+const sandboxRuns = ['bwrap', 'socat', 'rg'].every(tool => execFileSync('/bin/sh', ['-c', `command -v ${tool} || true`], { encoding: 'utf8' }).trim() !== '');
 // the window's login shell, as the console-shell suite resolves it (the default /usr/bin/zsh may not exist)
 const loginShell = [process.env.RAC_INTERACTIVE_SHELL?.trim(), process.env.SHELL?.trim(), '/usr/bin/zsh', '/bin/bash'].find((path): path is string => path !== undefined && ['zsh', 'bash', 'fish'].includes(interactiveShellName(path)) && existsSync(path));
 const tmuxSocketsWork = (() => {

@@ -48,10 +48,11 @@ describe('bridged command Watch generations', () => {
 // a Sandboxed Pi's commands are (its folder writable, nothing above it, only the allowlisted
 // environment), its stdout lines reach the console and are replayed to a later connection, and its
 // exit status stays readable on the dead pane. Unix sockets and the sandbox runtime's bubblewrap
-// are unavailable in the build sandbox, so this is skipped there and runs on the host and in CI.
+// are unavailable in the build sandbox (and the runtime also needs socat and ripgrep), so this is skipped there and runs on the host and in CI.
 
 const tmux = execFileSync('/bin/sh', ['-c', 'command -v tmux || true'], { encoding: 'utf8' }).trim();
-const bwrap = execFileSync('/bin/sh', ['-c', 'command -v bwrap || true'], { encoding: 'utf8' }).trim();
+// the sandbox runtime refuses every command unless all three are on PATH
+const sandboxRuns = ['bwrap', 'socat', 'rg'].every(tool => execFileSync('/bin/sh', ['-c', `command -v ${tool} || true`], { encoding: 'utf8' }).trim() !== '');
 // the window's login shell, as the console-shell suite resolves it (the default /usr/bin/zsh may not exist)
 const loginShell = [process.env.RAC_INTERACTIVE_SHELL?.trim(), process.env.SHELL?.trim(), '/usr/bin/zsh', '/bin/bash'].find((path): path is string => path !== undefined && ['zsh', 'bash', 'fish'].includes(interactiveShellName(path)) && existsSync(path));
 const tmuxSocketsWork = (() => {
@@ -113,7 +114,7 @@ async function read(connected: { channel: LineChannel }, count: number): Promise
   return lines;
 }
 
-describe.skipIf(!tmuxSocketsWork || loginShell === undefined || bwrap === '')('a command Watch\'s window', () => {
+describe.skipIf(!tmuxSocketsWork || loginShell === undefined || !sandboxRuns)('a command Watch\'s window', () => {
   beforeAll(() => { vi.stubEnv('RAC_TMUX_BIN', tmux); vi.stubEnv('RAC_INTERACTIVE_SHELL', loginShell!); });
   afterAll(() => { vi.unstubAllEnvs(); });
 
