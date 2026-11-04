@@ -35,4 +35,24 @@ test('uses one border animation per working tab without animated content', async
   }
   await expect(page.locator('.tab-kind-stack')).toHaveCount(3);
   expect(await page.locator('.tab-label').evaluateAll(labels => labels.flatMap(label => label.getAnimations()))).toHaveLength(0);
+  const ring = page.getByRole('tab').first().locator(':scope > .update-progress-ring');
+  // isolate small working indicators without repainting their ancestor surfaces
+  await expect(ring).toHaveCSS('contain', 'layout');
+  await expect(ring).toHaveCSS('will-change', 'transform');
+  // large loading overlays must not retain an oversized compositor layer
+  await page.evaluate(() => {
+    const loader = document.createElement('div');
+    loader.className = 'log-loading progress-border';
+    loader.innerHTML = '<span class="update-progress-ring" aria-hidden="true"></span>';
+    document.body.append(loader);
+  });
+  const loaderRing = page.locator('.log-loading').last().locator(':scope > .update-progress-ring');
+  await expect(loaderRing).toHaveCSS('contain', 'none');
+  await expect(loaderRing).toHaveCSS('will-change', 'auto');
+  // respect both operating-system and explicit reduced-motion preferences
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(ring).toHaveCSS('will-change', 'auto');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.evaluate(() => { document.documentElement.dataset.motion = 'reduced'; });
+  await expect(ring).toHaveCSS('will-change', 'auto');
 });

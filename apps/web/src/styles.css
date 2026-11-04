@@ -1782,6 +1782,10 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 /* apply the glow outside the masked child so it follows the same moving highlight */
 .updates-in-progress > .update-progress-ring, .progress-border > .update-progress-ring { position: absolute; inset: -1px; z-index: 1; display: block; width: auto; height: auto; min-width: 0; max-width: none; margin: 0; padding: 0; overflow: visible; border-radius: inherit; pointer-events: none; filter: var(--progress-indicator-filter, drop-shadow(0 0 .3rem var(--progress-ring-color, var(--mauve)))); }
 .update-progress-ring::before { content: ''; display: var(--progress-border-display, block); position: absolute; inset: 0; border-radius: inherit; padding: 2px; background: conic-gradient(from var(--update-orbit-angle), transparent 0deg 250deg, color-mix(in srgb, var(--progress-ring-color, var(--mauve)) 35%, transparent) 285deg, var(--progress-ring-color, var(--mauve)) 325deg, var(--progress-ring-highlight, var(--lavender)) 345deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: var(--progress-border-animation, var(--progress-orbit-animation, update-border-orbit 2s ease-in-out infinite)); }
+/* isolate long-lived working indicators without promoting full-panel loaders */
+@media (prefers-reduced-motion: no-preference) {
+  :root:not([data-motion="reduced"]) :is(.tabs button[role="tab"], .workspace-sheet-row, .agent-switcher-row, .agent-state-pill).progress-border > .update-progress-ring { contain: layout; will-change: transform; }
+}
 /* keep reduced-motion feedback compact without shifting button contents */
 @keyframes progress-spinner { to { transform: rotate(360deg); } }
 .update-progress-ring::after { content: ''; display: var(--progress-spinner-display, none); position: absolute; top: .25rem; left: .25rem; box-sizing: border-box; width: .65rem; height: .65rem; border: 2px solid var(--progress-ring-color, var(--mauve)); border-left-color: transparent; border-radius: 50%; animation: var(--progress-spinner-animation, none); }
