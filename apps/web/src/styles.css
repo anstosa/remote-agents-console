@@ -2543,8 +2543,9 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .tab-place-mark.shells { color: var(--green); }
 /* keep primary phone controls on one line around the Workspace dropdown */
 .tabs.workspace-dropdown-row { flex-wrap: nowrap; overflow: hidden; }
-/* phones launch from New Workspace instead of reserving a main plus slot */
-@media (max-width: 768px) { .tabs.workspace-dropdown-row > :is(.launcher, .tab-spacer) { display: none; } }
+/* phones launch from New Workspace instead of reserving a main plus slot; with no Workspace
+   there is no dropdown, so the plus stays as the only way into the launcher */
+@media (max-width: 768px) { .tabs.workspace-dropdown-row:has(> .workspace-dropdown) > :is(.launcher, .tab-spacer) { display: none; } }
 /* let Workspace absorb the Call slot when Davo is disabled */
 .tabs.workspace-dropdown-row > .tab-row-lead { flex: 0 0 auto; }
 /* keep optional notification enrollment below the primary control row */
