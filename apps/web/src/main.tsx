@@ -25,6 +25,7 @@ import { useTerminalFontSize } from './terminal-font-size.js';
 import { ProjectOpen } from './project-open.js';
 import type { CodePanelReview } from './code-panel/code-panel.js';
 import type { EditorTarget } from './code-panel/editor-jump.js';
+import { useCodeFileDeletion } from './code-panel/delete-file.js';
 import { savedCodeOpen, saveCodeOpen, supportingChange, useCodePanel, type CodePanelCommit, type CodePanelController, type CodePanelMode } from './code-panel/comparison.js';
 import { PullRequestCard, PullRequestIndicators, type PullRequestSummary } from './pull-request-card.js';
 import { hunkClass } from './pull-request-comments.js';
@@ -57,7 +58,7 @@ import { useBrowserPermissionBroker } from './browser-permissions.js';
 import { FilesPanel } from './files-panel/files-panel.js';
 import { useFilePreview, type FilePreviewController } from './file-preview.js';
 import { useFileOpenAction } from './file-open-action.js';
-import { saveFilesOpen, useFilesController } from './files-panel/controller.js';
+import { saveFilesOpen, useFilesController, type FilesController } from './files-panel/controller.js';
 import type { FileEntry } from './files-panel/contracts.js';
 import { SettingsCenter, useSettingsSession, type SettingsCloseGuard } from './settings/settings-center.js';
 import { SettingsHeaderActionsContext } from './settings/header-actions.js';
@@ -5582,8 +5583,10 @@ function PreviewPane({ controller, onReturnToFiles, onReturnToSettings, onOpenIn
 // split does not jump.
 // A Worktree's panel (`worktreeId`) can ask about lines of the Comparison it shows; its questions are
 // kept per scope on the server.
-function CodePane({ controller, worktreeId, prAvailable, branch, review, onOpenInEditor, onReturnToFiles, onReturnToSettings }: { controller: CodePanelController; worktreeId?: string; prAvailable: boolean; branch?: string; review?: CodePanelReview; onOpenInEditor?: (target: EditorTarget) => void; onReturnToFiles?: () => void; onReturnToSettings?: () => void }) {
+function CodePane({ controller, files, worktreeId, prAvailable, branch, review, onOpenInEditor, onReturnToFiles, onReturnToSettings }: { controller: CodePanelController; files: FilesController; worktreeId?: string; prAvailable: boolean; branch?: string; review?: CodePanelReview; onOpenInEditor?: (target: EditorTarget) => void; onReturnToFiles?: () => void; onReturnToSettings?: () => void }) {
   const openAgent = useContext(OpenAgentContext);
+  // return to the comparison even when an untracked file disappears entirely
+  const deleteFile = useCodeFileDeletion(files, () => { controller.clearFile(); controller.refresh(); });
   const scope = controller.commit !== undefined ? `kind=commit&commit=${encodeURIComponent(controller.commit.sha)}` : `kind=${controller.mode}`;
   const askable = worktreeId !== undefined && controller.filePreview === undefined && controller.state === 'ready' && controller.patch !== undefined;
   const askThreads = useAskThreads(request, `/api/worktrees/${encodeURIComponent(worktreeId ?? '')}/comparison/asks?${scope}`, controller.patch?.fingerprint, '', askable);
@@ -5601,7 +5604,7 @@ function CodePane({ controller, worktreeId, prAvailable, branch, review, onOpenI
     if (fromSettings) onReturnToSettings?.();
   };
   return <CodePaneBoundary panelKey="code" onClose={controller.close}><Suspense fallback={<section className="code-pane" role="region" aria-label="Code changes"><CodeLoading kind={controller.filePreview === undefined ? 'diff' : 'file'} path={controller.filePreview?.path} /></section>}>
-    <CodePanel mode={controller.mode} commit={controller.commit} state={controller.state} patch={controller.patch} selectedPath={controller.selectedPath} filePreview={controller.filePreview} prAvailable={prAvailable} branch={branch} review={review} loadFile={controller.loadFile} onSelectFile={controller.selectFile} onClearFile={controller.clearFile} onSetMode={controller.setMode} loadCommits={controller.loadCommits} onSelectCommit={controller.openCommit} onCloseFile={closeFile} onClose={controller.close} onRetry={controller.refresh} savedView={controller.savedView} onSaveView={controller.saveView} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} {...(askable ? { ask } : {})} />
+    <CodePanel mode={controller.mode} commit={controller.commit} state={controller.state} patch={controller.patch} selectedPath={controller.selectedPath} filePreview={controller.filePreview} prAvailable={prAvailable} branch={branch} review={review} loadFile={controller.loadFile} onSelectFile={controller.selectFile} onClearFile={controller.clearFile} onSetMode={controller.setMode} loadCommits={controller.loadCommits} onSelectCommit={controller.openCommit} onCloseFile={closeFile} onClose={controller.close} onRetry={controller.refresh} savedView={controller.savedView} onSaveView={controller.saveView} deleteFile={worktreeId === undefined ? undefined : deleteFile} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} {...(askable ? { ask } : {})} />
   </Suspense></CodePaneBoundary>;
 }
 // render every ordered resizable panel
@@ -6459,11 +6462,12 @@ function GitCommitSections({ log, error, uncommitted, collapsed, onToggle, messa
       changes={commit.changes} body={commit.body} collapsed={collapsed(commit.sha, commit.merge)} onToggle={() => onToggle(commit.sha, commit.merge)} messageOpen={messages.has(commit.sha)} onToggleMessage={() => onToggleMessage(commit.sha)} onViewChanges={onViewCommit === undefined ? undefined : () => onViewCommit({ sha: commit.sha, subject: commit.subject })} onReview={onReviewCommit === undefined ? undefined : () => onReviewCommit({ sha: commit.sha, subject: commit.subject })} reviewDisabledReason={reviewCommitDisabledReason} onOpenFile={path => onOpenFile(path, 'pr')} />)}
     {log !== undefined && log.commits.length === 0 && uncommitted.length === 0 && <span className="git-status-empty">No PR changes</span>}
     {log?.truncated && <span className="git-status-empty">Showing the newest {gitNumberLabel(log.commits.length)} commits.</span>}
-    {log === undefined && (error === undefined ? <CommitSkeletons /> : <span className="git-status-empty" role="alert">{error}</span>)}
+    {/* surface refresh failures beside the last loaded commits */}
+    {error !== undefined ? <span className="git-status-empty" role="alert">{error}</span> : log === undefined && <CommitSkeletons />}
   </>;
 }
 // render working changes, current pr controls, and repository switchers
-function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, expanded = false, onToggle, onOpenFile, onViewChanges, onViewCommit, onReview, onReviewCommit, review, reviewUnavailable, onSelectTarget, onNewWorktree, onOperationFeedback }: { worktreeId?: string; branch?: string; summary?: GitStatusSummary; prSummary?: GitComparisonSummary; pullRequest?: PullRequestSummary; expanded?: boolean; onToggle?: () => void; onOpenFile: (path: string, mode: CodePanelMode) => void; onViewChanges?: (mode: CodePanelMode) => void; onViewCommit?: (commit: CodePanelCommit) => void; onReview?: (scope: ReviewScope) => void; onReviewCommit?: (commit: CodePanelCommit) => void; review?: ReviewTourIndicator; reviewUnavailable?: string; onSelectTarget?: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
+function GitStatus({ worktreeId, branch, summary, prSummary, attention, pullRequest, expanded = false, onToggle, onOpenFile, onViewChanges, onViewCommit, onReview, onReviewCommit, review, reviewUnavailable, onSelectTarget, onNewWorktree, onOperationFeedback }: { worktreeId?: string; branch?: string; summary?: GitStatusSummary; prSummary?: GitComparisonSummary; attention?: string; pullRequest?: PullRequestSummary; expanded?: boolean; onToggle?: () => void; onOpenFile: (path: string, mode: CodePanelMode) => void; onViewChanges?: (mode: CodePanelMode) => void; onViewCommit?: (commit: CodePanelCommit) => void; onReview?: (scope: ReviewScope) => void; onReviewCommit?: (commit: CodePanelCommit) => void; review?: ReviewTourIndicator; reviewUnavailable?: string; onSelectTarget?: (target: DashboardTarget) => void; onNewWorktree?: (initial: NewWorktreeSelection) => void; onOperationFeedback?: (feedback: Omit<OperationFeedback, 'id'>) => void }) {
   const wrapRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
@@ -6494,24 +6498,31 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, expand
   const configuredPullRequestColor = configuredPullRequestActions.find(action => action.busy)?.color;
   const repositoryTabVisible = expanded && visibleTab !== 'working';
   const byCommit = mode === 'pr' && grouping === 'commit' && worktreeId !== undefined;
+  // compare git values rather than fresh dashboard object identities
+  const commitChangeSignal = comparisonChangeSignal(summary, prSummary, attention);
   // default new branches to all pr changes
   useEffect(() => {
     setTab('working');
     setMode(prSummary === undefined ? 'working' : 'pr');
-    setCommitLog(undefined);
     setSectionOverrides(new Map());
     setOpenMessages(new Set());
   }, [branch]);
+  // reset explicit opens and repository changes but retain cards during live refreshes
+  useEffect(() => {
+    setCommitLog(undefined);
+    setCommitLogError(undefined);
+  }, [expanded, byCommit, worktreeId, branch, prSummary?.base]);
   // load the commit log while By commit shows, and again whenever the git status moves
   useEffect(() => {
+    // defer reads until the commit view is active
     if (!expanded || !byCommit || worktreeId === undefined) return;
     const controller = new AbortController();
-    setCommitLog(undefined);
     setCommitLogError(undefined);
     void request(`/api/worktrees/${encodeURIComponent(worktreeId)}/commits`, { signal: controller.signal }).then(async response => {
       const payload: unknown = response.ok ? await response.json().catch(() => undefined) : undefined;
       // a superseded response cannot replace a newer loading state
       if (controller.signal.aborted) return;
+      // publish only a valid current log
       if (isGitCommitLog(payload)) {
         setCommitLog(payload);
         setCommitLogError(undefined);
@@ -6521,7 +6532,7 @@ function GitStatus({ worktreeId, branch, summary, prSummary, pullRequest, expand
       if (!controller.signal.aborted) setCommitLogError('Commits unavailable');
     });
     return () => controller.abort();
-  }, [expanded, byCommit, worktreeId, summary, prSummary]);
+  }, [expanded, byCommit, worktreeId, branch, prSummary?.base, commitChangeSignal]);
   const sectionCollapsed = (key: string, merge = false) => sectionOverrides.get(key) ?? merge;
   const toggleSection = (key: string, merge = false) => setSectionOverrides(current => new Map(current).set(key, !(current.get(key) ?? merge)));
   const setAllSections = (collapsed: boolean) => setSectionOverrides(new Map([uncommittedSectionKey, ...(commitLog?.commits.map(commit => commit.sha) ?? [])].map(key => [key, collapsed])));
@@ -7007,7 +7018,7 @@ function useWorkspace(place: WorkspacePlace, { agentId, newConversationInPlace, 
 type WorkspaceState = ReturnType<typeof useWorkspace>;
 // The git actions only an Agent offers (push, fixup, guided review); an agentless Workspace passes
 // the reason review is unavailable plus the navigation and feedback branch checkout reports through.
-type WorkspaceGitActions = Omit<Parameters<typeof GitStatus>[0], 'branch' | 'summary' | 'prSummary' | 'pullRequest' | 'expanded' | 'onToggle' | 'onOpenFile' | 'onViewChanges'>;
+type WorkspaceGitActions = Omit<Parameters<typeof GitStatus>[0], 'branch' | 'summary' | 'prSummary' | 'attention' | 'pullRequest' | 'expanded' | 'onToggle' | 'onOpenFile' | 'onViewChanges'>;
 
 // The Place's git status control. Opening a changed file or the changes collapses it and shows them
 // in the Code panel.
@@ -7015,7 +7026,7 @@ function WorkspaceGitStatus({ workspace, actions, onToggle }: { workspace: Works
   const { place, code, setGitExpanded } = workspace;
   const onReview = actions?.onReview;
   const onReviewCommit = actions?.onReviewCommit;
-  return <GitStatus {...actions} worktreeId={place.worktreeId} branch={place.branch} summary={place.gitStatus} prSummary={place.gitPrStatus} pullRequest={place.pullRequest} expanded={workspace.gitExpanded} onToggle={() => { onToggle?.(); setGitExpanded(value => !value); }} onOpenFile={(path, mode) => { setGitExpanded(false); code.openChanges(mode, path); }} onViewChanges={mode => { setGitExpanded(false); code.openChanges(mode); }} onViewCommit={commit => { setGitExpanded(false); code.openCommit(commit); }} onReview={onReview === undefined ? undefined : scope => { setGitExpanded(false); onReview(scope); }} onReviewCommit={onReviewCommit === undefined ? undefined : commit => { setGitExpanded(false); onReviewCommit(commit); }} />;
+  return <GitStatus {...actions} worktreeId={place.worktreeId} branch={place.branch} summary={place.gitStatus} prSummary={place.gitPrStatus} attention={place.attention} pullRequest={place.pullRequest} expanded={workspace.gitExpanded} onToggle={() => { onToggle?.(); setGitExpanded(value => !value); }} onOpenFile={(path, mode) => { setGitExpanded(false); code.openChanges(mode, path); }} onViewChanges={mode => { setGitExpanded(false); code.openChanges(mode); }} onViewCommit={commit => { setGitExpanded(false); code.openCommit(commit); }} onReview={onReview === undefined ? undefined : scope => { setGitExpanded(false); onReview(scope); }} onReviewCommit={onReviewCommit === undefined ? undefined : commit => { setGitExpanded(false); onReviewCommit(commit); }} />;
 }
 
 // Render one Place's panels in the resizable split: the agent panel first (while an Agent runs or
@@ -7075,7 +7086,7 @@ function Workspace({ workspace, output, empty, git, reviewPanel, onAddToPrompt, 
   };
   const filesPane = files.open && place.id !== undefined ? <FilesPanel controller={files} onOpenFile={openFilesEntry} onPreviewFile={previewFilesEntry} onEditFile={openInEditor === undefined ? undefined : async entry => { /* explicit edit retains error feedback without changing views */ await openInEditor({ objectToken: entry.objectToken }); }} /> : null;
   const previewPane = preview.open ? <PreviewPane controller={preview} onReturnToFiles={() => { /* return to the same directory and selection */ expansion.restore(); workspace.carousel?.show('files'); }} onReturnToSettings={() => { /* retain the settings draft */ expansion.restore(); workspace.carousel?.show('settings'); }} onOpenInEditor={openInEditor === undefined ? undefined : target => { /* retain line-aware editor navigation */ void openInEditor(target); }} /> : null;
-  const codePane = code.open ? <CodePane controller={code} {...(place.worktreeId === undefined ? {} : { worktreeId: place.worktreeId })} prAvailable={place.gitPrStatus !== undefined} branch={place.branch} review={review} onReturnToFiles={() => { expansion.restore(); workspace.carousel?.show('files'); }} onReturnToSettings={() => { /* retain settings drafts while returning from the read-only base */ expansion.restore(); workspace.carousel?.show('settings'); }} {...(openInEditor === undefined ? {} : { onOpenInEditor: (target: EditorTarget) => void openInEditor(target) })} /> : null;
+  const codePane = code.open ? <CodePane controller={code} files={files} {...(place.worktreeId === undefined ? {} : { worktreeId: place.worktreeId })} prAvailable={place.gitPrStatus !== undefined} branch={place.branch} review={review} onReturnToFiles={() => { expansion.restore(); workspace.carousel?.show('files'); }} onReturnToSettings={() => { /* retain settings drafts while returning from the read-only base */ expansion.restore(); workspace.carousel?.show('settings'); }} {...(openInEditor === undefined ? {} : { onOpenInEditor: (target: EditorTarget) => void openInEditor(target) })} /> : null;
   const stackName = stackPlaceName(place.worktreeId, projects);
   const placeId = place.id;
   // the Stack panel shows only for a Worktree whose stack has processes to show

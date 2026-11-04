@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { dashboardSocketReady, emitDashboard, installDashboardSocket } from './dashboard-socket-fixture.js';
 
 const worktree = {
   id: 'active', projectId: 'repo', label: 'Active', path: '/worktrees/active', main: true, detached: false, locked: false, available: true, pinned: true, order: 0,
@@ -28,11 +29,15 @@ async function mount(page: Page, failCommits = false, base = worktree.gitPrStatu
   const loads = { count: 0 };
   const comparisons: unknown[] = [];
   const gitPrStatus = { ...worktree.gitPrStatus, base };
+  const dashboard = { generation: 1, agents: [{ ...agent, gitPrStatus }], projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [{ ...worktree, gitPrStatus }] }] };
+  await installDashboardSocket(page);
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     // keep the unmodified git ref in dashboard data
-    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, agents: [{ ...agent, gitPrStatus }], projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [{ ...worktree, gitPrStatus }] }] } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: dashboard });
+    // authorize controlled dashboard pushes
+    if (url.pathname === '/api/dashboard/ticket') return route.fulfill({ json: { ticket: 'dashboard-ticket' } });
     if (url.pathname === '/api/push/public-key') return route.fulfill({ json: {} });
     if (/^\/api\/agents\/[^/]+\/tickets$/u.test(url.pathname)) return route.fulfill({ json: { ticket: 'log-ticket' } });
     if (/^\/api\/agents\/[^/]+\/(?:saved-prompts|queued-prompts|prompt-history)$/u.test(url.pathname)) return route.fulfill({ json: { prompts: [] } });
@@ -57,7 +62,7 @@ async function mount(page: Page, failCommits = false, base = worktree.gitPrStatu
   });
   await page.goto('/');
   await page.getByRole('button', { name: /^Git status: feature\/commits/u }).click();
-  return { panel: page.getByRole('region', { name: 'Changed files' }), loads, comparisons };
+  return { panel: page.getByRole('region', { name: 'Changed files' }), loads, comparisons, dashboard };
 }
 
 // preserve commit-card rhythm while the By commit read is pending
@@ -79,8 +84,8 @@ test('shows commit skeleton cards instead of a spinner while loading', async ({ 
   await expect(panel.locator('.commit-skeleton')).toHaveCount(0);
 });
 
-// hide stale commit cards whenever an expanded By commit view refreshes
-test('returns to commit skeleton cards while refreshing an expanded By commit view', async ({ page }) => {
+// hide cached commit cards when the flyout is explicitly reopened
+test('returns to commit skeleton cards when reopening the By commit view', async ({ page }) => {
   let releaseRefresh!: () => void;
   const refreshFinished = new Promise<void>(resolve => { releaseRefresh = resolve; });
   await page.addInitScript(() => localStorage.setItem('rac.git-change-grouping', 'commit'));
@@ -99,6 +104,154 @@ test('returns to commit skeleton cards while refreshing an expanded By commit vi
   }
   await expect(panel.locator('.git-commit-section')).toHaveCount(4);
   await expect(panel).toContainText('Show commit details');
+});
+
+// equal snapshots must not clear or restart the visible commit log
+test('keeps commit cards across unchanged dashboard pushes', async ({ page }) => {
+  let releaseRefresh!: () => void;
+  const refreshFinished = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  await page.addInitScript(() => localStorage.setItem('rac.git-change-grouping', 'commit'));
+  const { panel, loads, dashboard } = await mount(page, false, worktree.gitPrStatus.base, load => load > 1 ? refreshFinished : undefined);
+  await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+  await expect.poll(() => dashboardSocketReady(page)).toBe(true);
+  try {
+    // change unrelated dashboard metadata while preserving git values
+    for (const generation of [2, 3, 4]) {
+      await emitDashboard(page, { ...dashboard, generation, agents: [{ ...dashboard.agents[0], title: `Snapshot ${generation}` }] });
+      // flush the pushed render and its passive effects before checking requests
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      expect(loads.count).toBe(1);
+      await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+      await expect(panel.getByRole('status', { name: 'Loading commits' })).toHaveCount(0);
+    }
+  } finally {
+    // release unexpected duplicate reads even when the regression fails
+    releaseRefresh();
+  }
+});
+
+// real git changes refresh behind the loaded cards rather than flashing skeletons
+test('retains commit cards while changed git status refreshes the log', async ({ page }) => {
+  let releaseRefresh!: () => void;
+  const refreshFinished = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  await page.addInitScript(() => localStorage.setItem('rac.git-change-grouping', 'commit'));
+  const { panel, dashboard } = await mount(page);
+  await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+  await expect.poll(() => dashboardSocketReady(page)).toBe(true);
+  let refreshes = 0;
+  // hold an updated log until the loaded-state assertions finish
+  await page.route('**/api/worktrees/active/commits', async route => {
+    refreshes += 1;
+    await refreshFinished;
+    return route.fulfill({ json: { ...commits, commits: [{ ...commits.commits[0], subject: 'Updated commit details' }, ...commits.commits.slice(1)] } });
+  });
+  const gitStatus = { ...worktree.gitStatus, changes: [{ ...worktree.gitStatus.changes[0], additions: 15 }] };
+  try {
+    await emitDashboard(page, { ...dashboard, generation: 2, agents: [{ ...dashboard.agents[0], gitStatus }], projects: [{ ...dashboard.projects[0], worktrees: [{ ...worktree, gitStatus }] }] });
+    await expect.poll(() => refreshes).toBe(1);
+    await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+    await expect(panel).toContainText('Show commit details');
+    await expect(panel.locator('.git-commit-section.uncommitted')).toContainText('+15');
+    await expect(panel.getByRole('status', { name: 'Loading commits' })).toHaveCount(0);
+  } finally {
+    // always settle the held refresh
+    releaseRefresh();
+  }
+  await expect(panel).toContainText('Updated commit details');
+  await expect(panel).not.toContainText('Show commit details');
+});
+
+// a superseded response must not replace a newer visible commit log
+test('ignores superseded commit refreshes without clearing loaded cards', async ({ page }) => {
+  let releaseOlder!: () => void;
+  let releaseNewer!: () => void;
+  let finishOlder!: () => void;
+  const olderReady = new Promise<void>(resolve => { releaseOlder = resolve; });
+  const newerReady = new Promise<void>(resolve => { releaseNewer = resolve; });
+  const olderFinished = new Promise<void>(resolve => { finishOlder = resolve; });
+  await page.addInitScript(() => localStorage.setItem('rac.git-change-grouping', 'commit'));
+  const { panel, dashboard } = await mount(page);
+  await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+  await expect.poll(() => dashboardSocketReady(page)).toBe(true);
+  let refreshes = 0;
+  // hold both responses so either pending state can reveal a loading regression
+  await page.route('**/api/worktrees/active/commits', async route => {
+    const refresh = ++refreshes;
+    await (refresh === 1 ? olderReady : newerReady);
+    try {
+      await route.fulfill({ json: { ...commits, commits: [{ ...commits.commits[0], subject: refresh === 1 ? 'Superseded commit details' : 'Newest commit details' }, ...commits.commits.slice(1)] } });
+    } finally {
+      // observe completion even when the browser has already canceled the older read
+      if (refresh === 1) finishOlder();
+    }
+  });
+  try {
+    await emitDashboard(page, { ...dashboard, generation: 2, agents: [{ ...dashboard.agents[0], attention: 'finished' }] });
+    await expect.poll(() => refreshes).toBe(1);
+    await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+    await expect(panel.getByRole('status', { name: 'Loading commits' })).toHaveCount(0);
+    await emitDashboard(page, { ...dashboard, generation: 3, agents: [{ ...dashboard.agents[0], attention: 'working' }] });
+    await expect.poll(() => refreshes).toBe(2);
+    await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+    await expect(panel.getByRole('status', { name: 'Loading commits' })).toHaveCount(0);
+    // an aborted read cannot flash an error while its replacement remains pending
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+    releaseNewer();
+    await expect(panel).toContainText('Newest commit details');
+    releaseOlder();
+    await olderFinished;
+    // flush any publication queued after the superseded response was released
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(panel).toContainText('Newest commit details');
+    await expect(panel).not.toContainText('Superseded commit details');
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+    await expect(panel.getByRole('status', { name: 'Loading commits' })).toHaveCount(0);
+  } finally {
+    // settle both routes when an assertion fails
+    releaseOlder();
+    releaseNewer();
+  }
+});
+
+// turn boundaries can reveal commit edits that leave numstat unchanged
+test('refreshes loaded commits at agent turn boundaries without flashing skeletons', async ({ page }) => {
+  let releaseRefresh!: () => void;
+  const refreshFinished = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  await page.addInitScript(() => localStorage.setItem('rac.git-change-grouping', 'commit'));
+  const { panel, loads, dashboard } = await mount(page, false, worktree.gitPrStatus.base, load => load > 1 ? refreshFinished : undefined);
+  await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+  await expect.poll(() => dashboardSocketReady(page)).toBe(true);
+  try {
+    await emitDashboard(page, { ...dashboard, generation: 2, agents: [{ ...dashboard.agents[0], attention: 'finished' }] });
+    await expect.poll(() => loads.count).toBe(2);
+    await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+    await expect(panel.getByRole('status', { name: 'Loading commits' })).toHaveCount(0);
+  } finally {
+    // settle the held turn-boundary read
+    releaseRefresh();
+  }
+  await expect(panel).toContainText('Show commit details');
+});
+
+// retain useful cards without concealing a failed background refresh
+test('shows refresh failures alongside the last loaded commits', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('rac.git-change-grouping', 'commit'));
+  const { panel, dashboard } = await mount(page);
+  await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+  await expect.poll(() => dashboardSocketReady(page)).toBe(true);
+  // reject only subsequent commit reads
+  await page.route('**/api/worktrees/active/commits', route => route.fulfill({ status: 503, json: { error: 'commits unavailable' } }));
+  await emitDashboard(page, { ...dashboard, generation: 2, agents: [{ ...dashboard.agents[0], attention: 'finished' }] });
+  await expect(panel.getByRole('alert')).toHaveText('Commits unavailable');
+  await expect(panel.locator('.git-commit-section')).toHaveCount(4);
+  await expect(panel).toContainText('Show commit details');
+  await expect(panel.getByRole('status', { name: 'Loading commits' })).toHaveCount(0);
+  // recover on the next real change without reopening the flyout
+  await page.unroute('**/api/worktrees/active/commits');
+  await emitDashboard(page, { ...dashboard, generation: 3, agents: [{ ...dashboard.agents[0], attention: 'working' }] });
+  await expect(panel.getByRole('alert')).toHaveCount(0);
+  await expect(panel.locator('.git-commit-section')).toHaveCount(4);
 });
 
 // retain the resolved non-main base across flyout grouping and code navigation

@@ -287,8 +287,8 @@ export function useFilesController(placeId: string | undefined, request: Request
     return undefined;
   }, [placeId, refresh, request]);
 
-  // fetch a folder capability for scoped menus without changing visible navigation
-  const directoryAt = useCallback(async (path: string, objectToken?: string): Promise<FilesList | FilesError> => {
+  // fetch a folder capability or place home without changing visible navigation
+  const directoryAt = useCallback(async (path?: string, objectToken?: string): Promise<FilesList | FilesError> => {
     // require the same place scope as visible directory navigation
     if (placeId === undefined) return { code: 'invalid_place', message: 'This Workspace has no file location.' };
     const response = await request(`/api/worktrees/${encodeURIComponent(placeId)}/files/list`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path, ...(objectToken === undefined ? {} : { objectToken }) }) });

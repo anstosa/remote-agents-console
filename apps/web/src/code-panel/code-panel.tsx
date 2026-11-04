@@ -26,6 +26,8 @@ import { askLines } from '../asks.js';
 import type { LineAsks } from '../ask-thread.js';
 import { Skeleton } from '../skeleton.js';
 import { CodeLoading, type CodeLoadingImageSides } from './loading.js';
+import { SplitConfirmation } from '../split-confirmation.js';
+import type { CodeFileDeletion } from './delete-file.js';
 
 // an annotation is the Ask thread under some lines
 type PanelAnnotation = { askId: string } | undefined;
@@ -84,6 +86,8 @@ export type CodePanelProps = {
   onCloseFile: () => void;
   onClose: () => void;
   onRetry?: () => void;
+  // the workspace owns identity-bound preparation and execution
+  deleteFile?: CodeFileDeletion;
   // open a file at a line in the configured editor; the file headers' editor buttons are hidden
   // without it
   onOpenInEditor?: (target: EditorTarget) => void;
@@ -220,7 +224,8 @@ function codeContextMenu(event: ReactMouseEvent<HTMLElement>, actions: Selection
   });
 }
 
-export default function CodePanel({ mode, commit, state, patch, selectedPath, filePreview, prAvailable, branch, review, loadFile, onSelectFile, onClearFile, onSetMode, loadCommits, onSelectCommit, onCloseFile, onClose, onRetry, onOpenInEditor, savedView, onSaveView, ask }: CodePanelProps) {
+// render controlled comparisons and split-local file actions
+export default function CodePanel({ mode, commit, state, patch, selectedPath, filePreview, prAvailable, branch, review, loadFile, onSelectFile, onClearFile, onSetMode, loadCommits, onSelectCommit, onCloseFile, onClose, onRetry, deleteFile, onOpenInEditor, savedView, onSaveView, ask }: CodePanelProps) {
   const selectionActions = useSelectionActions();
   const theme = useColorTheme();
   const fontSize = useTerminalFontSize();
@@ -328,6 +333,12 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   // section mounts: the panel can open straight into the File view, whose section carries no ref, and
   // returning from a File detour remounts this section — a `[]`-effect would never see either.
   const [panelRef, panelWidth] = useObservedWidth();
+  const panelElement = useRef<HTMLElement | null>(null);
+  // share the measured section with its destructive confirmation
+  const capturePanel = useCallback((node: HTMLElement | null) => {
+    panelElement.current = node;
+    panelRef(node);
+  }, [panelRef]);
   // `narrow` folds the file list into a drawer and forces unified; `compact` (narrower still) drops
   // the header's branch.
   const narrow = panelWidth < RAIL_BREAKPOINT;
@@ -716,6 +727,14 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   if (filePreview !== undefined) return <FileView filePreview={filePreview} options={options} style={style} expanded={expanded} onBack={onCloseFile} onClose={onClose} {...(onOpenInEditor === undefined ? {} : { onOpenInEditor })} />;
 
   const hasDiffs = state === 'ready' && fileCount > 0;
+  const selectedFile = patch?.files.find(file => file.change.path === selectedPath);
+  // historical or missing copies cannot authorize a working-tree deletion
+  const deleteDisabledReason = selectedPath === undefined ? 'Open a file to delete it'
+    : commit !== undefined ? 'Historical commits are read only'
+    : state !== 'ready' || selectedFile === undefined ? 'File unavailable'
+    : selectedFile.change.code.includes('D') ? 'This file is already deleted'
+    : !isPlaceRelativePath(selectedPath) ? 'Only working-tree files can be deleted here'
+    : undefined;
   // render display choices directly in the header flyout at every panel width
   const viewMenu = hasDiffs && selectedPreviewFile === undefined ? (closeMenu: () => void) => <div className="code-pane-view-menu">
     <div className="code-pane-options-group">
@@ -735,6 +754,20 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
     {effectiveMode !== 'plain' && <label className="code-pane-view-check" onClick={event => event.stopPropagation()}><input type="checkbox" checked={ignoreWhitespace} onChange={event => { setIgnoreWhitespace(event.target.checked); closeMenu(); }} />Ignore whitespace</label>}
     <label className="code-pane-view-check" onClick={event => event.stopPropagation()}><input type="checkbox" checked={wrapLines} onChange={event => { setWrapLines(event.target.checked); closeMenu(); }} />Wrap lines</label>
   </div> : undefined;
+  // keep file actions available for binary files as well as rendered text diffs
+  const menuContent = viewMenu === undefined && deleteFile === undefined ? undefined : (closeMenu: () => void) => <>
+    {viewMenu?.(closeMenu)}
+    {deleteFile !== undefined && <>
+      {viewMenu !== undefined && <hr className="more-menu-divider" role="separator" />}
+      <button type="button" className="panel-header-action panel-header-row pane-delete" disabled={deleteDisabledReason !== undefined || deleteFile.busy} title={deleteDisabledReason ?? 'Permanently delete this working-tree file'} onClick={() => {
+        // restore focus to the persistent trigger when confirmation closes
+        panelElement.current?.querySelector<HTMLButtonElement>('.panel-header-more')?.focus();
+        closeMenu();
+        // require the single live file selected when the menu action is invoked
+        if (selectedPath !== undefined && deleteDisabledReason === undefined) void deleteFile.prepare(selectedPath);
+      }}><PanelIcon path={panelIcons.trash} /><span>Delete file</span></button>
+    </>}
+  </>;
   const title = <>
     {hasDiffs && (narrow || railCollapsed) && (
       <button type="button" className="code-pane-files-open" aria-label="Show changed files" title="Files" onClick={() => { if (narrow) setDrawerOpen(true); else setRailCollapsed(false); }}>
@@ -760,11 +793,13 @@ export default function CodePanel({ mode, commit, state, patch, selectedPath, fi
   </>;
 
   return (
-    <section onAuxClickCapture={event => closeOnMiddleClick(event, onClose)} className={`code-pane${expanded ? ' expanded' : ''}`} data-wrap-lines={wrapLines ? 'true' : undefined} style={style} role="region" aria-label="Code changes" ref={panelRef} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={event => codeContextMenu(event, selectionActions, [
+    <section onAuxClickCapture={event => closeOnMiddleClick(event, onClose)} className={`code-pane${expanded ? ' expanded' : ''}`} data-wrap-lines={wrapLines ? 'true' : undefined} style={style} role="region" aria-label="Code changes" ref={capturePanel} onPointerDownCapture={preserveContextMenuPress} onMouseDownCapture={preserveContextMenuPress} onContextMenu={event => codeContextMenu(event, selectionActions, [
       { id: 'working', label: 'Working changes', checked: commit === undefined && mode === 'working', onSelect: () => onSetMode('working') },
       ...(prAvailable ? [{ id: 'pr', label: 'All PR changes', checked: commit === undefined && mode === 'pr', onSelect: () => onSetMode('pr') }] : [])
     ])}>
-      <PanelHeader panelKey="code" label="code panel" title={title} actions={actions} menuContent={viewMenu} close={{ key: 'close', label: 'Close code changes', title: 'Close', icon: <PanelIcon path={panelIcons.close} />, onSelect: onClose }} />
+      <PanelHeader panelKey="code" label="code panel" title={title} actions={actions} menuContent={menuContent} close={{ key: 'close', label: 'Close code changes', title: 'Close', icon: <PanelIcon path={panelIcons.close} />, onSelect: onClose }} />
+      {/* bind confirmation to the prepared object rather than a later file selection */}
+      {deleteFile?.selection !== undefined && panelElement.current !== null && <SplitConfirmation target={panelElement.current} title="Permanently delete file?" description={<><p>Permanently delete <strong>{deleteFile.selection.hostPath ?? deleteFile.selection.path}</strong> from the working tree? This cannot be undone.</p>{deleteFile.error !== undefined && <p role="alert">{deleteFile.error}</p>}</>} confirmLabel="Delete file" confirmDisabled={deleteFile.selection.prepared === undefined} pending={deleteFile.busy} onCancel={deleteFile.cancel} onConfirm={deleteFile.confirm} />}
       <div className="code-pane-main">
         {state === 'ready' && fileCount > 0 && railVisible && (
           <aside className="code-pane-rail" style={railWidth === undefined ? undefined : { flexBasis: railWidth }}>
