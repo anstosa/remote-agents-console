@@ -20,6 +20,7 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
     '',
     'Bare links work at https://example.com/bare and www.example.org/docs.',
     'Open [the worktree](#worktree=wt%3A1) here.',
+    'Open [the task](obsidian://open?vault=Team&file=Tasks%2FFix) or obsidian://open?vault=Team&file=Bare, not [a new note](obsidian://new?content=x).',
     '**Start with [PR #7](https://example.com/pr/7).** See https://example.com/a_b_c, [`notes.md`](notes.md) and [https://example.com/label](https://example.com/label).',
     'Keep ~literal tildes~ outside lists.',
     '',
@@ -108,6 +109,12 @@ test('renders saved notes with stable tables, lists, links, selection actions, a
   await expect(preview.getByRole('link', { name: 'www.example.org/docs' })).toHaveAttribute('href', 'https://www.example.org/docs');
   await expect(preview.getByRole('link', { name: 'the worktree' })).toHaveAttribute('href', '#worktree=wt%3A1');
   await expect(preview.getByRole('link', { name: 'the worktree' })).not.toHaveAttribute('target');
+  // Obsidian `open` links hand off to the app from this tab; other Obsidian actions stay text
+  await expect(preview.getByRole('link', { name: 'the task' })).toHaveAttribute('href', 'obsidian://open?vault=Team&file=Tasks%2FFix');
+  await expect(preview.getByRole('link', { name: 'the task' })).not.toHaveAttribute('target');
+  await expect(preview.getByRole('link', { name: 'obsidian://open?vault=Team&file=Bare' })).toHaveAttribute('href', 'obsidian://open?vault=Team&file=Bare');
+  await expect(preview.getByRole('link', { name: 'a new note' })).toHaveCount(0);
+  await expect(preview.getByText('a new note')).toBeVisible();
   // emphasis and link labels hold inline markdown; underscores inside a bare URL are not emphasis
   await expect(preview.locator('strong').getByRole('link', { name: 'PR #7' })).toHaveAttribute('href', 'https://example.com/pr/7');
   await expect(preview.getByRole('link', { name: 'https://example.com/a_b_c' })).toHaveAttribute('href', 'https://example.com/a_b_c');

@@ -1,9 +1,12 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 
-// a `#` link is one of the console's own addresses (`#worktree=<id>` opens that Workspace), so it stays in this tab
-const safeLink = (value: string) => /^(?:https?:|mailto:|#)/iu.test(value) ? value : undefined;
+// Of Obsidian's URIs only `open` is linked: others (`new`, plugin commands) act on a vault, and the text is untrusted.
+const safeLink = (value: string) => /^(?:https?:|mailto:|#|obsidian:\/\/open\?)/iu.test(value) ? value : undefined;
 // a bare URL is one more token, so emphasis cannot match inside it (`https://a.com/x_y_z`)
-const inlinePattern = /(`([^`\n]+)`|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|\*([^*\n]+)\*|_([^_\n]+)_|(?:https?:\/\/|mailto:|www\.)[^\s<]+)/giu;
+const inlinePattern = /(`([^`\n]+)`|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|\*([^*\n]+)\*|_([^_\n]+)_|(?:https?:\/\/|mailto:|www\.|obsidian:\/\/open\?)[^\s<]+)/giu;
+// A `#` link is one of the console's own addresses (`#worktree=<id>` opens that Workspace) and an
+// Obsidian link hands off to the app, so both stay in this tab; the rest open a new one.
+const linkTo = (key: string, href: string, children: ReactNode) => /^(?:#|obsidian:)/iu.test(href) ? <a key={key} href={href}>{children}</a> : <a key={key} href={href} target="_blank" rel="noreferrer">{children}</a>;
 const singleTildeListStrike = /(^|[^~])~([^~\n]+)~(?!~)/gu;
 
 const trimLinkSuffix = (value: string) => {
@@ -28,14 +31,14 @@ const inlineMarkdown = (text: string, key: string, links = true): ReactNode[] =>
     else if (match[3] !== undefined && match[4] !== undefined) {
       const href = links ? safeLink(match[4]) : undefined;
       const label = inlineMarkdown(match[3], at, false);
-      content.push(href === undefined ? <Fragment key={at}>{label}</Fragment> : href.startsWith('#') ? <a key={at} href={href}>{label}</a> : <a key={at} href={href} target="_blank" rel="noreferrer">{label}</a>);
+      content.push(href === undefined ? <Fragment key={at}>{label}</Fragment> : linkTo(at, href, label));
     } else if (match[5] !== undefined || match[6] !== undefined) content.push(<strong key={at}>{inlineMarkdown(match[5] ?? match[6]!, at, links)}</strong>);
     else if (match[7] !== undefined) content.push(<del key={at}>{inlineMarkdown(match[7], at, links)}</del>);
     else if (match[8] !== undefined || match[9] !== undefined) content.push(<em key={at}>{inlineMarkdown(match[8] ?? match[9]!, at, links)}</em>);
     else if (!links) content.push(match[0]);
     else {
       const [label, suffix] = trimLinkSuffix(match[0]);
-      content.push(<a key={at} href={label.startsWith('www.') ? `https://${label}` : label} target="_blank" rel="noreferrer">{label}</a>);
+      content.push(linkTo(at, label.startsWith('www.') ? `https://${label}` : label, label));
       if (suffix) content.push(suffix);
     }
     cursor = index + match[0].length;
