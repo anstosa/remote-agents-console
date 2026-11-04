@@ -70,6 +70,8 @@ async function mockConsole(page: Page) {
     if (path === '/api/agents/updates') return route.fulfill({ json: { agents: [] } });
     // disable push enrollment
     if (path === '/api/push/public-key') return route.fulfill({ json: {} });
+    // accept the controlling browser's pane theme
+    if (path === '/api/console/theme') return route.fulfill({ status: 204 });
     scenario.browserErrors.push(`Unexpected request: ${route.request().method()} ${path}`);
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
