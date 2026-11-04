@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { stat } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { lstat, stat } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import type { ValidatedConfig } from '../config/schema.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import { run } from '../tmux/command.js';
-import { cleanWorkingTree, type GitCommand } from '../git/worktree-state.js';
+import { cleanWorkingTree, headUpdate, type GitCommand } from '../git/worktree-state.js';
 import { parseWorktreeListNul } from '../git/worktrees.js';
 import { branchCommitSummary, type BranchCommitSummary } from '../git/comparison.js';
 import { projectIdOf, worktreeById, worktreeMatchesWorkspace, worktreeWireId } from '../workspaces/resolver.js';
@@ -89,6 +89,8 @@ export type MoveToNewResult =
 type ContextualAction = 'switch' | 'move' | 'create' | 'held-new';
 type PullFetchSource = { remote: string; repositoryKey: string; baseRepositoryKey: string; originRepositoryKey: string; sourceRef: string; pinnedRef: string; upstream?: string };
 type ContextualPullRequest = SwitchablePullRequest & { fetchSource?: PullFetchSource };
+// what fetching a pull request's head reads of it
+type FetchablePullRequest = Pick<ContextualPullRequest, 'number' | 'headSha' | 'headOnOrigin' | 'branch' | 'fetchSource'>;
 type ContextualPull = { pullRequest: ContextualPullRequest; targetProjectId: string; target?: Worktree; source?: Worktree };
 
 // validate one optional unified-split mutation assertion before service entry
@@ -126,6 +128,24 @@ export function githubPullMutationContext(value: unknown, input: { number: numbe
     ...(typeof expectedSourceWorktreeId === 'string' ? { expectedSourceWorktreeId } : {})
   };
 }
+
+// The open Pull request a checkout's branch heads, read fresh; 'unreadable' when GitHub could not
+// answer for certain. A fork checkout (`rac/pr/…`) has none here: Since my review and Update to PR
+// head never check out fork code where agents run.
+export async function branchPullRequest(github: Pick<GithubService, 'repositoryAt' | 'branch' | 'pullRequestDetail'>, workspace: string, branch: string): Promise<PullRequestDetail | 'unreadable' | undefined> {
+  if (forkCheckoutIdentity(branch) !== undefined) return undefined;
+  const repository = await github.repositoryAt(workspace);
+  const summary = repository === undefined ? undefined : (await github.branch(repository, branch, undefined, { wait: true })).pullRequest;
+  if (repository === undefined || summary === undefined || summary.status === 'merged') return undefined;
+  const { pullRequest, problem } = await github.pullRequestDetail(repository, summary.number, { fresh: true });
+  // a failed read may still answer with an older one, whose head could be stale
+  if (pullRequest === undefined || problem !== undefined) return 'unreadable';
+  return pullRequest.state === 'open' ? pullRequest : undefined;
+}
+
+// the remote-tracking ref Update to PR head moves `branch` by, when the pull request's head is that
+// branch on origin; a head in a fork is never updated to
+export const updatableRef = (pull: Pick<PullRequestDetail, 'headOnOrigin' | 'branch'>, branch: string): string | undefined => pull.headOnOrigin && pull.branch === branch ? `refs/remotes/origin/${branch}` : undefined;
 
 export class PullRequestSwitchService {
   private branchMutationInProgress = false;
@@ -608,6 +628,62 @@ export class PullRequestSwitchService {
     }
   }
 
+  // Bring the Worktree's branch to its open pull request's head without losing local work: fast-
+  // forward, or after a force-push reset to the head (`reset --keep`), but only when no commit on
+  // the branch is local-only (`headUpdate`). A dirty tree, untracked files included, is refused
+  // before anything is fetched; a refusal leaves the branch and the tree as they were.
+  async updateToHead(worktreeId: string): Promise<BranchSwitchResult> {
+    return await this.withBranchMutation({ error: mutationInProgress }, async () => {
+      const worktree = worktreeById(this.discovery.worktreesNow(), worktreeId);
+      if (worktree === undefined) return { error: switchingUnavailable };
+      const workspace = worktree.identity;
+      const head = await this.gitHead(workspace);
+      // require a branch to move
+      if (head?.branch === undefined) return { error: 'This worktree has no branch checked out.' };
+      const pull = await branchPullRequest(this.github, workspace, head.branch).catch(() => 'unreadable' as const);
+      // require the open pull request this branch heads on origin; never a fork's
+      if (pull === 'unreadable') return { error: 'The pull request could not be read from GitHub. Try again.' };
+      const remoteRef = pull === undefined ? undefined : updatableRef(pull, head.branch);
+      if (pull === undefined || remoteRef === undefined) return { error: `${head.branch} has no open pull request from a branch on origin.` };
+      // already there: nothing to move
+      if (head.commit === pull.headSha) return 'switched';
+      // without job control a working agent cannot be interrupted
+      if (await this.busy(worktree)) return 'busy';
+      // refuse uncommitted work before anything is fetched
+      if (!await this.switchReady(worktree)) return { error: uncommittedChanges };
+      const before = await this.command('/usr/bin/git', ['-C', workspace, 'rev-parse', '--verify', '--quiet', `${remoteRef}^{commit}`]);
+      const fetched = await this.fetchVerifiedHead(workspace, pull);
+      if ('error' in fetched) return fetched;
+      const update = await headUpdate(workspace, head.commit, pull.headSha, remoteRef, before.code === 0 ? [before.stdout.trim()] : [], this.command);
+      // refuse commits that exist only in this checkout
+      if (update === 'local-commits') return { error: `${head.branch} has commits that are not on the pull request. Push them or move them to another branch, then update.` };
+      // git overwrites an ignored file (a local .env) the head adds; refuse instead
+      const ignored = await this.ignoredInTheWay(workspace, head.commit, pull.headSha);
+      if (ignored !== undefined) return { error: ignored };
+      // close the race with an edit, agent turn, commit or checkout begun during the fetch, reading HEAD last
+      if (!await this.switchReady(worktree) || await this.busy(worktree)) return { error: 'The worktree changed during the update. Try again.' };
+      const current = await this.gitHead(workspace);
+      if (current?.commit !== head.commit || current.branch !== head.branch) return { error: 'The worktree changed during the update. Try again.' };
+      const args = update === 'fast-forward' ? ['merge', '--ff-only', '--quiet', pull.headSha] : ['reset', '--keep', '--quiet', pull.headSha];
+      const failure = gitFailure(workspace, args[0]!, await this.command('/usr/bin/git', ['-C', workspace, ...args]));
+      if (failure !== undefined) return { error: failure };
+      const after = await this.gitHead(workspace);
+      return after?.commit === pull.headSha && after.branch === head.branch ? 'switched' : { error: `Git finished without moving ${head.branch} to the pull request head.` };
+    });
+  }
+
+  // a refusal naming a file on disk where `target` adds one that `head` lacks; in a clean tree such a
+  // file can only be ignored, and git would overwrite it without asking
+  private async ignoredInTheWay(workspace: string, head: string, target: string): Promise<string | undefined> {
+    const added = await this.command('/usr/bin/git', ['-C', workspace, 'diff', '--name-only', '--no-renames', '--diff-filter=A', '-z', head, target]);
+    if (added.code !== 0 || added.stdoutTruncated === true) return 'The pull request head could not be compared with the worktree.';
+    for (const path of added.stdout.split('\0').filter(path => path !== '')) {
+      const blocked = await lstat(join(workspace, path)).then(() => true, (error: NodeJS.ErrnoException) => error.code !== 'ENOENT');
+      if (blocked) return `The pull request head adds ${path}, which would overwrite an ignored file or folder here. Move it aside, then update.`;
+    }
+    return undefined;
+  }
+
   // run one branch-changing git transaction in-process, gated on idle agents; perform returns an error message or undefined
   private async runSwitch(worktreeId: string, checkoutBranch: string, perform: (workspace: string) => Promise<string | undefined>): Promise<BranchSwitchResult> {
     const targetWorktree = worktreeById(this.discovery.worktreesNow(), worktreeId);
@@ -952,14 +1028,26 @@ export class PullRequestSwitchService {
   // lands in its remote-tracking ref (so its local branch tracks it), a fork PR in refs/rac/pull/N.
   // An existing local branch is reusable only when it already sits at that head.
   private async fetchPinnedHead(workspace: string, pullRequest: ContextualPullRequest): Promise<PinnedPullRequestHead | { error: string }> {
-    const { number, headSha, checkoutBranch: branch, headOnOrigin } = pullRequest;
+    const { headSha, checkoutBranch: branch, headOnOrigin } = pullRequest;
+    const fetched = await this.fetchVerifiedHead(workspace, pullRequest);
+    if ('error' in fetched) return fetched;
+    const existing = (await this.command('/usr/bin/git', ['-C', workspace, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
+    if (existing && !await this.commitMatches(workspace, `refs/heads/${branch}^{commit}`, headSha)) return { error: `The local branch ${branch} differs from the pull request head. Update or delete it, then try again.` };
+    const source = pullRequest.fetchSource;
+    const repositoryScope = source === undefined ? undefined : { baseRepositoryKey: source.baseRepositoryKey, originRepositoryKey: source.originRepositoryKey };
+    return { branch, sha: headSha, existing, ...(repositoryScope === undefined ? {} : { repositoryScope }), ...(headOnOrigin ? { fork: false as const, upstream: source?.upstream ?? fetched.pinnedRef } : { fork: true as const }) };
+  }
+
+  // fetch a pull request's head into its pinned ref (`pinnedRef`) and verify it is the listed head
+  private async fetchVerifiedHead(workspace: string, pullRequest: FetchablePullRequest): Promise<{ pinnedRef: string } | { error: string }> {
+    const { number, headSha, headOnOrigin } = pullRequest;
     const source = pullRequest.fetchSource;
     const branchSource = source?.sourceRef.startsWith('refs/heads/') ?? headOnOrigin;
     // GitHub's head ref name is untrusted and lands in a forced refspec and a local branch name
     if (branchSource && !await this.safeBranchName(workspace, pullRequest.branch)) return { error: `Pull request #${number} has a head branch name git cannot check out.` };
     const remote = source?.remote ?? 'origin';
     let fetchTarget = remote;
-    const startPoint = source?.pinnedRef ?? (headOnOrigin ? `refs/remotes/origin/${pullRequest.branch}` : `refs/rac/pull/${number}`);
+    const startPoint = this.pinnedRef(pullRequest);
     const sourceRef = source?.sourceRef ?? (headOnOrigin ? `refs/heads/${pullRequest.branch}` : `refs/pull/${number}/head`);
     if (source !== undefined) {
       const remoteUrl = await this.command('/usr/bin/git', ['-C', workspace, 'remote', 'get-url', remote]).catch(() => undefined);
@@ -975,10 +1063,12 @@ export class PullRequestSwitchService {
     if (fetchFailure !== undefined) return { error: `Pull request #${number} could not be fetched from ${remote}. ${fetchFailure}` };
     // require the fetched ref to pin the exact reviewed head before mutating any checkout
     if (!await this.commitMatches(workspace, `${startPoint}^{commit}`, headSha)) return { error: `Pull request #${number} changed on GitHub after it was listed. Reopen the list and try again.` };
-    const existing = (await this.command('/usr/bin/git', ['-C', workspace, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
-    if (existing && !await this.commitMatches(workspace, `refs/heads/${branch}^{commit}`, headSha)) return { error: `The local branch ${branch} differs from the pull request head. Update or delete it, then try again.` };
-    const repositoryScope = source === undefined ? undefined : { baseRepositoryKey: source.baseRepositoryKey, originRepositoryKey: source.originRepositoryKey };
-    return { branch, sha: headSha, existing, ...(repositoryScope === undefined ? {} : { repositoryScope }), ...(headOnOrigin ? { fork: false as const, upstream: source?.upstream ?? startPoint } : { fork: true as const }) };
+    return { pinnedRef: startPoint };
+  }
+
+  // the ref a pull request's head is fetched into: its remote-tracking ref when it heads a branch
+  private pinnedRef({ fetchSource, headOnOrigin, branch, number }: FetchablePullRequest): string {
+    return fetchSource?.pinnedRef ?? (headOnOrigin ? `refs/remotes/origin/${branch}` : `refs/rac/pull/${number}`);
   }
 
   // a branch name git accepts as-is: not `HEAD`, not flag-shaped, and passing `check-ref-format --branch`

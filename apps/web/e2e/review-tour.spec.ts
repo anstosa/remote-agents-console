@@ -1196,14 +1196,27 @@ test('offers Since my review once I have reviewed the pull request, and names th
   expect(availabilityReads).toBe(1);
 });
 
-test('says why Since my review is unavailable while the Worktree is behind its pull request', async ({ page }) => {
+test('updates a Worktree behind its pull request to the head, then offers Since my review', async ({ page }) => {
   await installAgentWebSocket(page);
+  const reviewedCommit = 'a1b2c3d'.padEnd(40, '0');
+  let behind = true;
+  const updates: string[] = [];
   await page.route('**/api/**', async route => {
-    const url = new URL(route.request().url());
+    const request = route.request();
+    const url = new URL(request.url());
     if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
     if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, agents: [startSheetAgent], projects: [] } });
     if (await fulfillAgentSupport(route, url.pathname)) return;
-    if (url.pathname === '/api/worktrees/owen/review-tour/since-review') return route.fulfill({ status: 409, json: { status: 'error', error: { code: 'head_behind_pull_request', retryable: true } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/since-review') return behind
+      ? route.fulfill({ status: 409, json: { status: 'error', error: { code: 'head_behind_pull_request', retryable: true } } })
+      : route.fulfill({ json: { status: 'available', reviewedCommit, head: 'f'.repeat(40) } });
+    if (url.pathname === '/api/worktrees/owen/update-pr-head' && request.method() === 'POST') {
+      updates.push(request.headers()['x-csrf-token'] ?? '');
+      // the first try finds an untracked file; the second updates
+      if (updates.length === 1) return route.fulfill({ status: 409, json: { error: 'The worktree has uncommitted changes. Commit or stash them, then try again.' } });
+      behind = false;
+      return route.fulfill({ status: 202, body: '' });
+    }
     return route.fulfill({ status: 404, json: { error: 'not mocked' } });
   });
   await page.goto('/');
@@ -1211,7 +1224,34 @@ test('says why Since my review is unavailable while the Worktree is behind its p
   await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Review', exact: true }).click();
   const sheet = page.getByRole('dialog', { name: 'Start guided review' });
   await expect(sheet.getByRole('button', { name: 'Since my review' })).toBeDisabled();
-  await expect(sheet.getByText('Since my review needs this Worktree at its pull request’s head commit: pull or push until they match.')).toBeVisible();
+  await expect(sheet.getByText('Since my review needs this Worktree at its pull request’s head commit, which has moved on since the Worktree last matched it.')).toBeVisible();
+  const update = sheet.getByRole('button', { name: 'Update to PR head' });
+  await update.click();
+  await expect(sheet.getByText('The worktree has uncommitted changes. Commit or stash them, then try again.')).toBeVisible();
+  await update.click();
+  // a successful update reads the scope again, which is now offered
+  await expect(sheet.getByRole('button', { name: 'Since my review (a1b2c3d)' })).toBeEnabled();
+  await expect(update).toHaveCount(0);
+  expect(updates).toEqual(['csrf-token', 'csrf-token']);
+});
+
+test('says why Since my review is unavailable while the Worktree has commits its pull request does not, and offers no update', async ({ page }) => {
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, agents: [startSheetAgent], projects: [] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname === '/api/worktrees/owen/review-tour/since-review') return route.fulfill({ status: 409, json: { status: 'error', error: { code: 'head_diverged_from_pull_request', retryable: true } } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Review', exact: true }).click();
+  const sheet = page.getByRole('dialog', { name: 'Start guided review' });
+  await expect(sheet.getByRole('button', { name: 'Since my review' })).toBeDisabled();
+  await expect(sheet.getByText('Since my review needs this Worktree at its pull request’s head commit, and it cannot be moved there for you: HEAD has commits the pull request does not, or the pull request’s head is not this branch on origin.')).toBeVisible();
+  await expect(sheet.getByRole('button', { name: 'Update to PR head' })).toHaveCount(0);
 });
 
 test('hides the AI code review without Review presets and shows the start sheet as a phone bottom sheet', async ({ page }) => {

@@ -2496,6 +2496,17 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     await dashboardUpdates.refresh().catch(() => undefined);
     return reply.code(202).send();
   });
+  // bring the Worktree's branch to its pull request's head: fast-forward, or reset after a force-push
+  // when no local-only work would be lost
+  app.post('/api/worktrees/:id/update-pr-head', async (request, reply) => {
+    controlled(request, true);
+    const result = await prSwitch.updateToHead((request.params as { id: string }).id);
+    if (result === 'busy') return reply.code(409).send({ error: 'An agent in this worktree is busy. Wait for it to finish, then update again.' });
+    if (result !== 'switched') return reply.code(409).send({ error: result.error });
+    discovery.invalidateWorktrees();
+    await dashboardUpdates.refresh().catch(() => undefined);
+    return reply.code(202).send();
+  });
   // move one occupied pull request into the requested worktree
   app.post('/api/worktrees/:id/move-pr', async (request, reply) => {
     controlled(request, true);

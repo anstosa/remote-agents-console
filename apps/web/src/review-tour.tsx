@@ -139,8 +139,10 @@ function sameReviewScope(left: ReviewScope, right: ReviewScope): boolean {
   return left.scope === right.scope;
 }
 
-// why Since my review cannot start while HEAD is not the pull request's head
-export const sinceReviewHeadText = 'Since my review needs this Worktree at its pull request’s head commit: pull or push until they match.';
+// why Since my review cannot start while HEAD is behind the pull request's head, which Update to PR
+// head fixes, or is off it in a way only the operator can fix
+export const sinceReviewHeadText = 'Since my review needs this Worktree at its pull request’s head commit, which has moved on since the Worktree last matched it.';
+export const sinceReviewDivergedText = 'Since my review needs this Worktree at its pull request’s head commit, and it cannot be moved there for you: HEAD has commits the pull request does not, or the pull request’s head is not this branch on origin.';
 
 // how a tour's header and dispatch name its Comparison
 export function reviewScopeLabel(target: ReviewScope): string {
@@ -220,6 +222,7 @@ function errorMessage(failure: ReviewFailure, status: number, agent: string): st
   if (code === 'no_submitted_review') return 'You have not submitted a review on this pull request yet; a draft review does not count.';
   if (code === 'reviewed_commit_unreachable') return 'The commit you reviewed could not be fetched from origin.';
   if (code === 'head_behind_pull_request') return sinceReviewHeadText;
+  if (code === 'head_diverged_from_pull_request') return sinceReviewDivergedText;
   if (code === 'too_large') return 'This change is too large for a complete guided tour.';
   if (code === 'timed_out') return 'Tour generation timed out.';
   if (code === 'stale_during_generation') return 'The change moved while the tour was being generated.';

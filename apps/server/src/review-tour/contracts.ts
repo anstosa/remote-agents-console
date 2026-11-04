@@ -63,7 +63,7 @@ export type ReviewTourCapability = ReviewRunCapability & { agent: ReviewAgentKin
 export type StoredReviewTour = { worktreeId: string; branch: string; savedAt: string; tour: ReviewTour };
 // `codeReview` reports the tour's Code review (running, ready with `findings` counted, or failed)
 export type StoredReviewTourSummary = Pick<StoredReviewTour, 'worktreeId' | 'branch' | 'savedAt'> & ReviewScope & Pick<ReviewTour, 'title' | 'includeTests' | 'includeDocs' | 'fingerprint'> & { codeReview?: 'running' | 'ready' | 'failed'; findings?: number };
-export type ReviewErrorCode = 'invalid_request' | 'capability_unavailable' | 'authentication_required' | 'target_unavailable' | 'configured_worktree_required' | 'scope_unavailable' | 'conflicted_unavailable' | 'too_large' | 'generation_failed' | 'malformed_result' | 'generation_rejected' | 'timed_out' | 'cancelled' | 'stale_during_generation' | 'busy' | 'agent_busy' | 'conversation_unavailable' | 'no_pull_request' | 'no_submitted_review' | 'reviewed_commit_unreachable' | 'head_behind_pull_request';
+export type ReviewErrorCode = 'invalid_request' | 'capability_unavailable' | 'authentication_required' | 'target_unavailable' | 'configured_worktree_required' | 'scope_unavailable' | 'conflicted_unavailable' | 'too_large' | 'generation_failed' | 'malformed_result' | 'generation_rejected' | 'timed_out' | 'cancelled' | 'stale_during_generation' | 'busy' | 'agent_busy' | 'conversation_unavailable' | 'no_pull_request' | 'no_submitted_review' | 'reviewed_commit_unreachable' | 'head_behind_pull_request' | 'head_diverged_from_pull_request';
 export type PublicReviewComparison = ReviewScope & Pick<ReviewComparison, 'base' | 'fingerprint' | 'includeTests' | 'includeDocs'>;
 
 export class ReviewTourError extends Error {

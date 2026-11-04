@@ -242,7 +242,7 @@ describe('Since my review Comparison capture', () => {
 });
 
 describe('Since my review availability and start', () => {
-  type Detail = { headSha: string; viewerReviewCommit?: string; baseBranch?: string };
+  type Detail = { headSha: string; viewerReviewCommit?: string; baseBranch?: string; headOnOrigin?: boolean };
   // a service over the Worktree at `root` (branch `feature`) whose Pull request #7 GitHub reads as `detail`
   const service = (root: string, pull: { number: number; status: 'open' | 'merged' } | undefined, detail: Detail | undefined, prBase = 'main', problem?: object) => {
     const worktree = sinceReviewWorkspace(root, prBase).worktree;
@@ -253,7 +253,7 @@ describe('Since my review availability and start', () => {
     const github = {
       repositoryAt: async (path: string) => path === root ? repository : undefined,
       branch: async (asked: unknown, name: string) => ({ ...(pull === undefined || asked !== repository || name !== 'feature' ? {} : { pullRequest: { ...pull, title: 'Fixes', url: 'https://github.com/octo/repo/pull/7' } }) }),
-      pullRequestDetail: async (_repository: unknown, number: number, options: unknown) => { reads.push([number, options]); return { ...(detail === undefined || number !== 7 ? {} : { pullRequest: detail }), ...(problem === undefined ? {} : { problem }) }; }
+      pullRequestDetail: async (_repository: unknown, number: number, options: unknown) => { reads.push([number, options]); return { ...(detail === undefined || number !== 7 ? {} : { pullRequest: { branch: 'feature', headOnOrigin: true, state: 'open', ...detail } }), ...(problem === undefined ? {} : { problem }) }; }
     };
     return { reads, service: new ReviewTourService(discovery as never, {} as never, github as never) };
   };
@@ -272,8 +272,44 @@ describe('Since my review availability and start', () => {
     await expect(service(root, undefined, undefined).service.sinceReview('cora')).rejects.toMatchObject({ code: 'no_pull_request' });
     await expect(service(root, { number: 7, status: 'merged' }, { headSha: head }).service.sinceReview('cora')).rejects.toMatchObject({ code: 'no_pull_request' });
     await expect(service(root, { number: 7, status: 'open' }, { headSha: head }).service.sinceReview('cora')).rejects.toMatchObject({ code: 'no_submitted_review' });
-    await expect(service(root, { number: 7, status: 'open' }, { headSha: 'f'.repeat(40), viewerReviewCommit: reviewed }).service.sinceReview('cora')).rejects.toMatchObject({ code: 'head_behind_pull_request' });
+    await expect(service(root, { number: 7, status: 'open' }, { headSha: 'f'.repeat(40), viewerReviewCommit: reviewed }).service.sinceReview('cora')).rejects.toMatchObject({ code: 'head_diverged_from_pull_request' });
     await expect(service(root, { number: 7, status: 'open' }, { headSha: head, viewerReviewCommit: reviewed }, 'main', { kind: 'unreachable' }).service.sinceReview('cora')).rejects.toMatchObject({ code: 'scope_unavailable' });
+  });
+
+  // behind is what Update to PR head can fix: HEAD under the pull request's head, or, after a
+  // force-push this checkout has not fetched, HEAD holding only commits once on origin/feature
+  it('tells a HEAD Update to PR head can move from one with commits only this checkout has', async () => {
+    const { root, reviewed } = await reviewedRepository();
+    const pulled = (headSha: string) => service(root, { number: 7, status: 'open' }, { headSha, viewerReviewCommit: reviewed }).service.sinceReview('cora');
+    const head = await out(root, 'rev-parse', 'HEAD');
+    const later = await commitLines(root, 'author pushed more', lines({ 2: 'feature 2', 5: 'fixed 5' }));
+    await out(root, 'reset', '--hard', head);
+    await expect(pulled(later)).rejects.toMatchObject({ code: 'head_behind_pull_request' });
+    const forcePushed = 'f'.repeat(40);
+    await expect(pulled(forcePushed)).rejects.toMatchObject({ code: 'head_diverged_from_pull_request' });
+    await out(root, 'update-ref', 'refs/remotes/origin/feature', head);
+    await expect(pulled(forcePushed)).rejects.toMatchObject({ code: 'head_behind_pull_request' });
+    await commitLines(root, 'mine, not pushed', lines({ 2: 'feature 2', 7: 'local 7' }));
+    await expect(pulled(later)).rejects.toMatchObject({ code: 'head_diverged_from_pull_request' });
+  });
+
+  it('calls a HEAD behind when origin/feature holds it with no reflog, as a fresh clone leaves it', async () => {
+    const { root, reviewed } = await reviewedRepository();
+    await out(root, '-c', 'core.logAllRefUpdates=false', 'update-ref', 'refs/remotes/origin/feature', reviewed);
+    const pulled = (detail: Partial<Detail>) => service(root, { number: 7, status: 'open' }, { headSha: 'f'.repeat(40), viewerReviewCommit: reviewed, ...detail }).service.sinceReview('cora');
+    await expect(pulled({})).rejects.toMatchObject({ code: 'head_behind_pull_request' });
+    // Update to PR head never moves a branch to a head in a fork
+    await expect(pulled({ headOnOrigin: false })).rejects.toMatchObject({ code: 'head_diverged_from_pull_request' });
+  });
+
+  it('finds no pull request for a fork checkout, even one GitHub would map to its pull request', async () => {
+    const { root, reviewed } = await reviewedRepository();
+    const forkCheckout = `rac/pr/7/${reviewed.slice(0, 12)}`;
+    await out(root, 'switch', '-c', forkCheckout);
+    const worktree = sinceReviewWorkspace(root, 'main').worktree;
+    const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [{ id: 'cora', worktrees: [{ id: worktree.id, branch: forkCheckout, gitPrStatus: { base: 'main', files: 1, changes: [] } }] }] }) };
+    const github = { repositoryAt: async () => ({ owner: 'octo', name: 'repo' }), branch: async () => ({ pullRequest: { number: 7, status: 'open', title: 'Fixes', url: '' } }), pullRequestDetail: async () => ({ pullRequest: { number: 7, state: 'open', branch: 'main', headOnOrigin: false, headSha: reviewed, viewerReviewCommit: 'a'.repeat(40) } }) };
+    await expect(new ReviewTourService(discovery as never, {} as never, github as never).sinceReview('cora')).rejects.toMatchObject({ code: 'no_pull_request' });
   });
 
   it('refuses a start pinned to a review that is no longer my latest', async () => {

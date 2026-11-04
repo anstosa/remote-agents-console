@@ -739,6 +739,30 @@ describe('pull request switch API', () => {
     }
   }, 15_000);
 
+  it('updates a Worktree to its pull request head through the controlled HTTP boundary', async () => {
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const updateToHead = vi.fn<() => Promise<'switched' | 'busy' | { error: string }>>().mockResolvedValueOnce('switched').mockResolvedValueOnce({ error: 'feature has commits that are not on the pull request.' }).mockResolvedValueOnce('busy');
+    const pullRequestApp = await buildApp(config, { auth: new AuthService(hash, Buffer.alloc(32, 20).toString('base64url')), prSwitch: { updateToHead } as never });
+    try {
+      const boot = await pullRequestApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
+      const login = await pullRequestApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
+      const headers = { host: 'agents.example.com', origin: 'https://agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], 'x-csrf-token': login.json().csrfToken };
+      const update = () => pullRequestApp.inject({ method: 'POST', url: '/api/worktrees/cora/update-pr-head', headers });
+      const updated = await update();
+      const refused = await update();
+      const busy = await update();
+
+      expect(updated.statusCode).toBe(202);
+      expect(updateToHead).toHaveBeenCalledWith('cora');
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json()).toEqual({ error: 'feature has commits that are not on the pull request.' });
+      expect(busy.statusCode).toBe(409);
+      expect(busy.json()).toEqual({ error: 'An agent in this worktree is busy. Wait for it to finish, then update again.' });
+    } finally {
+      await pullRequestApp.close();
+    }
+  }, 15_000);
+
   it('switches and moves a local branch through the controlled HTTP boundary', async () => {
     const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
     const switchBranch = vi.fn<() => Promise<'switched' | 'unavailable'>>().mockResolvedValueOnce('switched').mockResolvedValueOnce('unavailable');

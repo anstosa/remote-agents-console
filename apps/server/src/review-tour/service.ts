@@ -1,6 +1,8 @@
 import type { DiscoveryService } from '../discovery/service.js';
 import { fetchCommit, fetchOriginBranch, resolveHead } from '../git/comparison.js';
 import type { GithubService } from '../github/service.js';
+import { headUpdate } from '../git/worktree-state.js';
+import { branchPullRequest, updatableRef } from '../pull-requests/switch-service.js';
 import { resolveConfiguredWorkspace, sameConfiguredWorkspace, type ResolvedWorkspace } from '../workspaces/resolver.js';
 import { captureReviewComparison } from './diff.js';
 import type { ReviewRunProgress } from '../review-runs/runner.js';
@@ -66,16 +68,17 @@ export class ReviewTourService {
 
   private async pullRequestReview(worktreeId: string): Promise<{ workspace: string; review: { reviewedCommit: string; head: string }; baseBranch?: string }> {
     const { workspace, branch } = await this.resolve(worktreeId);
-    if (branch === undefined) throw new ReviewTourError('no_pull_request', true);
-    const repository = await this.github.repositoryAt(workspace);
-    const pull = repository === undefined ? undefined : (await this.github.branch(repository, branch, undefined, { wait: true })).pullRequest;
-    if (repository === undefined || pull === undefined || pull.status === 'merged') throw new ReviewTourError('no_pull_request', true);
-    const { pullRequest, problem } = await this.github.pullRequestDetail(repository, pull.number, { fresh: true });
-    // a failed read may still answer with an older one, whose head could be stale
-    if (pullRequest === undefined || problem !== undefined) throw new ReviewTourError('scope_unavailable', true);
+    const pullRequest = branch === undefined ? undefined : await branchPullRequest(this.github, workspace, branch);
+    if (pullRequest === undefined) throw new ReviewTourError('no_pull_request', true);
+    if (pullRequest === 'unreadable') throw new ReviewTourError('scope_unavailable', true);
     if (pullRequest.viewerReviewCommit === undefined) throw new ReviewTourError('no_submitted_review', true);
     const head = (await resolveHead(workspace)).gitBase;
-    if (head !== pullRequest.headSha) throw new ReviewTourError('head_behind_pull_request', true);
+    if (head !== pullRequest.headSha) {
+      // behind is what Update to PR head can fix; anything else is the operator's to sort out
+      const remoteRef = updatableRef(pullRequest, branch!);
+      const update = remoteRef === undefined ? 'local-commits' : await headUpdate(workspace, head, pullRequest.headSha, remoteRef);
+      throw new ReviewTourError(update === 'local-commits' ? 'head_diverged_from_pull_request' : 'head_behind_pull_request', true);
+    }
     return { workspace, review: { reviewedCommit: pullRequest.viewerReviewCommit, head }, ...(pullRequest.baseBranch === undefined ? {} : { baseBranch: pullRequest.baseBranch }) };
   }
 
