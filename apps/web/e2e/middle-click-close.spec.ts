@@ -8,7 +8,9 @@ type Agent = {
   home: string;
   placeId: string;
   title: string;
-  kind: 'claude' | 'codex';
+  kind: 'claude' | 'codex' | 'pi';
+  panel?: 'terminal' | 'transcript';
+  structured?: { lifecycle: 'live'; role?: 'conductor'; revision: number; switchable: boolean; compacting?: true };
   attention: Attention;
   queuedPromptCount: number;
   displayLabel?: string;
@@ -89,6 +91,15 @@ const placeAgent = (id: string, place: Place): Agent => ({
   queuedPromptCount: 0
 });
 
+// build one structured pi agent at a directory place
+const piPlaceAgent = (id: string, place: Place, attention: Attention = 'finished', role?: 'conductor'): Agent => ({
+  ...placeAgent(id, place),
+  kind: 'pi',
+  panel: 'transcript',
+  structured: { lifecycle: 'live', revision: 1, switchable: false, ...(role === undefined ? {} : { role }) },
+  attention
+});
+
 // read one required route capture
 const routeCapture = (match: RegExpExecArray, index: number) => {
   const capture = match[index];
@@ -127,7 +138,10 @@ const routeApi = async (page: Page, scenario: Scenario): Promise<ConsoleHarness>
       // unmount the dashboard through its real inactive-control boundary
       if (scenario.controlLost === true) return route.fulfill({ status: 423, json: { error: 'another device is active' } });
       const places = scenario.places?.map(place => ({ ...place, consoleShells: scenario.panes[place.id]?.filter(pane => pane.role === 'shell' && !pane.agent).length ?? 0 }));
-      const adapters = { codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false } };
+      const adapters = {
+        codex: { launchable: true, program: '/bin/codex', stateSource: 'both', turnCapture: true, inlineQuestions: false, commands: true, sandbox: false },
+        pi: { launchable: true, program: '/bin/pi', stateSource: 'reported', turnCapture: true, inlineQuestions: true, commands: false, sandbox: true }
+      };
       return route.fulfill({ json: { generation: lifecycle.length + 1, adapters, agents: scenario.agents, projects: scenario.projects, ...(places === undefined ? {} : { places }), ...(scenario.editor === true ? { editor: true } : {}) } });
     }
     // disable push setup
@@ -141,6 +155,10 @@ const routeApi = async (page: Page, scenario: Scenario): Promise<ConsoleHarness>
       if (rest === 'tickets') return route.fulfill({ json: { ticket: `ticket-${id}` } });
       if (rest === 'saved-prompts' || rest === 'queued-prompts' || rest === 'prompt-history') return route.fulfill({ json: { prompts: [] } });
       if (rest === 'conversation') return route.fulfill({ json: { name: `Conversation ${id}` } });
+      // list structured conversations
+      if (rest === 'conversations') return route.fulfill({ json: { conversations: [], canResume: true } });
+      // serve an empty structured transcript
+      if (rest === 'transcript') return route.fulfill({ json: { items: [], earlier: 0, status: { extension: [] } } });
       if (rest === 'commands') return route.fulfill({ json: { commands: [] } });
       if (rest === 'notifications/dismiss') return route.fulfill({ status: 204 });
 
@@ -295,6 +313,23 @@ const openShell = async (page: Page, name: string, paneId: string): Promise<Loca
   const terminal = page.locator(`.terminal-pane[data-panel-key="${paneId}"]`);
   await expect(terminal).toBeVisible();
   return terminal;
+};
+
+// open one place's agent selector
+const openAgentSwitcher = async (page: Page, placeLabel: string): Promise<Locator> => {
+  const menu = page.getByRole('menu', { name: `Agents at ${placeLabel}`, exact: true });
+  // keep the helper safe when a previous auxiliary click left the menu open
+  if (!await menu.isVisible()) await page.getByRole('button', { name: `Switch Agent at ${placeLabel}`, exact: true }).click();
+  await expect(menu).toBeVisible();
+  return menu;
+};
+
+// find one exact agent selector row by its mocked conversation name
+const agentSwitcherRow = async (page: Page, placeLabel: string, agentId: string): Promise<Locator> => {
+  const menu = await openAgentSwitcher(page, placeLabel);
+  const row = menu.getByRole('menuitemradio').filter({ hasText: `Conversation ${agentId}` });
+  await expect(row).toHaveCount(1);
+  return row;
 };
 
 // attempt one power action unless the shared operation disables the whole control
@@ -806,6 +841,237 @@ test('middle-clicking the agent split title or body turns off only the current i
   await expect.poll(() => mutations(harness), { timeout: 5_000 }).toContain('POST /api/agents/cora-2/deactivate');
   await expect(page.locator('.agent-panel')).toHaveCount(0);
   await expect(terminal).toBeVisible();
+});
+
+test('middle-clicking agent selector rows turns off the exact inactive or selected worktree agent without touching shells', async ({ page }) => {
+  const scenario: Scenario = {
+    agents: [worktreeAgent('cora-1', cora), worktreeAgent('cora-2', cora, 'finished', 'claude')],
+    projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [cora] }],
+    panes: { cora: [{ paneId: '%5', session: '$1', window: '@2', role: 'shell', name: 'build', command: 'zsh', path: cora.path, title: '', agent: false, busy: false }] }
+  };
+  const harness = await mountConsole(page, scenario, '#agent=cora-1');
+  await seedPaneSize(page, 'cora-1', 80, 24);
+  const terminal = await openShell(page, 'build', '%5');
+
+  const inactive = await agentSwitcherRow(page, 'Cora', 'cora-2');
+  await expect(inactive).toHaveAttribute('aria-checked', 'false');
+  await inactive.click({ button: 'middle' });
+  await expect.poll(() => harness.agentAttempts.get('cora-2')).toBe(1);
+  await expect(page.locator('.agent-panel-title')).toHaveText('Conversation cora-1');
+  expect(harness.agentAttempts.get('cora-1')).toBeUndefined();
+  expect(harness.paneAttempts.get('%5')).toBeUndefined();
+  await expect(terminal).toBeVisible();
+
+  const selected = await agentSwitcherRow(page, 'Cora', 'cora-1');
+  await expect(selected).toHaveAttribute('aria-checked', 'true');
+  await selected.click({ button: 'middle' });
+  await expect.poll(() => harness.agentAttempts.get('cora-1')).toBe(1);
+  await expect(page.locator('.agent-panel')).toHaveCount(0);
+  expect(harness.paneAttempts.get('%5')).toBeUndefined();
+  await expect(terminal).toBeVisible();
+  expect(mutations(harness)).toEqual([
+    'POST /api/agents/cora-2/deactivate',
+    'POST /api/agents/cora-1/deactivate'
+  ]);
+});
+
+test('only the primary Conductor is protected while idle extra Pi agents close from their body or selector row', async ({ page }) => {
+  const conductor: Place = { id: 'conductor:/srv/conductor', kind: 'directory', projectId: 'conductor', label: 'Conductor', home: '/srv/conductor', pinned: true };
+  const primary = piPlaceAgent('conductor-primary', conductor, 'finished', 'conductor');
+  const scenario: Scenario = {
+    agents: [
+      primary,
+      piPlaceAgent('conductor-extra-row', conductor),
+      piPlaceAgent('conductor-extra-body', conductor),
+      piPlaceAgent('conductor-extra-working', conductor, 'working')
+    ],
+    projects: [{ id: 'conductor', label: 'Conductor', mode: 'directory', manageWorktrees: false, available: true, worktrees: [] }],
+    places: [conductor],
+    panes: { [conductor.id]: [] }
+  };
+  const harness = await mountConsole(page, scenario, '#agent=conductor-primary');
+  const agentBody = page.locator('.agent-panel > .agent-output');
+  await expect(page.locator('.agent-panel-title')).toHaveText('Conversation conductor-primary');
+
+  await agentBody.click({ button: 'middle' });
+  await page.waitForTimeout(100);
+  expect(harness.agentAttempts.get('conductor-primary')).toBeUndefined();
+  const primaryRow = await agentSwitcherRow(page, 'Conductor', 'conductor-primary');
+  await expect(primaryRow).toHaveAttribute('aria-checked', 'true');
+  await primaryRow.click({ button: 'middle' });
+  await page.waitForTimeout(100);
+  expect(harness.agentAttempts.get('conductor-primary')).toBeUndefined();
+  await expect(page.locator('.agent-panel-title')).toHaveText('Conversation conductor-primary');
+
+  primary.attention = 'working';
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(page.locator('.agent-panel .agent-state-pill')).toHaveText('Working');
+  const idleExtraRow = await agentSwitcherRow(page, 'Conductor', 'conductor-extra-row');
+  await idleExtraRow.click({ button: 'middle' });
+  await expect.poll(() => harness.agentAttempts.get('conductor-extra-row')).toBe(1);
+  await expect(page.locator('.agent-panel-title')).toHaveText('Conversation conductor-primary');
+  expect(harness.agentAttempts.get('conductor-primary')).toBeUndefined();
+
+  const bodyExtraRow = await agentSwitcherRow(page, 'Conductor', 'conductor-extra-body');
+  await bodyExtraRow.click();
+  await expect(page.locator('.agent-panel-title')).toHaveText('Conversation conductor-extra-body');
+  await page.locator('.agent-panel > .agent-output').click({ button: 'middle' });
+  await expect.poll(() => harness.agentAttempts.get('conductor-extra-body')).toBe(1);
+
+  const workingExtraRow = await agentSwitcherRow(page, 'Conductor', 'conductor-extra-working');
+  await workingExtraRow.click({ button: 'middle' });
+  await expect(page.getByRole('alert').filter({ hasText: /could not be turned off/u })).toContainText(/cancel.*work/iu);
+  expect(harness.agentAttempts.get('conductor-extra-working')).toBeUndefined();
+  const selectedWorkingExtra = await agentSwitcherRow(page, 'Conductor', 'conductor-extra-working');
+  await selectedWorkingExtra.click();
+  await expect(page.locator('.agent-panel-title')).toHaveText('Conversation conductor-extra-working');
+  await page.locator('.agent-panel > .agent-output').click({ button: 'middle' });
+  await page.waitForTimeout(100);
+  expect(harness.agentAttempts.get('conductor-extra-working')).toBeUndefined();
+  expect(harness.agentAttempts.get('conductor-primary')).toBeUndefined();
+  expect(mutations(harness)).toEqual([
+    'DELETE /api/agents/conductor-extra-row',
+    'DELETE /api/agents/conductor-extra-body'
+  ]);
+});
+
+test('compacting Pi agents stay protected without blocking an idle extra agent selected from the same Conductor', async ({ page }) => {
+  const conductor: Place = { id: 'conductor:/srv/conductor', kind: 'directory', projectId: 'conductor', label: 'Conductor', home: '/srv/conductor', pinned: true };
+  const primary = piPlaceAgent('conductor-primary', conductor, 'finished', 'conductor');
+  const compactingExtra = piPlaceAgent('conductor-extra-compacting', conductor);
+  primary.structured!.compacting = true;
+  compactingExtra.structured!.compacting = true;
+  const scenario: Scenario = {
+    agents: [primary, compactingExtra, piPlaceAgent('conductor-extra-idle', conductor)],
+    projects: [{ id: 'conductor', label: 'Conductor', mode: 'directory', manageWorktrees: false, available: true, worktrees: [] }],
+    places: [conductor],
+    panes: { [conductor.id]: [] }
+  };
+  const harness = await mountConsole(page, scenario, '#agent=conductor-primary');
+  await expect(page.locator('.agent-panel .agent-state-pill')).toHaveText('Compacting');
+
+  const compactingRow = await agentSwitcherRow(page, 'Conductor', 'conductor-extra-compacting');
+  await compactingRow.click({ button: 'middle' });
+  await page.waitForTimeout(100);
+  expect(harness.agentAttempts.get('conductor-extra-compacting')).toBeUndefined();
+  expect(harness.agentAttempts.get('conductor-primary')).toBeUndefined();
+
+  const idleRow = await agentSwitcherRow(page, 'Conductor', 'conductor-extra-idle');
+  await idleRow.click({ button: 'middle' });
+  await expect.poll(() => harness.agentAttempts.get('conductor-extra-idle')).toBe(1);
+  await expect(page.locator('.agent-panel-title')).toHaveText('Conversation conductor-primary');
+  expect(harness.agentAttempts.get('conductor-primary')).toBeUndefined();
+
+  const selectCompacting = await agentSwitcherRow(page, 'Conductor', 'conductor-extra-compacting');
+  await selectCompacting.click();
+  await expect(page.locator('.agent-panel-title')).toHaveText('Conversation conductor-extra-compacting');
+  // dashboard-only compaction also protects direct power-menu actions
+  const power = page.getByRole('button', { name: 'Agent power options', exact: true });
+  await expect(power).toBeDisabled();
+  await expect(power).toHaveAttribute('aria-busy', 'true');
+  await page.locator('.agent-panel > .agent-output').click({ button: 'middle' });
+  await page.waitForTimeout(100);
+  expect(harness.agentAttempts.get('conductor-extra-compacting')).toBeUndefined();
+  expect(mutations(harness)).toEqual(['DELETE /api/agents/conductor-extra-idle']);
+});
+
+// compaction ownership must outlive the selected panel and delayed dashboard pushes
+test('compaction stays protected across agent switches before the dashboard catches up', async ({ page }) => {
+  const conductor: Place = { id: 'conductor:/srv/conductor', kind: 'directory', projectId: 'conductor', label: 'Conductor', home: '/srv/conductor', pinned: true };
+  const scenario: Scenario = {
+    agents: [piPlaceAgent('conductor-primary', conductor, 'finished', 'conductor'), piPlaceAgent('extra-compacting', conductor), piPlaceAgent('extra-idle', conductor)],
+    projects: [{ id: 'conductor', label: 'Conductor', mode: 'directory', manageWorktrees: false, available: true, worktrees: [] }],
+    places: [conductor],
+    panes: { [conductor.id]: [] }
+  };
+  const harness = await mountConsole(page, scenario, '#agent=extra-compacting');
+  let finishCompaction!: () => void;
+  let compactRequests = 0;
+  // retain the request while every dashboard response still says the target is idle
+  const compacting = new Promise<void>(resolve => { finishCompaction = resolve; });
+  await page.route('**/api/agents/extra-compacting/compact', async route => {
+    compactRequests += 1;
+    await compacting;
+    await route.fulfill({ status: 204 });
+  });
+  try {
+    await page.getByRole('button', { name: 'Agent power options', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Compact…', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Compact the conversation' }).getByRole('button', { name: 'Compact', exact: true }).click();
+    await expect.poll(() => compactRequests).toBe(1);
+
+    const primary = await agentSwitcherRow(page, 'Conductor', 'conductor-primary');
+    await primary.click();
+    await expect(page.locator('.agent-panel-title')).toHaveText('Conversation conductor-primary');
+    const compactingRow = await agentSwitcherRow(page, 'Conductor', 'extra-compacting');
+    await compactingRow.click({ button: 'middle' });
+    await page.waitForTimeout(100);
+    expect(harness.agentAttempts.get('extra-compacting')).toBeUndefined();
+
+    const idleRow = await agentSwitcherRow(page, 'Conductor', 'extra-idle');
+    await idleRow.click({ button: 'middle' });
+    await expect.poll(() => harness.agentAttempts.get('extra-idle')).toBe(1);
+    const remount = await agentSwitcherRow(page, 'Conductor', 'extra-compacting');
+    await remount.click();
+    const power = page.getByRole('button', { name: 'Agent power options', exact: true });
+    await expect(power).toBeDisabled();
+    await expect(power).toHaveAttribute('aria-busy', 'true');
+    await page.locator('.agent-panel > .agent-output').click({ button: 'middle' });
+    await page.waitForTimeout(100);
+    expect(harness.agentAttempts.get('extra-compacting')).toBeUndefined();
+    expect(compactRequests).toBe(1);
+
+    finishCompaction();
+    await expect(power).toBeEnabled();
+    await page.locator('.agent-panel > .agent-output').click({ button: 'middle' });
+    await expect.poll(() => harness.agentAttempts.get('extra-compacting')).toBe(1);
+    expect(mutations(harness)).toEqual(['DELETE /api/agents/extra-idle', 'DELETE /api/agents/extra-compacting']);
+    expect(harness.agentAttempts.get('conductor-primary')).toBeUndefined();
+  } finally {
+    // release the held route even when a protection assertion fails
+    finishCompaction();
+  }
+});
+
+test('a failed selector-row shutdown stays retryable and duplicate pending or right clicks do not mutate', async ({ page }) => {
+  let finishFailure!: (status: number) => void;
+  const firstAttempt = new Promise<number>(resolve => { finishFailure = resolve; });
+  const scenario: Scenario = {
+    agents: [worktreeAgent('cora-1', cora), worktreeAgent('cora-2', cora, 'finished', 'claude')],
+    projects: [{ id: 'repo', label: 'Repo', available: true, worktrees: [cora] }],
+    panes: { cora: [] },
+    // hold one row shutdown so the duplicate races the same target
+    turnOffAgent: (target, _request, attempt) => target.id === 'cora-2' && attempt === 1 ? firstAttempt : 204
+  };
+  const harness = await mountConsole(page, scenario, '#agent=cora-1');
+  await seedPaneSize(page, 'cora-1', 80, 24);
+
+  const target = await agentSwitcherRow(page, 'Cora', 'cora-2');
+  await target.click({ button: 'middle' });
+  await expect.poll(() => harness.agentAttempts.get('cora-2')).toBe(1);
+  const duplicate = await agentSwitcherRow(page, 'Cora', 'cora-2');
+  await duplicate.click({ button: 'middle', force: true });
+  await page.waitForTimeout(100);
+  expect(harness.agentAttempts.get('cora-2')).toBe(1);
+  expect(harness.agentAttempts.get('cora-1')).toBeUndefined();
+
+  finishFailure(500);
+  await expect(page.getByRole('alert').filter({ hasText: 'Cora could not be turned off' })).toBeVisible();
+  const retry = await agentSwitcherRow(page, 'Cora', 'cora-2');
+  await retry.click({ button: 'right' });
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(100);
+  expect(harness.agentAttempts.get('cora-2')).toBe(1);
+
+  const retryAfterRightClick = await agentSwitcherRow(page, 'Cora', 'cora-2');
+  await retryAfterRightClick.click({ button: 'middle' });
+  await expect.poll(() => harness.agentAttempts.get('cora-2')).toBe(2);
+  await expect(page.locator('.agent-panel-title')).toHaveText('Conversation cora-1');
+  expect(harness.agentAttempts.get('cora-1')).toBeUndefined();
+  expect(mutations(harness)).toEqual([
+    'POST /api/agents/cora-2/deactivate',
+    'POST /api/agents/cora-2/deactivate'
+  ]);
 });
 
 test('a failed agent split middle-click keeps the agent visible and succeeds on retry', async ({ page }) => {

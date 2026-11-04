@@ -601,6 +601,8 @@ const deactivateOperationKey = (worktreeId: string) => `deactivate:${worktreeId}
 const restartOperationKey = (worktreeId: string) => `restart:${worktreeId}`;
 // track clear transitions by agent
 const clearOperationKey = (agentId: string) => `clear:${agentId}`;
+// retain compaction ownership across selected panel remounts
+const compactOperationKey = (agentId: string) => `compact:${agentId}`;
 // select one active agent transition
 const agentPendingOperation = (agent: Agent): DashboardOperation | undefined => {
   const scope = agent.worktreeId ?? agent.id;
@@ -7798,9 +7800,9 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
       if (steers.length > 0) setPromptDraft(agent.id, current => [...steers, current].filter(Boolean).join('\n\n'));
     } finally { if (mounted.current) setCancelling(false); }
   };
-  // turn off an Agent outside a Worktree (Scratch, a directory Project): its pane closes
-  const remove = async () => {
-    const operationKey = deactivateOperationKey(agent.id);
+  // close the exact agent outside a worktree without touching its siblings
+  const remove = async (target: Agent = agent) => {
+    const operationKey = deactivateOperationKey(target.id);
     // prevent duplicate or competing workspace closure
     if (deleting || !beginPendingOperation(operationKey, workspace.viewKey)) return;
     setDeleting(true);
@@ -7808,7 +7810,7 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     onOperationFeedback({ tone: 'pending', message: `Turning off ${label}…`, detail: 'The session is being stopped and removed from the console.' });
     try {
       // keep shutdown parseable when the tunnel uses chunked framing
-      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}`, emptyJsonMutation('DELETE'));
+      const response = await request(`/api/agents/${encodeURIComponent(target.id)}`, emptyJsonMutation('DELETE'));
       // surface failed closure
       if (!response.ok) return onOperationFeedback({ tone: 'error', message: `${label} could not be turned off`, detail: await launchError(response) });
       await onDeleted();
@@ -7816,23 +7818,23 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     } catch { onOperationFeedback({ tone: 'error', message: `${label} could not be turned off`, detail: 'The console could not be reached. The agent may still be running.' }); }
     finally { setPendingOperation(operationKey, false); if (mounted.current) setDeleting(false); }
   };
-  // deactivate one configured agent
-  const deactivate = async () => {
+  // deactivate the exact configured agent
+  const deactivate = async (target: Agent = agent) => {
     // require an idle configured target
-    if (deactivating || agent.worktreeId === undefined || !beginPendingOperation(deactivateOperationKey(agent.worktreeId), workspace.viewKey)) return;
+    if (deactivating || target.worktreeId === undefined || !beginPendingOperation(deactivateOperationKey(target.worktreeId), workspace.viewKey)) return;
     setDeactivating(true);
     const label = displayLabel;
-    onOperationFeedback({ tone: 'pending', message: `Turning off ${label}…`, detail: 'Stopping the agent while keeping the worktree available to start again.', worktreeId: agent.worktreeId });
+    onOperationFeedback({ tone: 'pending', message: `Turning off ${label}…`, detail: 'Stopping the agent while keeping the worktree available to start again.', worktreeId: target.worktreeId });
     try {
       // keep shutdown parseable when the tunnel uses chunked framing
-      const response = await request(`/api/agents/${encodeURIComponent(agent.id)}/deactivate`, emptyJsonMutation('POST'));
+      const response = await request(`/api/agents/${encodeURIComponent(target.id)}/deactivate`, emptyJsonMutation('POST'));
       // surface failed deactivation
-      if (!response.ok) return onOperationFeedback({ tone: 'error', message: `${label} could not be turned off`, detail: await launchError(response), worktreeId: agent.worktreeId });
+      if (!response.ok) return onOperationFeedback({ tone: 'error', message: `${label} could not be turned off`, detail: await launchError(response), worktreeId: target.worktreeId });
       await onDeleted();
-      onOperationFeedback({ tone: 'success', message: `${label} is off`, detail: 'The worktree is still available. Use Launch agent whenever you want to turn it back on.', worktreeId: agent.worktreeId });
-    } catch { onOperationFeedback({ tone: 'error', message: `${label} could not be turned off`, detail: 'The console could not be reached. The agent may still be running.', worktreeId: agent.worktreeId }); }
+      onOperationFeedback({ tone: 'success', message: `${label} is off`, detail: 'The worktree is still available. Use Launch agent whenever you want to turn it back on.', worktreeId: target.worktreeId });
+    } catch { onOperationFeedback({ tone: 'error', message: `${label} could not be turned off`, detail: 'The console could not be reached. The agent may still be running.', worktreeId: target.worktreeId }); }
     finally {
-      setPendingOperation(deactivateOperationKey(agent.worktreeId), false);
+      setPendingOperation(deactivateOperationKey(target.worktreeId), false);
       if (mounted.current) setDeactivating(false);
     }
   };
@@ -7925,10 +7927,12 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     }
   };
   // compact a structured Agent's conversation between Turns; the Conductor's summary also carries the console's state
-  const [compacting, setCompacting] = useState(false);
+  // honor both client ownership and dashboard-reported compaction
+  const compacting = usePendingOperation(compactOperationKey(agent.id)) || agent.structured?.compacting === true;
   const compact = async (instructions?: string) => {
-    if (compacting) return;
-    setCompacting(true);
+    const operationKey = compactOperationKey(agent.id);
+    // lock only this agent while rejecting known server work and duplicate compaction
+    if (compacting || !beginPendingOperation(operationKey)) return;
     const label = displayLabel;
     onOperationFeedback({ tone: 'pending', message: `Compacting ${label}…`, detail: 'Summarizing its conversation to free context. This can take a minute.', worktreeId: agent.worktreeId });
     try {
@@ -7938,8 +7942,8 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     } catch {
       onOperationFeedback({ tone: 'error', message: `${label} could not compact`, detail: 'The console could not be reached. The conversation was not compacted.', worktreeId: agent.worktreeId });
     } finally {
-      // avoid updating an unmounted agent panel
-      if (mounted.current) setCompacting(false);
+      // release ownership even after the operator switches agents
+      setPendingOperation(operationKey, false);
     }
   };
   // the inline question the dashboard reported for this agent (OMX files); the
@@ -7969,9 +7973,24 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
     finally { if (mounted.current) setRestarting(false); }
   };
   const onCompact = agent.structured === undefined ? undefined : (instructions?: string) => void compact(instructions);
-  const power = conductor ? <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || compacting} progressColor={compacting ? 'blue' : 'yellow'} hidden={active} {...(active ? { disabledReason: 'Cancel the Conductor’s work before restarting it' } : {})} onRestart={() => void restartConductor()} onCompact={onCompact} /> : <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || clearing || compacting || deactivating || deleting} progressColor={restarting ? 'yellow' : compacting ? 'blue' : 'red'} hidden={active} {...(active ? { disabledReason: 'Cancel the agent’s work before restarting, clearing or turning it off' } : {})} onClear={() => void clear()} onCompact={onCompact} onTurnOff={() => void (agent.worktreeId === undefined ? remove() : deactivate())} newTask={agent.worktreeId !== undefined || agent.placeId === undefined ? { agentId: agent.id, worktreeId: agent.worktreeId, configured: agent.newTaskConfigured === true, onOperationFeedback } : undefined} {...(agent.worktreeId === undefined ? {} : { onRestart: () => void restart(), restartAs: { label: displayLabel, resolution: agent.launch, target: { type: 'agent', id: agent.id }, onLaunch: choice => void restart(choice) } })} />;
+  const power = conductor ? <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || compacting} progressColor={compacting ? 'blue' : 'yellow'} hidden={active} {...(active ? { disabledReason: 'Cancel the Conductor’s work before restarting it' } : {})} onRestart={() => void restartConductor()} onCompact={onCompact} /> : <AgentPowerMenu className="panel-header-action agent-power" pending={restarting || clearing || compacting || deactivating || deleting} progressColor={restarting ? 'yellow' : compacting ? 'blue' : 'red'} hidden={active} {...(active ? { disabledReason: 'Cancel the agent’s work before restarting, clearing or turning it off' } : {})} onClear={() => void clear()} onCompact={onCompact} onTurnOff={() => { /* preserve the shared target shutdown guards */ turnOff(agent); }} newTask={agent.worktreeId !== undefined || agent.placeId === undefined ? { agentId: agent.id, worktreeId: agent.worktreeId, configured: agent.newTaskConfigured === true, onOperationFeedback } : undefined} {...(agent.worktreeId === undefined ? {} : { onRestart: () => void restart(), restartAs: { label: displayLabel, resolution: agent.launch, target: { type: 'agent', id: agent.id }, onLaunch: choice => void restart(choice) } })} />;
+  // reuse power actions for the requested agent without switching selection
+  const turnOff = (target: Agent = agent) => {
+    // keep the configured primary Conductor running
+    if (target.structured?.role === 'conductor') return;
+    // retain protection before dashboard updates and across panel remounts
+    const targetCompacting = target.structured?.compacting === true || pendingOperations.has(compactOperationKey(target.id));
+    // protect the target's work rather than unrelated work in the selected agent
+    if (agentState(target) === 'working' || targetCompacting) {
+      onOperationFeedback({ tone: 'error', message: `${displayLabel} could not be turned off`, detail: targetCompacting ? 'Wait for the agent to finish compacting before turning it off.' : 'Cancel the agent’s work before turning it off.', worktreeId: target.worktreeId });
+      return;
+    }
+    // ignore overlapping lifecycle operations
+    if (restarting || clearing || deactivating || deleting || agentPendingOperation(target) !== undefined || pendingOperations.has(deactivateOperationKey(workspace.place.id ?? target.id))) return;
+    void (target.worktreeId === undefined ? remove(target) : deactivate(target));
+  };
   const title = conversationName ?? displayLabel;
-  const switcher = <AgentSwitcher agent={agent} agents={agents} title={title} placeLabel={displayLabel} onSelect={onSelectAgent} />;
+  const switcher = <AgentSwitcher agent={agent} agents={agents} title={title} placeLabel={displayLabel} onSelect={onSelectAgent} onClose={turnOff} />;
   const model = agent.structured?.model;
   const modelChip = model === undefined ? undefined : <ModelChip agentId={agent.id} model={model} switchable={agent.structured?.switchable === true} working={active} request={request} onError={detail => onOperationFeedback({ tone: 'error', message: 'Model not switched', detail, worktreeId: agent.worktreeId })} />;
   const watchesButton = conductor ? <WatchesButton agentId={agent.id} watches={agent.watches ?? []} request={request} onError={detail => onOperationFeedback({ tone: 'error', message: 'Watch not removed', detail })} /> : undefined;
@@ -7979,18 +7998,6 @@ function AgentPanel({ agent, agents, onSelectAgent, active, displayLabel, worksp
   const prompt = <Prompt id={agent.id} steering={steering} offeredDraft={agent.structured?.draft} history={promptHistory.history} onHistoryChanged={promptHistory.refresh} onPromptFocus={onPromptFocus} onOperationFeedback={onOperationFeedback} question={dashboardQuestion ?? question} turnBlocked={agent.attention === 'question'} worktreeId={agent.worktreeId} placeId={workspace.place.id} historyControl={<PromptHistoryControl agentId={agent.id} history={promptHistory.history} refreshHistory={promptHistory.refresh} notes={workspace.notes} open={historyOpen} onOpenChange={onHistoryOpenChange} />} />;
   const paneMode = agent.pane?.paneMode;
   const composer = paneMode === undefined ? prompt : <><PaneModeNotice agentId={agent.id} mode={paneMode} worktreeId={agent.worktreeId} onOperationFeedback={onOperationFeedback} />{prompt}</>;
-  // reuse power actions without bypassing lifecycle safeguards
-  const turnOff = () => {
-    if (conductor) return;
-    // keep active work protected like the power menu
-    if (active) {
-      onOperationFeedback({ tone: 'error', message: `${displayLabel} could not be turned off`, detail: 'Cancel the agent’s work before turning it off.', worktreeId: agent.worktreeId });
-      return;
-    }
-    // ignore overlapping lifecycle operations
-    if (restarting || clearing || deactivating || deleting || agentPendingOperation(agent) !== undefined || pendingOperations.has(deactivateOperationKey(workspace.place.id ?? agent.id))) return;
-    void (agent.worktreeId === undefined ? remove() : deactivate());
-  };
   // a transcript Agent has no pane to stream: its Panel shows its transcript
   if (agent.panel === 'transcript') {
     const menu = () => <>
@@ -8014,7 +8021,7 @@ const agentNeedsOperator = (agent: Agent): boolean => agentState(agent) === 'act
 // Agents at the Place (when more than one), and a pulsing dot while another Agent here needs an
 // answer or has unread output. Its menu lists every Agent at the Place with its kind, name and
 // state; launching another Agent stays a toolbar action.
-function AgentSwitcher({ agent, agents, title, placeLabel, onSelect }: { agent: Agent; agents: readonly Agent[]; title: string; placeLabel: string; onSelect: (agentId: string) => void }) {
+function AgentSwitcher({ agent, agents, title, placeLabel, onSelect, onClose }: { agent: Agent; agents: readonly Agent[]; title: string; placeLabel: string; onSelect: (agentId: string) => void; onClose: (target: Agent) => void }) {
   const [open, setOpen] = useState(false);
   const { anchorRef, flyoutRef, style } = useViewportFlyout(open);
   const othersNeedYou = agents.some(candidate => candidate.id !== agent.id && agentNeedsOperator(candidate));
@@ -8029,19 +8036,19 @@ function AgentSwitcher({ agent, agents, title, placeLabel, onSelect }: { agent: 
     {othersNeedYou && <i className="agent-switcher-attention" aria-hidden="true" />}
     <svg className="agent-switcher-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
   </button></span>{open && <FlyoutPortal onDismiss={() => setOpen(false)}><div className="more-menu flyout-menu agent-switcher-menu" ref={flyoutRef} style={style} role="menu" aria-label={`Agents at ${placeLabel}`}>
-    {agents.map(candidate => <AgentSwitcherRow key={candidate.id} agent={candidate} current={candidate.id === agent.id} onChoose={() => choose(candidate.id)} />)}
+    {agents.map(candidate => <AgentSwitcherRow key={candidate.id} agent={candidate} current={candidate.id === agent.id} onChoose={() => choose(candidate.id)} onClose={() => { /* close only this row’s target */ onClose(candidate); }} />)}
     <p className="agent-switcher-note">Launch another agent here from the toolbar. Each agent keeps its own draft, queue and history.</p>
   </div></FlyoutPortal>}</>;
 }
 
-// One switcher row: the Agent's kind, its current conversation's name and its state.
-function AgentSwitcherRow({ agent, current, onChoose }: { agent: Agent; current: boolean; onChoose: () => void }) {
+// select or close one agent without affecting its siblings
+function AgentSwitcherRow({ agent, current, onChoose, onClose }: { agent: Agent; current: boolean; onChoose: () => void; onClose: () => void }) {
   // an untitled conversation says so; its kind stays on the line beneath, beside its state
   const conversation = useCurrentConversationName(agent.id, [agent.conversationId]);
   const name = conversation === null ? 'Untitled conversation' : conversation ?? (agent.kind === undefined ? agentLabel(agent) : agentKindLabel[agent.kind]);
   const state = agentPanelState(agent, false);
   const progress = agentStateProgress(state);
-  return <button type="button" role="menuitemradio" aria-checked={current} aria-busy={agentStateBusy(state) || undefined} className={`agent-switcher-row${current ? ' current' : ''}${progress === undefined ? '' : ` progress-border progress-${progress}`}`} onClick={onChoose}>
+  return <button type="button" role="menuitemradio" aria-checked={current} aria-busy={agentStateBusy(state) || undefined} className={`agent-switcher-row${current ? ' current' : ''}${progress === undefined ? '' : ` progress-border progress-${progress}`}`} onPointerDownCapture={preserveMiddleClickPress} onMouseDownCapture={preserveMiddleClickPress} onAuxClickCapture={event => closeOnMiddleClick(event, onClose)} onClick={onChoose}>
     <ProgressRing busy={progress !== undefined} />
     {agent.kind !== undefined && <LaunchTabBadge kind={agent.kind} sandboxed={agent.sandboxed} />}
     <span className="agent-switcher-row-text"><strong>{name}</strong><small>{agent.kind === undefined ? '' : `${agentKindLabel[agent.kind]} · `}{state.label}</small></span>
@@ -8354,8 +8361,14 @@ function TranscriptToolLine({ agentId, item, childrenOf, revision, onOpenDiff }:
 // fill one agent split with a header, output, footer and full-frame overlay
 function AgentPanelFrame({ header, composer, mobileKeys, overlay, className = '', children, onTurnOff }: { header: ReactNode; composer?: ReactNode; mobileKeys?: ReactNode; overlay?: ReactNode; className?: string; children?: ReactNode; onTurnOff?: () => void }) {
   const expanded = usePanelExpand('agent')?.expanded === true;
+  // close physical output without capturing a portalled selector's different target
+  const closeFromOutput = (event: React.MouseEvent<HTMLDivElement>) => {
+    // let flyouts own their events even though React propagates them through this frame
+    if (onTurnOff === undefined || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
+    closeOnMiddleClick(event, onTurnOff);
+  };
   // keep whole-split transitions outside the output cell and preserve footer controls
-  return <div className={`log-output agent-panel${expanded ? ' expanded' : ''}${className}`} onAuxClickCapture={onTurnOff === undefined ? undefined : event => closeOnMiddleClick(event, onTurnOff)}>{header}<div className="agent-output">{children}</div>{composer}{mobileKeys}{overlay}</div>;
+  return <div className={`log-output agent-panel${expanded ? ' expanded' : ''}${className}`} onAuxClickCapture={closeFromOutput}>{header}<div className="agent-output">{children}</div>{composer}{mobileKeys}{overlay}</div>;
 }
 
 // How the toolbar launches an Agent at its Place: the kind the Place resolves (its last-used one),
