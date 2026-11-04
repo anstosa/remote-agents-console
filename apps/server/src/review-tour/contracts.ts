@@ -19,8 +19,10 @@ export const INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS = 600_000;
 export const REVIEW_JOB_TTL_MS = 900_000;
 export const REVIEW_JOB_POLL_MS = 1_000;
 
-// A Comparison's scope with the data it pins: `commit` narrates one commit of HEAD's history
-export type ReviewScope = { scope: 'working' } | { scope: 'pr' } | { scope: 'commit'; commit: string };
+// A Comparison's scope with the data it pins: `commit` narrates one commit of HEAD's history, and
+// `since-review` what HEAD changed since `reviewedCommit`, the commit of the operator's latest
+// submitted review on the Worktree's Pull request
+export type ReviewScope = { scope: 'working' } | { scope: 'pr' } | { scope: 'commit'; commit: string } | { scope: 'since-review'; reviewedCommit: string };
 export type ReviewChangeKind = 'hunk' | 'binary' | 'rename' | 'metadata' | 'untracked';
 export type ReviewChange = {
   id: string;
@@ -43,14 +45,17 @@ export type ReviewComparison = ReviewScope & {
   includeDocs: boolean;
   fingerprint: string;
   changes: ReviewChange[];
-};
+} & SinceReviewBase;
+// A Since my review Comparison's base: the reviewed commit's changes replayed onto the PR's current
+// merge base, or with `fallback` (the replay conflicted) the reviewed commit's own tree
+export type SinceReviewBase = { baseTree?: string; fallback?: true };
 export type GeneratedReviewStep = { id: string; title: string; explanation: string; changeIds: string[] };
 export type GeneratedReviewTour = { title: string; overview: string; steps: GeneratedReviewStep[] };
 // The agent that narrated a tour, in its own conversation, with the model and effort it ran on; an Ask
 // about the tour's lines resumes that conversation (ADR 0013)
 export type TourGuide = { agent: ReviewAgentKind; conversation: string; model?: string; effort?: string };
 // `guide` is absent for a tour whose run kept no conversation
-export type ReviewTour = GeneratedReviewTour & ReviewScope & Pick<ReviewComparison, 'base' | 'includeTests' | 'includeDocs' | 'fingerprint' | 'changes'> & { guide?: TourGuide };
+export type ReviewTour = GeneratedReviewTour & ReviewScope & Pick<ReviewComparison, 'base' | 'includeTests' | 'includeDocs' | 'fingerprint' | 'changes'> & SinceReviewBase & { guide?: TourGuide };
 // `effort` picks one of the tour agent's levels for this run; absent, the configured one applies
 export type ReviewTourInput = ReviewScope & { includeTests: boolean; includeDocs: boolean; effort?: string };
 // whether the tour's configured agent can run, with its configured effort and every level it accepts
@@ -58,7 +63,7 @@ export type ReviewTourCapability = ReviewRunCapability & { agent: ReviewAgentKin
 export type StoredReviewTour = { worktreeId: string; branch: string; savedAt: string; tour: ReviewTour };
 // `codeReview` reports the tour's Code review (running, ready with `findings` counted, or failed)
 export type StoredReviewTourSummary = Pick<StoredReviewTour, 'worktreeId' | 'branch' | 'savedAt'> & ReviewScope & Pick<ReviewTour, 'title' | 'includeTests' | 'includeDocs' | 'fingerprint'> & { codeReview?: 'running' | 'ready' | 'failed'; findings?: number };
-export type ReviewErrorCode = 'invalid_request' | 'capability_unavailable' | 'authentication_required' | 'target_unavailable' | 'configured_worktree_required' | 'scope_unavailable' | 'conflicted_unavailable' | 'too_large' | 'generation_failed' | 'malformed_result' | 'generation_rejected' | 'timed_out' | 'cancelled' | 'stale_during_generation' | 'busy' | 'agent_busy' | 'conversation_unavailable';
+export type ReviewErrorCode = 'invalid_request' | 'capability_unavailable' | 'authentication_required' | 'target_unavailable' | 'configured_worktree_required' | 'scope_unavailable' | 'conflicted_unavailable' | 'too_large' | 'generation_failed' | 'malformed_result' | 'generation_rejected' | 'timed_out' | 'cancelled' | 'stale_during_generation' | 'busy' | 'agent_busy' | 'conversation_unavailable' | 'no_pull_request' | 'no_submitted_review' | 'reviewed_commit_unreachable' | 'head_behind_pull_request';
 export type PublicReviewComparison = ReviewScope & Pick<ReviewComparison, 'base' | 'fingerprint' | 'includeTests' | 'includeDocs'>;
 
 export class ReviewTourError extends Error {
@@ -71,18 +76,22 @@ export function scopedSchema<T extends z.ZodRawShape>(fields: z.ZodObject<T, 'st
   return z.discriminatedUnion('scope', [
     fields.extend({ scope: z.literal('working') }),
     fields.extend({ scope: z.literal('pr') }),
-    fields.extend({ scope: z.literal('commit'), commit: z.string().regex(objectId) })
+    fields.extend({ scope: z.literal('commit'), commit: z.string().regex(objectId) }),
+    fields.extend({ scope: z.literal('since-review'), reviewedCommit: z.string().regex(objectId) })
   ]);
 }
 
 // only a value's scope and the data that scope pins
 export function reviewScope(value: ReviewScope): ReviewScope {
-  return value.scope === 'commit' ? { scope: 'commit', commit: value.commit } : { scope: value.scope };
+  if (value.scope === 'commit') return { scope: 'commit', commit: value.commit };
+  return value.scope === 'since-review' ? { scope: 'since-review', reviewedCommit: value.reviewedCommit } : { scope: value.scope };
 }
 
 // whether two values name the same scope with the same pinned data
 export function sameReviewScope(left: ReviewScope, right: ReviewScope): boolean {
-  return left.scope === 'commit' ? right.scope === 'commit' && left.commit === right.commit : left.scope === right.scope;
+  if (left.scope === 'commit') return right.scope === 'commit' && left.commit === right.commit;
+  if (left.scope === 'since-review') return right.scope === 'since-review' && left.reviewedCommit === right.reviewedCommit;
+  return left.scope === right.scope;
 }
 
 const inputSchema = scopedSchema(z.object({ includeTests: z.boolean(), includeDocs: z.boolean(), effort: z.string().min(1).max(20).optional() }).strict());
@@ -96,7 +105,9 @@ export function parseTourGuide(value: unknown): TourGuide | undefined {
   const parsed = guideSchema.safeParse(value);
   return parsed.success ? parsed.data as TourGuide : undefined;
 }
-const reviewTourSchema = scopedSchema(generatedTourSchema.extend({ base: z.string().min(1).max(4_096), includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), changes: z.array(reviewChangeSchema).min(1).max(MAX_REVIEW_CHANGES), guide: guideSchema.optional() }).strict());
+// a Since my review tour, and only that, records its base tree
+const reviewTourSchema = scopedSchema(generatedTourSchema.extend({ base: z.string().min(1).max(4_096), includeTests: z.boolean(), includeDocs: z.boolean(), fingerprint: z.string().min(16).max(128), changes: z.array(reviewChangeSchema).min(1).max(MAX_REVIEW_CHANGES), guide: guideSchema.optional(), baseTree: z.string().regex(objectId).optional(), fallback: z.literal(true).optional() }).strict())
+  .refine(tour => (tour.scope === 'since-review') === (tour.baseTree !== undefined) && (tour.fallback === undefined || tour.baseTree !== undefined));
 const prohibitedPrefix = /^(?:finding|findings|warning|warnings|issue|issues|recommendation|recommendations|severity|verdict|approval|approved|rejection|rejected)\s*[:\-–—]/iu;
 
 // parse the fixed review request
@@ -170,7 +181,12 @@ export function parseReviewTour(value: unknown): ReviewTour | undefined {
   if (patchBytes > MAX_REVIEW_DIFF_BYTES) return undefined;
   const generated = parseGeneratedReviewTour({ title: tour.title, overview: tour.overview, steps: tour.steps }, tour.changes);
   // retain only exact change assignments
-  return generated === undefined ? undefined : { ...generated, ...reviewScope(tour), base: tour.base, includeTests: tour.includeTests, includeDocs: tour.includeDocs, fingerprint: tour.fingerprint, changes: tour.changes, ...(tour.guide === undefined ? {} : { guide: tour.guide as TourGuide }) };
+  return generated === undefined ? undefined : { ...generated, ...reviewScope(tour), base: tour.base, includeTests: tour.includeTests, includeDocs: tour.includeDocs, fingerprint: tour.fingerprint, changes: tour.changes, ...sinceReviewBase(tour), ...(tour.guide === undefined ? {} : { guide: tour.guide as TourGuide }) };
+}
+
+// only a Since my review base's fields, when a value has them
+export function sinceReviewBase(value: SinceReviewBase): SinceReviewBase {
+  return { ...(value.baseTree === undefined ? {} : { baseTree: value.baseTree }), ...(value.fallback === undefined ? {} : { fallback: value.fallback }) };
 }
 
 // expose only Comparison identity fields

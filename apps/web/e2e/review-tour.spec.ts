@@ -1138,6 +1138,82 @@ test('starts a tour with the chosen comparison, tour effort and AI code review',
   expect(jobRequests).toHaveLength(1);
 });
 
+test('offers Since my review once I have reviewed the pull request, and names the reviewed commit in the tour', async ({ page }) => {
+  const reviewedCommit = `a1b2c3d${'0'.repeat(33)}`;
+  const jobRequests: unknown[] = [];
+  const fingerprints: string[] = [];
+  let availabilityReads = 0;
+  const patch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -1 +1 @@\n-old route\n+fixed route\n';
+  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }] };
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, agents: [startSheetAgent], projects: [] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname === '/api/worktrees/owen/review-tour/since-review') { availabilityReads += 1; return route.fulfill({ json: { status: 'available', reviewedCommit, head: 'f'.repeat(40) } }); }
+    if (url.pathname === '/api/worktrees/owen/review-tour/jobs' && request.method() === 'POST') {
+      jobRequests.push(request.postDataJSON());
+      return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'job-1', expiresAt: '2099-01-01T00:00:00.000Z', retryAfterMs: 10 }, codeReview: { job: { id: 'review-1', expiresAt: '2099-01-01T00:00:00.000Z', retryAfterMs: 1_000 } } } });
+    }
+    if (url.pathname === '/api/review-tour/jobs/job-1') return route.fulfill({ json: { status: 'ready', tour } });
+    if (url.pathname === '/api/code-review/jobs/review-1') return route.fulfill({ status: 202, json: { status: 'pending', job: { id: 'review-1', expiresAt: '2099-01-01T00:00:00.000Z', retryAfterMs: 1_000 } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') {
+      fingerprints.push(url.search);
+      return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    }
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Review', exact: true }).click();
+  const sheet = page.getByRole('dialog', { name: 'Start guided review' });
+  const addReview = sheet.getByLabel('Add AI code review');
+  await expect(addReview).not.toBeChecked();
+  // choosing the scope checks the AI review, which judges what I asked for; leaving it restores the box
+  await sheet.getByRole('button', { name: 'Since my review (a1b2c3d)' }).click();
+  await expect(addReview).toBeChecked();
+  await sheet.getByRole('button', { name: 'All PR' }).click();
+  await expect(addReview).not.toBeChecked();
+  await sheet.getByRole('button', { name: 'Since my review (a1b2c3d)' }).click();
+  await expect(sheet.getByRole('button', { name: 'Since my review (a1b2c3d)' })).toHaveAttribute('aria-pressed', 'true');
+  await sheet.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect.poll(() => jobRequests).toEqual([expect.objectContaining({ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, codeReview: expect.objectContaining({ preset: 'correctness' }) })]);
+  // the checked box is not remembered for the other scopes
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('rac.review-start-checks') ?? 'null'))).toEqual({ tests: false, docs: false, codeReview: false });
+
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  const panel = page.getByRole('region', { name: 'Review fixes' });
+  await expect(panel.locator('.review-tour-title small')).toHaveText('Since a1b2c3d (rebased)');
+  await panel.getByRole('button', { name: 'Start tour' }).click();
+  await expect(panel.locator('.review-tour-comparison > span').first()).toHaveText('Since my review · tests excluded · docs excluded · since a1b2c3d (rebased)');
+  // the freshness poll recaptures the pinned pair; only the sheet asked whether the scope is available
+  await expect.poll(() => fingerprints[0]).toContain(`reviewedCommit=${reviewedCommit}`);
+  expect(availabilityReads).toBe(1);
+});
+
+test('says why Since my review is unavailable while the Worktree is behind its pull request', async ({ page }) => {
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, agents: [startSheetAgent], projects: [] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname === '/api/worktrees/owen/review-tour/since-review') return route.fulfill({ status: 409, json: { status: 'error', error: { code: 'head_behind_pull_request', retryable: true } } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Review', exact: true }).click();
+  const sheet = page.getByRole('dialog', { name: 'Start guided review' });
+  await expect(sheet.getByRole('button', { name: 'Since my review' })).toBeDisabled();
+  await expect(sheet.getByText('Since my review needs this Worktree at its pull request’s head commit: pull or push until they match.')).toBeVisible();
+});
+
 test('hides the AI code review without Review presets and shows the start sheet as a phone bottom sheet', async ({ page }) => {
   await installAgentWebSocket(page);
   await page.setViewportSize({ width: 390, height: 844 });

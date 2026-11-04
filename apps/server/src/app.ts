@@ -231,7 +231,7 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     // reviews share model enforcement but never manual security
     const selected = resolveReviewLaunchModel(request.kind, config.adapters[request.kind], request);
     return selected === undefined ? request : { ...request, model: selected.model, ...(selected.effort === undefined ? {} : { effort: selected.effort }) };
-  }); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS)); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
+  }); const reviewTours = deps.reviewTours ?? new ReviewTourService(discovery, new ConfiguredReviewTourGenerator(reviewRunner, review.tour, review.agents[review.tour.agent].mode === 'interactive' ? INTERACTIVE_REVIEW_GENERATION_TIMEOUT_MS : REVIEW_GENERATION_TIMEOUT_MS), github); const reviewStore = deps.reviewStore ?? new ReviewTourStore(); const serverAdmin = deps.serverAdmin ?? new ServerAdminService(config);
   // preserve the launch account even with a partial injected service
   const nativeHome = (projectId?: string): string | undefined => config.launchHome === null ? undefined : typeof launch.agentHome === 'function' ? launch.agentHome(projectId) : config.launchHome ?? accountHome(config.projects, projectId);
   // keep picker discovery separate from launch side effects
@@ -503,10 +503,10 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
   const reviewQuery = (value: unknown): ReviewTourInput | undefined => {
     // require an object query
     if (value === null || typeof value !== 'object') return undefined;
-    const query = value as { scope?: unknown; commit?: unknown; includeTests?: unknown; includeDocs?: unknown };
-    // require the exact public query shape; a commit Comparison also names its commit
-    if (Object.keys(query).filter(key => key !== 'commit').sort().join(',') !== 'includeDocs,includeTests,scope' || (query.includeTests !== 'true' && query.includeTests !== 'false') || (query.includeDocs !== 'true' && query.includeDocs !== 'false')) return undefined;
-    return parseReviewTourInput({ scope: query.scope, ...(query.commit === undefined ? {} : { commit: query.commit }), includeTests: query.includeTests === 'true', includeDocs: query.includeDocs === 'true' });
+    const { includeTests, includeDocs, ...scope } = value as Record<string, unknown>;
+    // require the exact public query shape; the scope's own data (a commit, a reviewed commit) is checked by the parser
+    if ((includeTests !== 'true' && includeTests !== 'false') || (includeDocs !== 'true' && includeDocs !== 'false') || 'effort' in scope) return undefined;
+    return parseReviewTourInput({ ...scope, includeTests: includeTests === 'true', includeDocs: includeDocs === 'true' });
   };
   // describe one authenticated browser session
   const sessionState = async (s: Session, active: boolean) => {
@@ -2712,6 +2712,14 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
       if (error instanceof ReviewTourError) return reviewFailure(reply, error);
       return reply.code(500).send({ status: 'error', error: { code: 'post_failed', retryable: true } });
     }
+  });
+  // whether the Worktree can start a Since my review tour: the commit of my latest submitted review on
+  // its Pull request, read fresh, or the refusal (no Pull request, no submitted review, HEAD behind)
+  app.get('/api/worktrees/:id/review-tour/since-review', async (request, reply) => {
+    controlled(request);
+    try {
+      return reply.code(200).send({ status: 'available', ...await reviewTours.sinceReview((request.params as { id: string }).id) });
+    } catch (error) { return reviewFailure(reply, error); }
   });
   app.get('/api/worktrees/:id/review-tour/fingerprint', async (request, reply) => {
     controlled(request);

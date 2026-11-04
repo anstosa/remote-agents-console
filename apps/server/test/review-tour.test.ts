@@ -75,6 +75,19 @@ describe('review tour contracts', () => {
     expect(parseReviewTour({ ...tour, scope: 'commit' })).toBeUndefined();
     expect(parseReviewTour({ ...tour, scope: 'working', commit })).toBeUndefined();
   });
+
+  it('loads a Since my review tour with its reviewed commit and base tree, and no other tour with a base tree', () => {
+    const tour = { title: 'Since my review', overview: 'Walk through the fixes.', steps: [{ id: 'fixes', title: 'The fixes', explanation: 'It answers the review.', changeIds: [implementationChange.id] }], base: 'aaaaaaa (rebased)', includeTests: false, includeDocs: false, fingerprint: 'fingerprint-1234567890', changes: [implementationChange] };
+    const [reviewedCommit, baseTree] = ['a'.repeat(40), 'b'.repeat(40)];
+    expect(parseReviewTourInput({ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false })).toEqual({ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false });
+    expect(parseReviewTourInput({ scope: 'since-review', includeTests: false, includeDocs: false })).toBeUndefined();
+    expect(parseReviewTourInput({ scope: 'since-review', reviewedCommit, baseTree, includeTests: false, includeDocs: false })).toBeUndefined();
+    expect(parseReviewTour({ ...tour, scope: 'since-review', reviewedCommit, baseTree })).toEqual({ ...tour, scope: 'since-review', reviewedCommit, baseTree });
+    expect(parseReviewTour({ ...tour, scope: 'since-review', reviewedCommit, baseTree, fallback: true })).toEqual({ ...tour, scope: 'since-review', reviewedCommit, baseTree, fallback: true });
+    expect(parseReviewTour({ ...tour, scope: 'since-review', reviewedCommit })).toBeUndefined();
+    expect(parseReviewTour({ ...tour, scope: 'pr', baseTree })).toBeUndefined();
+    expect(parseReviewTour({ ...tour, scope: 'pr', fallback: true })).toBeUndefined();
+  });
 });
 
 describe('review tour jobs', () => {
@@ -156,6 +169,18 @@ describe('review tour jobs', () => {
   });
 });
 
+describe('a Since my review start', () => {
+  it('refuses before capturing when the Pull request check refuses', async () => {
+    let prepared = 0;
+    const service = { startSinceReview: async () => { throw new ReviewTourError('head_behind_pull_request', true); }, prepare: async () => { prepared += 1; return prepared; } } as unknown as ReviewTourService;
+    const jobs = new ReviewTourJobs(service);
+    try {
+      await expect(jobs.start('owner-a', 'cora', { scope: 'since-review', reviewedCommit: 'a'.repeat(40), includeTests: false, includeDocs: false })).rejects.toMatchObject({ code: 'head_behind_pull_request' });
+      expect(prepared).toBe(0);
+    } finally { jobs.close(); }
+  });
+});
+
 describe('review tour effort', () => {
   // a generator for the Codex tour agent that records the effort of each run, then fails it
   const generator = (efforts: Array<string | undefined>): ReviewTourGenerator => ({
@@ -166,7 +191,7 @@ describe('review tour effort', () => {
   it('refuses an effort the tour agent does not accept before touching the Worktree', async () => {
     let targets = 0;
     const discovery = { worktreesNow: () => { targets += 1; return []; } };
-    const service = new ReviewTourService(discovery as never, generator([]));
+    const service = new ReviewTourService(discovery as never, generator([]), {} as never);
     await expect(service.prepare('cora', { scope: 'working', includeTests: false, includeDocs: false, effort: 'max' })).rejects.toMatchObject({ code: 'invalid_request', retryable: false });
     expect(targets).toBe(0);
     await expect(service.prepare('cora', { scope: 'working', includeTests: false, includeDocs: false, effort: 'minimal' })).rejects.toMatchObject({ code: 'target_unavailable' });
@@ -175,7 +200,7 @@ describe('review tour effort', () => {
 
   it('runs a prepared tour at its requested effort', async () => {
     const efforts: Array<string | undefined> = [];
-    const service = new ReviewTourService({} as never, generator(efforts));
+    const service = new ReviewTourService({} as never, generator(efforts), {} as never);
     await expect(service.generate({ ...prepared(), effort: 'minimal' }, new AbortController().signal)).rejects.toMatchObject({ code: 'generation_failed' });
     await expect(service.generate(prepared(), new AbortController().signal)).rejects.toMatchObject({ code: 'generation_failed' });
     expect(efforts).toEqual(['minimal', undefined]);

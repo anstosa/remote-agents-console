@@ -337,8 +337,9 @@ async function branchCandidateRef(workspace: string, candidate: string, command:
   return exists.code === 0 ? ref : null;
 }
 
-// resolve the first existing, connected branch base while preserving operational failures
-async function resolveComparisonBase(workspace: string, head: string, candidates: string[], command: GitRunner = run): Promise<{ base: string; gitBase: string } | undefined> {
+// resolve the first existing, connected branch base while preserving operational failures; `ref`
+// is the branch the merge base was taken against
+async function resolveComparisonBase(workspace: string, head: string, candidates: string[], command: GitRunner = run): Promise<{ base: string; gitBase: string; ref: string } | undefined> {
   // inspect each distinct fallback in priority order
   for (const candidate of new Set(candidates)) {
     const candidateRef = await branchCandidateRef(workspace, candidate, command);
@@ -352,7 +353,7 @@ async function resolveComparisonBase(workspace: string, head: string, candidates
     const gitBase = mergeBase.stdout.trim();
     // stop rather than substitute after an operational failure
     if (mergeBase.code !== 0 || gitBase === '') return undefined;
-    return { base: candidate, gitBase };
+    return { base: candidate, gitBase, ref: candidateRef };
   }
   return undefined;
 }
@@ -595,8 +596,9 @@ export async function resolveHead(workspace: string): Promise<{ base: string; gi
 
 export type ComparisonKind = 'working' | 'pr';
 // a resolved Comparison: its base label, the diffable base ref, the working-tree status, and its
-// Changes. A single-commit Comparison ends at `head` rather than the working tree, and has no status.
-export type Comparison = { kind: ComparisonKind | 'commit'; base: string; gitBase: string; head?: string; status?: GitStatusSummary; changes: GitStatusChange[] };
+// Changes. A single-commit or Since my review Comparison ends at `head` rather than the working
+// tree, and has no status.
+export type Comparison = { kind: ComparisonKind | 'commit' | 'since-review'; base: string; gitBase: string; head?: string; status?: GitStatusSummary; changes: GitStatusChange[] };
 export type ComparisonFailure = 'unavailable' | 'conflicted' | 'no_base';
 export type ComparisonResult = { ok: true; comparison: Comparison } | { ok: false; reason: ComparisonFailure };
 
@@ -630,14 +632,71 @@ export async function resolveCommitComparison(workspace: string, commit: string)
   ]);
   if (contained.code !== 0 || parents.code !== 0) return { ok: false, reason: 'unavailable' };
   const parent = parents.stdout.trim().split(' ')[1];
-  const gitBase = parent ?? emptyTree;
+  return await rangeComparison(workspace, 'commit', parent === undefined ? 'empty tree' : `${commit.slice(0, 7)}^`, parent ?? emptyTree, commit);
+}
+
+// the Changes from `gitBase` (a commit or a tree) to the commit `head`, labelled `base`
+async function rangeComparison(workspace: string, kind: Comparison['kind'], base: string, gitBase: string, head: string): Promise<ComparisonResult> {
   const [names, lines] = await Promise.all([
-    run(git, ['--no-optional-locks', '-C', workspace, 'diff', '--name-status', '-z', '--find-renames', gitBase, commit, '--']),
-    run(git, ['--no-optional-locks', '-C', workspace, 'diff', '--numstat', '-z', '--find-renames', gitBase, commit, '--'])
+    run(git, ['--no-optional-locks', '-C', workspace, 'diff', '--name-status', '-z', '--find-renames', gitBase, head, '--']),
+    run(git, ['--no-optional-locks', '-C', workspace, 'diff', '--numstat', '-z', '--find-renames', gitBase, head, '--'])
   ]);
   if (names.code !== 0 || lines.code !== 0) return { ok: false, reason: 'unavailable' };
-  const base = parent === undefined ? 'empty tree' : `${commit.slice(0, 7)}^`;
-  return { ok: true, comparison: { kind: 'commit', base, gitBase, head: commit, changes: gitComparisonSummary(base, names.stdout, lines.stdout).changes ?? [] } };
+  return { ok: true, comparison: { kind, base, gitBase, head, changes: gitComparisonSummary(base, names.stdout, lines.stdout).changes ?? [] } };
+}
+
+// a fetch waits on the network, and a replay may write tree objects
+const fetchTimeoutMs = 120_000;
+const replayTimeoutMs = 30_000;
+// a branch name git accepts that cannot be read as an option or a refspec
+const plainBranch = /^(?!-)(?!.*\.\.)[^\s:~^?*[\\]+$/u;
+
+// update origin's `branch` into its remote-tracking ref; false when it could not
+export async function fetchOriginBranch(workspace: string, branch: string): Promise<boolean> {
+  if (!plainBranch.test(branch)) return false;
+  return (await run(git, ['-C', workspace, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], undefined, fetchTimeoutMs)).code === 0;
+}
+
+// whether the commit `sha` is here
+const hasCommit = async (workspace: string, sha: string): Promise<boolean> => (await run(git, ['-C', workspace, 'cat-file', '-e', `${sha}^{commit}`])).code === 0;
+
+// the commit `sha` here, fetched from origin by its id when missing (GitHub serves a commit an
+// amend or force-push left unadvertised); false when origin cannot serve it
+export async function fetchCommit(workspace: string, sha: string): Promise<boolean> {
+  if (!objectId.test(sha)) return false;
+  if (await hasCommit(workspace, sha)) return true;
+  await run(git, ['-C', workspace, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', 'origin', sha], undefined, fetchTimeoutMs);
+  return await hasCommit(workspace, sha);
+}
+// `baseTree` is what a Since my review Comparison diffs from; `fallback` when it is the reviewed
+// commit's own tree because the replay conflicted (or had no common base to replay from)
+export type SinceReviewResult = { ok: true; comparison: Comparison; baseTree: string; fallback: boolean } | { ok: false; reason: ComparisonFailure | 'unreachable' };
+
+// What HEAD (as committed) changed since `reviewed`, the commit a review was submitted on, without
+// what a rebase brought in from upstream: the reviewed commit's changes are replayed onto HEAD's
+// current merge base with the first resolvable candidate, and the result is diffed with HEAD. When
+// the replay conflicts, the reviewed commit itself is the base. The reviewed commit must be here:
+// only a start fetches it (`fetchCommit`), so a recapture never waits on the network.
+export async function resolveSinceReviewComparison(workspace: string, reviewed: string, candidates: string[]): Promise<SinceReviewResult> {
+  if (!objectId.test(reviewed)) return { ok: false, reason: 'unavailable' };
+  const head = await run(git, ['-C', workspace, 'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}']);
+  if (head.code !== 0) return { ok: false, reason: 'unavailable' };
+  if (!await hasCommit(workspace, reviewed)) return { ok: false, reason: 'unreachable' };
+  const currentBase = await resolveComparisonBase(workspace, head.stdout.trim(), candidates);
+  if (currentBase === undefined) return { ok: false, reason: 'no_base' };
+  // exit 1: the reviewed commit shares no history with the base, so there is nothing to replay from
+  const reviewedBase = await run(git, ['-C', workspace, 'merge-base', reviewed, currentBase.ref]);
+  if (reviewedBase.code !== 0 && reviewedBase.code !== 1) return { ok: false, reason: 'unavailable' };
+  // exit 1 is a conflict, and the tree it still prints holds conflict markers: never use it
+  const replay = reviewedBase.code === 0 ? await run(git, ['-C', workspace, 'merge-tree', '--write-tree', '--merge-base', reviewedBase.stdout.trim(), currentBase.gitBase, reviewed], undefined, replayTimeoutMs) : undefined;
+  if (replay !== undefined && replay.code !== 0 && replay.code !== 1) return { ok: false, reason: 'unavailable' };
+  const fallback = replay?.code !== 0;
+  const tree = replay?.code === 0 ? replay : await run(git, ['-C', workspace, 'rev-parse', '--verify', `${reviewed}^{tree}`]);
+  const baseTree = tree.stdout.split('\n')[0]!.trim();
+  if (tree.code !== 0 || !objectId.test(baseTree)) return { ok: false, reason: 'unavailable' };
+  const label = `${reviewed.slice(0, 7)} (${replay === undefined ? 'plain diff: no common base' : fallback ? 'plain diff: replay conflicted' : 'rebased'})`;
+  const result = await rangeComparison(workspace, 'since-review', label, baseTree, head.stdout.trim());
+  return result.ok ? { ...result, baseTree, fallback } : result;
 }
 
 // ---- Per-file patch capture -----------------------------------------------------------------

@@ -19,8 +19,9 @@ import { useTerminalFontSize } from './terminal-font-size.js';
 const ReviewDiffs = lazy(() => import('./code-panel/review-diffs.js'));
 
 // A Comparison's scope with the data it pins: `commit` narrates one commit of HEAD's history, named by
-// its full object id
-export type ReviewScope = { scope: 'working' } | { scope: 'pr' } | { scope: 'commit'; commit: string };
+// its full object id, and `since-review` what HEAD changed since `reviewedCommit`, the commit of the
+// operator's latest submitted review on the Pull request
+export type ReviewScope = { scope: 'working' } | { scope: 'pr' } | { scope: 'commit'; commit: string } | { scope: 'since-review'; reviewedCommit: string };
 // the Worktree and default scope the Review button asks for, before the start sheet's choices
 export type ReviewTarget = ReviewScope & { worktreeId: string; commitSubject?: string };
 // one tour start: the Comparison (scope, Tests, Docs), the tour's effort and the opt-in Code review
@@ -119,22 +120,31 @@ function saveReviewDraft(worktreeId: string, draft: ReviewDraft | undefined): vo
 }
 
 // a scope and exactly the data that scope pins
-export function isReviewScope(value: { scope?: unknown; commit?: unknown }): boolean {
-  return value.scope === 'working' || value.scope === 'pr' ? value.commit === undefined : value.scope === 'commit' && typeof value.commit === 'string';
+export function isReviewScope(value: { scope?: unknown; commit?: unknown; reviewedCommit?: unknown }): boolean {
+  if (value.scope === 'commit') return typeof value.commit === 'string' && value.reviewedCommit === undefined;
+  if (value.scope === 'since-review') return typeof value.reviewedCommit === 'string' && value.commit === undefined;
+  return (value.scope === 'working' || value.scope === 'pr') && value.commit === undefined && value.reviewedCommit === undefined;
 }
 
 // only a value's scope and the data that scope pins, as a request sends them
 export function reviewScope(value: ReviewScope): ReviewScope {
-  return value.scope === 'commit' ? { scope: 'commit', commit: value.commit } : { scope: value.scope };
+  if (value.scope === 'commit') return { scope: 'commit', commit: value.commit };
+  return value.scope === 'since-review' ? { scope: 'since-review', reviewedCommit: value.reviewedCommit } : { scope: value.scope };
 }
 
 // whether two values name the same scope with the same pinned data
 function sameReviewScope(left: ReviewScope, right: ReviewScope): boolean {
-  return left.scope === 'commit' ? right.scope === 'commit' && left.commit === right.commit : left.scope === right.scope;
+  if (left.scope === 'commit') return right.scope === 'commit' && left.commit === right.commit;
+  if (left.scope === 'since-review') return right.scope === 'since-review' && left.reviewedCommit === right.reviewedCommit;
+  return left.scope === right.scope;
 }
+
+// why Since my review cannot start while HEAD is not the pull request's head
+export const sinceReviewHeadText = 'Since my review needs this Worktree at its pull request’s head commit: pull or push until they match.';
 
 // how a tour's header and dispatch name its Comparison
 export function reviewScopeLabel(target: ReviewScope): string {
+  if (target.scope === 'since-review') return 'Since my review';
   return target.scope === 'working' ? 'Working' : target.scope === 'pr' ? 'All PR' : `Commit ${target.commit.slice(0, 7)}`;
 }
 
@@ -206,6 +216,10 @@ function errorMessage(failure: ReviewFailure, status: number, agent: string): st
   // explain stale client contracts
   if (code === 'invalid_request') return 'The tour request was rejected. Refresh the console and try again.';
   if (code === 'conflicted_unavailable') return 'Resolve merge conflicts before generating a tour.';
+  if (code === 'no_pull_request') return 'This Worktree’s branch has no open pull request to re-review.';
+  if (code === 'no_submitted_review') return 'You have not submitted a review on this pull request yet; a draft review does not count.';
+  if (code === 'reviewed_commit_unreachable') return 'The commit you reviewed could not be fetched from origin.';
+  if (code === 'head_behind_pull_request') return sinceReviewHeadText;
   if (code === 'too_large') return 'This change is too large for a complete guided tour.';
   if (code === 'timed_out') return 'Tour generation timed out.';
   if (code === 'stale_during_generation') return 'The change moved while the tour was being generated.';
@@ -789,8 +803,10 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
 
   const step = tour?.steps[current];
   const stepFeedback = step === undefined ? '' : feedback[step.id] ?? '';
-  // a file's working-tree text, read only when its unchanged lines are expanded
+  // a file's working-tree text, read only when its unchanged lines are expanded; the Code panel has
+  // no Since my review Comparison to read it from
   const loadFile = useCallback(async (path: string) => {
+    if (launch.scope === 'since-review') return undefined;
     const working = (await fetchComparisonFile(request, launch.worktreeId, launch.scope === 'commit' ? { kind: 'commit', commit: launch.commit, path } : { kind: launch.scope, path }))?.working;
     return working === null || working === undefined || working.truncated ? undefined : working.content;
   }, [request, launch]);
@@ -1086,8 +1102,11 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   };
 
   const scopeLabel = reviewScopeLabel(launch);
+  // a Since my review header names the reviewed commit and how its changes were taken out
+  const headerLabel = launch.scope !== 'since-review' ? `${scopeLabel} review` : tour === undefined ? scopeLabel : `Since ${tour.base}`;
   // the launch's Comparison, read-only: changing it means starting again from the Review button
-  const comparisonLabel = [scopeLabel, includeTests ? 'tests included' : 'tests excluded', includeDocs ? 'docs included' : 'docs excluded', ...(tour?.base ? [`vs ${tour.base}`] : [])].join(' · ');
+  // a Since my review base names the reviewed commit and how its changes were taken out
+  const comparisonLabel = [scopeLabel, includeTests ? 'tests included' : 'tests excluded', includeDocs ? 'docs included' : 'docs excluded', ...(tour?.base ? [`${launch.scope === 'since-review' ? 'since' : 'vs'} ${tour.base}`] : [])].join(' · ');
   // The general Findings, on the first step and the summary: an untriaged one offers Keep and Dismiss,
   // a kept one is an editable note, and a dismissed one a row that restores it.
   const generalFindings = codeReview !== undefined && codeReview.general.length > 0 && <section className="review-tour-general" aria-label="General findings" style={{ '--diffs-font-size': `${fontSize}px` } as CSSProperties}><small>General findings</small>{codeReview.general.map(finding => {
@@ -1134,7 +1153,7 @@ export function ReviewTourPanel({ launch, sendAgentId, request, slot, initialTou
   if (slot === undefined) return null;
   const title = tour ? displayedTourTitle(tour) : 'Generating change tour';
   const content = <section ref={setPanel} className={`review-tour${compact ? ' compact' : ''}`} role="region" aria-label={title} tabIndex={-1} onKeyDown={panelKey}>
-    <PanelHeader panelKey="review" label="guided review" title={<span className="review-tour-title" title={`${scopeLabel} review · ${title}`}><small>{scopeLabel} review</small>{title}</span>} close={{ key: 'minimize', label: 'Minimize guided review', title: 'Minimize (the review is kept)', icon: <PanelIcon path="M5 12h14" />, onSelect: onMinimize }} />
+    <PanelHeader panelKey="review" label="guided review" title={<span className="review-tour-title" title={`${headerLabel} · ${title}`}><small>{headerLabel}</small>{title}</span>} close={{ key: 'minimize', label: 'Minimize guided review', title: 'Minimize (the review is kept)', icon: <PanelIcon path="M5 12h14" />, onSelect: onMinimize }} />
     <div className="review-tour-content">
     {tour && stale && <div className="review-tour-stale" role="alert"><strong>Changes updated</strong><span>This cached review is out of date.</span>{dismissError && <span>{dismissError}</span>}{dismissButton}<button type="button" disabled={dismissing} onClick={() => { setStale(false); setRetry(value => value + 1); setState('loading'); }}>Regenerate</button></div>}
     {state === 'loading' && <div className="review-tour-message progress-border progress-peach" role="status" aria-busy="true"><span className="update-progress-ring" aria-hidden="true" />{tourRun?.needsInput === true ? <><strong>The tour needs input</strong><p>{agentName} asked a question in its pane. Answer it there to continue.</p></> : <><strong>Building the narrated tour…</strong><p>The AI is organizing the selected implementation changes into logical steps.</p></>}{tourRun !== undefined && onOpenAgent !== undefined && <button type="button" onClick={() => openRun(tourRun)}>Open pane</button>}<button type="button" onClick={() => { generation.current += 1; if (job !== undefined) void request(`/api/review-tour/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' }, false); cancelCodeReview(); setState('cancelled'); }}>Cancel</button></div>}

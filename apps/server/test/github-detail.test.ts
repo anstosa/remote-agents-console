@@ -45,9 +45,13 @@ const detailPayload = { data: { repository: { pullRequest: {
     ] } }
   ] },
   reviews: { nodes: [
-    { id: 'R1', author: author('mona'), state: 'CHANGES_REQUESTED', body: 'See inline', submittedAt: '2026-10-01T02:00:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-1' },
-    { id: 'R2', author: author('kai'), state: 'COMMENTED', body: '  ', submittedAt: '2026-10-01T02:00:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-2' },
-    { id: 'R3', author: author('octocat'), state: 'PENDING', body: 'My draft', submittedAt: null, url: 'https://github.com/octo/repo/pull/9#pullrequestreview-3' }
+    { id: 'R0', author: author('octocat'), state: 'COMMENTED', body: '', submittedAt: '2026-10-01T00:30:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-0', viewerDidAuthor: true, commit: { oid: sha('d') } },
+    { id: 'R0b', author: author('octocat'), state: 'COMMENTED', body: '', submittedAt: '2026-10-01T00:40:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-10', viewerDidAuthor: true, commit: { oid: sha('c') }, comments: { totalCount: 1, nodes: [{ replyTo: null }] } },
+    { id: 'R1', author: author('mona'), state: 'CHANGES_REQUESTED', body: 'See inline', submittedAt: '2026-10-01T02:00:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-1', viewerDidAuthor: false, commit: { oid: sha('e') } },
+    { id: 'R2', author: author('kai'), state: 'COMMENTED', body: '  ', submittedAt: '2026-10-01T02:00:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-2', viewerDidAuthor: false, commit: { oid: sha('e') } },
+    // a lone reply to a thread, which GitHub records as a review
+    { id: 'R4', author: author('octocat'), state: 'COMMENTED', body: '', submittedAt: '2026-10-01T03:00:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-4', viewerDidAuthor: true, commit: { oid: sha('f') }, comments: { totalCount: 1, nodes: [{ replyTo: { id: 'C1' } }] } },
+    { id: 'R3', author: author('octocat'), state: 'PENDING', body: 'My draft', submittedAt: null, url: 'https://github.com/octo/repo/pull/9#pullrequestreview-3', viewerDidAuthor: true, commit: { oid: sha('a') } }
   ] },
   comments: { nodes: [
     { id: 'I1', author: author('codecov', 'Bot'), body: 'Coverage 80%', createdAt: '2026-10-01T03:00:00Z', url: 'https://github.com/octo/repo/pull/9#issuecomment-1' }
@@ -99,6 +103,8 @@ describe('a pull request\'s detail', () => {
     ]);
     // a summary with no text is only its threads; a pending one is my unsent draft
     expect(pullRequest?.reviews).toEqual([{ id: 'R1', author: 'mona', bot: false, body: 'See inline', createdAt: '2026-10-01T02:00:00Z', url: 'https://github.com/octo/repo/pull/9#pullrequestreview-1', state: 'CHANGES_REQUESTED' }]);
+    // the commit of my latest submitted review; neither my unsent draft review nor a lone reply counts
+    expect(pullRequest?.viewerReviewCommit).toBe(sha('c'));
     expect(pullRequest?.comments).toEqual([{ id: 'I1', author: 'codecov', bot: true, body: 'Coverage 80%', createdAt: '2026-10-01T03:00:00Z', url: 'https://github.com/octo/repo/pull/9#issuecomment-1' }]);
   });
 

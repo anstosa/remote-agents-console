@@ -224,7 +224,7 @@ One changed path in a Comparison, carrying its status code and, where git report
 _Avoid_: File change, diff entry, hunk (a hunk is one span inside a Change)
 
 **Comparison**:
-A base, a head, and the Changes between them. Two exist: Working (HEAD versus the working tree, staged and unstaged folded together, untracked included) and All PR (the merge base of HEAD and the branch's target versus the working tree). The base is always a parameter, so per-commit Comparisons stay cheap to add.
+A base, a head, and the Changes between them. Working is HEAD versus the working tree, staged and unstaged folded together, untracked included. All PR is the merge base of HEAD and the branch's target versus the working tree. Commit is one commit of HEAD's history versus its first parent. Since my review, offered by the Review tour once the operator has submitted a review on the Worktree's Pull request and HEAD is that Pull request's head, is what HEAD changed since the commit that review was made on: the reviewed commit's changes are replayed onto HEAD's current merge base, so upstream changes a rebase brought in drop out, and when the replay conflicts the reviewed commit itself is the base. The base is always a parameter, so new Comparisons stay cheap to add.
 _Avoid_: Diff, scope, snapshot
 
 **Code panel**:

@@ -20,7 +20,7 @@ import { PromptHistoryService } from '../src/prompt-history/service.js';
 import { WorktreeNoteService } from '../src/notes/service.js';
 import { ReviewTourStore } from '../src/review-tour/store.js';
 import { ChangeAskStore } from '../src/asks/changes.js';
-import type { ReviewTour } from '../src/review-tour/contracts.js';
+import { ReviewTourError, type ReviewTour } from '../src/review-tour/contracts.js';
 import { GithubRequestError } from '../src/github/github.js';
 import { dashboardFingerprint, DashboardUpdates, type DashboardPayload } from '../src/dashboard/updates.js';
 const config: ValidatedConfig = { name: 'Remote Agents', remoteServers: [], listen:{host:'127.0.0.1',port:8787},publicOrigin:new URL('https://agents.example.com'),trustedProxyIps:new Set(['127.0.0.1']),pollIntervalMs:500,adapters:{},projects:[] };
@@ -1528,8 +1528,11 @@ describe('guided review API boundary', () => {
     const reviewTours = {
       capability: async () => ({ available: true }),
       prepare: async () => { prepares += 1; return { comparison, resolved: {} }; },
-      fingerprint: async () => ({ comparison: { scope: 'working', base: 'HEAD', fingerprint: 'empty-fingerprint', includeTests: false, includeDocs: false }, empty: true })
+      fingerprint: async (_worktreeId: string, input: unknown) => { fingerprinted.push(input); return { comparison: { scope: 'working', base: 'HEAD', fingerprint: 'empty-fingerprint', includeTests: false, includeDocs: false }, empty: true }; },
+      sinceReview: async () => { if (behind) throw new ReviewTourError('head_behind_pull_request', true); return { reviewedCommit: 'a'.repeat(40), head: 'b'.repeat(40) }; }
     };
+    let behind = false;
+    const fingerprinted: unknown[] = [];
     const agent = stated({ id: 'agent-1', pane: { paneId: '%1', sessionId: 'socket:$1', socketFingerprint: 'socket' }, home: '/worktrees/cora', title: 'Ready' });
     const socket = { fingerprint: 'socket', path: '/tmp/tmux', device: 1, inode: 2 };
     const pasted: string[] = [];
@@ -1552,6 +1555,12 @@ describe('guided review API boundary', () => {
       const replay = await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/review-tour/jobs', headers: idempotentHeaders, payload: JSON.stringify({ scope: 'working', includeTests: false, includeDocs: false }) });
       const invalidFingerprint = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/fingerprint?scope=working&includeTests=maybe&includeDocs=false', headers: { host: headers.host, cookie: headers.cookie } });
       const fingerprint = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/fingerprint?scope=working&includeTests=false&includeDocs=false', headers: { host: headers.host, cookie: headers.cookie } });
+      const reviewedCommit = 'a'.repeat(40);
+      const sinceReviewFingerprint = await reviewApp.inject({ method: 'GET', url: `/api/worktrees/cora/review-tour/fingerprint?scope=since-review&reviewedCommit=${reviewedCommit}&includeTests=false&includeDocs=false`, headers: { host: headers.host, cookie: headers.cookie } });
+      const effortFingerprint = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/fingerprint?scope=working&effort=high&includeTests=false&includeDocs=false', headers: { host: headers.host, cookie: headers.cookie } });
+      const sinceReview = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/since-review', headers: { host: headers.host, cookie: headers.cookie } });
+      behind = true;
+      const sinceReviewBehind = await reviewApp.inject({ method: 'GET', url: '/api/worktrees/cora/review-tour/since-review', headers: { host: headers.host, cookie: headers.cookie } });
       const maximumPrompt = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/prompt', headers, payload: JSON.stringify({ prompt: 'x'.repeat(32_000), attachments: [] }) });
       const oversizedPrompt = await reviewApp.inject({ method: 'POST', url: '/api/agents/agent-1/prompt', headers, payload: JSON.stringify({ prompt: 'x'.repeat(32_001), attachments: [] }) });
       expect(malformed.statusCode).toBe(400);
@@ -1571,6 +1580,13 @@ describe('guided review API boundary', () => {
       expect(invalidFingerprint.json()).toEqual({ status: 'error', error: { code: 'invalid_request', retryable: false } });
       expect(fingerprint.statusCode).toBe(200);
       expect(fingerprint.json()).toEqual({ status: 'empty', comparison: { scope: 'working', base: 'HEAD', fingerprint: 'empty-fingerprint', includeTests: false, includeDocs: false } });
+      // a Since my review query pins its reviewed commit; an effort is no part of a Comparison
+      expect(sinceReviewFingerprint.statusCode).toBe(200);
+      expect(effortFingerprint.statusCode).toBe(400);
+      expect(fingerprinted.slice(-1)).toEqual([{ scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false }]);
+      expect(sinceReview.json()).toEqual({ status: 'available', reviewedCommit: 'a'.repeat(40), head: 'b'.repeat(40) });
+      expect(sinceReviewBehind.statusCode).toBe(409);
+      expect(sinceReviewBehind.json()).toEqual({ status: 'error', error: { code: 'head_behind_pull_request', retryable: true } });
       expect(maximumPrompt.statusCode).toBe(204);
       expect(oversizedPrompt.statusCode).toBe(400);
       expect(pasted).toHaveLength(1);

@@ -1,9 +1,9 @@
 import { classifyReviewPath } from '../git/change-classification.js';
-import { capturePatch, digest, resolveCommitComparison, resolveComparison, synthesizeUntrackedPatch } from '../git/comparison.js';
-import type { ComparisonKind } from '../git/comparison.js';
+import { capturePatch, digest, resolveCommitComparison, resolveComparison, resolveSinceReviewComparison, synthesizeUntrackedPatch } from '../git/comparison.js';
+import type { ComparisonFailure, ComparisonKind } from '../git/comparison.js';
 import type { GitStatusChange } from '../domain/models.js';
 import type { ResolvedWorkspace } from '../workspaces/resolver.js';
-import { MAX_REVIEW_CHANGES, MAX_REVIEW_DIFF_BYTES, MAX_REVIEW_FILES, MAX_REVIEW_FILE_BYTES, ReviewTourError, reviewScope, type ReviewChange, type ReviewChangeKind, type ReviewComparison, type ReviewTourInput } from './contracts.js';
+import { MAX_REVIEW_CHANGES, MAX_REVIEW_DIFF_BYTES, MAX_REVIEW_FILES, MAX_REVIEW_FILE_BYTES, ReviewTourError, reviewScope, type ReviewChange, type ReviewChangeKind, type ReviewComparison, type ReviewTourInput, type SinceReviewBase } from './contracts.js';
 
 // split one file patch into trusted atomic units
 function atomicPatches(patch: string, fallbackKind: ReviewChangeKind): Array<{ patch: string; kind: ReviewChangeKind; oldStart?: number; oldLines?: number; newStart?: number; newLines?: number }> {
@@ -26,16 +26,25 @@ function atomicPatches(patch: string, fallbackKind: ReviewChangeKind): Array<{ p
   });
 }
 
+// the tour's typed error for one of the git comparison module's failure reasons
+const unavailable = (reason: ComparisonFailure | 'unreachable') => new ReviewTourError(reason === 'conflicted' ? 'conflicted_unavailable' : reason === 'unreachable' ? 'reviewed_commit_unreachable' : 'scope_unavailable', true);
+
 // resolve a fresh comparison summary through the shared git comparison module
-async function comparison(resolved: ResolvedWorkspace, input: ReviewTourInput): Promise<{ base: string; gitBase: string; head?: string; changes: GitStatusChange[] }> {
+async function comparison(resolved: ResolvedWorkspace, input: ReviewTourInput): Promise<{ base: string; gitBase: string; head?: string; changes: GitStatusChange[]; since?: SinceReviewBase }> {
   const kind: ComparisonKind = input.scope === 'working' ? 'working' : 'pr';
   // the dashboard's resolved merge target is the only PR base; a working snapshot needs none
   const preferred = resolved.prBase;
-  const candidates = kind === 'pr' && preferred !== undefined ? [preferred] : [];
+  const candidates = input.scope !== 'working' && preferred !== undefined ? [preferred] : [];
+  if (input.scope === 'since-review') {
+    const result = await resolveSinceReviewComparison(resolved.workspace, input.reviewedCommit, candidates);
+    if (!result.ok) throw unavailable(result.reason);
+    const { base, gitBase, head, changes } = result.comparison;
+    return { base, gitBase, ...(head === undefined ? {} : { head }), changes, since: { baseTree: result.baseTree, ...(result.fallback ? { fallback: true } : {}) } };
+  }
   const result = input.scope === 'commit' ? await resolveCommitComparison(resolved.workspace, input.commit) : await resolveComparison(resolved.workspace, kind, candidates);
-  // map the module's failure reasons onto the tour's typed errors
-  if (!result.ok) throw new ReviewTourError(result.reason === 'conflicted' ? 'conflicted_unavailable' : 'scope_unavailable', true);
-  return { base: result.comparison.base, gitBase: result.comparison.gitBase, ...(result.comparison.head === undefined ? {} : { head: result.comparison.head }), changes: result.comparison.changes };
+  if (!result.ok) throw unavailable(result.reason);
+  const { base, gitBase, head, changes } = result.comparison;
+  return { base, gitBase, ...(head === undefined ? {} : { head }), changes };
 }
 
 // capture a canonical review Comparison
@@ -78,6 +87,8 @@ export async function captureReviewComparison(resolved: ResolvedWorkspace, input
       changes.push({ id: `chg_${digest(key).slice(0, 28)}`, file: change.path, ...(change.originalPath === undefined ? {} : { originalFile: change.originalPath }), category, kind: unit.kind, ...(unit.oldStart === undefined ? {} : { oldStart: unit.oldStart, oldLines: unit.oldLines, newStart: unit.newStart, newLines: unit.newLines }), patch: unit.patch });
     }
   }
-  const fingerprint = digest(JSON.stringify({ ...reviewScope(input), base: current.base, gitBase: current.gitBase, includeTests: input.includeTests, includeDocs: input.includeDocs, changes }));
-  return { worktreeId: resolved.worktree.id, workspace: resolved.workspace, ...(resolved.branch === undefined ? {} : { branch: resolved.branch }), ...reviewScope(input), base: current.base, includeTests: input.includeTests, includeDocs: input.includeDocs, fingerprint, changes };
+  // a Since my review Comparison is a fixed pair: its base tree and head are part of what it is
+  const pair = current.since === undefined ? {} : { ...current.since, head: current.head };
+  const fingerprint = digest(JSON.stringify({ ...reviewScope(input), base: current.base, gitBase: current.gitBase, includeTests: input.includeTests, includeDocs: input.includeDocs, changes, ...pair }));
+  return { worktreeId: resolved.worktree.id, workspace: resolved.workspace, ...(resolved.branch === undefined ? {} : { branch: resolved.branch }), ...reviewScope(input), base: current.base, includeTests: input.includeTests, includeDocs: input.includeDocs, fingerprint, changes, ...current.since };
 }

@@ -1,5 +1,6 @@
 import { run } from '../tmux/command.js';
 import { checkoutBranch, repositoryArgs, repositoryDefaultBranch } from '../git/worktrees.js';
+import { objectId } from '../git/comparison.js';
 import type { Project, PullRequestCheckStatus, PullRequestComment, PullRequestComments, PullRequestIssues, PullRequestReviewThread, PullRequestSummary, Worktree } from '../domain/models.js';
 import { SeenRecord } from './seen.js';
 import { createPullRequest, replyToThread, rerequestReviews, resolveThread } from './writes.js';
@@ -73,6 +74,8 @@ export type PullRequestDetail = PullRequestComments & {
   destination?: OverviewDestination;
   // the lists GitHub gave a full page of (`detailPageLimits`), which may be missing older ones
   pageFull?: { threads?: true; reviews?: true; comments?: true; checks?: true; reviewers?: true };
+  // the commit the viewer's latest submitted review was made on; an unsubmitted draft review is none
+  viewerReviewCommit?: string;
 };
 export type LinkedPullRequest = { number: number; title: string; url: string; state: 'open' | 'merged' | 'closed'; draft: boolean };
 /**
@@ -239,7 +242,7 @@ const detailQuery = `query PullRequestDetail($owner:String!,$name:String!,$numbe
   latestReviews(first:${detailPageLimits.reviewers}){nodes{author{login __typename ...on User{id} ...on Bot{id}} state commit{oid}}}
   closingIssuesReferences(first:10){nodes{number title url state repository{nameWithOwner}}}
   reviewThreads(last:${detailPageLimits.threads}){nodes{id isResolved isOutdated path line startLine originalLine originalStartLine comments(last:${detailPageLimits.threadComments}){nodes{${commentFields} diffHunk}}}}
-  reviews(last:${detailPageLimits.reviews}){nodes{id author{login __typename} state body submittedAt url viewerDidAuthor}}
+  reviews(last:${detailPageLimits.reviews}){nodes{id author{login __typename} state body submittedAt url viewerDidAuthor commit{oid} comments(first:1){totalCount nodes{replyTo{id}}}}}
   comments(last:${detailPageLimits.comments}){nodes{${commentFields}}}
 }}}`;
 const issueQuery = `query IssueDetail($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){
@@ -1629,6 +1632,9 @@ function readDetail(repository: GithubRepository, node: unknown): { data: PullRe
     if (typeof state !== 'string' || state === 'PENDING') return [];
     return prComment({ ...review as object, createdAt: at(review, 'submittedAt') }).filter(comment => comment.body.trim() !== '').map(comment => ({ ...comment, state }));
   });
+  // GitHub records a lone reply to a thread as a review of its own, which is not a re-review
+  const lonelyReply = (review: unknown) => at(review, 'state') === 'COMMENTED' && String(at(review, 'body') ?? '').trim() === '' && at(review, 'comments', 'totalCount') === 1 && typeof at(nodes(at(review, 'comments'))[0], 'replyTo', 'id') === 'string';
+  const viewerReviewCommit = nodes(at(node, 'reviews')).filter(review => at(review, 'viewerDidAuthor') === true && typeof at(review, 'state') === 'string' && at(review, 'state') !== 'PENDING' && !lonelyReply(review)).map(review => at(review, 'commit', 'oid')).filter((oid): oid is string => typeof oid === 'string' && objectId.test(oid)).at(-1);
   // the submitter's opening comment, left out when they wrote none
   const [description] = prComment(node).filter(comment => comment.body.trim() !== '');
   const mergeable = at(node, 'mergeable');
@@ -1647,7 +1653,7 @@ function readDetail(repository: GithubRepository, node: unknown): { data: PullRe
   };
   return {
     data: {
-      ...fields, id: String(at(node, 'id')), repository: name, ...(Object.keys(pageFull).length === 0 ? {} : { pageFull }), ...(description === undefined ? {} : { description }), threads, reviews, comments: nodes(at(node, 'comments')).flatMap(prComment),
+      ...fields, id: String(at(node, 'id')), repository: name, ...(Object.keys(pageFull).length === 0 ? {} : { pageFull }), ...(description === undefined ? {} : { description }), ...(viewerReviewCommit === undefined ? {} : { viewerReviewCommit }), threads, reviews, comments: nodes(at(node, 'comments')).flatMap(prComment),
       mergeable: mergeable === 'CONFLICTING' ? 'conflicting' : mergeable === 'MERGEABLE' ? 'mergeable' : 'unknown',
       checkRuns: nodes(at(node, 'statusCheckRollup', 'contexts')).flatMap(readCheck), reviewers: readReviewers(node, pull.headSha), linkedIssues
     },
