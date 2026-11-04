@@ -51,7 +51,6 @@ test('keeps the active tab, output, and prompt controls inside a narrow viewport
   // point each caret toward the flyout on the nearest button edge
   const flyoutIcons = [
     { button: lead.locator('.server-selector'), side: 'above' },
-    { button: page.locator('.tabs .new-agent-tab'), side: 'above' },
     { button: workspaceToolbar.locator('.terminal-picker-toggle'), side: 'above' },
     { button: workspaceToolbar.locator('.notes-toggle'), side: 'above' },
     { button: workspaceToolbar.locator('.git-status-summary'), side: 'above' },
@@ -80,9 +79,9 @@ test('keeps the active tab, output, and prompt controls inside a narrow viewport
   const serverTrigger = lead.locator('.server-selector');
   await serverTrigger.click();
   await expect(serverTrigger).toHaveAttribute('data-flyout-side', 'above');
-  const serverMenuBox = await page.getByRole('group', { name: 'Remote Agents servers' }).boundingBox();
   const serverTriggerBox = await serverTrigger.boundingBox();
-  expect(serverMenuBox!.y + serverMenuBox!.height).toBeLessThan(serverTriggerBox!.y);
+  // the menu repositions once its revision line loads and changes its height
+  await expect.poll(async () => { const box = (await page.getByRole('group', { name: 'Remote Agents servers' }).boundingBox())!; return box.y + box.height; }).toBeLessThan(serverTriggerBox!.y);
   await page.keyboard.press('Escape');
   await expect(serverTrigger).not.toHaveAttribute('data-flyout-side');
   await expect(workspaceToolbar.getByRole('button', { name: 'Browser', exact: true }).locator('.flyout-caret')).toHaveCount(0);
@@ -172,10 +171,11 @@ test('keeps the active tab, output, and prompt controls inside a narrow viewport
   expect(layout.queued.bottom).toBeLessThanOrEqual(layout.send.top);
   expect(layout.send.left).toBeGreaterThanOrEqual(layout.prompt.right);
   expect(layout.send.right).toBeLessThanOrEqual(layout.viewportWidth);
-  // the server selector and Call balance the launcher and trailing settings button
+  // the server selector and Call lead; the Workspace dropdown fills the row up to the trailing settings button
   expect(Math.abs(layout.tabRowLead.left - layout.tabs.left - 6)).toBeLessThanOrEqual(1);
   expect(Math.abs(layout.tabRowLead.top - layout.tabs.top - 6)).toBeLessThanOrEqual(1);
-  expect(Math.abs(layout.activeTab.left + layout.activeTab.width / 2 - layout.tabs.left - layout.tabs.width / 2)).toBeLessThanOrEqual(1);
+  expect(Math.abs(layout.activeTab.left - layout.tabRowLead.right - parseFloat(layout.tabsGap))).toBeLessThanOrEqual(1);
+  expect(Math.abs(layout.serverSettings.left - layout.activeTab.right - parseFloat(layout.tabsGap))).toBeLessThanOrEqual(1);
   expect(Math.abs(layout.serverSettings.right - layout.tabs.right + 6)).toBeLessThanOrEqual(1);
   expect(Math.abs(layout.serverSettings.height - layout.activeTab.height)).toBeLessThanOrEqual(1);
   expect(Math.abs(layout.serverSettings.width - layout.serverSettings.height)).toBeLessThanOrEqual(1);
@@ -464,18 +464,17 @@ test('a phone shows only the current Workspace, as a dropdown over a sheet of ev
   // the marks stand apart from the title
   await expect(dropdown).toHaveCSS('gap', '9.6px');
 
-  // one outlined row with balanced controls around the centered Workspace dropdown
+  // one outlined row: the lead controls, the Workspace dropdown, then settings at the far edge
   const row = await tabs.evaluate(nav => {
     const box = (element: Element) => { const rect = element.getBoundingClientRect(); return { left: rect.left, right: rect.right, middle: Math.round(rect.top + rect.height / 2) }; };
-    return { overflow: nav.scrollWidth - nav.clientWidth, width: nav.getBoundingClientRect().width, lead: box(nav.querySelector('.tab-row-lead')!), dropdown: box(nav.querySelector('.workspace-dropdown')!), plus: box(nav.querySelector('.launcher')!), settings: box(nav.querySelector('.server-switcher-settings-wrap')!) };
+    return { overflow: nav.scrollWidth - nav.clientWidth, width: nav.getBoundingClientRect().width, lead: box(nav.querySelector('.tab-row-lead')!), dropdown: box(nav.querySelector('.workspace-dropdown')!), settings: box(nav.querySelector('.server-switcher-settings-wrap')!) };
   });
   expect(row.overflow).toBeLessThanOrEqual(0);
-  expect(new Set([row.lead.middle, row.dropdown.middle, row.plus.middle, row.settings.middle]).size).toBe(1);
+  expect(new Set([row.lead.middle, row.dropdown.middle, row.settings.middle]).size).toBe(1);
   expect(Math.abs(row.dropdown.left - row.lead.right - 6)).toBeLessThanOrEqual(1);
-  expect(Math.abs(row.plus.left - row.dropdown.right - 6)).toBeLessThanOrEqual(1);
-  expect(Math.abs(row.settings.left - row.plus.right - 6)).toBeLessThanOrEqual(1);
+  // phones hide the main +, so settings follows the dropdown directly
+  expect(Math.abs(row.settings.left - row.dropdown.right - 6)).toBeLessThanOrEqual(1);
   expect(Math.abs(row.settings.right - (row.width - 6))).toBeLessThanOrEqual(1);
-  expect(Math.abs((row.dropdown.left + row.dropdown.right) / 2 - row.width / 2)).toBeLessThanOrEqual(1);
 
   // the sheet omits zero and singular counts while retaining each workspace state
   await dropdown.click();

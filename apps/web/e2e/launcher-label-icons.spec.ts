@@ -34,7 +34,11 @@ async function verifyLauncherLabels(page: import('@playwright/test').Page, scree
   await stubLauncher(page);
   await page.goto('/');
   await page.evaluate(() => document.fonts.ready);
-  await page.locator('.new-agent-tab').click();
+  // phones hide the main +; New Workspace opens the same launcher
+  if (page.viewportSize()!.width <= 768) {
+    await page.locator('.workspace-dropdown').click();
+    await page.getByRole('button', { name: /New Workspace/u }).click();
+  } else await page.locator('.new-agent-tab').click();
 
   const launcher = page.getByRole('group', { name: 'Agent launcher' });
   const scratchLabel = launcher.locator('.launcher-symbol-label');
