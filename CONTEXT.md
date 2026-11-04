@@ -243,6 +243,10 @@ _Avoid_: AI review (as a domain term — fine as a UI label), critique, audit
 One concern a Code review raises, anchored to a Change's line range (or general, when it cannot be anchored). It is a suggestion until the operator Keeps it as an inline comment or Dismisses it.
 _Avoid_: Issue, warning, suggestion
 
+**Verdict**:
+A Code review's judgment of whether one of the operator's earlier Review threads was addressed by the changes since their review: addressed, partly, not addressed, or needs you (the author pushed back or asked, or the answer is the operator's call). Only a Since my review tour's Code review gives them, one per thread the tour kept, with an explanation and optionally the Change lines that address it. Problems the changes introduce are still Findings. The operator can dismiss one.
+_Avoid_: Resolution (GitHub's resolved state is separate), status
+
 **Review preset**:
 A configured agent, model, effort and prompt for a Code review, picked when the tour starts.
 _Avoid_: Review profile, reviewer

@@ -1271,6 +1271,92 @@ test('shows my earlier threads on the first step and beside the lines they sit o
   await expect(first).toContainText('resolved by you');
 });
 
+test('orders my earlier threads by the AI review\'s verdict, marks where one was fixed, and counts them in the summary', async ({ page }) => {
+  const reviewedCommit = `a1b2c3d${'0'.repeat(33)}`;
+  const comment = (id: string, author: string, body: string) => ({ id, author, bot: false, ...(author === 'octocat' ? { mine: true } : {}), body, createdAt: '2026-10-01T00:00:00Z', url: `https://github.com/owner/repo/pull/7#discussion_${id}` });
+  const patch = 'diff --git a/src/route.ts b/src/route.ts\nindex 1111111..2222222 100644\n--- a/src/route.ts\n+++ b/src/route.ts\n@@ -4,4 +4,4 @@\n const a = 1;\n-const x = 8;\n+const x = 9;\n const b = 2;\n const c = 3;\n';
+  const earlierThreads = { pullRequest: 7, threads: [
+    { id: 'T1', path: 'src/route.ts', line: 5, resolved: false, outdated: false, diffHunk: '@@ -4 +4 @@', comments: [comment('C1', 'octocat', 'Why eight?'), comment('C2', 'mona', 'Changed it to nine.')] },
+    { id: 'T2', path: 'src/old.ts', line: 3, resolved: false, outdated: true, diffHunk: '@@ -3 +3 @@', comments: [comment('C3', 'octocat', 'Drop this file.')] },
+    { id: 'T3', path: 'src/api.ts', line: 9, resolved: false, outdated: false, diffHunk: '@@ -9 +9 @@', comments: [comment('C4', 'octocat', 'Return 404 here.'), comment('C5', 'mona', 'I think 410 is right.')] },
+    { id: 'T4', path: 'src/route.ts', line: 7, resolved: false, outdated: false, diffHunk: '@@ -7 +7 @@', comments: [comment('C6', 'octocat', 'Name both constants.')] },
+    { id: 'T5', path: 'src/docs.ts', line: 2, resolved: false, outdated: false, diffHunk: '@@ -2 +2 @@', comments: [comment('C7', 'octocat', 'Typo.')] }
+  ] };
+  const tour = { title: 'Review fixes', overview: 'The author answered the review.', scope: 'since-review', reviewedCommit, base: 'a1b2c3d (rebased)', baseTree: 'b'.repeat(40), includeTests: false, includeDocs: false, fingerprint: 'since-review-1234567890', changes: [{ id: 'chg_route0001', file: 'src/route.ts', category: 'implementation', kind: 'hunk', oldStart: 4, oldLines: 4, newStart: 4, newLines: 4, patch }], steps: [{ id: 'route', title: 'Fix the route', explanation: 'The route now validates.', changeIds: ['chg_route0001'] }], earlierThreads };
+  const verdicts = [
+    { threadId: 'T1', status: 'addressed', body: 'Now **nine**, as asked.', evidence: { changeId: 'chg_route0001', side: 'additions', startLine: 5, endLine: 5 } },
+    { threadId: 'T2', status: 'not_addressed', body: 'The file is still there.' },
+    { threadId: 'T3', status: 'needs_you', body: 'The author argues for 410.' },
+    { threadId: 'T4', status: 'partly', body: 'Only `b` was renamed.', evidence: { changeId: 'chg_route0001', side: 'additions', startLine: 6, endLine: 7 } }
+  ];
+  const codeReview = { fingerprint: tour.fingerprint, preset: { id: 'correctness', label: 'Correctness', agent: 'claude' }, completedAt: '2026-10-04T12:00:00.000Z', findings: [], general: [], verdicts };
+  await installAgentWebSocket(page);
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/api/auth/session') return route.fulfill({ json: { csrfToken: 'csrf-token', active: true, deviceName: 'Test device' } });
+    if (url.pathname === '/api/dashboard') return route.fulfill({ json: { generation: 1, ...claudeReviewCapabilities, reviews: [{ worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', title: tour.title, scope: 'since-review', reviewedCommit, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint }], agents: [{ ...startSheetAgent, pullRequest: { ...openPullRequest, number: 7, url: 'https://github.com/owner/repo/pull/7' } }], projects: [{ id: 'repo', label: 'Repo', github: 'owner/repo', available: true, worktrees: [{ id: 'owen', projectId: 'repo', label: 'Owen', path: '/worktrees/owen', main: false, detached: false, locked: false, available: true, pinned: true, order: 0, branch: 'feature/review-tour' }] }] } });
+    if (await fulfillAgentSupport(route, url.pathname)) return;
+    if (url.pathname === '/api/worktrees/owen/review-tour') return route.fulfill({ json: { status: 'ready', review: { worktreeId: 'owen', branch: 'feature/review-tour', savedAt: '2026-10-04T12:00:00.000Z', tour, codeReview } } });
+    if (url.pathname === '/api/worktrees/owen/review-tour/fingerprint') return route.fulfill({ json: { status: 'comparison', comparison: { scope: 'since-review', reviewedCommit, base: tour.base, includeTests: false, includeDocs: false, fingerprint: tour.fingerprint } } });
+    return route.fulfill({ status: 404, json: { error: 'not mocked' } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  const panel = page.getByRole('region', { name: 'Review fixes' });
+  await panel.getByRole('button', { name: 'Start tour' }).click();
+
+  // not addressed, partly, needs you, no verdict, then addressed
+  const earlier = panel.getByRole('region', { name: 'Your earlier comments (5)' });
+  const rows = earlier.getByRole('group', { name: /^Your earlier comment on / });
+  await expect(rows).toHaveCount(5);
+  await expect(rows.locator('.review-tour-verdict-badge')).toHaveText(['Not addressed', 'Partly', 'Needs you', 'No verdict', 'Addressed']);
+  await expect(rows.nth(0)).toContainText('The file is still there.');
+  await expect(rows.nth(2)).toContainText('@mona: I think 410 is right.');
+  await expect(rows.nth(1).locator('code')).toHaveText('b');
+  // an addressed thread is collapsed until opened
+  const addressed = earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts line 5' });
+  await expect(addressed).not.toContainText('Why eight?');
+  await addressed.getByRole('button', { name: 'Show' }).click();
+  await expect(addressed).toContainText('Why eight?');
+  await expect(addressed.locator('strong', { hasText: 'nine' })).toBeVisible();
+
+  // the evidence lines carry a marker that leads back to the thread
+  const diffs = panel.getByLabel('Relevant changes');
+  await expect(diffs.locator('.review-tour-fixed-here')).toHaveText(['AddressedFixed here: your comment on src/route.ts line 5', 'PartlyPartly fixed here: your comment on src/route.ts line 7']);
+  await diffs.getByRole('button', { name: 'Partly fixed here: your comment on src/route.ts line 7' }).click();
+  await expect(earlier.getByRole('group', { name: 'Your earlier comment on src/route.ts line 7' })).toBeFocused();
+
+  // the summary counts each verdict and leads back to the threads
+  await panel.getByRole('button', { name: 'Review summary' }).click();
+  const counts = panel.getByRole('region', { name: 'Your earlier comments' });
+  await expect(counts.getByRole('listitem')).toHaveText(['1 not addressed', '1 partly', '1 needs you', '1 no verdict', '1 addressed']);
+  await counts.getByRole('button', { name: 'Review earlier comments' }).click();
+  await expect(earlier).toBeVisible();
+
+  // Dismiss hides a verdict, which then counts as none
+  const notAddressed = earlier.getByRole('group', { name: 'Your earlier comment on src/old.ts line 3' });
+  await notAddressed.getByRole('button', { name: 'Dismiss verdict' }).click();
+  await expect(notAddressed).not.toContainText('The file is still there.');
+  await expect(rows.locator('.review-tour-verdict-badge')).toHaveText(['Partly', 'Needs you', 'No verdict', 'No verdict', 'Addressed']);
+  await panel.getByRole('button', { name: 'Review summary' }).click();
+  await expect(counts.getByRole('listitem')).toHaveText(['1 partly', '1 needs you', '2 no verdict', '1 addressed']);
+
+  // the tour's draft keeps the dismissal across a reload, and Restore brings the verdict back
+  await panel.getByRole('button', { name: 'Back to tour' }).click();
+  await page.reload();
+  await page.getByRole('button', { name: /Git status: feature\/review-tour/ }).click();
+  await page.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'Open Review' }).click();
+  await expect(rows.locator('.review-tour-verdict-badge')).toHaveText(['Partly', 'Needs you', 'No verdict', 'No verdict', 'Addressed']);
+  await notAddressed.getByRole('button', { name: 'Restore verdict' }).click();
+  await expect(notAddressed).toContainText('The file is still there.');
+  await expect(rows.locator('.review-tour-verdict-badge')).toHaveText(['Not addressed', 'Partly', 'Needs you', 'No verdict', 'Addressed']);
+  // a narrow panel lists the threads in its notes drawer, which a marker opens on the thread
+  await page.setViewportSize({ width: 600, height: 800 });
+  await diffs.getByRole('button', { name: 'Fixed here: your comment on src/route.ts line 5' }).click();
+  await expect(page.getByRole('dialog', { name: 'Step notes' }).getByRole('group', { name: 'Your earlier comment on src/route.ts line 5' })).toBeFocused();
+});
+
 test('updates a Worktree behind its pull request to the head, then offers Since my review', async ({ page }) => {
   await installAgentWebSocket(page);
   const reviewedCommit = 'a1b2c3d'.padEnd(40, '0');

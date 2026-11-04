@@ -57,7 +57,7 @@ export class CodeReviewJobs {
   // publish a terminal review result
   private async run(job: StoredCodeReviewJob, prepared: PreparedReviewTour, resolved: Awaited<ReturnType<CodeReviewer['resolve']>>): Promise<void> {
     try {
-      const review = await this.reviewer.run(prepared.comparison, resolved, (job.state as PendingJob).controller.signal, pendingRunProgress(() => job.state));
+      const review = await this.reviewer.run(prepared, resolved, (job.state as PendingJob).controller.signal, pendingRunProgress(() => job.state));
       // ignore superseded completions
       if (this.jobs.get(job.id) !== job || job.state.kind !== 'pending') return;
       const branch = prepared.comparison.branch;
@@ -93,9 +93,10 @@ export class CodeReviewJobs {
     if (stored?.branch !== run.branch || stored.tour.fingerprint !== run.fingerprint) return undefined;
     const { kind: _kind, worktreeId, branch, ...reviewed } = run;
     return {
-      validate: codeReviewReplyError,
+      // a Since my review tour's earlier threads are the ones the run judged
+      validate: value => codeReviewReplyError(value, stored.tour.earlierThreads?.threads),
       save: async (output, conversation) => {
-        const review = codeReviewFrom(output, stored.tour.changes, reviewed, conversation);
+        const review = codeReviewFrom(output, stored.tour, reviewed, conversation);
         if (review === undefined || !await store.saveCodeReviewIfCurrent(worktreeId, branch, review, 0)) return false;
         await Promise.resolve(this.onSettled?.({ worktreeId, fingerprint: review.fingerprint, state: { kind: 'ready', review } })).catch(() => undefined);
         return true;

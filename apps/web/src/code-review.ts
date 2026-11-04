@@ -12,8 +12,13 @@ export type CodeReviewAgent = 'codex' | 'claude';
 export type Finding = { id: string; changeId: string; side: 'additions' | 'deletions'; startLine: number; endLine: number; severity: CodeReviewSeverity; title: string; body: string };
 // a Finding with no anchor in the tour's diffs (an unknown Change or lines outside its hunk)
 export type GeneralFinding = { id: string; severity: CodeReviewSeverity; title: string; body: string; file?: string };
-// a completed Code review of the tour's Comparison; `conversation` is present when its reviewer can be asked about it
-export type CodeReview = { fingerprint: string; preset: { id: string; label: string; agent: CodeReviewAgent }; effort?: string; focus?: string; findings: Finding[]; general: GeneralFinding[]; completedAt: string; conversation?: string };
+// A Since my review Code review's judgment of one of my earlier Review threads, with the Change lines
+// that address it (or fail to) when the reviewer cited them
+export type VerdictStatus = 'addressed' | 'partly' | 'not_addressed' | 'needs_you';
+export type Verdict = { threadId: string; status: VerdictStatus; body: string; evidence?: { changeId: string; side: 'additions' | 'deletions'; startLine: number; endLine: number } };
+// a completed Code review of the tour's Comparison; `conversation` is present when its reviewer can be asked about it,
+// `verdicts` on a Since my review tour
+export type CodeReview = { fingerprint: string; preset: { id: string; label: string; agent: CodeReviewAgent }; effort?: string; focus?: string; findings: Finding[]; general: GeneralFinding[]; verdicts?: Verdict[]; completedAt: string; conversation?: string };
 // what one Code review run asks for: a preset id, an effort it accepts, and an optional extra focus
 export type CodeReviewOptions = { preset: string; effort?: string; focus?: string };
 // one Review preset as the dashboard lists it; an unavailable one says why
@@ -39,11 +44,19 @@ export function isGeneralFinding(value: unknown): value is GeneralFinding {
   return isRecord(value) && typeof value.id === 'string' && isSeverity(value.severity) && typeof value.title === 'string' && typeof value.body === 'string' && optionalString(value.file);
 }
 
+const isVerdictStatus = (value: unknown): value is VerdictStatus => value === 'addressed' || value === 'partly' || value === 'not_addressed' || value === 'needs_you';
+// validate one verdict on an earlier thread
+export function isVerdict(value: unknown): value is Verdict {
+  return isRecord(value) && typeof value.threadId === 'string' && isVerdictStatus(value.status) && typeof value.body === 'string'
+    && (value.evidence === undefined || isRecord(value.evidence) && typeof value.evidence.changeId === 'string' && (value.evidence.side === 'additions' || value.evidence.side === 'deletions') && isLine(value.evidence.startLine) && isLine(value.evidence.endLine) && value.evidence.startLine <= value.evidence.endLine);
+}
+
 // validate a completed Code review
 export function isCodeReview(value: unknown): value is CodeReview {
   return isRecord(value) && typeof value.fingerprint === 'string' && typeof value.completedAt === 'string' && optionalString(value.effort) && optionalString(value.focus) && optionalString(value.conversation)
     && isRecord(value.preset) && typeof value.preset.id === 'string' && typeof value.preset.label === 'string' && isAgent(value.preset.agent)
-    && Array.isArray(value.findings) && value.findings.every(isFinding) && Array.isArray(value.general) && value.general.every(isGeneralFinding);
+    && Array.isArray(value.findings) && value.findings.every(isFinding) && Array.isArray(value.general) && value.general.every(isGeneralFinding)
+    && (value.verdicts === undefined || Array.isArray(value.verdicts) && value.verdicts.every(isVerdict));
 }
 
 // Read a completed Code review from a reply, or undefined when malformed. A general Finding's

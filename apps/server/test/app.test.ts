@@ -1879,6 +1879,40 @@ describe('code review API', () => {
       expect(closedWorktrees).toEqual(['cora']);
     } finally { await reviewApp.close(); await rm(directory, { recursive: true, force: true }); }
   }, 15_000);
+
+  it('adds a review of a Since my review tour that judges the earlier threads the tour kept', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rac-code-review-api-'));
+    const hash = await argon2.hash('synthetic-password', { type: argon2.argon2id });
+    const worktree = { id: 'cora', projectId: 'cora', label: 'Cora', path: '/worktrees/cora', identity: '/worktrees/cora', available: true, pinned: false };
+    const change = { id: 'chg_route0001', file: 'src/route.ts', category: 'implementation' as const, kind: 'hunk' as const, oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, patch: '@@ -1 +1,2 @@\n-old\n+new\n+more' };
+    const since = { scope: 'since-review' as const, reviewedCommit: 'a'.repeat(40), baseTree: 'b'.repeat(40) };
+    const comparison = { worktreeId: 'cora', workspace: '/worktrees/cora', branch: 'feature/review', ...since, base: 'aaaaaaa (rebased)', includeTests: false, includeDocs: false, fingerprint: 'review-fingerprint-1234', changes: [change] };
+    const earlierThreads = { pullRequest: 7, threads: [{ id: 'PRRT_1', path: 'src/route.ts', line: 2, resolved: false, outdated: false, diffHunk: '@@ -1 +1 @@', comments: [{ id: 'C1', author: 'octocat', bot: false, mine: true as const, body: 'Validate the new line.', createdAt: '2026-10-01T00:00:00Z', url: 'https://github.com/octo/repo/pull/7#discussion_C1' }] }] };
+    const tour: ReviewTour = { title: 'Route tour', overview: 'Follow the route.', steps: [{ id: 'route', title: 'Route', explanation: 'The route changes.', changeIds: [change.id] }], ...since, base: comparison.base, includeTests: false, includeDocs: false, fingerprint: comparison.fingerprint, changes: [change], earlierThreads };
+    // a recapture never reads GitHub again: it carries only the threads it is handed
+    const reviewTours = { capability: async () => ({ available: true, agent: 'codex', efforts: [] }), prepare: async (_worktreeId: string, _input: unknown, handed?: unknown) => ({ comparison, resolved: { worktree }, ...(handed === undefined ? {} : { earlierThreads: handed }) }) };
+    const runs: Array<{ prompt: string }> = [];
+    const reviewRunner = { capability: async () => ({ available: true }), run: async (request: { prompt: string }) => { runs.push(request); return await new Promise(() => {}); }, closeWorktree: async () => {} };
+    const review = resolveReviewConfig({ presets: [{ id: 'correctness', label: 'Correctness', agent: 'codex', prompt: 'Review for correctness.' }] }, { codex: {} });
+    const reviewStore = new ReviewTourStore(join(directory, 'reviews.json'));
+    const discovery = { worktreesNow: () => [worktree], dashboard: async () => ({ generation: 1, places: [], adapters: {}, agents: [], projects: [] }) };
+    const reviewApp = await buildApp({ ...config, review }, { auth: new AuthService(hash, Buffer.alloc(32, 23).toString('base64url')), discovery: discovery as never, reviewStore, reviewTours: reviewTours as never, reviewRunner: reviewRunner as never, push: { notify: async () => undefined } as never });
+    try {
+      const boot = await reviewApp.inject({ method: 'GET', url: '/api/auth/bootstrap', headers: { host: 'agents.example.com' } });
+      const login = await reviewApp.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'agents.example.com', origin: 'https://agents.example.com', 'x-csrf-token': boot.json().csrfToken }, payload: { password: 'synthetic-password' } });
+      const headers = { host: 'agents.example.com', cookie: String(login.headers['set-cookie']).split(';')[0], origin: 'https://agents.example.com', 'x-csrf-token': login.json().csrfToken, 'content-type': 'application/json' };
+      const add = async () => await reviewApp.inject({ method: 'POST', url: '/api/worktrees/cora/code-review/jobs', headers, payload: JSON.stringify({ scope: 'since-review', reviewedCommit: since.reviewedCommit, includeTests: false, includeDocs: false, fingerprint: comparison.fingerprint, preset: 'correctness' }) });
+      // without the tour's threads there is nothing to judge them by, nor with another tour's
+      expect((await add()).json()).toEqual({ status: 'error', error: { code: 'stale_during_generation', retryable: true } });
+      await reviewStore.save('cora', 'feature/review', { ...tour, fingerprint: 'older-fingerprint-1234' });
+      expect((await add()).json()).toEqual({ status: 'error', error: { code: 'stale_during_generation', retryable: true } });
+      expect(runs).toEqual([]);
+      await reviewStore.save('cora', 'feature/review', tour);
+      expect((await add()).statusCode).toBe(202);
+      for (let index = 0; index < 50 && runs.length === 0; index += 1) await new Promise(resolve => setTimeout(resolve, 10));
+      expect(runs[0]!.prompt).toContain('Validate the new line.');
+    } finally { await reviewApp.close(); await rm(directory, { recursive: true, force: true }); }
+  });
 });
 
 describe('queued prompt API', () => {

@@ -2415,6 +2415,23 @@ button > .flyout-caret { --caret-mask: url("data:image/svg+xml,%3Csvg xmlns='htt
 .review-tour-earlier button { padding: .3rem .65rem; font-size: .68rem; box-shadow: none; }
 .review-tour-earlier-threads > small { color: var(--blue); }
 .review-tour-earlier-note { margin: 0; color: var(--subtext-0); font-size: .72rem; }
+/* the AI review's verdict on an earlier thread: a badge, its explanation, its evidence marker on the diff, and the summary's counts */
+.review-tour-earlier:focus { outline: 2px solid var(--blue); outline-offset: 1px; }
+.review-tour-earlier-head .review-tour-verdict-badge, .review-tour-verdict-badge { flex: none; padding: .05rem .4rem; border: 1px solid currentColor; border-radius: 999px; color: var(--overlay-1); font: 800 .58rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+.review-tour-verdict-badge.not_addressed { color: var(--red); }
+.review-tour-verdict-badge.partly { color: var(--peach); }
+.review-tour-verdict-badge.needs_you { color: var(--mauve); }
+.review-tour-verdict-badge.addressed { color: var(--green); }
+.review-tour-earlier-head .review-tour-earlier-toggle { padding: .1rem .45rem; font-size: .62rem; }
+.review-tour-verdict-body { padding: .35rem .5rem; border-left: 2px solid color-mix(in srgb, var(--blue) 45%, var(--surface-2)); color: var(--subtext-1); font-size: .74rem; }
+.review-tour-verdict-body > :first-child { margin-top: 0; }
+.review-tour-verdict-body > :last-child { margin-bottom: 0; }
+.review-tour-fixed-here { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .25rem .6rem .35rem; font: 500 var(--diffs-font-size, .76rem)/1.4 var(--font-mono); }
+.review-tour-fixed-here button { padding: 0; border: 0; background: none; box-shadow: none; color: var(--blue); font: inherit; text-align: left; text-decoration: underline; cursor: pointer; }
+.review-tour-earlier-summary { display: grid; gap: .4rem; margin-top: .75rem; padding: .5rem .65rem; border: 1px solid color-mix(in srgb, var(--blue) 45%, var(--surface-1)); border-radius: var(--control-radius); background: color-mix(in srgb, var(--blue) 6%, var(--mantle)); color: var(--subtext-0); font-size: .74rem; }
+.review-tour-earlier-summary > small { color: var(--blue); font: 800 .65rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+.review-tour-earlier-summary ul { display: flex; flex-wrap: wrap; gap: .25rem .9rem; margin: 0; padding: 0; list-style: none; font-family: var(--font-mono); }
+.review-tour-earlier-summary button { justify-self: start; padding: .3rem .65rem; font-size: .68rem; box-shadow: none; }
 @media (pointer: coarse) { .review-tour-earlier button { min-height: 2.2rem; padding-inline: .9rem; } }
 .review-tour-narration .review-tour-general-note label, .review-tour-summary .review-tour-general-note label { margin-top: 0; }
 .review-tour-narration .review-tour-general-note textarea, .review-tour-summary .review-tour-general-note textarea { min-height: 5rem; }

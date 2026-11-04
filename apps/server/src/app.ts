@@ -2685,7 +2685,12 @@ export async function buildApp(config: ValidatedConfig, deps: Dependencies = {})
     try {
       // refuse an unusable preset before capturing anything
       await codeReviews.validate(add.options);
-      const prepared = await reviewTours.prepare(worktreeId, add.input);
+      // a Since my review tour's review judges the earlier threads the tour kept, not GitHub's now,
+      // so it needs that tour still stored
+      const stored = add.input.scope === 'since-review' ? await reviewStore.storedTour(worktreeId) : undefined;
+      const earlierThreads = stored?.tour.fingerprint === add.fingerprint ? stored.tour.earlierThreads : undefined;
+      if (add.input.scope === 'since-review' && earlierThreads === undefined) throw new ReviewTourError('stale_during_generation', true);
+      const prepared = await reviewTours.prepare(worktreeId, add.input, earlierThreads);
       // refuse a review of a Comparison the tour no longer narrates
       if (prepared.comparison.fingerprint !== add.fingerprint) throw new ReviewTourError('stale_during_generation', true);
       return reply.code(202).send({ status: 'pending', job: await codeReviews.start(owner, prepared, add.options) });

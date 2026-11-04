@@ -114,10 +114,10 @@ export function parseTourGuide(value: unknown): TourGuide | undefined {
 // A snapshot is bounded whatever other participants write on my threads: the threads of one detail
 // page, each its first comment and latest replies with their text cut short ("View on GitHub" has the
 // rest), and the end of its hunk, the code the first comment sits on. Every snapshot taken loads again.
-const MAX_EARLIER_THREADS = 100;
-const MAX_EARLIER_REPLIES = 5;
-const MAX_EARLIER_COMMENT = 4_000;
-const MAX_EARLIER_HUNK_LINES = 20;
+export const MAX_EARLIER_THREADS = 100;
+export const MAX_EARLIER_REPLIES = 5;
+export const MAX_EARLIER_COMMENT = 4_000;
+export const MAX_EARLIER_HUNK_LINES = 20;
 const MAX_EARLIER_HUNK = 8_000;
 const threadCommentSchema = z.object({ id: z.string().min(1).max(200), author: z.string().min(1).max(100), bot: z.boolean(), mine: z.literal(true).optional(), body: z.string().max(MAX_EARLIER_COMMENT), createdAt: z.string().max(64), url: z.string().max(2_048) }).strict();
 const lineSchema = z.number().int().positive();

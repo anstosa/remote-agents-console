@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { digest } from '../git/comparison.js';
 import { reviewAgentKinds, validConversationId, type ReviewAgentKind } from '../review-runs/kinds.js';
 import type { ReviewRunCapability } from '../review-runs/runner.js';
-import { describeSchemaIssues, parseReviewTourInput, reviewScope, scopedSchema, type ReviewChange, type ReviewTourInput } from '../review-tour/contracts.js';
+import { describeSchemaIssues, MAX_EARLIER_THREADS, parseReviewTourInput, reviewScope, scopedSchema, type EarlierThreads, type ReviewChange, type ReviewTourInput } from '../review-tour/contracts.js';
 
 export const CODE_REVIEW_TIMEOUT_MS = 900_000;
 export const CODE_REVIEW_JOB_TTL_MS = 1_800_000;
@@ -11,8 +11,8 @@ export const MAX_CODE_REVIEW_GENERAL = 30;
 export const MAX_FINDING_TITLE = 200;
 export const MAX_FINDING_BODY = 4_000;
 export const MAX_CODE_REVIEW_FOCUS = 2_000;
-// the largest structured result a Code review run may return: every finding at its bounds
-export const MAX_CODE_REVIEW_OUTPUT_BYTES = 640_000;
+// the largest structured result a Code review run may return: every finding and verdict at its bounds
+export const MAX_CODE_REVIEW_OUTPUT_BYTES = 1_100_000;
 
 export type FindingSeverity = 'high' | 'medium' | 'low';
 export type FindingSide = 'additions' | 'deletions';
@@ -20,9 +20,16 @@ export type FindingSide = 'additions' | 'deletions';
 export type Finding = { id: string; changeId: string; side: FindingSide; startLine: number; endLine: number; severity: FindingSeverity; title: string; body: string };
 // a concern that cannot anchor to a hunk; `file` names the Change's file when the model cited a known one
 export type GeneralFinding = { id: string; severity: FindingSeverity; title: string; body: string; file?: string };
+// How a Since my review Code review judges one of my earlier Review threads against the changes:
+// `needs_you` when the author pushed back or asked, or the answer is the operator's call. `evidence`
+// is the Change lines that address (or fail to address) it, when the reviewer cited lines in a hunk.
+export type VerdictStatus = 'addressed' | 'partly' | 'not_addressed' | 'needs_you';
+export type VerdictEvidence = { changeId: string; side: FindingSide; startLine: number; endLine: number };
+export type Verdict = { threadId: string; status: VerdictStatus; body: string; evidence?: VerdictEvidence };
 export type CodeReviewPresetRef = { id: string; label: string; agent: ReviewAgentKind };
-// `conversation` is the reviewer's own conversation, which an Ask about a Finding resumes
-export type CodeReview = { fingerprint: string; preset: CodeReviewPresetRef; effort?: string; focus?: string; findings: Finding[]; general: GeneralFinding[]; completedAt: string; conversation?: string };
+// `conversation` is the reviewer's own conversation, which an Ask about a Finding resumes; only a
+// review of a Since my review tour has `verdicts`
+export type CodeReview = { fingerprint: string; preset: CodeReviewPresetRef; effort?: string; focus?: string; findings: Finding[]; general: GeneralFinding[]; verdicts?: Verdict[]; completedAt: string; conversation?: string };
 // the Comparison and settings one Code review run reviews, which its result carries
 export type CodeReviewRun = Pick<CodeReview, 'fingerprint' | 'preset' | 'effort' | 'focus'>;
 // what an interactive Code review run leaves beside its pane, so a run a restart orphans can still
@@ -32,7 +39,7 @@ export type CodeReviewOptions = { preset: string; effort?: string; focus?: strin
 // one preset as the dashboard offers it, with its agent's runnable state and effort levels
 export type CodeReviewPresetCapability = CodeReviewPresetRef & { effort?: string; efforts: string[]; available: boolean; reason?: string };
 export type CodeReviewCapability = { defaultPreset: string; presets: CodeReviewPresetCapability[] };
-export type GeneratedCodeReview = { findings: Finding[]; general: GeneralFinding[] };
+export type GeneratedCodeReview = { findings: Finding[]; general: GeneralFinding[]; verdicts?: Verdict[] };
 export type ReviewPresetCapabilityInput = CodeReviewPresetRef & { effort?: string; efforts: readonly string[]; capability: ReviewRunCapability };
 
 const severity = z.enum(['high', 'medium', 'low']);
@@ -49,6 +56,19 @@ const addSchema = scopedSchema(z.object({ includeTests: z.boolean(), includeDocs
 const generatedFindingSchema = z.object({ changeId: z.string().min(1).max(100), side: z.enum(['additions', 'deletions']), startLine: line, endLine: line, severity, title, body }).strict();
 const generatedGeneralSchema = z.object({ severity, title, body, file: file.nullable().optional() }).strict();
 const generatedSchema = z.object({ findings: z.array(generatedFindingSchema).max(MAX_CODE_REVIEW_FINDINGS), general: z.array(generatedGeneralSchema).max(MAX_CODE_REVIEW_GENERAL) }).strict();
+const verdictStatus = z.enum(['addressed', 'partly', 'not_addressed', 'needs_you']);
+const threadId = z.string().min(1).max(200);
+const evidenceSchema = generatedFindingSchema.pick({ changeId: true, side: true, startLine: true, endLine: true }).strict();
+const generatedVerdictSchema = z.object({ threadId, status: verdictStatus, body, evidence: evidenceSchema.nullable() }).strict();
+// a review of earlier threads also returns at most one verdict per thread
+const generatedWithVerdictsSchema = generatedSchema.extend({ verdicts: z.array(generatedVerdictSchema).max(MAX_EARLIER_THREADS) }).strict().superRefine((value, context) => {
+  const seen = new Set<string>();
+  value.verdicts.forEach((verdict, index) => {
+    if (seen.has(verdict.threadId)) context.addIssue({ code: z.ZodIssueCode.custom, path: ['verdicts', index, 'threadId'], message: `thread ${verdict.threadId} already has a verdict` });
+    seen.add(verdict.threadId);
+  });
+});
+const verdictSchema = z.object({ threadId, status: verdictStatus, body, evidence: evidenceSchema.optional() }).strict();
 const findingId = z.string().min(1).max(64);
 const findingSchema = generatedFindingSchema.extend({ id: findingId }).strict();
 const generalSchema = z.object({ id: findingId, severity, title, body, file: file.optional() }).strict();
@@ -59,6 +79,7 @@ const codeReviewShape = z.object({
   focus: focus.optional(),
   findings: z.array(findingSchema).max(MAX_CODE_REVIEW_FINDINGS),
   general: z.array(generalSchema).max(MAX_CODE_REVIEW_GENERAL + MAX_CODE_REVIEW_FINDINGS),
+  verdicts: z.array(verdictSchema).max(MAX_EARLIER_THREADS).optional(),
   completedAt: z.string().refine(value => Number.isFinite(Date.parse(value))),
   conversation: conversationSchema.optional()
 }).strict();
@@ -129,11 +150,23 @@ function contentId(parts: Array<string | number | undefined>): string {
   return `fnd_${digest(JSON.stringify(parts)).slice(0, 16)}`;
 }
 
+// whether a line range lies inside one Change's hunk on its side
+function anchored(change: ReviewChange | undefined, side: FindingSide, startLine: number, endLine: number): boolean {
+  const range = change === undefined ? undefined : anchorRange(change, side);
+  return range !== undefined && startLine <= endLine && startLine >= range.first && endLine <= range.last;
+}
+
+// The output shape a run must return: with `threads`, the earlier Review threads a Since my review
+// tour keeps, it also returns verdicts on them.
+const outputSchema = (threads: readonly { id: string }[] | undefined) => threads === undefined ? generatedSchema : generatedWithVerdictsSchema;
+
 // validate model output and anchor each finding to a hunk's lines; a finding that cannot anchor
 // (unknown Change, a line outside the hunk's span on its side, a binary, rename or metadata Change)
-// becomes a general finding carrying the known Change's file, so nothing is dropped or clamped
-export function parseGeneratedCodeReview(value: unknown, changes: ReviewChange[]): GeneratedCodeReview | undefined {
-  const parsed = generatedSchema.safeParse(value);
+// becomes a general finding carrying the known Change's file, so nothing is dropped or clamped. A
+// verdict on a thread not in `threads` is dropped, and evidence that cannot anchor is dropped from
+// its verdict.
+export function parseGeneratedCodeReview(value: unknown, changes: ReviewChange[], threads?: readonly { id: string }[]): GeneratedCodeReview | undefined {
+  const parsed = outputSchema(threads).safeParse(value);
   // require structural validity
   if (!parsed.success) return undefined;
   const byId = new Map(changes.map(change => [change.id, change]));
@@ -150,9 +183,8 @@ export function parseGeneratedCodeReview(value: unknown, changes: ReviewChange[]
   // anchor every cited finding
   for (const item of parsed.data.findings) {
     const change = byId.get(item.changeId);
-    const range = change === undefined ? undefined : anchorRange(change, item.side);
     // demote a finding that cannot anchor inside its hunk
-    if (range === undefined || item.startLine > item.endLine || item.startLine < range.first || item.endLine > range.last) {
+    if (!anchored(change, item.side, item.startLine, item.endLine)) {
       addGeneral({ severity: item.severity, title: item.title, body: item.body, ...(change === undefined ? {} : { file: change.file }) });
       continue;
     }
@@ -164,23 +196,28 @@ export function parseGeneratedCodeReview(value: unknown, changes: ReviewChange[]
   }
   // keep every unanchored concern
   for (const item of parsed.data.general) addGeneral({ severity: item.severity, title: item.title, body: item.body, ...(item.file === undefined || item.file === null ? {} : { file: item.file }) });
-  return { findings, general };
+  const generated = (parsed.data as { verdicts?: z.output<typeof generatedVerdictSchema>[] }).verdicts;
+  if (generated === undefined) return { findings, general };
+  const known = new Set(threads?.map(thread => thread.id));
+  const verdicts = generated.flatMap(({ threadId, status, body, evidence }): Verdict[] => !known.has(threadId) ? [] : [{ threadId, status, body, ...(evidence === null || !anchored(byId.get(evidence.changeId), evidence.side, evidence.startLine, evidence.endLine) ? {} : { evidence }) }]);
+  return { findings, general, verdicts };
 }
 
 // what makes a model reply fail the output shape, in words an agent can correct; anchoring
 // never fails a reply (an unanchored finding becomes a general one)
-export function codeReviewReplyError(value: unknown): string | undefined {
-  const parsed = generatedSchema.safeParse(value);
+export function codeReviewReplyError(value: unknown, threads?: readonly { id: string }[]): string | undefined {
+  const parsed = outputSchema(threads).safeParse(value);
   return parsed.success ? undefined : describeSchemaIssues(parsed.error);
 }
 
-// the Code review a run's structured output makes, its findings anchored in the reviewed Changes,
-// with the run's conversation when it is one its agent can resume
-export function codeReviewFrom(output: unknown, changes: ReviewChange[], run: CodeReviewRun, conversation?: string): CodeReview | undefined {
-  const parsed = parseGeneratedCodeReview(output, changes);
+// the Code review a run's structured output makes, its findings anchored in the reviewed Changes and,
+// for a Since my review tour, its verdicts on the tour's earlier threads, with the run's
+// conversation when it is one its agent can resume
+export function codeReviewFrom(output: unknown, reviewed: { changes: ReviewChange[]; earlierThreads?: EarlierThreads | undefined }, run: CodeReviewRun, conversation?: string): CodeReview | undefined {
+  const parsed = parseGeneratedCodeReview(output, reviewed.changes, reviewed.earlierThreads?.threads);
   if (parsed === undefined) return undefined;
   const resumable = conversation !== undefined && validConversationId(run.preset.agent, conversation);
-  return { fingerprint: run.fingerprint, preset: run.preset, ...(run.effort === undefined ? {} : { effort: run.effort }), ...(run.focus === undefined ? {} : { focus: run.focus }), findings: parsed.findings, general: parsed.general, completedAt: new Date().toISOString(), ...(resumable ? { conversation } : {}) };
+  return { fingerprint: run.fingerprint, preset: run.preset, ...(run.effort === undefined ? {} : { effort: run.effort }), ...(run.focus === undefined ? {} : { focus: run.focus }), findings: parsed.findings, general: parsed.general, ...(parsed.verdicts === undefined ? {} : { verdicts: parsed.verdicts }), completedAt: new Date().toISOString(), ...(resumable ? { conversation } : {}) };
 }
 
 // validate the recovery an orphaned Code review run left
@@ -223,6 +260,26 @@ export const generatedCodeReviewJsonSchema = {
         title: { type: 'string', minLength: 1, maxLength: MAX_FINDING_TITLE },
         body: { type: 'string', minLength: 1, maxLength: MAX_FINDING_BODY },
         file: { type: ['string', 'null'], maxLength: 4_096 }
+      }
+    } }
+  }
+} as const;
+
+// a verdict's evidence cites lines as a finding does
+const { changeId, side, startLine, endLine } = generatedCodeReviewJsonSchema.properties.findings.items.properties;
+// A Since my review run's schema: also one verdict per earlier thread; `evidence` is null or an
+// object through `anyOf`, the nullable-object form strict structured-output modes accept
+export const verdictsCodeReviewJsonSchema = {
+  ...generatedCodeReviewJsonSchema, required: [...generatedCodeReviewJsonSchema.required, 'verdicts'],
+  properties: {
+    ...generatedCodeReviewJsonSchema.properties,
+    verdicts: { type: 'array', maxItems: MAX_EARLIER_THREADS, items: {
+      type: 'object', additionalProperties: false, required: ['threadId', 'status', 'body', 'evidence'],
+      properties: {
+        threadId: { type: 'string', minLength: 1, maxLength: 200 },
+        status: { type: 'string', enum: ['addressed', 'partly', 'not_addressed', 'needs_you'] },
+        body: { type: 'string', minLength: 1, maxLength: MAX_FINDING_BODY },
+        evidence: { anyOf: [{ type: 'null' }, { type: 'object', additionalProperties: false, required: ['changeId', 'side', 'startLine', 'endLine'], properties: { changeId, side, startLine, endLine } }] }
       }
     } }
   }
