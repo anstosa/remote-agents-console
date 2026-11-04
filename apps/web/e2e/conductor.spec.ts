@@ -29,7 +29,7 @@ async function mockConsole(page: Page, lifecycle: 'live' | 'exited' = 'live') {
   return posted;
 }
 
-test('the Conductor\'s tab comes first, and its Panel offers Restart but no Clear, Turn off or model switch', async ({ page }) => {
+test('the Conductor\'s tab comes first, and its Panel offers Restart and Compact but no Clear, Turn off or model switch', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   const posted = await mockConsole(page);
   await page.goto('/');
@@ -40,7 +40,7 @@ test('the Conductor\'s tab comes first, and its Panel offers Restart but no Clea
 
   await header.getByRole('button', { name: 'Agent power options' }).click();
   const menu = page.getByRole('menu', { name: 'Agent power options' });
-  await expect(menu.getByRole('menuitem')).toHaveText(['Restart']);
+  await expect(menu.getByRole('menuitem')).toHaveText(['Restart', 'Compact…']);
   await menu.getByRole('menuitem', { name: 'Restart' }).click();
   await expect.poll(() => posted).toEqual(['POST /api/agents/conductor-1/restart']);
 });
