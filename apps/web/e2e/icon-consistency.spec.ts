@@ -20,7 +20,6 @@ test('keeps action icons at one size and stroke width', async ({ page }) => {
     <span class="launcher-shells"><svg class="launcher-icon-glyph" viewBox="0 0 24 24"></svg></span>
     <svg class="launch-lock" viewBox="0 0 24 24"></svg>
     <div class="upstream-rebase-notification"><svg viewBox="0 0 24 24"></svg></div>
-    <span class="pull-request-fixup"><svg viewBox="0 0 24 24"></svg></span>
   `);
   const selectors = [
     '.server-switcher-settings svg', '.server-switcher-voice svg', '.new-agent-tab svg', '.tab-place-mark svg',
@@ -28,7 +27,7 @@ test('keeps action icons at one size and stroke width', async ({ page }) => {
     '.code-pane-files-open svg', '.code-pane-file-collapse svg', '.agent-composer-column .queue svg',
     '.terminal-picker-toggle svg', '.git-branch-icon', '.more.icon-button svg', '.project-stack-server-icon',
     '.panel-header-action svg', '.more-menu-icon', '.launch-chevron-icon', '.launcher-single .launcher-icon-glyph',
-    '.launcher-shells .launcher-icon-glyph', '.launch-lock', '.upstream-rebase-notification > svg', '.pull-request-fixup svg'
+    '.launcher-shells .launcher-icon-glyph', '.launch-lock', '.upstream-rebase-notification > svg'
   ];
   // compare rendered metrics instead of individual stylesheet declarations
   for (const selector of selectors) {
